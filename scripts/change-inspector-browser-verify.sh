@@ -262,6 +262,46 @@ primary_revision="$(jq -er '.primary_revision' "$log_dir/base-matrix.json")"
 primary_artifact="$(jq -er '.topology.initial.current.artifact' "$log_dir/base-matrix.json")"
 historical_change="$(jq -er '.topology.parallel_current.change' "$log_dir/base-matrix.json")"
 shared_revision="$(jq -er '.shared_revision.revision' "$log_dir/base-matrix.json")"
+shared_artifact="$(jq -er '.shared_revision.artifact' "$log_dir/base-matrix.json")"
+replacement_change="$(jq -er '.topology.replacement.change' "$log_dir/base-matrix.json")"
+replacement_current_revision="$(jq -er '.topology.replacement.current.revision' "$log_dir/base-matrix.json")"
+replacement_current_artifact="$(jq -er '.topology.replacement.current.artifact' "$log_dir/base-matrix.json")"
+
+# Join the contextual predecessor only long enough to assert a supported
+# relation, then withdraw that membership. The active relation must remain as
+# pending nonmember context without changing the final effective replacement.
+POINTBREAK_HOME="$pointbreak_home" \
+  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
+  "$pointbreak_binary" change join "$replacement_change" "$primary_revision" \
+    --operation-id "change-operation:browser-replacement-context-join-v1" \
+    --repo "$fixture_repo" --format json \
+    >"$log_dir/replacement-context-join.json" \
+    2>"$log_dir/replacement-context-join.log"
+POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change show \
+  "$replacement_change" --repo "$fixture_repo" --format json \
+  >"$log_dir/replacement-context-after-join.json"
+replacement_context_membership_claim="$(jq -er --arg revision "$primary_revision" '
+  [.membershipClaims[] | select(.revisionId == $revision and .active == true)]
+  | if length == 1 then .[0].claimId
+    else error("expected one active replacement context membership claim") end
+' "$log_dir/replacement-context-after-join.json")"
+POINTBREAK_HOME="$pointbreak_home" \
+  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
+  "$pointbreak_binary" change assert-relation "$replacement_change" \
+    "$replacement_current_revision" "$primary_revision" \
+    --successor-artifact-hash "$replacement_current_artifact" \
+    --predecessor-artifact-hash "$primary_artifact" \
+    --operation-id "change-operation:browser-replacement-pending-nonmember-v1" \
+    --repo "$fixture_repo" --format json \
+    >"$log_dir/replacement-pending-nonmember.json" \
+    2>"$log_dir/replacement-pending-nonmember.log"
+POINTBREAK_HOME="$pointbreak_home" \
+  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
+  "$pointbreak_binary" change withdraw-membership "$replacement_context_membership_claim" \
+    --operation-id "change-operation:browser-replacement-context-withdraw-v1" \
+    --repo "$fixture_repo" --format json \
+    >"$log_dir/replacement-context-withdraw.json" \
+    2>"$log_dir/replacement-context-withdraw.log"
 
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
@@ -283,15 +323,25 @@ POINTBREAK_HOME="$pointbreak_home" \
     --idempotency-key "browser-history-correction-replacement-v1" --format json \
     >"$log_dir/correction-replacement.json" 2>"$log_dir/correction-replacement.log"
 
+POINTBREAK_HOME="$pointbreak_home" \
+  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
+  "$pointbreak_binary" observation add --repo "$fixture_repo" \
+    --exact-revision "$shared_revision" --track "agent:browser-history-cases" \
+    --title "Browser fact-port shared origin" \
+    --body "This observation is ported as relationship-only context to the rich primary exact Revision." \
+    --idempotency-key "browser-fact-port-shared-origin-v1" --format json \
+    >"$log_dir/fact-port-origin.json" 2>"$log_dir/fact-port-origin.log"
+fact_port_origin_id="$(jq -er '.observationId' "$log_dir/fact-port-origin.json")"
+
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change select \
-  "$historical_change" --revision "$shared_revision" --source captured \
+  "$primary_change" --revision "$primary_revision" --source captured \
   --repo "$fixture_repo" --format json >"$log_dir/fact-port-target-cursor.json"
 fact_port_cursor="$(jq -er '.token' "$log_dir/fact-port-target-cursor.json")"
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
   "$pointbreak_binary" fact port --repo "$fixture_repo" \
-    --origin-revision "$primary_revision@$primary_artifact" \
-    --origin-fact "$correction_origin_id" --review-cursor "$fact_port_cursor" \
+    --origin-revision "$shared_revision@$shared_artifact" \
+    --origin-fact "$fact_port_origin_id" --review-cursor "$fact_port_cursor" \
     --relation context-only --track "agent:browser-history-cases" --format json \
     >"$log_dir/fact-port.json" 2>"$log_dir/fact-port.log"
 
@@ -398,6 +448,21 @@ for topology in replacement parallel_current replacement_divergent consolidation
   ' "$log_dir/topology-$topology.json" >/dev/null \
     || die "topology fixture $topology omitted the shared exact Revision"
 done
+jq -e \
+  --arg successorRevision "$replacement_current_revision" \
+  --arg successorArtifact "$replacement_current_artifact" \
+  --arg predecessorRevision "$primary_revision" \
+  --arg predecessorArtifact "$primary_artifact" '
+    .summary.topology == "replacement" and
+    (.effectiveSupersedes | length) == 1 and
+    any(.pendingOrConflictingEdges[]?;
+      .active == true and
+      .successor.revisionId == $successorRevision and
+      .successor.objectArtifactContentHash == $successorArtifact and
+      .predecessor.revisionId == $predecessorRevision and
+      .predecessor.objectArtifactContentHash == $predecessorArtifact)
+  ' "$log_dir/topology-replacement.json" >/dev/null \
+  || die "replacement pending nonmember claim changed or disappeared from typed topology"
 
 rich_revision="$(jq -er '.primary_revision' "$log_dir/base-matrix.json")"
 rich_change="$(jq -er --arg revision "$rich_revision" '

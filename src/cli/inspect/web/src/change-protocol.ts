@@ -509,12 +509,35 @@ export interface RevisionRef {
   objectArtifactContentHash: string;
 }
 
+export type ChangeAttentionReason =
+  | { kind: "conflicted" }
+  | { kind: "incomplete" }
+  | { kind: "no_current_revision" }
+  | {
+      kind: "unresolved_operative_requests";
+      requestIds: string[];
+    }
+  | {
+      kind: "current_revisions_need_assessment";
+      revisions: RevisionRef[];
+    };
+
+export interface ChangeAttentionPresentation {
+  /** Server-ranked cause. It is always byte-for-byte equivalent to reasons[0]. */
+  primaryReason: ChangeAttentionReason;
+  /** Complete, deterministic, primary-first model causes. */
+  reasons: ChangeAttentionReason[];
+  diagnostics?: string[];
+}
+
 export interface ChangePresentation {
   currentRevisions: Array<{
     revision: RevisionRef;
     revisionProposalSummary?: string;
     summarySource: "revision_proposal_summary" | "absent";
   }>;
+  /** Inspector-only and present exclusively on the Attention lens. */
+  attention?: ChangeAttentionPresentation;
 }
 
 export interface ChangeSummary {
@@ -575,6 +598,62 @@ export interface ChangeDetail {
   operativeObligations: string[];
   diagnostics: string[];
   projectionStamp: string;
+  /**
+   * Non-durable Inspector geometry. This private projection is deliberately
+   * absent from the shared Change-reader document when no graph can be laid
+   * out.
+   */
+  inspectorPresentation?: {
+    revisionGraph: ChangeRevisionGraphPresentation;
+  };
+}
+
+export type GraphPoint = [number, number];
+
+export interface GraphBounds {
+  w: number;
+  h: number;
+}
+
+/** Whether this relationship node has an exact route in the enclosing Change. */
+export type GraphContextAvailability =
+  | "available"
+  | "relationship_context_only";
+
+/** Inspector-private layout of exact Revision supersession topology. */
+export interface ChangeRevisionGraphPresentation {
+  nodes: ChangeRevisionGraphNode[];
+  effectiveSupersedes: ChangeRevisionGraphEffectiveEdge[];
+  pendingOrConflictingClaims: ChangeRevisionGraphClaimEdge[];
+  bounds: GraphBounds;
+  diagnostics?: string[];
+}
+
+export interface ChangeRevisionGraphNode {
+  id: string;
+  revision: RevisionRef;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  isCurrent: boolean;
+  isMember: boolean;
+  contextAvailability: GraphContextAvailability;
+  activationRevision?: RevisionRef;
+}
+
+export interface ChangeRevisionGraphEffectiveEdge {
+  from: string;
+  to: string;
+  successor: RevisionRef;
+  predecessor: RevisionRef;
+  path: GraphPoint[];
+}
+
+export interface ChangeRevisionGraphClaimEdge
+  extends ChangeRevisionGraphEffectiveEdge {
+  claimId: string;
+  diagnostics: string[];
 }
 
 export interface ChangeClaimSupport {
@@ -693,6 +772,13 @@ export interface ChangeRevisionDetail {
   associations: AssociationComparison[];
   diagnostics: string[];
   projectionStamp: string;
+  /**
+   * Non-durable Inspector geometry. The exact Revision document remains the
+   * source of fact and fact-port meaning; this only routes those identities.
+   */
+  inspectorPresentation?: {
+    factGraph: FactRelationshipGraphPresentation;
+  };
 }
 
 export interface RevisionResource {
@@ -749,6 +835,64 @@ export interface FactRef {
   kind: "observation" | "input_request";
   observationId?: string;
   inputRequestId?: string;
+}
+
+/** Inspector-private layout of exact fact relationships and explicit ports. */
+export interface FactRelationshipGraphPresentation {
+  nodes: FactRelationshipGraphNode[];
+  observationSupersedes: FactRelationshipEdge[];
+  assessmentReplaces: FactRelationshipEdge[];
+  factPorts: FactPortRelationshipEdge[];
+  bounds: GraphBounds;
+}
+
+export type FactRelationshipGraphNode =
+  | {
+      id: string;
+      kind: "fact";
+      revision: RevisionRef;
+      factId: string;
+      family: string;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      contextAvailability: GraphContextAvailability;
+      activationRevision?: RevisionRef;
+    }
+  | {
+      id: string;
+      kind: "revision";
+      revision: RevisionRef;
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      contextAvailability: GraphContextAvailability;
+      activationRevision?: RevisionRef;
+    };
+
+export interface FactRelationshipEdge {
+  from: string;
+  to: string;
+  originRevision: RevisionRef;
+  fromFactId: string;
+  toFactId: string;
+  path: GraphPoint[];
+}
+
+export interface FactPortRelationshipEdge {
+  portId: string;
+  from: string;
+  to: string;
+  originRevision: RevisionRef;
+  originFact: FactRef;
+  targetRevision: RevisionRef;
+  targetFact?: FactRef;
+  relation: FactPortPresentation["relation"];
+  applicability: FactPortPresentation["applicability"];
+  path: GraphPoint[];
+  diagnostics?: string[];
 }
 
 export interface AssociationComparison {
@@ -830,6 +974,7 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
     detail.perCurrentRevisionQualification;
   const operativeObligations = detail.operativeObligations;
   const diagnostics = detail.diagnostics;
+  const inspectorPresentation = detail.inspectorPresentation;
   if (
     detail.schema !== "pointbreak.review-change" ||
     detail.version !== 1 ||
@@ -862,6 +1007,17 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
   ) {
     throw new Error("invalid Change detail DTO");
   }
+  if (
+    !isChangeDetailInspectorPresentation(inspectorPresentation, {
+      memberRevisions,
+      currentRevisionRefs,
+      effectiveSupersedes,
+      pendingOrConflictingEdges,
+      diagnostics,
+    })
+  ) {
+    throw new Error("invalid Change detail DTO");
+  }
   return {
     schema: "pointbreak.review-change",
     version: 1,
@@ -880,6 +1036,7 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
     operativeObligations,
     diagnostics,
     projectionStamp: stamp,
+    inspectorPresentation,
   };
 }
 
@@ -898,6 +1055,7 @@ export function decodeChangeRevisionDetail(
   const revisionCurrency = detail.revisionCurrency;
   const relationClassification = detail.relationClassification;
   const availability = detail.availability;
+  const inspectorPresentation = detail.inspectorPresentation;
   if (
     detail.schema !== "pointbreak.review-change-revision" ||
     detail.version !== 1 ||
@@ -933,6 +1091,15 @@ export function decodeChangeRevisionDetail(
   ) {
     throw new Error("invalid Change Revision detail DTO");
   }
+  if (
+    !isChangeRevisionDetailInspectorPresentation(inspectorPresentation, {
+      revision,
+      factPresentations,
+      factPorts,
+    })
+  ) {
+    throw new Error("invalid Change Revision detail DTO");
+  }
   return {
     schema: "pointbreak.review-change-revision",
     version: 1,
@@ -949,6 +1116,7 @@ export function decodeChangeRevisionDetail(
     associations,
     diagnostics,
     projectionStamp: detail.projectionStamp,
+    inspectorPresentation,
   };
 }
 
@@ -1668,7 +1836,8 @@ export function decodeChangePage(
     !isStrictlyAscending(changes.map((change) => change.changeId)) ||
     new Set(changes.map((change) => change.changeId)).size !== changes.length ||
     (diagnostics !== undefined && !isStringArray(diagnostics)) ||
-    (presentations !== undefined && !isPresentations(presentations, changes))
+    (presentations !== undefined &&
+      !isPresentations(presentations, changes, expected.lens))
   ) {
     throw new Error(`invalid ${expected.lens} Change page DTO`);
   }
@@ -1926,6 +2095,7 @@ function sameRevisionSet(left: RevisionRef[], right: RevisionRef[]): boolean {
 function isPresentations(
   value: unknown,
   changes: ChangeSummary[],
+  lens: ChangeLens,
 ): value is Record<string, ChangePresentation> {
   if (!isRecord(value)) return false;
   const summaries = new Map(
@@ -1938,7 +2108,10 @@ function isPresentations(
       change === undefined ||
       !isRecord(presentation) ||
       !Array.isArray(presentation.currentRevisions) ||
-      !presentation.currentRevisions.every(isPresentationRevision)
+      !presentation.currentRevisions.every(isPresentationRevision) ||
+      (lens === "attention"
+        ? !isAttentionPresentation(presentation.attention)
+        : presentation.attention !== undefined)
     ) {
       return false;
     }
@@ -1953,6 +2126,81 @@ function isPresentations(
       [...expected].every((key) => actual.has(key))
     );
   });
+}
+
+function isAttentionPresentation(
+  value: unknown,
+): value is ChangeAttentionPresentation {
+  if (
+    !isRecord(value) ||
+    !isAttentionReason(value.primaryReason) ||
+    !Array.isArray(value.reasons) ||
+    value.reasons.length === 0 ||
+    !value.reasons.every(isAttentionReason) ||
+    !sameAttentionReason(value.primaryReason, value.reasons[0]) ||
+    (value.diagnostics !== undefined && !isStringArray(value.diagnostics))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isAttentionReason(value: unknown): value is ChangeAttentionReason {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "conflicted":
+    case "incomplete":
+    case "no_current_revision":
+      return Object.keys(value).length === 1;
+    case "unresolved_operative_requests":
+      return (
+        Object.keys(value).length === 2 &&
+        Array.isArray(value.requestIds) &&
+        value.requestIds.length > 0 &&
+        value.requestIds.every(nonEmptyString) &&
+        new Set(value.requestIds).size === value.requestIds.length
+      );
+    case "current_revisions_need_assessment":
+      return (
+        Object.keys(value).length === 2 &&
+        Array.isArray(value.revisions) &&
+        value.revisions.length > 0 &&
+        value.revisions.every(isRevisionRef) &&
+        uniqueRevisionKeys(value.revisions).size === value.revisions.length
+      );
+    default:
+      return false;
+  }
+}
+
+function sameAttentionReason(
+  left: ChangeAttentionReason,
+  right: ChangeAttentionReason,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (
+    left.kind === "unresolved_operative_requests" &&
+    right.kind === "unresolved_operative_requests"
+  ) {
+    return (
+      left.requestIds.length === right.requestIds.length &&
+      left.requestIds.every(
+        (requestId, index) => requestId === right.requestIds[index],
+      )
+    );
+  }
+  if (
+    left.kind === "current_revisions_need_assessment" &&
+    right.kind === "current_revisions_need_assessment"
+  ) {
+    return (
+      left.revisions.length === right.revisions.length &&
+      left.revisions.every((revision, index) =>
+        sameRevision(revision, right.revisions[index]),
+      )
+    );
+  }
+  return true;
 }
 
 function isPresentationRevision(value: unknown): boolean {
@@ -1971,6 +2219,457 @@ function isRevisionRef(value: unknown): value is RevisionRef {
     isRecord(value) &&
     nonEmptyString(value.revisionId) &&
     nonEmptyString(value.objectArtifactContentHash)
+  );
+}
+
+function isChangeDetailInspectorPresentation(
+  value: unknown,
+  detail: Pick<
+    ChangeDetail,
+    | "memberRevisions"
+    | "currentRevisionRefs"
+    | "effectiveSupersedes"
+    | "pendingOrConflictingEdges"
+    | "diagnostics"
+  >,
+): value is ChangeDetail["inspectorPresentation"] {
+  if (value === undefined) return true;
+  if (
+    !isRecord(value) ||
+    !isChangeRevisionGraphPresentation(value.revisionGraph)
+  )
+    return false;
+  const graph = value.revisionGraph;
+  const expectedMembers = new Set(
+    detail.memberRevisions.map((member) =>
+      revisionGraphNodeId(member.revision),
+    ),
+  );
+  const expectedCurrent = new Set(
+    detail.currentRevisionRefs.map(revisionGraphNodeId),
+  );
+  const expectedNodes = new Set(expectedMembers);
+  for (const claim of detail.pendingOrConflictingEdges) {
+    expectedNodes.add(revisionGraphNodeId(claim.successor));
+    expectedNodes.add(revisionGraphNodeId(claim.predecessor));
+  }
+  const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  if (
+    actualNodes.size !== expectedNodes.size ||
+    ![...expectedNodes].every((id) => actualNodes.has(id)) ||
+    !graph.nodes.every(
+      (node) =>
+        node.isMember === expectedMembers.has(node.id) &&
+        node.isCurrent === expectedCurrent.has(node.id),
+    ) ||
+    !sameStringArray(graph.diagnostics ?? [], detail.diagnostics)
+  ) {
+    return false;
+  }
+  const effective = new Set(
+    detail.effectiveSupersedes.map(([successor, predecessor]) =>
+      graphEdgeKey(
+        revisionGraphNodeId(successor),
+        revisionGraphNodeId(predecessor),
+      ),
+    ),
+  );
+  const graphEffective = new Set(
+    graph.effectiveSupersedes.map((edge) => graphEdgeKey(edge.from, edge.to)),
+  );
+  if (!sameStringSet(effective, graphEffective)) return false;
+  const pending = new Map(
+    detail.pendingOrConflictingEdges.map((claim) => [claim.claimId, claim]),
+  );
+  return (
+    pending.size === graph.pendingOrConflictingClaims.length &&
+    graph.pendingOrConflictingClaims.every((edge) => {
+      const claim = pending.get(edge.claimId);
+      return (
+        claim !== undefined &&
+        sameRevision(edge.successor, claim.successor) &&
+        sameRevision(edge.predecessor, claim.predecessor) &&
+        sameStringArray(edge.diagnostics, claim.diagnostics)
+      );
+    })
+  );
+}
+
+function isChangeRevisionDetailInspectorPresentation(
+  value: unknown,
+  detail: Pick<
+    ChangeRevisionDetail,
+    "revision" | "factPresentations" | "factPorts"
+  >,
+): value is ChangeRevisionDetail["inspectorPresentation"] {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !isFactRelationshipGraphPresentation(value.factGraph))
+    return false;
+  const graph = value.factGraph;
+  const expectedActivation = new Map<string, RevisionRef>();
+  const expectedNodes = new Set<string>();
+  for (const fact of detail.factPresentations) {
+    const id = factGraphNodeId(fact.originRevision, fact.family, fact.factId);
+    expectedNodes.add(id);
+    if (
+      sameRevision(fact.originRevision, detail.revision) ||
+      (fact.presentedInRevision !== undefined &&
+        sameRevision(fact.presentedInRevision, detail.revision))
+    ) {
+      expectedActivation.set(id, detail.revision);
+    }
+  }
+  for (const port of detail.factPorts) {
+    expectedNodes.add(
+      factGraphNodeId(
+        port.originRevision,
+        port.originFact.kind,
+        factRefId(port.originFact),
+      ),
+    );
+    const targetId =
+      port.targetFact === undefined
+        ? revisionGraphNodeId(port.targetRevision)
+        : factGraphNodeId(
+            port.targetRevision,
+            port.targetFact.kind,
+            factRefId(port.targetFact),
+          );
+    expectedNodes.add(targetId);
+    if (
+      port.targetFact === undefined &&
+      sameRevision(port.targetRevision, detail.revision)
+    ) {
+      expectedActivation.set(targetId, detail.revision);
+    }
+  }
+  const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+  if (
+    actualNodes.size !== expectedNodes.size ||
+    ![...expectedNodes].every((id) => actualNodes.has(id)) ||
+    !graph.nodes.every((node) => {
+      const activation = expectedActivation.get(node.id);
+      return activation === undefined
+        ? node.contextAvailability === "relationship_context_only" &&
+            node.activationRevision === undefined
+        : node.contextAvailability === "available" &&
+            node.activationRevision !== undefined &&
+            sameRevision(node.activationRevision, activation);
+    })
+  ) {
+    return false;
+  }
+  const ports = new Map(detail.factPorts.map((port) => [port.portId, port]));
+  return (
+    ports.size === graph.factPorts.length &&
+    graph.factPorts.every((edge) => {
+      const port = ports.get(edge.portId);
+      return (
+        port !== undefined &&
+        sameRevision(edge.originRevision, port.originRevision) &&
+        sameFactRef(edge.originFact, port.originFact) &&
+        sameRevision(edge.targetRevision, port.targetRevision) &&
+        sameOptionalFactRef(edge.targetFact, port.targetFact) &&
+        edge.relation === port.relation &&
+        edge.applicability === port.applicability &&
+        sameStringArray(edge.diagnostics ?? [], port.diagnostics)
+      );
+    })
+  );
+}
+
+function isChangeRevisionGraphPresentation(
+  value: unknown,
+): value is ChangeRevisionGraphPresentation {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodes) ||
+    value.nodes.length === 0 ||
+    !value.nodes.every(isChangeRevisionGraphNode) ||
+    !Array.isArray(value.effectiveSupersedes) ||
+    !Array.isArray(value.pendingOrConflictingClaims) ||
+    !isGraphBounds(value.bounds) ||
+    (value.diagnostics !== undefined && !isStringArray(value.diagnostics))
+  ) {
+    return false;
+  }
+  const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+  return (
+    nodes.size === value.nodes.length &&
+    value.effectiveSupersedes.every((edge) =>
+      isChangeRevisionGraphEffectiveEdge(edge, nodes),
+    ) &&
+    uniqueGraphEdgeEndpoints(value.effectiveSupersedes) &&
+    value.pendingOrConflictingClaims.every((edge) =>
+      isChangeRevisionGraphClaimEdge(edge, nodes),
+    ) &&
+    new Set(value.pendingOrConflictingClaims.map((edge) => edge.claimId))
+      .size === value.pendingOrConflictingClaims.length
+  );
+}
+
+function isChangeRevisionGraphNode(
+  value: unknown,
+): value is ChangeRevisionGraphNode {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.id) &&
+    isRevisionRef(value.revision) &&
+    value.id === revisionGraphNodeId(value.revision) &&
+    isFiniteGeometry(value) &&
+    typeof value.isCurrent === "boolean" &&
+    typeof value.isMember === "boolean" &&
+    isGraphContext(value) &&
+    (value.isMember
+      ? value.contextAvailability === "available" &&
+        isRevisionRef(value.activationRevision) &&
+        sameRevision(value.activationRevision, value.revision)
+      : value.contextAvailability === "relationship_context_only" &&
+        value.activationRevision === undefined)
+  );
+}
+
+function isChangeRevisionGraphEffectiveEdge(
+  value: unknown,
+  nodes: ReadonlyMap<string, ChangeRevisionGraphNode>,
+): value is ChangeRevisionGraphEffectiveEdge {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.from) &&
+    nonEmptyString(value.to) &&
+    isRevisionRef(value.successor) &&
+    isRevisionRef(value.predecessor) &&
+    value.from === revisionGraphNodeId(value.successor) &&
+    value.to === revisionGraphNodeId(value.predecessor) &&
+    nodes.has(value.from) &&
+    nodes.has(value.to) &&
+    isGraphPath(value.path)
+  );
+}
+
+function isChangeRevisionGraphClaimEdge(
+  value: unknown,
+  nodes: ReadonlyMap<string, ChangeRevisionGraphNode>,
+): value is ChangeRevisionGraphClaimEdge {
+  if (!isRecord(value) || !isChangeRevisionGraphEffectiveEdge(value, nodes))
+    return false;
+  return nonEmptyString(value.claimId) && isStringArray(value.diagnostics);
+}
+
+function isFactRelationshipGraphPresentation(
+  value: unknown,
+): value is FactRelationshipGraphPresentation {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodes) ||
+    value.nodes.length === 0 ||
+    !value.nodes.every(isFactRelationshipGraphNode) ||
+    !Array.isArray(value.observationSupersedes) ||
+    !Array.isArray(value.assessmentReplaces) ||
+    !Array.isArray(value.factPorts) ||
+    !isGraphBounds(value.bounds)
+  ) {
+    return false;
+  }
+  const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+  return (
+    nodes.size === value.nodes.length &&
+    value.observationSupersedes.every((edge) =>
+      isFactRelationshipEdge(edge, "observation", nodes),
+    ) &&
+    uniqueGraphEdgeEndpoints(value.observationSupersedes) &&
+    value.assessmentReplaces.every((edge) =>
+      isFactRelationshipEdge(edge, "assessment", nodes),
+    ) &&
+    uniqueGraphEdgeEndpoints(value.assessmentReplaces) &&
+    value.factPorts.every((edge) => isFactPortRelationshipEdge(edge, nodes)) &&
+    new Set(value.factPorts.map((edge) => edge.portId)).size ===
+      value.factPorts.length
+  );
+}
+
+function isFactRelationshipGraphNode(
+  value: unknown,
+): value is FactRelationshipGraphNode {
+  if (
+    !isRecord(value) ||
+    !nonEmptyString(value.id) ||
+    !isRevisionRef(value.revision) ||
+    !isFiniteGeometry(value) ||
+    !isGraphContext(value)
+  ) {
+    return false;
+  }
+  if (value.kind === "fact") {
+    return (
+      nonEmptyString(value.factId) &&
+      nonEmptyString(value.family) &&
+      value.id === factGraphNodeId(value.revision, value.family, value.factId)
+    );
+  }
+  return (
+    value.kind === "revision" &&
+    value.factId === undefined &&
+    value.family === undefined &&
+    value.id === revisionGraphNodeId(value.revision)
+  );
+}
+
+function isGraphContext(value: Record<string, unknown>): boolean {
+  if (value.contextAvailability === "available") {
+    return isRevisionRef(value.activationRevision);
+  }
+  return (
+    value.contextAvailability === "relationship_context_only" &&
+    value.activationRevision === undefined
+  );
+}
+
+function isFactRelationshipEdge(
+  value: unknown,
+  family: string,
+  nodes: ReadonlyMap<string, FactRelationshipGraphNode>,
+): value is FactRelationshipEdge {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.from) &&
+    nonEmptyString(value.to) &&
+    isRevisionRef(value.originRevision) &&
+    nonEmptyString(value.fromFactId) &&
+    nonEmptyString(value.toFactId) &&
+    value.from ===
+      factGraphNodeId(value.originRevision, family, value.fromFactId) &&
+    value.to ===
+      factGraphNodeId(value.originRevision, family, value.toFactId) &&
+    nodes.has(value.from) &&
+    nodes.has(value.to) &&
+    isGraphPath(value.path)
+  );
+}
+
+function isFactPortRelationshipEdge(
+  value: unknown,
+  nodes: ReadonlyMap<string, FactRelationshipGraphNode>,
+): value is FactPortRelationshipEdge {
+  if (
+    !isRecord(value) ||
+    !nonEmptyString(value.portId) ||
+    !nonEmptyString(value.from) ||
+    !nonEmptyString(value.to) ||
+    !isRevisionRef(value.originRevision) ||
+    !isFactRef(value.originFact) ||
+    !isRevisionRef(value.targetRevision) ||
+    (value.targetFact !== undefined && !isFactRef(value.targetFact)) ||
+    (value.relation !== "context_only" &&
+      value.relation !== "reanchored_as" &&
+      value.relation !== "carried_open_as" &&
+      value.relation !== "resolved_by") ||
+    (value.applicability !== "applicable" &&
+      value.applicability !== "conflicted" &&
+      value.applicability !== "unavailable") ||
+    !isGraphPath(value.path) ||
+    (value.diagnostics !== undefined && !isStringArray(value.diagnostics))
+  ) {
+    return false;
+  }
+  const from = factGraphNodeId(
+    value.originRevision,
+    value.originFact.kind,
+    factRefId(value.originFact),
+  );
+  const to =
+    value.targetFact === undefined
+      ? revisionGraphNodeId(value.targetRevision)
+      : factGraphNodeId(
+          value.targetRevision,
+          value.targetFact.kind,
+          factRefId(value.targetFact),
+        );
+  return (
+    value.from === from && value.to === to && nodes.has(from) && nodes.has(to)
+  );
+}
+
+function isGraphBounds(value: unknown): value is GraphBounds {
+  return isRecord(value) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
+}
+
+function isFiniteGeometry(value: Record<string, unknown>): boolean {
+  return (
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y) &&
+    isFiniteNumber(value.w) &&
+    isFiniteNumber(value.h)
+  );
+}
+
+function isGraphPath(value: unknown): value is GraphPoint[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      (point) =>
+        Array.isArray(point) &&
+        point.length === 2 &&
+        isFiniteNumber(point[0]) &&
+        isFiniteNumber(point[1]),
+    )
+  );
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function uniqueGraphEdgeEndpoints(
+  edges: Array<{ from: string; to: string }>,
+): boolean {
+  return (
+    new Set(edges.map((edge) => `${edge.from}\u0000${edge.to}`)).size ===
+    edges.length
+  );
+}
+
+function revisionGraphNodeId(revision: RevisionRef): string {
+  return `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`;
+}
+
+function factGraphNodeId(
+  revision: RevisionRef,
+  family: string,
+  factId: string,
+): string {
+  return `${revisionGraphNodeId(revision).replace("revision:", "fact:")}:${family}:${factId}`;
+}
+
+function graphEdgeKey(from: string, to: string): string {
+  return `${from}\u0000${to}`;
+}
+
+function sameStringArray(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function sameStringSet(left: Set<string>, right: Set<string>): boolean {
+  return (
+    left.size === right.size && [...left].every((value) => right.has(value))
+  );
+}
+
+function sameFactRef(left: FactRef, right: FactRef): boolean {
+  return left.kind === right.kind && factRefId(left) === factRefId(right);
+}
+
+function sameOptionalFactRef(
+  left: FactRef | undefined,
+  right: FactRef | undefined,
+): boolean {
+  return (
+    (left === undefined && right === undefined) ||
+    (left !== undefined && right !== undefined && sameFactRef(left, right))
   );
 }
 

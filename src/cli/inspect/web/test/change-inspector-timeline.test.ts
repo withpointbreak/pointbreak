@@ -194,19 +194,14 @@ describe("Change-aware Timeline renderer", () => {
       "Timeline diagnostic: one legacy event has no exact Revision artifact",
     );
     expect(master.textContent).toContain("Web checks: passed");
-    expect(master.textContent).toContain("Revision rev:sha256:one");
-    expect(master.textContent).toContain("actor:author · pointbreak 0.10.0");
-    expect(master.textContent).toContain("advisory assertion");
-    expect(master.textContent).toContain(
-      "source legacy-review-journal · event:legacy:one",
-    );
-    expect(master.textContent).toContain("ingested via ingest-events");
-    expect(master.textContent).toContain(
-      "exact Revisions: rev:sha256:one · sha256:artifact-one",
-    );
-    expect(master.textContent).toContain(
-      "unresolved Revisions: rev:sha256:unresolved",
-    );
+    expect(master.textContent).toContain("Revisions rev:sha256:one");
+    expect(master.textContent).toContain("actor:author");
+    expect(master.textContent).toContain("Changes change:sha256:one");
+    expect(master.textContent).toContain("unresolved rev:sha256:unresolved");
+    expect(master.textContent).not.toContain("pointbreak 0.10.0");
+    expect(master.textContent).not.toContain("advisory assertion");
+    expect(master.textContent).not.toContain("legacy-review-journal");
+    expect(master.textContent).not.toContain("ingested via ingest-events");
     expect(master.textContent).toContain("verify: valid");
     expect(master.textContent).toContain("Previous page");
     expect(master.textContent).toContain("Next page");
@@ -232,7 +227,12 @@ describe("Change-aware Timeline renderer", () => {
     expect(list?.dataset.timelineRoute).toBe("#/timeline");
     expect(list?.tabIndex).toBe(0);
     expect(list?.querySelectorAll('[tabindex="0"]')).toHaveLength(0);
-    expect(list?.querySelectorAll('[tabindex="-1"]')).toHaveLength(2);
+    expect(list?.querySelectorAll('li.event[tabindex="-1"]')).toHaveLength(2);
+    expect(
+      Array.from(
+        list?.querySelectorAll<HTMLAnchorElement>("a.ref") ?? [],
+      ).every((link) => link.tabIndex === -1),
+    ).toBe(true);
     expect(
       document.querySelectorAll('.timeline-shell [tabindex="0"]'),
     ).toHaveLength(1);
@@ -249,6 +249,166 @@ describe("Change-aware Timeline renderer", () => {
 
     document.querySelector<HTMLElement>("li.event")?.click();
     expect(navigated).toEqual([]);
+  });
+
+  it("keeps Timeline rows compact while retaining every exact context action", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const timeline = documentValue();
+    const entry = timeline.entries[0];
+    if (entry?.summary.kind !== "validation_check_recorded") {
+      throw new Error("missing validation entry");
+    }
+    const eventId =
+      "evt:sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    const changeA =
+      "change:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const changeB =
+      "change:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const revisionA =
+      "rev:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const revisionB =
+      "rev:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const artifactA =
+      "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const artifactB =
+      "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    timeline.entries = [
+      {
+        ...entry,
+        eventId,
+        changeIds: [changeA, changeB],
+        revisionRefs: [
+          { revisionId: revisionA, objectArtifactContentHash: artifactA },
+          { revisionId: revisionB, objectArtifactContentHash: artifactB },
+        ],
+        unresolvedRevisionIds: [revisionB],
+        summary: {
+          ...entry.summary,
+          details: {
+            ...entry.summary.details,
+            summary: `${"Long reader-facing validation context. ".repeat(12)}${revisionA}`,
+          },
+        },
+      },
+    ];
+    timeline.eventCount = 1;
+    timeline.matchCount = 1;
+    timeline.offset = 0;
+    timeline.previous = undefined;
+    timeline.next = undefined;
+
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+    );
+
+    const row = document.querySelector<HTMLElement>("li.event");
+    if (!row) throw new Error("missing Timeline row");
+    expect(row.textContent).toContain("evt:12345678");
+    expect(row.textContent).toContain("change:aaaaaaaa");
+    expect(row.textContent).toContain("change:bbbbbbbb");
+    expect(row.textContent).toContain("rev:cccccccc");
+    expect(row.textContent).toContain("rev:dddddddd");
+    expect(row.textContent).not.toContain(eventId);
+    expect(row.textContent).not.toContain(changeA);
+    expect(row.textContent).not.toContain(revisionA);
+    expect(row.textContent).not.toContain(artifactA);
+    expect(
+      row.querySelector(".event-summary")?.textContent?.length,
+    ).toBeLessThanOrEqual(180);
+    expect(row.querySelector(".event-summary")?.textContent).toContain("…");
+    expect(row.getAttribute("aria-label")).toContain(eventId);
+    expect(row.getAttribute("aria-label")).toContain(changeA);
+    expect(row.getAttribute("aria-label")).toContain(revisionA);
+
+    const contexts = Array.from(
+      row.querySelectorAll<HTMLAnchorElement>("a[data-timeline-context-id]"),
+    );
+    expect(contexts.map((link) => link.dataset.timelineContextId)).toEqual([
+      eventId,
+      changeA,
+      changeB,
+      revisionA,
+      revisionB,
+    ]);
+    expect(contexts.map((link) => link.getAttribute("tabindex"))).toEqual([
+      "-1",
+      "-1",
+      "-1",
+      "-1",
+      "-1",
+    ]);
+    expect(contexts.map((link) => link.getAttribute("title"))).toEqual([
+      eventId,
+      changeA,
+      changeB,
+      revisionA,
+      revisionB,
+    ]);
+    expect(contexts[1]?.getAttribute("href")).toContain(
+      encodeURIComponent(changeA),
+    );
+    expect(contexts[3]?.getAttribute("href")).toContain(
+      `revision=${encodeURIComponent(revisionA)}`,
+    );
+    expect(contexts[3]?.getAttribute("href")).toContain(
+      `artifactHash=${encodeURIComponent(artifactA)}`,
+    );
+    // The two exact Revision filters stand alone: neither silently picks one
+    // of the two explicit Change contexts as their owner.
+    expect(contexts[3]?.getAttribute("href")).not.toContain("change=");
+    expect(contexts[4]?.getAttribute("href")).not.toContain("change=");
+  });
+
+  it("bounds opaque presentation titles without losing their exact source", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const timeline = documentValue();
+    const entry = timeline.entries[0];
+    if (!entry) throw new Error("missing Timeline entry");
+    const observationId =
+      "obs:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const longTitle = `${observationId} ${"reader-facing detail ".repeat(12)}`;
+    timeline.entries = [
+      {
+        ...entry,
+        eventType: "review_observation_recorded",
+        summary: {
+          kind: "review_observation_recorded",
+          details: {
+            observationId,
+            target: { kind: "revision", revisionId: "rev:sha256:one" },
+            title: longTitle,
+          },
+        },
+      },
+    ];
+    timeline.eventCount = 1;
+    timeline.matchCount = 1;
+    timeline.offset = 0;
+    timeline.previous = undefined;
+    timeline.next = undefined;
+
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+    );
+
+    const row = document.querySelector<HTMLElement>("li.event");
+    const heading = row?.querySelector<HTMLHeadingElement>(".title");
+    expect(heading?.textContent).toContain("obs:aaaaaaaa");
+    expect(heading?.textContent).not.toContain(observationId);
+    expect(heading?.textContent?.length).toBeLessThanOrEqual(120);
+    expect(heading?.textContent?.endsWith("…")).toBe(true);
+    expect(heading?.getAttribute("title")).toBe(longTitle);
+    expect(row?.getAttribute("aria-label")).toContain(longTitle);
   });
 
   it("reveals an exact deep-linked event outside the first virtual window", () => {

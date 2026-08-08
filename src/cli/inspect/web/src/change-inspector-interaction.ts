@@ -85,6 +85,53 @@ function narrowDetailOwnsFocus(target: EventTarget | null): boolean {
   );
 }
 
+function refineDiffFocus(
+  route: Extract<ChangeInspectorRoute, { kind: "diff" }>,
+  patch: Partial<
+    NonNullable<Extract<ChangeInspectorRoute, { kind: "diff" }>["focus"]>
+  >,
+): Extract<ChangeInspectorRoute, { kind: "diff" }> {
+  const focus = { ...route.focus, ...patch };
+  for (const key of Object.keys(focus) as Array<keyof typeof focus>) {
+    if (!focus[key]) delete focus[key];
+  }
+  return { ...route, ...(Object.keys(focus).length ? { focus } : {}) };
+}
+
+function moveDiffTarget(
+  items: HTMLElement[],
+  current: string | undefined,
+  delta: number,
+  identity: (item: HTMLElement) => string | undefined,
+): HTMLElement | null {
+  if (!items.length) return null;
+  const index = items.findIndex((item) => identity(item) === current);
+  return (
+    items[
+      Math.max(0, Math.min(items.length - 1, (index < 0 ? -1 : index) + delta))
+    ] ?? null
+  );
+}
+
+function revisionRouteFromDiff(
+  route: Extract<ChangeInspectorRoute, { kind: "diff" }>,
+): Extract<ChangeInspectorRoute, { kind: "revision" }> {
+  return {
+    kind: "revision",
+    changeId: route.changeId,
+    revision: route.revision,
+    query: route.query,
+    ...(route.focus && (route.focus.factId || route.focus.filePath)
+      ? {
+          focus: {
+            ...(route.focus.factId ? { factId: route.focus.factId } : {}),
+            ...(route.focus.filePath ? { filePath: route.focus.filePath } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
 
 /**
@@ -519,11 +566,13 @@ export function installChangeInspectorInteraction(
 
   const focusFallback = (route: ValidRoute | null = currentRoute): void => {
     const target =
-      route !== null && route.kind !== "lens" && route.kind !== "timeline"
-        ? window.matchMedia("(max-width: 760px)").matches
-          ? document.querySelector<HTMLElement>("#detail-back")
-          : document.querySelector<HTMLElement>("#detail-close")
-        : document.querySelector<HTMLElement>("#master");
+      route?.kind === "diff"
+        ? document.querySelector<HTMLElement>("#diff-page-close")
+        : route !== null && route.kind !== "lens" && route.kind !== "timeline"
+          ? window.matchMedia("(max-width: 760px)").matches
+            ? document.querySelector<HTMLElement>("#detail-back")
+            : document.querySelector<HTMLElement>("#detail-close")
+          : document.querySelector<HTMLElement>("#master");
     target?.focus({ preventScroll: true });
   };
 
@@ -868,6 +917,14 @@ export function installChangeInspectorInteraction(
     // An auth-owned dialog still blocks shortcuts from reaching the page
     // beneath it. Its own listener handles Tab and Escape settlement.
     if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
+    const route = currentRoute;
+    // Escape exits a routed diff even while its file-search control owns focus.
+    // Other text-control keystrokes remain native and never trigger page keys.
+    if (route?.kind === "diff" && event.key === "Escape") {
+      event.preventDefault();
+      actions.navigate(revisionRouteFromDiff(route));
+      return;
+    }
     if (isTextControl(event.target)) return;
     if (
       ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") ||
@@ -878,8 +935,52 @@ export function installChangeInspectorInteraction(
       return;
     }
     if (event.metaKey || event.ctrlKey || event.altKey) return;
-    const route = currentRoute;
     if (!route) return;
+    if (route.kind === "diff") {
+      // The routed diff owns ]/[ and n/p. Controls inside the navigator/body
+      // keep their native keyboard behavior, including button activation.
+      if (isNativeActionControl(event.target)) return;
+      if (event.key === "]" || event.key === "[") {
+        const next = moveDiffTarget(
+          Array.from(
+            document.querySelectorAll<HTMLElement>("#diff-page-body .dfile"),
+          ),
+          route.focus?.filePath,
+          event.key === "]" ? 1 : -1,
+          (item) => item.dataset.filePath,
+        );
+        const filePath = next?.dataset.filePath;
+        if (filePath) {
+          event.preventDefault();
+          actions.navigate(refineDiffFocus(route, { filePath }));
+        }
+        return;
+      }
+      if (event.key === "n" || event.key === "p") {
+        const seen = new Set<string>();
+        const facts = Array.from(
+          document.querySelectorAll<HTMLElement>("#diff-page-body [data-anno]"),
+        ).filter((item) => {
+          const id = item.dataset.anno;
+          if (!id || seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+        const next = moveDiffTarget(
+          facts,
+          route.focus?.factId,
+          event.key === "n" ? 1 : -1,
+          (item) => item.dataset.anno,
+        );
+        const factId = next?.dataset.anno;
+        if (factId) {
+          event.preventDefault();
+          actions.navigate(refineDiffFocus(route, { factId }));
+        }
+        return;
+      }
+      return;
+    }
     if (event.key === "?") {
       event.preventDefault();
       openModal("#key-help", document.querySelector("#key-help-close"));
@@ -1260,6 +1361,18 @@ export function installChangeInspectorInteraction(
         nextRoute.kind !== "timeline" &&
         formatChangeInspectorRoute(currentRoute) !==
           formatChangeInspectorRoute(nextRoute);
+      const entersVisibleDiff =
+        nextRoute?.kind === "diff" &&
+        (currentRoute?.kind !== "diff" ||
+          formatChangeInspectorRoute(currentRoute) !==
+            formatChangeInspectorRoute(nextRoute)) &&
+        document.querySelector("#diff-page:not(.hidden)") !== null;
+      const leavesDiffForExactSurface =
+        currentRoute?.kind === "diff" &&
+        nextRoute !== null &&
+        nextRoute.kind !== "diff" &&
+        nextRoute.kind !== "lens" &&
+        nextRoute.kind !== "timeline";
       document
         .querySelector(".split")
         ?.classList.toggle("split-closed", !detailOpen);
@@ -1268,7 +1381,17 @@ export function installChangeInspectorInteraction(
         if (detailOpen) detail.removeAttribute("aria-hidden");
         else detail.setAttribute("aria-hidden", "true");
       }
-      if (detailOpen && !detailWasOpen) {
+      if (entersVisibleDiff) {
+        // The full-frame diff replaces the split reader. Put focus on its
+        // visible Back control rather than leaving it on the now-hidden exact
+        // Revision action that opened the diff.
+        focusFallback(nextRoute);
+      } else if (leavesDiffForExactSurface) {
+        // The diff has just been hidden and its search/body nodes may still
+        // be connected. Always settle on retained exact-reader chrome, which
+        // remains visible at both breakpoints.
+        focusFallback(nextRoute);
+      } else if (detailOpen && !detailWasOpen) {
         detailReturnFocus = active && active !== document.body ? active : null;
         if (viewportIsNarrow) {
           document

@@ -106,7 +106,10 @@ pub use change_migration::{
     BulkAdoptionRetainedAllocationV1, BulkAdoptionRetainedManifestV1, dry_run_bulk_adoption,
     migrate_bulk_adoption, restore_bulk_adoption_backup,
 };
-pub use change_read::{ChangeReaderReadyV1, ChangeReaderStateV1, change_reader_state_for_repo};
+pub use change_read::{
+    ChangeReaderPresentationV1, ChangeReaderReadyV1, ChangeReaderStateV1,
+    change_reader_state_for_repo,
+};
 pub use commit_range_liveness::{
     CommitGraphCondition, CommitLiveness, LivenessEnrichment, REF_REWRITTEN_CODE, RefContinuity,
     RefContinuityReport, RefContinuityView, Retention, commit_graph_stamp, diagnose_ref_continuity,

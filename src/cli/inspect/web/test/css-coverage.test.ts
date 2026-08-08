@@ -150,7 +150,7 @@ test("the compact preset declares only the non-color rhythm tokens", () => {
 
 test("the lens row/card layout tracks are pinned", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
-  expect(css).toMatch(/\.event \{[^}]*grid-template-columns: 96px 14px 1fr;/s);
+  expect(css).toMatch(/\.event \{[^}]*grid-template-columns: 84px 12px 1fr;/s);
   expect(css).toMatch(
     /\.unit-card \.kv \{[^}]*grid-template-columns: 110px 1fr;/s,
   );

@@ -16,6 +16,11 @@ use super::event_history_page::{
 };
 use super::page_token::PageTokenSigner;
 
+#[cfg(test)]
+thread_local! {
+    static SEARCH_RECORD_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum ApplyError {
     Invalid(String),
@@ -199,10 +204,13 @@ fn matches_non_type_filters(
     }) {
         return false;
     }
-    matches_query(&search_record(entry), clauses)
+    clauses.is_empty() || matches_query(&search_record(entry), clauses)
 }
 
 fn search_record(entry: &EventHistoryEntryV1) -> SearchRecord {
+    #[cfg(test)]
+    SEARCH_RECORD_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+
     let mut fields = BTreeMap::new();
     fields.insert("type".to_owned(), entry.event_type.as_str().to_owned());
     fields.insert(
@@ -255,6 +263,16 @@ fn search_record(entry: &EventHistoryEntryV1) -> SearchRecord {
             .to_lowercase(),
         fields,
     }
+}
+
+#[cfg(test)]
+fn reset_search_record_build_count() {
+    SEARCH_RECORD_BUILD_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn search_record_build_count() -> usize {
+    SEARCH_RECORD_BUILD_COUNT.with(std::cell::Cell::get)
 }
 
 fn summary_search_fields(
@@ -559,5 +577,15 @@ mod tests {
             ),
             Err(ApplyError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn empty_search_skips_lowercase_search_record_materialization() {
+        reset_search_record_build_count();
+
+        let page = apply(document(7), &parse("limit=2&order=asc"), &signer()).unwrap();
+
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(search_record_build_count(), 0);
     }
 }

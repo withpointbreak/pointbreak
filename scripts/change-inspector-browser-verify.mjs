@@ -278,8 +278,58 @@
     const name = row.getAttribute("aria-label") || "";
     return name.includes("event ") && name.length > 24;
   })), "readable Timeline rows", "a live Timeline row lacked an accessible event identity");
+  const semanticTimelineRows = await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => {
+    const eventId = row.dataset.eventId || "";
+    const title = row.querySelector(".title");
+    const summary = row.querySelector(".event-summary");
+    const eventLink = row.querySelector('a.ref[data-timeline-context-kind="event"]');
+    const contextLinks = Array.from(
+      row.querySelectorAll('a.ref[data-timeline-context-kind="change"], a.ref[data-timeline-context-kind="revision"]'),
+    );
+    return {
+      eventId,
+      title: title?.textContent || "",
+      titleSource: title?.getAttribute("title") || "",
+      summary: summary?.textContent || "",
+      eventVisible: eventLink?.textContent || "",
+      eventTitle: eventLink?.getAttribute("title") || "",
+      eventHref: eventLink?.getAttribute("href") || "",
+      contextLinks: contextLinks.map((link) => ({
+        visible: link.textContent || "",
+        title: link.getAttribute("title") || "",
+        href: link.getAttribute("href") || "",
+      })),
+    };
+  }));
+  expect(
+    semanticTimelineRows.every((row) =>
+      row.eventId.length > 0
+      && row.title.length > 0
+      && row.title.length <= 120
+      && row.titleSource.length >= row.title.length
+      && row.eventVisible.length > 0
+      && row.eventVisible !== row.eventTitle
+      && row.eventTitle === row.eventId
+      && row.eventHref.includes(`/timeline/events/${encodeURIComponent(row.eventId)}`)
+      && row.summary.length <= 180,
+    ),
+    "compact semantic Timeline rows",
+    "Timeline did not retain bounded prose plus a shortened, exact event link",
+  );
+  const timelineContextLinks = semanticTimelineRows.flatMap((row) => row.contextLinks);
+  expect(
+    timelineContextLinks.length > 0
+      && timelineContextLinks.every((link) =>
+        link.visible.length > 0
+        && link.visible !== link.title
+        && (link.href.startsWith("#/changes/") || link.href.startsWith("#/timeline?")),
+      ),
+    "compact semantic Timeline rows",
+    "Timeline Change or exact Revision references were not shortened native links",
+  );
   const initialTimelineIds = await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
   await screenshot("wide-timeline-default");
+  await screenshot("wide-timeline-semantic-rows");
 
   // Chronology is server-owned and continuations are opaque/signed.  Exercise
   // both directions through the UI rather than constructing a token here.
@@ -833,6 +883,43 @@
     await screenshot(`${layout.name}-attention`);
   }
 
+  // Attention is a reading surface, not a redacted status badge. Every card
+  // must say what is unresolved, what evidence is missing, and the next human
+  // action. Diagnostics are deliberately optional in the protocol, but when a
+  // server supplies them the reader must make each one readable.
+  await open("attention?limit=100&order=change_id_asc", layouts[0], "reason-bearing Attention");
+  const attentionPresentation = await page.locator(".unit-card[data-change-id]").evaluateAll((cards) => cards.map((card) => {
+    const reason = card.querySelector(".change-card-attention-reason");
+    const ask = card.querySelector(".change-card-attention-ask");
+    const action = card.querySelector(".change-card-attention-action");
+    const diagnostics = Array.from(
+      card.querySelectorAll(".change-card-attention-diagnostics li"),
+      (item) => item.textContent?.trim() || "",
+    );
+    return {
+      changeId: card.dataset.changeId || "",
+      reason: reason?.textContent?.trim() || "",
+      reasonTitle: reason?.getAttribute("title") || "",
+      ask: ask?.textContent?.trim() || "",
+      action: action?.textContent?.trim() || "",
+      diagnostics,
+    };
+  }));
+  expect(attentionPresentation.length > 0, "reason-bearing Attention", "the attention lens had no retained fixture Changes");
+  expect(
+    attentionPresentation.every((card) =>
+      card.changeId.length > 0
+      && card.reason.length > 0
+      && card.reasonTitle.length > 0
+      && card.ask.length > 0
+      && card.action.startsWith("Next: ")
+      && card.diagnostics.every((diagnostic) => diagnostic.length > 0),
+    ),
+    "reason-bearing Attention",
+    "an attention card omitted its reason, evidence request, next action, or supplied diagnostic",
+  );
+  await screenshot("wide-attention-reasons");
+
   await open("changes?limit=100&order=change_id_asc", layouts[0], "keyboard changes");
   await page.keyboard.press("j");
   expect(await selected().count() === 1, "keyboard local selection", "j did not select exactly one local Change");
@@ -955,6 +1042,90 @@
       await screenshot(`${layout.name}-${slug}`);
     }
   }
+
+  // The Change graph is server-laid (mmdflux geometry) rather than a client
+  // inference. It must preserve both its SVG relationship map and an exact
+  // textual equivalent. Available nodes are keyboard-operable; claim-only
+  // context remains readable but deliberately does not choose a peer.
+  const graphChange = topologyFixture.replacement.change;
+  const graphRoute = `changes/${encodeURIComponent(graphChange)}?limit=100&order=change_id_asc`;
+  await open(graphRoute, layouts[0], "Change Revision relationship graph");
+  await page.waitForFunction(() => Boolean(document.querySelector("#detail-body .change-revision-graph")));
+  const changeGraphMetrics = await page.locator("#detail-body .change-revision-graph").evaluate((graph) => ({
+    svg: graph.querySelectorAll("svg.change-revision-graph-svg").length,
+    nodes: graph.querySelectorAll("g.change-revision-node").length,
+    edges: graph.querySelectorAll("g.change-revision-edge").length,
+    effective: graph.querySelectorAll('g.change-revision-edge[data-edge-kind="effective-supersedes"]').length,
+    claims: graph.querySelectorAll('g.change-revision-edge[data-edge-kind="pending-or-conflicting-claim"]').length,
+    textual: graph.querySelectorAll("details[data-graph-textual-equivalent]").length,
+    nodePresentation: Array.from(graph.querySelectorAll("g.change-revision-node")).map((node) => {
+      const revision = node.getAttribute("data-revision-id") || "";
+      const artifact = node.getAttribute("data-artifact-hash") || "";
+      const label = node.getAttribute("aria-label") || "";
+      return {
+        revision,
+        artifact,
+        label,
+        availability: node.getAttribute("data-context-availability") || "",
+        role: node.getAttribute("role") || "",
+        disabled: node.getAttribute("aria-disabled") || "",
+      };
+    }),
+    textualNodes: Array.from(graph.querySelectorAll("[data-graph-text-nodes] > li")).map((item) => ({
+      text: item.textContent || "",
+      actionTitle: item.querySelector("button")?.getAttribute("title") || "",
+    })),
+  }));
+  const changeGraphAvailableNodes = changeGraphMetrics.nodePresentation
+    .filter((node) => node.availability === "available");
+  const changeGraphContextNodes = changeGraphMetrics.nodePresentation
+    .filter((node) => node.availability === "relationship_context_only");
+  expect(
+    changeGraphMetrics.svg === 1
+      && changeGraphMetrics.nodes >= 2
+      && changeGraphMetrics.edges >= 1
+      && changeGraphMetrics.effective + changeGraphMetrics.claims === changeGraphMetrics.edges
+      && changeGraphMetrics.textual === 1
+      && changeGraphMetrics.nodePresentation.every((node) =>
+        node.revision.length > 0 && node.artifact.length > 0
+          && node.label.includes(node.revision) && node.label.includes(node.artifact))
+      && changeGraphMetrics.textualNodes.length === changeGraphMetrics.nodes
+      && changeGraphAvailableNodes.length > 0
+      && changeGraphAvailableNodes.every((node) =>
+        node.role === "link" && node.disabled.length === 0
+          && changeGraphMetrics.textualNodes.some((item) => item.actionTitle === node.label))
+      && changeGraphContextNodes.length > 0
+      && changeGraphContextNodes.every((node) =>
+        node.role === "group" && node.disabled === "true"
+          && changeGraphMetrics.textualNodes.some((item) => item.text === node.label && item.actionTitle.length === 0)),
+    "Change Revision relationship graph",
+    `invalid authoritative graph geometry: ${JSON.stringify(changeGraphMetrics)}`,
+  );
+  const changeGraphText = page.locator("#detail-body .change-revision-graph details[data-graph-textual-equivalent]");
+  await changeGraphText.locator("summary").click();
+  expect(
+    await changeGraphText.locator("[data-graph-text-nodes] > li").count() === changeGraphMetrics.nodes
+      && await changeGraphText.locator("[data-graph-text-nodes] button").count() === changeGraphAvailableNodes.length
+      && await changeGraphText.locator("[data-graph-text-edges] li").count() >= changeGraphMetrics.edges,
+    "Change Revision graph text alternative",
+    "the textual graph equivalent omitted a readable node, available-node action, or relationship",
+  );
+  await screenshot("wide-change-revision-graph");
+  const graphNode = page.locator("#detail-body .change-revision-graph g.change-revision-node[data-context-availability='available']").first();
+  const graphRevision = await graphNode.getAttribute("data-revision-id");
+  const graphArtifact = await graphNode.getAttribute("data-artifact-hash");
+  expect(Boolean(graphRevision && graphArtifact), "Change Revision graph action", "graph node omitted an exact Revision identity");
+  if (!graphRevision || !graphArtifact) throw new Error("graph node omitted an exact Revision identity");
+  await graphNode.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(({ changeId, revision, artifact }) => {
+    const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+    return location.hash.includes(`/changes/${encodeURIComponent(changeId)}/revisions/${encodeURIComponent(revision)}`)
+      && query.get("artifactHash") === artifact
+      && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey);
+  }, { changeId: graphChange, revision: graphRevision, artifact: graphArtifact });
+  await page.goBack();
+  await page.waitForFunction((expectedRoute) => location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body .change-revision-graph")), graphRoute);
 
   const expectedParallelChange = topologyFixture.parallel_current.change;
   const parallelRoute = `changes?limit=100&order=change_id_asc&topology=parallel_current&q=${encodeURIComponent(expectedParallelChange)}`;
@@ -1084,6 +1255,196 @@
   const encodedRevision = encodeURIComponent(config.fixture.rich.revisionId);
   const encodedArtifact = encodeURIComponent(config.fixture.rich.artifactHash);
   const exact = `changes/${encodedChange}/revisions/${encodedRevision}?artifactHash=${encodedArtifact}&limit=100&order=change_id_asc`;
+
+  // The rich matrix carries fact supersession, assessment replacement, and a
+  // context-only fact port. Its exact reader therefore proves that the fact
+  // graph retains those distinct relationships. Available exact nodes expose
+  // route actions; context-only nodes remain readable but noninteractive.
+  await open(exact, layouts[0], "exact fact relationship graph");
+  await page.waitForFunction(() => Boolean(document.querySelector("#detail-body .fact-relationship-graph")));
+  const factGraphMetrics = await page.locator("#detail-body .fact-relationship-graph").evaluate((graph, factPortId) => ({
+    svg: graph.querySelectorAll("svg.fact-relationship-graph-svg").length,
+    nodes: graph.querySelectorAll("g.fact-relationship-node").length,
+    edges: graph.querySelectorAll("g.fact-relationship-edge").length,
+    observationSupersedes: graph.querySelectorAll('g.fact-relationship-edge[data-edge-kind="observation-supersedes"]').length,
+    assessmentReplaces: graph.querySelectorAll('g.fact-relationship-edge[data-edge-kind="assessment-replaces"]').length,
+    factPorts: graph.querySelectorAll('g.fact-relationship-edge[data-edge-kind="fact-port"]').length,
+    expectedFactPort: Array.from(graph.querySelectorAll("g.fact-relationship-edge"))
+      .some((edge) => edge.getAttribute("data-port-id") === factPortId),
+    textual: graph.querySelectorAll("details[data-graph-textual-equivalent]").length,
+    nodePresentation: Array.from(graph.querySelectorAll("g.fact-relationship-node")).map((node) => {
+      const revision = node.getAttribute("data-revision-id") || "";
+      const artifact = node.getAttribute("data-artifact-hash") || "";
+      const label = node.getAttribute("aria-label") || "";
+      return {
+        revision,
+        artifact,
+        label,
+        availability: node.getAttribute("data-context-availability") || "",
+        role: node.getAttribute("role") || "",
+        disabled: node.getAttribute("aria-disabled") || "",
+      };
+    }),
+    textualNodes: Array.from(graph.querySelectorAll("[data-graph-text-nodes] > li")).map((item) => ({
+      text: item.textContent || "",
+      actionTitle: item.querySelector("button")?.getAttribute("title") || "",
+    })),
+  }), config.fixture.factPort.portId);
+  const factGraphAvailableNodes = factGraphMetrics.nodePresentation
+    .filter((node) => node.availability === "available");
+  const factGraphContextNodes = factGraphMetrics.nodePresentation
+    .filter((node) => node.availability === "relationship_context_only");
+  expect(
+    factGraphMetrics.svg === 1
+      && factGraphMetrics.nodes >= 2
+      && factGraphMetrics.edges >= 2
+      && factGraphMetrics.observationSupersedes >= 1
+      && factGraphMetrics.factPorts >= 1
+      && factGraphMetrics.expectedFactPort
+      && factGraphMetrics.textual === 1
+      && factGraphMetrics.nodePresentation.every((node) =>
+        node.revision.length > 0 && node.artifact.length > 0
+          && node.label.includes(node.revision) && node.label.includes(node.artifact))
+      && factGraphMetrics.textualNodes.length === factGraphMetrics.nodes
+      && factGraphAvailableNodes.length > 0
+      && factGraphAvailableNodes.every((node) =>
+        node.role === "link" && node.disabled.length === 0
+          && factGraphMetrics.textualNodes.some((item) => item.actionTitle === node.label))
+      && factGraphContextNodes.length > 0
+      && factGraphContextNodes.every((node) =>
+        node.role === "group" && node.disabled === "true"
+          && factGraphMetrics.textualNodes.some((item) => item.text === node.label && item.actionTitle.length === 0)),
+    "exact fact relationship graph",
+    `rich exact Revision did not retain its relationship evidence: ${JSON.stringify(factGraphMetrics)}`,
+  );
+  const factGraphText = page.locator("#detail-body .fact-relationship-graph details[data-graph-textual-equivalent]");
+  await factGraphText.locator("summary").click();
+  expect(
+    await factGraphText.locator("[data-graph-text-nodes] > li").count() === factGraphMetrics.nodes
+      && await factGraphText.locator("[data-graph-text-nodes] button").count() === factGraphAvailableNodes.length
+      && await factGraphText.locator("[data-graph-text-edges] li").count() >= factGraphMetrics.edges,
+    "exact fact graph text alternative",
+    "the textual fact graph equivalent omitted a readable node, available-node action, or relationship",
+  );
+  await screenshot("wide-exact-fact-relationship-graph");
+  const factGraphNode = page.locator("#detail-body .fact-relationship-node[data-node-kind='fact'][data-context-availability='available']").first();
+  const graphFactId = await factGraphNode.getAttribute("data-graph-fact-id");
+  expect(Boolean(graphFactId), "exact fact graph action", "the graph did not expose a focusable exact fact node");
+  if (!graphFactId) throw new Error("the graph did not expose a focusable exact fact node");
+  await factGraphNode.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction((factId) => {
+    const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+    const target = Array.from(document.querySelectorAll("#detail-body [data-fact-id]"))
+      .find((element) => element.dataset.factId === factId);
+    return query.get("fact") === factId
+      && target?.dataset.exactFocus === "true"
+      && document.activeElement === target;
+  }, graphFactId);
+  await page.goBack();
+  await page.waitForFunction((expectedRoute) => location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body .fact-relationship-graph")), exact);
+
+  // An annotated diff is a first-class full-frame exact route, not an
+  // embedded side panel. It keeps the captured byte view and inlined facts
+  // together, advertises its keys, restores focus, and round-trips through
+  // reload and browser history without losing the exact Revision selector.
+  const annotatedDiffOpener = page.getByRole("button", { name: "Open annotated diff" });
+  expect(await annotatedDiffOpener.count() === 1, "annotated diff entry", "exact Revision did not offer one full-frame annotated diff action");
+  await annotatedDiffOpener.click();
+  await page.waitForFunction(() =>
+    location.hash.includes("/diff?")
+      && !document.querySelector("#diff-page")?.classList.contains("hidden")
+      && document.querySelector(".split")?.classList.contains("hidden"),
+  );
+  expect(
+    await page.locator("#diff-page-close").evaluate((node) => document.activeElement === node),
+    "annotated diff entry focus",
+    "entering the full-frame diff did not move focus to its explicit return action",
+  );
+  const diffMetrics = await page.locator("#diff-page").evaluate((diff) => ({
+    title: diff.querySelector("#diff-page-title")?.textContent || "",
+    titleSource: diff.querySelector("#diff-page-title")?.getAttribute("title") || "",
+    keyHints: diff.querySelector(".diff-page-keys")?.textContent?.replace(/\s+/g, " ").trim() || "",
+    files: diff.querySelectorAll("#diff-page-body .dfile").length,
+    facts: Array.from(diff.querySelectorAll("#diff-page-body [data-anno]"), (item) => item.dataset.anno || "")
+      .filter((id, index, values) => id.length > 0 && values.indexOf(id) === index),
+    splitVisible: !document.querySelector(".split")?.classList.contains("hidden"),
+  }));
+  expect(
+    diffMetrics.title.length > 0
+      && diffMetrics.titleSource.includes(config.fixture.rich.revisionId)
+      && diffMetrics.titleSource.includes(config.fixture.rich.artifactHash)
+      && diffMetrics.keyHints.includes("[")
+      && diffMetrics.keyHints.includes("]")
+      && diffMetrics.keyHints.includes("p")
+      && diffMetrics.keyHints.includes("n")
+      && diffMetrics.files >= 1
+      && diffMetrics.facts.length >= 1
+      && !diffMetrics.splitVisible,
+    "first-class annotated diff",
+    `full-frame diff omitted captured files, inline facts, exact identity, or key hints: ${JSON.stringify(diffMetrics)}`,
+  );
+  const diffFilePaths = await page.locator("#diff-page-body .dfile").evaluateAll((files) =>
+    files.map((file) => file.dataset.filePath || file.dataset.newFilePath || file.dataset.oldFilePath || ""),
+  );
+  expect(diffFilePaths.every((path) => path.length > 0), "annotated diff file navigation", "a full-frame diff file had no routeable path");
+  const diffBody = page.locator("#diff-page-body");
+  await diffBody.locator(".dfile").first().focus();
+  await page.keyboard.press("]");
+  await page.waitForFunction((filePath) => new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get("file") === filePath, diffFilePaths[0]);
+  expect(
+    await page.locator("#diff-page-body .dfile").first().getAttribute("data-exact-focus") === "true",
+    "annotated diff ] file key",
+    "the first file key did not focus the routed file section",
+  );
+  await page.keyboard.press("[");
+  expect(
+    new URLSearchParams((await hash()).split("?", 2)[1] ?? "").get("file") === diffFilePaths[0],
+    "annotated diff [ file key",
+    "the backward file key did not retain the first-file boundary",
+  );
+  const firstDiffFact = diffMetrics.facts[0];
+  await page.keyboard.press("n");
+  await page.waitForFunction((factId) => new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get("fact") === factId, firstDiffFact);
+  expect(
+    await page.locator(`#diff-page-body [data-anno]`).evaluateAll((nodes, factId) =>
+      nodes.some((node) => node.dataset.anno === factId && node.dataset.exactFocus === "true"), firstDiffFact),
+    "annotated diff n fact key",
+    "the first fact key did not focus an inlined fact",
+  );
+  await page.keyboard.press("p");
+  expect(
+    new URLSearchParams((await hash()).split("?", 2)[1] ?? "").get("fact") === firstDiffFact,
+    "annotated diff p fact key",
+    "the backward fact key did not retain the first-fact boundary",
+  );
+  const focusedDiffRoute = await hash();
+  await screenshot("wide-annotated-diff-full-frame");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction((expectedRoute) =>
+    location.hash === expectedRoute
+      && !document.querySelector("#diff-page")?.classList.contains("hidden")
+      && document.querySelectorAll("#diff-page-body .dfile").length > 0,
+  focusedDiffRoute);
+  expect(
+    await page.locator("#diff-page-close").evaluate((node) => document.activeElement === node),
+    "annotated diff reload focus",
+    "reload did not restore focus to the diff return action",
+  );
+  await page.locator("#diff-page-close").click();
+  await page.waitForFunction((expectedRoute) => location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), exact);
+  expect(
+    await page.locator("#detail-close").evaluate((node) => document.activeElement === node),
+    "annotated diff return focus",
+    "returning from the full-frame diff did not restore detail focus",
+  );
+  await page.goBack();
+  await page.waitForFunction((expectedRoute) =>
+    location.hash === expectedRoute && !document.querySelector("#diff-page")?.classList.contains("hidden"), focusedDiffRoute);
+  await page.goForward();
+  await page.waitForFunction((expectedRoute) =>
+    location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), exact);
+
   await open(exact, layouts[1], "narrow exact revision");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   expect(await page.locator("#detail").evaluate((node) => !node.inert && !node.hasAttribute("aria-hidden")), "narrow exact revision", "open detail remained inert or hidden");

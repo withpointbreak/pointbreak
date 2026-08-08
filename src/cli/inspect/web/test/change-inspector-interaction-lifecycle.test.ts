@@ -195,6 +195,132 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(toggleTimelineMonitoring).toHaveBeenCalledOnce();
   });
 
+  it("keeps the routed annotated-diff keys inside its exact Change and Revision", () => {
+    const { controller, navigate } = install();
+    const revision = {
+      revisionId: "revision:sha256:diff",
+      objectArtifactContentHash: "sha256:artifact-diff",
+    };
+    const route: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId: "change:sha256:diff",
+      revision,
+      query: { q: "annotated" },
+      focus: { filePath: "src/one.rs", factId: "obs:one" },
+    };
+    controller.sync({
+      generation: null,
+      route,
+      selected: null,
+      diagnostic: null,
+    });
+    const body = document.querySelector<HTMLElement>("#diff-page-body");
+    if (!body) throw new Error("diff body fixture is missing");
+    for (const [path, fact] of [
+      ["src/one.rs", "obs:one"],
+      ["src/two.rs", "obs:two"],
+    ]) {
+      const file = document.createElement("section");
+      file.className = "dfile";
+      file.dataset.filePath = path;
+      const annotation = document.createElement("article");
+      annotation.className = "anno";
+      annotation.dataset.anno = fact;
+      file.append(annotation);
+      body.append(file);
+    }
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "]", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      ...route,
+      focus: { filePath: "src/two.rs", factId: "obs:one" },
+    });
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      ...route,
+      focus: { filePath: "src/one.rs", factId: "obs:two" },
+    });
+
+    const input = document.querySelector<HTMLInputElement>("#diff-file-query");
+    input?.focus();
+    input?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "n", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenCalledTimes(2);
+
+    input?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "revision",
+      changeId: route.changeId,
+      revision,
+      query: route.query,
+      focus: route.focus,
+    });
+  });
+
+  it("hands focus between the full-frame diff and visible exact Revision chrome", () => {
+    const { controller } = install();
+    const revision = {
+      revisionId: "revision:sha256:focus-handoff",
+      objectArtifactContentHash: "sha256:artifact-focus-handoff",
+    };
+    const diffRoute: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId: "change:sha256:focus-handoff",
+      revision,
+      query: {},
+    };
+    const revisionRoute: Extract<ChangeInspectorRoute, { kind: "revision" }> = {
+      kind: "revision",
+      changeId: diffRoute.changeId,
+      revision,
+      query: {},
+    };
+    const diffPage = document.querySelector<HTMLElement>("#diff-page");
+    const split = document.querySelector<HTMLElement>(".split");
+    const input = document.querySelector<HTMLInputElement>("#diff-file-query");
+    const close = document.querySelector<HTMLButtonElement>("#diff-page-close");
+    const exactClose =
+      document.querySelector<HTMLButtonElement>("#detail-close");
+    if (!diffPage || !split || !input || !close || !exactClose) {
+      throw new Error("diff focus-handoff fixture is missing");
+    }
+
+    // Match the renderer's full-frame shell transition before the controller
+    // observes the routed diff.
+    diffPage.classList.remove("hidden");
+    split.classList.add("hidden");
+    input.focus();
+    controller.sync({
+      generation: null,
+      route: diffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(close);
+
+    // Escape/Back renders this exact Revision before the controller syncs;
+    // its hidden diff input remains connected, so the lifecycle must override
+    // it with visible exact-reader chrome.
+    diffPage.classList.add("hidden");
+    split.classList.remove("hidden");
+    input.focus();
+    controller.sync({
+      generation: null,
+      route: revisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(exactClose);
+  });
+
   it("keeps one Timeline tab stop and moves its event cursor with j/k/g/G", () => {
     const { controller, navigate } = install();
     const list = mountTimelineRows(["evt:one", "evt:two", "evt:three"]);

@@ -114,6 +114,37 @@ describe("Change inspector routes", () => {
     );
   });
 
+  it("makes the annotated diff a contextual exact Revision route", () => {
+    const diff = {
+      kind: "diff" as const,
+      changeId: "change:sha256:one",
+      revision: {
+        revisionId: "revision:sha256:two",
+        objectArtifactContentHash: "sha256:artifact-two",
+      },
+      query: {},
+      focus: {
+        filePath: "src/lib.rs",
+        factId: "obs:sha256:one",
+        fileQuery: "path:lib has:facts",
+      },
+    };
+    const formatted = formatChangeInspectorRoute(diff);
+    expect(formatted).toBe(
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Atwo/diff?artifactHash=sha256%3Aartifact-two&fact=obs%3Asha256%3Aone&file=src%2Flib.rs&fq=path%3Alib+has%3Afacts",
+    );
+    expect(parseChangeInspectorRoute(formatted)).toEqual(diff);
+    expect(
+      parseChangeInspectorRoute(
+        "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Atwo/resource?artifactHash=sha256%3Aartifact-two&fq=path%3Alib",
+      ),
+    ).toEqual({
+      kind: "invalid",
+      message:
+        "Exact route focus requires at most one non-empty fact and file.",
+    });
+  });
+
   it("round trips an exact event route and rejects a competing anchor", () => {
     const route = parseChangeInspectorRoute(
       "#/timeline/events/evt%3Asha256%3Aone?q=release&type=validation_check_recorded",

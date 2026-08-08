@@ -173,6 +173,409 @@ fn change_pages_preserve_bare_shape_and_reject_append_stale_continuations() {
 }
 
 #[test]
+fn change_attention_explains_one_primary_model_reason_without_widening_shared_profile() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let attention = inspector.get_json("/api/v2/attention");
+    let change_id = attention["changes"][0]["changeId"]
+        .as_str()
+        .expect("Attention Change identity");
+    let presentation = &attention["presentations"][change_id];
+
+    assert!(
+        changes["presentations"][change_id]
+            .get("attention")
+            .is_none(),
+        "ordinary Change cards must not carry Attention-only policy: {changes}"
+    );
+    assert_eq!(
+        presentation["attention"]["primaryReason"]["kind"],
+        "current_revisions_need_assessment"
+    );
+    assert_eq!(
+        presentation["attention"]["reasons"][0], presentation["attention"]["primaryReason"],
+        "reasons are ordered primary-first"
+    );
+    let exact = &presentation["attention"]["primaryReason"]["revisions"][0];
+    assert!(exact["revisionId"].as_str().is_some());
+    assert!(exact["objectArtifactContentHash"].as_str().is_some());
+
+    let profile = inspector.get_json("/api/v2/profile");
+    assert!(
+        profile["documents"]
+            .get("pointbreak.inspect-attention-presentation")
+            .is_none(),
+        "Inspector-private presentation must not widen the shared reader profile: {profile}"
+    );
+}
+
+#[test]
+fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let revision_id = capture(repo.path());
+    let repo_arg = repo.path().to_str().unwrap();
+    let observation = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        &revision_id,
+        "--track",
+        "agent:graph-contract",
+        "--title",
+        "Graph contract observation",
+    ]);
+    assert!(
+        observation.status.success(),
+        "observation add failed:\n{}",
+        String::from_utf8_lossy(&observation.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = &changes["changes"][0];
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = &change["currentRevisionRefs"][0];
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("exact artifact identity");
+
+    let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+    let revision_graph = &detail["inspectorPresentation"]["revisionGraph"];
+    assert_eq!(revision_graph["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(revision_graph["nodes"][0]["revision"], *exact);
+    assert_eq!(revision_graph["nodes"][0]["isCurrent"], true);
+    assert_eq!(
+        revision_graph["nodes"][0]["contextAvailability"],
+        "available"
+    );
+    assert_eq!(revision_graph["nodes"][0]["activationRevision"], *exact);
+    assert!(revision_graph["nodes"][0]["x"].as_f64().is_some());
+    assert!(revision_graph["nodes"][0]["y"].as_f64().is_some());
+    assert!(revision_graph["bounds"]["w"].as_f64().is_some());
+    assert!(revision_graph["bounds"]["h"].as_f64().is_some());
+
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(change_id),
+        urlencode(&revision_id),
+        urlencode(artifact_hash)
+    ));
+    let fact_graph = &revision["inspectorPresentation"]["factGraph"];
+    assert_eq!(fact_graph["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(fact_graph["nodes"][0]["kind"], "fact");
+    assert_eq!(fact_graph["nodes"][0]["family"], "observation");
+    assert_eq!(fact_graph["nodes"][0]["revision"], *exact);
+    assert_eq!(fact_graph["nodes"][0]["contextAvailability"], "available");
+    assert_eq!(fact_graph["nodes"][0]["activationRevision"], *exact);
+    assert!(
+        fact_graph["nodes"][0]["factId"]
+            .as_str()
+            .unwrap()
+            .starts_with("obs:sha256:")
+    );
+
+    let profile = inspector.get_json("/api/v2/profile");
+    assert!(
+        profile["documents"]
+            .get("pointbreak.inspect-revision-graph")
+            .is_none()
+            && profile["documents"]
+                .get("pointbreak.inspect-fact-graph")
+                .is_none(),
+        "Inspector-private graph geometry must not widen the shared reader profile: {profile}"
+    );
+}
+
+#[test]
+fn change_revision_graph_keeps_effective_edges_separate_from_unresolved_claims() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let first_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(first_output.status.success());
+    let first: Value = serde_json::from_slice(&first_output.stdout).unwrap();
+    let cursor = first["reviewCursor"]["token"]
+        .as_str()
+        .expect("review cursor");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_output = support::pointbreak([
+        "capture",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        cursor,
+        "--advance",
+        "replace",
+    ]);
+    assert!(second_output.status.success());
+    let second: Value = serde_json::from_slice(&second_output.stdout).unwrap();
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let change_id = second["changeId"].as_str().expect("Change identity");
+    let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+    let graph = &detail["inspectorPresentation"]["revisionGraph"];
+    let effective = graph["effectiveSupersedes"]
+        .as_array()
+        .expect("effective graph edges");
+
+    assert_eq!(effective.len(), 1);
+    assert_eq!(
+        effective[0]["successor"],
+        second["reviewCursor"]["cursor"]["revision"]
+    );
+    assert_eq!(
+        effective[0]["predecessor"],
+        first["reviewCursor"]["cursor"]["revision"]
+    );
+    assert!(!effective[0]["path"].as_array().unwrap().is_empty());
+    assert!(
+        graph["pendingOrConflictingClaims"]
+            .as_array()
+            .expect("unresolved claim graph edges")
+            .is_empty(),
+        "effective topology must not be echoed as an unresolved claim: {graph}"
+    );
+}
+
+#[test]
+fn pending_change_claim_keeps_nonmember_revision_as_non_navigable_context() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let member_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(member_output.status.success());
+    let member: Value = serde_json::from_slice(&member_output.stdout).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let context_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(context_output.status.success());
+    let context: Value = serde_json::from_slice(&context_output.stdout).unwrap();
+    let member_exact = &member["reviewCursor"]["cursor"]["revision"];
+    let context_exact = &context["reviewCursor"]["cursor"]["revision"];
+    let change_id = member["changeId"].as_str().unwrap();
+    let joined = support::pointbreak([
+        "change",
+        "join",
+        change_id,
+        context_exact["revisionId"].as_str().unwrap(),
+        "--operation-id",
+        "change-operation:inspector-claim-context-join",
+        "--repo",
+        repo_arg,
+    ]);
+    assert!(
+        joined.status.success(),
+        "temporary context membership failed:\n{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let asserted = support::pointbreak([
+        "change",
+        "assert-relation",
+        change_id,
+        member_exact["revisionId"].as_str().unwrap(),
+        context_exact["revisionId"].as_str().unwrap(),
+        "--successor-artifact-hash",
+        member_exact["objectArtifactContentHash"].as_str().unwrap(),
+        "--predecessor-artifact-hash",
+        context_exact["objectArtifactContentHash"].as_str().unwrap(),
+        "--operation-id",
+        "change-operation:inspector-claim-context",
+        "--repo",
+        repo_arg,
+    ]);
+    assert!(
+        asserted.status.success(),
+        "assert relation failed:\n{}",
+        String::from_utf8_lossy(&asserted.stderr)
+    );
+    let shown = support::pointbreak(["change", "show", change_id, "--repo", repo_arg]);
+    assert!(shown.status.success());
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let context_membership_claim = shown["membershipClaims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["revisionId"] == context_exact["revisionId"] && claim["active"] == true)
+        .and_then(|claim| claim["claimId"].as_str())
+        .expect("active temporary context membership claim");
+    let withdrawn = support::pointbreak([
+        "change",
+        "withdraw-membership",
+        context_membership_claim,
+        "--operation-id",
+        "change-operation:inspector-claim-context-withdraw",
+        "--repo",
+        repo_arg,
+    ]);
+    assert!(
+        withdrawn.status.success(),
+        "temporary context membership withdrawal failed:\n{}",
+        String::from_utf8_lossy(&withdrawn.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+    let graph = &detail["inspectorPresentation"]["revisionGraph"];
+    assert_eq!(
+        graph["pendingOrConflictingClaims"]
+            .as_array()
+            .expect("pending relationship claims")
+            .len(),
+        1,
+        "nonmember predecessor cannot become effective topology: {graph}"
+    );
+    let context_node = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["revision"] == *context_exact)
+        .expect("claim-only exact Revision node");
+    assert_eq!(context_node["isMember"], false);
+    assert_eq!(
+        context_node["contextAvailability"],
+        "relationship_context_only"
+    );
+    assert!(context_node.get("activationRevision").is_none());
+    let member_node = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["revision"] == *member_exact)
+        .expect("member exact Revision node");
+    assert_eq!(member_node["contextAvailability"], "available");
+    assert_eq!(member_node["activationRevision"], *member_exact);
+}
+
+#[test]
+fn applicable_fact_port_filters_unmaterialized_origin_relationship_endpoints() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let first_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(first_output.status.success());
+    let first: Value = serde_json::from_slice(&first_output.stdout).unwrap();
+    let first_exact = &first["reviewCursor"]["cursor"]["revision"];
+    let first_revision = first_exact["revisionId"].as_str().unwrap();
+
+    let old_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        first_revision,
+        "--track",
+        "agent:graph-contract",
+        "--title",
+        "old unrelated endpoint",
+    ]);
+    assert!(old_output.status.success());
+    let old: Value = serde_json::from_slice(&old_output.stdout).unwrap();
+    let new_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        first_revision,
+        "--track",
+        "agent:graph-contract",
+        "--title",
+        "ported current endpoint",
+        "--supersedes",
+        old["observationId"].as_str().unwrap(),
+    ]);
+    assert!(new_output.status.success());
+    let new: Value = serde_json::from_slice(&new_output.stdout).unwrap();
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_output = support::pointbreak([
+        "capture",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        first["reviewCursor"]["token"].as_str().unwrap(),
+        "--advance",
+        "replace",
+    ]);
+    assert!(second_output.status.success());
+    let second: Value = serde_json::from_slice(&second_output.stdout).unwrap();
+    let second_exact = &second["reviewCursor"]["cursor"]["revision"];
+    let origin = format!(
+        "{}@{}",
+        first_revision,
+        first_exact["objectArtifactContentHash"].as_str().unwrap()
+    );
+    let port = support::pointbreak([
+        "fact",
+        "port",
+        "--repo",
+        repo_arg,
+        "--origin-revision",
+        &origin,
+        "--origin-fact",
+        new["observationId"].as_str().unwrap(),
+        "--review-cursor",
+        second["reviewCursor"]["token"].as_str().unwrap(),
+        "--relation",
+        "context-only",
+        "--track",
+        "agent:graph-contract",
+    ]);
+    assert!(
+        port.status.success(),
+        "fact port failed:\n{}",
+        String::from_utf8_lossy(&port.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(second["changeId"].as_str().unwrap()),
+        urlencode(second_exact["revisionId"].as_str().unwrap()),
+        urlencode(second_exact["objectArtifactContentHash"].as_str().unwrap())
+    ));
+    let graph = &revision["inspectorPresentation"]["factGraph"];
+    assert!(
+        graph["observationSupersedes"]
+            .as_array()
+            .expect("observation relationships")
+            .is_empty(),
+        "a relationship whose old endpoint was not ported must be omitted: {graph}"
+    );
+    let ported = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["factId"] == new["observationId"])
+        .expect("ported fact node");
+    assert_eq!(ported["revision"], *first_exact, "origin stays explicit");
+    assert_eq!(ported["contextAvailability"], "available");
+    assert_eq!(ported["activationRevision"], *second_exact);
+    assert!(
+        graph["factPorts"]
+            .as_array()
+            .is_some_and(|ports| ports.len() == 1)
+    );
+}
+
+#[test]
 fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profile() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

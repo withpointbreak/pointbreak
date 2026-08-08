@@ -5,10 +5,18 @@ import {
   exactRevisionAccessibleIdentity,
 } from "./change-inspector-cards";
 import {
+  hideChangeInspectorDiffPage,
+  renderChangeInspectorDiffPage,
+} from "./change-inspector-diff";
+import {
   eventSubjectLabel,
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
+import {
+  renderChangeRevisionGraph,
+  renderFactRelationshipGraph,
+} from "./change-inspector-graphs";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
@@ -27,20 +35,21 @@ import type {
   EventHistoryEntry,
   EventHistoryQuery,
   FactContent,
-  FactTarget,
   RevisionRef,
   RevisionResource,
 } from "./change-protocol";
 import {
-  type Annotation,
   type DiffArtifact,
   renderDiff,
   renderDiffFileBody,
 } from "./diff/render";
 import { renderBodyContent } from "./markdown";
+import { shortRef } from "./refs";
 
 export interface ChangeInspectorRenderActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
+  /** Replace local presentation-only route refinements such as diff file search. */
+  replace?(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
   navigateTimelineBoundary?(
     boundary: "first" | "last",
     route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
@@ -54,6 +63,47 @@ export interface ChangeInspectorDetailPresentation {
   reading: ChangeInspectorReading | null;
   refusal: string | null;
   timeline?: TimelineMonitorSnapshot | null;
+}
+
+function routeForLens(
+  lens: "timeline" | "changes" | "attention",
+  current: ChangeInspectorRoute,
+): Exclude<ChangeInspectorRoute, { kind: "invalid" }> {
+  if (lens === "timeline") {
+    return {
+      kind: "timeline",
+      historyQuery:
+        current.kind === "timeline" || current.kind === "event"
+          ? { ...current.historyQuery, after: undefined, at: undefined }
+          : {},
+    };
+  }
+  return {
+    kind: "lens",
+    lens,
+    query:
+      current.kind === "invalid" ||
+      current.kind === "timeline" ||
+      current.kind === "event"
+        ? {}
+        : { ...current.query, after: undefined },
+  };
+}
+
+function syncLensLinks(
+  active: "timeline" | "changes" | "attention",
+  current: ChangeInspectorRoute,
+): void {
+  document
+    .querySelectorAll<HTMLAnchorElement>("#lens-switcher a[data-lens]")
+    .forEach((link) => {
+      const lens = link.dataset.lens;
+      if (lens !== "timeline" && lens !== "changes" && lens !== "attention")
+        return;
+      link.href = formatChangeInspectorRoute(routeForLens(lens, current));
+      if (lens === active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
 }
 
 const FILTER_OPTIONS = [
@@ -154,42 +204,35 @@ export function prepareChangeInspectorShell(
   if (switcher) {
     switcher.replaceChildren();
     for (const lens of ["timeline", "changes", "attention"] as const) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "lens-tab";
-      button.dataset.lens = lens;
-      button.textContent =
+      const link = document.createElement("a");
+      link.className = "lens-tab";
+      link.dataset.lens = lens;
+      link.textContent =
         lens === "timeline"
           ? "Timeline"
           : lens === "changes"
             ? "Changes"
             : "Attention";
-      button.addEventListener("click", () => {
+      const destination = () => {
         const current = parseChangeInspectorRoute(
           location.hash || "#/timeline",
         );
-        if (lens === "timeline") {
-          actions.navigate({
-            kind: "timeline",
-            historyQuery:
-              current.kind === "timeline" || current.kind === "event"
-                ? { ...current.historyQuery, after: undefined, at: undefined }
-                : {},
-          });
-        } else {
-          actions.navigate({
-            kind: "lens",
-            lens,
-            query:
-              current.kind === "invalid" ||
-              current.kind === "timeline" ||
-              current.kind === "event"
-                ? {}
-                : { ...current.query, after: undefined },
-          });
-        }
+        return routeForLens(lens, current);
+      };
+      link.href = formatChangeInspectorRoute(destination());
+      link.addEventListener("click", (event) => {
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        )
+          return;
+        event.preventDefault();
+        actions.navigate(destination());
       });
-      switcher.append(button);
+      switcher.append(link);
     }
   }
   const back = document.querySelector<HTMLButtonElement>("#detail-back");
@@ -592,6 +635,18 @@ function syncFilterChrome(
       : "Filters";
 }
 
+function appendDefinition(
+  list: HTMLDListElement,
+  label: string,
+  value: string,
+): void {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const definition = document.createElement("dd");
+  definition.textContent = value;
+  list.append(term, definition);
+}
+
 function renderEventDetail(
   event: EventHistoryEntry,
   actions: ChangeInspectorRenderActions,
@@ -606,11 +661,7 @@ function renderEventDetail(
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
   for (const item of presentation.fields) {
-    const term = document.createElement("dt");
-    term.textContent = item.label;
-    const definition = document.createElement("dd");
-    definition.textContent = item.value;
-    summaryFacts.append(term, definition);
+    appendDefinition(summaryFacts, item.label, item.value);
   }
   if (presentation.fields.length) summary.append(summaryFacts);
 
@@ -619,13 +670,8 @@ function renderEventDetail(
   attribution.append(detailHeading("Subject and attribution", 3));
   const attributionFacts = document.createElement("dl");
   attributionFacts.className = "kv";
-  const attributionAdd = (name: string, value: string) => {
-    const term = document.createElement("dt");
-    term.textContent = name;
-    const definition = document.createElement("dd");
-    definition.textContent = value;
-    attributionFacts.append(term, definition);
-  };
+  const attributionAdd = (name: string, value: string) =>
+    appendDefinition(attributionFacts, name, value);
   attributionAdd("subject", eventSubjectLabel(event.subject));
   attributionAdd("writer", event.writer.actorId);
   attributionAdd(
@@ -653,13 +699,8 @@ function renderEventDetail(
   record.append(detailHeading("Event record", 3));
   const facts = document.createElement("dl");
   facts.className = "kv";
-  const add = (name: string, value: string) => {
-    const term = document.createElement("dt");
-    term.textContent = name;
-    const definition = document.createElement("dd");
-    definition.textContent = value;
-    facts.append(term, definition);
-  };
+  const add = (name: string, value: string) =>
+    appendDefinition(facts, name, value);
   add("type", event.eventType.replaceAll("_", " "));
   add("occurred", event.occurredAt);
   add("verification", event.verificationStatus.replaceAll("_", " "));
@@ -760,11 +801,57 @@ function detailLine(text: string, className?: string): HTMLParagraphElement {
   return line;
 }
 
+function detailState(
+  entries: Array<[label: string, value: string]>,
+): HTMLDListElement {
+  const list = document.createElement("dl");
+  list.className = "detail-state";
+  for (const [label, value] of entries) {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const description = document.createElement("dd");
+    description.textContent = value;
+    list.append(term, description);
+  }
+  return list;
+}
+
+function detailIdentity(revision: RevisionRef): HTMLParagraphElement {
+  const line = document.createElement("p");
+  line.className = "detail-identity";
+  line.append(exactRevisionIdentity(revision));
+  return line;
+}
+
+function detailActions(...buttons: HTMLButtonElement[]): HTMLElement {
+  const actions = document.createElement("div");
+  actions.className = "detail-actions";
+  actions.append(...buttons);
+  return actions;
+}
+
 function shortExact(revision: {
   revisionId: string;
   objectArtifactContentHash: string;
 }): string {
-  return `${revision.revisionId} · ${revision.objectArtifactContentHash}`;
+  return `${shortRef(revision.revisionId)} · ${shortRef(
+    revision.objectArtifactContentHash,
+  )}`;
+}
+
+function exactRevisionIdentity(
+  revision: RevisionRef,
+  className = "mono",
+): HTMLElement {
+  const identity = document.createElement("code");
+  identity.className = className;
+  identity.textContent = shortExact(revision);
+  identity.title = exactRevisionAccessibleIdentity(revision);
+  identity.setAttribute(
+    "aria-label",
+    exactRevisionAccessibleIdentity(revision),
+  );
+  return identity;
 }
 
 function renderedFactBody(
@@ -810,8 +897,25 @@ function renderFacts(
       card.className = "unit-card";
       card.dataset.factId = fact.factId;
       card.tabIndex = -1;
+      const content = reading.document.factContentPresentations?.[fact.factId];
+      if (content) {
+        const heading =
+          content.content.kind === "assessment"
+            ? `Assessment: ${content.content.assessment}`
+            : content.content.kind === "validation"
+              ? content.content.checkName
+              : content.content.title;
+        card.append(detailHeading(heading, 5));
+      }
+      const factIdentity = document.createElement("p");
+      factIdentity.className = "detail-fact-identity";
+      const factCode = document.createElement("code");
+      factCode.textContent = shortRef(fact.factId);
+      factCode.title = fact.factId;
+      factCode.setAttribute("aria-label", `${fact.family} ${fact.factId}`);
+      factIdentity.append(factCode);
       card.append(
-        detailLine(fact.factId, "mono"),
+        factIdentity,
         detailLine(
           `origin: ${shortExact(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`,
         ),
@@ -838,7 +942,6 @@ function renderFacts(
           ),
         );
       }
-      const content = reading.document.factContentPresentations?.[fact.factId];
       if (content) {
         card.append(
           detailLine(
@@ -948,6 +1051,26 @@ function openCapturedResource(
   return button;
 }
 
+function openAnnotatedDiff(
+  route: Extract<ChangeInspectorRoute, { kind: "revision" | "association" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost detail-action-primary";
+  button.textContent = "Open annotated diff";
+  button.addEventListener("click", () =>
+    actions.navigate({
+      kind: "diff",
+      changeId: route.changeId,
+      revision: route.revision,
+      query: route.query,
+      ...(route.focus ? { focus: route.focus } : {}),
+    }),
+  );
+  return button;
+}
+
 function renderAssociations(
   reading: Extract<
     ChangeInspectorReading,
@@ -993,106 +1116,6 @@ function capturedDiffArtifact(documentValue: unknown): DiffArtifact | null {
   return Array.isArray(files) ? (documentValue as DiffArtifact) : null;
 }
 
-function annotationTarget(target: FactTarget): Annotation["target"] {
-  return {
-    kind: target.kind,
-    filePath: target.filePath,
-    startLine: target.startLine,
-    endLine: target.endLine,
-    side: target.side,
-    observationId: target.observationId,
-    inputRequestId: target.inputRequestId,
-    assessmentId: target.assessmentId,
-    eventId: target.eventId,
-  };
-}
-
-function annotationBody(content: FactContent): string | undefined {
-  return content.kind === "observation" || content.kind === "input_request"
-    ? content.body
-    : content.kind === "assessment" || content.kind === "validation"
-      ? content.summary
-      : undefined;
-}
-
-/**
- * Preserve each typed fact family's readable fields when adapting the
- * authoritative Change document to the retained, pure fact renderer.  This
- * is a presentation adapter only: it never chooses a target or joins facts
- * across Revisions.
- */
-function annotationForFact(
-  fact: Extract<
-    ChangeInspectorReading,
-    { kind: "revision" }
-  >["document"]["factPresentations"][number],
-  presentation: NonNullable<
-    Extract<
-      ChangeInspectorReading,
-      { kind: "revision" }
-    >["document"]["factContentPresentations"]
-  >[string],
-): Annotation {
-  const content = presentation.content;
-  const base: Annotation = {
-    id: fact.factId,
-    kind: content.kind === "input_request" ? "input-request" : content.kind,
-    title:
-      content.kind === "assessment"
-        ? `assessment: ${content.assessment}`
-        : content.kind === "validation"
-          ? content.checkName
-          : content.title,
-    track: fact.trackId ?? "untracked",
-    body: annotationBody(content),
-    bodyContentType: presentation.contentType,
-    bodyContentState: presentation.bodyContentState,
-    ...(fact.target ? { target: annotationTarget(fact.target) } : {}),
-  };
-  if (content.kind === "input_request") {
-    base.status = content.status;
-    base.responses = content.responses?.map((response) => ({
-      id: response.responseId,
-      outcome: response.outcome,
-      reason: response.reason,
-      reasonContentType: response.contentType,
-      reasonContentState: response.bodyContentState,
-      verificationStatus: response.availability,
-    }));
-  } else if (content.kind === "assessment") {
-    // `assessment` is the recorded verdict; family state remains the only
-    // lifecycle status this contextual document promises.
-    base.assessment = content.assessment;
-    base.status = fact.familyState;
-  } else if (content.kind === "validation") {
-    base.status = content.status;
-    base.command = content.command;
-  }
-  return base;
-}
-
-function annotationsForExactRevision(
-  detail: Extract<ChangeInspectorReading, { kind: "revision" }>["document"],
-): Annotation[] {
-  const annotations: Annotation[] = [];
-  for (const fact of detail.factPresentations) {
-    const content = detail.factContentPresentations?.[fact.factId];
-    if (
-      fact.family !== content?.content.kind ||
-      fact.originRevision.revisionId !== detail.revision.revisionId ||
-      fact.originRevision.objectArtifactContentHash !==
-        detail.revision.objectArtifactContentHash ||
-      !content
-    ) {
-      continue;
-    }
-    if (fact.target && fact.target.revisionId !== detail.revision.revisionId)
-      continue;
-    annotations.push(annotationForFact(fact, content));
-  }
-  return annotations;
-}
-
 function bindCapturedDiffInteractions(
   diff: HTMLElement,
   rendered: ReturnType<typeof renderDiff>,
@@ -1134,10 +1157,7 @@ function bindCapturedDiffInteractions(
   });
 }
 
-function renderCapturedDiff(
-  resource: RevisionResource,
-  annotations: Annotation[] = [],
-): HTMLElement {
+function renderCapturedDiff(resource: RevisionResource): HTMLElement {
   const artifact = capturedDiffArtifact(resource.capturedDocument);
   if (artifact === null) {
     const refusal = document.createElement("section");
@@ -1151,11 +1171,7 @@ function renderCapturedDiff(
   }
   const diff = document.createElement("section");
   diff.className = "captured-diff";
-  const rendered = renderDiff(
-    resource.resource.objectId,
-    artifact,
-    annotations,
-  );
+  const rendered = renderDiff(resource.resource.objectId, artifact, []);
   diff.innerHTML = rendered.html;
   rendered.ctx.files.forEach((file, index) => {
     const section = diff.querySelector<HTMLElement>(`[data-dfile="${index}"]`);
@@ -1229,7 +1245,8 @@ function renderCurrentRevisionChoices(
     const button = document.createElement("button");
     button.type = "button";
     button.className = "ghost mono";
-    button.textContent = revision.revisionId;
+    button.textContent = shortExact(revision);
+    button.title = exactRevisionAccessibleIdentity(revision);
     button.setAttribute(
       "aria-label",
       `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`,
@@ -1247,20 +1264,91 @@ function renderCurrentRevisionChoices(
   return choices;
 }
 
+function renderChangeRelationshipGraph(
+  detail: ChangeDetail,
+  route: Extract<ChangeInspectorRoute, { kind: "change" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLElement | null {
+  const graph = detail.inspectorPresentation?.revisionGraph;
+  if (!graph) return null;
+  const section = document.createElement("section");
+  section.className = "detail-relationships";
+  section.append(
+    detailHeading("Revision relationships", 3),
+    renderChangeRevisionGraph(graph, {
+      document,
+      onActivateRevision: (revision) =>
+        actions.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision,
+          query: route.query,
+        }),
+    }),
+  );
+  return section;
+}
+
+function renderExactFactRelationshipGraph(
+  detail: Extract<ChangeInspectorReading, { kind: "revision" }>["document"],
+  route: Extract<ChangeInspectorRoute, { kind: "revision" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLElement | null {
+  const graph = detail.inspectorPresentation?.factGraph;
+  if (!graph) return null;
+  const section = document.createElement("section");
+  section.className = "detail-relationships";
+  section.append(
+    detailHeading("Fact relationships", 3),
+    renderFactRelationshipGraph(graph, {
+      document,
+      onActivateRevision: (revision) =>
+        actions.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision,
+          query: queryForExactNavigation(route),
+        }),
+      onFocusFact: (focus) =>
+        actions.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision: focus.revision,
+          query: queryForExactNavigation(route),
+          focus: { factId: focus.factId },
+        }),
+    }),
+  );
+  return section;
+}
+
 function renderChangeDetail(
   detail: ChangeDetail,
   route: Extract<ChangeInspectorRoute, { kind: "change" }>,
   actions: ChangeInspectorRenderActions,
 ): Node[] {
+  const changeIdentity = document.createElement("p");
+  changeIdentity.className = "detail-identity";
+  const changeCode = document.createElement("code");
+  changeCode.textContent = shortRef(detail.summary.changeId);
+  changeCode.title = detail.summary.changeId;
+  changeCode.setAttribute("aria-label", `Change ${detail.summary.changeId}`);
+  changeIdentity.append(changeCode);
   const nodes: Node[] = [
-    detailHeading("Change"),
-    detailLine(detail.summary.changeId, "mono"),
-    detailLine(
-      `declaration: ${detail.summary.declarationState.replaceAll("_", " ")} · topology: ${detail.summary.topology.replaceAll("_", " ")} · lifecycle: ${detail.summary.lifecycle.replaceAll("_", " ")}`,
+    detailHeading(
+      detail.summary.titleAssertions.length === 1
+        ? detail.summary.titleAssertions[0]
+        : "Change",
     ),
-    detailLine(
-      `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact).join("; ") || "none"}`,
-    ),
+    changeIdentity,
+    detailState([
+      ["Topology", detail.summary.topology.replaceAll("_", " ")],
+      ["Lifecycle", detail.summary.lifecycle.replaceAll("_", " ")],
+      ["Attention", detail.summary.attentionSummary.replaceAll("_", " ")],
+      ["Availability", detail.summary.availabilitySummary.replaceAll("_", " ")],
+      ["Members", String(detail.summary.memberCount)],
+      ["Current peers", String(detail.currentRevisionRefs.length)],
+    ]),
     renderCurrentRevisionChoices(
       route.changeId,
       detail.currentRevisionRefs,
@@ -1268,6 +1356,24 @@ function renderChangeDetail(
       actions,
     ),
   ];
+  const relationships = renderChangeRelationshipGraph(detail, route, actions);
+  if (relationships) nodes.push(relationships);
+  if (detail.summary.titleAssertions.length > 1) {
+    const titles = document.createElement("section");
+    titles.className = "detail-notice";
+    titles.append(detailHeading("Title assertions", 3));
+    for (const title of detail.summary.titleAssertions)
+      titles.append(detailLine(title));
+    nodes.push(titles);
+  }
+  if (detail.operativeObligations.length > 0) {
+    const obligations = document.createElement("section");
+    obligations.className = "detail-notice detail-notice-warning";
+    obligations.append(detailHeading("What needs attention", 3));
+    for (const obligation of detail.operativeObligations)
+      obligations.append(detailLine(obligation));
+    nodes.push(obligations);
+  }
   const sections: Array<[string, string[]]> = [
     [
       "Member Revisions",
@@ -1339,16 +1445,21 @@ function renderChangeDetail(
           `${shortExact(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`,
       ),
     ],
-    ["Operative Obligations", detail.operativeObligations],
     ["Diagnostics", detail.diagnostics],
   ];
+  const record = document.createElement("details");
+  record.className = "detail-record";
+  const recordLabel = document.createElement("summary");
+  recordLabel.textContent = "Recorded claims and diagnostics";
+  record.append(recordLabel);
   for (const [title, entries] of sections) {
     const section = document.createElement("section");
     section.append(detailHeading(title, 3));
     if (entries.length === 0) section.append(message("None."));
     for (const entry of entries) section.append(detailLine(entry));
-    nodes.push(section);
+    record.append(section);
   }
+  nodes.push(record);
   return nodes;
 }
 
@@ -1420,30 +1531,39 @@ function renderReading(
           ? "Association comparisons"
           : "Exact Revision",
       ),
-      detailLine(shortExact(document.revision), "mono"),
-      detailLine(
-        `currency: ${document.revisionCurrency.replaceAll("_", " ")} · relation: ${document.relationClassification}`,
-      ),
-      detailLine(
-        `captured resource: ${document.availability.replaceAll("_", " ")}`,
-      ),
+      detailIdentity(document.revision),
+      detailState([
+        ["Currency", document.revisionCurrency.replaceAll("_", " ")],
+        ["Relation", document.relationClassification.replaceAll("_", " ")],
+        ["Captured resource", document.availability.replaceAll("_", " ")],
+        ["Facts", String(document.factPresentations.length)],
+        ["Associations", String(document.associations.length)],
+      ]),
     ];
     if (reading.kind === "revision") {
+      const factRelationships =
+        route.kind === "revision"
+          ? renderExactFactRelationshipGraph(document, route, actions)
+          : null;
       nodes.push(
-        detailHeading("Authoritative captured diff", 3),
-        renderCapturedDiff(
-          document.exactRevisionDocument,
-          annotationsForExactRevision(document),
+        detailActions(
+          openAnnotatedDiff(route, actions),
+          openCapturedResource(route, actions),
         ),
+        ...(factRelationships ? [factRelationships] : []),
         renderFacts(reading, route, actions),
         renderFactPorts(reading),
       );
     }
-    nodes.push(
-      renderAssociations(reading, route, actions),
-      openCapturedResource(route, actions),
-      copy,
-    );
+    nodes.push(renderAssociations(reading, route, actions));
+    if (reading.kind === "association")
+      nodes.push(
+        detailActions(
+          openAnnotatedDiff(route, actions),
+          openCapturedResource(route, actions),
+        ),
+      );
+    nodes.push(copy);
     return nodes;
   }
   return [
@@ -1622,6 +1742,15 @@ export function renderChangeInspector(
 ): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
+  if (snapshot.route.kind === "diff" && presentation.reading?.kind === "diff") {
+    renderChangeInspectorDiffPage(
+      presentation.reading.document,
+      snapshot.route,
+      actions,
+    );
+    return;
+  }
+  hideChangeInspectorDiffPage();
   const routeDiagnostic =
     document.querySelector<HTMLElement>("#route-diagnostic");
   if (routeDiagnostic) {
@@ -1687,14 +1816,7 @@ export function renderChangeInspector(
       timelineRoute,
       route.kind === "event" ? route.eventId : null,
     );
-    document
-      .querySelectorAll<HTMLButtonElement>("#lens-switcher [data-lens]")
-      .forEach((button) => {
-        button.setAttribute(
-          "aria-pressed",
-          String(button.dataset.lens === "timeline"),
-        );
-      });
+    syncLensLinks("timeline", snapshot.route);
     setText("#stat-events", `${history.eventCount} events`);
     setText(
       "#stat-units",
@@ -1731,7 +1853,7 @@ export function renderChangeInspector(
     // The protocol caps individual responses lower than this guard. Keep the
     // render-side bound as a second line of defence against an over-full server
     // page: a large store must never create an unbounded live DOM.
-    for (const summary of page.changes.slice(0, 150)) {
+    for (const [index, summary] of page.changes.slice(0, 150).entries()) {
       const card = changeCardPresentation(
         summary,
         page.presentations?.[summary.changeId],
@@ -1739,81 +1861,135 @@ export function renderChangeInspector(
       const element = document.createElement("article");
       element.className = "unit-card";
       element.dataset.changeId = summary.changeId;
-      element.setAttribute("aria-label", card.accessibleName);
-      const badges = document.createElement("p");
-      badges.className = "change-card-badges";
-      for (const value of card.badges) {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = value;
-        badges.append(badge, " ");
-      }
-      element.append(badges);
-      if (card.peers.length === 0) {
-        const unavailable = document.createElement("h3");
-        unavailable.textContent = "Current Revision unavailable";
-        element.append(unavailable);
-      } else if (card.peers.length > 1) {
-        const peerHeading = document.createElement("h3");
-        peerHeading.textContent = "Current Revisions";
-        element.append(peerHeading);
-      }
-      for (const peer of card.peers) {
-        const peerRow = document.createElement("div");
-        peerRow.className = "change-card-peer";
-        const choose = document.createElement("button");
-        choose.type = "button";
-        choose.className = "ghost change-card-peer-open";
-        choose.textContent = peer.label;
-        choose.title = peer.copyText;
-        choose.setAttribute(
-          "aria-label",
-          `${peer.accessibleName}; open for Change ${summary.changeId}`,
-        );
-        choose.addEventListener("click", () =>
-          actions.navigate({
-            kind: "revision",
-            changeId: summary.changeId,
-            revision: peer.revision,
-            query: queryForExactNavigation(route),
-          }),
-        );
-        const copyPeer = document.createElement("button");
-        copyPeer.type = "button";
-        copyPeer.className = "ghost";
-        copyPeer.textContent = "Copy exact Revision";
-        copyPeer.setAttribute(
-          "aria-label",
-          `Copy ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`,
-        );
-        copyPeer.addEventListener("click", () => copyExact(peer.copyText));
-        peerRow.append(choose, copyPeer);
-        element.append(peerRow);
-      }
-      const actionsElement = document.createElement("div");
-      actionsElement.className = "actions change-card-actions";
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "ghost";
-      open.textContent = "Open Change";
-      open.setAttribute("aria-label", `Open Change ${summary.changeId}`);
-      open.addEventListener("click", () =>
+      const headingId = `change-card-heading-${index}`;
+      element.setAttribute("aria-labelledby", headingId);
+
+      const primary = document.createElement("button");
+      primary.type = "button";
+      primary.className = "change-card-primary";
+      primary.setAttribute(
+        "aria-label",
+        `${card.primaryAction.label}. ${card.accessibleName}`,
+      );
+      primary.title = card.title;
+      const headline = document.createElement("span");
+      headline.id = headingId;
+      headline.className = "change-card-headline";
+      headline.textContent = card.headline;
+      const identity = document.createElement("code");
+      identity.className = "change-card-id mono";
+      identity.textContent = card.visibleChangeId;
+      identity.title = card.title;
+      primary.append(headline, identity);
+      primary.addEventListener("click", () =>
         actions.navigate({
           kind: "change",
           changeId: summary.changeId,
           query: queryForExactNavigation(route),
         }),
       );
-      const changeIdentity = document.createElement("code");
-      changeIdentity.className = "mono";
-      changeIdentity.textContent = summary.changeId;
-      const copyChange = document.createElement("button");
-      copyChange.type = "button";
-      copyChange.className = "ghost";
-      copyChange.textContent = "Copy Change ID";
-      copyChange.addEventListener("click", () => copyExact(summary.changeId));
-      actionsElement.append(open, changeIdentity, copyChange);
-      element.append(actionsElement);
+      element.append(primary);
+
+      if (card.attention) {
+        const attention = document.createElement("section");
+        attention.className = "change-card-attention";
+        attention.setAttribute("aria-label", "Why this Change needs attention");
+        const reason = document.createElement("strong");
+        reason.className = "change-card-attention-reason";
+        reason.textContent = card.attention.reason;
+        reason.title = card.attention.primary.title;
+        const ask = document.createElement("p");
+        ask.className = "change-card-attention-ask";
+        ask.textContent = card.attention.ask;
+        const action = document.createElement("p");
+        action.className = "change-card-attention-action";
+        action.textContent = `Next: ${card.attention.actionLabel}`;
+        attention.append(reason, ask, action);
+        if (card.attention.additionalReasons.length > 0) {
+          const additional = document.createElement("ul");
+          additional.className = "change-card-attention-additional";
+          additional.setAttribute("aria-label", "Additional reasons");
+          for (const item of card.attention.additionalReasons) {
+            const row = document.createElement("li");
+            row.textContent = `${item.reason}: ${item.ask}`;
+            row.title = item.title;
+            additional.append(row);
+          }
+          attention.append(additional);
+        }
+        if (card.attention.diagnostics?.length) {
+          const details = document.createElement("section");
+          details.className = "change-card-attention-diagnostics";
+          details.setAttribute("aria-label", "Attention details");
+          const detailsHeading = document.createElement("strong");
+          detailsHeading.textContent = "Details";
+          const diagnostics = document.createElement("ul");
+          for (const diagnostic of card.attention.diagnostics) {
+            const row = document.createElement("li");
+            row.textContent = diagnostic;
+            diagnostics.append(row);
+          }
+          details.append(detailsHeading, diagnostics);
+          attention.append(details);
+        }
+        element.append(attention);
+      }
+
+      const state = document.createElement("dl");
+      state.className = "change-card-state";
+      for (const axis of card.stateAxes) {
+        const label = document.createElement("dt");
+        label.textContent = axis.label;
+        const value = document.createElement("dd");
+        value.textContent = axis.value;
+        state.append(label, value);
+      }
+      element.append(state);
+
+      if (card.unavailableReason) {
+        const unavailable = document.createElement("p");
+        unavailable.className = "change-card-unavailable";
+        unavailable.textContent = card.unavailableReason;
+        element.append(unavailable);
+      } else if (card.peers.length === 1) {
+        const peer = card.peers[0];
+        const current = document.createElement("p");
+        current.className = "change-card-current";
+        current.append("Current Revision · ");
+        const exact = document.createElement("code");
+        exact.className = "mono";
+        exact.textContent = peer.visibleIdentity;
+        exact.title = peer.title;
+        current.append(exact);
+        element.append(current);
+      } else {
+        const peers = document.createElement("section");
+        peers.className = "change-card-peers";
+        const peerHeading = document.createElement("h3");
+        peerHeading.textContent = "Choose an exact current Revision";
+        peers.append(peerHeading);
+        for (const peer of card.peers) {
+          const choose = document.createElement("button");
+          choose.type = "button";
+          choose.className = "ghost change-card-peer-open";
+          choose.textContent = `${peer.label} · ${peer.visibleIdentity}`;
+          choose.title = peer.title;
+          choose.setAttribute(
+            "aria-label",
+            `${peer.accessibleName}; open for Change ${summary.changeId}`,
+          );
+          choose.addEventListener("click", () =>
+            actions.navigate({
+              kind: "revision",
+              changeId: summary.changeId,
+              revision: peer.revision,
+              query: queryForExactNavigation(route),
+            }),
+          );
+          peers.append(choose);
+        }
+        element.append(peers);
+      }
       list.append(element);
     }
     if (page.changes.length === 0)
@@ -1843,11 +2019,7 @@ export function renderChangeInspector(
     master.replaceChildren(list);
     master.dataset.changeListKey = listKey;
   }
-  document
-    .querySelectorAll<HTMLButtonElement>("#lens-switcher [data-lens]")
-    .forEach((button) => {
-      button.setAttribute("aria-pressed", String(button.dataset.lens === lens));
-    });
+  syncLensLinks(lens, snapshot.route);
   setText(
     "#stat-events",
     `${snapshot.generation.profile.authorityCursor.eventCount ?? "—"} events`,

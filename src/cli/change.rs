@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -932,6 +932,69 @@ pub(crate) struct ExactRead {
     pub(crate) facts: Vec<FactPresentationV1>,
     pub(crate) fact_content: BTreeMap<String, pointbreak::documents::FactContentPresentationV1>,
     pub(crate) associations: Vec<AssociationComparisonDocumentV1>,
+    pub(crate) fact_relationships: Vec<ExactFactRelationship>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExactFactRelationshipKind {
+    ObservationSupersedes,
+    AssessmentReplaces,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExactFactRelationship {
+    pub(crate) origin_revision: RevisionRefV1,
+    pub(crate) from_fact_id: String,
+    pub(crate) to_fact_id: String,
+    pub(crate) family: &'static str,
+    pub(crate) kind: ExactFactRelationshipKind,
+}
+
+fn exact_fact_relationships(
+    result: &pointbreak::session::RevisionShowResult,
+    exact: &RevisionRefV1,
+) -> Vec<ExactFactRelationship> {
+    let mut relationships = Vec::new();
+    for observation in &result.observations {
+        relationships.extend(observation.supersedes.iter().map(|superseded| {
+            ExactFactRelationship {
+                origin_revision: exact.clone(),
+                from_fact_id: observation.id.as_str().to_owned(),
+                to_fact_id: superseded.as_str().to_owned(),
+                family: "observation",
+                kind: ExactFactRelationshipKind::ObservationSupersedes,
+            }
+        }));
+    }
+    for assessment in &result.assessments {
+        relationships.extend(
+            assessment
+                .replaces
+                .iter()
+                .map(|replaced| ExactFactRelationship {
+                    origin_revision: exact.clone(),
+                    from_fact_id: assessment.id.as_str().to_owned(),
+                    to_fact_id: replaced.as_str().to_owned(),
+                    family: "assessment",
+                    kind: ExactFactRelationshipKind::AssessmentReplaces,
+                }),
+        );
+    }
+    relationships.sort_by(|left, right| {
+        (
+            left.family,
+            &left.from_fact_id,
+            &left.to_fact_id,
+            &left.origin_revision,
+        )
+            .cmp(&(
+                right.family,
+                &right.from_fact_id,
+                &right.to_fact_id,
+                &right.origin_revision,
+            ))
+    });
+    relationships
 }
 
 pub(crate) fn build_exact_read(
@@ -952,6 +1015,7 @@ pub(crate) fn build_exact_read(
         return Err("exact Revision projection returned a different artifact hash".into());
     }
     let (facts, fact_content) = pointbreak::documents::normalize_fact_presentations(&result, exact);
+    let fact_relationships = exact_fact_relationships(&result, exact);
     let associations = association_documents(&result, exact)?;
     let resource_ref = RevisionResourceRefV1 {
         revision: exact.clone(),
@@ -983,6 +1047,7 @@ pub(crate) fn build_exact_read(
         facts,
         fact_content,
         associations,
+        fact_relationships,
     })
 }
 
@@ -1005,6 +1070,7 @@ pub(crate) fn build_contextual_exact_read(
         (
             Vec<FactPresentationV1>,
             BTreeMap<String, FactContentPresentationV1>,
+            Vec<ExactFactRelationship>,
         ),
     >::new();
     let mut contextual_facts = BTreeMap::<String, FactPresentationV1>::new();
@@ -1046,15 +1112,20 @@ pub(crate) fn build_contextual_exact_read(
             {
                 continue;
             }
+            let (facts, content) = pointbreak::documents::normalize_fact_presentations(
+                &origin_result,
+                &port.origin_revision,
+            );
             origin_cache.insert(
                 cache_key.clone(),
-                pointbreak::documents::normalize_fact_presentations(
-                    &origin_result,
-                    &port.origin_revision,
+                (
+                    facts,
+                    content,
+                    exact_fact_relationships(&origin_result, &port.origin_revision),
                 ),
             );
         }
-        let Some((facts, content)) = origin_cache.get(&cache_key) else {
+        let Some((facts, content, _relationships)) = origin_cache.get(&cache_key) else {
             continue;
         };
         let origin_fact_id = fact_ref_id(&port.origin_fact);
@@ -1089,6 +1160,48 @@ pub(crate) fn build_contextual_exact_read(
         .facts
         .sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
     exact_read.fact_content.extend(contextual_content);
+    let materialized_fact_keys = exact_read
+        .facts
+        .iter()
+        .map(|fact| {
+            (
+                fact.origin_revision.clone(),
+                fact.family.clone(),
+                fact.fact_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    exact_read.fact_relationships.extend(
+        origin_cache
+            .into_values()
+            .flat_map(|(_, _, relationships)| relationships)
+            .filter(|relationship| {
+                [&relationship.from_fact_id, &relationship.to_fact_id]
+                    .into_iter()
+                    .all(|fact_id| {
+                        materialized_fact_keys.contains(&(
+                            relationship.origin_revision.clone(),
+                            relationship.family.to_owned(),
+                            fact_id.clone(),
+                        ))
+                    })
+            }),
+    );
+    exact_read.fact_relationships.sort_by(|left, right| {
+        (
+            left.family,
+            &left.from_fact_id,
+            &left.to_fact_id,
+            &left.origin_revision,
+        )
+            .cmp(&(
+                right.family,
+                &right.from_fact_id,
+                &right.to_fact_id,
+                &right.origin_revision,
+            ))
+    });
+    exact_read.fact_relationships.dedup();
     Ok(exact_read)
 }
 

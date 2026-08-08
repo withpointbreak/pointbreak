@@ -13,18 +13,23 @@ use std::sync::{Arc, RwLock};
 use mmdflux::graph::{Direction, Edge, Graph, Node};
 use mmdflux::layout::{LaidOutGraph, LayoutOptions, layout_graph};
 use pointbreak::documents::{
-    ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1, InspectFreshnessDocument,
-    ReaderProfileDocumentV1, review_snapshot_document, revision_show_document,
+    ChangeDetailV1, ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1,
+    ChangeRevisionDetailV1, FactFamilyStateV1, FactPortApplicabilityV1, FactPortPresentationV1,
+    InspectFreshnessDocument, ReaderProfileDocumentV1, review_snapshot_document,
+    revision_show_document,
 };
 use pointbreak::git::git_commit_subjects;
-use pointbreak::model::{ChangeId, EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
-use pointbreak::session::event::{GitProvenance, ReviewAssessment};
+use pointbreak::model::{
+    ChangeId, EventId, InputRequestId, ObjectId, ReviewEndpoint, ReviewFactPortId, RevisionId,
+    RevisionRefV1, RevisionSource,
+};
+use pointbreak::session::event::{FactPortRelationV1, FactRefV1, GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AUTHORITATIVE_REVISION_PAGE_PROFILE, AssessmentRecordStatus, AssessmentView, AttentionItem,
-    AttentionListOptions, BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus,
-    DerivedAttention, DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryLifecycleStatus,
-    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
-    DerivedRevisionDetail, DerivedRevisionDetailRoute, DerivedRevisionPage,
+    AttentionListOptions, BaseHistoryProjection, BaseProjectionConfig, ChangeLifecycleV1,
+    CurrentAssessmentStatus, DerivedAttention, DerivedAttentionRoute, DerivedHistoryAccess,
+    DerivedHistoryLifecycleStatus, DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute,
+    DerivedHistoryStatus, DerivedRevisionDetail, DerivedRevisionDetailRoute, DerivedRevisionPage,
     DerivedRevisionPageRoute, DerivedThreads, DerivedThreadsRoute, DistinctValues,
     EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
     LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
@@ -60,8 +65,8 @@ pub(super) fn change_v2_profile_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
 ) -> Result<String, String> {
-    let state = cache.load(repo).map_err(|error| error.to_string())?;
-    let mut profile = ReaderProfileDocumentV1::from(&state.capability);
+    let generation = cache.load_state(repo).map_err(|error| error.to_string())?;
+    let mut profile = ReaderProfileDocumentV1::from(&generation.state.capability);
     profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
     serde_json::to_string(&profile).map_err(|error| error.to_string())
 }
@@ -101,7 +106,8 @@ pub(super) fn event_history_v2_json(
             )));
         }
     };
-    event_history_v2_from_loaded(repo, request, signer, cache.load(repo))
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    event_history_v2_from_loaded(repo, request, signer, cache.load_timeline(repo, &trust_set))
 }
 
 /// Finish a Timeline response after its signed request has passed the closed
@@ -109,16 +115,13 @@ pub(super) fn event_history_v2_json(
 /// invalid-query-before-store-access guarantee while letting the cache-race
 /// test prove that a real moving journal is rendered as a typed retry.
 pub(super) fn event_history_v2_from_loaded(
-    repo: &Path,
+    _repo: &Path,
     request: super::event_history_page::Request,
     signer: &super::page_token::PageTokenSigner,
-    loaded: Result<
-        Arc<pointbreak::session::ChangeReaderStateV1>,
-        super::server::ChangeReaderLoadError,
-    >,
+    loaded: Result<super::server::ChangeReaderGeneration, super::server::ChangeReaderLoadError>,
 ) -> Result<ChangeV2Json, String> {
-    let state = match loaded {
-        Ok(state) => state,
+    let generation = match loaded {
+        Ok(generation) => generation,
         Err(super::server::ChangeReaderLoadError::MovingJournal) => {
             return Ok(ChangeV2Json::Retryable(event_history_error_json(
                 "moving_journal",
@@ -128,18 +131,23 @@ pub(super) fn event_history_v2_from_loaded(
         }
         Err(super::server::ChangeReaderLoadError::Other(message)) => return Err(message),
     };
-    if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
+    if let Some(unavailable) =
+        ChangeQueryUnavailableDocumentV1::for_inspection(&generation.state.capability)
+    {
         return serde_json::to_string(&unavailable)
             .map(ChangeV2Json::Unavailable)
             .map_err(|error| error.to_string());
     }
-    let ready = state
+    generation
+        .state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
-    let document = ready
-        .event_history_facade(&crate::cli::common::discover_trust_set(repo))
-        .map_err(|error| error.to_string())?
-        .document();
+    let document = generation
+        .timeline
+        .as_ref()
+        .ok_or_else(|| "Change reader Timeline is unavailable".to_owned())?
+        .as_ref()
+        .clone();
     match super::event_history_query::apply(document, &request, signer) {
         Ok(document) => serde_json::to_string(&document)
             .map(ChangeV2Json::Ok)
@@ -186,8 +194,148 @@ pub(super) fn change_attention_v2_json(
         let document = facade
             .attention_document_with_presentations(true)
             .map_err(|error| error.to_string())?;
-        paged_change_json(document, request, signer)
+        let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+        enrich_change_attention_presentations(&mut value, facade)?;
+        paged_change_json(value, request, signer)
     })
+}
+
+/// Inspector-only attention explanation derived from the same immutable
+/// `ChangeDocumentFacadeV1` generation as the visible summary. The shared
+/// Change documents and strict reader profile remain unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeAttentionPresentation {
+    primary_reason: ChangeAttentionReason,
+    /// Primary-first, deterministic reasons. Consumers may choose wording but
+    /// must not re-rank model causes.
+    reasons: Vec<ChangeAttentionReason>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
+}
+
+/// Closed, user-neutral causes for a Change appearing in the Attention lens.
+/// Exact current peers remain a collection; no presentation adapter selects
+/// one Revision on the reader's behalf.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+enum ChangeAttentionReason {
+    Conflicted,
+    Incomplete,
+    NoCurrentRevision,
+    UnresolvedOperativeRequests { request_ids: Vec<InputRequestId> },
+    CurrentRevisionsNeedAssessment { revisions: Vec<RevisionRefV1> },
+}
+
+struct ChangeAttentionReasonSource {
+    lifecycle: ChangeLifecycleV1,
+    current_revisions: Vec<RevisionRefV1>,
+    qualification: Vec<(RevisionRefV1, bool)>,
+    operative_requests: Vec<InputRequestId>,
+    diagnostics: Vec<String>,
+}
+
+impl From<&ChangeDetailV1> for ChangeAttentionReasonSource {
+    fn from(detail: &ChangeDetailV1) -> Self {
+        Self {
+            lifecycle: detail.summary.lifecycle,
+            current_revisions: detail.current_revision_refs.clone(),
+            qualification: detail
+                .per_current_revision_qualification
+                .iter()
+                .map(|qualification| (qualification.revision.clone(), qualification.qualified))
+                .collect(),
+            operative_requests: detail.operative_obligations.clone(),
+            diagnostics: detail.diagnostics.clone(),
+        }
+    }
+}
+
+fn change_attention_presentation(
+    source: &ChangeAttentionReasonSource,
+) -> Result<ChangeAttentionPresentation, String> {
+    let mut reasons = Vec::new();
+    match source.lifecycle {
+        ChangeLifecycleV1::Conflicted => reasons.push(ChangeAttentionReason::Conflicted),
+        ChangeLifecycleV1::Incomplete => reasons.push(ChangeAttentionReason::Incomplete),
+        ChangeLifecycleV1::InProgress | ChangeLifecycleV1::Accepted => {}
+    }
+    if source.current_revisions.is_empty() {
+        reasons.push(ChangeAttentionReason::NoCurrentRevision);
+    }
+    if !source.operative_requests.is_empty() {
+        reasons.push(ChangeAttentionReason::UnresolvedOperativeRequests {
+            request_ids: source.operative_requests.clone(),
+        });
+    }
+    let revisions = source
+        .qualification
+        .iter()
+        .filter(|(_, qualified)| !qualified)
+        .map(|(revision, _)| revision.clone())
+        .collect::<Vec<_>>();
+    if !revisions.is_empty() {
+        reasons.push(ChangeAttentionReason::CurrentRevisionsNeedAssessment { revisions });
+    }
+    let primary_reason = reasons
+        .first()
+        .cloned()
+        .ok_or_else(|| "non-accepted Change has no model-derived Attention reason".to_owned())?;
+    Ok(ChangeAttentionPresentation {
+        primary_reason,
+        reasons,
+        diagnostics: source.diagnostics.clone(),
+    })
+}
+
+fn enrich_change_attention_presentations(
+    value: &mut serde_json::Value,
+    facade: &ChangeDocumentFacadeV1,
+) -> Result<(), String> {
+    let changes = value
+        .get("changes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Inspector Attention document has no Change array".to_owned())?;
+    let change_ids = changes
+        .iter()
+        .map(|change| {
+            change
+                .get("changeId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "Inspector Attention summary has no Change identity".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let presentations = value
+        .get_mut("presentations")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| "Inspector Attention document has no presentation map".to_owned())?;
+    for change_id in change_ids {
+        let detail = facade
+            .detail_document(&ChangeId::new(change_id.clone()))
+            .map_err(|error| error.to_string())?;
+        if detail.detail.summary.lifecycle == ChangeLifecycleV1::Accepted {
+            return Err("accepted Change leaked into the Attention lens".to_owned());
+        }
+        let presentation = presentations
+            .get_mut(&change_id)
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                format!("Inspector Attention presentation missing for Change {change_id}")
+            })?;
+        presentation.insert(
+            "attention".to_owned(),
+            serde_json::to_value(change_attention_presentation(
+                &ChangeAttentionReasonSource::from(&detail.detail),
+            )?)
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(())
 }
 
 fn paged_change_json(
@@ -246,7 +394,12 @@ pub(super) fn change_detail_v2_json(
         let document = facade
             .detail_document(&ChangeId::new(change_id))
             .map_err(|error| error.to_string())?;
-        serde_json::to_string(&document).map_err(|error| error.to_string())
+        let graph = change_revision_graph(&document.detail)?;
+        let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+        if let Some(graph) = graph {
+            splice_inspector_presentation(&mut value, "revisionGraph", graph)?;
+        }
+        serde_json::to_string(&value).map_err(|error| error.to_string())
     })
 }
 
@@ -289,6 +442,7 @@ pub(super) fn change_revision_v2_json(
                 .map(ChangeV2Json::Ok)
                 .map_err(|error| error.to_string())
         } else {
+            let fact_relationships = exact_read.fact_relationships.clone();
             let document = facade
                 .contextual_revision_document_with_fact_content(
                     &change_id,
@@ -299,7 +453,12 @@ pub(super) fn change_revision_v2_json(
                     exact_read.fact_content,
                 )
                 .map_err(|error| error.to_string())?;
-            serde_json::to_string(&document)
+            let graph = fact_relationship_graph(&document.document.detail, &fact_relationships)?;
+            let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+            if let Some(graph) = graph {
+                splice_inspector_presentation(&mut value, "factGraph", graph)?;
+            }
+            serde_json::to_string(&value)
                 .map(ChangeV2Json::Ok)
                 .map_err(|error| error.to_string())
         }
@@ -369,17 +528,26 @@ fn with_change_v2_outcome(
         &pointbreak::session::ChangeReaderReadyV1,
     ) -> Result<ChangeV2Json, String>,
 ) -> Result<ChangeV2Json, String> {
-    let state = cache.load(repo).map_err(|error| error.to_string())?;
-    if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
+    let generation = cache
+        .load_changes(repo)
+        .map_err(|error| error.to_string())?;
+    if let Some(unavailable) =
+        ChangeQueryUnavailableDocumentV1::for_inspection(&generation.state.capability)
+    {
         return serde_json::to_string(&unavailable)
             .map(ChangeV2Json::Unavailable)
             .map_err(|error| error.to_string());
     }
-    let ready = state
+    let ready = generation
+        .state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
-    let facade = ready.document_facade().map_err(|error| error.to_string())?;
-    build(&facade, ready)
+    let facade = generation
+        .presentation
+        .as_ref()
+        .ok_or_else(|| "Change reader presentation is unavailable".to_owned())?
+        .change_document_facade();
+    build(facade, ready)
 }
 
 #[derive(Serialize)]
@@ -609,6 +777,556 @@ struct LaidOutEdgeWire {
 struct LayoutBounds {
     w: f64,
     h: f64,
+}
+
+/// Non-durable, Inspector-private geometry over the authoritative Change
+/// relationship document. Effective state and unresolved claims remain
+/// structurally separate so a client never promotes a claim into topology.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeRevisionGraphPresentation {
+    nodes: Vec<ChangeRevisionGraphNode>,
+    effective_supersedes: Vec<ChangeRevisionGraphEffectiveEdge>,
+    pending_or_conflicting_claims: Vec<ChangeRevisionGraphClaimEdge>,
+    bounds: LayoutBounds,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeRevisionGraphNode {
+    id: String,
+    revision: RevisionRefV1,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    is_current: bool,
+    is_member: bool,
+    context_availability: InspectorGraphContextAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_revision: Option<RevisionRefV1>,
+}
+
+/// Whether a relationship node has an exact contextual reader target on the
+/// enclosing Change surface. Relationship documents can honestly name exact
+/// Revisions and facts that are not members/materialized context; those nodes
+/// remain useful evidence but must not be presented as dead navigation.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InspectorGraphContextAvailability {
+    Available,
+    RelationshipContextOnly,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeRevisionGraphEffectiveEdge {
+    from: String,
+    to: String,
+    successor: RevisionRefV1,
+    predecessor: RevisionRefV1,
+    path: Vec<[f64; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeRevisionGraphClaimEdge {
+    claim_id: String,
+    from: String,
+    to: String,
+    successor: RevisionRefV1,
+    predecessor: RevisionRefV1,
+    path: Vec<[f64; 2]>,
+    diagnostics: Vec<String>,
+}
+
+/// One exact fact or exact Revision anchor in the contextual fact graph.
+/// Revision anchors are used only when a fact port deliberately has no target
+/// fact; the exact Revision identity is still never reduced to a bare id.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FactRelationshipGraphNode {
+    id: String,
+    kind: &'static str,
+    revision: RevisionRefV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    family: Option<String>,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    context_availability: InspectorGraphContextAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activation_revision: Option<RevisionRefV1>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FactRelationshipEdge {
+    from: String,
+    to: String,
+    origin_revision: RevisionRefV1,
+    from_fact_id: String,
+    to_fact_id: String,
+    path: Vec<[f64; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FactPortRelationshipEdge {
+    port_id: ReviewFactPortId,
+    from: String,
+    to: String,
+    origin_revision: RevisionRefV1,
+    origin_fact: FactRefV1,
+    target_revision: RevisionRefV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_fact: Option<FactRefV1>,
+    relation: FactPortRelationV1,
+    applicability: FactPortApplicabilityV1,
+    path: Vec<[f64; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FactRelationshipGraphPresentation {
+    nodes: Vec<FactRelationshipGraphNode>,
+    observation_supersedes: Vec<FactRelationshipEdge>,
+    assessment_replaces: Vec<FactRelationshipEdge>,
+    fact_ports: Vec<FactPortRelationshipEdge>,
+    bounds: LayoutBounds,
+}
+
+fn exact_revision_graph_key(revision: &RevisionRefV1) -> String {
+    format!(
+        "revision:{}@{}",
+        revision.revision_id.as_str(),
+        revision.object_artifact_content_hash
+    )
+}
+
+fn exact_fact_graph_key(revision: &RevisionRefV1, family: &str, fact_id: &str) -> String {
+    format!(
+        "fact:{}@{}:{family}:{fact_id}",
+        revision.revision_id.as_str(),
+        revision.object_artifact_content_hash
+    )
+}
+
+fn fact_ref_parts(reference: &FactRefV1) -> (&'static str, &str) {
+    match reference {
+        FactRefV1::Observation { observation_id } => ("observation", observation_id.as_str()),
+        FactRefV1::InputRequest { input_request_id } => {
+            ("input_request", input_request_id.as_str())
+        }
+    }
+}
+
+fn laid_out_paths(layout: &ThreadLayout) -> BTreeMap<(String, String), Vec<[f64; 2]>> {
+    layout
+        .edges
+        .iter()
+        .map(|edge| ((edge.from.clone(), edge.to.clone()), edge.path.clone()))
+        .collect()
+}
+
+fn change_revision_graph(
+    detail: &ChangeDetailV1,
+) -> Result<Option<ChangeRevisionGraphPresentation>, String> {
+    let member_keys = detail
+        .member_revisions
+        .iter()
+        .map(|member| exact_revision_graph_key(&member.revision))
+        .collect::<BTreeSet<_>>();
+    let current_keys = detail
+        .current_revision_refs
+        .iter()
+        .map(exact_revision_graph_key)
+        .collect::<BTreeSet<_>>();
+    let mut exact = BTreeMap::<String, RevisionRefV1>::new();
+    for member in &detail.member_revisions {
+        exact.insert(
+            exact_revision_graph_key(&member.revision),
+            member.revision.clone(),
+        );
+    }
+    for claim in &detail.pending_or_conflicting_edges {
+        for revision in [&claim.successor, &claim.predecessor] {
+            exact
+                .entry(exact_revision_graph_key(revision))
+                .or_insert_with(|| revision.clone());
+        }
+    }
+    if exact.is_empty() {
+        return Ok(None);
+    }
+    let superseded = detail
+        .effective_supersedes
+        .iter()
+        .map(|(_, predecessor)| exact_revision_graph_key(predecessor))
+        .collect::<BTreeSet<_>>();
+    let nodes = exact
+        .iter()
+        .map(|(id, revision)| SupersessionLayoutNode {
+            id: id.clone(),
+            label: short_node_label(revision.revision_id.as_str()),
+            is_head: current_keys.contains(id),
+            is_superseded: superseded.contains(id),
+        })
+        .collect::<Vec<_>>();
+    let mut topology = BTreeSet::<(String, String)>::new();
+    for (successor, predecessor) in &detail.effective_supersedes {
+        topology.insert((
+            exact_revision_graph_key(successor),
+            exact_revision_graph_key(predecessor),
+        ));
+    }
+    for claim in &detail.pending_or_conflicting_edges {
+        topology.insert((
+            exact_revision_graph_key(&claim.successor),
+            exact_revision_graph_key(&claim.predecessor),
+        ));
+    }
+    let layout_edges = topology
+        .into_iter()
+        .map(|(from, to)| SupersessionLayoutEdge {
+            from,
+            to,
+            kind: None,
+        })
+        .collect::<Vec<_>>();
+    let layout = layout_supersession_graph(&nodes, &layout_edges)?;
+    let paths = laid_out_paths(&layout);
+    let graph_nodes = layout
+        .nodes
+        .iter()
+        .map(|node| ChangeRevisionGraphNode {
+            id: node.id.clone(),
+            revision: exact[&node.id].clone(),
+            x: node.x,
+            y: node.y,
+            w: node.w,
+            h: node.h,
+            is_current: current_keys.contains(&node.id),
+            is_member: member_keys.contains(&node.id),
+            context_availability: if member_keys.contains(&node.id) {
+                InspectorGraphContextAvailability::Available
+            } else {
+                InspectorGraphContextAvailability::RelationshipContextOnly
+            },
+            activation_revision: member_keys
+                .contains(&node.id)
+                .then(|| exact[&node.id].clone()),
+        })
+        .collect();
+    let effective_supersedes = detail
+        .effective_supersedes
+        .iter()
+        .map(|(successor, predecessor)| {
+            let from = exact_revision_graph_key(successor);
+            let to = exact_revision_graph_key(predecessor);
+            Ok(ChangeRevisionGraphEffectiveEdge {
+                path: paths
+                    .get(&(from.clone(), to.clone()))
+                    .cloned()
+                    .ok_or_else(|| "mmdflux omitted an effective Change edge".to_owned())?,
+                from,
+                to,
+                successor: successor.clone(),
+                predecessor: predecessor.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let pending_or_conflicting_claims = detail
+        .pending_or_conflicting_edges
+        .iter()
+        .map(|claim| {
+            let from = exact_revision_graph_key(&claim.successor);
+            let to = exact_revision_graph_key(&claim.predecessor);
+            Ok(ChangeRevisionGraphClaimEdge {
+                claim_id: claim.claim_id.as_str().to_owned(),
+                path: paths
+                    .get(&(from.clone(), to.clone()))
+                    .cloned()
+                    .ok_or_else(|| "mmdflux omitted a pending Change claim edge".to_owned())?,
+                from,
+                to,
+                successor: claim.successor.clone(),
+                predecessor: claim.predecessor.clone(),
+                diagnostics: claim.diagnostics.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Some(ChangeRevisionGraphPresentation {
+        nodes: graph_nodes,
+        effective_supersedes,
+        pending_or_conflicting_claims,
+        bounds: layout.bounds,
+        diagnostics: detail.diagnostics.clone(),
+    }))
+}
+
+fn fact_relationship_graph(
+    detail: &ChangeRevisionDetailV1,
+    relationships: &[crate::cli::change::ExactFactRelationship],
+) -> Result<Option<FactRelationshipGraphPresentation>, String> {
+    #[derive(Clone)]
+    struct NodeInput {
+        kind: &'static str,
+        revision: RevisionRefV1,
+        fact_id: Option<String>,
+        family: Option<String>,
+        is_head: bool,
+        is_superseded: bool,
+        activation_revision: Option<RevisionRefV1>,
+    }
+
+    let mut inputs = BTreeMap::<String, NodeInput>::new();
+    for fact in &detail.fact_presentations {
+        let id = exact_fact_graph_key(&fact.origin_revision, &fact.family, &fact.fact_id);
+        let activation_revision = (fact.origin_revision == detail.revision
+            || fact.presented_in_revision.as_ref() == Some(&detail.revision))
+        .then(|| detail.revision.clone());
+        inputs.insert(
+            id,
+            NodeInput {
+                kind: "fact",
+                revision: fact.origin_revision.clone(),
+                fact_id: Some(fact.fact_id.clone()),
+                family: Some(fact.family.clone()),
+                is_head: fact.family_state == FactFamilyStateV1::Current,
+                is_superseded: fact.family_state == FactFamilyStateV1::Stale,
+                activation_revision,
+            },
+        );
+    }
+    for port in &detail.fact_ports {
+        let (origin_family, origin_id) = fact_ref_parts(&port.origin_fact);
+        inputs
+            .entry(exact_fact_graph_key(
+                &port.origin_revision,
+                origin_family,
+                origin_id,
+            ))
+            .or_insert_with(|| NodeInput {
+                kind: "fact",
+                revision: port.origin_revision.clone(),
+                fact_id: Some(origin_id.to_owned()),
+                family: Some(origin_family.to_owned()),
+                is_head: false,
+                is_superseded: false,
+                activation_revision: None,
+            });
+        if let Some(target_fact) = &port.target_fact {
+            let (family, fact_id) = fact_ref_parts(target_fact);
+            inputs
+                .entry(exact_fact_graph_key(&port.target_revision, family, fact_id))
+                .or_insert_with(|| NodeInput {
+                    kind: "fact",
+                    revision: port.target_revision.clone(),
+                    fact_id: Some(fact_id.to_owned()),
+                    family: Some(family.to_owned()),
+                    is_head: false,
+                    is_superseded: false,
+                    activation_revision: None,
+                });
+        } else {
+            inputs
+                .entry(exact_revision_graph_key(&port.target_revision))
+                .or_insert_with(|| NodeInput {
+                    kind: "revision",
+                    revision: port.target_revision.clone(),
+                    fact_id: None,
+                    family: None,
+                    is_head: false,
+                    is_superseded: false,
+                    activation_revision: (port.target_revision == detail.revision)
+                        .then(|| detail.revision.clone()),
+                });
+        }
+    }
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let mut topology = BTreeSet::<(String, String)>::new();
+    for relationship in relationships {
+        topology.insert((
+            exact_fact_graph_key(
+                &relationship.origin_revision,
+                relationship.family,
+                &relationship.from_fact_id,
+            ),
+            exact_fact_graph_key(
+                &relationship.origin_revision,
+                relationship.family,
+                &relationship.to_fact_id,
+            ),
+        ));
+    }
+    for port in &detail.fact_ports {
+        let (origin_family, origin_id) = fact_ref_parts(&port.origin_fact);
+        let from = exact_fact_graph_key(&port.origin_revision, origin_family, origin_id);
+        let to = if let Some(target_fact) = &port.target_fact {
+            let (family, fact_id) = fact_ref_parts(target_fact);
+            exact_fact_graph_key(&port.target_revision, family, fact_id)
+        } else {
+            exact_revision_graph_key(&port.target_revision)
+        };
+        topology.insert((from, to));
+    }
+    let nodes = inputs
+        .iter()
+        .map(|(id, input)| SupersessionLayoutNode {
+            id: id.clone(),
+            label: input
+                .fact_id
+                .as_deref()
+                .map(short_node_label)
+                .unwrap_or_else(|| short_node_label(input.revision.revision_id.as_str())),
+            is_head: input.is_head,
+            is_superseded: input.is_superseded,
+        })
+        .collect::<Vec<_>>();
+    let layout_edges = topology
+        .into_iter()
+        .map(|(from, to)| SupersessionLayoutEdge {
+            from,
+            to,
+            kind: None,
+        })
+        .collect::<Vec<_>>();
+    let layout = layout_supersession_graph(&nodes, &layout_edges)?;
+    let paths = laid_out_paths(&layout);
+    let graph_nodes = layout
+        .nodes
+        .iter()
+        .map(|node| {
+            let input = &inputs[&node.id];
+            FactRelationshipGraphNode {
+                id: node.id.clone(),
+                kind: input.kind,
+                revision: input.revision.clone(),
+                fact_id: input.fact_id.clone(),
+                family: input.family.clone(),
+                x: node.x,
+                y: node.y,
+                w: node.w,
+                h: node.h,
+                context_availability: if input.activation_revision.is_some() {
+                    InspectorGraphContextAvailability::Available
+                } else {
+                    InspectorGraphContextAvailability::RelationshipContextOnly
+                },
+                activation_revision: input.activation_revision.clone(),
+            }
+        })
+        .collect();
+    let relationship_edge = |relationship: &crate::cli::change::ExactFactRelationship| {
+        let from = exact_fact_graph_key(
+            &relationship.origin_revision,
+            relationship.family,
+            &relationship.from_fact_id,
+        );
+        let to = exact_fact_graph_key(
+            &relationship.origin_revision,
+            relationship.family,
+            &relationship.to_fact_id,
+        );
+        Ok(FactRelationshipEdge {
+            path: paths
+                .get(&(from.clone(), to.clone()))
+                .cloned()
+                .ok_or_else(|| "mmdflux omitted an exact fact edge".to_owned())?,
+            from,
+            to,
+            origin_revision: relationship.origin_revision.clone(),
+            from_fact_id: relationship.from_fact_id.clone(),
+            to_fact_id: relationship.to_fact_id.clone(),
+        })
+    };
+    let observation_supersedes = relationships
+        .iter()
+        .filter(|relationship| {
+            relationship.kind
+                == crate::cli::change::ExactFactRelationshipKind::ObservationSupersedes
+        })
+        .map(relationship_edge)
+        .collect::<Result<Vec<_>, String>>()?;
+    let assessment_replaces = relationships
+        .iter()
+        .filter(|relationship| {
+            relationship.kind == crate::cli::change::ExactFactRelationshipKind::AssessmentReplaces
+        })
+        .map(relationship_edge)
+        .collect::<Result<Vec<_>, String>>()?;
+    let fact_ports = detail
+        .fact_ports
+        .iter()
+        .map(|port| fact_port_relationship_edge(port, &paths))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(Some(FactRelationshipGraphPresentation {
+        nodes: graph_nodes,
+        observation_supersedes,
+        assessment_replaces,
+        fact_ports,
+        bounds: layout.bounds,
+    }))
+}
+
+fn fact_port_relationship_edge(
+    port: &FactPortPresentationV1,
+    paths: &BTreeMap<(String, String), Vec<[f64; 2]>>,
+) -> Result<FactPortRelationshipEdge, String> {
+    let (origin_family, origin_id) = fact_ref_parts(&port.origin_fact);
+    let from = exact_fact_graph_key(&port.origin_revision, origin_family, origin_id);
+    let to = if let Some(target_fact) = &port.target_fact {
+        let (family, fact_id) = fact_ref_parts(target_fact);
+        exact_fact_graph_key(&port.target_revision, family, fact_id)
+    } else {
+        exact_revision_graph_key(&port.target_revision)
+    };
+    Ok(FactPortRelationshipEdge {
+        port_id: port.port_id.clone(),
+        path: paths
+            .get(&(from.clone(), to.clone()))
+            .cloned()
+            .ok_or_else(|| "mmdflux omitted an explicit fact-port edge".to_owned())?,
+        from,
+        to,
+        origin_revision: port.origin_revision.clone(),
+        origin_fact: port.origin_fact.clone(),
+        target_revision: port.target_revision.clone(),
+        target_fact: port.target_fact.clone(),
+        relation: port.relation,
+        applicability: port.applicability,
+        diagnostics: port.diagnostics.clone(),
+    })
+}
+
+fn splice_inspector_presentation(
+    value: &mut serde_json::Value,
+    field: &str,
+    presentation: impl Serialize,
+) -> Result<(), String> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "Inspector document is not an object".to_owned())?;
+    let inspector = object
+        .entry("inspectorPresentation".to_owned())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "Inspector presentation slot is not an object".to_owned())?;
+    inspector.insert(
+        field.to_owned(),
+        serde_json::to_value(presentation).map_err(|error| error.to_string())?,
+    );
+    Ok(())
 }
 
 /// Inspector-private, additive fact-level supersession graphs for one revision,
@@ -2786,6 +3504,50 @@ mod tests {
         };
         assert_eq!(actual.as_bytes(), expected.as_bytes());
         assert!(!actual.contains("\"next\""));
+    }
+
+    #[test]
+    fn change_attention_reasons_keep_every_exact_peer_and_model_cause() {
+        let first = pointbreak::model::RevisionRefV1::new(
+            RevisionId::new("rev:sha256:first"),
+            format!("sha256:{}", "a".repeat(64)),
+        )
+        .unwrap();
+        let second = pointbreak::model::RevisionRefV1::new(
+            RevisionId::new("rev:sha256:second"),
+            format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap();
+        let source = ChangeAttentionReasonSource {
+            lifecycle: pointbreak::session::ChangeLifecycleV1::Conflicted,
+            current_revisions: vec![first.clone(), second.clone()],
+            qualification: vec![(first.clone(), false), (second.clone(), false)],
+            operative_requests: vec![pointbreak::model::InputRequestId::new(
+                "input-request:sha256:open",
+            )],
+            diagnostics: vec!["change_relation_revision_artifact_conflict".to_owned()],
+        };
+
+        let value = serde_json::to_value(change_attention_presentation(&source).unwrap()).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "primaryReason": {"kind": "conflicted"},
+                "reasons": [
+                    {"kind": "conflicted"},
+                    {
+                        "kind": "unresolved_operative_requests",
+                        "requestIds": ["input-request:sha256:open"],
+                    },
+                    {
+                        "kind": "current_revisions_need_assessment",
+                        "revisions": [first, second],
+                    },
+                ],
+                "diagnostics": ["change_relation_revision_artifact_conflict"],
+            })
+        );
     }
 
     #[test]

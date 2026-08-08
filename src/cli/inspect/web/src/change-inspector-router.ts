@@ -40,6 +40,18 @@ export type ChangeInspectorRoute =
       focus?: ExactRouteFocus;
     }
   | {
+      /**
+       * The review reader's full-frame annotated view. Unlike `resource`, it
+       * deliberately reads the contextual exact-Revision document so inline
+       * facts remain bound to this Change and Revision pair.
+       */
+      kind: "diff";
+      changeId: string;
+      revision: RevisionRef;
+      query: ChangePageQuery;
+      focus?: ExactRouteFocus;
+    }
+  | {
       kind: "association";
       changeId: string;
       revision: RevisionRef;
@@ -74,9 +86,10 @@ const ROUTE_QUERY_KEYS = new Set<string>([
   "toArtifactHash",
   "fact",
   "file",
+  "fq",
 ]);
 
-const TIMELINE_QUERY_KEYS = new Set<string>([
+const TIMELINE_QUERY_KEYS = [
   "limit",
   "after",
   "at",
@@ -87,11 +100,14 @@ const TIMELINE_QUERY_KEYS = new Set<string>([
   "revision",
   "artifactHash",
   "order",
-]);
+] as const;
+const TIMELINE_QUERY_KEY_SET = new Set<string>(TIMELINE_QUERY_KEYS);
 
 export interface ExactRouteFocus {
   factId?: string;
   filePath?: string;
+  /** The local, presentation-only file navigator query for an annotated diff. */
+  fileQuery?: string;
 }
 
 function decodeSegment(value: string): string | null {
@@ -110,6 +126,7 @@ interface ParsedQuery {
   toArtifactHashes: string[];
   facts: string[];
   files: string[];
+  fileQueries: string[];
 }
 
 function validQueryEncoding(search: string): boolean {
@@ -166,6 +183,7 @@ function parseQuery(search: string): ParsedQuery | { message: string } {
     toArtifactHashes: params.getAll("toArtifactHash"),
     facts: params.getAll("fact"),
     files: params.getAll("file"),
+    fileQueries: params.getAll("fq"),
   };
 }
 
@@ -184,7 +202,7 @@ function parseTimelineQuery(
   const params = new URLSearchParams(search);
   const query: EventHistoryQuery = {};
   for (const key of params.keys()) {
-    if (!TIMELINE_QUERY_KEYS.has(key)) {
+    if (!TIMELINE_QUERY_KEY_SET.has(key)) {
       return { message: `Unknown ${key} route query.` };
     }
     if (params.getAll(key).length !== 1) {
@@ -276,19 +294,26 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
     toArtifactHashes,
     facts,
     files,
+    fileQueries,
   } = parsed;
-  const focus = (): ExactRouteFocus | null | undefined => {
+  const focus = (
+    allowFileQuery = false,
+  ): ExactRouteFocus | null | undefined => {
     if (
       facts.length > 1 ||
       files.length > 1 ||
+      fileQueries.length > 1 ||
       facts.some((value) => !value) ||
-      files.some((value) => !value)
+      files.some((value) => !value) ||
+      fileQueries.some((value) => !value) ||
+      (!allowFileQuery && fileQueries.length > 0)
     ) {
       return null;
     }
     const selected = {
       ...(facts[0] ? { factId: facts[0] } : {}),
       ...(files[0] ? { filePath: files[0] } : {}),
+      ...(fileQueries[0] ? { fileQuery: fileQueries[0] } : {}),
     };
     return Object.keys(selected).length ? selected : undefined;
   };
@@ -301,7 +326,8 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
       fromArtifactHashes.length > 0 ||
       toArtifactHashes.length > 0 ||
       facts.length > 0 ||
-      files.length > 0
+      files.length > 0 ||
+      fileQueries.length > 0
     ) {
       return {
         kind: "invalid",
@@ -321,7 +347,8 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
       fromArtifactHashes.length > 0 ||
       toArtifactHashes.length > 0 ||
       facts.length > 0 ||
-      files.length > 0
+      files.length > 0 ||
+      fileQueries.length > 0
     ) {
       return {
         kind: "invalid",
@@ -352,7 +379,7 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
   if (segments[2] === "revisions" && segments.length >= 4) {
     const revision = exactRevision(decodeSegment(segments[3]));
     if (revision === null) return exactFailure();
-    const exactFocus = focus();
+    const exactFocus = focus(segments.length === 5 && segments[4] === "diff");
     if (exactFocus === null)
       return {
         kind: "invalid",
@@ -375,6 +402,14 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
     if (segments.length === 5 && segments[4] === "resource")
       return {
         kind: "resource",
+        changeId,
+        revision,
+        query,
+        ...(exactFocus ? { focus: exactFocus } : {}),
+      };
+    if (segments.length === 5 && segments[4] === "diff")
+      return {
+        kind: "diff",
         changeId,
         revision,
         query,
@@ -449,19 +484,7 @@ function appendTimelineQuery(
   query: EventHistoryQuery,
   params: URLSearchParams,
 ): void {
-  const keys = [
-    "limit",
-    "after",
-    "at",
-    "q",
-    "type",
-    "track",
-    "change",
-    "revision",
-    "artifactHash",
-    "order",
-  ] as const;
-  for (const key of keys) {
+  for (const key of TIMELINE_QUERY_KEYS) {
     const value = query[key];
     if (value !== undefined) params.set(key, String(value));
   }
@@ -484,6 +507,7 @@ export function formatChangeInspectorRoute(
   if (
     route.kind === "revision" ||
     route.kind === "resource" ||
+    route.kind === "diff" ||
     route.kind === "association"
   )
     params.set("artifactHash", route.revision.objectArtifactContentHash);
@@ -495,6 +519,8 @@ export function formatChangeInspectorRoute(
     params.set("fact", route.focus.factId);
   if ("focus" in route && route.focus?.filePath)
     params.set("file", route.focus.filePath);
+  if (route.kind === "diff" && route.focus?.fileQuery)
+    params.set("fq", route.focus.fileQuery);
   const suffix = params.size ? `?${params}` : "";
   if (route.kind === "lens") return `#/${route.lens}${suffix}`;
   const change = encodeURIComponent(route.changeId);
@@ -503,6 +529,8 @@ export function formatChangeInspectorRoute(
     return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
   if (route.kind === "resource")
     return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
+  if (route.kind === "diff")
+    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/diff${suffix}`;
   if (route.kind === "association")
     return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
   return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;

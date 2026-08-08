@@ -29,6 +29,23 @@ pub struct ChangeReaderReadyV1 {
     authority_cursor: AuthorityCursorV2,
 }
 
+/// Immutable, trust-neutral Change presentation derived from one complete
+/// Change-reader generation.
+///
+/// Timeline projection is intentionally separate: Change list and detail
+/// readers must not pay to fold the event history or discover reader trust.
+#[derive(Clone, Debug)]
+pub struct ChangeReaderPresentationV1 {
+    change_document_facade: crate::documents::ChangeDocumentFacadeV1,
+    authority_cursor: AuthorityCursorV2,
+}
+
+impl ChangeReaderPresentationV1 {
+    pub fn change_document_facade(&self) -> &crate::documents::ChangeDocumentFacadeV1 {
+        &self.change_document_facade
+    }
+}
+
 impl ChangeReaderReadyV1 {
     pub(crate) fn events(&self) -> &[ShoreEvent] {
         &self.events
@@ -62,13 +79,50 @@ impl ChangeReaderReadyV1 {
         &self,
         trust_set: &crate::session::TrustSet,
     ) -> Result<crate::documents::EventHistoryFacadeV1> {
-        let source_change_projection_stamp = self.document_facade()?.projection_stamp().to_owned();
-        crate::session::projection::event_history::project_event_history(
-            &self.events,
-            &self.document_projection,
-            self.authority_cursor.clone(),
-            source_change_projection_stamp,
-            trust_set,
+        let presentation = self.presentation()?;
+        Ok(crate::documents::EventHistoryFacadeV1::new(
+            self.event_history_document(trust_set, &presentation)?,
+        ))
+    }
+
+    /// Build the trust-neutral Change presentation. A process cache can reuse
+    /// this across list, Attention, detail, exact-Revision, and Timeline reads.
+    pub fn presentation(&self) -> Result<ChangeReaderPresentationV1> {
+        let change_document_facade = self.document_facade()?;
+        Ok(ChangeReaderPresentationV1 {
+            change_document_facade,
+            authority_cursor: self.authority_cursor.clone(),
+        })
+    }
+
+    /// Build the trust-qualified Timeline against an already-built Change
+    /// presentation from this exact generation.
+    ///
+    /// Accepting the opaque presentation prevents Timeline from rebuilding the
+    /// relatively expensive Change facade and lets this method reject a facade
+    /// from a different authority generation.
+    pub fn event_history_document(
+        &self,
+        trust_set: &crate::session::TrustSet,
+        presentation: &ChangeReaderPresentationV1,
+    ) -> Result<crate::documents::EventHistoryDocumentV1> {
+        if presentation.authority_cursor != self.authority_cursor {
+            return Err(crate::error::ShoreError::Message(
+                "Change presentation belongs to a different authority generation".to_owned(),
+            ));
+        }
+        Ok(
+            crate::session::projection::event_history::project_event_history(
+                &self.events,
+                &self.document_projection,
+                self.authority_cursor.clone(),
+                presentation
+                    .change_document_facade()
+                    .projection_stamp()
+                    .to_owned(),
+                trust_set,
+            )?
+            .document(),
         )
     }
 }
@@ -186,6 +240,7 @@ mod tests {
         assert!(l2.ready().is_some());
         assert!(!l2.ready().unwrap().projection.changes.is_empty());
         let ready = l2.ready().unwrap();
+        let presentation = ready.presentation().unwrap();
         let history = ready
             .event_history_facade(&crate::session::TrustSet::default())
             .unwrap()
@@ -194,6 +249,20 @@ mod tests {
         assert_eq!(
             history.source_change_projection_stamp,
             ready.document_facade().unwrap().projection_stamp()
+        );
+        assert_eq!(
+            history.source_change_projection_stamp,
+            presentation.change_document_facade().projection_stamp()
+        );
+
+        let mut mismatched = presentation;
+        mismatched.authority_cursor.journal_record_count += 1;
+        let error = ready
+            .event_history_document(&crate::session::TrustSet::default(), &mismatched)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Change presentation belongs to a different authority generation"
         );
     }
 

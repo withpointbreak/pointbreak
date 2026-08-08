@@ -17,9 +17,9 @@ const INDEX_BODY = `
     <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
   </div>
   <nav id="lens-switcher" aria-label="Change lenses">
-    <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-    <button class="lens-tab" type="button" data-lens="changes" aria-pressed="false">Changes</button>
-    <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
+    <a class="lens-tab" data-lens="timeline" href="#/timeline" aria-current="page">Timeline</a>
+    <a class="lens-tab" data-lens="changes" href="#/changes">Changes</a>
+    <a class="lens-tab" data-lens="attention" href="#/attention">Attention</a>
   </nav>
   <div class="stats">
     <div id="store-identity" class="store-identity">
@@ -146,6 +146,9 @@ const INDEX_BODY = `
   <section id="diff-page" class="diff-page hidden" aria-label="annotated diff">
     <header class="diff-page-head">
       <span id="diff-page-title" class="mono"></span>
+      <span class="diff-page-keys">
+        <kbd>[</kbd>/<kbd>]</kbd> files · <kbd>p</kbd>/<kbd>n</kbd> facts
+      </span>
       <button id="diff-page-close" class="ghost" aria-label="Back to the record">‹ back</button>
     </header>
     <div class="diff-layout">

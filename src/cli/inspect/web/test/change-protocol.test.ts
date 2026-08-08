@@ -82,6 +82,14 @@ function page(
     presentations: {
       "change:sha256:a": {
         currentRevisions: [],
+        ...(schema === "pointbreak.inspect-attention"
+          ? {
+              attention: {
+                primaryReason: { kind: "no_current_revision" },
+                reasons: [{ kind: "no_current_revision" }],
+              },
+            }
+          : {}),
       },
     },
     changes: [
@@ -361,6 +369,81 @@ describe("bounded Change protocol", () => {
     expect(() => requireCoherentGeneration(changes, attention)).toThrow(
       "coherent generation",
     );
+  });
+
+  it("requires server-ranked Attention reasons and keeps exact reason payloads", () => {
+    const response = page("pointbreak.inspect-attention");
+    const presentation = response.presentations?.["change:sha256:a"] as
+      | ChangePresentation
+      | undefined;
+    if (!presentation?.attention)
+      throw new Error("fixture must include Attention presentation");
+    presentation.attention = {
+      primaryReason: {
+        kind: "unresolved_operative_requests",
+        requestIds: ["input-request:sha256:one"],
+      },
+      reasons: [
+        {
+          kind: "unresolved_operative_requests",
+          requestIds: ["input-request:sha256:one"],
+        },
+        {
+          kind: "current_revisions_need_assessment",
+          revisions: [
+            {
+              revisionId: "rev:sha256:one",
+              objectArtifactContentHash: "sha256:artifact-one",
+            },
+          ],
+        },
+      ],
+    };
+
+    const decoded = decodeChangePage(response, {
+      lens: "attention",
+      bounded: true,
+    });
+    expect(
+      decoded.presentations?.["change:sha256:a"]?.attention?.primaryReason,
+    ).toEqual({
+      kind: "unresolved_operative_requests",
+      requestIds: ["input-request:sha256:one"],
+    });
+
+    const missing = page("pointbreak.inspect-attention");
+    delete missing.presentations?.["change:sha256:a"]?.attention;
+    expect(() =>
+      decodeChangePage(missing, { lens: "attention", bounded: true }),
+    ).toThrow("invalid attention Change page DTO");
+
+    const reprioritized = page("pointbreak.inspect-attention");
+    const reprioritizedPresentation = reprioritized.presentations?.[
+      "change:sha256:a"
+    ] as ChangePresentation | undefined;
+    if (!reprioritizedPresentation?.attention)
+      throw new Error("fixture must include Attention presentation");
+    reprioritizedPresentation.attention.primaryReason = { kind: "incomplete" };
+    expect(() =>
+      decodeChangePage(reprioritized, {
+        lens: "attention",
+        bounded: true,
+      }),
+    ).toThrow("invalid attention Change page DTO");
+
+    const leaked = page("pointbreak.inspect-changes-page");
+    const leakedPresentation = leaked.presentations?.["change:sha256:a"] as
+      | ChangePresentation
+      | undefined;
+    if (!leakedPresentation)
+      throw new Error("fixture must include Change presentation");
+    leakedPresentation.attention = {
+      primaryReason: { kind: "incomplete" },
+      reasons: [{ kind: "incomplete" }],
+    };
+    expect(() =>
+      decodeChangePage(leaked, { lens: "changes", bounded: true }),
+    ).toThrow("invalid changes Change page DTO");
   });
 
   it("requires the postflight capability and freshness profile to be unchanged", () => {
@@ -788,6 +871,370 @@ describe("bounded Change protocol", () => {
     missingOrigin.factPresentations = [];
     missingOrigin.factContentPresentations = {};
     expect(() => decodeChangeRevisionDetail(missingOrigin)).toThrow(
+      "Revision detail DTO",
+    );
+  });
+
+  it("decodes only identity-bound Inspector-private revision graphs", () => {
+    const predecessor = {
+      revisionId: "rev:sha256:predecessor",
+      objectArtifactContentHash: "sha256:predecessor-artifact",
+    };
+    const successor = {
+      revisionId: "rev:sha256:successor",
+      objectArtifactContentHash: "sha256:successor-artifact",
+    };
+    const context = {
+      revisionId: "rev:sha256:claim-context",
+      objectArtifactContentHash: "sha256:claim-context-artifact",
+    };
+    const revisionNodeId = (revision: typeof predecessor) =>
+      `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`;
+    const changeId = "change:sha256:graph";
+    const pendingClaim = {
+      claimId: "claim:sha256:pending",
+      changeId,
+      successor,
+      predecessor: context,
+      supports: [],
+      withdrawals: [],
+      active: true,
+      diagnostics: [],
+    };
+    const graph = {
+      nodes: [
+        {
+          id: revisionNodeId(predecessor),
+          revision: predecessor,
+          x: 0,
+          y: 0,
+          w: 1,
+          h: 1,
+          isCurrent: false,
+          isMember: true,
+          contextAvailability: "available",
+          activationRevision: predecessor,
+        },
+        {
+          id: revisionNodeId(successor),
+          revision: successor,
+          x: 2,
+          y: 0,
+          w: 1,
+          h: 1,
+          isCurrent: true,
+          isMember: true,
+          contextAvailability: "available",
+          activationRevision: successor,
+        },
+        {
+          id: revisionNodeId(context),
+          revision: context,
+          x: 4,
+          y: 0,
+          w: 1,
+          h: 1,
+          isCurrent: false,
+          isMember: false,
+          contextAvailability: "relationship_context_only",
+        },
+      ],
+      effectiveSupersedes: [
+        {
+          from: revisionNodeId(successor),
+          to: revisionNodeId(predecessor),
+          successor,
+          predecessor,
+          path: [
+            [2, 0],
+            [0, 0],
+          ],
+        },
+      ],
+      pendingOrConflictingClaims: [
+        {
+          claimId: pendingClaim.claimId,
+          from: revisionNodeId(successor),
+          to: revisionNodeId(context),
+          successor,
+          predecessor: context,
+          path: [
+            [2, 0],
+            [4, 0],
+          ],
+          diagnostics: [],
+        },
+      ],
+      bounds: { w: 3, h: 1 },
+    };
+    const detail = {
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary: {
+        changeId,
+        declarationState: "authoritative",
+        titleAssertions: [],
+        memberCount: 2,
+        topology: "replacement",
+        lifecycle: "in_progress",
+        attentionSummary: "in_progress",
+        availabilitySummary: "available",
+        currentRevisionRefs: [successor],
+        projectionStamp: "sha256:generation",
+      },
+      memberRevisions: [
+        { revision: predecessor, supportingClaimIds: [] },
+        { revision: successor, supportingClaimIds: [] },
+      ],
+      unavailableMemberRevisions: [],
+      membershipClaims: [],
+      membershipWithdrawals: [],
+      relationClaims: [],
+      relationWithdrawals: [],
+      links: [],
+      effectiveSupersedes: [[successor, predecessor]],
+      pendingOrConflictingEdges: [pendingClaim],
+      currentRevisionRefs: [successor],
+      perCurrentRevisionQualification: [
+        { revision: successor, qualified: true },
+      ],
+      operativeObligations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+      inspectorPresentation: { revisionGraph: graph },
+    };
+    expect(
+      decodeChangeDetail(detail).inspectorPresentation?.revisionGraph,
+    ).toEqual(graph);
+
+    const nonFinite = structuredClone(detail);
+    nonFinite.inspectorPresentation.revisionGraph.nodes[0].x = Infinity;
+    expect(() => decodeChangeDetail(nonFinite)).toThrow("Change detail DTO");
+
+    const duplicateNode = structuredClone(detail);
+    duplicateNode.inspectorPresentation.revisionGraph.nodes.push({
+      ...duplicateNode.inspectorPresentation.revisionGraph.nodes[0],
+    });
+    expect(() => decodeChangeDetail(duplicateNode)).toThrow(
+      "Change detail DTO",
+    );
+
+    const promotedClaim = structuredClone(detail);
+    promotedClaim.inspectorPresentation.revisionGraph.pendingOrConflictingClaims =
+      [];
+    expect(() => decodeChangeDetail(promotedClaim)).toThrow(
+      "Change detail DTO",
+    );
+
+    const deadMemberRoute = structuredClone(detail) as unknown as {
+      inspectorPresentation: {
+        revisionGraph: { nodes: Array<Record<string, unknown>> };
+      };
+    };
+    deadMemberRoute.inspectorPresentation.revisionGraph.nodes[0].contextAvailability =
+      "relationship_context_only";
+    delete deadMemberRoute.inspectorPresentation.revisionGraph.nodes[0]
+      .activationRevision;
+    expect(() => decodeChangeDetail(deadMemberRoute)).toThrow(
+      "Change detail DTO",
+    );
+  });
+
+  it("decodes only identity-bound Inspector-private fact relationship graphs", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const factNodeId = (family: string, factId: string) =>
+      `fact:${revision.revisionId}@${revision.objectArtifactContentHash}:${family}:${factId}`;
+    const facts = [
+      "obs:sha256:new",
+      "obs:sha256:old",
+      "assessment:sha256:new",
+      "assessment:sha256:old",
+    ].map((factId) => ({
+      factId,
+      family: factId.startsWith("obs:") ? "observation" : "assessment",
+      originRevision: revision,
+      actorId: "actor:one",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+      ...(factId === "obs:sha256:new" ? { presentedInRevision: revision } : {}),
+    }));
+    const port = {
+      portId: "fact-port:sha256:one",
+      originRevision: revision,
+      originFact: { kind: "observation", observationId: "obs:sha256:new" },
+      targetRevision: revision,
+      relation: "carried_open_as",
+      actorId: "actor:one",
+      trackId: "track:one",
+      sourceEventIds: ["evt:sha256:one"],
+      applicability: "applicable",
+      diagnostics: [],
+    };
+    const contextRevision = {
+      revisionId: "rev:sha256:port-context",
+      objectArtifactContentHash: "sha256:port-context-artifact",
+    };
+    const contextFactId = "obs:sha256:port-context";
+    const contextFactNodeId = `fact:${contextRevision.revisionId}@${contextRevision.objectArtifactContentHash}:observation:${contextFactId}`;
+    const conflictedPort = {
+      portId: "fact-port:sha256:context",
+      originRevision: contextRevision,
+      originFact: { kind: "observation", observationId: contextFactId },
+      targetRevision: revision,
+      relation: "context_only",
+      actorId: "actor:one",
+      trackId: "track:one",
+      sourceEventIds: ["evt:sha256:context"],
+      applicability: "conflicted",
+      diagnostics: ["origin context is not materialized"],
+    };
+    const graph = {
+      nodes: [
+        ...facts.map((fact) => ({
+          id: factNodeId(fact.family, fact.factId),
+          kind: "fact" as const,
+          revision,
+          factId: fact.factId,
+          family: fact.family,
+          x: 0,
+          y: 0,
+          w: 1,
+          h: 1,
+          contextAvailability: "available" as const,
+          activationRevision: revision,
+        })),
+        {
+          id: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
+          kind: "revision" as const,
+          revision,
+          x: 2,
+          y: 0,
+          w: 1,
+          h: 1,
+          contextAvailability: "available" as const,
+          activationRevision: revision,
+        },
+        {
+          id: contextFactNodeId,
+          kind: "fact" as const,
+          revision: contextRevision,
+          factId: contextFactId,
+          family: "observation",
+          x: 4,
+          y: 0,
+          w: 1,
+          h: 1,
+          contextAvailability: "relationship_context_only" as const,
+        },
+      ],
+      observationSupersedes: [
+        {
+          from: factNodeId("observation", "obs:sha256:new"),
+          to: factNodeId("observation", "obs:sha256:old"),
+          originRevision: revision,
+          fromFactId: "obs:sha256:new",
+          toFactId: "obs:sha256:old",
+          path: [
+            [1, 0],
+            [0, 0],
+          ],
+        },
+      ],
+      assessmentReplaces: [
+        {
+          from: factNodeId("assessment", "assessment:sha256:new"),
+          to: factNodeId("assessment", "assessment:sha256:old"),
+          originRevision: revision,
+          fromFactId: "assessment:sha256:new",
+          toFactId: "assessment:sha256:old",
+          path: [
+            [1, 0],
+            [0, 0],
+          ],
+        },
+      ],
+      factPorts: [
+        {
+          portId: port.portId,
+          from: factNodeId("observation", "obs:sha256:new"),
+          to: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
+          originRevision: revision,
+          originFact: port.originFact,
+          targetRevision: revision,
+          relation: port.relation,
+          applicability: port.applicability,
+          path: [
+            [1, 0],
+            [2, 0],
+          ],
+        },
+        {
+          portId: conflictedPort.portId,
+          from: contextFactNodeId,
+          to: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
+          originRevision: contextRevision,
+          originFact: conflictedPort.originFact,
+          targetRevision: revision,
+          relation: conflictedPort.relation,
+          applicability: conflictedPort.applicability,
+          path: [
+            [4, 0],
+            [2, 0],
+          ],
+          diagnostics: conflictedPort.diagnostics,
+        },
+      ],
+      bounds: { w: 3, h: 1 },
+    };
+    const detail = {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: availableResource(revision),
+      factPresentations: facts,
+      factPorts: [port, conflictedPort],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+      inspectorPresentation: { factGraph: graph },
+    };
+    expect(
+      decodeChangeRevisionDetail(detail).inspectorPresentation?.factGraph,
+    ).toEqual(graph);
+
+    const invalidObservationFamily = structuredClone(detail);
+    invalidObservationFamily.inspectorPresentation.factGraph.observationSupersedes[0].from =
+      factNodeId("assessment", "assessment:sha256:new");
+    expect(() => decodeChangeRevisionDetail(invalidObservationFamily)).toThrow(
+      "Revision detail DTO",
+    );
+
+    const danglingPort = structuredClone(detail);
+    danglingPort.inspectorPresentation.factGraph.factPorts[0].to =
+      "revision:rev:sha256:missing@sha256:missing";
+    expect(() => decodeChangeRevisionDetail(danglingPort)).toThrow(
+      "Revision detail DTO",
+    );
+
+    const deadMaterializedFact = structuredClone(detail) as unknown as {
+      inspectorPresentation: {
+        factGraph: { nodes: Array<Record<string, unknown>> };
+      };
+    };
+    deadMaterializedFact.inspectorPresentation.factGraph.nodes[0].contextAvailability =
+      "relationship_context_only";
+    delete deadMaterializedFact.inspectorPresentation.factGraph.nodes[0]
+      .activationRevision;
+    expect(() => decodeChangeRevisionDetail(deadMaterializedFact)).toThrow(
       "Revision detail DTO",
     );
   });

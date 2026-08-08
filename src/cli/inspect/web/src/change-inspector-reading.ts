@@ -26,6 +26,7 @@ import {
 export type ChangeInspectorReading =
   | { kind: "change"; document: ChangeDetail }
   | { kind: "revision"; document: ChangeRevisionDetail }
+  | { kind: "diff"; document: ChangeRevisionDetail }
   | { kind: "association"; document: ChangeRevisionDetail }
   | { kind: "resource"; document: RevisionResource }
   | { kind: "interdiff"; document: RevisionInterdiff };
@@ -62,7 +63,10 @@ function assertStamp(stamp: string, expected: string, surface: string): void {
 
 function assertRevisionDetail(
   document: ChangeRevisionDetail,
-  route: Extract<ChangeInspectorRoute, { kind: "revision" | "association" }>,
+  route: Extract<
+    ChangeInspectorRoute,
+    { kind: "revision" | "diff" | "association" }
+  >,
   stamp: string,
 ): void {
   if (document.changeId !== route.changeId) {
@@ -148,7 +152,11 @@ export async function loadChangeInspectorReading(
     );
     return { kind: "change", document };
   }
-  if (route.kind === "revision" || route.kind === "association") {
+  if (
+    route.kind === "revision" ||
+    route.kind === "diff" ||
+    route.kind === "association"
+  ) {
     const document = decodeChangeRevisionDetail(
       await fetchChangeInspectorJSON(
         revisionPath(route.changeId, route.revision),

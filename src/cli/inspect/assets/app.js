@@ -475,9 +475,10 @@
     "fromArtifactHash",
     "toArtifactHash",
     "fact",
-    "file"
+    "file",
+    "fq"
   ]);
-  var TIMELINE_QUERY_KEYS = /* @__PURE__ */ new Set([
+  var TIMELINE_QUERY_KEYS = [
     "limit",
     "after",
     "at",
@@ -488,7 +489,8 @@
     "revision",
     "artifactHash",
     "order"
-  ]);
+  ];
+  var TIMELINE_QUERY_KEY_SET = new Set(TIMELINE_QUERY_KEYS);
   function decodeSegment(value) {
     try {
       const decoded2 = decodeURIComponent(value);
@@ -551,7 +553,8 @@
       fromArtifactHashes: params.getAll("fromArtifactHash"),
       toArtifactHashes: params.getAll("toArtifactHash"),
       facts: params.getAll("fact"),
-      files: params.getAll("file")
+      files: params.getAll("file"),
+      fileQueries: params.getAll("fq")
     };
   }
   __name(parseQuery, "parseQuery");
@@ -566,7 +569,7 @@
     const params = new URLSearchParams(search);
     const query = {};
     for (const key of params.keys()) {
-      if (!TIMELINE_QUERY_KEYS.has(key)) {
+      if (!TIMELINE_QUERY_KEY_SET.has(key)) {
         return { message: `Unknown ${key} route query.` };
       }
       if (params.getAll(key).length !== 1) {
@@ -635,20 +638,22 @@
       fromArtifactHashes,
       toArtifactHashes,
       facts,
-      files
+      files,
+      fileQueries
     } = parsed;
-    const focus = /* @__PURE__ */ __name(() => {
-      if (facts.length > 1 || files.length > 1 || facts.some((value) => !value) || files.some((value) => !value)) {
+    const focus = /* @__PURE__ */ __name((allowFileQuery = false) => {
+      if (facts.length > 1 || files.length > 1 || fileQueries.length > 1 || facts.some((value) => !value) || files.some((value) => !value) || fileQueries.some((value) => !value) || !allowFileQuery && fileQueries.length > 0) {
         return null;
       }
       const selected = {
         ...facts[0] ? { factId: facts[0] } : {},
-        ...files[0] ? { filePath: files[0] } : {}
+        ...files[0] ? { filePath: files[0] } : {},
+        ...fileQueries[0] ? { fileQuery: fileQueries[0] } : {}
       };
       return Object.keys(selected).length ? selected : void 0;
     }, "focus");
     if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
-      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0 || fileQueries.length > 0) {
         return {
           kind: "invalid",
           message: "artifactHash is only valid on an exact Revision route."
@@ -662,7 +667,7 @@
     if (changeId === null)
       return { kind: "invalid", message: "Change routes require a Change ID." };
     if (segments.length === 2) {
-      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0 || fileQueries.length > 0) {
         return {
           kind: "invalid",
           message: "artifactHash is only valid on an exact Revision route."
@@ -685,7 +690,7 @@
     if (segments[2] === "revisions" && segments.length >= 4) {
       const revision2 = exactRevision(decodeSegment(segments[3]));
       if (revision2 === null) return exactFailure();
-      const exactFocus = focus();
+      const exactFocus = focus(segments.length === 5 && segments[4] === "diff");
       if (exactFocus === null)
         return {
           kind: "invalid",
@@ -707,6 +712,14 @@
       if (segments.length === 5 && segments[4] === "resource")
         return {
           kind: "resource",
+          changeId,
+          revision: revision2,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+      if (segments.length === 5 && segments[4] === "diff")
+        return {
+          kind: "diff",
           changeId,
           revision: revision2,
           query,
@@ -771,19 +784,7 @@
   }
   __name(appendQuery, "appendQuery");
   function appendTimelineQuery(query, params) {
-    const keys = [
-      "limit",
-      "after",
-      "at",
-      "q",
-      "type",
-      "track",
-      "change",
-      "revision",
-      "artifactHash",
-      "order"
-    ];
-    for (const key of keys) {
+    for (const key of TIMELINE_QUERY_KEYS) {
       const value = query[key];
       if (value !== void 0) params.set(key, String(value));
     }
@@ -801,7 +802,7 @@
       return `#/timeline/events/${eventId}${params.size ? `?${params}` : ""}`;
     }
     appendQuery(route.query, params);
-    if (route.kind === "revision" || route.kind === "resource" || route.kind === "association")
+    if (route.kind === "revision" || route.kind === "resource" || route.kind === "diff" || route.kind === "association")
       params.set("artifactHash", route.revision.objectArtifactContentHash);
     if (route.kind === "interdiff") {
       params.set("fromArtifactHash", route.from.objectArtifactContentHash);
@@ -811,6 +812,8 @@
       params.set("fact", route.focus.factId);
     if ("focus" in route && route.focus?.filePath)
       params.set("file", route.focus.filePath);
+    if (route.kind === "diff" && route.focus?.fileQuery)
+      params.set("fq", route.focus.fileQuery);
     const suffix = params.size ? `?${params}` : "";
     if (route.kind === "lens") return `#/${route.lens}${suffix}`;
     const change = encodeURIComponent(route.changeId);
@@ -819,6 +822,8 @@
       return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
     if (route.kind === "resource")
       return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
+    if (route.kind === "diff")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/diff${suffix}`;
     if (route.kind === "association")
       return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
     return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
@@ -893,25 +898,6 @@
     }
   }
   __name(eventSubjectLabel, "eventSubjectLabel");
-  function eventAttributionLines(entry) {
-    const lines = [
-      `${entry.writer.actorId} · ${entry.writer.producer.name} ${entry.writer.producer.version}`,
-      `${words(entry.assertionMode)} assertion`
-    ];
-    if (entry.signer) lines.push(`signed by ${entry.signer}`);
-    if (entry.sourceRef) {
-      lines.push(
-        `source ${entry.sourceRef.sourceSystem} · ${entry.sourceRef.sourceId}`
-      );
-    }
-    if (entry.ingest) {
-      lines.push(
-        `ingested via ${entry.ingest.via} at ${entry.ingest.receivedAt}`
-      );
-    }
-    return lines;
-  }
-  __name(eventAttributionLines, "eventAttributionLines");
   function eventTypeColor(eventType) {
     switch (eventType) {
       case "review_initialized":
@@ -1333,6 +1319,403 @@
   }
   __name(watchColorScheme, "watchColorScheme");
 
+  // src/classNames.ts
+  var CLASS = {
+    // App chrome, master-detail panes, lens containers, and shared chips.
+    units: "units",
+    timeline: "timeline",
+    empty: "empty",
+    badge: "badge",
+    tierMedium: "tier-medium",
+    body: "body",
+    title: "title",
+    time: "time",
+    eventDate: "event-date",
+    rail: "rail",
+    meta: "meta",
+    type: "type",
+    typeCount: "type-count",
+    code: "code",
+    dot: "dot",
+    kv: "kv",
+    ghost: "ghost",
+    actions: "actions",
+    timelineShell: "timeline-shell",
+    timelineNewPill: "timeline-new-pill",
+    // (The app-shell store-identity chip + detail popover is static markup in
+    // index.html — `store-identity*` classes live there and in app.css, not here —
+    // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
+    // Issue #391.)
+    // Fact cards (observation / input-request / assessment / validation / note).
+    annoGroup: "anno-group",
+    annoHead: "anno-head",
+    annoLoc: "anno-loc",
+    annoSummary: "anno-summary",
+    annoTime: "anno-time",
+    annoTitle: "anno-title",
+    annoTrack: "anno-track",
+    actorAttribution: "actor-attribution",
+    factBodyRemoved: "fact-body-removed",
+    factRel: "fact-rel",
+    factResponse: "fact-response",
+    factResponses: "fact-responses",
+    factStaleContext: "fact-stale-context",
+    factStatus: "fact-status",
+    outcome: "outcome",
+    advisoryNote: "advisory-note",
+    validationNote: "validation-note",
+    validationContinuity: "validation-continuity",
+    validationContinuityNeutral: "validation-continuity-neutral",
+    validationContinuityOutstanding: "validation-continuity-outstanding",
+    readback: "readback",
+    readbackRow: "readback-row",
+    readerScopeNote: "reader-scope-note",
+    rawEvent: "raw-event",
+    rawEventActions: "raw-event-actions",
+    // The current-assessment verdict block.
+    verdictStatus: "verdict-status",
+    verdictSummary: "verdict-summary",
+    verdictValue: "verdict-value",
+    // The advisory endorsement readback.
+    endorseAttrs: "endorse-attrs",
+    endorseLabel: "endorse-label",
+    endorseList: "endorse-list",
+    endorseWho: "endorse-who",
+    endorsements: "endorsements",
+    endorsementsLabel: "endorsements-label",
+    // The revision-overview summary line.
+    overviewAssessment: "overview-assessment",
+    overviewCue: "overview-cue",
+    overviewHistoryCue: "overview-history-cue",
+    overviewCues: "overview-cues",
+    overviewLabel: "overview-label",
+    overviewLatest: "overview-latest",
+    overviewMain: "overview-main",
+    overviewMuted: "overview-muted",
+    revisionDiagnostic: "revision-diagnostic",
+    overviewStat: "overview-stat",
+    overviewStats: "overview-stats",
+    overviewSummary: "overview-summary",
+    // The annotated snapshot diff: files, rows, and the navigator.
+    dfileBody: "dfile-body",
+    dfileHead: "dfile-head",
+    dfileNotes: "dfile-notes",
+    dfileSummary: "dfile-summary",
+    dhunk: "dhunk",
+    diffBtn: "diff-btn",
+    diffAnchorReason: "diff-anchor-reason",
+    diffDecisionContext: "diff-decision-context",
+    diffDecisionContextNav: "diff-decision-context-nav",
+    diffFactVicinity: "diff-fact-vicinity",
+    diffFileNotice: "diff-file-notice",
+    diffNavFact: "diff-nav-fact",
+    diffNavFile: "diff-nav-file",
+    diffNavFiles: "diff-nav-files",
+    diffNavReason: "diff-nav-reason",
+    diffNavSummary: "diff-nav-summary",
+    diffUnanchored: "diff-unanchored",
+    diffUnanchoredFacts: "diff-unanchored-facts",
+    dpath: "dpath",
+    drow: "drow",
+    drowMeta: "drow-meta",
+    dtext: "dtext",
+    emph: "emph",
+    ln: "ln",
+    sign: "sign",
+    // Revision list, supersession badges, and the laid-out DAG.
+    unitCard: "unit-card",
+    unitPage: "unit-page",
+    unitPageTitle: "unit-page-title",
+    supersessionBadges: "supersession-badges",
+    competing: "competing",
+    revisionSupersession: "revision-supersession",
+    revisionHeads: "revision-heads",
+    revisionSelf: "revision-self",
+    dagEdge: "dag-edge",
+    dagArrowHead: "dag-arrow-head",
+    dagArrowHeadTraced: "dag-arrow-head-traced",
+    revisionDag: "revision-dag",
+    factDag: "fact-dag",
+    head: "head",
+    stale: "stale",
+    superseded: "superseded",
+    supersedes: "supersedes",
+    upEmpty: "up-empty",
+    upIdentity: "up-identity",
+    upStat: "up-stat",
+    upStats: "up-stats",
+    // The applied-filter chip row (the toolbar's pure view of filterText).
+    filterChips: "filter-chips",
+    filterChipRemove: "filter-chip-remove",
+    // The type facet section (the Timeline-only ?type= page-set control): static
+    // container/list classes in index.html; rows are emitted via typeFacetRowClass.
+    typeFacet: "type-facet",
+    typeFacetMenu: "type-facet-menu",
+    // The search-bar suggestion popover: static list container in index.html;
+    // the rows are emitted via suggestionClass below.
+    filterSuggestions: "filter-suggestions",
+    suggestion: "suggestion",
+    suggestionActive: "suggestion-active",
+    // The command palette.
+    cmdEmpty: "cmd-empty",
+    cmdGroup: "cmd-group",
+    cmdHint: "cmd-hint",
+    cmdLabel: "cmd-label",
+    // The attention lens: tiered cards over the outstanding review state.
+    attentionCard: "attention-card",
+    attentionTier: "attention-tier",
+    attentionEmpty: "attention-empty",
+    attentionOrderLabel: "attention-order-label",
+    attentionKind: "attention-kind",
+    attentionMeta: "attention-meta",
+    attentionFreshness: "attention-freshness",
+    attentionFocus: "attention-focus",
+    attentionDelta: "attention-delta",
+    // The attention tab's judgment-queue count badge (absent when both tiers are
+    // empty) and the muted advisory count beside the needs-input number.
+    attentionBadge: "attention-badge",
+    attentionBadgeSecondary: "attention-badge-secondary",
+    // The detail page's per-revision outstanding set (the scoped attention read);
+    // absent when nothing is outstanding on the shown revision.
+    outstandingSet: "outstanding-set",
+    // Copyable CLI command handoffs (workflow-handoff.ts): the block, its label,
+    // the command code, the visible placeholder marker, the clipboard-only copy
+    // control, and the detail page's stage-template section host.
+    workflowHandoff: "workflow-handoff",
+    workflowHandoffLabel: "workflow-handoff-label",
+    workflowCommand: "workflow-command",
+    workflowPlaceholder: "workflow-placeholder",
+    workflowCopy: "workflow-copy",
+    workflowHandoffs: "workflow-handoffs"
+  };
+  var ANNO_KINDS = [
+    "observation",
+    "assessment",
+    "input-request",
+    "validation"
+  ];
+  var DIFF_ROW_KINDS = ["added", "removed", "context"];
+  var TOKEN_KINDS = [
+    "keyword",
+    "string",
+    "comment",
+    "number",
+    "type",
+    "function",
+    "constant",
+    "operator",
+    "punctuation",
+    "variable"
+  ];
+  var DIFF_FILE_STATUSES = [
+    "added",
+    "deleted",
+    "modified",
+    "renamed",
+    "copied"
+  ];
+  var VERIFY_STATUSES = [
+    "valid",
+    "invalid",
+    "unsigned",
+    "untrusted_key"
+  ];
+  var ENDORSE_CLASSES = [
+    "endorsement-trusted",
+    "ambiguous_endorser",
+    "unknown_endorser"
+  ];
+  var VERDICT_ASSESSMENTS = [
+    "accepted",
+    "accepted_with_follow_up",
+    "ambiguous",
+    "needs_changes",
+    "needs_clarification",
+    "unassessed"
+  ];
+  var FACT_STATUSES = [
+    "accepted",
+    "accepted_with_follow_up",
+    "ambiguous",
+    "current",
+    "errored",
+    "failed",
+    "needs_changes",
+    "needs_clarification",
+    "open",
+    "passed",
+    "replaced",
+    "resolved",
+    "responded",
+    "skipped",
+    "stale",
+    "superseded",
+    "unassessed"
+  ];
+  var REF_ID_PREFIXES = [
+    "input-request-response",
+    "input-request",
+    "obs",
+    "assess",
+    "rev",
+    "evt",
+    "validation",
+    "obj",
+    "engagement",
+    "checkpoint",
+    "task-attempt",
+    "assoc-commit",
+    "assoc-ref",
+    "withdraw-commit",
+    "withdraw-ref"
+  ];
+  var REF_KINDS = [
+    ...REF_ID_PREFIXES,
+    "hash",
+    "commit",
+    "track",
+    "actor"
+  ];
+  var annoContainerClass = /* @__PURE__ */ __name((kind) => `anno anno-${kind}`, "annoContainerClass");
+  var annoKindClass = /* @__PURE__ */ __name((kind) => `anno-kind anno-kind-${kind}`, "annoKindClass");
+  var drowClass = /* @__PURE__ */ __name((kind, noted) => `drow drow-${kind}${noted ? " drow-noted" : ""}`, "drowClass");
+  var tokClass = /* @__PURE__ */ __name((kind) => `tok tok-${kind}`, "tokClass");
+  var diffStatusClass = /* @__PURE__ */ __name((status) => `dstatus s-${status}`, "diffStatusClass");
+  var verifyClass = /* @__PURE__ */ __name((status) => `verify verify-${status}`, "verifyClass");
+  var endorseClass = /* @__PURE__ */ __name((cls) => `endorse endorse-${cls}`, "endorseClass");
+  var verdictClass = /* @__PURE__ */ __name((assessment) => `verdict verdict-${assessment}`, "verdictClass");
+  var factStatusClass = /* @__PURE__ */ __name((status) => `fact-status ${status}`, "factStatusClass");
+  var refClass = /* @__PURE__ */ __name((kind) => `ref ref-${kind}`, "refClass");
+  var dfileClass = /* @__PURE__ */ __name((lowSignal) => `dfile${lowSignal ? " dfile-lowsignal" : ""}`, "dfileClass");
+  var dagNodeClass = /* @__PURE__ */ __name((o) => `dag-node${o.isHead ? " head" : ""}${o.isSuperseded ? " superseded" : ""}`, "dagNodeClass");
+  var bodyClass = /* @__PURE__ */ __name((base, markdown) => `${base}${markdown ? " markdown-body" : ""}`, "bodyClass");
+  var cmdItemClass = /* @__PURE__ */ __name((active3) => `cmd-item${active3 ? " active" : ""}`, "cmdItemClass");
+  var filterChipClass = /* @__PURE__ */ __name((negated) => `filter-chip${negated ? " filter-chip-negated" : ""}`, "filterChipClass");
+  var typeFacetRowClass = /* @__PURE__ */ __name((enabled) => `type-facet-row${enabled ? "" : " type-facet-row-off"}`, "typeFacetRowClass");
+  var suggestionClass = /* @__PURE__ */ __name((active3) => `suggestion${active3 ? " suggestion-active" : ""}`, "suggestionClass");
+  var tokensOf = /* @__PURE__ */ __name((classStrings) => classStrings.flatMap((s) => s.split(" ")), "tokensOf");
+  var ALL_EMITTABLE_CLASSES = [
+    ...new Set(
+      tokensOf([
+        ...Object.values(CLASS),
+        ...ANNO_KINDS.map((k) => annoContainerClass(k)),
+        ...ANNO_KINDS.map((k) => annoKindClass(k)),
+        ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
+        ...TOKEN_KINDS.map((k) => tokClass(k)),
+        ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
+        ...VERIFY_STATUSES.map((s) => verifyClass(s)),
+        ...ENDORSE_CLASSES.map((c) => endorseClass(c)),
+        ...VERDICT_ASSESSMENTS.map((a) => verdictClass(a)),
+        ...FACT_STATUSES.map((s) => factStatusClass(s)),
+        ...REF_KINDS.map((k) => refClass(k)),
+        dfileClass(true),
+        filterChipClass(true),
+        typeFacetRowClass(true),
+        typeFacetRowClass(false),
+        suggestionClass(true),
+        dagNodeClass({ isHead: true, isSuperseded: true }),
+        bodyClass("anno-body", true),
+        bodyClass("verdict-summary", true),
+        cmdItemClass(true)
+      ])
+    )
+  ];
+
+  // src/escape.ts
+  var ENTITIES = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  };
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ENTITIES[char]);
+  }
+  __name(escapeHtml, "escapeHtml");
+
+  // src/refs.ts
+  function shortRef(id) {
+    const value = String(id);
+    let match = value.match(
+      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i
+    );
+    if (match) return `${match[1]}:${match[2].slice(0, 8)}`;
+    match = value.match(/^sha256:([0-9a-f]{8,})$/i);
+    if (match) return `sha256:${match[1].slice(0, 8)}`;
+    if (/^[0-9a-f]{40}$/i.test(value)) return value.slice(0, 10);
+    return value;
+  }
+  __name(shortRef, "shortRef");
+  var NON_CLICKABLE_KINDS = /* @__PURE__ */ new Set([
+    "validation",
+    "obj",
+    "engagement",
+    "checkpoint",
+    "task-attempt",
+    "assoc-commit",
+    "assoc-ref",
+    "withdraw-commit",
+    "withdraw-ref"
+  ]);
+  function refInfo(token) {
+    const match = token.match(
+      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:[0-9a-f]+$/i
+    );
+    if (match) {
+      const kind = match[1].toLowerCase();
+      return { kind, clickable: !NON_CLICKABLE_KINDS.has(kind) };
+    }
+    if (/^sha256:[0-9a-f]+$/i.test(token))
+      return { kind: "hash", clickable: false };
+    if (/^[0-9a-f]{40}$/i.test(token))
+      return { kind: "commit", clickable: false };
+    if (/^(agent|human):[a-z0-9][a-z0-9_-]*$/i.test(token)) {
+      return { kind: "track", clickable: true };
+    }
+    return null;
+  }
+  __name(refInfo, "refInfo");
+  var REF_RE = new RegExp(
+    `\\b(?:${REF_ID_PREFIXES.join("|")}):(?:git:|worktree:)?sha256:[0-9a-f]{6,}\\b|(?<!:)\\bsha256:[0-9a-f]{16,}\\b|\\b[0-9a-f]{40}\\b|\\b(?:agent|human):[a-z0-9][a-z0-9_-]*\\b`,
+    "gi"
+  );
+  function linkifyEscaped(escaped, opts = {}) {
+    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : 0;
+    return escaped.replace(REF_RE, (token) => {
+      const info = refInfo(token);
+      if (!info) return token;
+      const display = escapeHtml(shortRef(token));
+      if (!info.clickable) {
+        return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
+      }
+      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+    });
+  }
+  __name(linkifyEscaped, "linkifyEscaped");
+  function linkify(text, opts = {}) {
+    return linkifyEscaped(escapeHtml(String(text ?? "")), opts);
+  }
+  __name(linkify, "linkify");
+  function actorChip(actorId, opts = {}) {
+    if (!actorId) return "";
+    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : opts;
+    const display = escapeHtml(actorId);
+    return `<span class="${refClass("actor")}" role="link" tabindex="${tabIndex}" data-ref-kind="actor" data-ref-id="${escapeHtml(actorId)}" title="filter to ${escapeHtml(actorId)}">${display}</span>`;
+  }
+  __name(actorChip, "actorChip");
+  function isMarkdownContentType(contentType) {
+    return contentType === "text/markdown";
+  }
+  __name(isMarkdownContentType, "isMarkdownContentType");
+  function safeMarkdownHref(href) {
+    const raw = String(href ?? "").trim();
+    if (/^(https?:|mailto:)/i.test(raw) || raw.startsWith("#"))
+      return escapeHtml(raw);
+    return "";
+  }
+  __name(safeMarkdownHref, "safeMarkdownHref");
+
   // src/change-inspector-timeline.ts
   var FALLBACK_ROW_HEIGHT = 72;
   var OVERSCAN = 8;
@@ -1342,10 +1725,55 @@
     return value.replaceAll("_", " ");
   }
   __name(label, "label");
-  function short(value, size = 18) {
-    return value.length > size ? `${value.slice(0, size)}…` : value;
+  var MAX_TIMELINE_TITLE = 120;
+  var MAX_TIMELINE_EXCERPT = 180;
+  var OPAQUE_ID = /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
+  function compactTimelineText(value, limit) {
+    const compact = value.replace(OPAQUE_ID, (identity) => shortRef(identity)).replace(/\s+/g, " ").trim();
+    if (compact.length <= limit) return compact;
+    return `${compact.slice(0, limit - 1).trimEnd()}…`;
   }
-  __name(short, "short");
+  __name(compactTimelineText, "compactTimelineText");
+  function timelineTitle(value) {
+    return compactTimelineText(value, MAX_TIMELINE_TITLE);
+  }
+  __name(timelineTitle, "timelineTitle");
+  function timelineExcerpt(value) {
+    return compactTimelineText(value, MAX_TIMELINE_EXCERPT);
+  }
+  __name(timelineExcerpt, "timelineExcerpt");
+  function appendTimelineLink(parent, identity, kind, href) {
+    const link = document.createElement("a");
+    link.className = "ref";
+    link.href = href;
+    link.tabIndex = -1;
+    link.title = identity;
+    link.dataset.timelineContextKind = kind.toLowerCase();
+    link.dataset.timelineContextId = identity;
+    link.setAttribute("aria-label", `Open ${kind} ${identity}`);
+    link.textContent = shortRef(identity);
+    parent.append(link);
+  }
+  __name(appendTimelineLink, "appendTimelineLink");
+  function appendExactRevisionLink(parent, reference, route) {
+    appendTimelineLink(
+      parent,
+      reference.revisionId,
+      "Revision",
+      formatChangeInspectorRoute({
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          after: void 0,
+          at: void 0,
+          change: void 0,
+          revision: reference.revisionId,
+          artifactHash: reference.objectArtifactContentHash
+        }
+      })
+    );
+  }
+  __name(appendExactRevisionLink, "appendExactRevisionLink");
   function optionId(eventId) {
     return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
   }
@@ -1373,10 +1801,8 @@
     row.append(chip);
   }
   __name(appendVerificationChip, "appendVerificationChip");
-  function entryRow(entry, selectedEventId) {
+  function entryRow(entry, selectedEventId, route) {
     const presentation = presentEvent(entry);
-    const subject = eventSubjectLabel(entry.subject);
-    const attribution = eventAttributionLines(entry);
     const row = document.createElement("li");
     row.className = "event";
     row.dataset.eventId = entry.eventId;
@@ -1386,7 +1812,7 @@
     row.setAttribute("aria-selected", String(entry.eventId === selectedEventId));
     row.setAttribute(
       "aria-label",
-      `${presentation.title}; ${subject}; ${attribution.join("; ")}; ${entry.occurredAt}; event ${entry.eventId}`
+      `${presentation.title}; ${entry.eventType}; writer ${entry.writer.actorId}; ${entry.occurredAt}; event ${entry.eventId}; Changes ${entry.changeIds.join(", ") || "none"}; exact Revisions ${entry.revisionRefs.map((reference) => `${reference.revisionId} ${reference.objectArtifactContentHash}`).join(", ") || "none"}; unresolved Revisions ${entry.unresolvedRevisionIds.join(", ") || "none"}`
     );
     const occurred = new Date(entry.occurredAt);
     const time = document.createElement("time");
@@ -1414,11 +1840,12 @@
     body.className = "body";
     const heading = document.createElement("h3");
     heading.className = "title";
-    heading.textContent = presentation.title;
+    heading.textContent = timelineTitle(presentation.title);
+    heading.title = presentation.title;
     if (presentation.body) {
       const summary = document.createElement("p");
       summary.className = "event-summary";
-      summary.textContent = presentation.body;
+      summary.textContent = timelineExcerpt(presentation.body);
       body.append(heading, summary);
     } else {
       body.append(heading);
@@ -1433,40 +1860,61 @@
     eventType.style.color = eventTypeColor(entry.eventType);
     meta.append(eventType);
     appendVerificationChip(meta, entry.verificationStatus);
-    if (entry.trackId) appendChip(meta, entry.trackId);
-    for (const changeId of entry.changeIds) appendChip(meta, short(changeId));
-    const eventId = document.createElement("span");
-    eventId.textContent = short(entry.eventId);
-    eventId.title = entry.eventId;
-    meta.append(eventId);
-    const context = document.createElement("p");
-    context.className = "event-context mono";
-    context.textContent = subject;
-    const attributionLine = document.createElement("p");
-    attributionLine.className = "event-attribution dim";
-    attributionLine.textContent = attribution.join(" · ");
-    body.append(meta, context, attributionLine);
+    if (entry.trackId) appendChip(meta, `track ${entry.trackId}`);
+    const actor = document.createElement("span");
+    actor.textContent = entry.writer.actorId;
+    actor.title = `writer ${entry.writer.actorId}`;
+    meta.append(actor);
+    appendTimelineLink(
+      meta,
+      entry.eventId,
+      "event",
+      formatChangeInspectorRoute({
+        kind: "event",
+        eventId: entry.eventId,
+        historyQuery: { ...route.historyQuery, after: void 0, at: void 0 },
+        query: {}
+      })
+    );
+    const contexts = document.createElement("p");
+    contexts.className = "event-context mono";
+    if (entry.changeIds.length) {
+      const changes = document.createElement("span");
+      changes.textContent = "Changes ";
+      contexts.append(changes);
+      entry.changeIds.forEach((changeId, index) => {
+        if (index) contexts.append(document.createTextNode(", "));
+        appendTimelineLink(
+          contexts,
+          changeId,
+          "Change",
+          formatChangeInspectorRoute({ kind: "change", changeId, query: {} })
+        );
+      });
+    }
     if (entry.revisionRefs.length) {
-      const exact = document.createElement("p");
-      exact.className = "event-context mono dim";
-      exact.textContent = `exact Revisions: ${entry.revisionRefs.map(
-        (reference) => `${reference.revisionId} · ${reference.objectArtifactContentHash}`
-      ).join("; ")}`;
-      body.append(exact);
+      if (contexts.childNodes.length)
+        contexts.append(document.createTextNode(" · "));
+      const revisions = document.createElement("span");
+      revisions.textContent = "Revisions ";
+      contexts.append(revisions);
+      entry.revisionRefs.forEach((reference, index) => {
+        if (index) contexts.append(document.createTextNode(", "));
+        appendExactRevisionLink(contexts, reference, route);
+      });
     }
     if (entry.unresolvedRevisionIds.length) {
-      const unresolved = document.createElement("p");
-      unresolved.className = "event-context mono warning";
-      unresolved.textContent = `unresolved Revisions: ${entry.unresolvedRevisionIds.join("; ")}`;
-      body.append(unresolved);
+      if (contexts.childNodes.length)
+        contexts.append(document.createTextNode(" · "));
+      const unresolved = document.createElement("span");
+      unresolved.className = "warning";
+      unresolved.title = entry.unresolvedRevisionIds.join(", ");
+      unresolved.textContent = `unresolved ${entry.unresolvedRevisionIds.map(shortRef).join(", ")}`;
+      contexts.append(unresolved);
     }
+    body.append(meta);
+    if (contexts.childNodes.length) body.append(contexts);
     row.append(time, rail, body);
-    if (entry.revisionRefs.length > 1 || entry.changeIds.length > 1) {
-      const note = document.createElement("p");
-      note.className = "dim";
-      note.textContent = "This event has multiple contexts; choose a Change and exact Revision from the Changes lens.";
-      body.append(note);
-    }
     return row;
   }
   __name(entryRow, "entryRow");
@@ -1483,7 +1931,7 @@
     const bottom = rowSpacer(Math.max(0, entries.length - localEnd) * rowHeight);
     list.replaceChildren(
       top,
-      ...entries.slice(localStart, localEnd).map((entry) => entryRow(entry, view.selectedEventId)),
+      ...entries.slice(localStart, localEnd).map((entry) => entryRow(entry, view.selectedEventId, view.route)),
       bottom
     );
     const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
@@ -1810,6 +2258,35 @@
     return target instanceof Element && target.closest("#detail") !== null && window.matchMedia("(max-width: 760px)").matches;
   }
   __name(narrowDetailOwnsFocus, "narrowDetailOwnsFocus");
+  function refineDiffFocus(route, patch) {
+    const focus = { ...route.focus, ...patch };
+    for (const key of Object.keys(focus)) {
+      if (!focus[key]) delete focus[key];
+    }
+    return { ...route, ...Object.keys(focus).length ? { focus } : {} };
+  }
+  __name(refineDiffFocus, "refineDiffFocus");
+  function moveDiffTarget(items, current, delta, identity) {
+    if (!items.length) return null;
+    const index = items.findIndex((item) => identity(item) === current);
+    return items[Math.max(0, Math.min(items.length - 1, (index < 0 ? -1 : index) + delta))] ?? null;
+  }
+  __name(moveDiffTarget, "moveDiffTarget");
+  function revisionRouteFromDiff(route) {
+    return {
+      kind: "revision",
+      changeId: route.changeId,
+      revision: route.revision,
+      query: route.query,
+      ...route.focus && (route.focus.factId || route.focus.filePath) ? {
+        focus: {
+          ...route.focus.factId ? { factId: route.focus.factId } : {},
+          ...route.focus.filePath ? { filePath: route.focus.filePath } : {}
+        }
+      } : {}
+    };
+  }
+  __name(revisionRouteFromDiff, "revisionRouteFromDiff");
   function companionTimelineRoute(route) {
     if (route?.kind === "timeline") return route;
     if (route?.kind === "event") {
@@ -1919,7 +2396,7 @@
     return Array.from(
       document.querySelectorAll("#master button")
     ).find(
-      (button) => button.textContent?.trim() === `${direction === "next" ? "Next" : "Previous"} page`
+      (button2) => button2.textContent?.trim() === `${direction === "next" ? "Next" : "Previous"} page`
     ) ?? null;
   }
   __name(timelinePager, "timelinePager");
@@ -2097,7 +2574,7 @@
       return timelineOriginRoute ?? (route.kind === "event" ? { kind: "timeline", historyQuery: route.historyQuery } : { kind: "timeline", historyQuery: {} });
     }, "listRoute");
     const focusFallback = /* @__PURE__ */ __name((route = currentRoute2) => {
-      const target = route !== null && route.kind !== "lens" && route.kind !== "timeline" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
+      const target = route?.kind === "diff" ? document.querySelector("#diff-page-close") : route !== null && route.kind !== "lens" && route.kind !== "timeline" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
       target?.focus({ preventScroll: true });
     }, "focusFallback");
     const setCoveredPageInert = /* @__PURE__ */ __name((covered) => {
@@ -2176,14 +2653,14 @@
           ([label2]) => label2.toLocaleLowerCase().includes(query)
         );
         for (const [label2, lens] of matching) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "ghost cmd-item";
+          const button2 = document.createElement("button");
+          button2.type = "button";
+          button2.className = "ghost cmd-item";
           const commandLabel = document.createElement("span");
           commandLabel.className = "cmd-label";
           commandLabel.textContent = label2;
-          button.append(commandLabel);
-          button.addEventListener("click", () => {
+          button2.append(commandLabel);
+          button2.addEventListener("click", () => {
             closeModal("#cmd-palette");
             const route = currentRoute2;
             if (route) {
@@ -2196,7 +2673,7 @@
               );
             }
           });
-          paletteResults.append(button);
+          paletteResults.append(button2);
         }
         if (matching.length === 0) {
           const empty = document.createElement("p");
@@ -2378,6 +2855,12 @@
         return;
       }
       if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
+      const route = currentRoute2;
+      if (route?.kind === "diff" && event.key === "Escape") {
+        event.preventDefault();
+        actions2.navigate(revisionRouteFromDiff(route));
+        return;
+      }
       if (isTextControl(event.target)) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" || event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "p") {
         event.preventDefault();
@@ -2385,8 +2868,50 @@
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const route = currentRoute2;
       if (!route) return;
+      if (route.kind === "diff") {
+        if (isNativeActionControl(event.target)) return;
+        if (event.key === "]" || event.key === "[") {
+          const next = moveDiffTarget(
+            Array.from(
+              document.querySelectorAll("#diff-page-body .dfile")
+            ),
+            route.focus?.filePath,
+            event.key === "]" ? 1 : -1,
+            (item) => item.dataset.filePath
+          );
+          const filePath = next?.dataset.filePath;
+          if (filePath) {
+            event.preventDefault();
+            actions2.navigate(refineDiffFocus(route, { filePath }));
+          }
+          return;
+        }
+        if (event.key === "n" || event.key === "p") {
+          const seen = /* @__PURE__ */ new Set();
+          const facts = Array.from(
+            document.querySelectorAll("#diff-page-body [data-anno]")
+          ).filter((item) => {
+            const id = item.dataset.anno;
+            if (!id || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          });
+          const next = moveDiffTarget(
+            facts,
+            route.focus?.factId,
+            event.key === "n" ? 1 : -1,
+            (item) => item.dataset.anno
+          );
+          const factId = next?.dataset.anno;
+          if (factId) {
+            event.preventDefault();
+            actions2.navigate(refineDiffFocus(route, { factId }));
+          }
+          return;
+        }
+        return;
+      }
       if (event.key === "?") {
         event.preventDefault();
         openModal("#key-help", document.querySelector("#key-help-close"));
@@ -2665,13 +3190,19 @@
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
         const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
+        const entersVisibleDiff = nextRoute?.kind === "diff" && (currentRoute2?.kind !== "diff" || formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute)) && document.querySelector("#diff-page:not(.hidden)") !== null;
+        const leavesDiffForExactSurface = currentRoute2?.kind === "diff" && nextRoute !== null && nextRoute.kind !== "diff" && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline";
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
           detail.inert = !detailOpen;
           if (detailOpen) detail.removeAttribute("aria-hidden");
           else detail.setAttribute("aria-hidden", "true");
         }
-        if (detailOpen && !detailWasOpen) {
+        if (entersVisibleDiff) {
+          focusFallback(nextRoute);
+        } else if (leavesDiffForExactSurface) {
+          focusFallback(nextRoute);
+        } else if (detailOpen && !detailWasOpen) {
           detailReturnFocus = active3 && active3 !== document.body ? active3 : null;
           if (viewportIsNarrow) {
             document.querySelector("#detail-back")?.focus({ preventScroll: true });
@@ -2829,6 +3360,7 @@
     const perCurrentRevisionQualification = detail.perCurrentRevisionQualification;
     const operativeObligations = detail.operativeObligations;
     const diagnostics = detail.diagnostics;
+    const inspectorPresentation = detail.inspectorPresentation;
     if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
       (claim) => isRelationClaim(claim, summary.changeId)
     ) || !isClaimWithdrawals(relationWithdrawals) || !isChangeLinks(links) || !isEffectiveSupersedes(effectiveSupersedes) || !Array.isArray(pendingOrConflictingEdges) || !pendingOrConflictingEdges.every(
@@ -2837,6 +3369,15 @@
       perCurrentRevisionQualification,
       currentRevisionRefs
     ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Change detail DTO");
+    }
+    if (!isChangeDetailInspectorPresentation(inspectorPresentation, {
+      memberRevisions,
+      currentRevisionRefs,
+      effectiveSupersedes,
+      pendingOrConflictingEdges,
+      diagnostics
+    })) {
       throw new Error("invalid Change detail DTO");
     }
     return {
@@ -2856,7 +3397,8 @@
       perCurrentRevisionQualification,
       operativeObligations,
       diagnostics,
-      projectionStamp: stamp
+      projectionStamp: stamp,
+      inspectorPresentation
     };
   }
   __name(decodeChangeDetail, "decodeChangeDetail");
@@ -2873,12 +3415,20 @@
     const revisionCurrency = detail.revisionCurrency;
     const relationClassification = detail.relationClassification;
     const availability = detail.availability;
+    const inspectorPresentation = detail.inspectorPresentation;
     if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
       factPorts,
       detail.changeId,
       factPresentations,
       revision2
     ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
+      throw new Error("invalid Change Revision detail DTO");
+    }
+    if (!isChangeRevisionDetailInspectorPresentation(inspectorPresentation, {
+      revision: revision2,
+      factPresentations,
+      factPorts
+    })) {
       throw new Error("invalid Change Revision detail DTO");
     }
     return {
@@ -2896,7 +3446,8 @@
       factPorts,
       associations,
       diagnostics,
-      projectionStamp: detail.projectionStamp
+      projectionStamp: detail.projectionStamp,
+      inspectorPresentation
     };
   }
   __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
@@ -3226,7 +3777,7 @@
     const changes = page.changes;
     const diagnostics = page.diagnostics;
     const presentations = page.presentations;
-    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes)) {
+    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
       throw new Error(`invalid ${expected.lens} Change page DTO`);
     }
     const next = page.next;
@@ -3353,7 +3904,7 @@
     return leftKeys.size === left.length && rightKeys.size === right.length && leftKeys.size === rightKeys.size && [...leftKeys].every((key) => rightKeys.has(key));
   }
   __name(sameRevisionSet, "sameRevisionSet");
-  function isPresentations(value, changes) {
+  function isPresentations(value, changes, lens) {
     if (!isRecord(value)) return false;
     const summaries = new Map(
       changes.map((change) => [change.changeId, change])
@@ -3361,7 +3912,7 @@
     if (Object.keys(value).length !== summaries.size) return false;
     return Object.entries(value).every(([changeId, presentation]) => {
       const change = summaries.get(changeId);
-      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision)) {
+      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision) || (lens === "attention" ? !isAttentionPresentation(presentation.attention) : presentation.attention !== void 0)) {
         return false;
       }
       const expected = uniqueRevisionKeys(change.currentRevisionRefs);
@@ -3372,6 +3923,44 @@
     });
   }
   __name(isPresentations, "isPresentations");
+  function isAttentionPresentation(value) {
+    if (!isRecord(value) || !isAttentionReason(value.primaryReason) || !Array.isArray(value.reasons) || value.reasons.length === 0 || !value.reasons.every(isAttentionReason) || !sameAttentionReason(value.primaryReason, value.reasons[0]) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    return true;
+  }
+  __name(isAttentionPresentation, "isAttentionPresentation");
+  function isAttentionReason(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "conflicted":
+      case "incomplete":
+      case "no_current_revision":
+        return Object.keys(value).length === 1;
+      case "unresolved_operative_requests":
+        return Object.keys(value).length === 2 && Array.isArray(value.requestIds) && value.requestIds.length > 0 && value.requestIds.every(nonEmptyString) && new Set(value.requestIds).size === value.requestIds.length;
+      case "current_revisions_need_assessment":
+        return Object.keys(value).length === 2 && Array.isArray(value.revisions) && value.revisions.length > 0 && value.revisions.every(isRevisionRef) && uniqueRevisionKeys(value.revisions).size === value.revisions.length;
+      default:
+        return false;
+    }
+  }
+  __name(isAttentionReason, "isAttentionReason");
+  function sameAttentionReason(left, right) {
+    if (left.kind !== right.kind) return false;
+    if (left.kind === "unresolved_operative_requests" && right.kind === "unresolved_operative_requests") {
+      return left.requestIds.length === right.requestIds.length && left.requestIds.every(
+        (requestId, index) => requestId === right.requestIds[index]
+      );
+    }
+    if (left.kind === "current_revisions_need_assessment" && right.kind === "current_revisions_need_assessment") {
+      return left.revisions.length === right.revisions.length && left.revisions.every(
+        (revision2, index) => sameRevision(revision2, right.revisions[index])
+      );
+    }
+    return true;
+  }
+  __name(sameAttentionReason, "sameAttentionReason");
   function isPresentationRevision(value) {
     return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
@@ -3380,6 +3969,223 @@
     return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
   }
   __name(isRevisionRef, "isRevisionRef");
+  function isChangeDetailInspectorPresentation(value, detail) {
+    if (value === void 0) return true;
+    if (!isRecord(value) || !isChangeRevisionGraphPresentation(value.revisionGraph))
+      return false;
+    const graph = value.revisionGraph;
+    const expectedMembers = new Set(
+      detail.memberRevisions.map(
+        (member) => revisionGraphNodeId(member.revision)
+      )
+    );
+    const expectedCurrent = new Set(
+      detail.currentRevisionRefs.map(revisionGraphNodeId)
+    );
+    const expectedNodes = new Set(expectedMembers);
+    for (const claim of detail.pendingOrConflictingEdges) {
+      expectedNodes.add(revisionGraphNodeId(claim.successor));
+      expectedNodes.add(revisionGraphNodeId(claim.predecessor));
+    }
+    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every(
+      (node) => node.isMember === expectedMembers.has(node.id) && node.isCurrent === expectedCurrent.has(node.id)
+    ) || !sameStringArray(graph.diagnostics ?? [], detail.diagnostics)) {
+      return false;
+    }
+    const effective = new Set(
+      detail.effectiveSupersedes.map(
+        ([successor, predecessor]) => graphEdgeKey(
+          revisionGraphNodeId(successor),
+          revisionGraphNodeId(predecessor)
+        )
+      )
+    );
+    const graphEffective = new Set(
+      graph.effectiveSupersedes.map((edge) => graphEdgeKey(edge.from, edge.to))
+    );
+    if (!sameStringSet(effective, graphEffective)) return false;
+    const pending = new Map(
+      detail.pendingOrConflictingEdges.map((claim) => [claim.claimId, claim])
+    );
+    return pending.size === graph.pendingOrConflictingClaims.length && graph.pendingOrConflictingClaims.every((edge) => {
+      const claim = pending.get(edge.claimId);
+      return claim !== void 0 && sameRevision(edge.successor, claim.successor) && sameRevision(edge.predecessor, claim.predecessor) && sameStringArray(edge.diagnostics, claim.diagnostics);
+    });
+  }
+  __name(isChangeDetailInspectorPresentation, "isChangeDetailInspectorPresentation");
+  function isChangeRevisionDetailInspectorPresentation(value, detail) {
+    if (value === void 0) return true;
+    if (!isRecord(value) || !isFactRelationshipGraphPresentation(value.factGraph))
+      return false;
+    const graph = value.factGraph;
+    const expectedActivation = /* @__PURE__ */ new Map();
+    const expectedNodes = /* @__PURE__ */ new Set();
+    for (const fact2 of detail.factPresentations) {
+      const id = factGraphNodeId(fact2.originRevision, fact2.family, fact2.factId);
+      expectedNodes.add(id);
+      if (sameRevision(fact2.originRevision, detail.revision) || fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, detail.revision)) {
+        expectedActivation.set(id, detail.revision);
+      }
+    }
+    for (const port of detail.factPorts) {
+      expectedNodes.add(
+        factGraphNodeId(
+          port.originRevision,
+          port.originFact.kind,
+          factRefId(port.originFact)
+        )
+      );
+      const targetId = port.targetFact === void 0 ? revisionGraphNodeId(port.targetRevision) : factGraphNodeId(
+        port.targetRevision,
+        port.targetFact.kind,
+        factRefId(port.targetFact)
+      );
+      expectedNodes.add(targetId);
+      if (port.targetFact === void 0 && sameRevision(port.targetRevision, detail.revision)) {
+        expectedActivation.set(targetId, detail.revision);
+      }
+    }
+    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every((node) => {
+      const activation = expectedActivation.get(node.id);
+      return activation === void 0 ? node.contextAvailability === "relationship_context_only" && node.activationRevision === void 0 : node.contextAvailability === "available" && node.activationRevision !== void 0 && sameRevision(node.activationRevision, activation);
+    })) {
+      return false;
+    }
+    const ports = new Map(detail.factPorts.map((port) => [port.portId, port]));
+    return ports.size === graph.factPorts.length && graph.factPorts.every((edge) => {
+      const port = ports.get(edge.portId);
+      return port !== void 0 && sameRevision(edge.originRevision, port.originRevision) && sameFactRef(edge.originFact, port.originFact) && sameRevision(edge.targetRevision, port.targetRevision) && sameOptionalFactRef(edge.targetFact, port.targetFact) && edge.relation === port.relation && edge.applicability === port.applicability && sameStringArray(edge.diagnostics ?? [], port.diagnostics);
+    });
+  }
+  __name(isChangeRevisionDetailInspectorPresentation, "isChangeRevisionDetailInspectorPresentation");
+  function isChangeRevisionGraphPresentation(value) {
+    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isChangeRevisionGraphNode) || !Array.isArray(value.effectiveSupersedes) || !Array.isArray(value.pendingOrConflictingClaims) || !isGraphBounds(value.bounds) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+    return nodes.size === value.nodes.length && value.effectiveSupersedes.every(
+      (edge) => isChangeRevisionGraphEffectiveEdge(edge, nodes)
+    ) && uniqueGraphEdgeEndpoints(value.effectiveSupersedes) && value.pendingOrConflictingClaims.every(
+      (edge) => isChangeRevisionGraphClaimEdge(edge, nodes)
+    ) && new Set(value.pendingOrConflictingClaims.map((edge) => edge.claimId)).size === value.pendingOrConflictingClaims.length;
+  }
+  __name(isChangeRevisionGraphPresentation, "isChangeRevisionGraphPresentation");
+  function isChangeRevisionGraphNode(value) {
+    return isRecord(value) && nonEmptyString(value.id) && isRevisionRef(value.revision) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
+  }
+  __name(isChangeRevisionGraphNode, "isChangeRevisionGraphNode");
+  function isChangeRevisionGraphEffectiveEdge(value, nodes) {
+    return isRecord(value) && nonEmptyString(value.from) && nonEmptyString(value.to) && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && value.from === revisionGraphNodeId(value.successor) && value.to === revisionGraphNodeId(value.predecessor) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+  }
+  __name(isChangeRevisionGraphEffectiveEdge, "isChangeRevisionGraphEffectiveEdge");
+  function isChangeRevisionGraphClaimEdge(value, nodes) {
+    if (!isRecord(value) || !isChangeRevisionGraphEffectiveEdge(value, nodes))
+      return false;
+    return nonEmptyString(value.claimId) && isStringArray(value.diagnostics);
+  }
+  __name(isChangeRevisionGraphClaimEdge, "isChangeRevisionGraphClaimEdge");
+  function isFactRelationshipGraphPresentation(value) {
+    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isFactRelationshipGraphNode) || !Array.isArray(value.observationSupersedes) || !Array.isArray(value.assessmentReplaces) || !Array.isArray(value.factPorts) || !isGraphBounds(value.bounds)) {
+      return false;
+    }
+    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+    return nodes.size === value.nodes.length && value.observationSupersedes.every(
+      (edge) => isFactRelationshipEdge(edge, "observation", nodes)
+    ) && uniqueGraphEdgeEndpoints(value.observationSupersedes) && value.assessmentReplaces.every(
+      (edge) => isFactRelationshipEdge(edge, "assessment", nodes)
+    ) && uniqueGraphEdgeEndpoints(value.assessmentReplaces) && value.factPorts.every((edge) => isFactPortRelationshipEdge(edge, nodes)) && new Set(value.factPorts.map((edge) => edge.portId)).size === value.factPorts.length;
+  }
+  __name(isFactRelationshipGraphPresentation, "isFactRelationshipGraphPresentation");
+  function isFactRelationshipGraphNode(value) {
+    if (!isRecord(value) || !nonEmptyString(value.id) || !isRevisionRef(value.revision) || !isFiniteGeometry(value) || !isGraphContext(value)) {
+      return false;
+    }
+    if (value.kind === "fact") {
+      return nonEmptyString(value.factId) && nonEmptyString(value.family) && value.id === factGraphNodeId(value.revision, value.family, value.factId);
+    }
+    return value.kind === "revision" && value.factId === void 0 && value.family === void 0 && value.id === revisionGraphNodeId(value.revision);
+  }
+  __name(isFactRelationshipGraphNode, "isFactRelationshipGraphNode");
+  function isGraphContext(value) {
+    if (value.contextAvailability === "available") {
+      return isRevisionRef(value.activationRevision);
+    }
+    return value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0;
+  }
+  __name(isGraphContext, "isGraphContext");
+  function isFactRelationshipEdge(value, family, nodes) {
+    return isRecord(value) && nonEmptyString(value.from) && nonEmptyString(value.to) && isRevisionRef(value.originRevision) && nonEmptyString(value.fromFactId) && nonEmptyString(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+  }
+  __name(isFactRelationshipEdge, "isFactRelationshipEdge");
+  function isFactPortRelationshipEdge(value, nodes) {
+    if (!isRecord(value) || !nonEmptyString(value.portId) || !nonEmptyString(value.from) || !nonEmptyString(value.to) || !isRevisionRef(value.originRevision) || !isFactRef(value.originFact) || !isRevisionRef(value.targetRevision) || value.targetFact !== void 0 && !isFactRef(value.targetFact) || value.relation !== "context_only" && value.relation !== "reanchored_as" && value.relation !== "carried_open_as" && value.relation !== "resolved_by" || value.applicability !== "applicable" && value.applicability !== "conflicted" && value.applicability !== "unavailable" || !isGraphPath(value.path) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    const from = factGraphNodeId(
+      value.originRevision,
+      value.originFact.kind,
+      factRefId(value.originFact)
+    );
+    const to = value.targetFact === void 0 ? revisionGraphNodeId(value.targetRevision) : factGraphNodeId(
+      value.targetRevision,
+      value.targetFact.kind,
+      factRefId(value.targetFact)
+    );
+    return value.from === from && value.to === to && nodes.has(from) && nodes.has(to);
+  }
+  __name(isFactPortRelationshipEdge, "isFactPortRelationshipEdge");
+  function isGraphBounds(value) {
+    return isRecord(value) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
+  }
+  __name(isGraphBounds, "isGraphBounds");
+  function isFiniteGeometry(value) {
+    return isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
+  }
+  __name(isFiniteGeometry, "isFiniteGeometry");
+  function isGraphPath(value) {
+    return Array.isArray(value) && value.length > 0 && value.every(
+      (point) => Array.isArray(point) && point.length === 2 && isFiniteNumber(point[0]) && isFiniteNumber(point[1])
+    );
+  }
+  __name(isGraphPath, "isGraphPath");
+  function isFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+  __name(isFiniteNumber, "isFiniteNumber");
+  function uniqueGraphEdgeEndpoints(edges) {
+    return new Set(edges.map((edge) => `${edge.from}\0${edge.to}`)).size === edges.length;
+  }
+  __name(uniqueGraphEdgeEndpoints, "uniqueGraphEdgeEndpoints");
+  function revisionGraphNodeId(revision2) {
+    return `revision:${revision2.revisionId}@${revision2.objectArtifactContentHash}`;
+  }
+  __name(revisionGraphNodeId, "revisionGraphNodeId");
+  function factGraphNodeId(revision2, family, factId) {
+    return `${revisionGraphNodeId(revision2).replace("revision:", "fact:")}:${family}:${factId}`;
+  }
+  __name(factGraphNodeId, "factGraphNodeId");
+  function graphEdgeKey(from, to) {
+    return `${from}\0${to}`;
+  }
+  __name(graphEdgeKey, "graphEdgeKey");
+  function sameStringArray(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+  __name(sameStringArray, "sameStringArray");
+  function sameStringSet(left, right) {
+    return left.size === right.size && [...left].every((value) => right.has(value));
+  }
+  __name(sameStringSet, "sameStringSet");
+  function sameFactRef(left, right) {
+    return left.kind === right.kind && factRefId(left) === factRefId(right);
+  }
+  __name(sameFactRef, "sameFactRef");
+  function sameOptionalFactRef(left, right) {
+    return left === void 0 && right === void 0 || left !== void 0 && right !== void 0 && sameFactRef(left, right);
+  }
+  __name(sameOptionalFactRef, "sameOptionalFactRef");
   function uniqueRevisionKeys(revisions) {
     return new Set(
       revisions.map(
@@ -3670,7 +4476,7 @@
       );
       return { kind: "change", document: document3 };
     }
-    if (route.kind === "revision" || route.kind === "association") {
+    if (route.kind === "revision" || route.kind === "diff" || route.kind === "association") {
       const document3 = decodeChangeRevisionDetail(
         await fetchChangeInspectorJSON(
           revisionPath(route.changeId, route.revision)
@@ -3725,16 +4531,104 @@
     return value.replaceAll("_", " ");
   }
   __name(words2, "words");
+  function shortened(value, limit) {
+    return value.length > limit ? `${value.slice(0, limit)}…` : value;
+  }
+  __name(shortened, "shortened");
   function shortExact(revision2) {
-    const revisionId = revision2.revisionId.length > 24 ? `${revision2.revisionId.slice(0, 24)}…` : revision2.revisionId;
-    const artifact = revision2.objectArtifactContentHash.length > 18 ? `${revision2.objectArtifactContentHash.slice(0, 18)}…` : revision2.objectArtifactContentHash;
-    return `${revisionId} · ${artifact}`;
+    return `${shortened(revision2.revisionId, 24)} · ${shortened(
+      revision2.objectArtifactContentHash,
+      18
+    )}`;
   }
   __name(shortExact, "shortExact");
+  function exactRevisionCopyText(revisions) {
+    return revisions.map(
+      (revision2) => `${revision2.revisionId} ${revision2.objectArtifactContentHash}`
+    ).join("\n");
+  }
+  __name(exactRevisionCopyText, "exactRevisionCopyText");
   function exactRevisionAccessibleIdentity(revision2) {
     return `exact Revision ${revision2.revisionId}; artifact ${revision2.objectArtifactContentHash}`;
   }
   __name(exactRevisionAccessibleIdentity, "exactRevisionAccessibleIdentity");
+  function attentionReasonCopy(reason) {
+    switch (reason.kind) {
+      case "conflicted":
+        return {
+          kind: reason.kind,
+          reason: "Conflicting Change state",
+          ask: "Resolve the conflicting Change state.",
+          actionLabel: "Review conflict",
+          accessibleName: "Conflicting Change state. Resolve the conflicting Change state.",
+          title: "Conflicting Change state",
+          copyText: "conflicted"
+        };
+      case "incomplete":
+        return {
+          kind: reason.kind,
+          reason: "Incomplete Change state",
+          ask: "Complete the missing Change state.",
+          actionLabel: "Review incomplete Change",
+          accessibleName: "Incomplete Change state. Complete the missing Change state.",
+          title: "Incomplete Change state",
+          copyText: "incomplete"
+        };
+      case "no_current_revision":
+        return {
+          kind: reason.kind,
+          reason: "No current Revision",
+          ask: "Establish one exact current Revision before review can continue.",
+          actionLabel: "Review Change",
+          accessibleName: "No current Revision. Establish one exact current Revision before review can continue.",
+          title: "No current Revision",
+          copyText: "no_current_revision"
+        };
+      case "unresolved_operative_requests": {
+        const visibleRequestIds = reason.requestIds.map(
+          (id) => shortened(id, 24)
+        );
+        const requestList = visibleRequestIds.join(", ");
+        const fullRequestList = reason.requestIds.join(", ");
+        return {
+          kind: reason.kind,
+          reason: "Unresolved operative requests",
+          ask: `Respond to operative requests: ${requestList}.`,
+          actionLabel: "Respond to requests",
+          accessibleName: `Unresolved operative requests. Respond to operative requests: ${fullRequestList}.`,
+          title: `Operative requests: ${fullRequestList}`,
+          copyText: reason.requestIds.join("\n")
+        };
+      }
+      case "current_revisions_need_assessment": {
+        const visibleRevisions = reason.revisions.map(shortExact).join(", ");
+        const fullRevisions = reason.revisions.map(exactRevisionAccessibleIdentity).join("; ");
+        return {
+          kind: reason.kind,
+          reason: "Current Revisions need assessment",
+          ask: `Assess current Revisions: ${visibleRevisions}.`,
+          actionLabel: "Assess current Revisions",
+          accessibleName: `Current Revisions need assessment. Assess ${fullRevisions}.`,
+          title: fullRevisions,
+          copyText: exactRevisionCopyText(reason.revisions)
+        };
+      }
+    }
+  }
+  __name(attentionReasonCopy, "attentionReasonCopy");
+  function attentionPresentation(attention) {
+    if (attention === void 0) return void 0;
+    const primary = attentionReasonCopy(attention.primaryReason);
+    return {
+      primary,
+      reason: primary.reason,
+      ask: primary.ask,
+      actionLabel: primary.actionLabel,
+      additionalReasons: attention.reasons.slice(1).map(attentionReasonCopy),
+      ...attention.diagnostics === void 0 ? {} : { diagnostics: attention.diagnostics }
+    };
+  }
+  __name(attentionPresentation, "attentionPresentation");
   function changeCardPresentation(summary, presentation) {
     const byExactIdentity = new Map(
       (presentation?.currentRevisions ?? []).map((entry) => [
@@ -3747,344 +4641,45 @@
         `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
+      const identity = exactRevisionAccessibleIdentity(revision2);
       return {
         revision: revision2,
-        label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision2)}`,
-        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${exactRevisionAccessibleIdentity(revision2)}` : `Current Revision — ${exactRevisionAccessibleIdentity(revision2)}`,
-        copyText: `${revision2.revisionId} ${revision2.objectArtifactContentHash}`
+        label: summaryLabel || "Current Revision",
+        visibleIdentity: shortExact(revision2),
+        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
+        title: identity,
+        copyText: exactRevisionCopyText([revision2])
       };
     });
+    const onlyPeer = peers.length === 1 ? peers[0] : void 0;
+    const headline = onlyPeer === void 0 ? peers.length === 0 ? "Current Revision unavailable" : "Multiple current Revisions need selection" : onlyPeer.label;
     const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
       (peer) => peer.accessibleName.replace(/^Current Revision — /, "")
     ).join("; ")}`;
+    const unavailableReason = peers.length === 0 ? "No exact current Revision is available for this Change." : void 0;
     return {
       changeId: summary.changeId,
-      accessibleName: `${currentRevisionName}; Change ${summary.changeId}`,
-      badges: [
-        summary.topology,
-        summary.lifecycle,
-        summary.attentionSummary,
-        summary.availabilitySummary
-      ].map(words2),
-      peers
+      visibleChangeId: shortened(summary.changeId, 28),
+      accessibleName: `${headline}; ${currentRevisionName}; Change ${summary.changeId}`,
+      title: `Change ${summary.changeId}`,
+      copyText: summary.changeId,
+      headline,
+      stateAxes: [
+        { label: "Topology", value: words2(summary.topology) },
+        { label: "Lifecycle", value: words2(summary.lifecycle) },
+        { label: "Attention", value: words2(summary.attentionSummary) },
+        { label: "Availability", value: words2(summary.availabilitySummary) }
+      ],
+      peers,
+      ...unavailableReason === void 0 ? {} : { unavailableReason },
+      primaryAction: {
+        kind: "open_change",
+        label: peers.length > 1 ? "Review current Revisions" : "Review Change"
+      },
+      ...presentation?.attention === void 0 ? {} : { attention: attentionPresentation(presentation.attention) }
     };
   }
   __name(changeCardPresentation, "changeCardPresentation");
-
-  // src/classNames.ts
-  var CLASS = {
-    // App chrome, master-detail panes, lens containers, and shared chips.
-    units: "units",
-    timeline: "timeline",
-    empty: "empty",
-    badge: "badge",
-    tierMedium: "tier-medium",
-    body: "body",
-    title: "title",
-    time: "time",
-    eventDate: "event-date",
-    rail: "rail",
-    meta: "meta",
-    type: "type",
-    typeCount: "type-count",
-    code: "code",
-    dot: "dot",
-    kv: "kv",
-    ghost: "ghost",
-    actions: "actions",
-    timelineShell: "timeline-shell",
-    timelineNewPill: "timeline-new-pill",
-    // (The app-shell store-identity chip + detail popover is static markup in
-    // index.html — `store-identity*` classes live there and in app.css, not here —
-    // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
-    // Issue #391.)
-    // Fact cards (observation / input-request / assessment / validation / note).
-    annoGroup: "anno-group",
-    annoHead: "anno-head",
-    annoLoc: "anno-loc",
-    annoSummary: "anno-summary",
-    annoTime: "anno-time",
-    annoTitle: "anno-title",
-    annoTrack: "anno-track",
-    actorAttribution: "actor-attribution",
-    factBodyRemoved: "fact-body-removed",
-    factRel: "fact-rel",
-    factResponse: "fact-response",
-    factResponses: "fact-responses",
-    factStaleContext: "fact-stale-context",
-    factStatus: "fact-status",
-    outcome: "outcome",
-    advisoryNote: "advisory-note",
-    validationNote: "validation-note",
-    validationContinuity: "validation-continuity",
-    validationContinuityNeutral: "validation-continuity-neutral",
-    validationContinuityOutstanding: "validation-continuity-outstanding",
-    readback: "readback",
-    readbackRow: "readback-row",
-    readerScopeNote: "reader-scope-note",
-    rawEvent: "raw-event",
-    rawEventActions: "raw-event-actions",
-    // The current-assessment verdict block.
-    verdictStatus: "verdict-status",
-    verdictSummary: "verdict-summary",
-    verdictValue: "verdict-value",
-    // The advisory endorsement readback.
-    endorseAttrs: "endorse-attrs",
-    endorseLabel: "endorse-label",
-    endorseList: "endorse-list",
-    endorseWho: "endorse-who",
-    endorsements: "endorsements",
-    endorsementsLabel: "endorsements-label",
-    // The revision-overview summary line.
-    overviewAssessment: "overview-assessment",
-    overviewCue: "overview-cue",
-    overviewHistoryCue: "overview-history-cue",
-    overviewCues: "overview-cues",
-    overviewLabel: "overview-label",
-    overviewLatest: "overview-latest",
-    overviewMain: "overview-main",
-    overviewMuted: "overview-muted",
-    revisionDiagnostic: "revision-diagnostic",
-    overviewStat: "overview-stat",
-    overviewStats: "overview-stats",
-    overviewSummary: "overview-summary",
-    // The annotated snapshot diff: files, rows, and the navigator.
-    dfileBody: "dfile-body",
-    dfileHead: "dfile-head",
-    dfileNotes: "dfile-notes",
-    dfileSummary: "dfile-summary",
-    dhunk: "dhunk",
-    diffBtn: "diff-btn",
-    diffAnchorReason: "diff-anchor-reason",
-    diffDecisionContext: "diff-decision-context",
-    diffDecisionContextNav: "diff-decision-context-nav",
-    diffFactVicinity: "diff-fact-vicinity",
-    diffFileNotice: "diff-file-notice",
-    diffNavFact: "diff-nav-fact",
-    diffNavFile: "diff-nav-file",
-    diffNavFiles: "diff-nav-files",
-    diffNavReason: "diff-nav-reason",
-    diffNavSummary: "diff-nav-summary",
-    diffUnanchored: "diff-unanchored",
-    diffUnanchoredFacts: "diff-unanchored-facts",
-    dpath: "dpath",
-    drow: "drow",
-    drowMeta: "drow-meta",
-    dtext: "dtext",
-    emph: "emph",
-    ln: "ln",
-    sign: "sign",
-    // Revision list, supersession badges, and the laid-out DAG.
-    unitCard: "unit-card",
-    unitPage: "unit-page",
-    unitPageTitle: "unit-page-title",
-    supersessionBadges: "supersession-badges",
-    competing: "competing",
-    revisionSupersession: "revision-supersession",
-    revisionHeads: "revision-heads",
-    revisionSelf: "revision-self",
-    dagEdge: "dag-edge",
-    dagArrowHead: "dag-arrow-head",
-    dagArrowHeadTraced: "dag-arrow-head-traced",
-    revisionDag: "revision-dag",
-    factDag: "fact-dag",
-    head: "head",
-    stale: "stale",
-    superseded: "superseded",
-    supersedes: "supersedes",
-    upEmpty: "up-empty",
-    upIdentity: "up-identity",
-    upStat: "up-stat",
-    upStats: "up-stats",
-    // The applied-filter chip row (the toolbar's pure view of filterText).
-    filterChips: "filter-chips",
-    filterChipRemove: "filter-chip-remove",
-    // The type facet section (the Timeline-only ?type= page-set control): static
-    // container/list classes in index.html; rows are emitted via typeFacetRowClass.
-    typeFacet: "type-facet",
-    typeFacetMenu: "type-facet-menu",
-    // The search-bar suggestion popover: static list container in index.html;
-    // the rows are emitted via suggestionClass below.
-    filterSuggestions: "filter-suggestions",
-    suggestion: "suggestion",
-    suggestionActive: "suggestion-active",
-    // The command palette.
-    cmdEmpty: "cmd-empty",
-    cmdGroup: "cmd-group",
-    cmdHint: "cmd-hint",
-    cmdLabel: "cmd-label",
-    // The attention lens: tiered cards over the outstanding review state.
-    attentionCard: "attention-card",
-    attentionTier: "attention-tier",
-    attentionEmpty: "attention-empty",
-    attentionOrderLabel: "attention-order-label",
-    attentionKind: "attention-kind",
-    attentionMeta: "attention-meta",
-    attentionFreshness: "attention-freshness",
-    attentionFocus: "attention-focus",
-    attentionDelta: "attention-delta",
-    // The attention tab's judgment-queue count badge (absent when both tiers are
-    // empty) and the muted advisory count beside the needs-input number.
-    attentionBadge: "attention-badge",
-    attentionBadgeSecondary: "attention-badge-secondary",
-    // The detail page's per-revision outstanding set (the scoped attention read);
-    // absent when nothing is outstanding on the shown revision.
-    outstandingSet: "outstanding-set",
-    // Copyable CLI command handoffs (workflow-handoff.ts): the block, its label,
-    // the command code, the visible placeholder marker, the clipboard-only copy
-    // control, and the detail page's stage-template section host.
-    workflowHandoff: "workflow-handoff",
-    workflowHandoffLabel: "workflow-handoff-label",
-    workflowCommand: "workflow-command",
-    workflowPlaceholder: "workflow-placeholder",
-    workflowCopy: "workflow-copy",
-    workflowHandoffs: "workflow-handoffs"
-  };
-  var ANNO_KINDS = [
-    "observation",
-    "assessment",
-    "input-request",
-    "validation"
-  ];
-  var DIFF_ROW_KINDS = ["added", "removed", "context"];
-  var TOKEN_KINDS = [
-    "keyword",
-    "string",
-    "comment",
-    "number",
-    "type",
-    "function",
-    "constant",
-    "operator",
-    "punctuation",
-    "variable"
-  ];
-  var DIFF_FILE_STATUSES = [
-    "added",
-    "deleted",
-    "modified",
-    "renamed",
-    "copied"
-  ];
-  var VERIFY_STATUSES = [
-    "valid",
-    "invalid",
-    "unsigned",
-    "untrusted_key"
-  ];
-  var ENDORSE_CLASSES = [
-    "endorsement-trusted",
-    "ambiguous_endorser",
-    "unknown_endorser"
-  ];
-  var VERDICT_ASSESSMENTS = [
-    "accepted",
-    "accepted_with_follow_up",
-    "ambiguous",
-    "needs_changes",
-    "needs_clarification",
-    "unassessed"
-  ];
-  var FACT_STATUSES = [
-    "accepted",
-    "accepted_with_follow_up",
-    "ambiguous",
-    "current",
-    "errored",
-    "failed",
-    "needs_changes",
-    "needs_clarification",
-    "open",
-    "passed",
-    "replaced",
-    "resolved",
-    "responded",
-    "skipped",
-    "stale",
-    "superseded",
-    "unassessed"
-  ];
-  var REF_ID_PREFIXES = [
-    "input-request-response",
-    "input-request",
-    "obs",
-    "assess",
-    "rev",
-    "evt",
-    "validation",
-    "obj",
-    "engagement",
-    "checkpoint",
-    "task-attempt",
-    "assoc-commit",
-    "assoc-ref",
-    "withdraw-commit",
-    "withdraw-ref"
-  ];
-  var REF_KINDS = [
-    ...REF_ID_PREFIXES,
-    "hash",
-    "commit",
-    "track",
-    "actor"
-  ];
-  var annoContainerClass = /* @__PURE__ */ __name((kind) => `anno anno-${kind}`, "annoContainerClass");
-  var annoKindClass = /* @__PURE__ */ __name((kind) => `anno-kind anno-kind-${kind}`, "annoKindClass");
-  var drowClass = /* @__PURE__ */ __name((kind, noted) => `drow drow-${kind}${noted ? " drow-noted" : ""}`, "drowClass");
-  var tokClass = /* @__PURE__ */ __name((kind) => `tok tok-${kind}`, "tokClass");
-  var diffStatusClass = /* @__PURE__ */ __name((status) => `dstatus s-${status}`, "diffStatusClass");
-  var verifyClass = /* @__PURE__ */ __name((status) => `verify verify-${status}`, "verifyClass");
-  var endorseClass = /* @__PURE__ */ __name((cls) => `endorse endorse-${cls}`, "endorseClass");
-  var verdictClass = /* @__PURE__ */ __name((assessment) => `verdict verdict-${assessment}`, "verdictClass");
-  var factStatusClass = /* @__PURE__ */ __name((status) => `fact-status ${status}`, "factStatusClass");
-  var refClass = /* @__PURE__ */ __name((kind) => `ref ref-${kind}`, "refClass");
-  var dfileClass = /* @__PURE__ */ __name((lowSignal) => `dfile${lowSignal ? " dfile-lowsignal" : ""}`, "dfileClass");
-  var dagNodeClass = /* @__PURE__ */ __name((o) => `dag-node${o.isHead ? " head" : ""}${o.isSuperseded ? " superseded" : ""}`, "dagNodeClass");
-  var bodyClass = /* @__PURE__ */ __name((base, markdown) => `${base}${markdown ? " markdown-body" : ""}`, "bodyClass");
-  var cmdItemClass = /* @__PURE__ */ __name((active3) => `cmd-item${active3 ? " active" : ""}`, "cmdItemClass");
-  var filterChipClass = /* @__PURE__ */ __name((negated) => `filter-chip${negated ? " filter-chip-negated" : ""}`, "filterChipClass");
-  var typeFacetRowClass = /* @__PURE__ */ __name((enabled) => `type-facet-row${enabled ? "" : " type-facet-row-off"}`, "typeFacetRowClass");
-  var suggestionClass = /* @__PURE__ */ __name((active3) => `suggestion${active3 ? " suggestion-active" : ""}`, "suggestionClass");
-  var tokensOf = /* @__PURE__ */ __name((classStrings) => classStrings.flatMap((s) => s.split(" ")), "tokensOf");
-  var ALL_EMITTABLE_CLASSES = [
-    ...new Set(
-      tokensOf([
-        ...Object.values(CLASS),
-        ...ANNO_KINDS.map((k) => annoContainerClass(k)),
-        ...ANNO_KINDS.map((k) => annoKindClass(k)),
-        ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
-        ...TOKEN_KINDS.map((k) => tokClass(k)),
-        ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
-        ...VERIFY_STATUSES.map((s) => verifyClass(s)),
-        ...ENDORSE_CLASSES.map((c) => endorseClass(c)),
-        ...VERDICT_ASSESSMENTS.map((a) => verdictClass(a)),
-        ...FACT_STATUSES.map((s) => factStatusClass(s)),
-        ...REF_KINDS.map((k) => refClass(k)),
-        dfileClass(true),
-        filterChipClass(true),
-        typeFacetRowClass(true),
-        typeFacetRowClass(false),
-        suggestionClass(true),
-        dagNodeClass({ isHead: true, isSuperseded: true }),
-        bodyClass("anno-body", true),
-        bodyClass("verdict-summary", true),
-        cmdItemClass(true)
-      ])
-    )
-  ];
-
-  // src/escape.ts
-  var ENTITIES = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  };
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (char) => ENTITIES[char]);
-  }
-  __name(escapeHtml, "escapeHtml");
 
   // src/format.ts
   var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
@@ -4150,88 +4745,6 @@
     return new Date(ms).toLocaleString([], { hour12: false });
   }
   __name(fmtDateTime, "fmtDateTime");
-
-  // src/refs.ts
-  function shortRef(id) {
-    const value = String(id);
-    let match = value.match(
-      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i
-    );
-    if (match) return `${match[1]}:${match[2].slice(0, 8)}`;
-    match = value.match(/^sha256:([0-9a-f]{8,})$/i);
-    if (match) return `sha256:${match[1].slice(0, 8)}`;
-    if (/^[0-9a-f]{40}$/i.test(value)) return value.slice(0, 10);
-    return value;
-  }
-  __name(shortRef, "shortRef");
-  var NON_CLICKABLE_KINDS = /* @__PURE__ */ new Set([
-    "validation",
-    "obj",
-    "engagement",
-    "checkpoint",
-    "task-attempt",
-    "assoc-commit",
-    "assoc-ref",
-    "withdraw-commit",
-    "withdraw-ref"
-  ]);
-  function refInfo(token) {
-    const match = token.match(
-      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:[0-9a-f]+$/i
-    );
-    if (match) {
-      const kind = match[1].toLowerCase();
-      return { kind, clickable: !NON_CLICKABLE_KINDS.has(kind) };
-    }
-    if (/^sha256:[0-9a-f]+$/i.test(token))
-      return { kind: "hash", clickable: false };
-    if (/^[0-9a-f]{40}$/i.test(token))
-      return { kind: "commit", clickable: false };
-    if (/^(agent|human):[a-z0-9][a-z0-9_-]*$/i.test(token)) {
-      return { kind: "track", clickable: true };
-    }
-    return null;
-  }
-  __name(refInfo, "refInfo");
-  var REF_RE = new RegExp(
-    `\\b(?:${REF_ID_PREFIXES.join("|")}):(?:git:|worktree:)?sha256:[0-9a-f]{6,}\\b|(?<!:)\\bsha256:[0-9a-f]{16,}\\b|\\b[0-9a-f]{40}\\b|\\b(?:agent|human):[a-z0-9][a-z0-9_-]*\\b`,
-    "gi"
-  );
-  function linkifyEscaped(escaped, opts = {}) {
-    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : 0;
-    return escaped.replace(REF_RE, (token) => {
-      const info = refInfo(token);
-      if (!info) return token;
-      const display = escapeHtml(shortRef(token));
-      if (!info.clickable) {
-        return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
-      }
-      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
-    });
-  }
-  __name(linkifyEscaped, "linkifyEscaped");
-  function linkify(text, opts = {}) {
-    return linkifyEscaped(escapeHtml(String(text ?? "")), opts);
-  }
-  __name(linkify, "linkify");
-  function actorChip(actorId, opts = {}) {
-    if (!actorId) return "";
-    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : opts;
-    const display = escapeHtml(actorId);
-    return `<span class="${refClass("actor")}" role="link" tabindex="${tabIndex}" data-ref-kind="actor" data-ref-id="${escapeHtml(actorId)}" title="filter to ${escapeHtml(actorId)}">${display}</span>`;
-  }
-  __name(actorChip, "actorChip");
-  function isMarkdownContentType(contentType) {
-    return contentType === "text/markdown";
-  }
-  __name(isMarkdownContentType, "isMarkdownContentType");
-  function safeMarkdownHref(href) {
-    const raw = String(href ?? "").trim();
-    if (/^(https?:|mailto:)/i.test(raw) || raw.startsWith("#"))
-      return escapeHtml(raw);
-    return "";
-  }
-  __name(safeMarkdownHref, "safeMarkdownHref");
 
   // src/markdown.ts
   function renderBodyContent(text, contentType) {
@@ -4424,6 +4937,19 @@
   ];
   var DEFAULT_OPEN_FILES = 10;
   var LARGE_FILE_ROWS = 500;
+
+  // src/query.ts
+  function tokenizeQuery(q) {
+    const out = [];
+    const re = /-?(?:[a-z]+:)?"[^"]*"|\S+/gi;
+    let m = re.exec(q);
+    while (m !== null) {
+      out.push(m[0]);
+      m = re.exec(q);
+    }
+    return out;
+  }
+  __name(tokenizeQuery, "tokenizeQuery");
 
   // src/projection.ts
   function verificationChip(status) {
@@ -5057,6 +5583,15 @@
     return { html, ctx };
   }
   __name(renderDiff, "renderDiff");
+  function renderDiffNavSummary(summary) {
+    return `<div class="${CLASS.diffNavSummary}" aria-label="diff summary">
+    <span><b>${summary.fileCount}</b> files</span>
+    <span><b>${summary.factCount}</b> facts</span>
+    <span><b>${summary.decisionContextCount}</b> context</span>
+    <span><b>${summary.unanchoredCount}</b> unanchored</span>
+  </div>`;
+  }
+  __name(renderDiffNavSummary, "renderDiffNavSummary");
   function unanchoredReason(a, filePaths) {
     const t = a.target ?? {};
     if (t.kind !== "range" && t.kind !== "file") {
@@ -5070,8 +5605,949 @@
     return "not anchored to a diff line";
   }
   __name(unanchoredReason, "unanchoredReason");
+  var DIFF_FILE_QUERY_KEYS = ["path", "change", "has", "is"];
+  var DIFF_FILE_CHANGE_VALUES = [
+    "added",
+    "deleted",
+    "modified",
+    "renamed",
+    "copied"
+  ];
+  var DIFF_FILE_HAS_VALUES = ["facts"];
+  var DIFF_FILE_IS_VALUES = ["unanchored"];
+  function parseDiffFileQuery(query) {
+    const clauses = [];
+    const freeText = [];
+    const diagnostics = [];
+    for (const tok of tokenizeQuery(query || "")) {
+      const colon = tok.indexOf(":");
+      const field2 = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+      const rawValue = colon > 0 ? tok.slice(colon + 1).replace(/^"|"$/g, "").toLowerCase() : "";
+      if (field2 === "status") {
+        diagnostics.push({
+          code: "unsupported-qualifier",
+          key: "status",
+          message: "status: isn't valid in the diff file search — use change: (added, deleted, modified, renamed, copied)"
+        });
+        continue;
+      }
+      if (DIFF_FILE_QUERY_KEYS.includes(field2)) {
+        const key = field2;
+        if (key === "change" && !DIFF_FILE_CHANGE_VALUES.includes(rawValue)) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key: "change",
+            message: `change: has no value "${rawValue}" — expected one of ${DIFF_FILE_CHANGE_VALUES.join(", ")}`
+          });
+          continue;
+        }
+        if (key === "has" && !DIFF_FILE_HAS_VALUES.includes(rawValue)) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key: "has",
+            message: `has: has no value "${rawValue}" — expected "facts"`
+          });
+          continue;
+        }
+        if (key === "is" && !DIFF_FILE_IS_VALUES.includes(rawValue)) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key: "is",
+            message: `is: has no value "${rawValue}" — expected "unanchored"`
+          });
+          continue;
+        }
+        clauses.push({ field: key, value: rawValue });
+        continue;
+      }
+      const term = tok.replace(/^"|"$/g, "").toLowerCase();
+      if (term) freeText.push(term);
+    }
+    return { clauses, freeText, diagnostics };
+  }
+  __name(parseDiffFileQuery, "parseDiffFileQuery");
+  function matchDiffFiles(ctx, query) {
+    const { clauses, freeText, diagnostics } = parseDiffFileQuery(query);
+    const files = ctx.files.filter((f) => {
+      const label2 = filePathLabel(f).toLowerCase();
+      for (const term of freeText) {
+        if (!label2.includes(term)) return false;
+      }
+      for (const c of clauses) {
+        if (c.field === "path" && !label2.includes(c.value)) return false;
+        if (c.field === "change" && f.status !== c.value) return false;
+        if (c.field === "has" && fileFactCount(f, ctx.anchored) <= 0)
+          return false;
+        if (c.field === "is" && fileFactCount(f, ctx.unanchored) <= 0)
+          return false;
+      }
+      return true;
+    });
+    return { files, diagnostics };
+  }
+  __name(matchDiffFiles, "matchDiffFiles");
+
+  // src/change-inspector-diff.ts
+  function capturedDiffArtifact(value) {
+    if (typeof value !== "object" || value === null) return null;
+    const snapshot2 = value.snapshot;
+    if (typeof snapshot2 !== "object" || snapshot2 === null) return null;
+    return Array.isArray(snapshot2.files) ? value : null;
+  }
+  __name(capturedDiffArtifact, "capturedDiffArtifact");
+  function annotationTarget(target) {
+    return {
+      kind: target.kind,
+      filePath: target.filePath,
+      startLine: target.startLine,
+      endLine: target.endLine,
+      side: target.side,
+      observationId: target.observationId,
+      inputRequestId: target.inputRequestId,
+      assessmentId: target.assessmentId,
+      eventId: target.eventId
+    };
+  }
+  __name(annotationTarget, "annotationTarget");
+  function annotationBody(content) {
+    return content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
+  }
+  __name(annotationBody, "annotationBody");
+  function annotationForFact(detail, fact2) {
+    const presentation = detail.factContentPresentations?.[fact2.factId];
+    const content = presentation?.content;
+    if (!content || content.kind !== fact2.family || fact2.originRevision.revisionId !== detail.revision.revisionId || fact2.originRevision.objectArtifactContentHash !== detail.revision.objectArtifactContentHash || fact2.target !== void 0 && fact2.target.revisionId !== detail.revision.revisionId) {
+      return null;
+    }
+    const annotation = {
+      id: fact2.factId,
+      kind: content.kind === "input_request" ? "input-request" : content.kind,
+      title: content.kind === "assessment" ? `assessment: ${content.assessment}` : content.kind === "validation" ? content.checkName : content.title,
+      track: fact2.trackId ?? "untracked",
+      body: annotationBody(content),
+      bodyContentType: presentation.contentType,
+      bodyContentState: presentation.bodyContentState,
+      ...fact2.target ? { target: annotationTarget(fact2.target) } : {}
+    };
+    if (content.kind === "input_request") {
+      annotation.status = content.status;
+      annotation.responses = content.responses?.map((response) => ({
+        id: response.responseId,
+        outcome: response.outcome,
+        reason: response.reason,
+        reasonContentType: response.contentType,
+        reasonContentState: response.bodyContentState,
+        verificationStatus: response.availability
+      }));
+    } else if (content.kind === "assessment") {
+      annotation.assessment = content.assessment;
+      annotation.status = fact2.familyState;
+    } else if (content.kind === "validation") {
+      annotation.status = content.status;
+      annotation.command = content.command;
+    }
+    return annotation;
+  }
+  __name(annotationForFact, "annotationForFact");
+  function annotationsForExactRevision(detail) {
+    return detail.factPresentations.flatMap((fact2) => {
+      const annotation = annotationForFact(detail, fact2);
+      return annotation ? [annotation] : [];
+    });
+  }
+  __name(annotationsForExactRevision, "annotationsForExactRevision");
+  function exactRoute(route, focus) {
+    return { ...route, ...focus ? { focus } : {} };
+  }
+  __name(exactRoute, "exactRoute");
+  function updateFocus(route, patch) {
+    const next = { ...route.focus, ...patch };
+    for (const key of Object.keys(next)) {
+      if (!next[key]) delete next[key];
+    }
+    return exactRoute(route, Object.keys(next).length ? next : void 0);
+  }
+  __name(updateFocus, "updateFocus");
+  function expandFile(section, file, ctx) {
+    const body = section.querySelector("[data-dfile-body]");
+    if (!body) return;
+    if (body.dataset.rendered !== "1") {
+      body.innerHTML = renderDiffFileBody(file, ctx.anchored);
+      body.dataset.rendered = "1";
+    }
+    section.dataset.expanded = "true";
+    section.querySelector(".dfile-head")?.setAttribute("aria-expanded", "true");
+  }
+  __name(expandFile, "expandFile");
+  function factTarget(root, factId) {
+    const matching = Array.from(
+      root.querySelectorAll("[data-anno]")
+    ).filter((element) => element.dataset.anno === factId);
+    return matching.find((element) => element.classList.contains("anno")) ?? matching[0] ?? null;
+  }
+  __name(factTarget, "factTarget");
+  function focusFile(body, ctx, filePath) {
+    const index = ctx.files.findIndex(
+      (file) => file.new_path === filePath || file.old_path === filePath
+    );
+    if (index < 0) return;
+    const section = body.querySelector(`[data-dfile="${index}"]`);
+    if (!section) return;
+    expandFile(section, ctx.files[index], ctx);
+    section.dataset.exactFocus = "true";
+    section.scrollIntoView({ block: "start", behavior: "auto" });
+    section.focus({ preventScroll: true });
+  }
+  __name(focusFile, "focusFile");
+  function focusFact(body, ctx, factId) {
+    const fact2 = [
+      ...ctx.anchored,
+      ...ctx.decisionContext,
+      ...ctx.unanchored
+    ].find((item) => item.id === factId);
+    if (fact2?.target?.filePath) focusFile(body, ctx, fact2.target.filePath);
+    const target = factTarget(body, factId);
+    if (!target) return;
+    target.dataset.exactFocus = "true";
+    target.tabIndex = -1;
+    target.scrollIntoView({ block: "center", behavior: "auto" });
+    target.focus({ preventScroll: true });
+  }
+  __name(focusFact, "focusFact");
+  function button(label2, className = "ghost") {
+    const element = document.createElement("button");
+    element.type = "button";
+    element.className = className;
+    element.textContent = label2;
+    return element;
+  }
+  __name(button, "button");
+  function renderNavigator(nav, route, actions2, ctx) {
+    const query = route.focus?.fileQuery ?? "";
+    const match = matchDiffFiles(ctx, query);
+    nav.replaceChildren();
+    const summary = document.createElement("div");
+    summary.innerHTML = renderDiffNavSummary({
+      fileCount: ctx.files.length,
+      factCount: ctx.anchored.length + ctx.decisionContext.length + ctx.unanchored.length,
+      decisionContextCount: ctx.decisionContext.length,
+      unanchoredCount: ctx.unanchored.length
+    });
+    nav.append(summary);
+    for (const diagnostic of match.diagnostics) {
+      const notice = document.createElement("p");
+      notice.className = "diff-file-notice";
+      notice.textContent = diagnostic.message;
+      nav.append(notice);
+    }
+    const files = document.createElement("ol");
+    files.className = "diff-nav-files";
+    for (const file of match.files) {
+      const index = ctx.files.indexOf(file);
+      const item = document.createElement("li");
+      const trigger = button(filePathLabel(file), "diff-nav-file");
+      trigger.dataset.navFile = String(index);
+      const count = fileFactCount(file, ctx.anchored);
+      trigger.setAttribute(
+        "aria-label",
+        `${filePathLabel(file)}${count ? `, ${count} inline facts` : ""}`
+      );
+      trigger.addEventListener("click", () => {
+        const filePath = file.new_path ?? file.old_path;
+        if (!filePath) return;
+        actions2.navigate(updateFocus(route, { filePath }));
+      });
+      item.append(trigger);
+      files.append(item);
+    }
+    nav.append(files);
+    const facts = [...ctx.anchored, ...ctx.decisionContext, ...ctx.unanchored];
+    if (facts.length > 0) {
+      const heading = document.createElement("h3");
+      heading.textContent = "Facts";
+      nav.append(heading);
+      const list = document.createElement("ol");
+      for (const fact2 of facts) {
+        const item = document.createElement("li");
+        const trigger = button(fact2.title, "diff-nav-fact");
+        trigger.dataset.anno = fact2.id;
+        trigger.addEventListener(
+          "click",
+          () => actions2.navigate(updateFocus(route, { factId: fact2.id }))
+        );
+        item.append(trigger);
+        list.append(item);
+      }
+      nav.append(list);
+    }
+  }
+  __name(renderNavigator, "renderNavigator");
+  function bindDiffBody(body, route, actions2, ctx) {
+    ctx.files.forEach((file, index) => {
+      const section = body.querySelector(`[data-dfile="${index}"]`);
+      if (!section) return;
+      const path = file.new_path ?? file.old_path;
+      if (path) section.dataset.filePath = path;
+      if (file.old_path) section.dataset.oldFilePath = file.old_path;
+      if (file.new_path) section.dataset.newFilePath = file.new_path;
+      section.tabIndex = -1;
+      const toggle = /* @__PURE__ */ __name(() => {
+        if (section.dataset.expanded === "true") {
+          section.dataset.expanded = "false";
+          section.querySelector(".dfile-head")?.setAttribute("aria-expanded", "false");
+        } else {
+          expandFile(section, file, ctx);
+        }
+      }, "toggle");
+      const header = section.querySelector(".dfile-head");
+      header?.addEventListener("click", toggle);
+      header?.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        toggle();
+      });
+    });
+    const activateBodyTarget = /* @__PURE__ */ __name((target) => {
+      const renderAll = target?.closest("[data-render-diff-file]");
+      if (renderAll) {
+        const section = renderAll.closest(".dfile");
+        const index = Number(section?.dataset.dfile);
+        if (section && Number.isInteger(index))
+          expandFile(section, ctx.files[index], ctx);
+        return;
+      }
+      const noted = target?.closest(".drow-noted[data-anno]");
+      if (noted?.dataset.anno)
+        actions2.navigate(updateFocus(route, { factId: noted.dataset.anno }));
+    }, "activateBodyTarget");
+    body.onclick = (event) => activateBodyTarget(event.target instanceof Element ? event.target : null);
+    body.onkeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target?.closest(".drow-noted[data-anno]")) return;
+      event.preventDefault();
+      activateBodyTarget(target);
+    };
+  }
+  __name(bindDiffBody, "bindDiffBody");
+  function renderChangeInspectorDiffPage(detail, route, actions2) {
+    const page = document.querySelector("#diff-page");
+    const toolbar = document.querySelector("#toolbar");
+    const split = document.querySelector(".split");
+    const title = document.querySelector("#diff-page-title");
+    const close = document.querySelector("#diff-page-close");
+    const input = document.querySelector("#diff-file-query");
+    const nav = document.querySelector("#diff-page-nav-list");
+    const body = document.querySelector("#diff-page-body");
+    if (!page || !toolbar || !split || !title || !close || !input || !nav || !body)
+      return false;
+    page.classList.remove("hidden");
+    toolbar.classList.add("hidden");
+    split.classList.add("hidden");
+    title.textContent = `Annotated diff · ${shortRef(detail.revision.revisionId)}`;
+    title.title = `exact Revision ${detail.revision.revisionId}; artifact ${detail.revision.objectArtifactContentHash}`;
+    title.setAttribute(
+      "aria-label",
+      `Annotated diff for exact Revision ${detail.revision.revisionId}; artifact ${detail.revision.objectArtifactContentHash}`
+    );
+    close.onclick = () => actions2.navigate({
+      kind: "revision",
+      changeId: route.changeId,
+      revision: route.revision,
+      query: route.query,
+      ...route.focus && (route.focus.factId || route.focus.filePath) ? {
+        focus: {
+          ...route.focus.factId ? { factId: route.focus.factId } : {},
+          ...route.focus.filePath ? { filePath: route.focus.filePath } : {}
+        }
+      } : {}
+    });
+    input.value = route.focus?.fileQuery ?? "";
+    input.oninput = () => actions2.replace?.(updateFocus(route, { fileQuery: input.value }));
+    const resource = detail.exactRevisionDocument;
+    if (resource.availability !== "available") {
+      body.replaceChildren(
+        Object.assign(document.createElement("p"), {
+          className: "empty",
+          textContent: "Captured bytes are unavailable. The Inspector will not reconstruct a diff from Git or an associated commit."
+        })
+      );
+      nav.replaceChildren();
+      return true;
+    }
+    const artifact = capturedDiffArtifact(resource.capturedDocument);
+    if (!artifact) {
+      body.replaceChildren(
+        Object.assign(document.createElement("p"), {
+          className: "empty",
+          textContent: "This exact resource does not contain a captured snapshot."
+        })
+      );
+      nav.replaceChildren();
+      return true;
+    }
+    const rendered = renderDiff(
+      resource.resource.objectId,
+      artifact,
+      annotationsForExactRevision(detail)
+    );
+    body.innerHTML = rendered.html;
+    bindDiffBody(body, route, actions2, rendered.ctx);
+    renderNavigator(nav, route, actions2, rendered.ctx);
+    if (route.focus?.filePath)
+      focusFile(body, rendered.ctx, route.focus.filePath);
+    if (route.focus?.factId) focusFact(body, rendered.ctx, route.focus.factId);
+    return true;
+  }
+  __name(renderChangeInspectorDiffPage, "renderChangeInspectorDiffPage");
+  function hideChangeInspectorDiffPage() {
+    document.querySelector("#diff-page")?.classList.add("hidden");
+    document.querySelector("#toolbar")?.classList.remove("hidden");
+    document.querySelector(".split")?.classList.remove("hidden");
+  }
+  __name(hideChangeInspectorDiffPage, "hideChangeInspectorDiffPage");
+
+  // src/change-inspector-graphs.ts
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function svgElement(document2, name, attributes = {}) {
+    const element = document2.createElementNS(SVG_NS, name);
+    for (const [attribute, value] of Object.entries(attributes)) {
+      element.setAttribute(attribute, String(value));
+    }
+    return element;
+  }
+  __name(svgElement, "svgElement");
+  function words3(value) {
+    return value.replaceAll("_", " ");
+  }
+  __name(words3, "words");
+  function exactRevisionIdentity(revision2) {
+    return `exact Revision ${revision2.revisionId}; artifact ${revision2.objectArtifactContentHash}`;
+  }
+  __name(exactRevisionIdentity, "exactRevisionIdentity");
+  function exactFactIdentity(focus) {
+    return `${words3(focus.family)} ${focus.factId}; ${exactRevisionIdentity(focus.revision)}`;
+  }
+  __name(exactFactIdentity, "exactFactIdentity");
+  function exactFactData(focus) {
+    return JSON.stringify({
+      revisionId: focus.revision.revisionId,
+      objectArtifactContentHash: focus.revision.objectArtifactContentHash,
+      family: focus.family,
+      factId: focus.factId
+    });
+  }
+  __name(exactFactData, "exactFactData");
+  function setRevisionData(element, revision2) {
+    element.setAttribute("data-revision-id", revision2.revisionId);
+    element.setAttribute(
+      "data-artifact-hash",
+      revision2.objectArtifactContentHash
+    );
+  }
+  __name(setRevisionData, "setRevisionData");
+  function wireAction(element, action, keyboard) {
+    element.addEventListener("click", action);
+    if (!keyboard) return;
+    element.addEventListener("keydown", (event) => {
+      if (!(event instanceof KeyboardEvent)) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      action();
+    });
+  }
+  __name(wireAction, "wireAction");
+  function appendTitle(document2, parent, value) {
+    const title = svgElement(document2, "title");
+    title.textContent = value;
+    parent.append(title);
+  }
+  __name(appendTitle, "appendTitle");
+  function marker(document2, id, kind) {
+    const result = svgElement(document2, "marker", {
+      id,
+      markerWidth: 9,
+      markerHeight: 9,
+      refX: 8,
+      refY: 4.5,
+      orient: "auto",
+      markerUnits: "userSpaceOnUse"
+    });
+    const path = svgElement(document2, "path", {
+      d: "M0,0 L8,4.5 L0,9 z",
+      fill: kind === "solid" ? "currentColor" : "none",
+      stroke: "currentColor",
+      "stroke-width": kind === "solid" ? 0 : 1.5
+    });
+    result.append(path);
+    return result;
+  }
+  __name(marker, "marker");
+  function graphRoot(document2, className, label2, bounds) {
+    return svgElement(document2, "svg", {
+      class: className,
+      width: bounds.w,
+      height: bounds.h,
+      viewBox: `0 0 ${bounds.w} ${bounds.h}`,
+      preserveAspectRatio: "xMinYMin meet",
+      role: "group",
+      "aria-label": label2
+    });
+  }
+  __name(graphRoot, "graphRoot");
+  function sorted(values, key) {
+    return [...values].sort(
+      (left, right) => key(left).localeCompare(key(right), "en")
+    );
+  }
+  __name(sorted, "sorted");
+  function edgePoints(path, from) {
+    let points = path;
+    if (from && path.length > 1) {
+      const distance = /* @__PURE__ */ __name(([x, y]) => (x - from.x) ** 2 + (y - from.y) ** 2, "distance");
+      if (distance(path[0]) < distance(path[path.length - 1])) {
+        points = [...path].reverse();
+      }
+    }
+    return points.map(([x, y]) => `${x},${y}`).join(" ");
+  }
+  __name(edgePoints, "edgePoints");
+  function relationshipGroup(document2, accessibleName, attributes, path, from, markerId, strokeDasharray) {
+    const group = svgElement(document2, "g", {
+      role: "group",
+      "aria-label": accessibleName,
+      ...attributes
+    });
+    appendTitle(document2, group, accessibleName);
+    group.append(
+      svgElement(document2, "polyline", {
+        points: edgePoints(path, from),
+        fill: "none",
+        stroke: "currentColor",
+        "stroke-width": 2,
+        "stroke-dasharray": strokeDasharray ?? "none",
+        "vector-effect": "non-scaling-stroke",
+        "marker-end": `url(#${markerId})`,
+        "aria-hidden": true
+      })
+    );
+    return group;
+  }
+  __name(relationshipGroup, "relationshipGroup");
+  function textualEquivalent(document2, label2) {
+    const root = document2.createElement("details");
+    root.className = "relationship-graph-text";
+    root.dataset.graphTextualEquivalent = "true";
+    const summary = document2.createElement("summary");
+    summary.textContent = `${label2} as text`;
+    const nodeHeading = document2.createElement("h4");
+    nodeHeading.textContent = "Exact identities";
+    const nodes = document2.createElement("ul");
+    nodes.dataset.graphTextNodes = "true";
+    const edgeHeading = document2.createElement("h4");
+    edgeHeading.textContent = "Relationships";
+    const edges = document2.createElement("ul");
+    edges.dataset.graphTextEdges = "true";
+    root.append(summary, nodeHeading, nodes, edgeHeading, edges);
+    return { root, nodes, edges };
+  }
+  __name(textualEquivalent, "textualEquivalent");
+  function actionItem(document2, text, accessibleName, action) {
+    const item = document2.createElement("li");
+    const button2 = document2.createElement("button");
+    button2.type = "button";
+    button2.textContent = text;
+    button2.title = accessibleName;
+    button2.setAttribute("aria-label", accessibleName);
+    wireAction(button2, action, false);
+    item.append(button2);
+    return item;
+  }
+  __name(actionItem, "actionItem");
+  function textItem(document2, value) {
+    const item = document2.createElement("li");
+    item.textContent = value;
+    return item;
+  }
+  __name(textItem, "textItem");
+  function renderChangeRevisionGraph(graph, options) {
+    const { document: document2 } = options;
+    const figure = document2.createElement("figure");
+    figure.className = "change-revision-graph";
+    figure.setAttribute("aria-label", "Change Revision relationships");
+    const svg = graphRoot(
+      document2,
+      "change-revision-graph-svg",
+      "Change Revision relationship graph",
+      graph.bounds
+    );
+    const defs = svgElement(document2, "defs");
+    defs.append(
+      marker(document2, "change-effective-arrow", "solid"),
+      marker(document2, "change-claim-arrow", "open")
+    );
+    svg.append(defs);
+    const text = textualEquivalent(document2, "Change Revision relationships");
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+    for (const edge of sorted(
+      graph.effectiveSupersedes,
+      (candidate) => `${candidate.from}\0${candidate.to}`
+    )) {
+      const accessibleName = `Effective supersedes relationship: ${exactRevisionIdentity(edge.successor)} supersedes ${exactRevisionIdentity(edge.predecessor)}`;
+      const group = relationshipGroup(
+        document2,
+        accessibleName,
+        {
+          class: "change-revision-edge change-revision-edge-effective",
+          "data-edge-kind": "effective-supersedes",
+          "data-from": edge.from,
+          "data-to": edge.to
+        },
+        edge.path,
+        nodesById.get(edge.from),
+        "change-effective-arrow"
+      );
+      setRevisionData(group, edge.successor);
+      group.setAttribute(
+        "data-predecessor-revision-id",
+        edge.predecessor.revisionId
+      );
+      group.setAttribute(
+        "data-predecessor-artifact-hash",
+        edge.predecessor.objectArtifactContentHash
+      );
+      svg.append(group);
+      text.edges.append(textItem(document2, accessibleName));
+    }
+    for (const edge of sorted(
+      graph.pendingOrConflictingClaims,
+      (candidate) => `${candidate.claimId}\0${candidate.from}\0${candidate.to}`
+    )) {
+      const diagnostics = (edge.diagnostics ?? []).length ? ` Diagnostics: ${edge.diagnostics?.join("; ")}` : "";
+      const accessibleName = `Pending or conflicting supersedes claim ${edge.claimId}: ${exactRevisionIdentity(edge.successor)} claims to supersede ${exactRevisionIdentity(edge.predecessor)}.${diagnostics}`;
+      const group = relationshipGroup(
+        document2,
+        accessibleName,
+        {
+          class: "change-revision-edge change-revision-edge-claim",
+          "data-edge-kind": "pending-or-conflicting-claim",
+          "data-claim-id": edge.claimId,
+          "data-from": edge.from,
+          "data-to": edge.to
+        },
+        edge.path,
+        nodesById.get(edge.from),
+        "change-claim-arrow",
+        "7 5"
+      );
+      setRevisionData(group, edge.successor);
+      group.setAttribute(
+        "data-predecessor-revision-id",
+        edge.predecessor.revisionId
+      );
+      group.setAttribute(
+        "data-predecessor-artifact-hash",
+        edge.predecessor.objectArtifactContentHash
+      );
+      svg.append(group);
+      text.edges.append(textItem(document2, accessibleName));
+    }
+    for (const node of sorted(graph.nodes, (candidate) => candidate.id)) {
+      const activationRevision = node.activationRevision;
+      const canActivate = node.contextAvailability === "available" && activationRevision !== void 0;
+      const state = [
+        node.isCurrent ? "current" : "not current",
+        node.isMember ? "Change member" : "claim-only context",
+        canActivate ? "exact Change context available" : "relationship context only; no exact Change route is available"
+      ].join("; ");
+      const accessibleName = `${exactRevisionIdentity(node.revision)}; ${state}`;
+      const group = svgElement(document2, "g", {
+        class: `change-revision-node${node.isCurrent ? " is-current" : ""}${node.isMember ? " is-member" : " is-context"}`,
+        role: canActivate ? "link" : "group",
+        "aria-label": accessibleName,
+        "data-graph-node-id": node.id,
+        "data-current": node.isCurrent,
+        "data-member": node.isMember,
+        "data-context-availability": node.contextAvailability
+      });
+      if (canActivate) {
+        group.setAttribute("tabindex", "0");
+      } else {
+        group.setAttribute("aria-disabled", "true");
+      }
+      setRevisionData(group, node.revision);
+      group.setAttribute("title", accessibleName);
+      appendTitle(document2, group, accessibleName);
+      group.append(
+        svgElement(document2, "rect", {
+          x: node.x - node.w / 2,
+          y: node.y - node.h / 2,
+          width: node.w,
+          height: node.h,
+          rx: 6,
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": node.isCurrent ? 3 : node.isMember ? 2 : 1,
+          "stroke-dasharray": node.isMember ? "none" : "4 3",
+          "vector-effect": "non-scaling-stroke",
+          "aria-hidden": true
+        })
+      );
+      const label2 = svgElement(document2, "text", {
+        x: node.x,
+        y: node.y,
+        "text-anchor": "middle",
+        "dominant-baseline": "middle",
+        "aria-hidden": true
+      });
+      label2.textContent = `${node.isCurrent ? "current · " : ""}${canActivate ? "" : "context · "}${shortRef(node.revision.revisionId)}`;
+      group.append(label2);
+      const activate = canActivate ? () => options.onActivateRevision(activationRevision) : void 0;
+      if (activate) wireAction(group, activate, true);
+      svg.append(group);
+      text.nodes.append(
+        activate ? actionItem(
+          document2,
+          `${node.isCurrent ? "Current " : ""}${shortRef(node.revision.revisionId)}`,
+          `Open ${accessibleName}`,
+          activate
+        ) : textItem(document2, accessibleName)
+      );
+    }
+    for (const diagnostic of graph.diagnostics ?? []) {
+      text.edges.append(textItem(document2, `Graph diagnostic: ${diagnostic}`));
+    }
+    figure.append(svg, text.root);
+    return figure;
+  }
+  __name(renderChangeRevisionGraph, "renderChangeRevisionGraph");
+  function factRefIdentity(reference) {
+    if (reference.kind === "observation") {
+      return { family: reference.kind, factId: reference.observationId ?? "" };
+    }
+    return { family: reference.kind, factId: reference.inputRequestId ?? "" };
+  }
+  __name(factRefIdentity, "factRefIdentity");
+  function appendFactEdge(document2, svg, text, nodesById, edge, accessibleName, kind, markerId, dash) {
+    const group = relationshipGroup(
+      document2,
+      accessibleName,
+      {
+        class: `fact-relationship-edge fact-relationship-edge-${kind}`,
+        "data-edge-kind": kind,
+        "data-from": edge.from,
+        "data-to": edge.to
+      },
+      edge.path,
+      nodesById.get(edge.from),
+      markerId,
+      dash
+    );
+    svg.append(group);
+    text.append(textItem(document2, accessibleName));
+    return group;
+  }
+  __name(appendFactEdge, "appendFactEdge");
+  function renderFactRelationshipGraph(graph, options) {
+    const { document: document2 } = options;
+    const figure = document2.createElement("figure");
+    figure.className = "fact-relationship-graph";
+    figure.setAttribute("aria-label", "Exact fact relationships");
+    const svg = graphRoot(
+      document2,
+      "fact-relationship-graph-svg",
+      "Exact fact relationship graph",
+      graph.bounds
+    );
+    const defs = svgElement(document2, "defs");
+    defs.append(
+      marker(document2, "fact-observation-arrow", "solid"),
+      marker(document2, "fact-assessment-arrow", "open"),
+      marker(document2, "fact-port-arrow", "open")
+    );
+    svg.append(defs);
+    const text = textualEquivalent(document2, "Exact fact relationships");
+    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
+    for (const edge of sorted(
+      graph.observationSupersedes,
+      (candidate) => `${candidate.from}\0${candidate.to}`
+    )) {
+      const accessibleName = `Observation supersedes relationship: observation ${edge.fromFactId}; ${exactRevisionIdentity(edge.originRevision)} supersedes observation ${edge.toFactId}; ${exactRevisionIdentity(edge.originRevision)}`;
+      const group = appendFactEdge(
+        document2,
+        svg,
+        text.edges,
+        nodesById,
+        edge,
+        accessibleName,
+        "observation-supersedes",
+        "fact-observation-arrow"
+      );
+      setRevisionData(group, edge.originRevision);
+      group.setAttribute("data-graph-from-fact-id", edge.fromFactId);
+      group.setAttribute("data-graph-to-fact-id", edge.toFactId);
+    }
+    for (const edge of sorted(
+      graph.assessmentReplaces,
+      (candidate) => `${candidate.from}\0${candidate.to}`
+    )) {
+      const accessibleName = `Assessment replaces relationship: assessment ${edge.fromFactId}; ${exactRevisionIdentity(edge.originRevision)} replaces assessment ${edge.toFactId}; ${exactRevisionIdentity(edge.originRevision)}`;
+      const group = appendFactEdge(
+        document2,
+        svg,
+        text.edges,
+        nodesById,
+        edge,
+        accessibleName,
+        "assessment-replaces",
+        "fact-assessment-arrow",
+        "10 4"
+      );
+      setRevisionData(group, edge.originRevision);
+      group.setAttribute("data-graph-from-fact-id", edge.fromFactId);
+      group.setAttribute("data-graph-to-fact-id", edge.toFactId);
+    }
+    for (const edge of sorted(
+      graph.factPorts,
+      (candidate) => `${candidate.portId}\0${candidate.from}\0${candidate.to}`
+    )) {
+      const origin = factRefIdentity(edge.originFact);
+      const originIdentity = exactFactIdentity({
+        revision: edge.originRevision,
+        ...origin
+      });
+      const target = edge.targetFact ? exactFactIdentity({
+        revision: edge.targetRevision,
+        ...factRefIdentity(edge.targetFact)
+      }) : exactRevisionIdentity(edge.targetRevision);
+      const diagnostics = (edge.diagnostics ?? []).length ? ` Diagnostics: ${edge.diagnostics?.join("; ")}` : "";
+      const accessibleName = `Fact port ${edge.portId}: ${originIdentity} ${words3(edge.relation)} ${target}; applicability ${words3(edge.applicability)}.${diagnostics}`;
+      const group = appendFactEdge(
+        document2,
+        svg,
+        text.edges,
+        nodesById,
+        edge,
+        accessibleName,
+        "fact-port",
+        "fact-port-arrow",
+        "2 4"
+      );
+      group.setAttribute("data-port-id", edge.portId);
+      group.setAttribute("data-port-relation", edge.relation);
+      group.setAttribute("data-port-applicability", edge.applicability);
+      setRevisionData(group, edge.originRevision);
+      group.setAttribute(
+        "data-target-revision-id",
+        edge.targetRevision.revisionId
+      );
+      group.setAttribute(
+        "data-target-artifact-hash",
+        edge.targetRevision.objectArtifactContentHash
+      );
+    }
+    for (const node of sorted(graph.nodes, (candidate) => candidate.id)) {
+      const isFact = node.kind === "fact";
+      const focus = isFact && node.factId !== void 0 && node.family !== void 0 ? {
+        revision: node.revision,
+        family: node.family,
+        factId: node.factId
+      } : void 0;
+      const activationRevision = node.activationRevision;
+      const canActivate = node.contextAvailability === "available" && activationRevision !== void 0;
+      const availability = canActivate ? `exact Change context available in ${exactRevisionIdentity(activationRevision)}` : "relationship context only; no exact Change route is available";
+      const accessibleName = focus ? `${canActivate ? "Focus" : "Relationship context for"} exact fact ${exactFactIdentity(focus)}; ${availability}` : `${canActivate ? "Open" : "Relationship context for"} ${exactRevisionIdentity(node.revision)} fact-port anchor; ${availability}`;
+      const group = svgElement(document2, "g", {
+        class: `fact-relationship-node fact-relationship-node-${isFact ? "fact" : "revision"}`,
+        role: canActivate ? "link" : "group",
+        "aria-label": accessibleName,
+        "data-graph-node-id": node.id,
+        "data-node-kind": node.kind,
+        "data-context-availability": node.contextAvailability
+      });
+      if (canActivate) {
+        group.setAttribute("tabindex", "0");
+      } else {
+        group.setAttribute("aria-disabled", "true");
+      }
+      setRevisionData(group, node.revision);
+      group.setAttribute("title", accessibleName);
+      if (focus) {
+        group.setAttribute("data-graph-family", focus.family);
+        group.setAttribute("data-graph-fact-id", focus.factId);
+        group.setAttribute("data-graph-fact-focus", exactFactData(focus));
+      }
+      appendTitle(document2, group, accessibleName);
+      group.append(
+        svgElement(document2, "rect", {
+          x: node.x - node.w / 2,
+          y: node.y - node.h / 2,
+          width: node.w,
+          height: node.h,
+          rx: isFact ? 6 : 0,
+          fill: "none",
+          stroke: "currentColor",
+          "stroke-width": 2,
+          "stroke-dasharray": isFact ? "none" : "4 3",
+          "vector-effect": "non-scaling-stroke",
+          "aria-hidden": true
+        })
+      );
+      const label2 = svgElement(document2, "text", {
+        x: node.x,
+        y: node.y,
+        "text-anchor": "middle",
+        "dominant-baseline": "middle",
+        "aria-hidden": true
+      });
+      label2.textContent = focus ? `${words3(focus.family)} · ${shortRef(focus.factId)}` : `Revision · ${shortRef(node.revision.revisionId)}`;
+      group.append(label2);
+      const activate = canActivate ? focus ? () => options.onFocusFact({
+        ...focus,
+        revision: activationRevision
+      }) : () => options.onActivateRevision(activationRevision) : void 0;
+      if (activate) wireAction(group, activate, true);
+      svg.append(group);
+      text.nodes.append(
+        activate ? actionItem(
+          document2,
+          focus ? `${words3(focus.family)} ${shortRef(focus.factId)}` : `Revision ${shortRef(node.revision.revisionId)}`,
+          accessibleName,
+          activate
+        ) : textItem(document2, accessibleName)
+      );
+    }
+    figure.append(svg, text.root);
+    return figure;
+  }
+  __name(renderFactRelationshipGraph, "renderFactRelationshipGraph");
 
   // src/change-inspector-render.ts
+  function routeForLens(lens, current) {
+    if (lens === "timeline") {
+      return {
+        kind: "timeline",
+        historyQuery: current.kind === "timeline" || current.kind === "event" ? { ...current.historyQuery, after: void 0, at: void 0 } : {}
+      };
+    }
+    return {
+      kind: "lens",
+      lens,
+      query: current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? {} : { ...current.query, after: void 0 }
+    };
+  }
+  __name(routeForLens, "routeForLens");
+  function syncLensLinks(active3, current) {
+    document.querySelectorAll("#lens-switcher a[data-lens]").forEach((link) => {
+      const lens = link.dataset.lens;
+      if (lens !== "timeline" && lens !== "changes" && lens !== "attention")
+        return;
+      link.href = formatChangeInspectorRoute(routeForLens(lens, current));
+      if (lens === active3) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+  }
+  __name(syncLensLinks, "syncLensLinks");
   var FILTER_OPTIONS = [
     [
       "topology",
@@ -5146,29 +6622,24 @@
     if (switcher) {
       switcher.replaceChildren();
       for (const lens of ["timeline", "changes", "attention"]) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "lens-tab";
-        button.dataset.lens = lens;
-        button.textContent = lens === "timeline" ? "Timeline" : lens === "changes" ? "Changes" : "Attention";
-        button.addEventListener("click", () => {
+        const link = document.createElement("a");
+        link.className = "lens-tab";
+        link.dataset.lens = lens;
+        link.textContent = lens === "timeline" ? "Timeline" : lens === "changes" ? "Changes" : "Attention";
+        const destination = /* @__PURE__ */ __name(() => {
           const current = parseChangeInspectorRoute(
             location.hash || "#/timeline"
           );
-          if (lens === "timeline") {
-            actions2.navigate({
-              kind: "timeline",
-              historyQuery: current.kind === "timeline" || current.kind === "event" ? { ...current.historyQuery, after: void 0, at: void 0 } : {}
-            });
-          } else {
-            actions2.navigate({
-              kind: "lens",
-              lens,
-              query: current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? {} : { ...current.query, after: void 0 }
-            });
-          }
+          return routeForLens(lens, current);
+        }, "destination");
+        link.href = formatChangeInspectorRoute(destination());
+        link.addEventListener("click", (event) => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+            return;
+          event.preventDefault();
+          actions2.navigate(destination());
         });
-        switcher.append(button);
+        switcher.append(link);
       }
     }
     const back = document.querySelector("#detail-back");
@@ -5361,11 +6832,11 @@
     );
     const rows = history2.completion.eventTypes.map((eventType) => {
       const item = document.createElement("li");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = `type-facet-row${selected.has(eventType) ? "" : " type-facet-row-off"}`;
-      button.dataset.eventType = eventType;
-      button.setAttribute("aria-pressed", String(selected.has(eventType)));
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.className = `type-facet-row${selected.has(eventType) ? "" : " type-facet-row-off"}`;
+      button2.dataset.eventType = eventType;
+      button2.setAttribute("aria-pressed", String(selected.has(eventType)));
       const dot = document.createElement("span");
       dot.className = "dot";
       dot.style.background = eventTypeColor(eventType);
@@ -5375,8 +6846,8 @@
       const count = document.createElement("span");
       count.className = "type-count";
       count.textContent = String(history2.facets[eventType] ?? 0);
-      button.append(dot, name, count);
-      button.addEventListener("click", () => {
+      button2.append(dot, name, count);
+      button2.addEventListener("click", () => {
         const nextTypes = new Set(selected);
         if (nextTypes.has(eventType)) nextTypes.delete(eventType);
         else nextTypes.add(eventType);
@@ -5390,7 +6861,7 @@
           }
         });
       });
-      item.append(button);
+      item.append(button2);
       return item;
     });
     if (!rows.length) {
@@ -5520,6 +6991,14 @@
       toggle.textContent = values.length ? `Filters · ${values.length}` : "Filters";
   }
   __name(syncFilterChrome, "syncFilterChrome");
+  function appendDefinition(list, label2, value) {
+    const term = document.createElement("dt");
+    term.textContent = label2;
+    const definition = document.createElement("dd");
+    definition.textContent = value;
+    list.append(term, definition);
+  }
+  __name(appendDefinition, "appendDefinition");
   function renderEventDetail(event, actions2) {
     const presentation = presentEvent(event);
     const heading = detailHeading("Event");
@@ -5531,11 +7010,7 @@
     const summaryFacts = document.createElement("dl");
     summaryFacts.className = "kv";
     for (const item of presentation.fields) {
-      const term = document.createElement("dt");
-      term.textContent = item.label;
-      const definition = document.createElement("dd");
-      definition.textContent = item.value;
-      summaryFacts.append(term, definition);
+      appendDefinition(summaryFacts, item.label, item.value);
     }
     if (presentation.fields.length) summary.append(summaryFacts);
     const attribution = document.createElement("section");
@@ -5543,13 +7018,7 @@
     attribution.append(detailHeading("Subject and attribution", 3));
     const attributionFacts = document.createElement("dl");
     attributionFacts.className = "kv";
-    const attributionAdd = /* @__PURE__ */ __name((name, value) => {
-      const term = document.createElement("dt");
-      term.textContent = name;
-      const definition = document.createElement("dd");
-      definition.textContent = value;
-      attributionFacts.append(term, definition);
-    }, "attributionAdd");
+    const attributionAdd = /* @__PURE__ */ __name((name, value) => appendDefinition(attributionFacts, name, value), "attributionAdd");
     attributionAdd("subject", eventSubjectLabel(event.subject));
     attributionAdd("writer", event.writer.actorId);
     attributionAdd(
@@ -5576,13 +7045,7 @@
     record.append(detailHeading("Event record", 3));
     const facts = document.createElement("dl");
     facts.className = "kv";
-    const add = /* @__PURE__ */ __name((name, value) => {
-      const term = document.createElement("dt");
-      term.textContent = name;
-      const definition = document.createElement("dd");
-      definition.textContent = value;
-      facts.append(term, definition);
-    }, "add");
+    const add = /* @__PURE__ */ __name((name, value) => appendDefinition(facts, name, value), "add");
     add("type", event.eventType.replaceAll("_", " "));
     add("occurred", event.occurredAt);
     add("verification", event.verificationStatus.replaceAll("_", " "));
@@ -5679,10 +7142,51 @@
     return line;
   }
   __name(detailLine, "detailLine");
+  function detailState(entries) {
+    const list = document.createElement("dl");
+    list.className = "detail-state";
+    for (const [label2, value] of entries) {
+      const term = document.createElement("dt");
+      term.textContent = label2;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      list.append(term, description);
+    }
+    return list;
+  }
+  __name(detailState, "detailState");
+  function detailIdentity(revision2) {
+    const line = document.createElement("p");
+    line.className = "detail-identity";
+    line.append(exactRevisionIdentity2(revision2));
+    return line;
+  }
+  __name(detailIdentity, "detailIdentity");
+  function detailActions(...buttons) {
+    const actions2 = document.createElement("div");
+    actions2.className = "detail-actions";
+    actions2.append(...buttons);
+    return actions2;
+  }
+  __name(detailActions, "detailActions");
   function shortExact2(revision2) {
-    return `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`;
+    return `${shortRef(revision2.revisionId)} · ${shortRef(
+      revision2.objectArtifactContentHash
+    )}`;
   }
   __name(shortExact2, "shortExact");
+  function exactRevisionIdentity2(revision2, className = "mono") {
+    const identity = document.createElement("code");
+    identity.className = className;
+    identity.textContent = shortExact2(revision2);
+    identity.title = exactRevisionAccessibleIdentity(revision2);
+    identity.setAttribute(
+      "aria-label",
+      exactRevisionAccessibleIdentity(revision2)
+    );
+    return identity;
+  }
+  __name(exactRevisionIdentity2, "exactRevisionIdentity");
   function renderedFactBody(content, contentType) {
     const body = document.createElement("div");
     body.className = "anno-body";
@@ -5709,8 +7213,20 @@
         card.className = "unit-card";
         card.dataset.factId = fact2.factId;
         card.tabIndex = -1;
+        const content = reading.document.factContentPresentations?.[fact2.factId];
+        if (content) {
+          const heading = content.content.kind === "assessment" ? `Assessment: ${content.content.assessment}` : content.content.kind === "validation" ? content.content.checkName : content.content.title;
+          card.append(detailHeading(heading, 5));
+        }
+        const factIdentity = document.createElement("p");
+        factIdentity.className = "detail-fact-identity";
+        const factCode = document.createElement("code");
+        factCode.textContent = shortRef(fact2.factId);
+        factCode.title = fact2.factId;
+        factCode.setAttribute("aria-label", `${fact2.family} ${fact2.factId}`);
+        factIdentity.append(factCode);
         card.append(
-          detailLine(fact2.factId, "mono"),
+          factIdentity,
           detailLine(
             `origin: ${shortExact2(fact2.originRevision)} · context: ${fact2.contextChangeId ?? "unavailable"} · currency: ${fact2.revisionCurrency.replaceAll("_", " ")}`
           ),
@@ -5729,7 +7245,6 @@
             )
           );
         }
-        const content = reading.document.factContentPresentations?.[fact2.factId];
         if (content) {
           card.append(
             detailLine(
@@ -5804,11 +7319,11 @@
   }
   __name(renderFactPorts, "renderFactPorts");
   function openCapturedResource(route, actions2) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "ghost";
-    button.textContent = "Open authoritative captured diff";
-    button.addEventListener(
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "ghost";
+    button2.textContent = "Open authoritative captured diff";
+    button2.addEventListener(
       "click",
       () => actions2.navigate({
         kind: "resource",
@@ -5818,9 +7333,27 @@
         ...route.focus ? { focus: route.focus } : {}
       })
     );
-    return button;
+    return button2;
   }
   __name(openCapturedResource, "openCapturedResource");
+  function openAnnotatedDiff(route, actions2) {
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "ghost detail-action-primary";
+    button2.textContent = "Open annotated diff";
+    button2.addEventListener(
+      "click",
+      () => actions2.navigate({
+        kind: "diff",
+        changeId: route.changeId,
+        revision: route.revision,
+        query: route.query,
+        ...route.focus ? { focus: route.focus } : {}
+      })
+    );
+    return button2;
+  }
+  __name(openAnnotatedDiff, "openAnnotatedDiff");
   function renderAssociations(reading, route, actions2) {
     const section = document.createElement("section");
     section.append(detailHeading("Association comparisons", 3));
@@ -5850,7 +7383,7 @@
     return section;
   }
   __name(renderAssociations, "renderAssociations");
-  function capturedDiffArtifact(documentValue) {
+  function capturedDiffArtifact2(documentValue) {
     if (typeof documentValue !== "object" || documentValue === null) return null;
     const documentRecord = documentValue;
     const snapshot2 = documentRecord.snapshot;
@@ -5858,71 +7391,7 @@
     const files = snapshot2.files;
     return Array.isArray(files) ? documentValue : null;
   }
-  __name(capturedDiffArtifact, "capturedDiffArtifact");
-  function annotationTarget(target) {
-    return {
-      kind: target.kind,
-      filePath: target.filePath,
-      startLine: target.startLine,
-      endLine: target.endLine,
-      side: target.side,
-      observationId: target.observationId,
-      inputRequestId: target.inputRequestId,
-      assessmentId: target.assessmentId,
-      eventId: target.eventId
-    };
-  }
-  __name(annotationTarget, "annotationTarget");
-  function annotationBody(content) {
-    return content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
-  }
-  __name(annotationBody, "annotationBody");
-  function annotationForFact(fact2, presentation) {
-    const content = presentation.content;
-    const base = {
-      id: fact2.factId,
-      kind: content.kind === "input_request" ? "input-request" : content.kind,
-      title: content.kind === "assessment" ? `assessment: ${content.assessment}` : content.kind === "validation" ? content.checkName : content.title,
-      track: fact2.trackId ?? "untracked",
-      body: annotationBody(content),
-      bodyContentType: presentation.contentType,
-      bodyContentState: presentation.bodyContentState,
-      ...fact2.target ? { target: annotationTarget(fact2.target) } : {}
-    };
-    if (content.kind === "input_request") {
-      base.status = content.status;
-      base.responses = content.responses?.map((response) => ({
-        id: response.responseId,
-        outcome: response.outcome,
-        reason: response.reason,
-        reasonContentType: response.contentType,
-        reasonContentState: response.bodyContentState,
-        verificationStatus: response.availability
-      }));
-    } else if (content.kind === "assessment") {
-      base.assessment = content.assessment;
-      base.status = fact2.familyState;
-    } else if (content.kind === "validation") {
-      base.status = content.status;
-      base.command = content.command;
-    }
-    return base;
-  }
-  __name(annotationForFact, "annotationForFact");
-  function annotationsForExactRevision(detail) {
-    const annotations = [];
-    for (const fact2 of detail.factPresentations) {
-      const content = detail.factContentPresentations?.[fact2.factId];
-      if (fact2.family !== content?.content.kind || fact2.originRevision.revisionId !== detail.revision.revisionId || fact2.originRevision.objectArtifactContentHash !== detail.revision.objectArtifactContentHash || !content) {
-        continue;
-      }
-      if (fact2.target && fact2.target.revisionId !== detail.revision.revisionId)
-        continue;
-      annotations.push(annotationForFact(fact2, content));
-    }
-    return annotations;
-  }
-  __name(annotationsForExactRevision, "annotationsForExactRevision");
+  __name(capturedDiffArtifact2, "capturedDiffArtifact");
   function bindCapturedDiffInteractions(diff, rendered) {
     rendered.ctx.files.forEach((file, index) => {
       const section = diff.querySelector(`[data-dfile="${index}"]`);
@@ -5961,8 +7430,8 @@
     });
   }
   __name(bindCapturedDiffInteractions, "bindCapturedDiffInteractions");
-  function renderCapturedDiff(resource, annotations = []) {
-    const artifact = capturedDiffArtifact(resource.capturedDocument);
+  function renderCapturedDiff(resource) {
+    const artifact = capturedDiffArtifact2(resource.capturedDocument);
     if (artifact === null) {
       const refusal = document.createElement("section");
       refusal.className = "detail-facts";
@@ -5975,11 +7444,7 @@
     }
     const diff = document.createElement("section");
     diff.className = "captured-diff";
-    const rendered = renderDiff(
-      resource.resource.objectId,
-      artifact,
-      annotations
-    );
+    const rendered = renderDiff(resource.resource.objectId, artifact, []);
     diff.innerHTML = rendered.html;
     rendered.ctx.files.forEach((file, index) => {
       const section = diff.querySelector(`[data-dfile="${index}"]`);
@@ -6042,15 +7507,16 @@
       return choices;
     }
     for (const revision2 of revisions) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "ghost mono";
-      button.textContent = revision2.revisionId;
-      button.setAttribute(
+      const button2 = document.createElement("button");
+      button2.type = "button";
+      button2.className = "ghost mono";
+      button2.textContent = shortExact2(revision2);
+      button2.title = exactRevisionAccessibleIdentity(revision2);
+      button2.setAttribute(
         "aria-label",
         `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}`
       );
-      button.addEventListener(
+      button2.addEventListener(
         "click",
         () => actions2.navigate({
           kind: "revision",
@@ -6059,21 +7525,79 @@
           query
         })
       );
-      choices.append(button);
+      choices.append(button2);
     }
     return choices;
   }
   __name(renderCurrentRevisionChoices, "renderCurrentRevisionChoices");
+  function renderChangeRelationshipGraph(detail, route, actions2) {
+    const graph = detail.inspectorPresentation?.revisionGraph;
+    if (!graph) return null;
+    const section = document.createElement("section");
+    section.className = "detail-relationships";
+    section.append(
+      detailHeading("Revision relationships", 3),
+      renderChangeRevisionGraph(graph, {
+        document,
+        onActivateRevision: /* @__PURE__ */ __name((revision2) => actions2.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision: revision2,
+          query: route.query
+        }), "onActivateRevision")
+      })
+    );
+    return section;
+  }
+  __name(renderChangeRelationshipGraph, "renderChangeRelationshipGraph");
+  function renderExactFactRelationshipGraph(detail, route, actions2) {
+    const graph = detail.inspectorPresentation?.factGraph;
+    if (!graph) return null;
+    const section = document.createElement("section");
+    section.className = "detail-relationships";
+    section.append(
+      detailHeading("Fact relationships", 3),
+      renderFactRelationshipGraph(graph, {
+        document,
+        onActivateRevision: /* @__PURE__ */ __name((revision2) => actions2.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision: revision2,
+          query: queryForExactNavigation(route)
+        }), "onActivateRevision"),
+        onFocusFact: /* @__PURE__ */ __name((focus) => actions2.navigate({
+          kind: "revision",
+          changeId: route.changeId,
+          revision: focus.revision,
+          query: queryForExactNavigation(route),
+          focus: { factId: focus.factId }
+        }), "onFocusFact")
+      })
+    );
+    return section;
+  }
+  __name(renderExactFactRelationshipGraph, "renderExactFactRelationshipGraph");
   function renderChangeDetail(detail, route, actions2) {
+    const changeIdentity = document.createElement("p");
+    changeIdentity.className = "detail-identity";
+    const changeCode = document.createElement("code");
+    changeCode.textContent = shortRef(detail.summary.changeId);
+    changeCode.title = detail.summary.changeId;
+    changeCode.setAttribute("aria-label", `Change ${detail.summary.changeId}`);
+    changeIdentity.append(changeCode);
     const nodes = [
-      detailHeading("Change"),
-      detailLine(detail.summary.changeId, "mono"),
-      detailLine(
-        `declaration: ${detail.summary.declarationState.replaceAll("_", " ")} · topology: ${detail.summary.topology.replaceAll("_", " ")} · lifecycle: ${detail.summary.lifecycle.replaceAll("_", " ")}`
+      detailHeading(
+        detail.summary.titleAssertions.length === 1 ? detail.summary.titleAssertions[0] : "Change"
       ),
-      detailLine(
-        `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact2).join("; ") || "none"}`
-      ),
+      changeIdentity,
+      detailState([
+        ["Topology", detail.summary.topology.replaceAll("_", " ")],
+        ["Lifecycle", detail.summary.lifecycle.replaceAll("_", " ")],
+        ["Attention", detail.summary.attentionSummary.replaceAll("_", " ")],
+        ["Availability", detail.summary.availabilitySummary.replaceAll("_", " ")],
+        ["Members", String(detail.summary.memberCount)],
+        ["Current peers", String(detail.currentRevisionRefs.length)]
+      ]),
       renderCurrentRevisionChoices(
         route.changeId,
         detail.currentRevisionRefs,
@@ -6081,6 +7605,24 @@
         actions2
       )
     ];
+    const relationships = renderChangeRelationshipGraph(detail, route, actions2);
+    if (relationships) nodes.push(relationships);
+    if (detail.summary.titleAssertions.length > 1) {
+      const titles = document.createElement("section");
+      titles.className = "detail-notice";
+      titles.append(detailHeading("Title assertions", 3));
+      for (const title of detail.summary.titleAssertions)
+        titles.append(detailLine(title));
+      nodes.push(titles);
+    }
+    if (detail.operativeObligations.length > 0) {
+      const obligations = document.createElement("section");
+      obligations.className = "detail-notice detail-notice-warning";
+      obligations.append(detailHeading("What needs attention", 3));
+      for (const obligation of detail.operativeObligations)
+        obligations.append(detailLine(obligation));
+      nodes.push(obligations);
+    }
     const sections = [
       [
         "Member Revisions",
@@ -6142,16 +7684,21 @@
           (qualification) => `${shortExact2(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`
         )
       ],
-      ["Operative Obligations", detail.operativeObligations],
       ["Diagnostics", detail.diagnostics]
     ];
+    const record = document.createElement("details");
+    record.className = "detail-record";
+    const recordLabel = document.createElement("summary");
+    recordLabel.textContent = "Recorded claims and diagnostics";
+    record.append(recordLabel);
     for (const [title, entries] of sections) {
       const section = document.createElement("section");
       section.append(detailHeading(title, 3));
       if (entries.length === 0) section.append(message("None."));
       for (const entry of entries) section.append(detailLine(entry));
-      nodes.push(section);
+      record.append(section);
     }
+    nodes.push(record);
     return nodes;
   }
   __name(renderChangeDetail, "renderChangeDetail");
@@ -6191,11 +7738,11 @@
       for (const diagnostic of reading.document.diagnostics)
         nodes.push(detailLine(diagnostic));
       for (const revision2 of [route.from, route.to]) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "ghost";
-        button.textContent = `Open authoritative captured diff: ${revision2.revisionId}`;
-        button.addEventListener(
+        const button2 = document.createElement("button");
+        button2.type = "button";
+        button2.className = "ghost";
+        button2.textContent = `Open authoritative captured diff: ${revision2.revisionId}`;
+        button2.addEventListener(
           "click",
           () => actions2.navigate({
             kind: "resource",
@@ -6204,7 +7751,7 @@
             query: route.query
           })
         );
-        nodes.push(button);
+        nodes.push(button2);
       }
       nodes.push(copy);
       return nodes;
@@ -6215,30 +7762,36 @@
         detailHeading(
           reading.kind === "association" ? "Association comparisons" : "Exact Revision"
         ),
-        detailLine(shortExact2(document2.revision), "mono"),
-        detailLine(
-          `currency: ${document2.revisionCurrency.replaceAll("_", " ")} · relation: ${document2.relationClassification}`
-        ),
-        detailLine(
-          `captured resource: ${document2.availability.replaceAll("_", " ")}`
-        )
+        detailIdentity(document2.revision),
+        detailState([
+          ["Currency", document2.revisionCurrency.replaceAll("_", " ")],
+          ["Relation", document2.relationClassification.replaceAll("_", " ")],
+          ["Captured resource", document2.availability.replaceAll("_", " ")],
+          ["Facts", String(document2.factPresentations.length)],
+          ["Associations", String(document2.associations.length)]
+        ])
       ];
       if (reading.kind === "revision") {
+        const factRelationships = route.kind === "revision" ? renderExactFactRelationshipGraph(document2, route, actions2) : null;
         nodes.push(
-          detailHeading("Authoritative captured diff", 3),
-          renderCapturedDiff(
-            document2.exactRevisionDocument,
-            annotationsForExactRevision(document2)
+          detailActions(
+            openAnnotatedDiff(route, actions2),
+            openCapturedResource(route, actions2)
           ),
+          ...factRelationships ? [factRelationships] : [],
           renderFacts(reading, route, actions2),
           renderFactPorts(reading)
         );
       }
-      nodes.push(
-        renderAssociations(reading, route, actions2),
-        openCapturedResource(route, actions2),
-        copy
-      );
+      nodes.push(renderAssociations(reading, route, actions2));
+      if (reading.kind === "association")
+        nodes.push(
+          detailActions(
+            openAnnotatedDiff(route, actions2),
+            openCapturedResource(route, actions2)
+          )
+        );
+      nodes.push(copy);
       return nodes;
     }
     return [
@@ -6368,6 +7921,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   }) {
     const master = document.querySelector("#master");
     if (!master) return;
+    if (snapshot2.route.kind === "diff" && presentation.reading?.kind === "diff") {
+      renderChangeInspectorDiffPage(
+        presentation.reading.document,
+        snapshot2.route,
+        actions2
+      );
+      return;
+    }
+    hideChangeInspectorDiffPage();
     const routeDiagnostic = document.querySelector("#route-diagnostic");
     if (routeDiagnostic) {
       routeDiagnostic.textContent = snapshot2.diagnostic ?? "";
@@ -6422,12 +7984,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         timelineRoute,
         route.kind === "event" ? route.eventId : null
       );
-      document.querySelectorAll("#lens-switcher [data-lens]").forEach((button) => {
-        button.setAttribute(
-          "aria-pressed",
-          String(button.dataset.lens === "timeline")
-        );
-      });
+      syncLensLinks("timeline", snapshot2.route);
       setText("#stat-events", `${history2.eventCount} events`);
       setText(
         "#stat-units",
@@ -6455,7 +8012,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const heading = document.createElement("h1");
       heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
       list.append(heading);
-      for (const summary of page.changes.slice(0, 150)) {
+      for (const [index, summary] of page.changes.slice(0, 150).entries()) {
         const card = changeCardPresentation(
           summary,
           page.presentations?.[summary.changeId]
@@ -6463,66 +8020,26 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const element = document.createElement("article");
         element.className = "unit-card";
         element.dataset.changeId = summary.changeId;
-        element.setAttribute("aria-label", card.accessibleName);
-        const badges = document.createElement("p");
-        badges.className = "change-card-badges";
-        for (const value of card.badges) {
-          const badge = document.createElement("span");
-          badge.className = "badge";
-          badge.textContent = value;
-          badges.append(badge, " ");
-        }
-        element.append(badges);
-        if (card.peers.length === 0) {
-          const unavailable = document.createElement("h3");
-          unavailable.textContent = "Current Revision unavailable";
-          element.append(unavailable);
-        } else if (card.peers.length > 1) {
-          const peerHeading = document.createElement("h3");
-          peerHeading.textContent = "Current Revisions";
-          element.append(peerHeading);
-        }
-        for (const peer of card.peers) {
-          const peerRow = document.createElement("div");
-          peerRow.className = "change-card-peer";
-          const choose = document.createElement("button");
-          choose.type = "button";
-          choose.className = "ghost change-card-peer-open";
-          choose.textContent = peer.label;
-          choose.title = peer.copyText;
-          choose.setAttribute(
-            "aria-label",
-            `${peer.accessibleName}; open for Change ${summary.changeId}`
-          );
-          choose.addEventListener(
-            "click",
-            () => actions2.navigate({
-              kind: "revision",
-              changeId: summary.changeId,
-              revision: peer.revision,
-              query: queryForExactNavigation(route)
-            })
-          );
-          const copyPeer = document.createElement("button");
-          copyPeer.type = "button";
-          copyPeer.className = "ghost";
-          copyPeer.textContent = "Copy exact Revision";
-          copyPeer.setAttribute(
-            "aria-label",
-            `Copy ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`
-          );
-          copyPeer.addEventListener("click", () => copyExact(peer.copyText));
-          peerRow.append(choose, copyPeer);
-          element.append(peerRow);
-        }
-        const actionsElement = document.createElement("div");
-        actionsElement.className = "actions change-card-actions";
-        const open = document.createElement("button");
-        open.type = "button";
-        open.className = "ghost";
-        open.textContent = "Open Change";
-        open.setAttribute("aria-label", `Open Change ${summary.changeId}`);
-        open.addEventListener(
+        const headingId = `change-card-heading-${index}`;
+        element.setAttribute("aria-labelledby", headingId);
+        const primary = document.createElement("button");
+        primary.type = "button";
+        primary.className = "change-card-primary";
+        primary.setAttribute(
+          "aria-label",
+          `${card.primaryAction.label}. ${card.accessibleName}`
+        );
+        primary.title = card.title;
+        const headline = document.createElement("span");
+        headline.id = headingId;
+        headline.className = "change-card-headline";
+        headline.textContent = card.headline;
+        const identity = document.createElement("code");
+        identity.className = "change-card-id mono";
+        identity.textContent = card.visibleChangeId;
+        identity.title = card.title;
+        primary.append(headline, identity);
+        primary.addEventListener(
           "click",
           () => actions2.navigate({
             kind: "change",
@@ -6530,16 +8047,106 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             query: queryForExactNavigation(route)
           })
         );
-        const changeIdentity = document.createElement("code");
-        changeIdentity.className = "mono";
-        changeIdentity.textContent = summary.changeId;
-        const copyChange = document.createElement("button");
-        copyChange.type = "button";
-        copyChange.className = "ghost";
-        copyChange.textContent = "Copy Change ID";
-        copyChange.addEventListener("click", () => copyExact(summary.changeId));
-        actionsElement.append(open, changeIdentity, copyChange);
-        element.append(actionsElement);
+        element.append(primary);
+        if (card.attention) {
+          const attention = document.createElement("section");
+          attention.className = "change-card-attention";
+          attention.setAttribute("aria-label", "Why this Change needs attention");
+          const reason = document.createElement("strong");
+          reason.className = "change-card-attention-reason";
+          reason.textContent = card.attention.reason;
+          reason.title = card.attention.primary.title;
+          const ask = document.createElement("p");
+          ask.className = "change-card-attention-ask";
+          ask.textContent = card.attention.ask;
+          const action = document.createElement("p");
+          action.className = "change-card-attention-action";
+          action.textContent = `Next: ${card.attention.actionLabel}`;
+          attention.append(reason, ask, action);
+          if (card.attention.additionalReasons.length > 0) {
+            const additional = document.createElement("ul");
+            additional.className = "change-card-attention-additional";
+            additional.setAttribute("aria-label", "Additional reasons");
+            for (const item of card.attention.additionalReasons) {
+              const row = document.createElement("li");
+              row.textContent = `${item.reason}: ${item.ask}`;
+              row.title = item.title;
+              additional.append(row);
+            }
+            attention.append(additional);
+          }
+          if (card.attention.diagnostics?.length) {
+            const details = document.createElement("section");
+            details.className = "change-card-attention-diagnostics";
+            details.setAttribute("aria-label", "Attention details");
+            const detailsHeading = document.createElement("strong");
+            detailsHeading.textContent = "Details";
+            const diagnostics = document.createElement("ul");
+            for (const diagnostic of card.attention.diagnostics) {
+              const row = document.createElement("li");
+              row.textContent = diagnostic;
+              diagnostics.append(row);
+            }
+            details.append(detailsHeading, diagnostics);
+            attention.append(details);
+          }
+          element.append(attention);
+        }
+        const state = document.createElement("dl");
+        state.className = "change-card-state";
+        for (const axis of card.stateAxes) {
+          const label2 = document.createElement("dt");
+          label2.textContent = axis.label;
+          const value = document.createElement("dd");
+          value.textContent = axis.value;
+          state.append(label2, value);
+        }
+        element.append(state);
+        if (card.unavailableReason) {
+          const unavailable = document.createElement("p");
+          unavailable.className = "change-card-unavailable";
+          unavailable.textContent = card.unavailableReason;
+          element.append(unavailable);
+        } else if (card.peers.length === 1) {
+          const peer = card.peers[0];
+          const current = document.createElement("p");
+          current.className = "change-card-current";
+          current.append("Current Revision · ");
+          const exact = document.createElement("code");
+          exact.className = "mono";
+          exact.textContent = peer.visibleIdentity;
+          exact.title = peer.title;
+          current.append(exact);
+          element.append(current);
+        } else {
+          const peers = document.createElement("section");
+          peers.className = "change-card-peers";
+          const peerHeading = document.createElement("h3");
+          peerHeading.textContent = "Choose an exact current Revision";
+          peers.append(peerHeading);
+          for (const peer of card.peers) {
+            const choose = document.createElement("button");
+            choose.type = "button";
+            choose.className = "ghost change-card-peer-open";
+            choose.textContent = `${peer.label} · ${peer.visibleIdentity}`;
+            choose.title = peer.title;
+            choose.setAttribute(
+              "aria-label",
+              `${peer.accessibleName}; open for Change ${summary.changeId}`
+            );
+            choose.addEventListener(
+              "click",
+              () => actions2.navigate({
+                kind: "revision",
+                changeId: summary.changeId,
+                revision: peer.revision,
+                query: queryForExactNavigation(route)
+              })
+            );
+            peers.append(choose);
+          }
+          element.append(peers);
+        }
         list.append(element);
       }
       if (page.changes.length === 0)
@@ -6570,9 +8177,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       master.replaceChildren(list);
       master.dataset.changeListKey = listKey;
     }
-    document.querySelectorAll("#lens-switcher [data-lens]").forEach((button) => {
-      button.setAttribute("aria-pressed", String(button.dataset.lens === lens));
-    });
+    syncLensLinks(lens, snapshot2.route);
     setText(
       "#stat-events",
       `${snapshot2.generation.profile.authorityCursor.eventCount ?? "—"} events`
@@ -7023,6 +8628,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (location.hash !== hash) location.hash = hash;
       else void onRoute();
     }, "navigate");
+    const replace = /* @__PURE__ */ __name((route) => {
+      const hash = formatChangeInspectorRoute(route);
+      if (location.hash === hash) return;
+      history.replaceState(history.state, "", hash);
+      void onRoute();
+    }, "replace");
     let reading = null;
     let readingRefusal = null;
     let visibleReading = "";
@@ -7039,7 +8650,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const monitor = timelineMonitor.snapshot();
       renderChangeInspector(
         snapshot2,
-        { navigate, parkTimelineMonitoring },
+        { navigate, replace, parkTimelineMonitoring },
         {
           reading,
           refusal: readingRefusal,

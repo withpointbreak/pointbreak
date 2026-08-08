@@ -8,7 +8,7 @@ mod support;
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::inspect::{Inspector, capture, representative_store};
+use support::inspect::{Inspector, capture, representative_store, urlencode};
 use support::pointbreak;
 
 /// A repo with a base commit and a working-tree change, ready to capture.
@@ -227,4 +227,108 @@ fn shared_review_show_document_has_no_fact_supersession() {
         show.get("factSupersession").is_none(),
         "shared doc must not carry the graph"
     );
+}
+
+#[test]
+fn change_exact_revision_graph_separates_fact_relationship_families() {
+    let repo = repo_with_change();
+    let arg = repo.path().to_str().unwrap();
+    let revision_id = capture(repo.path());
+
+    let first_observation: Value = serde_json::from_slice(
+        &pointbreak([
+            "observation",
+            "add",
+            "--repo",
+            arg,
+            "--track",
+            "agent:codex",
+            "--title",
+            "first note",
+        ])
+        .stdout,
+    )
+    .expect("observation add JSON");
+    let observation_a = first_observation["observationId"]
+        .as_str()
+        .expect("observationId")
+        .to_owned();
+    let second_observation: Value = serde_json::from_slice(
+        &pointbreak([
+            "observation",
+            "add",
+            "--repo",
+            arg,
+            "--track",
+            "agent:codex",
+            "--title",
+            "corrected note",
+            "--supersedes",
+            &observation_a,
+        ])
+        .stdout,
+    )
+    .expect("observation add JSON");
+    let observation_b = second_observation["observationId"]
+        .as_str()
+        .expect("observationId")
+        .to_owned();
+
+    let assessment_a = assessment_id(&pointbreak([
+        "assessment",
+        "add",
+        "--repo",
+        arg,
+        "--track",
+        "agent:codex",
+        "--assessment",
+        "needs-changes",
+    ]));
+    let assessment_b = assessment_id(&pointbreak([
+        "assessment",
+        "add",
+        "--repo",
+        arg,
+        "--track",
+        "agent:codex",
+        "--assessment",
+        "accepted",
+        "--replaces",
+        &assessment_a,
+    ]));
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = &changes["changes"][0];
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = &change["currentRevisionRefs"][0];
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(change_id),
+        urlencode(&revision_id),
+        urlencode(artifact_hash)
+    ));
+    let graph = &revision["inspectorPresentation"]["factGraph"];
+
+    let observation_edges = graph["observationSupersedes"]
+        .as_array()
+        .expect("observation edges");
+    assert_eq!(observation_edges.len(), 1);
+    assert_eq!(observation_edges[0]["fromFactId"], observation_b);
+    assert_eq!(observation_edges[0]["toFactId"], observation_a);
+    assert_eq!(observation_edges[0]["originRevision"], *exact);
+    assert!(!observation_edges[0]["path"].as_array().unwrap().is_empty());
+
+    let assessment_edges = graph["assessmentReplaces"]
+        .as_array()
+        .expect("assessment edges");
+    assert_eq!(assessment_edges.len(), 1);
+    assert_eq!(assessment_edges[0]["fromFactId"], assessment_b);
+    assert_eq!(assessment_edges[0]["toFactId"], assessment_a);
+    assert_eq!(assessment_edges[0]["originRevision"], *exact);
+    assert!(!assessment_edges[0]["path"].as_array().unwrap().is_empty());
+    assert!(graph["factPorts"].as_array().unwrap().is_empty());
 }

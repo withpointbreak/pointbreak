@@ -75,6 +75,28 @@ describe("exact Inspector reading controller", () => {
     expect(reading.kind).toBe("revision");
   });
 
+  it("loads the full-frame annotated diff from the same contextual exact Revision document", async () => {
+    const route: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId,
+      revision,
+      query: {},
+      focus: { fileQuery: "has:facts" },
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe(
+        "/api/v2/changes/change%3Asha256%3Areading/revisions/rev%3Asha256%3Areading?artifactHash=sha256%3Aartifact-reading",
+      );
+      return new Response(JSON.stringify(contextualDetail()));
+    }) as typeof fetch;
+
+    const reading = await loadChangeInspectorReading(route, stamp);
+    expect(reading).toMatchObject({
+      kind: "diff",
+      document: { changeId, revision },
+    });
+  });
+
   it("refuses a captured resource returned for another exact Revision", async () => {
     const route: Extract<ChangeInspectorRoute, { kind: "resource" }> = {
       kind: "resource",

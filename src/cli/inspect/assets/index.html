@@ -17,9 +17,9 @@
         <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
       </div>
       <nav id="lens-switcher" aria-label="Change lenses">
-        <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-        <button class="lens-tab" type="button" data-lens="changes" aria-pressed="false">Changes</button>
-        <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
+        <a class="lens-tab" data-lens="timeline" href="#/timeline" aria-current="page">Timeline</a>
+        <a class="lens-tab" data-lens="changes" href="#/changes">Changes</a>
+        <a class="lens-tab" data-lens="attention" href="#/attention">Attention</a>
       </nav>
       <div class="stats">
         <div id="store-identity" class="store-identity">
@@ -164,6 +164,9 @@
       <section id="diff-page" class="diff-page hidden" aria-label="annotated diff">
         <header class="diff-page-head">
           <span id="diff-page-title" class="mono"></span>
+          <span class="diff-page-keys">
+            <kbd>[</kbd>/<kbd>]</kbd> files · <kbd>p</kbd>/<kbd>n</kbd> facts
+          </span>
           <button id="diff-page-close" class="ghost" aria-label="Back to the record">‹ back</button>
         </header>
         <div class="diff-layout">
@@ -229,6 +232,8 @@
           <dt><kbd>Shift</kbd> + <kbd>F</kbd></dt><dd>follow or park the filtered Timeline head</dd>
           <dt><kbd>Enter</kbd></dt><dd>open the selected event or Change; choose an explicit current Revision from exact detail</dd>
           <dt><kbd>h</kbd> / <kbd>l</kbd></dt><dd>shrink / grow the Change list pane</dd>
+          <dt><kbd>[</kbd> / <kbd>]</kbd></dt><dd>move to the previous / next file in an annotated diff</dd>
+          <dt><kbd>p</kbd> / <kbd>n</kbd></dt><dd>move to the previous / next inline fact in an annotated diff</dd>
           <dt><kbd>/</kbd></dt><dd>focus the search box</dd>
           <dt><kbd>Esc</kbd></dt><dd>close a dialog or return from an exact surface to its originating lens</dd>
           <dt><kbd>?</kbd></dt><dd>toggle this cheat sheet</dd>

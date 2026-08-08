@@ -192,6 +192,17 @@ export async function bootstrapChangeInspector(
     if (location.hash !== hash) location.hash = hash;
     else void onRoute();
   };
+  // File navigation search is route state so reload/copy/Back remain honest,
+  // but typing it must not create a history entry per character. It refines
+  // the same exact document and still goes through the normal route epoch.
+  const replace = (
+    route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+  ) => {
+    const hash = formatChangeInspectorRoute(route);
+    if (location.hash === hash) return;
+    history.replaceState(history.state, "", hash);
+    void onRoute();
+  };
   let reading: ChangeInspectorReading | null = null;
   let readingRefusal: string | null = null;
   let visibleReading = "";
@@ -220,7 +231,7 @@ export async function bootstrapChangeInspector(
     const monitor = timelineMonitor.snapshot();
     renderChangeInspector(
       snapshot,
-      { navigate, parkTimelineMonitoring },
+      { navigate, replace, parkTimelineMonitoring },
       {
         reading,
         refusal: readingRefusal,

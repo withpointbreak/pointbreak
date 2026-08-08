@@ -19,13 +19,13 @@ use std::{fmt, thread};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use pointbreak::documents::{
-    ChangeQueryUnavailableDocumentV1, InspectStartupDocument, ReaderUpgradeRequiredDocumentV1,
-    version_document,
+    ChangeQueryUnavailableDocumentV1, EventHistoryDocumentV1, InspectStartupDocument,
+    ReaderUpgradeRequiredDocumentV1, version_document,
 };
 use pointbreak::model::EventId;
 use pointbreak::session::{
-    HistoryOrder, HistoryPage, HistoryQuery, QueryDiagnosticCode, QuerySurface,
-    SnapshotSummaryCache, parse_search_query_for,
+    ChangeReaderPresentationV1, HistoryOrder, HistoryPage, HistoryQuery, QueryDiagnosticCode,
+    QuerySurface, SnapshotSummaryCache, TrustSet, parse_search_query_for,
 };
 
 use super::{StartupOutputFormat, api};
@@ -157,9 +157,39 @@ impl InspectState {
     }
 }
 
-struct CachedChangeReaderState {
+struct CachedChangeReaderState<Presentation> {
     marker: u64,
     state: Arc<pointbreak::session::ChangeReaderStateV1>,
+    presentation_loaded: bool,
+    presentation: Option<Arc<Presentation>>,
+}
+
+struct CachedTimelineState<Timeline> {
+    marker: u64,
+    trust_set: TrustSet,
+    timeline: Option<Arc<Timeline>>,
+}
+
+struct ChangeReaderBaseGeneration<Presentation> {
+    marker: u64,
+    state: Arc<pointbreak::session::ChangeReaderStateV1>,
+    presentation: Option<Arc<Presentation>>,
+}
+
+pub(super) struct ChangeReaderGeneration<
+    Presentation = ChangeReaderPresentationV1,
+    Timeline = EventHistoryDocumentV1,
+> {
+    pub(super) state: Arc<pointbreak::session::ChangeReaderStateV1>,
+    pub(super) presentation: Option<Arc<Presentation>>,
+    pub(super) timeline: Option<Arc<Timeline>>,
+}
+
+#[derive(Clone, Copy)]
+enum ChangeReaderLoad<'a> {
+    State,
+    Changes,
+    Timeline(&'a TrustSet),
 }
 
 #[derive(Debug)]
@@ -182,24 +212,56 @@ impl fmt::Display for ChangeReaderLoadError {
 ///
 /// The cheap marker is only an invalidation detector. A miss always performs a
 /// complete capability-validated fold, and the marker is re-read afterward so
-/// a moving Journal can never publish a mixed generation. Cold CLI commands do
-/// not use this process-local cache.
-pub(super) struct ChangeReaderCache {
-    slot: Mutex<Option<CachedChangeReaderState>>,
+/// a moving Journal can never publish a mixed generation. Timeline projection
+/// has an independent single-flight slot so it cannot hold up already-warm
+/// Change readers. Cold CLI commands do not use this process-local cache.
+pub(super) struct ChangeReaderCache<
+    Presentation = ChangeReaderPresentationV1,
+    Timeline = EventHistoryDocumentV1,
+> {
+    slot: Mutex<Option<CachedChangeReaderState<Presentation>>>,
+    timeline_slot: Mutex<Option<CachedTimelineState<Timeline>>>,
 }
 
-impl ChangeReaderCache {
+impl<Presentation, Timeline> ChangeReaderCache<Presentation, Timeline> {
     fn new() -> Self {
         Self {
             slot: Mutex::new(None),
+            timeline_slot: Mutex::new(None),
         }
     }
+}
 
-    pub(super) fn load(
+impl ChangeReaderCache<ChangeReaderPresentationV1, EventHistoryDocumentV1> {
+    pub(super) fn load_state(
         &self,
         repo: &std::path::Path,
-    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, ChangeReaderLoadError> {
+    ) -> Result<ChangeReaderGeneration, ChangeReaderLoadError> {
+        self.load(repo, ChangeReaderLoad::State)
+    }
+
+    pub(super) fn load_changes(
+        &self,
+        repo: &std::path::Path,
+    ) -> Result<ChangeReaderGeneration, ChangeReaderLoadError> {
+        self.load(repo, ChangeReaderLoad::Changes)
+    }
+
+    pub(super) fn load_timeline(
+        &self,
+        repo: &std::path::Path,
+        trust_set: &TrustSet,
+    ) -> Result<ChangeReaderGeneration, ChangeReaderLoadError> {
+        self.load(repo, ChangeReaderLoad::Timeline(trust_set))
+    }
+
+    fn load(
+        &self,
+        repo: &std::path::Path,
+        scope: ChangeReaderLoad<'_>,
+    ) -> Result<ChangeReaderGeneration, ChangeReaderLoadError> {
         self.load_with(
+            scope,
             || {
                 pointbreak::session::change_reader_head_marker_for_repo(repo)
                     .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
@@ -209,38 +271,215 @@ impl ChangeReaderCache {
                     .map(Arc::new)
                     .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
             },
+            |state| {
+                state
+                    .ready()
+                    .map(|ready| ready.presentation().map(Arc::new))
+                    .transpose()
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
+            |state, presentation, trust_set| {
+                state
+                    .ready()
+                    .map(|ready| {
+                        ready
+                            .event_history_document(trust_set, presentation)
+                            .map(Arc::new)
+                    })
+                    .transpose()
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
         )
     }
+}
 
+impl<Presentation, Timeline> ChangeReaderCache<Presentation, Timeline> {
     fn load_with(
         &self,
+        scope: ChangeReaderLoad<'_>,
         mut marker: impl FnMut() -> Result<u64, ChangeReaderLoadError>,
         mut build: impl FnMut() -> Result<
             Arc<pointbreak::session::ChangeReaderStateV1>,
             ChangeReaderLoadError,
         >,
-    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, ChangeReaderLoadError> {
+        mut build_presentation: impl FnMut(
+            &pointbreak::session::ChangeReaderStateV1,
+        )
+            -> Result<Option<Arc<Presentation>>, ChangeReaderLoadError>,
+        mut build_timeline: impl FnMut(
+            &pointbreak::session::ChangeReaderStateV1,
+            &Presentation,
+            &TrustSet,
+        ) -> Result<Option<Arc<Timeline>>, ChangeReaderLoadError>,
+    ) -> Result<ChangeReaderGeneration<Presentation, Timeline>, ChangeReaderLoadError> {
+        match scope {
+            ChangeReaderLoad::State | ChangeReaderLoad::Changes => {
+                let generation =
+                    self.load_base_with(scope, &mut marker, &mut build, &mut build_presentation)?;
+                Ok(ChangeReaderGeneration {
+                    state: generation.state,
+                    presentation: generation.presentation,
+                    timeline: None,
+                })
+            }
+            ChangeReaderLoad::Timeline(trust_set) => self.load_timeline_with(
+                trust_set,
+                &mut marker,
+                &mut build,
+                &mut build_presentation,
+                &mut build_timeline,
+            ),
+        }
+    }
+
+    fn load_base_with(
+        &self,
+        scope: ChangeReaderLoad<'_>,
+        marker: &mut impl FnMut() -> Result<u64, ChangeReaderLoadError>,
+        build: &mut impl FnMut() -> Result<
+            Arc<pointbreak::session::ChangeReaderStateV1>,
+            ChangeReaderLoadError,
+        >,
+        build_presentation: &mut impl FnMut(
+            &pointbreak::session::ChangeReaderStateV1,
+        )
+            -> Result<Option<Arc<Presentation>>, ChangeReaderLoadError>,
+    ) -> Result<ChangeReaderBaseGeneration<Presentation>, ChangeReaderLoadError> {
+        debug_assert!(!matches!(scope, ChangeReaderLoad::Timeline(_)));
         let mut slot = self.slot.lock().map_err(|_| {
             ChangeReaderLoadError::Other("Change reader cache lock is poisoned".to_owned())
         })?;
         for _ in 0..2 {
             let before = marker()?;
-            if let Some(cached) = slot.as_ref()
+            if let Some(cached) = slot.as_mut()
                 && cached.marker == before
             {
-                return Ok(Arc::clone(&cached.state));
+                match scope {
+                    ChangeReaderLoad::State => {
+                        return Ok(ChangeReaderBaseGeneration {
+                            marker: cached.marker,
+                            state: Arc::clone(&cached.state),
+                            presentation: None,
+                        });
+                    }
+                    ChangeReaderLoad::Changes if cached.presentation_loaded => {
+                        return Ok(ChangeReaderBaseGeneration {
+                            marker: cached.marker,
+                            state: Arc::clone(&cached.state),
+                            presentation: cached.presentation.clone(),
+                        });
+                    }
+                    ChangeReaderLoad::Changes => {}
+                    ChangeReaderLoad::Timeline(_) => {
+                        unreachable!("Timeline loads use their own slot")
+                    }
+                }
+
+                let state = Arc::clone(&cached.state);
+                let presentation = build_presentation(&state)?;
+                let after = marker()?;
+                if before == after {
+                    cached.presentation_loaded = true;
+                    cached.presentation = presentation.clone();
+                    return Ok(ChangeReaderBaseGeneration {
+                        marker: after,
+                        state,
+                        presentation,
+                    });
+                }
+                continue;
             }
             let state = build()?;
+            let presentation_loaded = !matches!(scope, ChangeReaderLoad::State);
+            let presentation = presentation_loaded
+                .then(|| build_presentation(&state))
+                .transpose()?
+                .flatten();
             let after = marker()?;
             if before == after {
                 *slot = Some(CachedChangeReaderState {
                     marker: after,
                     state: Arc::clone(&state),
+                    presentation_loaded,
+                    presentation: presentation.clone(),
                 });
-                return Ok(state);
+                return Ok(ChangeReaderBaseGeneration {
+                    marker: after,
+                    state,
+                    presentation,
+                });
             }
         }
         Err(ChangeReaderLoadError::MovingJournal)
+    }
+
+    fn load_timeline_with(
+        &self,
+        trust_set: &TrustSet,
+        marker: &mut impl FnMut() -> Result<u64, ChangeReaderLoadError>,
+        build: &mut impl FnMut() -> Result<
+            Arc<pointbreak::session::ChangeReaderStateV1>,
+            ChangeReaderLoadError,
+        >,
+        build_presentation: &mut impl FnMut(
+            &pointbreak::session::ChangeReaderStateV1,
+        )
+            -> Result<Option<Arc<Presentation>>, ChangeReaderLoadError>,
+        build_timeline: &mut impl FnMut(
+            &pointbreak::session::ChangeReaderStateV1,
+            &Presentation,
+            &TrustSet,
+        ) -> Result<Option<Arc<Timeline>>, ChangeReaderLoadError>,
+    ) -> Result<ChangeReaderGeneration<Presentation, Timeline>, ChangeReaderLoadError> {
+        let generation =
+            self.load_base_with(ChangeReaderLoad::Changes, marker, build, build_presentation)?;
+
+        // Timeline construction can be expensive, but it is a pure projection
+        // over this already-stable immutable Change generation. Serialize only
+        // competing Timeline builders; warm State and Changes readers must not
+        // wait for it. An append during this projection does not invalidate the
+        // coherent snapshot: this result remains generation N, while the next
+        // request observes the new marker and loads generation N+1.
+        let mut timeline_slot = self.timeline_slot.lock().map_err(|_| {
+            ChangeReaderLoadError::Other("Change reader Timeline cache lock is poisoned".to_owned())
+        })?;
+        if let Some(cached) = timeline_slot.as_ref()
+            && cached.marker == generation.marker
+            && cached.trust_set == *trust_set
+        {
+            return Ok(ChangeReaderGeneration {
+                state: generation.state,
+                presentation: generation.presentation,
+                timeline: cached.timeline.clone(),
+            });
+        }
+
+        let timeline = generation
+            .presentation
+            .as_deref()
+            .map(|presentation| build_timeline(&generation.state, presentation, trust_set))
+            .transpose()?
+            .flatten();
+        let generation_is_current = self
+            .slot
+            .lock()
+            .map_err(|_| {
+                ChangeReaderLoadError::Other("Change reader cache lock is poisoned".to_owned())
+            })?
+            .as_ref()
+            .is_some_and(|cached| cached.marker == generation.marker);
+        if generation_is_current {
+            *timeline_slot = Some(CachedTimelineState {
+                marker: generation.marker,
+                trust_set: trust_set.clone(),
+                timeline: timeline.clone(),
+            });
+        }
+        Ok(ChangeReaderGeneration {
+            state: generation.state,
+            presentation: generation.presentation,
+            timeline,
+        })
     }
 }
 
@@ -588,7 +827,7 @@ fn warm_caches_after_auth(state: &Arc<InspectState>) {
     }
     let state = Arc::clone(state);
     thread::spawn(move || {
-        if let Err(error) = state.change_reader_cache.load(state.repo.as_path()) {
+        if let Err(error) = state.change_reader_cache.load_state(state.repo.as_path()) {
             tracing::debug!(error = %error, "inspect_change_reader_cache_warm_failed");
         }
         if !state.derived_history.is_active()
@@ -1908,6 +2147,8 @@ mod tests {
 
     #[test]
     fn change_reader_cache_reuses_and_invalidates_one_complete_generation() {
+        use std::cell::Cell;
+
         let repo = tempfile::tempdir().expect("cache test repository");
         for args in [
             vec!["init", "--quiet"],
@@ -1943,21 +2184,644 @@ mod tests {
         );
 
         let cache = ChangeReaderCache::new();
-        let first = cache.load(repo.path()).unwrap();
-        let hit = cache.load(repo.path()).unwrap();
-        assert!(Arc::ptr_eq(&first, &hit));
+        let first = cache.load_state(repo.path()).unwrap();
+        let hit = cache.load_state(repo.path()).unwrap();
+        assert!(Arc::ptr_eq(&first.state, &hit.state));
 
         std::fs::write(repo.path().join("sample.txt"), "after\n").unwrap();
         pointbreak::session::capture_worktree_review(pointbreak::session::CaptureOptions::new(
             repo.path(),
         ))
         .unwrap();
-        let refreshed = cache.load(repo.path()).unwrap();
-        assert!(!Arc::ptr_eq(&first, &refreshed));
+        let refreshed = cache.load_state(repo.path()).unwrap();
+        assert!(!Arc::ptr_eq(&first.state, &refreshed.state));
         assert!(
-            refreshed.capability.cursor.journal_record_count
-                > first.capability.cursor.journal_record_count
+            refreshed.state.capability.cursor.journal_record_count
+                > first.state.capability.cursor.journal_record_count
         );
+
+        let cache = ChangeReaderCache::<u8, u16>::new();
+        let state_builds = Cell::new(0_usize);
+        let presentation_builds = Cell::new(0_usize);
+        let timeline_builds = Cell::new(0_usize);
+        let trust_set = TrustSet::default();
+        let presented = cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || {
+                    state_builds.set(state_builds.get() + 1);
+                    pointbreak::session::change_reader_state_for_repo(repo.path())
+                        .map(Arc::new)
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                |_| {
+                    presentation_builds.set(presentation_builds.get() + 1);
+                    Ok(Some(Arc::new(presentation_builds.get() as u8)))
+                },
+                |_, _, _| panic!("a Changes load must not build Timeline"),
+            )
+            .expect("first Changes request builds one state and presentation");
+        assert_eq!(state_builds.get(), 1);
+        assert_eq!(presentation_builds.get(), 1);
+        assert_eq!(timeline_builds.get(), 0);
+        let first_presentation = presented
+            .presentation
+            .as_ref()
+            .expect("captured Change state has a presentation");
+        assert!(presented.timeline.is_none());
+
+        let same_changes = cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || panic!("same-marker Changes request must not rebuild state"),
+                |_| panic!("same-marker Changes request must not rebuild presentation"),
+                |_, _, _| panic!("a Changes load must not build Timeline"),
+            )
+            .expect("same-marker Changes cache hit");
+        assert!(Arc::ptr_eq(
+            first_presentation,
+            same_changes
+                .presentation
+                .as_ref()
+                .expect("Changes returns cached presentation")
+        ));
+
+        let profile = cache
+            .load_with(
+                ChangeReaderLoad::State,
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || panic!("profile cache hit must not rebuild state"),
+                |_| panic!("profile cache hit must not build presentation"),
+                |_, _, _| panic!("profile cache hit must not build Timeline"),
+            )
+            .expect("profile cache hit");
+        assert!(profile.presentation.is_none());
+        assert!(profile.timeline.is_none());
+        assert!(Arc::ptr_eq(&presented.state, &profile.state));
+
+        let timeline = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || panic!("Timeline must reuse the cached state"),
+                |_| panic!("Timeline must reuse the cached Change presentation"),
+                |_, presentation, _| {
+                    assert_eq!(*presentation, 1);
+                    timeline_builds.set(timeline_builds.get() + 1);
+                    Ok(Some(Arc::new(timeline_builds.get() as u16)))
+                },
+            )
+            .expect("first Timeline request builds only Timeline");
+        assert_eq!(state_builds.get(), 1);
+        assert_eq!(presentation_builds.get(), 1);
+        assert_eq!(timeline_builds.get(), 1);
+        assert!(Arc::ptr_eq(
+            first_presentation,
+            timeline
+                .presentation
+                .as_ref()
+                .expect("Timeline reuses the Change presentation")
+        ));
+        let first_timeline = timeline.timeline.as_ref().expect("Timeline is available");
+
+        let same_timeline = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || panic!("same trust must not rebuild state"),
+                |_| panic!("same trust must not rebuild Change presentation"),
+                |_, _, _| panic!("same trust must not rebuild Timeline"),
+            )
+            .expect("same-trust Timeline cache hit");
+        assert!(Arc::ptr_eq(
+            first_timeline,
+            same_timeline.timeline.as_ref().expect("cached Timeline")
+        ));
+
+        let trust_path = repo.path().join("different-trust.json");
+        std::fs::write(
+            &trust_path,
+            r#"{"allowedSigners":{"actor:agent:codex":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
+        )
+        .expect("write distinct trust fixture");
+        let different_trust =
+            TrustSet::from_allowed_signers_file(&trust_path).expect("parse distinct trust fixture");
+        let different = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&different_trust),
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || panic!("trust-only change must not rebuild state"),
+                |_| panic!("trust-only change must not rebuild Change presentation"),
+                |_, presentation, _| {
+                    assert_eq!(*presentation, 1);
+                    timeline_builds.set(timeline_builds.get() + 1);
+                    Ok(Some(Arc::new(timeline_builds.get() as u16)))
+                },
+            )
+            .expect("different trust rebuilds only Timeline");
+        assert_eq!(state_builds.get(), 1);
+        assert_eq!(presentation_builds.get(), 1);
+        assert_eq!(timeline_builds.get(), 2);
+        assert!(Arc::ptr_eq(&presented.state, &different.state));
+        assert!(Arc::ptr_eq(
+            first_presentation,
+            different
+                .presentation
+                .as_ref()
+                .expect("different trust reuses the Change presentation")
+        ));
+        assert!(!Arc::ptr_eq(
+            first_timeline,
+            different
+                .timeline
+                .as_ref()
+                .expect("different trust has a distinct Timeline")
+        ));
+
+        std::fs::write(repo.path().join("sample.txt"), "after again\n").unwrap();
+        pointbreak::session::capture_worktree_review(pointbreak::session::CaptureOptions::new(
+            repo.path(),
+        ))
+        .unwrap();
+        let advanced = cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || {
+                    pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                || {
+                    state_builds.set(state_builds.get() + 1);
+                    pointbreak::session::change_reader_state_for_repo(repo.path())
+                        .map(Arc::new)
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+                |_| {
+                    presentation_builds.set(presentation_builds.get() + 1);
+                    Ok(Some(Arc::new(presentation_builds.get() as u8)))
+                },
+                |_, _, _| panic!("a post-append Changes load must not build Timeline"),
+            )
+            .expect("append advances state and Change presentation together");
+        assert_eq!(state_builds.get(), 2);
+        assert_eq!(presentation_builds.get(), 2);
+        assert_eq!(timeline_builds.get(), 2);
+        assert!(!Arc::ptr_eq(&different.state, &advanced.state));
+        assert!(!Arc::ptr_eq(
+            different
+                .presentation
+                .as_ref()
+                .expect("pre-append presentation exists"),
+            advanced
+                .presentation
+                .as_ref()
+                .expect("post-append presentation exists")
+        ));
+        assert!(advanced.timeline.is_none());
+    }
+
+    #[test]
+    fn change_reader_cache_serializes_concurrent_timeline_bootstrap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let repo = tempfile::tempdir().expect("concurrent cache test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let state = Arc::new(
+            pointbreak::session::change_reader_state_for_repo(repo.path())
+                .expect("build one reusable test state"),
+        );
+        let cache = Arc::new(ChangeReaderCache::<u8, u16>::new());
+        let state_builds = Arc::new(AtomicUsize::new(0));
+        let presentation_builds = Arc::new(AtomicUsize::new(0));
+        let timeline_builds = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(9));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let cache = Arc::clone(&cache);
+            let state = Arc::clone(&state);
+            let state_builds = Arc::clone(&state_builds);
+            let presentation_builds = Arc::clone(&presentation_builds);
+            let timeline_builds = Arc::clone(&timeline_builds);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let trust_set = TrustSet::default();
+                barrier.wait();
+                cache
+                    .load_with(
+                        ChangeReaderLoad::Timeline(&trust_set),
+                        || Ok(41),
+                        || {
+                            state_builds.fetch_add(1, Ordering::SeqCst);
+                            Ok(Arc::clone(&state))
+                        },
+                        |_| {
+                            presentation_builds.fetch_add(1, Ordering::SeqCst);
+                            Ok(Some(Arc::new(7)))
+                        },
+                        |_, presentation, _| {
+                            assert_eq!(*presentation, 7);
+                            timeline_builds.fetch_add(1, Ordering::SeqCst);
+                            Ok(Some(Arc::new(9)))
+                        },
+                    )
+                    .expect("concurrent bootstrap reaches one cached generation")
+            }));
+        }
+        barrier.wait();
+
+        let generations = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("cache bootstrap thread"))
+            .collect::<Vec<_>>();
+        assert_eq!(state_builds.load(Ordering::SeqCst), 1);
+        assert_eq!(presentation_builds.load(Ordering::SeqCst), 1);
+        assert_eq!(timeline_builds.load(Ordering::SeqCst), 1);
+        let first_presentation = generations[0]
+            .presentation
+            .as_ref()
+            .expect("presentation exists");
+        let first_timeline = generations[0].timeline.as_ref().expect("Timeline exists");
+        assert!(generations.iter().all(|generation| {
+            Arc::ptr_eq(&state, &generation.state)
+                && Arc::ptr_eq(
+                    first_presentation,
+                    generation
+                        .presentation
+                        .as_ref()
+                        .expect("every caller receives the cached presentation"),
+                )
+                && Arc::ptr_eq(
+                    first_timeline,
+                    generation
+                        .timeline
+                        .as_ref()
+                        .expect("every caller receives the cached Timeline"),
+                )
+        }));
+    }
+
+    #[test]
+    fn change_reader_cache_slow_timeline_does_not_block_warm_changes() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let repo = tempfile::tempdir().expect("mixed-scope cache test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let state = Arc::new(
+            pointbreak::session::change_reader_state_for_repo(repo.path())
+                .expect("build one reusable test state"),
+        );
+        let cache = Arc::new(ChangeReaderCache::<u8, u16>::new());
+        let warmed = cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || Ok(41),
+                || Ok(Arc::clone(&state)),
+                |_| Ok(Some(Arc::new(7))),
+                |_, _, _| panic!("warming Changes must not build Timeline"),
+            )
+            .expect("warm one marker-stable Changes generation");
+        let warmed_presentation = Arc::clone(
+            warmed
+                .presentation
+                .as_ref()
+                .expect("warm Changes presentation exists"),
+        );
+
+        let (timeline_started_tx, timeline_started_rx) = mpsc::channel();
+        let (timeline_release_tx, timeline_release_rx) = mpsc::channel();
+        let timeline_cache = Arc::clone(&cache);
+        let timeline_handle = std::thread::spawn(move || {
+            let trust_set = TrustSet::default();
+            timeline_cache
+                .load_with(
+                    ChangeReaderLoad::Timeline(&trust_set),
+                    || Ok(41),
+                    || panic!("warm Timeline must not rebuild state"),
+                    |_| panic!("warm Timeline must not rebuild Change presentation"),
+                    |_, presentation, _| {
+                        assert_eq!(*presentation, 7);
+                        timeline_started_tx
+                            .send(())
+                            .expect("announce blocked Timeline construction");
+                        timeline_release_rx
+                            .recv()
+                            .expect("release blocked Timeline construction");
+                        Ok(Some(Arc::new(9)))
+                    },
+                )
+                .expect("blocked Timeline builds from the warm generation")
+        });
+        timeline_started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Timeline construction reached its deliberate gate");
+
+        let (changes_done_tx, changes_done_rx) = mpsc::channel();
+        let changes_cache = Arc::clone(&cache);
+        let changes_handle = std::thread::spawn(move || {
+            let generation = changes_cache
+                .load_with(
+                    ChangeReaderLoad::Changes,
+                    || Ok(41),
+                    || panic!("warm Changes hit must not rebuild state"),
+                    |_| panic!("warm Changes hit must not rebuild presentation"),
+                    |_, _, _| panic!("Changes hit must not build Timeline"),
+                )
+                .expect("Changes remains available during Timeline construction");
+            changes_done_tx
+                .send(generation.presentation)
+                .expect("report completed Changes hit");
+        });
+        let concurrent_presentation = changes_done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("warm Changes hit must finish before Timeline is released")
+            .expect("concurrent Changes presentation exists");
+        assert!(Arc::ptr_eq(&warmed_presentation, &concurrent_presentation));
+
+        timeline_release_tx
+            .send(())
+            .expect("release Timeline construction");
+        changes_handle.join().expect("Changes cache-hit thread");
+        let timeline = timeline_handle.join().expect("Timeline builder thread");
+        assert_eq!(
+            timeline.timeline.as_deref().copied(),
+            Some(9),
+            "Timeline publishes after the independent Changes hit"
+        );
+    }
+
+    #[test]
+    fn change_reader_cache_keeps_snapshot_when_marker_advances_during_timeline_projection() {
+        use std::cell::Cell;
+
+        let repo = tempfile::tempdir().expect("Timeline snapshot cache test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let state = Arc::new(
+            pointbreak::session::change_reader_state_for_repo(repo.path())
+                .expect("build one reusable test state"),
+        );
+        let cache = ChangeReaderCache::<u8, u16>::new();
+        let current_marker = Cell::new(41_u64);
+        let state_builds = Cell::new(0_usize);
+        let presentation_builds = Cell::new(0_usize);
+        let timeline_builds = Cell::new(0_usize);
+        let trust_set = TrustSet::default();
+
+        let captured = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || Ok(current_marker.get()),
+                || {
+                    state_builds.set(state_builds.get() + 1);
+                    Ok(Arc::clone(&state))
+                },
+                |_| {
+                    presentation_builds.set(presentation_builds.get() + 1);
+                    Ok(Some(Arc::new(presentation_builds.get() as u8)))
+                },
+                |_, _, _| {
+                    timeline_builds.set(timeline_builds.get() + 1);
+                    current_marker.set(42);
+                    Ok(Some(Arc::new(timeline_builds.get() as u16)))
+                },
+            )
+            .expect("pure Timeline projection returns its captured generation");
+        assert_eq!(
+            state_builds.get(),
+            1,
+            "Timeline did not retry the state fold"
+        );
+        assert_eq!(presentation_builds.get(), 1);
+        assert_eq!(timeline_builds.get(), 1);
+        assert_eq!(captured.timeline.as_deref().copied(), Some(1));
+        {
+            let cached = cache.timeline_slot.lock().expect("Timeline cache slot");
+            let cached = cached.as_ref().expect("captured Timeline is cached");
+            assert_eq!(cached.marker, 41);
+            assert_eq!(cached.timeline.as_deref().copied(), Some(1));
+        }
+
+        let advanced = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || Ok(current_marker.get()),
+                || {
+                    state_builds.set(state_builds.get() + 1);
+                    Ok(Arc::clone(&state))
+                },
+                |_| {
+                    presentation_builds.set(presentation_builds.get() + 1);
+                    Ok(Some(Arc::new(presentation_builds.get() as u8)))
+                },
+                |_, _, _| {
+                    timeline_builds.set(timeline_builds.get() + 1);
+                    Ok(Some(Arc::new(timeline_builds.get() as u16)))
+                },
+            )
+            .expect("next Timeline request advances to the new marker");
+        assert_eq!(state_builds.get(), 2);
+        assert_eq!(presentation_builds.get(), 2);
+        assert_eq!(timeline_builds.get(), 2);
+        assert_eq!(advanced.timeline.as_deref().copied(), Some(2));
+        assert_eq!(
+            cache
+                .timeline_slot
+                .lock()
+                .expect("Timeline cache slot")
+                .as_ref()
+                .expect("advanced Timeline is cached")
+                .marker,
+            42
+        );
+    }
+
+    #[test]
+    fn change_reader_cache_older_timeline_cannot_overwrite_newer_cached_generation() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let repo = tempfile::tempdir().expect("Timeline generation-order test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let state = Arc::new(
+            pointbreak::session::change_reader_state_for_repo(repo.path())
+                .expect("build one reusable test state"),
+        );
+        let cache = Arc::new(ChangeReaderCache::<u8, u16>::new());
+        let marker = Arc::new(AtomicU64::new(41));
+        cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || Ok(marker.load(Ordering::SeqCst)),
+                || Ok(Arc::clone(&state)),
+                |_| Ok(Some(Arc::new(7))),
+                |_, _, _| panic!("warming Changes must not build Timeline"),
+            )
+            .expect("warm generation N");
+
+        let mut timeline_slot = cache.timeline_slot.lock().expect("hold Timeline slot");
+        let (old_base_tx, old_base_rx) = mpsc::channel();
+        let old_cache = Arc::clone(&cache);
+        let old_marker = Arc::clone(&marker);
+        let old_handle = std::thread::spawn(move || {
+            let trust_set = TrustSet::default();
+            let mut old_base_tx = Some(old_base_tx);
+            old_cache
+                .load_with(
+                    ChangeReaderLoad::Timeline(&trust_set),
+                    || {
+                        let observed = old_marker.load(Ordering::SeqCst);
+                        if let Some(sender) = old_base_tx.take() {
+                            sender.send(observed).expect("announce generation N base");
+                        }
+                        Ok(observed)
+                    },
+                    || panic!("generation N is already warm"),
+                    |_| panic!("generation N presentation is already warm"),
+                    |_, _, _| Ok(Some(Arc::new(9))),
+                )
+                .expect("older Timeline still returns its coherent generation")
+        });
+        assert_eq!(
+            old_base_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("older Timeline captured its base before advancing"),
+            41
+        );
+
+        marker.store(42, Ordering::SeqCst);
+        cache
+            .load_with(
+                ChangeReaderLoad::Changes,
+                || Ok(marker.load(Ordering::SeqCst)),
+                || Ok(Arc::clone(&state)),
+                |_| Ok(Some(Arc::new(8))),
+                |_, _, _| panic!("advancing Changes must not build Timeline"),
+            )
+            .expect("publish generation N+1 while older Timeline waits");
+        *timeline_slot = Some(CachedTimelineState {
+            marker: 42,
+            trust_set: TrustSet::default(),
+            timeline: Some(Arc::new(99)),
+        });
+        drop(timeline_slot);
+
+        let old = old_handle.join().expect("older Timeline thread");
+        assert_eq!(old.timeline.as_deref().copied(), Some(9));
+        let cached = cache.timeline_slot.lock().expect("Timeline cache slot");
+        let cached = cached.as_ref().expect("newer Timeline remains cached");
+        assert_eq!(cached.marker, 42);
+        assert_eq!(cached.timeline.as_deref().copied(), Some(99));
+    }
+
+    #[test]
+    fn change_reader_cache_remembers_same_trust_unavailable_timeline() {
+        use std::cell::Cell;
+
+        let repo = tempfile::tempdir().expect("unavailable cache test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+        let state = Arc::new(
+            pointbreak::session::change_reader_state_for_repo(repo.path())
+                .expect("build unavailable test state"),
+        );
+        let cache = ChangeReaderCache::<u8, u16>::new();
+        let state_builds = Cell::new(0_usize);
+        let presentation_builds = Cell::new(0_usize);
+        let timeline_builds = Cell::new(0_usize);
+        let trust_set = TrustSet::default();
+        let first = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || Ok(17),
+                || {
+                    state_builds.set(state_builds.get() + 1);
+                    Ok(Arc::clone(&state))
+                },
+                |_| {
+                    presentation_builds.set(presentation_builds.get() + 1);
+                    Ok(Some(Arc::new(1)))
+                },
+                |_, _, _| {
+                    timeline_builds.set(timeline_builds.get() + 1);
+                    Ok(None)
+                },
+            )
+            .expect("first unavailable Timeline attempt is cached");
+        assert!(first.presentation.is_some());
+        assert!(first.timeline.is_none());
+
+        let second = cache
+            .load_with(
+                ChangeReaderLoad::Timeline(&trust_set),
+                || Ok(17),
+                || panic!("same marker and trust must not rebuild state"),
+                |_| panic!("cached unavailable Timeline must not rebuild presentation"),
+                |_, _, _| panic!("cached unavailable Timeline must not rebuild"),
+            )
+            .expect("same trust returns cached unavailability");
+        assert!(second.presentation.is_some());
+        assert!(second.timeline.is_none());
+        assert!(Arc::ptr_eq(&first.state, &second.state));
+        assert_eq!(state_builds.get(), 1);
+        assert_eq!(presentation_builds.get(), 1);
+        assert_eq!(timeline_builds.get(), 1);
     }
 
     #[test]
@@ -1975,10 +2839,11 @@ mod tests {
                 .success()
         );
 
-        let cache = ChangeReaderCache::new();
+        let cache = ChangeReaderCache::<ChangeReaderPresentationV1>::new();
         let markers = RefCell::new(VecDeque::from([1_u64, 2, 2, 3]));
         let builds = Cell::new(0_usize);
         let moving = cache.load_with(
+            ChangeReaderLoad::State,
             || {
                 markers
                     .borrow_mut()
@@ -1991,6 +2856,8 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
             },
+            |_| panic!("a profile-only load must not build presentation"),
+            |_, _, _| panic!("a profile-only load must not build Timeline"),
         );
         assert!(matches!(&moving, Err(ChangeReaderLoadError::MovingJournal)));
         assert_eq!(builds.get(), 2, "both bounded retries folded once");
@@ -1998,6 +2865,7 @@ mod tests {
         let stable_markers = RefCell::new(VecDeque::from([4_u64, 4]));
         let stable = cache
             .load_with(
+                ChangeReaderLoad::State,
                 || {
                     stable_markers.borrow_mut().pop_front().ok_or_else(|| {
                         ChangeReaderLoadError::Other("missing stable test marker".to_owned())
@@ -2009,17 +2877,22 @@ mod tests {
                         .map(Arc::new)
                         .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
                 },
+                |_| panic!("a profile-only load must not build presentation"),
+                |_, _, _| panic!("a profile-only load must not build Timeline"),
             )
             .expect("a later stable generation is cacheable");
         assert_eq!(builds.get(), 3);
 
         let hit = cache
             .load_with(
+                ChangeReaderLoad::State,
                 || Ok(4),
                 || panic!("stable cached generation should not rebuild"),
+                |_| panic!("stable profile cache hit should not build presentation"),
+                |_, _, _| panic!("stable profile cache hit should not build Timeline"),
             )
             .unwrap();
-        assert!(Arc::ptr_eq(&stable, &hit));
+        assert!(Arc::ptr_eq(&stable.state, &hit.state));
     }
 
     #[test]
@@ -2060,9 +2933,10 @@ mod tests {
                 .success()
         );
 
-        let cache = ChangeReaderCache::new();
+        let cache = ChangeReaderCache::<ChangeReaderPresentationV1>::new();
         let append_count = Cell::new(0_usize);
         let moving = cache.load_with(
+            ChangeReaderLoad::State,
             || {
                 pointbreak::session::change_reader_head_marker_for_repo(repo.path())
                     .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
@@ -2084,6 +2958,8 @@ mod tests {
                 .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))?;
                 Ok(state)
             },
+            |_| panic!("a profile-only load must not build presentation"),
+            |_, _, _| panic!("a profile-only load must not build Timeline"),
         );
 
         assert!(matches!(moving, Err(ChangeReaderLoadError::MovingJournal)));

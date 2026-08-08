@@ -68,6 +68,25 @@ const attention: AttentionPage = {
   ...changes,
   schema: "pointbreak.inspect-attention",
   version: 2,
+  presentations: {
+    "change:sha256:one": {
+      ...changes.presentations?.["change:sha256:one"],
+      currentRevisions:
+        changes.presentations?.["change:sha256:one"]?.currentRevisions ?? [],
+      attention: {
+        primaryReason: {
+          kind: "current_revisions_need_assessment",
+          revisions: [revision],
+        },
+        reasons: [
+          { kind: "current_revisions_need_assessment", revisions: [revision] },
+        ],
+        diagnostics: [
+          "assessment coverage is incomplete for revision:sha256:one",
+        ],
+      },
+    },
+  },
 };
 
 function eventHistory(): EventHistoryDocument {
@@ -227,6 +246,29 @@ function revisionReading(): Extract<
       associations: [],
       diagnostics: [],
       projectionStamp: "sha256:generation",
+      inspectorPresentation: {
+        factGraph: {
+          nodes: [
+            {
+              id: `fact:${revision.revisionId}@${revision.objectArtifactContentHash}:observation:obs:sha256:focused`,
+              kind: "fact",
+              revision,
+              factId: "obs:sha256:focused",
+              family: "observation",
+              x: 80,
+              y: 30,
+              w: 140,
+              h: 34,
+              contextAvailability: "available",
+              activationRevision: revision,
+            },
+          ],
+          observationSupersedes: [],
+          assessmentReplaces: [],
+          factPorts: [],
+          bounds: { w: 160, h: 64 },
+        },
+      },
     },
   };
 }
@@ -236,30 +278,73 @@ function changeReading(): ChangeInspectorReading {
     revisionId: "revision:sha256:predecessor",
     objectArtifactContentHash: "sha256:predecessor",
   };
-  const successor = {
-    revisionId: "revision:sha256:successor",
-    objectArtifactContentHash: "sha256:successor",
-  };
   const summary = changes.changes[0];
   if (!summary) throw new Error("fixture needs Change summary");
   const document: ChangeDetail = {
     schema: "pointbreak.review-change",
     version: 1,
-    summary,
-    memberRevisions: [],
+    summary: { ...summary, memberCount: 2, topology: "replacement" },
+    memberRevisions: [
+      { revision, supportingClaimIds: [] },
+      { revision: predecessor, supportingClaimIds: [] },
+    ],
     unavailableMemberRevisions: [],
     membershipClaims: [],
     membershipWithdrawals: [],
     relationClaims: [],
     relationWithdrawals: [],
     links: [],
-    effectiveSupersedes: [[successor, predecessor]],
+    effectiveSupersedes: [[revision, predecessor]],
     pendingOrConflictingEdges: [],
     currentRevisionRefs: [revision],
     perCurrentRevisionQualification: [],
     operativeObligations: [],
     diagnostics: [],
     projectionStamp: "sha256:generation",
+    inspectorPresentation: {
+      revisionGraph: {
+        nodes: [
+          {
+            id: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
+            revision,
+            x: 80,
+            y: 30,
+            w: 128,
+            h: 34,
+            isCurrent: true,
+            isMember: true,
+            contextAvailability: "available",
+            activationRevision: revision,
+          },
+          {
+            id: `revision:${predecessor.revisionId}@${predecessor.objectArtifactContentHash}`,
+            revision: predecessor,
+            x: 80,
+            y: 110,
+            w: 128,
+            h: 34,
+            isCurrent: false,
+            isMember: true,
+            contextAvailability: "available",
+            activationRevision: predecessor,
+          },
+        ],
+        effectiveSupersedes: [
+          {
+            from: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
+            to: `revision:${predecessor.revisionId}@${predecessor.objectArtifactContentHash}`,
+            successor: revision,
+            predecessor,
+            path: [
+              [80, 110],
+              [80, 30],
+            ],
+          },
+        ],
+        pendingOrConflictingClaims: [],
+        bounds: { w: 160, h: 144 },
+      },
+    },
   };
   return { kind: "change", document };
 }
@@ -295,6 +380,65 @@ function interdiffReading(): Extract<
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
+  it("renders native lens links with the active lens as the only current page", () => {
+    const cases = [
+      {
+        route: { kind: "timeline" as const, historyQuery: {} },
+        current: "timeline",
+      },
+      {
+        route: { kind: "lens" as const, lens: "changes" as const, query: {} },
+        current: "changes",
+      },
+      {
+        route: {
+          kind: "lens" as const,
+          lens: "attention" as const,
+          query: {},
+        },
+        current: "attention",
+      },
+    ];
+
+    for (const { route, current } of cases) {
+      const state = createChangeInspectorState(route);
+      state.publish(
+        stageGeneration(profile, changes, attention, profile, eventHistory()),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+
+      const links = Array.from(
+        document.querySelectorAll<HTMLAnchorElement>(
+          "#lens-switcher a[data-lens]",
+        ),
+      );
+      expect(links).toHaveLength(3);
+      expect(
+        links.map((link) => ({
+          lens: link.dataset.lens,
+          href: link.getAttribute("href"),
+          current: link.getAttribute("aria-current"),
+        })),
+      ).toEqual([
+        {
+          lens: "timeline",
+          href: "#/timeline",
+          current: current === "timeline" ? "page" : null,
+        },
+        {
+          lens: "changes",
+          href: "#/changes",
+          current: current === "changes" ? "page" : null,
+        },
+        {
+          lens: "attention",
+          href: "#/attention",
+          current: current === "attention" ? "page" : null,
+        },
+      ]);
+    }
+  });
+
   it("offers completion-backed Timeline filters and removable applied filters", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -496,7 +640,7 @@ describe("Change inspector render", () => {
     renderChangeInspector(state.snapshot(), { navigate });
     const firstCard = document.querySelector(".unit-card[data-change-id]");
     expect(
-      firstCard?.querySelector(".change-card-badges")?.textContent,
+      firstCard?.querySelector(".change-card-state")?.textContent,
     ).toContain("conflicted");
     expect(document.querySelector("#stat-threads")?.textContent).toBe(
       "1 need attention",
@@ -513,6 +657,34 @@ describe("Change inspector render", () => {
       createElement.mock.calls.some(([tagName]) => tagName === "article"),
     ).toBe(false);
     createElement.mockRestore();
+  });
+
+  it("states the server-ranked Attention reason, ask, and next action", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "attention",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const card = document.querySelector(".unit-card[data-change-id]");
+    expect(
+      card?.querySelector(".change-card-attention-reason")?.textContent,
+    ).toBe("Current Revisions need assessment");
+    expect(
+      card?.querySelector(".change-card-attention-ask")?.textContent,
+    ).toContain("revision:sha256:one");
+    expect(
+      card?.querySelector(".change-card-attention-action")?.textContent,
+    ).toBe("Next: Assess current Revisions");
+    expect(
+      card?.querySelector(".change-card-attention-diagnostics")?.textContent,
+    ).toContain("assessment coverage is incomplete for revision:sha256:one");
+    expect(card?.querySelectorAll("button")).toHaveLength(1);
   });
 
   it("restores a same-generation list after a transient refusal replaced its DOM", () => {
@@ -611,18 +783,19 @@ describe("Change inspector render", () => {
     );
     expect(
       document
-        .querySelector(".unit-card[data-change-id]")
+        .querySelector(".change-card-primary")
         ?.getAttribute("aria-label"),
-    ).toBe(
-      "Current Revision — Server proposal; exact Revision revision:sha256:one; artifact sha256:artifact; Change change:sha256:one",
+    ).toContain(
+      "Server proposal; Current Revision — Server proposal; exact Revision revision:sha256:one; artifact sha256:artifact; Change change:sha256:one",
     );
     expect(
+      document.querySelectorAll(".unit-card[data-change-id] button"),
+    ).toHaveLength(1);
+    expect(
       document
-        .querySelector(".change-card-peer button:last-child")
-        ?.getAttribute("aria-label"),
-    ).toBe(
-      "Copy exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
-    );
+        .querySelector(".change-card-current code")
+        ?.getAttribute("title"),
+    ).toContain("exact Revision revision:sha256:one; artifact sha256:artifact");
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );
@@ -671,7 +844,7 @@ describe("Change inspector render", () => {
     renderChangeInspector(state.snapshot(), { navigate });
     const chooser = Array.from(
       document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
-    ).find((button) => button.textContent === revision.revisionId);
+    ).find((button) => button.title?.includes(revision.revisionId));
     expect(chooser?.getAttribute("aria-label")).toBe(
       "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
     );
@@ -705,7 +878,7 @@ describe("Change inspector render", () => {
     expect(file?.dataset.exactFocus).toBe("true");
   });
 
-  it("renders exact fact Markdown and focuses the requested fact without selecting a peer", () => {
+  it("renders exact fact Markdown and focuses the requested fact without embedding the diff or selecting a peer", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
     const state = createChangeInspectorState({
@@ -722,19 +895,126 @@ describe("Change inspector render", () => {
       { reading: revisionReading(), refusal: null },
     );
     const fact = document.querySelector<HTMLElement>(
-      '[data-anno="obs:sha256:focused"]',
+      '#detail-body .detail-facts [data-fact-id="obs:sha256:focused"]',
     );
     expect(fact?.dataset.exactFocus).toBe("true");
+    expect(fact?.textContent).toContain("Rendered fact body");
+    expect(document.querySelector("#detail-body .captured-diff")).toBeNull();
     expect(
-      document.querySelector<HTMLElement>(
-        '.anno[data-anno="obs:sha256:focused"]',
-      )?.textContent,
-    ).toContain("Rendered fact body");
+      document.querySelector("#detail-body .fact-relationship-graph"),
+    ).not.toBeNull();
+    navigate.mockClear();
+    document
+      .querySelector<SVGGElement>(
+        '#detail-body .fact-relationship-node[data-graph-fact-id="obs:sha256:focused"]',
+      )
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
     expect(
       document
-        .querySelector<HTMLElement>('[data-fact-id="obs:sha256:focused"]')
+        .querySelector<HTMLElement>(
+          '#detail-body .detail-facts [data-fact-id="obs:sha256:focused"]',
+        )
         ?.querySelector("strong")?.textContent,
     ).toBe("Rendered");
+  });
+
+  it("renders a full-frame annotated diff from the contextual exact Revision document", () => {
+    const navigate = vi.fn();
+    const replace = vi.fn();
+    prepareChangeInspectorShell({ navigate, replace });
+    const state = createChangeInspectorState({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: {
+        filePath: "src/lib.rs",
+        factId: "obs:sha256:focused",
+        fileQuery: "has:facts",
+      },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const revisionDocument = revisionReading().document;
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate, replace },
+      { reading: { kind: "diff", document: revisionDocument }, refusal: null },
+    );
+
+    expect(document.querySelector("#diff-page")?.classList).not.toContain(
+      "hidden",
+    );
+    expect(document.querySelector(".split")?.classList).toContain("hidden");
+    expect(document.querySelector("#diff-page-body")?.textContent).toContain(
+      "pub fn restored() {}",
+    );
+    const focusedFact = document.querySelector<HTMLElement>(
+      '.anno[data-anno="obs:sha256:focused"]',
+    );
+    expect(focusedFact?.dataset.exactFocus).toBe("true");
+    expect(focusedFact?.tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(focusedFact);
+    expect(
+      document.querySelector<HTMLInputElement>("#diff-file-query")?.value,
+    ).toBe("has:facts");
+    document
+      .querySelector<HTMLInputElement>("#diff-file-query")
+      ?.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(replace).toHaveBeenCalled();
+
+    // The persistent full-frame body replaces, rather than accumulates, its
+    // delegated route closure on polling repaints.
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate, replace },
+      { reading: { kind: "diff", document: revisionDocument }, refusal: null },
+    );
+    const gutter = document.querySelector<HTMLElement>(
+      '#diff-page-body .drow-noted[data-anno="obs:sha256:focused"]',
+    );
+    navigate.mockClear();
+    gutter?.click();
+    expect(navigate).toHaveBeenCalledOnce();
+    navigate.mockClear();
+    gutter?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenCalledOnce();
+  });
+
+  it("offers the first-class annotated-diff route from exact Revision detail", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: revisionReading(), refusal: null },
+    );
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    )
+      .find((button) => button.textContent === "Open annotated diff")
+      ?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
   });
 
   it("retains an unchanged exact detail surface across a polling repaint", () => {
@@ -1008,7 +1288,7 @@ describe("Change inspector render", () => {
     });
     prepareChangeInspectorShell({ navigate });
     const state = createChangeInspectorState({
-      kind: "revision",
+      kind: "diff",
       changeId: "change:sha256:one",
       revision,
       query: {},
@@ -1017,7 +1297,7 @@ describe("Change inspector render", () => {
     renderChangeInspector(
       state.snapshot(),
       { navigate },
-      { reading, refusal: null },
+      { reading: { kind: "diff", document: reading.document }, refusal: null },
     );
     expect(
       document.querySelector(".anno-input-request")?.textContent,
@@ -1093,8 +1373,13 @@ describe("Change inspector render", () => {
       },
     );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "revision:sha256:predecessor · sha256:predecessor → revision:sha256:successor · sha256:successor",
+      "revision:sha256:predecessor · sha256:predecessor → revision:sha256:one · sha256:artifact",
     );
+    expect(
+      document.querySelector(
+        '#detail-body [data-edge-kind="effective-supersedes"]',
+      ),
+    ).not.toBeNull();
     const chooser = document.querySelector<HTMLButtonElement>(
       "#detail-body .detail-current-revisions button",
     );
@@ -1102,6 +1387,20 @@ describe("Change inspector render", () => {
       "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
     );
     chooser?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    navigate.mockClear();
+    document
+      .querySelector<SVGGElement>(
+        `#detail-body .change-revision-node[data-revision-id="${revision.revisionId}"]`,
+      )
+      ?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
     expect(navigate).toHaveBeenCalledWith({
       kind: "revision",
       changeId: "change:sha256:one",

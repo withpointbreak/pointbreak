@@ -6,8 +6,6 @@
  */
 
 import {
-  eventAttributionLines,
-  eventSubjectLabel,
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
@@ -19,8 +17,10 @@ import {
 import type {
   EventHistoryDocument,
   EventHistoryEntry,
+  EventHistoryRevisionRef,
 } from "./change-protocol";
 import { registerDensityListener } from "./prefs";
+import { shortRef } from "./refs";
 
 const FALLBACK_ROW_HEIGHT = 72;
 const OVERSCAN = 8;
@@ -43,8 +43,73 @@ function label(value: string): string {
   return value.replaceAll("_", " ");
 }
 
-function short(value: string, size = 18): string {
-  return value.length > size ? `${value.slice(0, size)}…` : value;
+const MAX_TIMELINE_TITLE = 120;
+const MAX_TIMELINE_EXCERPT = 180;
+
+// Timeline rows intentionally use one display form for every opaque identity.
+// The exact value remains available in the native link title, aria label, and
+// data attribute; the detail surface remains the place for full provenance.
+const OPAQUE_ID =
+  /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
+
+function compactTimelineText(value: string, limit: number): string {
+  const compact = value
+    .replace(OPAQUE_ID, (identity) => shortRef(identity))
+    .replace(/\s+/g, " ")
+    .trim();
+  if (compact.length <= limit) return compact;
+  return `${compact.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function timelineTitle(value: string): string {
+  return compactTimelineText(value, MAX_TIMELINE_TITLE);
+}
+
+function timelineExcerpt(value: string): string {
+  return compactTimelineText(value, MAX_TIMELINE_EXCERPT);
+}
+
+function appendTimelineLink(
+  parent: HTMLElement,
+  identity: string,
+  kind: "Change" | "Revision" | "event",
+  href: string,
+): void {
+  const link = document.createElement("a");
+  link.className = "ref";
+  link.href = href;
+  link.tabIndex = -1;
+  link.title = identity;
+  link.dataset.timelineContextKind = kind.toLowerCase();
+  link.dataset.timelineContextId = identity;
+  link.setAttribute("aria-label", `Open ${kind} ${identity}`);
+  link.textContent = shortRef(identity);
+  parent.append(link);
+}
+
+function appendExactRevisionLink(
+  parent: HTMLElement,
+  reference: EventHistoryRevisionRef,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): void {
+  // An event may name several Changes. A Timeline filter gives this exact
+  // Revision an honest action without inventing which Change owns it.
+  appendTimelineLink(
+    parent,
+    reference.revisionId,
+    "Revision",
+    formatChangeInspectorRoute({
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        change: undefined,
+        revision: reference.revisionId,
+        artifactHash: reference.objectArtifactContentHash,
+      },
+    }),
+  );
 }
 
 function optionId(eventId: string): string {
@@ -80,10 +145,9 @@ function appendVerificationChip(
 function entryRow(
   entry: EventHistoryEntry,
   selectedEventId: string | null,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
 ): HTMLLIElement {
   const presentation = presentEvent(entry);
-  const subject = eventSubjectLabel(entry.subject);
-  const attribution = eventAttributionLines(entry);
   const row = document.createElement("li");
   row.className = "event";
   row.dataset.eventId = entry.eventId;
@@ -93,7 +157,7 @@ function entryRow(
   row.setAttribute("aria-selected", String(entry.eventId === selectedEventId));
   row.setAttribute(
     "aria-label",
-    `${presentation.title}; ${subject}; ${attribution.join("; ")}; ${entry.occurredAt}; event ${entry.eventId}`,
+    `${presentation.title}; ${entry.eventType}; writer ${entry.writer.actorId}; ${entry.occurredAt}; event ${entry.eventId}; Changes ${entry.changeIds.join(", ") || "none"}; exact Revisions ${entry.revisionRefs.map((reference) => `${reference.revisionId} ${reference.objectArtifactContentHash}`).join(", ") || "none"}; unresolved Revisions ${entry.unresolvedRevisionIds.join(", ") || "none"}`,
   );
   const occurred = new Date(entry.occurredAt);
   const time = document.createElement("time");
@@ -121,11 +185,16 @@ function entryRow(
   body.className = "body";
   const heading = document.createElement("h3");
   heading.className = "title";
-  heading.textContent = presentation.title;
+  // A supplied presentation title is prose, not an unrestricted layout
+  // channel. Keep Timeline geometry bounded and use the same short form as
+  // other opaque identities, while the native title and row label retain the
+  // full semantic source for assistive technology and inspection.
+  heading.textContent = timelineTitle(presentation.title);
+  heading.title = presentation.title;
   if (presentation.body) {
     const summary = document.createElement("p");
     summary.className = "event-summary";
-    summary.textContent = presentation.body;
+    summary.textContent = timelineExcerpt(presentation.body);
     body.append(heading, summary);
   } else {
     body.append(heading);
@@ -140,45 +209,62 @@ function entryRow(
   eventType.style.color = eventTypeColor(entry.eventType);
   meta.append(eventType);
   appendVerificationChip(meta, entry.verificationStatus);
-  if (entry.trackId) appendChip(meta, entry.trackId);
-  for (const changeId of entry.changeIds) appendChip(meta, short(changeId));
-  const eventId = document.createElement("span");
-  eventId.textContent = short(entry.eventId);
-  eventId.title = entry.eventId;
-  meta.append(eventId);
-  const context = document.createElement("p");
-  context.className = "event-context mono";
-  context.textContent = subject;
-  const attributionLine = document.createElement("p");
-  attributionLine.className = "event-attribution dim";
-  attributionLine.textContent = attribution.join(" · ");
-  body.append(meta, context, attributionLine);
+  if (entry.trackId) appendChip(meta, `track ${entry.trackId}`);
+  const actor = document.createElement("span");
+  actor.textContent = entry.writer.actorId;
+  actor.title = `writer ${entry.writer.actorId}`;
+  meta.append(actor);
+  appendTimelineLink(
+    meta,
+    entry.eventId,
+    "event",
+    formatChangeInspectorRoute({
+      kind: "event",
+      eventId: entry.eventId,
+      historyQuery: { ...route.historyQuery, after: undefined, at: undefined },
+      query: {},
+    }),
+  );
+
+  const contexts = document.createElement("p");
+  contexts.className = "event-context mono";
+  if (entry.changeIds.length) {
+    const changes = document.createElement("span");
+    changes.textContent = "Changes ";
+    contexts.append(changes);
+    entry.changeIds.forEach((changeId, index) => {
+      if (index) contexts.append(document.createTextNode(", "));
+      appendTimelineLink(
+        contexts,
+        changeId,
+        "Change",
+        formatChangeInspectorRoute({ kind: "change", changeId, query: {} }),
+      );
+    });
+  }
   if (entry.revisionRefs.length) {
-    const exact = document.createElement("p");
-    exact.className = "event-context mono dim";
-    exact.textContent = `exact Revisions: ${entry.revisionRefs
-      .map(
-        (reference) =>
-          `${reference.revisionId} · ${reference.objectArtifactContentHash}`,
-      )
-      .join("; ")}`;
-    body.append(exact);
+    if (contexts.childNodes.length)
+      contexts.append(document.createTextNode(" · "));
+    const revisions = document.createElement("span");
+    revisions.textContent = "Revisions ";
+    contexts.append(revisions);
+    entry.revisionRefs.forEach((reference, index) => {
+      if (index) contexts.append(document.createTextNode(", "));
+      appendExactRevisionLink(contexts, reference, route);
+    });
   }
   if (entry.unresolvedRevisionIds.length) {
-    const unresolved = document.createElement("p");
-    unresolved.className = "event-context mono warning";
-    unresolved.textContent = `unresolved Revisions: ${entry.unresolvedRevisionIds.join("; ")}`;
-    body.append(unresolved);
+    if (contexts.childNodes.length)
+      contexts.append(document.createTextNode(" · "));
+    const unresolved = document.createElement("span");
+    unresolved.className = "warning";
+    unresolved.title = entry.unresolvedRevisionIds.join(", ");
+    unresolved.textContent = `unresolved ${entry.unresolvedRevisionIds.map(shortRef).join(", ")}`;
+    contexts.append(unresolved);
   }
+  body.append(meta);
+  if (contexts.childNodes.length) body.append(contexts);
   row.append(time, rail, body);
-
-  if (entry.revisionRefs.length > 1 || entry.changeIds.length > 1) {
-    const note = document.createElement("p");
-    note.className = "dim";
-    note.textContent =
-      "This event has multiple contexts; choose a Change and exact Revision from the Changes lens.";
-    body.append(note);
-  }
   return row;
 }
 
@@ -206,7 +292,7 @@ function paintVisible(view: TimelineView): void {
     top,
     ...entries
       .slice(localStart, localEnd)
-      .map((entry) => entryRow(entry, view.selectedEventId)),
+      .map((entry) => entryRow(entry, view.selectedEventId, view.route)),
     bottom,
   );
   const activeOption = view.selectedEventId

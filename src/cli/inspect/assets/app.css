@@ -153,8 +153,8 @@ body {
   font-size: var(--fs-sm);
 }
 
-/* Two lens families: the record group (Timeline · Revisions) reads as one
-   adjacency; the wider switcher gap sets Attention apart. No umbrella label. */
+/* Change-aware record lenses remain native links so hover status, open-in-new-
+   tab, and assistive navigation work without surrendering in-app routing. */
 #lens-switcher {
   display: flex;
   flex-wrap: wrap;
@@ -167,6 +167,8 @@ body {
   gap: 4px;
 }
 .lens-tab {
+  display: inline-flex;
+  align-items: center;
   background: transparent;
   color: var(--fg-dim);
   border: 1px solid transparent;
@@ -174,8 +176,10 @@ body {
   padding: 5px 12px;
   cursor: pointer;
   font: inherit;
+  text-decoration: none;
 }
-.lens-tab[aria-pressed="true"] {
+.lens-tab[aria-pressed="true"],
+.lens-tab[aria-current="page"] {
   color: var(--fg);
   background: var(--bg-row);
   border-color: var(--border);
@@ -830,10 +834,10 @@ main {
 }
 .event {
   display: grid;
-  grid-template-columns: 96px 14px 1fr;
-  gap: 10px;
+  grid-template-columns: 84px 12px 1fr;
+  gap: 8px;
   align-items: baseline;
-  padding: var(--row-pad);
+  padding: 7px 14px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
@@ -871,7 +875,7 @@ main {
 .event .title {
   margin: 0;
   font-size: var(--fs-base);
-  line-height: 1.3;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -880,9 +884,9 @@ main {
   color: var(--fg-dim);
   font-size: var(--fs-xs);
   font-family: var(--mono);
-  margin-top: 2px;
+  margin-top: 1px;
   display: flex;
-  gap: 10px;
+  gap: 7px;
   flex-wrap: wrap;
 }
 .event .type {
@@ -890,17 +894,35 @@ main {
   font-size: var(--fs-xs);
 }
 .event-summary,
-.event-context,
-.event-attribution {
+.event-context {
   margin: 2px 0 0;
   overflow-wrap: anywhere;
 }
 .event-summary {
   font-size: var(--fs-sm);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
 }
-.event-context,
-.event-attribution {
+.event-context {
   font-size: var(--fs-xs);
+  color: var(--fg-dim);
+}
+.event .meta a.ref,
+.event-context a.ref {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.event .meta a.ref:hover,
+.event-context a.ref:hover {
+  background: var(--bg-row);
+}
+.event .meta a.ref:focus-visible,
+.event-context a.ref:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .detail {
@@ -967,6 +989,70 @@ main {
 .detail .mono {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+.detail-identity,
+.detail-fact-identity {
+  margin: 2px 0 10px;
+  color: var(--fg-dim);
+  font-size: var(--fs-sm);
+}
+.detail-identity code,
+.detail-fact-identity code {
+  font-family: var(--mono);
+  cursor: help;
+}
+.detail-state {
+  display: grid;
+  grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
+  gap: 3px 12px;
+  margin: 10px 0 14px;
+  font-size: var(--fs-sm);
+}
+.detail-state dt {
+  color: var(--fg-dim);
+}
+.detail-state dd {
+  margin: 0;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.detail-action-primary {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+  font-weight: var(--font-weight-semibold);
+}
+.detail-action-primary:hover {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.detail-notice {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--border);
+  background: var(--bg-elev);
+}
+.detail-notice-warning {
+  border-left-color: var(--warning);
+}
+.detail-record {
+  margin: 16px 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.detail-record > summary {
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+}
+.detail-record[open] > summary {
+  margin-bottom: 12px;
 }
 .event-detail-summary,
 .event-detail-attribution,
@@ -1242,37 +1328,114 @@ html.compact .unit-card {
   color: var(--fg);
   font-weight: 500;
 }
-.change-card-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 10px;
+.change-card-primary {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
-.change-card-peer {
+.change-card-primary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--r-sm);
+}
+.change-card-headline {
+  color: var(--fg);
+  font-size: var(--fs-lg);
+  font-weight: var(--font-weight-semibold);
+  line-height: 1.25;
+}
+.change-card-id,
+.change-card-current {
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+.change-card-state {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  gap: 4px 12px;
+  margin: 9px 0 0;
+  font-size: var(--fs-xs);
+}
+.change-card-state > dt {
+  color: var(--fg-dim);
+}
+.change-card-state > dd {
+  margin: 0;
+  color: var(--fg);
+}
+.change-card-state > dd:not(:last-child)::after {
+  color: var(--border);
+  content: "·";
+  margin-left: 12px;
+}
+.change-card-attention {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 7%, transparent);
+}
+.change-card-attention-reason {
+  display: block;
+  color: var(--warning-strong);
+}
+.change-card-attention-ask,
+.change-card-attention-action,
+.change-card-attention-additional {
+  margin: 3px 0 0;
+  font-size: var(--fs-sm);
+}
+.change-card-attention-action {
+  color: var(--fg-dim);
+}
+.change-card-attention-additional {
+  padding-left: 18px;
+  color: var(--fg-dim);
+}
+.change-card-attention-diagnostics {
+  margin-top: 7px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+}
+.change-card-attention-diagnostics strong {
+  color: var(--fg);
+  font-weight: var(--font-weight-medium);
+}
+.change-card-attention-diagnostics ul {
+  margin: 3px 0 0;
+  padding-left: 18px;
+  overflow-wrap: anywhere;
+}
+.change-card-current,
+.change-card-unavailable {
+  margin: 8px 0 0;
+}
+.change-card-unavailable {
+  color: var(--warning);
+  font-size: var(--fs-sm);
+}
+.change-card-peers {
+  display: grid;
   gap: 4px;
+  margin-top: 10px;
+}
+.change-card-peers h3 {
+  color: var(--warning);
+  font-family: var(--sans);
 }
 .change-card-peer-open {
   color: var(--fg);
-  font-size: var(--fs-md);
+  font-size: var(--fs-sm);
   font-weight: 500;
   text-align: left;
-}
-.change-card-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  color: var(--fg-dim);
-  font-size: var(--fs-xs);
-}
-.change-card-actions code {
-  color: var(--fg-dim);
-  font-size: var(--fs-xs);
-  font-weight: 400;
-  overflow-wrap: anywhere;
 }
 .compact .tier-medium {
   display: none;
@@ -1586,6 +1749,105 @@ html.compact .unit-card {
   font-size: var(--fs-xs);
   margin-bottom: 4px;
 }
+
+/* Change-aware relationship diagrams consume server-laid mmdflux geometry.
+   Edge families keep both a color and a line/arrow shape cue so effective
+   topology can never be mistaken for an unresolved claim or an explicit port. */
+.detail-relationships {
+  margin: 16px 0;
+}
+.change-revision-graph,
+.fact-relationship-graph {
+  margin: 8px 0 14px;
+  overflow-x: auto;
+}
+.change-revision-graph-svg,
+.fact-relationship-graph-svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  color: var(--border);
+}
+.change-revision-graph-svg text,
+.fact-relationship-graph-svg text {
+  fill: var(--fg);
+  font: var(--fs-xs) / 1 var(--mono);
+  pointer-events: none;
+}
+.change-revision-node,
+.fact-relationship-node {
+  color: var(--border);
+  cursor: pointer;
+}
+.change-revision-node.is-current {
+  color: var(--success);
+}
+.change-revision-node.is-context {
+  color: var(--warning);
+}
+.change-revision-node rect,
+.fact-relationship-node rect {
+  fill: var(--bg-row);
+}
+.change-revision-node:hover,
+.fact-relationship-node:hover,
+.change-revision-node:focus,
+.fact-relationship-node:focus {
+  color: var(--accent);
+  outline: none;
+}
+.change-revision-node:focus-visible rect,
+.fact-relationship-node:focus-visible rect {
+  stroke-width: 3;
+}
+.change-revision-edge-effective {
+  color: var(--success);
+}
+.change-revision-edge-claim {
+  color: var(--warning);
+}
+.fact-relationship-edge-observation-supersedes {
+  color: var(--success);
+}
+.fact-relationship-edge-assessment-replaces {
+  color: var(--assess);
+}
+.fact-relationship-edge-fact-port {
+  color: var(--teal);
+}
+.relationship-graph-text {
+  margin-top: 8px;
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+}
+.relationship-graph-text > summary {
+  cursor: pointer;
+}
+.relationship-graph-text h4 {
+  margin: 10px 0 4px;
+  color: var(--fg);
+  font-size: var(--fs-xs);
+}
+.relationship-graph-text ul {
+  margin: 0;
+  padding-left: 20px;
+}
+.relationship-graph-text li + li {
+  margin-top: 4px;
+}
+.relationship-graph-text button {
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.relationship-graph-text button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .revision-heads {
   display: flex;
   gap: 6px;
@@ -1867,10 +2129,19 @@ html.compact .unit-card {
 .diff-page-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
+}
+.diff-page-keys {
+  margin-left: auto;
+  color: var(--fg-dim);
+  font-size: var(--fs-xs);
+}
+.diff-page-keys kbd {
+  color: var(--fg);
+  font-family: var(--mono);
 }
 .diff-fact-vicinity {
   display: grid;

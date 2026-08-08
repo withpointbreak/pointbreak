@@ -155,6 +155,30 @@ function revisionDetail(projectionStamp = "sha256:generation") {
   };
 }
 
+function changeDetail(projectionStamp = "sha256:generation") {
+  const summary = page("changes", projectionStamp).changes[0];
+  if (!summary) throw new Error("fixture needs one Change");
+  return {
+    schema: "pointbreak.review-change",
+    version: 1,
+    summary,
+    memberRevisions: [{ revision, supportingClaimIds: [] }],
+    unavailableMemberRevisions: [],
+    membershipClaims: [],
+    membershipWithdrawals: [],
+    relationClaims: [],
+    relationWithdrawals: [],
+    links: [],
+    effectiveSupersedes: [],
+    pendingOrConflictingEdges: [],
+    currentRevisionRefs: [revision],
+    perCurrentRevisionQualification: [{ revision, qualified: true }],
+    operativeObligations: [],
+    diagnostics: [],
+    projectionStamp,
+  };
+}
+
 function staleProjectionResponse(): Response {
   return new Response(
     JSON.stringify({
@@ -183,6 +207,10 @@ function isExactRevisionPath(path: string): boolean {
   return path.startsWith(
     "/api/v2/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?",
   );
+}
+
+function isChangeDetailPath(path: string): boolean {
+  return path === "/api/v2/changes/change%3Asha256%3Aone";
 }
 
 function isExactResourcePath(path: string): boolean {
@@ -387,6 +415,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isChangeDetailPath(path))
+        return new Response(JSON.stringify(changeDetail()));
       if (isExactRevisionPath(path))
         return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
@@ -398,12 +428,24 @@ describe("Change-first composition", () => {
 
     const detail = document.querySelector<HTMLElement>("#detail");
     const opener = document.querySelector<HTMLButtonElement>(
-      "[data-change-id] .change-card-peer-open",
+      "[data-change-id] .change-card-primary",
     );
     expect(detail?.inert).toBe(true);
     expect(detail?.getAttribute("aria-hidden")).toBe("true");
     opener?.focus();
     opener?.click();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLButtonElement>(
+          "#detail-body .detail-current-revisions button",
+        ),
+      ).not.toBeNull(),
+    );
+    document
+      .querySelector<HTMLButtonElement>(
+        "#detail-body .detail-current-revisions button",
+      )
+      ?.click();
     await vi.waitFor(() =>
       expect(
         document.querySelector<HTMLElement>("#detail-body")?.dataset
@@ -560,6 +602,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isChangeDetailPath(path))
+        return new Response(JSON.stringify(changeDetail()));
       if (isExactRevisionPath(path))
         return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
@@ -569,8 +613,18 @@ describe("Change-first composition", () => {
     );
     await bootstrapChangeInspector();
 
+    document.querySelector<HTMLButtonElement>(".change-card-primary")?.click();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLButtonElement>(
+          "#detail-body .detail-current-revisions button",
+        ),
+      ).not.toBeNull(),
+    );
     document
-      .querySelector<HTMLButtonElement>(".change-card-peer-open")
+      .querySelector<HTMLButtonElement>(
+        "#detail-body .detail-current-revisions button",
+      )
       ?.click();
     await vi.waitFor(() =>
       expect(document.querySelector("#detail-body")?.textContent).toContain(
@@ -747,6 +801,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isChangeDetailPath(path))
+        return new Response(JSON.stringify(changeDetail()));
       if (isExactRevisionPath(path))
         return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
@@ -762,11 +818,24 @@ describe("Change-first composition", () => {
       "/api/v2/profile",
     ]);
     document
+      .querySelector<HTMLButtonElement>("[data-change-id] .change-card-primary")
+      ?.click();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLButtonElement>(
+          "#detail-body .detail-current-revisions button",
+        ),
+      ).not.toBeNull(),
+    );
+    document
       .querySelector<HTMLButtonElement>(
-        "[data-change-id] .change-card-peer-open",
+        "#detail-body .detail-current-revisions button",
       )
       ?.click();
-    await vi.waitFor(() => expect(requests).toHaveLength(6));
+    await vi.waitFor(() =>
+      expect(requests.some(isExactRevisionPath)).toBe(true),
+    );
+    expect(requests.some(isChangeDetailPath)).toBe(true);
     expect(location.hash).toContain("artifactHash=sha256%3Aartifact");
   });
 
