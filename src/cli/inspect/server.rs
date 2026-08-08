@@ -117,7 +117,7 @@ pub(super) struct InspectState {
     pub change_reader_cache: ChangeReaderCache,
     /// Ephemeral continuation-token authority, deliberately independent of the
     /// browser bearer secret and never persisted beyond this Inspector process.
-    pub page_token_signer: super::change_page::PageTokenSigner,
+    pub page_token_signer: super::page_token::PageTokenSigner,
     /// The eager cache warm is delayed until the first authenticated API request,
     /// so serving the recovery shell never opens the store.
     initial_warm_started: AtomicBool,
@@ -149,7 +149,7 @@ impl InspectState {
             history_cache: super::cache::HistoryProjectionCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             change_reader_cache: ChangeReaderCache::new(),
-            page_token_signer: super::change_page::PageTokenSigner::generate()
+            page_token_signer: super::page_token::PageTokenSigner::generate()
                 .map_err(|error| error.to_string())?,
             initial_warm_started: AtomicBool::new(false),
             authoritative_fallback: AuthoritativeFallbackGate::new(),
@@ -160,6 +160,22 @@ impl InspectState {
 struct CachedChangeReaderState {
     marker: u64,
     state: Arc<pointbreak::session::ChangeReaderStateV1>,
+}
+
+#[derive(Debug)]
+pub(super) enum ChangeReaderLoadError {
+    MovingJournal,
+    Other(String),
+}
+
+impl fmt::Display for ChangeReaderLoadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MovingJournal => formatter
+                .write_str("Journal changed while the Change reader generation was loading; retry"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
 }
 
 /// Single-generation cache for the warm Change reader.
@@ -182,25 +198,40 @@ impl ChangeReaderCache {
     pub(super) fn load(
         &self,
         repo: &std::path::Path,
-    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, String> {
-        let mut slot = self
-            .slot
-            .lock()
-            .map_err(|_| "Change reader cache lock is poisoned".to_owned())?;
+    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, ChangeReaderLoadError> {
+        self.load_with(
+            || {
+                pointbreak::session::change_reader_head_marker_for_repo(repo)
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
+            || {
+                pointbreak::session::change_reader_state_for_repo(repo)
+                    .map(Arc::new)
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
+        )
+    }
+
+    fn load_with(
+        &self,
+        mut marker: impl FnMut() -> Result<u64, ChangeReaderLoadError>,
+        mut build: impl FnMut() -> Result<
+            Arc<pointbreak::session::ChangeReaderStateV1>,
+            ChangeReaderLoadError,
+        >,
+    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, ChangeReaderLoadError> {
+        let mut slot = self.slot.lock().map_err(|_| {
+            ChangeReaderLoadError::Other("Change reader cache lock is poisoned".to_owned())
+        })?;
         for _ in 0..2 {
-            let before = pointbreak::session::change_reader_head_marker_for_repo(repo)
-                .map_err(|error| error.to_string())?;
+            let before = marker()?;
             if let Some(cached) = slot.as_ref()
                 && cached.marker == before
             {
                 return Ok(Arc::clone(&cached.state));
             }
-            let state = Arc::new(
-                pointbreak::session::change_reader_state_for_repo(repo)
-                    .map_err(|error| error.to_string())?,
-            );
-            let after = pointbreak::session::change_reader_head_marker_for_repo(repo)
-                .map_err(|error| error.to_string())?;
+            let state = build()?;
+            let after = marker()?;
             if before == after {
                 *slot = Some(CachedChangeReaderState {
                     marker: after,
@@ -209,7 +240,7 @@ impl ChangeReaderCache {
                 return Ok(state);
             }
         }
-        Err("Journal changed while the Change reader generation was loading; retry".to_owned())
+        Err(ChangeReaderLoadError::MovingJournal)
     }
 }
 
@@ -711,6 +742,14 @@ fn route(
             &state.change_reader_cache,
         ));
     }
+    if path == "/api/v2/history" {
+        return change_v2_response(api::event_history_v2_json(
+            repo,
+            &state.change_reader_cache,
+            query,
+            &state.page_token_signer,
+        ));
+    }
     if path == "/api/v2/changes" {
         return change_v2_response(api::changes_v2_json(
             repo,
@@ -1039,6 +1078,11 @@ fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
         ),
         Ok(api::ChangeV2Json::Stale(body)) => Response::new(
             "409 Conflict",
+            "application/json; charset=utf-8",
+            body.into_bytes(),
+        ),
+        Ok(api::ChangeV2Json::Retryable(body)) => Response::new(
+            "503 Service Unavailable",
             "application/json; charset=utf-8",
             body.into_bytes(),
         ),
@@ -1494,6 +1538,15 @@ mod tests {
     }
 
     #[test]
+    fn timeline_route_uses_its_closed_typed_query_contract_before_store_access() {
+        let response = route_for_query("/api/v2/history", "unknown=value");
+        assert_eq!(response.status, "400 Bad Request");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["schema"], "pointbreak.inspect-event-history-error");
+        assert_eq!(body["code"], "invalid_query");
+    }
+
+    #[test]
     fn exact_selector_query_is_closed_strict_and_order_independent() {
         assert_eq!(
             exact_selector_values(
@@ -1564,8 +1617,21 @@ mod tests {
         let stale = change_v2_response(Ok(api::ChangeV2Json::Stale(
             "{\"code\":\"stale_projection\"}".to_owned(),
         )));
+        let moving = change_v2_response(Ok(api::ChangeV2Json::Retryable(
+            "{\"code\":\"moving_journal\"}".to_owned(),
+        )));
         assert_eq!(invalid.status, "400 Bad Request");
         assert_eq!(stale.status, "409 Conflict");
+        assert_eq!(moving.status, "503 Service Unavailable");
+    }
+
+    #[test]
+    fn timeline_route_preserves_typed_migration_state() {
+        let response = route_for("GET", "/api/v2/history");
+        assert_eq!(response.status, "409 Conflict");
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["schema"], "pointbreak.store-migration-required");
+        assert_eq!(body["state"], "migration_required");
     }
 
     fn capability(
@@ -1891,6 +1957,157 @@ mod tests {
         assert!(
             refreshed.capability.cursor.journal_record_count
                 > first.capability.cursor.journal_record_count
+        );
+    }
+
+    #[test]
+    fn change_reader_cache_refuses_a_generation_that_moves_during_both_folds() {
+        use std::cell::{Cell, RefCell};
+        use std::collections::VecDeque;
+
+        let repo = tempfile::tempdir().expect("moving cache test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize repository")
+                .success()
+        );
+
+        let cache = ChangeReaderCache::new();
+        let markers = RefCell::new(VecDeque::from([1_u64, 2, 2, 3]));
+        let builds = Cell::new(0_usize);
+        let moving = cache.load_with(
+            || {
+                markers
+                    .borrow_mut()
+                    .pop_front()
+                    .ok_or_else(|| ChangeReaderLoadError::Other("missing test marker".to_owned()))
+            },
+            || {
+                builds.set(builds.get() + 1);
+                pointbreak::session::change_reader_state_for_repo(repo.path())
+                    .map(Arc::new)
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
+        );
+        assert!(matches!(&moving, Err(ChangeReaderLoadError::MovingJournal)));
+        assert_eq!(builds.get(), 2, "both bounded retries folded once");
+
+        let stable_markers = RefCell::new(VecDeque::from([4_u64, 4]));
+        let stable = cache
+            .load_with(
+                || {
+                    stable_markers.borrow_mut().pop_front().ok_or_else(|| {
+                        ChangeReaderLoadError::Other("missing stable test marker".to_owned())
+                    })
+                },
+                || {
+                    builds.set(builds.get() + 1);
+                    pointbreak::session::change_reader_state_for_repo(repo.path())
+                        .map(Arc::new)
+                        .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                },
+            )
+            .expect("a later stable generation is cacheable");
+        assert_eq!(builds.get(), 3);
+
+        let hit = cache
+            .load_with(
+                || Ok(4),
+                || panic!("stable cached generation should not rebuild"),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&stable, &hit));
+    }
+
+    #[test]
+    fn change_reader_cache_refuses_real_appends_between_fold_and_after_marker() {
+        use std::cell::Cell;
+
+        let repo = tempfile::tempdir().expect("real moving cache test repository");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Pointbreak Test"],
+            vec!["config", "user.email", "pointbreak@example.test"],
+            vec!["config", "commit.gpgsign", "false"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "before\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "sample.txt"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let cache = ChangeReaderCache::new();
+        let append_count = Cell::new(0_usize);
+        let moving = cache.load_with(
+            || {
+                pointbreak::session::change_reader_head_marker_for_repo(repo.path())
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+            },
+            || {
+                let state = pointbreak::session::change_reader_state_for_repo(repo.path())
+                    .map(Arc::new)
+                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))?;
+                let generation = append_count.get() + 1;
+                append_count.set(generation);
+                std::fs::write(
+                    repo.path().join("sample.txt"),
+                    format!("generation {generation}\n"),
+                )
+                .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))?;
+                pointbreak::session::capture_worktree_review(
+                    pointbreak::session::CaptureOptions::new(repo.path()),
+                )
+                .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))?;
+                Ok(state)
+            },
+        );
+
+        assert!(matches!(moving, Err(ChangeReaderLoadError::MovingJournal)));
+        assert_eq!(
+            append_count.get(),
+            2,
+            "each bounded fold was invalidated by a real journal append"
+        );
+
+        let signer = super::super::page_token::PageTokenSigner::from_seed([7_u8; 32]);
+        let request = super::super::event_history_page::parse_signed(None, &signer)
+            .expect("bare Timeline request is valid");
+        let retryable = api::event_history_v2_from_loaded(repo.path(), request, &signer, moving)
+            .expect("moving journal is a typed Timeline response");
+        let api::ChangeV2Json::Retryable(body) = retryable else {
+            panic!("a real append race must remain retryable")
+        };
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["schema"], "pointbreak.inspect-event-history-error");
+        assert_eq!(body["code"], "moving_journal");
+        assert_eq!(body["retryable"], true);
+        assert_eq!(
+            change_v2_response(Ok(api::ChangeV2Json::Retryable(body.to_string()))).status,
+            "503 Service Unavailable"
         );
     }
 

@@ -4,6 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promptForCredential } from "../src/auth";
 import { installChangeInspectorInteraction } from "../src/change-inspector-interaction";
 import type { ChangeInspectorSnapshot } from "../src/change-inspector-state";
+import {
+  renderChangeInspectorTimeline,
+  revealChangeInspectorTimelineEvent,
+} from "../src/change-inspector-timeline";
+import type { EventHistoryDocument } from "../src/change-protocol";
+import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
 const lensSnapshot = (): ChangeInspectorSnapshot => ({
@@ -16,6 +22,20 @@ const lensSnapshot = (): ChangeInspectorSnapshot => ({
 const attentionSnapshot = (): ChangeInspectorSnapshot => ({
   generation: null,
   route: { kind: "lens", lens: "attention", query: { q: "needs-review" } },
+  selected: null,
+  diagnostic: null,
+});
+
+const timelineSnapshot = (): ChangeInspectorSnapshot => ({
+  generation: null,
+  route: {
+    kind: "timeline",
+    historyQuery: {
+      q: "assessment",
+      type: "assessment_recorded",
+      after: "opaque-continuation",
+    },
+  },
   selected: null,
   diagnostic: null,
 });
@@ -34,13 +54,91 @@ const exactSnapshot = (
   diagnostic: null,
 });
 
+const eventSnapshot = (): ChangeInspectorSnapshot => ({
+  generation: null,
+  route: {
+    kind: "event",
+    eventId: "evt:sha256:deep-link",
+    historyQuery: {
+      q: "assessment",
+      track: "reviewer",
+      after: "opaque-event-page",
+    },
+    query: {},
+  },
+  selected: null,
+  diagnostic: null,
+});
+
 const activeControllers: Array<{ stop(): void }> = [];
+
+function timelineDocument(eventIds: string[]): EventHistoryDocument {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: authorityCursor(eventIds.length),
+    sourceChangeProjectionStamp: "sha256:changes",
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: eventIds.length,
+    matchCount: eventIds.length,
+    offset: 0,
+    facets: {},
+    completion: {
+      eventTypes: [],
+      trackIds: [],
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: eventIds.map((eventId) => ({
+      eventId,
+      eventType: "review_note_imported",
+      occurredAt: "2026-08-08T00:00:00Z",
+      payloadHash: `sha256:${eventId}`,
+      journalId: "journal:sha256:test",
+      writer: {
+        actorId: "actor:test",
+        producer: { name: "pointbreak", version: "0.10.0" },
+      },
+      verificationStatus: "valid",
+      assertionMode: "advisory",
+      subject: { kind: "journal", journalId: "journal:sha256:test" },
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+      summary: { kind: "review_note_imported" },
+    })),
+  };
+}
 
 function install() {
   const navigate = vi.fn();
-  const controller = installChangeInspectorInteraction({ navigate });
+  const toggleTimelineMonitoring = vi.fn();
+  const controller = installChangeInspectorInteraction({
+    navigate,
+    toggleTimelineMonitoring,
+  });
   activeControllers.push(controller);
-  return { controller, navigate };
+  return { controller, navigate, toggleTimelineMonitoring };
+}
+
+function mountTimelineRows(eventIds: string[]): HTMLOListElement {
+  const list = document.createElement("ol");
+  list.id = "timeline";
+  list.tabIndex = 0;
+  for (const eventId of eventIds) {
+    const row = document.createElement("li");
+    row.className = "event";
+    row.dataset.eventId = eventId;
+    row.tabIndex = 0;
+    row.textContent = eventId;
+    list.append(row);
+  }
+  document.querySelector("#master")?.append(list);
+  return list;
 }
 
 beforeEach(() => {
@@ -68,6 +166,316 @@ afterEach(() => {
 });
 
 describe("Change Inspector interaction lifecycle", () => {
+  it("reserves Shift-F for Timeline follow while text controls own their keys", () => {
+    const { controller, toggleTimelineMonitoring } = install();
+    controller.sync(timelineSnapshot(), timelineDocument([]));
+    const input = document.querySelector<HTMLInputElement>("#filter-text");
+    input?.focus();
+    input?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "F", bubbles: true }),
+    );
+    expect(toggleTimelineMonitoring).not.toHaveBeenCalled();
+
+    document.body.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "F", bubbles: true }),
+    );
+    expect(toggleTimelineMonitoring).toHaveBeenCalledOnce();
+  });
+
+  it("keeps one Timeline tab stop and moves its event cursor with j/k/g/G", () => {
+    const { controller, navigate } = install();
+    const list = mountTimelineRows(["evt:one", "evt:two", "evt:three"]);
+    controller.sync(
+      timelineSnapshot(),
+      timelineDocument(["evt:one", "evt:two", "evt:three"]),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Aone");
+    expect(document.activeElement).toBe(list);
+    expect(
+      Array.from(list.querySelectorAll<HTMLElement>("[data-event-id]")).map(
+        (row) => row.tabIndex,
+      ),
+    ).toEqual([-1, -1, -1]);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "k", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Atwo");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "g", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Aone");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "event",
+      eventId: "evt:one",
+      historyQuery: {
+        q: "assessment",
+        type: "assessment_recorded",
+        after: "opaque-continuation",
+      },
+      query: {},
+    });
+  });
+
+  it("opens a clicked Timeline event exactly once through the interaction owner", () => {
+    const { controller, navigate } = install();
+    const timeline = timelineDocument(["evt:one", "evt:two"]);
+    const route = timelineSnapshot().route;
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master || route.kind !== "timeline") {
+      throw new Error("Timeline interaction fixture is incomplete");
+    }
+    renderChangeInspectorTimeline(master, timeline, { navigate }, route);
+    controller.sync(timelineSnapshot(), timeline);
+
+    document
+      .querySelector<HTMLElement>('#timeline [data-event-id="evt:one"]')
+      ?.click();
+
+    expect(navigate).toHaveBeenCalledOnce();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: "evt:one",
+      historyQuery: {
+        q: "assessment",
+        type: "assessment_recorded",
+        after: undefined,
+      },
+      query: {},
+    });
+    expect(
+      document
+        .querySelector<HTMLOListElement>("#timeline")
+        ?.getAttribute("aria-activedescendant"),
+    ).toContain("evt_3Aone");
+  });
+
+  it("lands a global boundary selection only after its routed page paints", async () => {
+    const navigate = vi.fn();
+    const target = {
+      kind: "timeline" as const,
+      historyQuery: {
+        q: "assessment",
+        type: "assessment_recorded",
+        after: "opaque-tail",
+      },
+    };
+    const navigateTimelineBoundary = vi.fn(async () => target);
+    const controller = installChangeInspectorInteraction({
+      navigate,
+      navigateTimelineBoundary,
+    });
+    activeControllers.push(controller);
+    const list = mountTimelineRows(["evt:one", "evt:two"]);
+    controller.sync(
+      timelineSnapshot(),
+      timelineDocument(["evt:one", "evt:two"]),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    await Promise.resolve();
+    expect(navigateTimelineBoundary).toHaveBeenCalledWith(
+      "last",
+      timelineSnapshot().route,
+    );
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
+
+    list.replaceChildren();
+    for (const eventId of ["evt:tail-one", "evt:tail-two"]) {
+      const row = document.createElement("li");
+      row.className = "event";
+      row.dataset.eventId = eventId;
+      list.append(row);
+    }
+    controller.sync(
+      {
+        ...timelineSnapshot(),
+        route: target,
+      },
+      timelineDocument(["evt:tail-one", "evt:tail-two"]),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Atail-two",
+    );
+  });
+
+  it("moves consecutively through a full 100-entry page beyond the mounted virtual slice", () => {
+    const eventIds = Array.from({ length: 100 }, (_, index) => `evt:${index}`);
+    const history = timelineDocument(eventIds);
+    history.next = "opaque-next-page";
+    history.matchCount = 101;
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const navigate = vi.fn();
+    renderChangeInspectorTimeline(
+      master,
+      history,
+      { navigate },
+      {
+        kind: "timeline",
+        historyQuery: {
+          q: "assessment",
+          type: "assessment_recorded",
+          after: "opaque-continuation",
+        },
+      },
+    );
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    if (!list) throw new Error("missing Timeline list");
+    Object.defineProperty(list, "clientHeight", {
+      configurable: true,
+      value: 144,
+    });
+    revealChangeInspectorTimelineEvent("evt:0");
+    expect(list.querySelectorAll("[data-event-id]").length).toBeLessThan(100);
+
+    const controller = installChangeInspectorInteraction({
+      navigate,
+      revealTimelineEvent: revealChangeInspectorTimelineEvent,
+    });
+    activeControllers.push(controller);
+    controller.sync(timelineSnapshot(), history);
+    for (let index = 0; index < 20; index += 1) {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+      );
+    }
+
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3A19");
+    expect(list.querySelector('[data-event-id="evt:19"]')).not.toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("uses f/b/u/d for Timeline movement and adjacent page controls at a boundary", () => {
+    const { controller } = install();
+    const list = mountTimelineRows(["evt:one", "evt:two"]);
+    Object.defineProperty(list, "clientHeight", {
+      configurable: true,
+      value: 1,
+    });
+    for (const row of list.querySelectorAll<HTMLElement>("[data-event-id]")) {
+      row.getBoundingClientRect = () => ({ height: 1 }) as DOMRect;
+    }
+    const next = document.createElement("button");
+    next.type = "button";
+    next.dataset.timelinePage = "next";
+    next.textContent = "Next page";
+    const nextPage = vi.fn();
+    next.addEventListener("click", nextPage);
+    const previous = document.createElement("button");
+    previous.type = "button";
+    previous.dataset.timelinePage = "previous";
+    previous.textContent = "Previous page";
+    const previousPage = vi.fn();
+    previous.addEventListener("click", previousPage);
+    document.querySelector("#master")?.append(previous, next);
+    controller.sync(
+      timelineSnapshot(),
+      timelineDocument(["evt:one", "evt:two"]),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "f", bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "f", bubbles: true }),
+    );
+    expect(nextPage).toHaveBeenCalledOnce();
+
+    // Simulate the server-owned next page replacing the bounded DOM. The
+    // pending anchor selects its first event and preserves focus on the list.
+    list.replaceChildren();
+    for (const eventId of ["evt:three", "evt:four"]) {
+      const row = document.createElement("li");
+      row.className = "event";
+      row.dataset.eventId = eventId;
+      row.getBoundingClientRect = () => ({ height: 1 }) as DOMRect;
+      list.append(row);
+    }
+    controller.sync(
+      {
+        ...timelineSnapshot(),
+        route: { kind: "timeline", historyQuery: { after: "next-page" } },
+      },
+      timelineDocument(["evt:three", "evt:four"]),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "u", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "d", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Afour");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "b", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "b", bubbles: true }),
+    );
+    // `u` at the first row and the final `b` at the first row are each one
+    // deliberate adjacent-page action, so the adjacent signed page is asked
+    // for twice rather than coalescing two independent reader keys.
+    expect(previousPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns an exact Revision opened from Timeline to its filtered Timeline route", () => {
+    const { controller, navigate } = install();
+    controller.sync(timelineSnapshot(), timelineDocument([]));
+    controller.sync(exactSnapshot());
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "assessment",
+        type: "assessment_recorded",
+        after: "opaque-continuation",
+      },
+    });
+  });
+
+  it("returns a direct event deep link to its typed Timeline filter context", () => {
+    const { controller, navigate } = install();
+    controller.sync(eventSnapshot());
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "assessment",
+        track: "reviewer",
+        after: "opaque-event-page",
+      },
+    });
+  });
+
   it("leaves Enter on a focused native control instead of opening the local Change cursor", () => {
     const { controller, navigate } = install();
     const card = document.createElement("article");
@@ -460,7 +868,7 @@ describe("Change Inspector interaction lifecycle", () => {
     });
   });
 
-  it("uses Changes for a direct exact link after the prior composition stops", () => {
+  it("uses Timeline for a direct exact link after the prior composition stops", () => {
     const first = install();
     history.replaceState(null, "", "/#/attention?q=needs-review");
     first.controller.sync(attentionSnapshot());
@@ -482,9 +890,8 @@ describe("Change Inspector interaction lifecycle", () => {
     document.querySelector<HTMLButtonElement>("#detail-close")?.click();
 
     expect(second.navigate).toHaveBeenLastCalledWith({
-      kind: "lens",
-      lens: "changes",
-      query: {},
+      kind: "timeline",
+      historyQuery: {},
     });
   });
 

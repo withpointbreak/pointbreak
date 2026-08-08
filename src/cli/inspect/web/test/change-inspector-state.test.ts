@@ -6,14 +6,16 @@ import {
 import type {
   AttentionPage,
   ChangesPage,
+  EventHistoryDocument,
   ReaderProfile,
 } from "../src/change-protocol";
+import { authorityCursor } from "./support/authority";
 
 const profile: ReaderProfile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
   availability: "ready",
-  authorityCursor: { eventCount: 1 },
+  authorityCursor: authorityCursor(1),
   commitGraphStamp: "sha256:stamp",
   minimumReaderProfile: "review_change_revision_v1",
   documents: {},
@@ -45,6 +47,31 @@ function page(lens: "changes" | "attention", hash = "sha256:artifact") {
       },
     ],
   } as ChangesPage | AttentionPage;
+}
+
+function history(cursor = authorityCursor(1)): EventHistoryDocument {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: cursor,
+    sourceChangeProjectionStamp: "sha256:generation",
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: cursor.eventCount,
+    matchCount: 0,
+    offset: 0,
+    facets: {},
+    completion: {
+      eventTypes: [],
+      trackIds: [],
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: [],
+  };
 }
 
 describe("Change inspector state", () => {
@@ -95,7 +122,19 @@ describe("Change inspector state", () => {
         profile,
         page("changes") as ChangesPage,
         page("attention") as AttentionPage,
-        { ...profile, authorityCursor: { eventCount: 2 } },
+        { ...profile, authorityCursor: authorityCursor(2) },
+      ),
+    ).toThrow("changed during staging");
+  });
+
+  it("refuses history from a different authority generation", () => {
+    expect(() =>
+      stageGeneration(
+        profile,
+        page("changes") as ChangesPage,
+        page("attention") as AttentionPage,
+        profile,
+        history(authorityCursor(2)),
       ),
     ).toThrow("changed during staging");
   });

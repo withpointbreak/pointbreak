@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface BoundaryModule {
@@ -23,9 +23,70 @@ async function readBoundaryInventory(): Promise<BoundaryInventory> {
 }
 
 function importsIn(source: string): string[] {
-  return [...source.matchAll(/from\s+["'](\.[^"']+)["']/g)].map(
+  const fromImports = [
+    ...source.matchAll(
+      /(?:import|export)\s+(?:type\s+)?[^;]*?\s+from\s+["'](\.[^"']+)["']/g,
+    ),
+  ];
+  const sideEffectImports = [
+    ...source.matchAll(/import\s+["'](\.[^"']+)["']/g),
+  ];
+  const dynamicImports = [
+    ...source.matchAll(/import\s*\(\s*["'](\.[^"']+)["']\s*\)/g),
+  ];
+  return [...fromImports, ...sideEffectImports, ...dynamicImports].map(
     (match) => match[1] ?? "",
   );
+}
+
+const ACTIVE_SOURCE_ROOT = resolve("src");
+
+/**
+ * These four leaves are deliberately omitted from the semantic inventory:
+ * each is a tiny generic primitive with no Pointbreak model, transport, route,
+ * or state vocabulary. Keeping this allowlist explicit and exact prevents a
+ * newly reachable module from becoming "neutral" merely by going unrecorded.
+ */
+const NEUTRAL_IMPORT_ALLOWLIST = new Map<string, string>([
+  ["classNames.ts", "pure CSS class composition"],
+  ["dom.ts", "typed DOM lookup"],
+  ["escape.ts", "HTML escaping"],
+  ["format.ts", "pure scalar formatting"],
+]);
+
+function importedTypeScriptPath(
+  importer: string,
+  specifier: string,
+): string | null {
+  const unresolved = resolve(dirname(importer), specifier);
+  if (specifier.endsWith(".json")) return null;
+  if (specifier.endsWith(".ts")) return unresolved;
+  if (specifier.endsWith(".js")) return `${unresolved.slice(0, -3)}.ts`;
+  return `${unresolved}.ts`;
+}
+
+async function activeImportClosure(): Promise<Map<string, string>> {
+  const pending = [resolve(ACTIVE_SOURCE_ROOT, "entry.ts")];
+  const closure = new Map<string, string>();
+  while (pending.length > 0) {
+    const file = pending.pop();
+    if (file === undefined || closure.has(file)) continue;
+    const source = await readFile(file, "utf8");
+    closure.set(file, source);
+    for (const imported of importsIn(source)) {
+      const candidate = importedTypeScriptPath(file, imported);
+      if (candidate === null) continue;
+      const fromSourceRoot = relative(ACTIVE_SOURCE_ROOT, candidate);
+      if (fromSourceRoot !== ".." && !fromSourceRoot.startsWith(`..${sep}`)) {
+        pending.push(candidate);
+      }
+    }
+  }
+  return closure;
+}
+
+function sourcePath(file: string): string {
+  return relative(ACTIVE_SOURCE_ROOT, file).replaceAll("\\", "/");
 }
 
 describe("active Change inspector architecture", () => {
@@ -40,6 +101,26 @@ describe("active Change inspector architecture", () => {
       expect.arrayContaining([
         expect.objectContaining({
           path: "change-inspector-interaction.ts",
+          classification: "adapted",
+          activeImport: true,
+        }),
+        expect.objectContaining({
+          path: "change-inspector-timeline-boundary.ts",
+          classification: "adapted",
+          activeImport: true,
+        }),
+        expect.objectContaining({
+          path: "change-inspector-timeline-monitor.ts",
+          classification: "adapted",
+          activeImport: true,
+        }),
+        expect.objectContaining({
+          path: "change-inspector-timeline-navigation.ts",
+          classification: "adapted",
+          activeImport: true,
+        }),
+        expect.objectContaining({
+          path: "change-inspector-timeline.ts",
           classification: "adapted",
           activeImport: true,
         }),
@@ -71,29 +152,55 @@ describe("active Change inspector architecture", () => {
 
   it("boots only the Change-first composition and has no legacy semantic imports or aggregate URLs", async () => {
     const inventory = await readBoundaryInventory();
-    const boundaries = new Map(
-      inventory.modules.map((module) => [resolve("src", module.path), module]),
+    const boundaries = new Map<string, BoundaryModule>(
+      inventory.modules.map((module) => [module.path, module]),
     );
     const entry = await readFile("src/entry.ts", "utf8");
     expect(entry).toContain('from "./change-inspector"');
     expect(entry).not.toContain("bootstrapChangeReader");
-    const pending = [resolve("src/entry.ts")];
-    const closure = new Map<string, string>();
-    while (pending.length > 0) {
-      const file = pending.pop();
-      if (file === undefined) continue;
-      if (closure.has(file)) continue;
-      const source = await readFile(file, "utf8");
-      closure.set(file, source);
-      for (const imported of importsIn(source)) {
-        const candidate = resolve(dirname(file), `${imported}.ts`);
-        if (candidate.includes("/src/cli/inspect/web/src/"))
-          pending.push(candidate);
+    const closure = await activeImportClosure();
+    const closurePaths = new Set([...closure.keys()].map(sourcePath));
+    expect(closurePaths).toContain("entry.ts");
+
+    for (const [path, reason] of NEUTRAL_IMPORT_ALLOWLIST) {
+      expect(reason).not.toHaveLength(0);
+      expect(
+        closurePaths.has(path),
+        `${path} is allowlisted as neutral but is not in the active closure`,
+      ).toBe(true);
+      expect(
+        boundaries.has(path),
+        `${path} must be either inventoried or neutral, never both`,
+      ).toBe(false);
+    }
+    for (const path of closurePaths) {
+      const boundary = boundaries.get(path);
+      expect(
+        boundary !== undefined || NEUTRAL_IMPORT_ALLOWLIST.has(path),
+        `${path} is reachable from entry.ts but has no architecture inventory entry`,
+      ).toBe(true);
+      if (boundary !== undefined) {
+        expect(
+          boundary.activeImport,
+          `${path} is ${boundary.classification} and must not be reachable from the active composition`,
+        ).toBe(true);
       }
     }
-    expect(
-      [...closure.keys()].map((file) => file.replace(process.cwd(), "")),
-    ).toContain("/src/entry.ts");
+    for (const boundary of inventory.modules) {
+      if (boundary.activeImport) {
+        expect(
+          closurePaths.has(boundary.path),
+          `${boundary.path} is marked activeImport=true but is not reachable from entry.ts`,
+        ).toBe(true);
+      }
+      if (boundary.classification === "quarantined") {
+        expect(
+          closurePaths.has(boundary.path),
+          `${boundary.path} is quarantined but reachable from entry.ts`,
+        ).toBe(false);
+      }
+    }
+
     // Type-only imports are still architectural dependencies: a neutral renderer
     // must not regain the legacy aggregate store through a type declared beside
     // the state-reading model. Keep the whole active import closure free of both
@@ -122,13 +229,6 @@ describe("active Change inspector architecture", () => {
         file.endsWith("/src/change-inspector-reading.ts")
       )
         expect(source).not.toMatch(/\/api\/(?!v2\/)/);
-    }
-    for (const [file, boundary] of boundaries) {
-      if (!closure.has(file)) continue;
-      expect(
-        boundary.activeImport,
-        `${boundary.path} is ${boundary.classification} and must not be reachable from the active composition`,
-      ).toBe(true);
     }
   });
 });

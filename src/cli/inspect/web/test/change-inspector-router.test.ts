@@ -6,7 +6,47 @@ import {
 } from "../src/change-inspector-router";
 
 describe("Change inspector routes", () => {
-  it("round trips the two lenses, Change detail, and an exact contextual Revision", () => {
+  it("uses Timeline for an empty hash and round trips its bounded query", () => {
+    expect(parseChangeInspectorRoute("")).toEqual({
+      kind: "timeline",
+      historyQuery: {},
+    });
+    const timeline = parseChangeInspectorRoute(
+      "#/timeline?q=release&type=validation_check_recorded&order=asc&limit=25",
+    );
+    expect(timeline).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        q: "release",
+        type: "validation_check_recorded",
+        order: "asc",
+        limit: 25,
+      },
+    });
+    if (timeline.kind === "invalid") throw new Error(timeline.message);
+    expect(formatChangeInspectorRoute(timeline)).toBe(
+      "#/timeline?limit=25&q=release&type=validation_check_recorded&order=asc",
+    );
+  });
+
+  it("keeps Timeline continuation position exclusive and exact revision-scoped", () => {
+    expect(
+      parseChangeInspectorRoute(
+        "#/timeline?at=evt%3Asha256%3Aone&after=opaque",
+      ),
+    ).toEqual({
+      kind: "invalid",
+      message: "Timeline at and after cannot be combined.",
+    });
+    expect(
+      parseChangeInspectorRoute("#/timeline?revision=rev%3Asha256%3Aone"),
+    ).toEqual({
+      kind: "invalid",
+      message: "Timeline revision requires artifactHash.",
+    });
+  });
+
+  it("round trips the two Change lenses, Change detail, and an exact contextual Revision", () => {
     expect(
       parseChangeInspectorRoute("#/changes?q=ready&lifecycle=in_progress"),
     ).toEqual({
@@ -72,6 +112,34 @@ describe("Change inspector routes", () => {
         to: interdiff.from,
       }),
     );
+  });
+
+  it("round trips an exact event route and rejects a competing anchor", () => {
+    const route = parseChangeInspectorRoute(
+      "#/timeline/events/evt%3Asha256%3Aone?q=release&type=validation_check_recorded",
+    );
+    expect(route).toEqual({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: { q: "release", type: "validation_check_recorded" },
+      query: {},
+    });
+    if (route.kind === "invalid") throw new Error(route.message);
+    expect(formatChangeInspectorRoute(route)).toBe(
+      "#/timeline/events/evt%3Asha256%3Aone?q=release&type=validation_check_recorded",
+    );
+    expect(
+      parseChangeInspectorRoute(
+        "#/timeline/events/evt%3Asha256%3Aone?at=evt%3Asha256%3Atwo",
+      ),
+    ).toEqual({
+      kind: "invalid",
+      message: "Event routes select their anchor from the event ID.",
+    });
+    expect(parseChangeInspectorRoute("#/timeline/events")).toEqual({
+      kind: "invalid",
+      message: "Unknown Change Inspector route.",
+    });
   });
 
   it("rejects a Revision route with no artifact hash instead of retargeting it", () => {
@@ -175,7 +243,8 @@ describe("Change inspector routes", () => {
     const changes = parseChangeInspectorRoute(
       "#/changes?after=changes-page&limit=20&order=change_id_asc",
     );
-    if (changes.kind === "invalid") throw new Error(changes.message);
+    if (changes.kind === "invalid" || changes.kind === "timeline")
+      throw new Error("expected Changes route");
     expect(queryForExactNavigation(changes)).toEqual(changes.query);
   });
 });

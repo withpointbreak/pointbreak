@@ -95,6 +95,13 @@ impl Inspector {
         inspector
     }
 
+    /// Start against the supplied authority without waiting for a ready reader.
+    /// Capability-fence tests use this to inspect a real L0 or M1 response;
+    /// ordinary v2 tests should use [`Self::spawn_current`] instead.
+    pub fn spawn_current_unready(repo: &Path) -> Self {
+        Self::spawn_with_env_mode(repo, InspectSurface::Web, InspectOutput::Text, &[], false)
+    }
+
     pub fn spawn_human(repo: &Path) -> Self {
         Self::spawn_web_text(repo)
     }

@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CHANGE_READER_DOCUMENTS } from "../src/change-protocol";
+import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
 const profile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
   availability: "ready",
-  authorityCursor: { eventCount: 1 },
+  authorityCursor: authorityCursor(1),
   commitGraphStamp: "sha256:stamp",
   minimumReaderProfile: "review_change_revision_v1",
   documents: { ...CHANGE_READER_DOCUMENTS },
@@ -47,6 +48,31 @@ const revision = {
   revisionId: "revision:sha256:one",
   objectArtifactContentHash: "sha256:artifact",
 };
+
+function historyPage(projectionStamp = "sha256:generation") {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: authorityCursor(1),
+    sourceChangeProjectionStamp: projectionStamp,
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: 1,
+    matchCount: 1,
+    offset: 0,
+    facets: {},
+    completion: {
+      eventTypes: [],
+      trackIds: [],
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: [],
+  };
+}
 
 function revisionDetail(projectionStamp = "sha256:generation") {
   return {
@@ -98,6 +124,19 @@ function staleProjectionResponse(): Response {
   );
 }
 
+function movingJournalResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      schema: "pointbreak.inspect-event-history-error",
+      version: 1,
+      code: "moving_journal",
+      message: "private server detail",
+      retryable: true,
+    }),
+    { status: 503 },
+  );
+}
+
 function isExactRevisionPath(path: string): boolean {
   return path.startsWith(
     "/api/v2/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?",
@@ -125,6 +164,77 @@ afterEach(async () => {
 });
 
 describe("Change-first composition", () => {
+  it("decodes and retries one typed moving-Journal Timeline refusal", async () => {
+    history.replaceState(null, "", "/#/timeline?q=review&limit=20");
+    let historyRequests = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      if (path.startsWith("/api/v2/history?")) {
+        historyRequests += 1;
+        return historyRequests === 1
+          ? movingJournalResponse()
+          : new Response(JSON.stringify(historyPage()));
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    await bootstrapChangeInspector({ poll: false });
+
+    expect(historyRequests).toBe(2);
+    expect(document.querySelector("#master")?.textContent).toContain(
+      "Timeline",
+    );
+    expect(document.querySelector("#error")?.textContent).not.toContain(
+      "private server detail",
+    );
+  });
+
+  it("returns an exact event search to its filtered Timeline instead of a card lens", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Asha256%3Aone?q=before&limit=20",
+    );
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      if (path.startsWith("/api/v2/history?"))
+        return new Response(JSON.stringify(historyPage()));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing search input");
+    search.value = "after";
+    search.dispatchEvent(new Event("change"));
+
+    await vi.waitFor(() =>
+      expect(location.hash).toBe("#/timeline?limit=20&q=after"),
+    );
+    expect(requests.some((path) => path.startsWith("/api/v2/changes?"))).toBe(
+      true,
+    );
+  });
+
   it("consumes a same-document capability before strict Change routing", async () => {
     const token = "opaque_test_capability_0123456789abcdef";
     const requests: string[] = [];
@@ -424,7 +534,7 @@ describe("Change-first composition", () => {
     ).toBe(false);
   });
 
-  it("maps only 1 and 2 to Change lenses and keeps split and reading controls local", async () => {
+  it("maps 1, 2, and 3 to Timeline, Changes, and Attention", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/v2/profile")
@@ -433,6 +543,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (path.startsWith("/api/v2/history?"))
+        return new Response(JSON.stringify(historyPage()));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const { bootstrapChangeInspector } = await import(
@@ -443,7 +555,7 @@ describe("Change-first composition", () => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "2", bubbles: true }),
     );
-    expect(location.hash).toBe("#/attention");
+    expect(location.hash).toBe("#/changes");
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "3", bubbles: true }),
     );
@@ -451,7 +563,7 @@ describe("Change-first composition", () => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "1", bubbles: true }),
     );
-    expect(location.hash).toBe("#/changes");
+    expect(location.hash).toBe("#/timeline");
 
     const divider = document.querySelector<HTMLElement>(".divider");
     divider?.dispatchEvent(
@@ -724,7 +836,7 @@ describe("Change-first composition", () => {
         return new Response(
           JSON.stringify({
             ...profile,
-            authorityCursor: { eventCount: generation },
+            authorityCursor: authorityCursor(generation),
           }),
         );
       if (path.startsWith("/api/v2/changes?"))
@@ -841,7 +953,7 @@ describe("Change-first composition", () => {
           new Response(
             JSON.stringify({
               ...profile,
-              authorityCursor: { eventCount: generation },
+              authorityCursor: authorityCursor(generation),
             }),
           ),
         );
@@ -881,20 +993,7 @@ describe("Change-first composition", () => {
 
     const detail = document.querySelector<HTMLElement>("#detail-body");
     if (detail === null) throw new Error("missing exact detail body");
-    const repainted = new Promise<void>((resolve) => {
-      const observer = new MutationObserver(() => {
-        if (detail.dataset.changeReadingKey?.includes("sha256:generation-2")) {
-          observer.disconnect();
-          resolve();
-        }
-      });
-      observer.observe(detail, {
-        attributes: true,
-        attributeFilter: ["data-change-reading-key"],
-      });
-    });
     await vi.advanceTimersByTimeAsync(10_000);
-    await repainted;
     expect(changesRequests).toBe(3);
     expect(exactRequests).toBe(3);
     expect(
@@ -919,7 +1018,7 @@ describe("Change-first composition", () => {
         return new Response(
           JSON.stringify({
             ...profile,
-            authorityCursor: { eventCount: generation },
+            authorityCursor: authorityCursor(generation),
           }),
         );
       if (path.startsWith("/api/v2/changes?"))
@@ -997,7 +1096,7 @@ describe("Change-first composition", () => {
         return new Response(
           JSON.stringify({
             ...profile,
-            authorityCursor: { eventCount: generation },
+            authorityCursor: authorityCursor(generation),
           }),
         );
       }
@@ -1215,7 +1314,7 @@ describe("Change-first composition", () => {
         return new Response(
           JSON.stringify({
             ...profile,
-            authorityCursor: { eventCount },
+            authorityCursor: authorityCursor(eventCount),
           }),
         );
       }

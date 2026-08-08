@@ -12,7 +12,7 @@ use crate::session::store::capabilities::{
     JournalInspection, StoreCapabilityInspection, StoreCapabilityStatus,
 };
 use crate::session::store::resolution::resolve_change_read_store;
-use crate::session::{ChangeDocumentProjectionV1, ChangeProjection, EventStore};
+use crate::session::{AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection, EventStore};
 
 /// The complete strict semantic input for a Change-capable reader.
 ///
@@ -26,6 +26,7 @@ pub struct ChangeReaderReadyV1 {
     pub document_projection: ChangeDocumentProjectionV1,
     events: Arc<Vec<ShoreEvent>>,
     event_set_hash: String,
+    authority_cursor: AuthorityCursorV2,
 }
 
 impl ChangeReaderReadyV1 {
@@ -52,6 +53,23 @@ impl ChangeReaderReadyV1 {
             self.document_projection.clone(),
         )?
         .with_presentations(presentations)
+    }
+
+    /// Build the typed, review-domain event timeline from the same complete
+    /// generation as the Change documents. Raw event payload JSON remains
+    /// private to the projector.
+    pub fn event_history_facade(
+        &self,
+        trust_set: &crate::session::TrustSet,
+    ) -> Result<crate::documents::EventHistoryFacadeV1> {
+        let source_change_projection_stamp = self.document_facade()?.projection_stamp().to_owned();
+        crate::session::projection::event_history::project_event_history(
+            &self.events,
+            &self.document_projection,
+            self.authority_cursor.clone(),
+            source_change_projection_stamp,
+            trust_set,
+        )
     }
 }
 
@@ -100,6 +118,7 @@ fn change_reader_state_from_inspection(
             document_projection: generation.document_projection,
             events: Arc::new(events),
             event_set_hash: inspection.cursor.event_set_hash.clone(),
+            authority_cursor: inspection.cursor.clone(),
         })
     } else {
         None
@@ -166,6 +185,16 @@ mod tests {
         ));
         assert!(l2.ready().is_some());
         assert!(!l2.ready().unwrap().projection.changes.is_empty());
+        let ready = l2.ready().unwrap();
+        let history = ready
+            .event_history_facade(&crate::session::TrustSet::default())
+            .unwrap()
+            .document();
+        assert_eq!(history.authority_cursor, l2.capability.cursor);
+        assert_eq!(
+            history.source_change_projection_stamp,
+            ready.document_facade().unwrap().projection_stamp()
+        );
     }
 
     #[test]
@@ -295,6 +324,77 @@ mod tests {
         assert_eq!(review_attention_stamp, list_stamp);
         assert_eq!(inspect_attention_stamp, list_stamp);
         assert_eq!(detail_stamp, list_stamp);
+    }
+
+    #[test]
+    fn ready_generation_remains_immutable_across_a_later_append() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+
+        let before = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let before_ready = before.ready().expect("L2 reader is ready");
+        let before_change_stamp = before_ready
+            .document_facade()
+            .unwrap()
+            .projection_stamp()
+            .to_owned();
+        let before_history = before_ready
+            .event_history_facade(&crate::session::TrustSet::default())
+            .unwrap()
+            .document();
+        assert_eq!(
+            before_history.source_change_projection_stamp,
+            before_change_stamp
+        );
+
+        EventStore::from_backend(&backend)
+            .record_change_event_once(&external_observation_event(RevisionId::new(
+                "rev:sha256:immutable-generation-test",
+            )))
+            .unwrap();
+
+        // A ready reader is one immutable generation. Re-projecting through it
+        // after the append must not mix its old Change snapshot with new events.
+        let retained_history = before_ready
+            .event_history_facade(&crate::session::TrustSet::default())
+            .unwrap()
+            .document();
+        assert_eq!(retained_history, before_history);
+        assert_eq!(
+            before_ready.document_facade().unwrap().projection_stamp(),
+            before_change_stamp
+        );
+
+        // A subsequent load observes the append as one entirely new generation.
+        let after = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let after_ready = after.ready().expect("L2 reader stays ready");
+        let after_change_stamp = after_ready
+            .document_facade()
+            .unwrap()
+            .projection_stamp()
+            .to_owned();
+        let after_history = after_ready
+            .event_history_facade(&crate::session::TrustSet::default())
+            .unwrap()
+            .document();
+        assert_ne!(
+            after_history.authority_cursor,
+            before_history.authority_cursor
+        );
+        assert_ne!(
+            after_history.timeline_projection_stamp,
+            before_history.timeline_projection_stamp
+        );
+        assert_eq!(
+            after_history.entries.len(),
+            before_history.entries.len() + 1
+        );
+        assert_eq!(
+            after_history.source_change_projection_stamp,
+            after_change_stamp
+        );
+        assert_ne!(after_change_stamp, before_change_stamp);
     }
 
     #[test]

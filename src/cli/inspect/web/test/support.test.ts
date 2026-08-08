@@ -87,7 +87,7 @@ describe("mountInspectorDom", () => {
     for (const id of FIXED_IDS) {
       expect(document.getElementById(id), id).not.toBeNull();
     }
-    expect(document.querySelectorAll(".lens-tab")).toHaveLength(2);
+    expect(document.querySelectorAll(".lens-tab")).toHaveLength(3);
   });
 
   it("does not inject the render-created lens bodies (renderMaster owns those)", () => {
@@ -102,7 +102,7 @@ describe("mountInspectorDom", () => {
     mountInspectorDom();
     mountInspectorDom();
     expect(document.querySelectorAll("#master")).toHaveLength(1);
-    expect(document.querySelectorAll(".lens-tab")).toHaveLength(2);
+    expect(document.querySelectorAll(".lens-tab")).toHaveLength(3);
   });
 
   it("resetDom clears the body and the prefs-applied root attributes", () => {

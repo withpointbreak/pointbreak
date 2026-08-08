@@ -53,13 +53,14 @@ pub(super) enum ChangeV2Json {
     Unavailable(String),
     Invalid(String),
     Stale(String),
+    Retryable(String),
 }
 
 pub(super) fn change_v2_profile_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
 ) -> Result<String, String> {
-    let state = cache.load(repo)?;
+    let state = cache.load(repo).map_err(|error| error.to_string())?;
     let mut profile = ReaderProfileDocumentV1::from(&state.capability);
     profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
     serde_json::to_string(&profile).map_err(|error| error.to_string())
@@ -82,6 +83,89 @@ pub(super) fn changes_v2_json(
             .map_err(|error| error.to_string())?;
         paged_change_json(document, request, signer)
     })
+}
+
+pub(super) fn event_history_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    query: Option<&str>,
+    signer: &super::page_token::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    let request = match super::event_history_page::parse_signed(query, signer) {
+        Ok(request) => request,
+        Err(super::event_history_page::PageError::Invalid(message)) => {
+            return Ok(ChangeV2Json::Invalid(event_history_error_json(
+                "invalid_query",
+                &message,
+                false,
+            )));
+        }
+    };
+    event_history_v2_from_loaded(repo, request, signer, cache.load(repo))
+}
+
+/// Finish a Timeline response after its signed request has passed the closed
+/// parser. Keeping the load result as an argument preserves the route's
+/// invalid-query-before-store-access guarantee while letting the cache-race
+/// test prove that a real moving journal is rendered as a typed retry.
+pub(super) fn event_history_v2_from_loaded(
+    repo: &Path,
+    request: super::event_history_page::Request,
+    signer: &super::page_token::PageTokenSigner,
+    loaded: Result<
+        Arc<pointbreak::session::ChangeReaderStateV1>,
+        super::server::ChangeReaderLoadError,
+    >,
+) -> Result<ChangeV2Json, String> {
+    let state = match loaded {
+        Ok(state) => state,
+        Err(super::server::ChangeReaderLoadError::MovingJournal) => {
+            return Ok(ChangeV2Json::Retryable(event_history_error_json(
+                "moving_journal",
+                "Journal changed while the Timeline generation was loading; retry",
+                true,
+            )));
+        }
+        Err(super::server::ChangeReaderLoadError::Other(message)) => return Err(message),
+    };
+    if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
+        return serde_json::to_string(&unavailable)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string());
+    }
+    let ready = state
+        .ready()
+        .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
+    let document = ready
+        .event_history_facade(&crate::cli::common::discover_trust_set(repo))
+        .map_err(|error| error.to_string())?
+        .document();
+    match super::event_history_query::apply(document, &request, signer) {
+        Ok(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Ok)
+            .map_err(|error| error.to_string()),
+        Err(super::event_history_query::ApplyError::Invalid(message)) => Ok(ChangeV2Json::Invalid(
+            event_history_error_json("invalid_query", &message, false),
+        )),
+        Err(super::event_history_query::ApplyError::Stale) => {
+            Ok(ChangeV2Json::Stale(event_history_error_json(
+                "stale_projection",
+                "continuation belongs to a stale Timeline projection",
+                false,
+            )))
+        }
+    }
+}
+
+fn event_history_error_json(code: &str, message: &str, retryable: bool) -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-event-history-error",
+        "version": 1,
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    })
+    .to_string()
 }
 
 pub(super) fn change_attention_v2_json(
@@ -285,7 +369,7 @@ fn with_change_v2_outcome(
         &pointbreak::session::ChangeReaderReadyV1,
     ) -> Result<ChangeV2Json, String>,
 ) -> Result<ChangeV2Json, String> {
-    let state = cache.load(repo)?;
+    let state = cache.load(repo).map_err(|error| error.to_string())?;
     if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
         return serde_json::to_string(&unavailable)
             .map(ChangeV2Json::Unavailable)

@@ -320,6 +320,11 @@ fn classify_retained_reference(path: &str, line: &str) -> Option<&'static str> {
         {
             Some("checked-in screenshot basename or inspector preference key")
         }
+        "scripts/change-inspector-browser-verify.sh"
+            if line.contains("\"schema\":\"shore.store-config\"") =>
+        {
+            Some("frozen persisted protocol identifier in a disposable browser fixture")
+        }
         "scripts/install-selftest.sh"
             if line.contains("neighbor=\"${install_dir}/shore\"")
                 || line.contains("grep -i 'shore'") =>

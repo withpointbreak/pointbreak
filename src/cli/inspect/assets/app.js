@@ -242,11 +242,11 @@
         const first = stops[0];
         const last = stops.at(-1);
         if (!first || !last) return;
-        const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        if (event.shiftKey && (active2 === first || !dialog.contains(active2))) {
+        const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        if (event.shiftKey && (active3 === first || !dialog.contains(active3))) {
           event.preventDefault();
           last.focus();
-        } else if (!event.shiftKey && (active2 === last || !dialog.contains(active2))) {
+        } else if (!event.shiftKey && (active3 === last || !dialog.contains(active3))) {
           event.preventDefault();
           first.focus();
         }
@@ -382,6 +382,9 @@
     constructor(code, status) {
       super("protocol", status);
       this.code = code;
+      if (code === "moving_journal") {
+        this.message = "Timeline journal changed while loading; retry";
+      }
     }
     code;
     static {
@@ -396,12 +399,15 @@
   function typedPageFailure(value, status) {
     if (typeof value !== "object" || value === null) return null;
     const document2 = value;
-    if (document2.schema !== "pointbreak.inspect-change-page-error" || document2.version !== 1)
+    if (document2.schema !== "pointbreak.inspect-change-page-error" && document2.schema !== "pointbreak.inspect-event-history-error" || document2.version !== 1)
       return null;
     if (document2.code === "invalid_query" && status === 400)
       return new ChangeInspectorPageFailure("invalid_query", status);
     if (document2.code === "stale_projection" && status === 409)
       return new ChangeInspectorPageFailure("stale_projection", status);
+    if (document2.schema === "pointbreak.inspect-event-history-error" && document2.code === "moving_journal" && status === 503) {
+      return new ChangeInspectorPageFailure("moving_journal", status);
+    }
     return null;
   }
   __name(typedPageFailure, "typedPageFailure");
@@ -470,6 +476,18 @@
     "toArtifactHash",
     "fact",
     "file"
+  ]);
+  var TIMELINE_QUERY_KEYS = /* @__PURE__ */ new Set([
+    "limit",
+    "after",
+    "at",
+    "q",
+    "type",
+    "track",
+    "change",
+    "revision",
+    "artifactHash",
+    "order"
   ]);
   function decodeSegment(value) {
     try {
@@ -541,11 +559,74 @@
     return "message" in value;
   }
   __name(isParseError, "isParseError");
+  function parseTimelineQuery(search) {
+    if (!validQueryEncoding(search)) {
+      return { message: "Malformed route query encoding." };
+    }
+    const params = new URLSearchParams(search);
+    const query = {};
+    for (const key of params.keys()) {
+      if (!TIMELINE_QUERY_KEYS.has(key)) {
+        return { message: `Unknown ${key} route query.` };
+      }
+      if (params.getAll(key).length !== 1) {
+        return { message: `Duplicate ${key} route query.` };
+      }
+    }
+    for (const key of TIMELINE_QUERY_KEYS) {
+      const value = params.get(key);
+      if (value === null) continue;
+      if (!value) return { message: `Empty ${key} route query.` };
+      if (key === "limit") {
+        const limit = Number(value);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+          return { message: "Invalid limit route query." };
+        query.limit = limit;
+      } else if (key === "order") {
+        if (value !== "asc" && value !== "desc")
+          return { message: "Invalid order route query." };
+        query.order = value;
+      } else if (key === "after" || key === "at" || key === "q" || key === "type" || key === "track" || key === "change" || key === "revision" || key === "artifactHash") {
+        query[key] = value;
+      }
+    }
+    if (query.revision === void 0 !== (query.artifactHash === void 0)) {
+      return { message: "Timeline revision requires artifactHash." };
+    }
+    if (query.at !== void 0 && query.after !== void 0) {
+      return { message: "Timeline at and after cannot be combined." };
+    }
+    return query;
+  }
+  __name(parseTimelineQuery, "parseTimelineQuery");
+  function isTimelineParseError(value) {
+    return "message" in value;
+  }
+  __name(isTimelineParseError, "isTimelineParseError");
   function parseChangeInspectorRoute(hash) {
     const raw = hash.startsWith("#") ? hash.slice(1) : hash;
     const separator = raw.indexOf("?");
     const path = separator === -1 ? raw : raw.slice(0, separator);
     const search = separator === -1 ? "" : raw.slice(separator + 1);
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 0 || segments.length === 1 && segments[0] === "timeline") {
+      const historyQuery = parseTimelineQuery(search);
+      return isTimelineParseError(historyQuery) ? { kind: "invalid", message: historyQuery.message } : { kind: "timeline", historyQuery };
+    }
+    if (segments.length === 3 && segments[0] === "timeline" && segments[1] === "events") {
+      const eventId = decodeSegment(segments[2]);
+      if (eventId === null)
+        return { kind: "invalid", message: "Event routes require an event ID." };
+      const historyQuery = parseTimelineQuery(search);
+      if (isTimelineParseError(historyQuery))
+        return { kind: "invalid", message: historyQuery.message };
+      if (historyQuery.at !== void 0)
+        return {
+          kind: "invalid",
+          message: "Event routes select their anchor from the event ID."
+        };
+      return { kind: "event", eventId, historyQuery, query: {} };
+    }
     const parsed = parseQuery(search);
     if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
     const {
@@ -566,7 +647,6 @@
       };
       return Object.keys(selected).length ? selected : void 0;
     }, "focus");
-    const segments = path.split("/").filter(Boolean);
     if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
       if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
         return {
@@ -603,8 +683,8 @@
       message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
     }), "exactFailure");
     if (segments[2] === "revisions" && segments.length >= 4) {
-      const revision = exactRevision(decodeSegment(segments[3]));
-      if (revision === null) return exactFailure();
+      const revision2 = exactRevision(decodeSegment(segments[3]));
+      if (revision2 === null) return exactFailure();
       const exactFocus = focus();
       if (exactFocus === null)
         return {
@@ -620,7 +700,7 @@
         return {
           kind: "revision",
           changeId,
-          revision,
+          revision: revision2,
           query,
           ...exactFocus ? { focus: exactFocus } : {}
         };
@@ -628,7 +708,7 @@
         return {
           kind: "resource",
           changeId,
-          revision,
+          revision: revision2,
           query,
           ...exactFocus ? { focus: exactFocus } : {}
         };
@@ -636,7 +716,7 @@
         return {
           kind: "association",
           changeId,
-          revision,
+          revision: revision2,
           query,
           ...exactFocus ? { focus: exactFocus } : {}
         };
@@ -690,8 +770,36 @@
     }
   }
   __name(appendQuery, "appendQuery");
+  function appendTimelineQuery(query, params) {
+    const keys = [
+      "limit",
+      "after",
+      "at",
+      "q",
+      "type",
+      "track",
+      "change",
+      "revision",
+      "artifactHash",
+      "order"
+    ];
+    for (const key of keys) {
+      const value = query[key];
+      if (value !== void 0) params.set(key, String(value));
+    }
+  }
+  __name(appendTimelineQuery, "appendTimelineQuery");
   function formatChangeInspectorRoute(route) {
     const params = new URLSearchParams();
+    if (route.kind === "timeline") {
+      appendTimelineQuery(route.historyQuery, params);
+      return `#/timeline${params.size ? `?${params}` : ""}`;
+    }
+    if (route.kind === "event") {
+      appendTimelineQuery(route.historyQuery, params);
+      const eventId = encodeURIComponent(route.eventId);
+      return `#/timeline/events/${eventId}${params.size ? `?${params}` : ""}`;
+    }
     appendQuery(route.query, params);
     if (route.kind === "revision" || route.kind === "resource" || route.kind === "association")
       params.set("artifactHash", route.revision.objectArtifactContentHash);
@@ -717,7 +825,7 @@
   }
   __name(formatChangeInspectorRoute, "formatChangeInspectorRoute");
   function lensForRoute(route) {
-    return route.kind === "lens" ? route.lens : "changes";
+    return route.kind === "timeline" || route.kind === "event" ? "timeline" : route.kind === "lens" ? route.lens : "changes";
   }
   __name(lensForRoute, "lensForRoute");
   function firstPageQuery(query) {
@@ -726,10 +834,399 @@
   }
   __name(firstPageQuery, "firstPageQuery");
   function queryForExactNavigation(route) {
+    if (route.kind === "timeline" || route.kind === "event") return {};
     if (route.kind !== "lens" || route.lens !== "attention") return route.query;
     return firstPageQuery(route.query);
   }
   __name(queryForExactNavigation, "queryForExactNavigation");
+
+  // src/change-inspector-event-presentation.ts
+  function words(value) {
+    return value.replaceAll("_", " ");
+  }
+  __name(words, "words");
+  function revision(reference) {
+    return `${reference.revisionId} · ${reference.objectArtifactContentHash}`;
+  }
+  __name(revision, "revision");
+  function fact(reference) {
+    return reference.kind === "observation" ? `observation ${reference.observationId ?? "unknown"}` : `input request ${reference.inputRequestId ?? "unknown"}`;
+  }
+  __name(fact, "fact");
+  function eventTargetLabel(target) {
+    switch (target.kind) {
+      case "revision":
+        return `Revision ${target.revisionId}`;
+      case "file":
+        return `File ${target.filePath ?? "unknown"} in ${target.revisionId}`;
+      case "range":
+        return `${target.filePath ?? "unknown"}:${target.startLine ?? "?"}-${target.endLine ?? "?"} (${target.side ?? "?"}) in ${target.revisionId}`;
+      case "observation":
+        return `Observation ${target.observationId ?? "unknown"} in ${target.revisionId}`;
+      case "input_request":
+        return `Input request ${target.inputRequestId ?? "unknown"} in ${target.revisionId}`;
+      case "assessment":
+        return `Assessment ${target.assessmentId ?? "unknown"} in ${target.revisionId}`;
+      case "event":
+        return `Event ${target.eventId ?? "unknown"} in ${target.revisionId}`;
+    }
+  }
+  __name(eventTargetLabel, "eventTargetLabel");
+  function eventSubjectLabel(subject) {
+    switch (subject.kind) {
+      case "journal":
+        return `Journal ${subject.journalId}`;
+      case "review":
+        return eventTargetLabel(subject.target);
+      case "change":
+        return `Change ${subject.changeId}`;
+      case "change_membership_claim":
+        return `Change membership claim ${subject.membershipClaimId}`;
+      case "change_link_claim":
+        return `Change link claim ${subject.linkClaimId}`;
+      case "change_revision_relation_claim":
+        return `Change Revision relation claim ${subject.relationClaimId}`;
+      case "revision_relation_attestation":
+        return `Revision relation attestation ${subject.relationAttestationId} for ${revision(subject.revision)}`;
+      case "review_fact_port":
+        return `Fact port ${subject.portId} from ${fact(subject.originFact)} on ${revision(subject.originRevision)}`;
+    }
+  }
+  __name(eventSubjectLabel, "eventSubjectLabel");
+  function eventAttributionLines(entry) {
+    const lines = [
+      `${entry.writer.actorId} · ${entry.writer.producer.name} ${entry.writer.producer.version}`,
+      `${words(entry.assertionMode)} assertion`
+    ];
+    if (entry.signer) lines.push(`signed by ${entry.signer}`);
+    if (entry.sourceRef) {
+      lines.push(
+        `source ${entry.sourceRef.sourceSystem} · ${entry.sourceRef.sourceId}`
+      );
+    }
+    if (entry.ingest) {
+      lines.push(
+        `ingested via ${entry.ingest.via} at ${entry.ingest.receivedAt}`
+      );
+    }
+    return lines;
+  }
+  __name(eventAttributionLines, "eventAttributionLines");
+  function eventTypeColor(eventType) {
+    switch (eventType) {
+      case "review_initialized":
+      case "review_note_imported":
+        return "var(--evt-init)";
+      case "work_object_proposed":
+      case "change_declared":
+      case "change_membership_asserted":
+        return "var(--evt-capture)";
+      case "review_observation_recorded":
+      case "revision_ref_associated":
+      case "revision_commit_associated":
+      case "review_fact_ported":
+        return "var(--evt-observation)";
+      case "review_assessment_recorded":
+      case "revision_relation_attested":
+        return "var(--evt-assessment)";
+      case "input_request_opened":
+      case "revision_ref_withdrawn":
+      case "revision_commit_withdrawn":
+      case "change_membership_withdrawn":
+      case "change_revision_relation_withdrawn":
+        return "var(--evt-request)";
+      case "input_request_responded":
+      case "change_link_asserted":
+      case "change_revision_relation_asserted":
+        return "var(--evt-response)";
+      case "validation_check_recorded":
+        return "var(--evt-validation)";
+    }
+  }
+  __name(eventTypeColor, "eventTypeColor");
+  function field(label2, value) {
+    return value ? { label: label2, value } : null;
+  }
+  __name(field, "field");
+  function fields(...values) {
+    return values.filter(
+      (value) => value !== null
+    );
+  }
+  __name(fields, "fields");
+  function presentEvent(entry) {
+    const summary = entry.summary;
+    switch (summary.kind) {
+      case "review_initialized":
+        return {
+          label: "review initialized",
+          title: "Review initialized",
+          body: "The review journal was initialized.",
+          fields: []
+        };
+      case "work_object_proposed": {
+        const detail = summary.details;
+        return {
+          label: "Revision proposed",
+          title: detail.summary || `Revision ${detail.revision.id} proposed`,
+          body: `Captured ${detail.revision.objectId} as an exact Revision artifact.`,
+          fields: fields(
+            field("Revision", detail.revision.id),
+            field("object", detail.revision.objectId),
+            field("artifact", detail.objectArtifactContentHash),
+            field("engagement", detail.engagementId),
+            field(
+              "supersedes",
+              detail.supersedes.length ? detail.supersedes.join("; ") : "none"
+            )
+          )
+        };
+      }
+      case "review_observation_recorded": {
+        const detail = summary.details;
+        return {
+          label: "observation",
+          title: detail.title,
+          body: detail.body,
+          fields: fields(
+            field("observation", detail.observationId),
+            field("target", eventTargetLabel(detail.target)),
+            field("confidence", detail.confidence),
+            field("tags", detail.tags?.join(", ")),
+            field("supersedes", detail.supersedesObservationIds?.join("; ")),
+            field("responds to", detail.respondsToObservationIds?.join("; "))
+          )
+        };
+      }
+      case "review_assessment_recorded": {
+        const detail = summary.details;
+        return {
+          label: "assessment",
+          title: `Assessment: ${words(detail.assessment)}`,
+          body: detail.summary,
+          fields: fields(
+            field("assessment", detail.assessmentId),
+            field("target", eventTargetLabel(detail.target)),
+            field("replaces", detail.replacesAssessmentIds?.join("; ")),
+            field("observations", detail.relatedObservationIds?.join("; ")),
+            field("input requests", detail.relatedInputRequestIds?.join("; "))
+          )
+        };
+      }
+      case "input_request_opened": {
+        const detail = summary.details;
+        return {
+          label: "input requested",
+          title: detail.title,
+          body: detail.body,
+          fields: fields(
+            field("input request", detail.inputRequestId),
+            field("reason", words(detail.reasonCode)),
+            field("target", eventTargetLabel(detail.target))
+          )
+        };
+      }
+      case "input_request_responded": {
+        const detail = summary.details;
+        return {
+          label: "input response",
+          title: `Input request ${words(detail.outcome)}`,
+          body: detail.reason,
+          fields: fields(
+            field("response", detail.inputRequestResponseId),
+            field("input request", detail.inputRequestId),
+            field("Revision", detail.revisionId)
+          )
+        };
+      }
+      case "review_note_imported":
+        return {
+          label: "imported note",
+          title: "Legacy review note imported",
+          body: "A note from the retired import path remains in this journal.",
+          fields: []
+        };
+      case "revision_ref_associated": {
+        const detail = summary.details;
+        return {
+          label: "Git ref associated",
+          title: `Associated ${detail.refName}`,
+          fields: fields(
+            field("association", detail.refAssociationId),
+            field("target", eventTargetLabel(detail.target)),
+            field("head", detail.headOid)
+          )
+        };
+      }
+      case "revision_ref_withdrawn": {
+        const detail = summary.details;
+        return {
+          label: "Git ref withdrawn",
+          title: "Withdrew a Git ref association",
+          fields: fields(
+            field("withdrawal", detail.refWithdrawalId),
+            field("association", detail.refAssociationId),
+            field("target", eventTargetLabel(detail.target))
+          )
+        };
+      }
+      case "revision_commit_associated": {
+        const detail = summary.details;
+        const endpoint = detail.commit.kind === "git_commit" ? `commit ${detail.commit.commitOid} · tree ${detail.commit.treeOid}` : detail.commit.kind === "git_working_tree" ? `working tree ${detail.commit.worktreeRoot}` : `${words(detail.commit.kind)} ${detail.commit.treeOid}`;
+        return {
+          label: "commit associated",
+          title: `Associated ${endpoint}`,
+          fields: fields(
+            field("association", detail.commitAssociationId),
+            field("target", eventTargetLabel(detail.target)),
+            field("endpoint", endpoint)
+          )
+        };
+      }
+      case "revision_commit_withdrawn": {
+        const detail = summary.details;
+        return {
+          label: "commit withdrawn",
+          title: "Withdrew a commit association",
+          fields: fields(
+            field("withdrawal", detail.commitWithdrawalId),
+            field("association", detail.commitAssociationId),
+            field("target", eventTargetLabel(detail.target))
+          )
+        };
+      }
+      case "validation_check_recorded": {
+        const detail = summary.details;
+        return {
+          label: "validation",
+          title: `${detail.checkName}: ${words(detail.status)}`,
+          body: detail.summary,
+          fields: fields(
+            field("validation", detail.validationCheckId),
+            field("target", eventTargetLabel(detail.target)),
+            field("command", detail.command),
+            field("trigger", words(detail.trigger)),
+            field(
+              "exit code",
+              detail.exitCode === void 0 ? void 0 : String(detail.exitCode)
+            )
+          )
+        };
+      }
+      case "change_declared": {
+        const detail = summary.details;
+        const root = detail.identityDescriptor.kind === "root_revision" ? detail.identityDescriptor.revision_id : `opaque nonce ${detail.identityDescriptor.nonce}`;
+        return {
+          label: "Change declared",
+          title: `Declared ${detail.changeId}`,
+          body: `The stable Change identity is rooted in ${root}.`,
+          fields: fields(
+            field("declaration", detail.declarationClaimId),
+            field("identity", root)
+          )
+        };
+      }
+      case "change_membership_asserted": {
+        const detail = summary.details;
+        return {
+          label: "Change membership",
+          title: `Added ${detail.revisionId} to a Change`,
+          fields: fields(
+            field("Change", detail.changeId),
+            field("Revision", detail.revisionId),
+            field("claim", detail.membershipClaimId)
+          )
+        };
+      }
+      case "change_membership_withdrawn": {
+        const detail = summary.details;
+        return {
+          label: "membership withdrawn",
+          title: "Withdrew a Change membership claim",
+          fields: fields(
+            field("claim", detail.membershipClaimId),
+            field("withdrawal", detail.membershipWithdrawalId)
+          )
+        };
+      }
+      case "change_link_asserted": {
+        const detail = summary.details;
+        return {
+          label: "Change link",
+          title: `Linked Changes as ${words(detail.relation)}`,
+          fields: fields(
+            field("left Change", detail.leftChangeId),
+            field("right Change", detail.rightChangeId),
+            field("claim", detail.linkClaimId)
+          )
+        };
+      }
+      case "change_revision_relation_asserted": {
+        const detail = summary.details;
+        return {
+          label: "Revision relation",
+          title: "Asserted Revision supersession",
+          body: `${detail.successor.revisionId} supersedes ${detail.predecessor.revisionId}.`,
+          fields: fields(
+            field("Change", detail.changeId),
+            field("successor", revision(detail.successor)),
+            field("predecessor", revision(detail.predecessor)),
+            field("claim", detail.relationClaimId)
+          )
+        };
+      }
+      case "change_revision_relation_withdrawn": {
+        const detail = summary.details;
+        return {
+          label: "relation withdrawn",
+          title: "Withdrew a Revision-relation claim",
+          fields: fields(
+            field("claim", detail.relationClaimId),
+            field("withdrawal", detail.relationWithdrawalId)
+          )
+        };
+      }
+      case "revision_relation_attested": {
+        const detail = summary.details;
+        return {
+          label: "relation attested",
+          title: `${words(detail.semanticRelation)}: ${words(detail.proofStatus)}`,
+          body: `Proof method ${detail.proofMethod} (${detail.proofAlgorithmVersion}).`,
+          fields: fields(
+            field("Revision", revision(detail.revision)),
+            field("commit association", detail.commitAssociationId),
+            field("attestation", detail.relationAttestationId),
+            field(
+              "capture scope",
+              detail.captureScope.join(", ") || "whole capture"
+            ),
+            field("comparison base", detail.comparisonBaseOrParent),
+            field("endpoints", detail.endpointOids.join("; ")),
+            field("evidence", detail.evidenceContentHash),
+            field("result", detail.resultDigest)
+          )
+        };
+      }
+      case "review_fact_ported": {
+        const detail = summary.details;
+        return {
+          label: "fact ported",
+          title: `${words(detail.relation)} ${fact(detail.originFact)}`,
+          body: `Ported review context from ${detail.originRevision.revisionId} to ${detail.targetRevision.revisionId}.`,
+          fields: fields(
+            field("port", detail.portId),
+            field("origin Revision", revision(detail.originRevision)),
+            field("origin fact", fact(detail.originFact)),
+            field("target Revision", revision(detail.targetRevision)),
+            field("target fact", detail.targetFact && fact(detail.targetFact)),
+            field("Change context", detail.contextChangeId),
+            field("rationale", detail.rationaleContentHash)
+          )
+        };
+      }
+    }
+  }
+  __name(presentEvent, "presentEvent");
 
   // src/dom.ts
   function $(sel) {
@@ -744,6 +1241,11 @@
   var SPLIT_MIN = 25;
   var SPLIT_MAX = 75;
   var liveMediaQueries = [];
+  var densityListeners = [];
+  function registerDensityListener(listener) {
+    densityListeners.push(listener);
+  }
+  __name(registerDensityListener, "registerDensityListener");
   function preferredThemeMode() {
     const stored = localStorage.getItem(THEME_KEY);
     return stored === "light" || stored === "dark" ? stored : "system";
@@ -831,6 +1333,420 @@
   }
   __name(watchColorScheme, "watchColorScheme");
 
+  // src/change-inspector-timeline.ts
+  var FALLBACK_ROW_HEIGHT = 72;
+  var OVERSCAN = 8;
+  var REMEASURE_SETTLE_MS = 150;
+  var active = null;
+  function label(value) {
+    return value.replaceAll("_", " ");
+  }
+  __name(label, "label");
+  function short(value, size = 18) {
+    return value.length > size ? `${value.slice(0, size)}…` : value;
+  }
+  __name(short, "short");
+  function optionId(eventId) {
+    return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
+  }
+  __name(optionId, "optionId");
+  function rowSpacer(height) {
+    const spacer = document.createElement("li");
+    spacer.dataset.timelineSpacer = "true";
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.style.height = `${height}px`;
+    return spacer;
+  }
+  __name(rowSpacer, "rowSpacer");
+  function appendChip(row, text) {
+    const chip = document.createElement("span");
+    chip.className = "badge";
+    chip.textContent = text;
+    row.append(chip);
+  }
+  __name(appendChip, "appendChip");
+  function appendVerificationChip(row, status) {
+    const chip = document.createElement("span");
+    chip.className = `verify verify-${status}`;
+    chip.title = "event signature verification status";
+    chip.textContent = `verify: ${label(status)}`;
+    row.append(chip);
+  }
+  __name(appendVerificationChip, "appendVerificationChip");
+  function entryRow(entry, selectedEventId) {
+    const presentation = presentEvent(entry);
+    const subject = eventSubjectLabel(entry.subject);
+    const attribution = eventAttributionLines(entry);
+    const row = document.createElement("li");
+    row.className = "event";
+    row.dataset.eventId = entry.eventId;
+    row.id = optionId(entry.eventId);
+    row.tabIndex = -1;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(entry.eventId === selectedEventId));
+    row.setAttribute(
+      "aria-label",
+      `${presentation.title}; ${subject}; ${attribution.join("; ")}; ${entry.occurredAt}; event ${entry.eventId}`
+    );
+    const occurred = new Date(entry.occurredAt);
+    const time = document.createElement("time");
+    time.className = "time";
+    time.dateTime = entry.occurredAt;
+    if (Number.isNaN(occurred.valueOf())) {
+      time.textContent = entry.occurredAt;
+    } else {
+      const date = document.createElement("span");
+      date.className = "event-date";
+      date.textContent = occurred.toLocaleDateString();
+      const clock = document.createElement("span");
+      clock.textContent = occurred.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+      time.append(date, clock);
+    }
+    const rail = document.createElement("span");
+    rail.className = "rail";
+    rail.style.background = eventTypeColor(entry.eventType);
+    rail.setAttribute("aria-hidden", "true");
+    const body = document.createElement("div");
+    body.className = "body";
+    const heading = document.createElement("h3");
+    heading.className = "title";
+    heading.textContent = presentation.title;
+    if (presentation.body) {
+      const summary = document.createElement("p");
+      summary.className = "event-summary";
+      summary.textContent = presentation.body;
+      body.append(heading, summary);
+    } else {
+      body.append(heading);
+    }
+    const meta = document.createElement("div");
+    meta.className = "mono";
+    meta.classList.add("meta");
+    const eventType = document.createElement("span");
+    eventType.className = "type";
+    eventType.textContent = presentation.label;
+    eventType.title = entry.eventType;
+    eventType.style.color = eventTypeColor(entry.eventType);
+    meta.append(eventType);
+    appendVerificationChip(meta, entry.verificationStatus);
+    if (entry.trackId) appendChip(meta, entry.trackId);
+    for (const changeId of entry.changeIds) appendChip(meta, short(changeId));
+    const eventId = document.createElement("span");
+    eventId.textContent = short(entry.eventId);
+    eventId.title = entry.eventId;
+    meta.append(eventId);
+    const context = document.createElement("p");
+    context.className = "event-context mono";
+    context.textContent = subject;
+    const attributionLine = document.createElement("p");
+    attributionLine.className = "event-attribution dim";
+    attributionLine.textContent = attribution.join(" · ");
+    body.append(meta, context, attributionLine);
+    if (entry.revisionRefs.length) {
+      const exact = document.createElement("p");
+      exact.className = "event-context mono dim";
+      exact.textContent = `exact Revisions: ${entry.revisionRefs.map(
+        (reference) => `${reference.revisionId} · ${reference.objectArtifactContentHash}`
+      ).join("; ")}`;
+      body.append(exact);
+    }
+    if (entry.unresolvedRevisionIds.length) {
+      const unresolved = document.createElement("p");
+      unresolved.className = "event-context mono warning";
+      unresolved.textContent = `unresolved Revisions: ${entry.unresolvedRevisionIds.join("; ")}`;
+      body.append(unresolved);
+    }
+    row.append(time, rail, body);
+    if (entry.revisionRefs.length > 1 || entry.changeIds.length > 1) {
+      const note = document.createElement("p");
+      note.className = "dim";
+      note.textContent = "This event has multiple contexts; choose a Change and exact Revision from the Changes lens.";
+      body.append(note);
+    }
+    return row;
+  }
+  __name(entryRow, "entryRow");
+  function paintVisible(view) {
+    const { list, document: timeline, rowHeight } = view;
+    const entries = timeline.entries;
+    const viewport = list.clientHeight;
+    const localStart = viewport > 0 ? Math.max(0, Math.floor(list.scrollTop / rowHeight) - OVERSCAN) : 0;
+    const localEnd = viewport > 0 ? Math.min(
+      entries.length,
+      Math.ceil((list.scrollTop + viewport) / rowHeight) + OVERSCAN
+    ) : entries.length;
+    const top = rowSpacer(localStart * rowHeight);
+    const bottom = rowSpacer(Math.max(0, entries.length - localEnd) * rowHeight);
+    list.replaceChildren(
+      top,
+      ...entries.slice(localStart, localEnd).map((entry) => entryRow(entry, view.selectedEventId)),
+      bottom
+    );
+    const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
+      (row) => row.dataset.eventId === view.selectedEventId
+    ) : null;
+    if (activeOption) {
+      list.setAttribute("aria-activedescendant", activeOption.id);
+    } else {
+      list.removeAttribute("aria-activedescendant");
+    }
+  }
+  __name(paintVisible, "paintVisible");
+  function anchoredScrollTop(view, nextRowHeight) {
+    const { list, rowHeight: previousRowHeight } = view;
+    const listTop = list.getBoundingClientRect().top;
+    const leading = list.firstElementChild;
+    const leadingHeight = leading?.dataset.timelineSpacer ? Number.parseFloat(leading.style.height) || 0 : 0;
+    const paintStart = Math.round(leadingHeight / previousRowHeight);
+    const rows = list.querySelectorAll("li.event[data-event-id]");
+    let localIndex = 0;
+    for (const row of rows) {
+      const bounds = row.getBoundingClientRect();
+      if (bounds.height > 0 && bounds.bottom > listTop) {
+        return Math.max(
+          0,
+          (paintStart + localIndex) * nextRowHeight - (bounds.top - listTop)
+        );
+      }
+      localIndex += 1;
+    }
+    return list.scrollTop / previousRowHeight * nextRowHeight;
+  }
+  __name(anchoredScrollTop, "anchoredScrollTop");
+  function remeasureChangeInspectorTimelineRows() {
+    const view = active;
+    if (view === null || !view.list.isConnected) return false;
+    const rows = Array.from(
+      view.list.querySelectorAll("li.event[data-event-id]")
+    );
+    if (rows.length === 0) return false;
+    const mean = rows.reduce((total, row) => total + row.getBoundingClientRect().height, 0) / rows.length;
+    if (!Number.isFinite(mean) || mean <= 0) return false;
+    if (Math.abs(mean - view.rowHeight) < 0.5) return false;
+    const anchored = anchoredScrollTop(view, mean);
+    view.rowHeight = mean;
+    view.list.scrollTop = anchored;
+    paintVisible(view);
+    return true;
+  }
+  __name(remeasureChangeInspectorTimelineRows, "remeasureChangeInspectorTimelineRows");
+  function scheduleChangeInspectorTimelineRemeasure() {
+    const view = active;
+    if (view === null) return;
+    if (view.remeasureTimer !== null) clearTimeout(view.remeasureTimer);
+    view.remeasureTimer = setTimeout(() => {
+      view.remeasureTimer = null;
+      if (active === view) remeasureChangeInspectorTimelineRows();
+    }, REMEASURE_SETTLE_MS);
+  }
+  __name(scheduleChangeInspectorTimelineRemeasure, "scheduleChangeInspectorTimelineRemeasure");
+  registerDensityListener(scheduleChangeInspectorTimelineRemeasure);
+  function disposeActiveTimeline() {
+    if (active === null) return;
+    if (active.remeasureTimer !== null) clearTimeout(active.remeasureTimer);
+    active.resizeObserver?.disconnect();
+  }
+  __name(disposeActiveTimeline, "disposeActiveTimeline");
+  function renderChangeInspectorTimeline(master, timeline, actions2, route, selectedEventId = null) {
+    const key = `${timeline.timelineProjectionStamp}\0${JSON.stringify(route.historyQuery)}`;
+    if (master.dataset.timelineKey === key && active !== null) {
+      active.document = timeline;
+      active.route = route;
+      active.selectedEventId = selectedEventId;
+      paintVisible(active);
+      return;
+    }
+    const section = document.createElement("section");
+    section.className = "timeline-shell";
+    const heading = document.createElement("h1");
+    heading.textContent = `Timeline · ${timeline.matchCount}`;
+    const notice = document.createElement("p");
+    notice.className = "timeline-summary dim";
+    const loadedStart = timeline.entries.length ? timeline.offset + 1 : 0;
+    const loadedEnd = timeline.offset + timeline.entries.length;
+    notice.textContent = `${timeline.order === "desc" ? "Newest" : "Oldest"} first · loaded ${loadedStart}-${loadedEnd} of ${timeline.matchCount} matches · ${timeline.eventCount} recorded events. Presentation chronology uses writer timestamps; late events can backfill when writer clocks differ.`;
+    const notices = document.createElement("div");
+    notices.className = "timeline-notices";
+    notices.setAttribute("aria-live", "polite");
+    for (const message2 of timeline.queryNotices) {
+      const line = document.createElement("p");
+      line.className = "info";
+      line.textContent = `Query notice: ${message2}`;
+      notices.append(line);
+    }
+    for (const message2 of timeline.diagnostics) {
+      const line = document.createElement("p");
+      line.className = "warning";
+      line.textContent = `Timeline diagnostic: ${message2}`;
+      notices.append(line);
+    }
+    const page = document.createElement("div");
+    page.className = "actions";
+    if (timeline.previous) {
+      const previous = document.createElement("button");
+      previous.type = "button";
+      previous.className = "ghost";
+      previous.dataset.timelinePage = "previous";
+      previous.textContent = "Previous page";
+      previous.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "timeline",
+          historyQuery: {
+            ...route.historyQuery,
+            at: void 0,
+            after: timeline.previous
+          }
+        })
+      );
+      page.append(previous);
+    }
+    if (timeline.next) {
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "ghost";
+      next.dataset.timelinePage = "next";
+      next.textContent = "Next page";
+      next.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "timeline",
+          historyQuery: {
+            ...route.historyQuery,
+            at: void 0,
+            after: timeline.next
+          }
+        })
+      );
+      page.append(next);
+    }
+    const list = document.createElement("ol");
+    list.id = "timeline";
+    list.className = "timeline";
+    list.tabIndex = timeline.entries.length ? 0 : -1;
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "event timeline");
+    if (!timeline.entries.length) list.setAttribute("aria-disabled", "true");
+    section.append(heading, notice, notices, page);
+    if (timeline.matchCount === 0) {
+      const empty = document.createElement("p");
+      empty.className = "timeline-empty dim";
+      empty.setAttribute("role", "status");
+      empty.textContent = "No Timeline events match the current filters.";
+      section.append(empty);
+    }
+    section.append(list);
+    delete master.dataset.changeListKey;
+    disposeActiveTimeline();
+    master.replaceChildren(section);
+    master.dataset.timelineKey = key;
+    active = {
+      document: timeline,
+      list,
+      remeasureTimer: null,
+      resizeObserver: null,
+      rowHeight: FALLBACK_ROW_HEIGHT,
+      route,
+      selectedEventId
+    };
+    const view = active;
+    list.addEventListener("scroll", () => {
+      if (active === view) paintVisible(view);
+    });
+    if (typeof ResizeObserver !== "undefined") {
+      view.resizeObserver = new ResizeObserver(() => {
+        if (active === view) scheduleChangeInspectorTimelineRemeasure();
+      });
+      view.resizeObserver.observe(list);
+    }
+    paintVisible(view);
+    remeasureChangeInspectorTimelineRows();
+  }
+  __name(renderChangeInspectorTimeline, "renderChangeInspectorTimeline");
+  function revealChangeInspectorTimelineEvent(eventId) {
+    if (active === null) return false;
+    const localIndex = active.document.entries.findIndex(
+      (entry) => entry.eventId === eventId
+    );
+    if (localIndex < 0) return false;
+    active.selectedEventId = eventId;
+    remeasureChangeInspectorTimelineRows();
+    const top = localIndex * active.rowHeight;
+    const bottom = top + active.rowHeight;
+    if (top < active.list.scrollTop) active.list.scrollTop = top;
+    else if (bottom > active.list.scrollTop + active.list.clientHeight) {
+      active.list.scrollTop = Math.max(0, bottom - active.list.clientHeight);
+    }
+    paintVisible(active);
+    remeasureChangeInspectorTimelineRows();
+    paintVisible(active);
+    Array.from(
+      active.list.querySelectorAll("li.event[data-event-id]")
+    ).find((row) => row.dataset.eventId === eventId)?.scrollIntoView({ block: "nearest", behavior: "auto" });
+    return true;
+  }
+  __name(revealChangeInspectorTimelineEvent, "revealChangeInspectorTimelineEvent");
+
+  // src/change-inspector-timeline-navigation.ts
+  function selectedIndex(window2) {
+    return window2.selectedEventId === null ? -1 : window2.eventIds.indexOf(window2.selectedEventId);
+  }
+  __name(selectedIndex, "selectedIndex");
+  function moveTimelineSelection(window2, delta) {
+    const { eventIds } = window2;
+    if (eventIds.length === 0 || delta === 0) return null;
+    const current = selectedIndex(window2);
+    if (current < 0) {
+      const eventId = eventIds[0];
+      return eventId ? { kind: "select", eventId } : null;
+    }
+    const start = current;
+    const target = start + delta;
+    if (target >= 0 && target < eventIds.length) {
+      const eventId = eventIds[target];
+      return eventId ? { kind: "select", eventId } : null;
+    }
+    if (target >= eventIds.length) {
+      return {
+        kind: "adjacent-page",
+        direction: "next",
+        index: target - eventIds.length
+      };
+    }
+    return {
+      kind: "adjacent-page",
+      direction: "previous",
+      indexFromEnd: Math.abs(target) - 1
+    };
+  }
+  __name(moveTimelineSelection, "moveTimelineSelection");
+  function boundaryTimelineSelection(window2, boundary) {
+    const eventId = boundary === "first" ? window2.eventIds[0] : window2.eventIds.at(-1);
+    return eventId ? { kind: "select", eventId } : null;
+  }
+  __name(boundaryTimelineSelection, "boundaryTimelineSelection");
+  function pageTimelineSelection(window2, direction, visibleRows, fraction) {
+    const rows = Math.max(1, Math.floor(visibleRows));
+    const delta = fraction === "full" ? rows : Math.max(1, Math.ceil(rows / 2));
+    return moveTimelineSelection(
+      window2,
+      direction === "forward" ? delta : -delta
+    );
+  }
+  __name(pageTimelineSelection, "pageTimelineSelection");
+  function resolveTimelinePageSelection(eventIds, intent) {
+    if (eventIds.length === 0) return null;
+    if (intent.direction === "next") {
+      return eventIds[Math.min(intent.index ?? 0, eventIds.length - 1)] ?? null;
+    }
+    return eventIds[Math.max(0, eventIds.length - 1 - (intent.indexFromEnd ?? 0))] ?? null;
+  }
+  __name(resolveTimelinePageSelection, "resolveTimelinePageSelection");
+
   // src/change-inspector-interaction.ts
   var colorSchemeWatcherInstalled = false;
   var HISTORY_ORIGIN_KEY = "__pointbreakChangeInspectorOrigin";
@@ -886,6 +1802,72 @@
     return changeId;
   }
   __name(moveSelectionToBoundary, "moveSelectionToBoundary");
+  function timelineRows() {
+    return Array.from(
+      document.querySelectorAll("#timeline [data-event-id]")
+    );
+  }
+  __name(timelineRows, "timelineRows");
+  function timelineWindow(eventIds, selectedEventId) {
+    return {
+      eventIds: [...eventIds],
+      selectedEventId
+    };
+  }
+  __name(timelineWindow, "timelineWindow");
+  function timelineRowId(eventId) {
+    return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
+  }
+  __name(timelineRowId, "timelineRowId");
+  function setTimelineSelected(eventId) {
+    const list = document.querySelector("#timeline");
+    const rows = timelineRows();
+    let activeId = null;
+    for (const row of rows) {
+      const rowEventId = row.dataset.eventId ?? null;
+      const selected = rowEventId === eventId;
+      row.tabIndex = -1;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", String(selected));
+      if (selected && rowEventId !== null) {
+        row.id = timelineRowId(rowEventId);
+        activeId = row.id;
+      }
+    }
+    if (!list) return;
+    list.setAttribute("role", "listbox");
+    list.tabIndex = rows.length > 0 ? 0 : -1;
+    list.toggleAttribute("aria-disabled", rows.length === 0);
+    if (activeId) list.setAttribute("aria-activedescendant", activeId);
+    else list.removeAttribute("aria-activedescendant");
+  }
+  __name(setTimelineSelected, "setTimelineSelected");
+  function focusTimelineSelection(eventId) {
+    const row = timelineRows().find((item) => item.dataset.eventId === eventId);
+    row?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+    document.querySelector("#timeline")?.focus({ preventScroll: true });
+  }
+  __name(focusTimelineSelection, "focusTimelineSelection");
+  function visibleTimelineRows() {
+    const list = document.querySelector("#timeline");
+    const row = timelineRows()[0];
+    const rowHeight = row?.getBoundingClientRect().height ?? 0;
+    if (!list || rowHeight <= 0 || list.clientHeight <= 0) return 10;
+    return Math.max(1, Math.floor(list.clientHeight / rowHeight));
+  }
+  __name(visibleTimelineRows, "visibleTimelineRows");
+  function timelinePager(direction) {
+    const explicit = document.querySelector(
+      `#timeline [data-timeline-page="${direction}"], [data-timeline-page="${direction}"]`
+    );
+    if (explicit) return explicit;
+    return Array.from(
+      document.querySelectorAll("#master button")
+    ).find(
+      (button) => button.textContent?.trim() === `${direction === "next" ? "Next" : "Previous"} page`
+    ) ?? null;
+  }
+  __name(timelinePager, "timelinePager");
   function trapModalFocus(modal, event) {
     if (event.key !== "Tab") return;
     const stops = Array.from(
@@ -894,13 +1876,13 @@
       )
     );
     if (!stops.length) return;
-    const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const first = stops[0];
     const last = stops.at(-1) ?? first;
-    if (event.shiftKey && (active2 === first || !modal.contains(active2))) {
+    if (event.shiftKey && (active3 === first || !modal.contains(active3))) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && (active2 === last || !modal.contains(active2))) {
+    } else if (!event.shiftKey && (active3 === last || !modal.contains(active3))) {
       event.preventDefault();
       first.focus();
     }
@@ -908,19 +1890,96 @@
   __name(trapModalFocus, "trapModalFocus");
   function installChangeInspectorInteraction(actions2) {
     let selectedChangeId = null;
+    let selectedTimelineEventId = null;
+    let currentTimelineEventIds = [];
+    let pendingTimelineSelection = null;
+    let pendingGlobalTimelineSelection = null;
     let modalReturnFocus = null;
     let detailReturnFocus = null;
     let detailWasOpen = false;
     let currentRoute2 = null;
     let exactOriginLens = null;
+    let timelineOriginRoute = null;
     let detailDomIdentity = null;
+    const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
+      actions2.parkTimelineMonitoring?.();
+    }, "parkTimelineForReaderActivity");
+    const selectTimelineEvent = /* @__PURE__ */ __name((eventId) => {
+      selectedTimelineEventId = eventId;
+      actions2.revealTimelineEvent?.(eventId);
+      setTimelineSelected(eventId);
+      focusTimelineSelection(eventId);
+    }, "selectTimelineEvent");
+    const applyTimelineIntent = /* @__PURE__ */ __name((intent) => {
+      if (intent === null) return false;
+      parkTimelineForReaderActivity();
+      if (intent.kind === "select") {
+        pendingTimelineSelection = null;
+        selectTimelineEvent(intent.eventId);
+        return true;
+      }
+      const pager = timelinePager(intent.direction);
+      if (!pager) return false;
+      pendingTimelineSelection = intent;
+      pager.click();
+      return true;
+    }, "applyTimelineIntent");
+    const syncTimelineDom = /* @__PURE__ */ __name((route = currentRoute2) => {
+      const window2 = timelineWindow(
+        currentTimelineEventIds,
+        selectedTimelineEventId
+      );
+      if (pendingGlobalTimelineSelection !== null && route?.kind === "timeline" && formatChangeInspectorRoute(route) === pendingGlobalTimelineSelection.route && window2.eventIds.length > 0) {
+        selectedTimelineEventId = pendingGlobalTimelineSelection.boundary === "first" ? window2.eventIds[0] ?? null : window2.eventIds.at(-1) ?? null;
+        pendingGlobalTimelineSelection = null;
+        if (selectedTimelineEventId !== null) {
+          actions2.revealTimelineEvent?.(selectedTimelineEventId);
+        }
+      }
+      if (pendingTimelineSelection !== null && window2.eventIds.length > 0) {
+        selectedTimelineEventId = resolveTimelinePageSelection(
+          window2.eventIds,
+          pendingTimelineSelection
+        );
+        pendingTimelineSelection = null;
+      }
+      if (selectedTimelineEventId !== null && !window2.eventIds.includes(selectedTimelineEventId)) {
+        setTimelineSelected(null);
+        return;
+      }
+      setTimelineSelected(selectedTimelineEventId);
+    }, "syncTimelineDom");
+    const applyGlobalTimelineBoundary = /* @__PURE__ */ __name((boundary, route) => {
+      const navigateBoundary = actions2.navigateTimelineBoundary;
+      if (navigateBoundary === void 0) {
+        return applyTimelineIntent(
+          boundaryTimelineSelection(
+            timelineWindow(currentTimelineEventIds, selectedTimelineEventId),
+            boundary
+          )
+        );
+      }
+      parkTimelineForReaderActivity();
+      pendingTimelineSelection = null;
+      void navigateBoundary(boundary, route).then((target) => {
+        if (target === null) return;
+        pendingGlobalTimelineSelection = {
+          boundary,
+          route: formatChangeInspectorRoute(target)
+        };
+        syncTimelineDom();
+      }).catch(() => {
+        pendingGlobalTimelineSelection = null;
+      });
+      return true;
+    }, "applyGlobalTimelineBoundary");
     applyPrefs();
     if (!colorSchemeWatcherInstalled) {
       watchColorScheme();
       colorSchemeWatcherInstalled = true;
     }
     const historyOrigin = /* @__PURE__ */ __name((route) => {
-      if (route.kind === "lens") return null;
+      if (route.kind === "lens" || route.kind === "timeline") return null;
       const state = history.state;
       if (state === null || typeof state !== "object" || Array.isArray(state))
         return null;
@@ -928,10 +1987,10 @@
       if (origin === null || typeof origin !== "object") return null;
       const record = origin;
       if (record.route !== formatChangeInspectorRoute(route)) return null;
-      return record.lens === "changes" || record.lens === "attention" ? record.lens : null;
+      return record.lens === "timeline" || record.lens === "changes" || record.lens === "attention" ? record.lens : null;
     }, "historyOrigin");
     const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens) => {
-      if (route.kind === "lens") return;
+      if (route.kind === "lens" || route.kind === "timeline") return;
       const state = history.state;
       const retained = state !== null && typeof state === "object" && !Array.isArray(state) ? state : {};
       history.replaceState(
@@ -946,13 +2005,14 @@
         location.href
       );
     }, "persistHistoryOrigin");
-    const listRoute = /* @__PURE__ */ __name((route) => ({
-      kind: "lens",
-      lens: route.kind === "lens" ? route.lens : historyOrigin(route) ?? exactOriginLens ?? "changes",
-      query: route.query
-    }), "listRoute");
+    const listRoute = /* @__PURE__ */ __name((route) => {
+      if (route.kind === "timeline" || route.kind === "lens") return route;
+      const lens = historyOrigin(route) ?? exactOriginLens ?? "timeline";
+      if (lens !== "timeline") return { kind: "lens", lens, query: route.query };
+      return timelineOriginRoute ?? (route.kind === "event" ? { kind: "timeline", historyQuery: route.historyQuery } : { kind: "timeline", historyQuery: {} });
+    }, "listRoute");
     const focusFallback = /* @__PURE__ */ __name((route = currentRoute2) => {
-      const target = route !== null && route.kind !== "lens" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
+      const target = route !== null && route.kind !== "lens" && route.kind !== "timeline" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
       target?.focus({ preventScroll: true });
     }, "focusFallback");
     const closeModal = /* @__PURE__ */ __name((id) => {
@@ -980,6 +2040,7 @@
       const input = event.target;
       if (!input.checked) return;
       setDensity(input.value);
+      scheduleChangeInspectorTimelineRemeasure();
     }, "changeDensity");
     document.querySelectorAll("input[name='theme-mode']").forEach((input) => {
       input.addEventListener("change", changeTheme);
@@ -990,6 +2051,7 @@
     const paletteInput = document.querySelector("#cmd-input");
     const paletteResults = document.querySelector("#cmd-results");
     const paletteCommands = [
+      ["Open Timeline", "timeline"],
       ["Open Changes", "changes"],
       ["Open Attention", "attention"]
     ];
@@ -998,25 +2060,28 @@
         paletteResults.replaceChildren();
         const query = paletteInput?.value.trim().toLocaleLowerCase() ?? "";
         const matching = paletteCommands.filter(
-          ([label]) => label.toLocaleLowerCase().includes(query)
+          ([label2]) => label2.toLocaleLowerCase().includes(query)
         );
-        for (const [label, lens] of matching) {
+        for (const [label2, lens] of matching) {
           const button = document.createElement("button");
           button.type = "button";
           button.className = "ghost cmd-item";
           const commandLabel = document.createElement("span");
           commandLabel.className = "cmd-label";
-          commandLabel.textContent = label;
+          commandLabel.textContent = label2;
           button.append(commandLabel);
           button.addEventListener("click", () => {
             closeModal("#cmd-palette");
             const route = currentRoute2;
-            if (route)
-              actions2.navigate({
-                kind: "lens",
-                lens,
-                query: { ...route.query, after: void 0 }
-              });
+            if (route) {
+              actions2.navigate(
+                lens === "timeline" ? { kind: "timeline", historyQuery: {} } : {
+                  kind: "lens",
+                  lens,
+                  query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
+                }
+              );
+            }
           });
           paletteResults.append(button);
         }
@@ -1045,6 +2110,7 @@
       const detailViewport = document.querySelector("#detail-body");
       const scrollTop = detailViewport?.scrollTop ?? 0;
       split?.classList.toggle("reading", enabled);
+      scheduleChangeInspectorTimelineRemeasure();
       if (readingButton) {
         readingButton.textContent = enabled ? "⤡" : "⤢";
         readingButton.setAttribute("aria-pressed", String(enabled));
@@ -1070,6 +2136,7 @@
     const divider = document.querySelector(".divider");
     const updateSplit = /* @__PURE__ */ __name((value) => {
       applySplit(value);
+      scheduleChangeInspectorTimelineRemeasure();
       divider?.setAttribute("aria-valuenow", String(preferredSplit() ?? 50));
     }, "updateSplit");
     updateSplit(preferredSplit());
@@ -1140,9 +2207,50 @@
       if (card && !target?.closest("button, a, input, select, textarea")) {
         selectedChangeId = card.dataset.changeId ?? null;
         setSelected(selectedChangeId);
+        return;
+      }
+      const timelineEvent = target?.closest(
+        "#timeline [data-event-id]"
+      );
+      if (timelineEvent?.dataset.eventId && !target?.closest("button, a[href], input, select, textarea")) {
+        parkTimelineForReaderActivity();
+        const eventId = timelineEvent.dataset.eventId;
+        selectTimelineEvent(eventId);
+        const historyQuery = currentRoute2?.kind === "timeline" || currentRoute2?.kind === "event" ? currentRoute2.historyQuery : {};
+        actions2.navigate({
+          kind: "event",
+          eventId,
+          historyQuery: { ...historyQuery, after: void 0 },
+          query: {}
+        });
       }
     }, "onClick");
     document.addEventListener("click", onClick);
+    const onFocusIn = /* @__PURE__ */ __name((event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const timelineEvent = target?.closest(
+        "#timeline [data-event-id]"
+      );
+      if (!timelineEvent?.dataset.eventId) return;
+      selectedTimelineEventId = timelineEvent.dataset.eventId;
+      setTimelineSelected(selectedTimelineEventId);
+    }, "onFocusIn");
+    document.addEventListener("focusin", onFocusIn);
+    const onTimelineScroll = /* @__PURE__ */ __name((event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("#timeline")) parkTimelineForReaderActivity();
+    }, "onTimelineScroll");
+    document.addEventListener("scroll", onTimelineScroll, true);
+    const timelineDomObserver = new MutationObserver(() => {
+      if (currentRoute2?.kind === "timeline") syncTimelineDom();
+    });
+    const master = document.querySelector("#master");
+    if (master) {
+      timelineDomObserver.observe(master, {
+        childList: true,
+        subtree: true
+      });
+    }
     const onKey = /* @__PURE__ */ __name((event) => {
       const open = document.querySelector(
         "#cmd-palette:not(.hidden), #key-help:not(.hidden)"
@@ -1176,6 +2284,90 @@
         document.querySelector("#filter-text")?.focus();
         return;
       }
+      if (route.kind === "timeline") {
+        const timeline = timelineWindow(
+          currentTimelineEventIds,
+          selectedTimelineEventId
+        );
+        if (event.key === "j" || event.key === "ArrowDown") {
+          if (applyTimelineIntent(moveTimelineSelection(timeline, 1))) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "k" || event.key === "ArrowUp") {
+          if (applyTimelineIntent(moveTimelineSelection(timeline, -1))) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "g") {
+          if (applyGlobalTimelineBoundary("first", route)) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "G") {
+          if (applyGlobalTimelineBoundary("last", route)) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "f") {
+          if (applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              "forward",
+              visibleTimelineRows(),
+              "full"
+            )
+          )) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "b") {
+          if (applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              "backward",
+              visibleTimelineRows(),
+              "full"
+            )
+          )) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "d" || event.key === "u") {
+          if (applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              event.key === "d" ? "forward" : "backward",
+              visibleTimelineRows(),
+              "half"
+            )
+          )) {
+            event.preventDefault();
+          }
+          return;
+        }
+        if (event.key === "F") {
+          event.preventDefault();
+          actions2.toggleTimelineMonitoring?.();
+          return;
+        }
+        if (event.key === "Enter" && selectedTimelineEventId !== null && !isNativeActionControl(event.target)) {
+          event.preventDefault();
+          actions2.navigate({
+            kind: "event",
+            eventId: selectedTimelineEventId,
+            historyQuery: route.historyQuery,
+            query: {}
+          });
+          return;
+        }
+      }
       if (event.key === "j" || event.key === "ArrowDown") {
         event.preventDefault();
         selectedChangeId = moveSelection(selectedChangeId, 1);
@@ -1198,19 +2390,24 @@
       }
       if (event.key === "1") {
         event.preventDefault();
-        actions2.navigate({
-          kind: "lens",
-          lens: "changes",
-          query: { ...route.query, after: void 0 }
-        });
+        actions2.navigate({ kind: "timeline", historyQuery: {} });
         return;
       }
       if (event.key === "2") {
         event.preventDefault();
         actions2.navigate({
           kind: "lens",
+          lens: "changes",
+          query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
+        });
+        return;
+      }
+      if (event.key === "3") {
+        event.preventDefault();
+        actions2.navigate({
+          kind: "lens",
           lens: "attention",
-          query: { ...route.query, after: void 0 }
+          query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
         });
         return;
       }
@@ -1233,7 +2430,7 @@
         updateSplit((preferredSplit() ?? 50) + 5);
         return;
       }
-      if (event.key === "Escape" && route.kind !== "lens") {
+      if (event.key === "Escape" && route.kind !== "lens" && route.kind !== "timeline") {
         event.preventDefault();
         actions2.navigate(listRoute(route));
       }
@@ -1249,7 +2446,10 @@
     if (backButton) backButton.onclick = onClose;
     const stop = /* @__PURE__ */ __name(() => {
       document.removeEventListener("click", onClick);
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("scroll", onTimelineScroll, true);
       document.removeEventListener("keydown", onKey);
+      timelineDomObserver.disconnect();
       document.querySelectorAll("input[name='theme-mode']").forEach((input) => {
         input.removeEventListener("change", changeTheme);
       });
@@ -1281,20 +2481,30 @@
       document.querySelector("#key-help")?.classList.add("hidden");
       paletteResults?.replaceChildren();
       selectedChangeId = null;
+      selectedTimelineEventId = null;
+      currentTimelineEventIds = [];
+      pendingTimelineSelection = null;
+      pendingGlobalTimelineSelection = null;
       setSelected(null);
+      setTimelineSelected(null);
       modalReturnFocus = null;
       detailReturnFocus = null;
       detailWasOpen = false;
       currentRoute2 = null;
       exactOriginLens = null;
+      timelineOriginRoute = null;
       detailDomIdentity = null;
     }, "stop");
     return {
-      sync(snapshot2) {
+      sync(snapshot2, timelinePage = snapshot2.generation?.history ?? null) {
         const nextRoute = snapshot2.route.kind === "invalid" ? null : snapshot2.route;
-        if (nextRoute !== null && nextRoute.kind !== "lens") {
+        currentTimelineEventIds = nextRoute?.kind === "timeline" && timelinePage !== null ? timelinePage.entries.map((entry) => entry.eventId) : [];
+        if (nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline") {
           const persistedOrigin = historyOrigin(nextRoute);
-          const origin = persistedOrigin ?? (currentRoute2?.kind === "lens" ? currentRoute2.lens : exactOriginLens ?? "changes");
+          const origin = persistedOrigin ?? (currentRoute2?.kind === "lens" ? currentRoute2.lens : currentRoute2?.kind === "timeline" ? "timeline" : exactOriginLens ?? "timeline");
+          if (currentRoute2?.kind === "timeline") {
+            timelineOriginRoute = currentRoute2;
+          }
           exactOriginLens = origin;
           if (persistedOrigin === null) persistHistoryOrigin(nextRoute, origin);
         } else {
@@ -1306,13 +2516,20 @@
         if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
           selectedChangeId = null;
         setSelected(selectedChangeId);
-        const detailOpen = snapshot2.route.kind !== "lens" && snapshot2.route.kind !== "invalid";
+        if (nextRoute?.kind === "timeline") {
+          syncTimelineDom(nextRoute);
+        } else {
+          selectedTimelineEventId = null;
+          pendingTimelineSelection = null;
+          pendingGlobalTimelineSelection = null;
+        }
+        const detailOpen = snapshot2.route.kind !== "lens" && snapshot2.route.kind !== "timeline" && snapshot2.route.kind !== "invalid";
         const detail = document.querySelector("#detail");
         const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
         const nextDetailDomIdentity = document.querySelector("#detail-body")?.firstChild ?? null;
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
-        const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && nextRoute !== null && nextRoute.kind !== "lens" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
+        const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
           detail.inert = !detailOpen;
@@ -1320,11 +2537,11 @@
           else detail.setAttribute("aria-hidden", "true");
         }
         if (detailOpen && !detailWasOpen) {
-          detailReturnFocus = active2 && active2 !== document.body ? active2 : null;
+          detailReturnFocus = active3 && active3 !== document.body ? active3 : null;
           if (viewportIsNarrow) {
             document.querySelector("#detail-back")?.focus({ preventScroll: true });
           }
-        } else if (detailOpen && detailWasOpen && detailRouteChanged && viewportIsNarrow && detail !== null && (active2 === null || !detail.contains(active2)) && (active2 === null || active2.closest(".modal:not(.hidden)") === null)) {
+        } else if (detailOpen && detailWasOpen && detailRouteChanged && viewportIsNarrow && detail !== null && (active3 === null || !detail.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
           focusFallback(nextRoute);
         } else if (detailOpen && detailWasOpen && detailDomChanged && (!(document.activeElement instanceof HTMLElement) || document.activeElement === document.body || !document.activeElement.isConnected)) {
           focusFallback(nextRoute);
@@ -1365,6 +2582,28 @@
   };
 
   // src/change-protocol.ts
+  var EVENT_HISTORY_EVENT_TYPES = [
+    "review_initialized",
+    "work_object_proposed",
+    "review_observation_recorded",
+    "review_assessment_recorded",
+    "input_request_opened",
+    "input_request_responded",
+    "review_note_imported",
+    "revision_ref_associated",
+    "revision_ref_withdrawn",
+    "revision_commit_associated",
+    "revision_commit_withdrawn",
+    "validation_check_recorded",
+    "change_declared",
+    "change_membership_asserted",
+    "change_membership_withdrawn",
+    "change_link_asserted",
+    "change_revision_relation_asserted",
+    "change_revision_relation_withdrawn",
+    "revision_relation_attested",
+    "review_fact_ported"
+  ];
   var CHANGE_PAGE_LIMIT = 50;
   var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
   var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
@@ -1481,7 +2720,7 @@
   __name(decodeChangeDetail, "decodeChangeDetail");
   function decodeChangeRevisionDetail(value) {
     const detail = object(value, "Change Revision detail");
-    const revision = detail.revision;
+    const revision2 = detail.revision;
     const factPresentations = detail.factPresentations;
     const factContentPresentations = detail.factContentPresentations;
     const exactRevisionDocument = detail.exactRevisionDocument;
@@ -1492,11 +2731,11 @@
     const revisionCurrency = detail.revisionCurrency;
     const relationClassification = detail.relationClassification;
     const availability = detail.availability;
-    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
+    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
       factPorts,
       detail.changeId,
       factPresentations,
-      revision
+      revision2
     ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
       throw new Error("invalid Change Revision detail DTO");
     }
@@ -1504,7 +2743,7 @@
       schema: "pointbreak.review-change-revision",
       version: 1,
       changeId: detail.changeId,
-      revision,
+      revision: revision2,
       membershipSupport,
       revisionCurrency,
       relationClassification,
@@ -1610,14 +2849,215 @@
     return `/api/v2/${lens}?${params}`;
   }
   __name(buildChangePageUrl, "buildChangePageUrl");
+  function buildEventHistoryUrl(query = {}) {
+    const limit = query.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Timeline limit must be an integer from 1 through 100");
+    }
+    if (query.after !== void 0 && query.at !== void 0) {
+      throw new Error("Timeline at and after are mutually exclusive");
+    }
+    if (query.revision === void 0 !== (query.artifactHash === void 0) || query.revision !== void 0 && (!query.revision || !query.artifactHash)) {
+      throw new Error("Timeline revision requires an exact artifact hash");
+    }
+    const eventTypes = query.type?.split(",");
+    if (eventTypes?.some((eventType) => !isEventHistoryEventType(eventType))) {
+      throw new Error("Timeline type contains an unknown event type");
+    }
+    if (eventTypes && new Set(eventTypes).size !== eventTypes.length) {
+      throw new Error("Timeline type contains a duplicate event type");
+    }
+    const canonicalTypes = eventTypes?.sort().join(",");
+    const params = new URLSearchParams({ limit: String(limit) });
+    const textFields = [
+      "after",
+      "at",
+      "q",
+      "track",
+      "change",
+      "revision",
+      "artifactHash"
+    ];
+    for (const field2 of textFields) {
+      const value = query[field2];
+      if (value === void 0) continue;
+      if (!value) throw new Error(`Timeline ${field2} must be non-empty`);
+      params.set(
+        field2,
+        field2 === "q" ? trimUnicodeWhitespace(value).toLowerCase() : value
+      );
+    }
+    if (canonicalTypes) params.set("type", canonicalTypes);
+    if (query.order !== void 0 && query.order !== "asc" && query.order !== "desc") {
+      throw new Error("Timeline order must be asc or desc");
+    }
+    params.set("order", query.order ?? "desc");
+    return `/api/v2/history?${params}`;
+  }
+  __name(buildEventHistoryUrl, "buildEventHistoryUrl");
+  function isEventHistoryRevisionRef(value) {
+    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
+  }
+  __name(isEventHistoryRevisionRef, "isEventHistoryRevisionRef");
+  var EVENT_HISTORY_EVENT_TYPE_VALUES = new Set(
+    EVENT_HISTORY_EVENT_TYPES
+  );
+  function isEventHistoryEventType(value) {
+    return typeof value === "string" && EVENT_HISTORY_EVENT_TYPE_VALUES.has(value);
+  }
+  __name(isEventHistoryEventType, "isEventHistoryEventType");
+  function isEventHistoryWriter(value) {
+    return isRecord(value) && nonEmptyString(value.actorId) && isRecord(value.producer) && nonEmptyString(value.producer.name) && nonEmptyString(value.producer.version);
+  }
+  __name(isEventHistoryWriter, "isEventHistoryWriter");
+  function isReviewEndpoint(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "git_commit":
+        return nonEmptyString(value.commitOid) && nonEmptyString(value.treeOid);
+      case "git_tree":
+      case "git_index":
+        return nonEmptyString(value.treeOid);
+      case "git_working_tree":
+        return nonEmptyString(value.worktreeRoot);
+      default:
+        return false;
+    }
+  }
+  __name(isReviewEndpoint, "isReviewEndpoint");
+  function isEventHistorySubject(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "journal":
+        return nonEmptyString(value.journalId);
+      case "review":
+        return isFactTarget(value.target);
+      case "change":
+        return nonEmptyString(value.changeId);
+      case "change_membership_claim":
+        return nonEmptyString(value.membershipClaimId);
+      case "change_link_claim":
+        return nonEmptyString(value.linkClaimId);
+      case "change_revision_relation_claim":
+        return nonEmptyString(value.relationClaimId);
+      case "revision_relation_attestation":
+        return nonEmptyString(value.relationAttestationId) && isEventHistoryRevisionRef(value.revision);
+      case "review_fact_port":
+        return nonEmptyString(value.portId) && isEventHistoryRevisionRef(value.originRevision) && isFactRef(value.originFact);
+      default:
+        return false;
+    }
+  }
+  __name(isEventHistorySubject, "isEventHistorySubject");
+  function isOptionalStringArray(value) {
+    return value === void 0 || isStringArray(value);
+  }
+  __name(isOptionalStringArray, "isOptionalStringArray");
+  function isNullableString(value) {
+    return value === null || typeof value === "string";
+  }
+  __name(isNullableString, "isNullableString");
+  function isReviewTargetSummary(value) {
+    return isFactTarget(value);
+  }
+  __name(isReviewTargetSummary, "isReviewTargetSummary");
+  function isEventHistorySummary(value, eventType) {
+    if (!isRecord(value) || value.kind !== eventType) return false;
+    if (eventType === "review_initialized" || eventType === "review_note_imported") {
+      return value.details === void 0;
+    }
+    const details = value.details;
+    if (!isRecord(details)) return false;
+    switch (eventType) {
+      case "work_object_proposed":
+        return nonEmptyString(details.engagementId) && isRecord(details.revision) && nonEmptyString(details.revision.id) && nonEmptyString(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString(details.objectArtifactContentHash) && isStringArray(details.supersedes);
+      case "review_observation_recorded":
+        return nonEmptyString(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds);
+      case "review_assessment_recorded":
+        return nonEmptyString(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds);
+      case "input_request_opened":
+        return nonEmptyString(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString(details.title) && optionalString(details.body);
+      case "input_request_responded":
+        return nonEmptyString(details.inputRequestResponseId) && nonEmptyString(details.inputRequestId) && nonEmptyString(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason);
+      case "revision_ref_associated":
+        return nonEmptyString(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString(details.refName) && nonEmptyString(details.headOid);
+      case "revision_ref_withdrawn":
+        return nonEmptyString(details.refWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString(details.refAssociationId);
+      case "revision_commit_associated":
+        return nonEmptyString(details.commitAssociationId) && isReviewTargetSummary(details.target) && isReviewEndpoint(details.commit);
+      case "revision_commit_withdrawn":
+        return nonEmptyString(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString(details.commitAssociationId);
+      case "validation_check_recorded":
+        return nonEmptyString(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString(details.target.revisionId) && nonEmptyString(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary);
+      case "change_declared":
+        return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString(details.declarationClaimId) && nonEmptyString(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString(details.identityDescriptor.revision_id)) && nonEmptyString(details.claimNonce);
+      case "change_membership_asserted":
+        return details.schema === "pointbreak.change-membership-asserted" && details.version === 1 && nonEmptyString(details.membershipClaimId) && nonEmptyString(details.changeId) && nonEmptyString(details.revisionId) && nonEmptyString(details.claimNonce);
+      case "change_membership_withdrawn":
+        return details.schema === "pointbreak.change-membership-withdrawn" && details.version === 1 && nonEmptyString(details.membershipWithdrawalId) && nonEmptyString(details.membershipClaimId) && nonEmptyString(details.claimNonce);
+      case "change_link_asserted":
+        return details.schema === "pointbreak.change-link-asserted" && details.version === 1 && nonEmptyString(details.linkClaimId) && nonEmptyString(details.leftChangeId) && nonEmptyString(details.rightChangeId) && (details.relation === "same_work" || details.relation === "related_work") && nonEmptyString(details.claimNonce);
+      case "change_revision_relation_asserted":
+        return details.schema === "pointbreak.change-revision-relation-asserted" && details.version === 1 && nonEmptyString(details.relationClaimId) && nonEmptyString(details.changeId) && isEventHistoryRevisionRef(details.successor) && isEventHistoryRevisionRef(details.predecessor) && details.relation === "supersedes" && nonEmptyString(details.claimNonce);
+      case "change_revision_relation_withdrawn":
+        return details.schema === "pointbreak.change-revision-relation-withdrawn" && details.version === 1 && nonEmptyString(details.relationWithdrawalId) && nonEmptyString(details.relationClaimId) && nonEmptyString(details.claimNonce);
+      case "revision_relation_attested":
+        return details.schema === "pointbreak.revision-relation-attested" && details.version === 1 && nonEmptyString(details.relationAttestationId) && isEventHistoryRevisionRef(details.revision) && nonEmptyString(details.commitAssociationId) && (details.semanticRelation === "exact_materialization" || details.semanticRelation === "equivalent_rewrite" || details.semanticRelation === "content_preserving_extension" || details.semanticRelation === "landing_provenance" || details.semanticRelation === "related_provenance" || details.semanticRelation === "unknown") && (details.proofStatus === "verified" || details.proofStatus === "asserted" || details.proofStatus === "unverified" || details.proofStatus === "indeterminate" || details.proofStatus === "refuted") && nonEmptyString(details.proofMethod) && nonEmptyString(details.proofAlgorithmVersion) && isStringArray(details.captureScope) && isNullableString(details.comparisonBaseOrParent) && isStringArray(details.endpointOids) && isNullableString(details.evidenceContentHash) && nonEmptyString(details.resultDigest);
+      case "review_fact_ported":
+        return details.schema === "pointbreak.review-fact-ported" && details.version === 1 && nonEmptyString(details.portId) && isEventHistoryRevisionRef(details.originRevision) && isFactRef(details.originFact) && isEventHistoryRevisionRef(details.targetRevision) && (details.relation === "context_only" || details.relation === "reanchored_as" || details.relation === "carried_open_as" || details.relation === "resolved_by") && (details.targetFact === null || isFactRef(details.targetFact)) && isNullableString(details.rationaleContentHash) && isNullableString(details.contextChangeId);
+    }
+  }
+  __name(isEventHistorySummary, "isEventHistorySummary");
+  function isEventHistoryEntry(value) {
+    if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
+      return false;
+    }
+    return nonEmptyString(value.eventId) && nonEmptyString(value.occurredAt) && nonEmptyString(value.payloadHash) && nonEmptyString(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString(value.sourceRef.sourceSystem) && nonEmptyString(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
+  }
+  __name(isEventHistoryEntry, "isEventHistoryEntry");
+  function decodeEventHistory(value) {
+    const document2 = object(value, "event history");
+    const completion = document2.completion;
+    const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
+    if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString(document2.sourceChangeProjectionStamp) || !nonEmptyString(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
+      ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
+    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString(document2.previous) || document2.next !== void 0 && !nonEmptyString(document2.next)) {
+      throw new Error("invalid event history DTO");
+    }
+    if (document2.offset + document2.entries.length > document2.matchCount) {
+      throw new Error("event history page exceeds its match count");
+    }
+    return {
+      ...document2,
+      authorityCursor
+    };
+  }
+  __name(decodeEventHistory, "decodeEventHistory");
+  var AUTHORITY_CURSOR_V2_KEYS = /* @__PURE__ */ new Set([
+    "schema",
+    "journalRecordCount",
+    "eventCount",
+    "journalRecordSetHash",
+    "eventSetHash",
+    "capabilitySetHash"
+  ]);
+  var PREFIXED_SHA256 = /^sha256:[0-9a-f]{64}$/;
+  function decodeAuthorityCursorV2(value) {
+    const cursor = object(value, "authority cursor");
+    if (!hasExactKeys(cursor, AUTHORITY_CURSOR_V2_KEYS) || cursor.schema !== "pointbreak.authority-cursor.v2" || !isNonnegativeSafeInteger(cursor.journalRecordCount) || !isNonnegativeSafeInteger(cursor.eventCount) || cursor.eventCount > cursor.journalRecordCount || typeof cursor.journalRecordSetHash !== "string" || !PREFIXED_SHA256.test(cursor.journalRecordSetHash) || typeof cursor.eventSetHash !== "string" || !PREFIXED_SHA256.test(cursor.eventSetHash) || typeof cursor.capabilitySetHash !== "string" || !PREFIXED_SHA256.test(cursor.capabilitySetHash)) {
+      throw new Error("invalid authority cursor DTO");
+    }
+    return cursor;
+  }
+  __name(decodeAuthorityCursorV2, "decodeAuthorityCursorV2");
   function decodeReaderProfile(value) {
     const profile = object(value, "Inspector reader profile");
     const availability = profile.availability;
-    const authorityCursor = profile.authorityCursor;
+    const authorityCursor = decodeAuthorityCursorV2(profile.authorityCursor);
     const documents = profile.documents;
     const minimumReaderProfile = profile.minimumReaderProfile;
     const commitGraphStamp = profile.commitGraphStamp;
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
       throw new Error("incompatible Inspector reader profile");
     }
     if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
@@ -1678,9 +3118,13 @@
   }
   __name(requireCoherentGeneration, "requireCoherentGeneration");
   function sameProfileGeneration(initial, postflight) {
-    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && canonicalJson(initial.authorityCursor) === canonicalJson(postflight.authorityCursor);
+    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && sameAuthorityCursor(initial.authorityCursor, postflight.authorityCursor);
   }
   __name(sameProfileGeneration, "sameProfileGeneration");
+  function sameAuthorityCursor(left, right) {
+    return canonicalJson(left) === canonicalJson(right);
+  }
+  __name(sameAuthorityCursor, "sameAuthorityCursor");
   function trimUnicodeWhitespace(value) {
     return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
   }
@@ -1747,11 +3191,11 @@
       if (!isRecord(candidate) || !isRevisionRef(candidate.revision)) {
         return false;
       }
-      const revision = candidate.revision;
-      if (typeof candidate.qualified !== "boolean" || !currentRevisionRefs.some((current) => sameRevision(current, revision)))
+      const revision2 = candidate.revision;
+      if (typeof candidate.qualified !== "boolean" || !currentRevisionRefs.some((current) => sameRevision(current, revision2)))
         return false;
       qualifications.push({
-        revision,
+        revision: revision2,
         qualified: candidate.qualified
       });
     }
@@ -1797,7 +3241,7 @@
   function uniqueRevisionKeys(revisions) {
     return new Set(
       revisions.map(
-        (revision) => `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+        (revision2) => `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
       )
     );
   }
@@ -1825,7 +3269,7 @@
   }
   __name(isFactTarget, "isFactTarget");
   function uniqueFactPresentationIds(facts) {
-    return new Set(facts.map((fact) => fact.factId)).size === facts.length;
+    return new Set(facts.map((fact2) => fact2.factId)).size === facts.length;
   }
   __name(uniqueFactPresentationIds, "uniqueFactPresentationIds");
   function isResourceProjection(value) {
@@ -1846,7 +3290,7 @@
   }
   __name(isFactContentPresentations, "isFactContentPresentations");
   function sameFactIds(facts, content) {
-    const expected = new Set(facts.map((fact) => fact.factId));
+    const expected = new Set(facts.map((fact2) => fact2.factId));
     const actual = Object.keys(content);
     return expected.size === facts.length && expected.size === actual.length && actual.every((factId) => expected.has(factId));
   }
@@ -1870,20 +3314,20 @@
     );
   }
   __name(isFactPortPresentations, "isFactPortPresentations");
-  function factRefId(fact) {
-    return fact.kind === "observation" ? fact.observationId ?? "" : fact.inputRequestId ?? "";
+  function factRefId(fact2) {
+    return fact2.kind === "observation" ? fact2.observationId ?? "" : fact2.inputRequestId ?? "";
   }
   __name(factRefId, "factRefId");
   function applicableFactPortHasExactEndpoints(port, facts, selectedRevision) {
     if (!sameRevision(port.targetRevision, selectedRevision)) return false;
     const matchingOrigin = facts.filter(
-      (fact) => fact.factId === factRefId(port.originFact) && fact.family === port.originFact.kind && sameRevision(fact.originRevision, port.originRevision) && fact.presentedInRevision !== void 0 && sameRevision(fact.presentedInRevision, selectedRevision)
+      (fact2) => fact2.factId === factRefId(port.originFact) && fact2.family === port.originFact.kind && sameRevision(fact2.originRevision, port.originRevision) && fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, selectedRevision)
     );
     if (matchingOrigin.length !== 1) return false;
     const targetFact = port.targetFact;
     if (targetFact === void 0) return true;
     return facts.filter(
-      (fact) => fact.factId === factRefId(targetFact) && fact.family === targetFact.kind && sameRevision(fact.originRevision, selectedRevision)
+      (fact2) => fact2.factId === factRefId(targetFact) && fact2.family === targetFact.kind && sameRevision(fact2.originRevision, selectedRevision)
     ).length === 1;
   }
   __name(applicableFactPortHasExactEndpoints, "applicableFactPortHasExactEndpoints");
@@ -1957,6 +3401,15 @@
     );
   }
   __name(sameDocumentMap, "sameDocumentMap");
+  function hasExactKeys(value, expected) {
+    const actual = Object.keys(value);
+    return actual.length === expected.size && actual.every((key) => expected.has(key));
+  }
+  __name(hasExactKeys, "hasExactKeys");
+  function isNonnegativeSafeInteger(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  __name(isNonnegativeSafeInteger, "isNonnegativeSafeInteger");
   function canonicalJson(value) {
     if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
     if (isRecord(value)) {
@@ -1996,12 +3449,12 @@
     return encodeURIComponent(value);
   }
   __name(encoded, "encoded");
-  function revisionPath(changeId, revision) {
-    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision.revisionId)}?artifactHash=${encoded(revision.objectArtifactContentHash)}`;
+  function revisionPath(changeId, revision2) {
+    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision2.revisionId)}?artifactHash=${encoded(revision2.objectArtifactContentHash)}`;
   }
   __name(revisionPath, "revisionPath");
-  function resourcePath(changeId, revision) {
-    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision.revisionId)}/resource?artifactHash=${encoded(revision.objectArtifactContentHash)}`;
+  function resourcePath(changeId, revision2) {
+    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision2.revisionId)}/resource?artifactHash=${encoded(revision2.objectArtifactContentHash)}`;
   }
   __name(resourcePath, "resourcePath");
   function assertStamp(stamp, expected, surface) {
@@ -2032,7 +3485,7 @@
       );
     }
     if (document2.factPresentations.some(
-      (fact) => fact.contextChangeId !== route.changeId || fact.presentedInRevision !== void 0 && !sameExactRevision(fact.presentedInRevision, route.revision)
+      (fact2) => fact2.contextChangeId !== route.changeId || fact2.presentedInRevision !== void 0 && !sameExactRevision(fact2.presentedInRevision, route.revision)
     )) {
       throw new Error(
         "fact presentation does not match its Change and exact Revision context"
@@ -2126,18 +3579,18 @@
   __name(loadChangeInspectorReading, "loadChangeInspectorReading");
 
   // src/change-inspector-cards.ts
-  function words(value) {
+  function words2(value) {
     return value.replaceAll("_", " ");
   }
-  __name(words, "words");
-  function shortExact(revision) {
-    const revisionId = revision.revisionId.length > 24 ? `${revision.revisionId.slice(0, 24)}…` : revision.revisionId;
-    const artifact = revision.objectArtifactContentHash.length > 18 ? `${revision.objectArtifactContentHash.slice(0, 18)}…` : revision.objectArtifactContentHash;
+  __name(words2, "words");
+  function shortExact(revision2) {
+    const revisionId = revision2.revisionId.length > 24 ? `${revision2.revisionId.slice(0, 24)}…` : revision2.revisionId;
+    const artifact = revision2.objectArtifactContentHash.length > 18 ? `${revision2.objectArtifactContentHash.slice(0, 18)}…` : revision2.objectArtifactContentHash;
     return `${revisionId} · ${artifact}`;
   }
   __name(shortExact, "shortExact");
-  function exactRevisionAccessibleIdentity(revision) {
-    return `exact Revision ${revision.revisionId}; artifact ${revision.objectArtifactContentHash}`;
+  function exactRevisionAccessibleIdentity(revision2) {
+    return `exact Revision ${revision2.revisionId}; artifact ${revision2.objectArtifactContentHash}`;
   }
   __name(exactRevisionAccessibleIdentity, "exactRevisionAccessibleIdentity");
   function changeCardPresentation(summary, presentation) {
@@ -2147,16 +3600,16 @@
         entry
       ])
     );
-    const peers = summary.currentRevisionRefs.map((revision) => {
+    const peers = summary.currentRevisionRefs.map((revision2) => {
       const entry = byExactIdentity.get(
-        `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+        `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       return {
-        revision,
-        label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision)}`,
-        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${exactRevisionAccessibleIdentity(revision)}` : `Current Revision — ${exactRevisionAccessibleIdentity(revision)}`,
-        copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`
+        revision: revision2,
+        label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision2)}`,
+        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${exactRevisionAccessibleIdentity(revision2)}` : `Current Revision — ${exactRevisionAccessibleIdentity(revision2)}`,
+        copyText: `${revision2.revisionId} ${revision2.objectArtifactContentHash}`
       };
     });
     const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
@@ -2170,7 +3623,7 @@
         summary.lifecycle,
         summary.attentionSummary,
         summary.availabilitySummary
-      ].map(words),
+      ].map(words2),
       peers
     };
   }
@@ -2446,10 +3899,10 @@
   var dfileClass = /* @__PURE__ */ __name((lowSignal) => `dfile${lowSignal ? " dfile-lowsignal" : ""}`, "dfileClass");
   var dagNodeClass = /* @__PURE__ */ __name((o) => `dag-node${o.isHead ? " head" : ""}${o.isSuperseded ? " superseded" : ""}`, "dagNodeClass");
   var bodyClass = /* @__PURE__ */ __name((base, markdown) => `${base}${markdown ? " markdown-body" : ""}`, "bodyClass");
-  var cmdItemClass = /* @__PURE__ */ __name((active2) => `cmd-item${active2 ? " active" : ""}`, "cmdItemClass");
+  var cmdItemClass = /* @__PURE__ */ __name((active3) => `cmd-item${active3 ? " active" : ""}`, "cmdItemClass");
   var filterChipClass = /* @__PURE__ */ __name((negated) => `filter-chip${negated ? " filter-chip-negated" : ""}`, "filterChipClass");
   var typeFacetRowClass = /* @__PURE__ */ __name((enabled) => `type-facet-row${enabled ? "" : " type-facet-row-off"}`, "typeFacetRowClass");
-  var suggestionClass = /* @__PURE__ */ __name((active2) => `suggestion${active2 ? " suggestion-active" : ""}`, "suggestionClass");
+  var suggestionClass = /* @__PURE__ */ __name((active3) => `suggestion${active3 ? " suggestion-active" : ""}`, "suggestionClass");
   var tokensOf = /* @__PURE__ */ __name((classStrings) => classStrings.flatMap((s) => s.split(" ")), "tokensOf");
   var ALL_EMITTABLE_CLASSES = [
     ...new Set(
@@ -2738,9 +4191,9 @@
     html = protectBackslashEscapes(html, stash);
     html = html.replace(
       /\[([^\]]+)\]\(([^)\s]+)\)/g,
-      (_, label, href) => {
+      (_, label2, href) => {
         const safe = safeMarkdownHref(href);
-        const labelHtml = renderMarkdownInline(label);
+        const labelHtml = renderMarkdownInline(label2);
         return safe ? stash(
           `<a href="${safe}" target="_blank" rel="noreferrer">${labelHtml}</a>`
         ) : labelHtml;
@@ -2833,8 +4286,8 @@
   // src/projection.ts
   function verificationChip(status) {
     if (!status) return "";
-    const label = VERIFICATION_LABELS[status] || status;
-    return `<span class="${verifyClass(escapeHtml(status))}" title="advisory signature readback — reader-relative, never gates a write">${escapeHtml(label)}</span>`;
+    const label2 = VERIFICATION_LABELS[status] || status;
+    return `<span class="${verifyClass(escapeHtml(status))}" title="advisory signature readback — reader-relative, never gates a write">${escapeHtml(label2)}</span>`;
   }
   __name(verificationChip, "verificationChip");
   function endorserDisplay(actorId) {
@@ -2843,9 +4296,9 @@
   __name(endorserDisplay, "endorserDisplay");
   function endorsementRow(en) {
     const cls = en.classification || "";
-    const label = ENDORSEMENT_LABELS[cls] || cls;
+    const label2 = ENDORSEMENT_LABELS[cls] || cls;
     const parts = [
-      `<span class="${CLASS.endorseLabel}">${escapeHtml(label)}</span>`
+      `<span class="${CLASS.endorseLabel}">${escapeHtml(label2)}</span>`
     ];
     if (en.endorser) {
       parts.push(
@@ -2895,10 +4348,10 @@
     historical: "historical",
     skipped: "skipped"
   };
-  function renderActorAttribution(label, writer) {
+  function renderActorAttribution(label2, writer) {
     const actorId = writer?.actorId ?? "";
     if (!actorId) return "";
-    return `<span class="${CLASS.actorAttribution}">${label} ${actorChip(actorId)}</span>`;
+    return `<span class="${CLASS.actorAttribution}">${label2} ${actorChip(actorId)}</span>`;
   }
   __name(renderActorAttribution, "renderActorAttribution");
   function renderRecordedTime(createdAt) {
@@ -3502,6 +4955,19 @@
     return element;
   }
   __name(message, "message");
+  function selectOption(label2, value, artifactHash, revisionId) {
+    const option = document.createElement("option");
+    option.textContent = label2;
+    option.value = value;
+    if (artifactHash) option.dataset.artifactHash = artifactHash;
+    if (revisionId) option.dataset.revisionId = revisionId;
+    return option;
+  }
+  __name(selectOption, "selectOption");
+  function exactRevisionOptionValue(revisionId, objectArtifactContentHash) {
+    return JSON.stringify([revisionId, objectArtifactContentHash]);
+  }
+  __name(exactRevisionOptionValue, "exactRevisionOptionValue");
   function setText(selector, value) {
     const element = document.querySelector(selector);
     if (element) element.textContent = value;
@@ -3528,44 +4994,67 @@
     document.querySelector("#view-sort-section")?.classList.add("hidden");
     document.querySelector("#jump-latest")?.closest(".control-section")?.classList.add("hidden");
     document.querySelector("#derived-access-status")?.classList.add("hidden");
-    document.querySelector("#follow-toggle")?.classList.add("hidden");
+    const follow = document.querySelector("#follow-toggle");
+    if (follow) {
+      follow.classList.add("hidden");
+      follow.onclick = () => actions2.toggleTimelineMonitoring?.();
+    }
     const switcher = document.querySelector("#lens-switcher");
     if (switcher) {
       switcher.replaceChildren();
-      for (const lens of ["changes", "attention"]) {
+      for (const lens of ["timeline", "changes", "attention"]) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "lens-tab";
         button.dataset.lens = lens;
-        button.textContent = lens === "changes" ? "Changes" : "Attention";
+        button.textContent = lens === "timeline" ? "Timeline" : lens === "changes" ? "Changes" : "Attention";
         button.addEventListener("click", () => {
-          const current = parseChangeInspectorRoute(location.hash || "#/changes");
-          actions2.navigate({
-            kind: "lens",
-            lens,
-            query: current.kind === "invalid" ? {} : { ...current.query, after: void 0 }
-          });
+          const current = parseChangeInspectorRoute(
+            location.hash || "#/timeline"
+          );
+          if (lens === "timeline") {
+            actions2.navigate({
+              kind: "timeline",
+              historyQuery: current.kind === "timeline" || current.kind === "event" ? { ...current.historyQuery, after: void 0, at: void 0 } : {}
+            });
+          } else {
+            actions2.navigate({
+              kind: "lens",
+              lens,
+              query: current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? {} : { ...current.query, after: void 0 }
+            });
+          }
         });
         switcher.append(button);
       }
     }
     const back = document.querySelector("#detail-back");
     if (back) {
-      back.textContent = "‹ Changes";
+      back.textContent = "‹ Timeline";
     }
     const search = document.querySelector("#filter-text");
-    if (search) search.placeholder = "Search Changes and current Revisions";
+    if (search)
+      search.placeholder = "Search Timeline, Changes, and exact Revisions";
     const filterTypes = document.querySelector("#filter-types");
     if (filterTypes) {
       filterTypes.replaceChildren();
       const heading = document.createElement("h2");
       heading.id = "filter-types-label";
-      heading.className = "control-heading";
+      heading.className = "control-heading change-filter";
       heading.textContent = "Change status";
       filterTypes.append(heading);
+      const timelineHeading = document.createElement("h2");
+      timelineHeading.className = "control-heading timeline-filter hidden";
+      timelineHeading.textContent = "Event types";
+      const timelineMenu = document.createElement("ul");
+      timelineMenu.id = "filter-types-menu";
+      timelineMenu.className = "type-facet-menu timeline-filter hidden";
+      timelineMenu.setAttribute("aria-label", "event types");
+      filterTypes.append(timelineHeading, timelineMenu);
       for (const [name, values] of FILTER_OPTIONS) {
-        const label = document.createElement("label");
-        label.textContent = name.replaceAll("_", " ");
+        const label2 = document.createElement("label");
+        label2.className = "change-filter";
+        label2.textContent = name.replaceAll("_", " ");
         const select = document.createElement("select");
         select.id = `change-filter-${name}`;
         for (const [labelText, value] of [
@@ -3578,8 +5067,10 @@
           select.append(option);
         }
         select.addEventListener("change", () => {
-          const current = parseChangeInspectorRoute(location.hash || "#/changes");
-          const base = current.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : current;
+          const current = parseChangeInspectorRoute(
+            location.hash || "#/timeline"
+          );
+          const base = current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? { kind: "lens", lens: "changes", query: {} } : current;
           actions2.navigate({
             ...base,
             query: {
@@ -3589,14 +5080,79 @@
             }
           });
         });
-        label.append(select);
-        filterTypes.append(label);
+        label2.append(select);
+        filterTypes.append(label2);
       }
+      const timelineChoice = /* @__PURE__ */ __name((label2, id, update) => {
+        const choiceLabel = document.createElement("label");
+        choiceLabel.className = "timeline-filter hidden";
+        choiceLabel.textContent = label2;
+        const select = document.createElement("select");
+        select.id = id;
+        select.append(selectOption("Any", ""));
+        select.addEventListener("change", () => {
+          const current = parseChangeInspectorRoute(
+            location.hash || "#/timeline"
+          );
+          if (current.kind !== "timeline" && current.kind !== "event") return;
+          const query = {
+            ...current.historyQuery,
+            after: void 0,
+            at: void 0
+          };
+          update(query);
+          actions2.navigate({ kind: "timeline", historyQuery: query });
+        });
+        choiceLabel.append(select);
+        filterTypes.append(choiceLabel);
+      }, "timelineChoice");
+      timelineChoice("track", "timeline-filter-track", (query) => {
+        query.track = document.querySelector("#timeline-filter-track")?.value || void 0;
+      });
+      timelineChoice("Change", "timeline-filter-change", (query) => {
+        query.change = document.querySelector("#timeline-filter-change")?.value || void 0;
+      });
+      timelineChoice("exact Revision", "timeline-filter-revision", (query) => {
+        const select = document.querySelector(
+          "#timeline-filter-revision"
+        );
+        const selected = select?.selectedOptions[0];
+        query.revision = selected?.dataset.revisionId;
+        query.artifactHash = selected?.dataset.artifactHash;
+      });
+    }
+    for (const input of document.querySelectorAll(
+      "input[name='view-order']"
+    )) {
+      input.addEventListener("change", () => {
+        if (!input.checked) return;
+        const current = parseChangeInspectorRoute(location.hash || "#/timeline");
+        if (current.kind !== "timeline" && current.kind !== "event") return;
+        actions2.navigate({
+          kind: "timeline",
+          historyQuery: {
+            ...current.historyQuery,
+            after: void 0,
+            at: void 0,
+            order: input.value === "asc" ? "asc" : "desc"
+          }
+        });
+      });
     }
     const clear = document.querySelector("#filter-clear");
     if (clear) {
       clear.onclick = () => {
-        const current = parseChangeInspectorRoute(location.hash || "#/changes");
+        const current = parseChangeInspectorRoute(location.hash || "#/timeline");
+        if (current.kind === "timeline" || current.kind === "event") {
+          actions2.navigate({
+            kind: "timeline",
+            historyQuery: {
+              limit: current.historyQuery.limit,
+              order: current.historyQuery.order
+            }
+          });
+          return;
+        }
         const base = current.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : current;
         actions2.navigate({
           ...base,
@@ -3633,8 +5189,168 @@
     return values;
   }
   __name(filterValues, "filterValues");
-  function syncFilterChrome(route) {
+  function replaceTimelineSelectOptions(id, options, selected) {
+    const select = document.querySelector(`#${id}`);
+    if (!select) return;
+    const key = JSON.stringify(options);
+    if (select.dataset.timelineOptions !== key) {
+      select.replaceChildren(selectOption("Any", ""));
+      for (const option of options) {
+        select.append(
+          selectOption(
+            option.label,
+            option.value,
+            option.artifactHash,
+            option.revisionId
+          )
+        );
+      }
+      select.dataset.timelineOptions = key;
+    }
+    select.value = selected ?? "";
+  }
+  __name(replaceTimelineSelectOptions, "replaceTimelineSelectOptions");
+  function syncTimelineTypeFacets(route, history2, actions2) {
+    const menu = document.querySelector("#filter-types-menu");
+    if (!menu) return;
+    const selected = new Set(
+      route.historyQuery.type?.split(",").filter(Boolean) ?? []
+    );
+    const rows = history2.completion.eventTypes.map((eventType) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `type-facet-row${selected.has(eventType) ? "" : " type-facet-row-off"}`;
+      button.dataset.eventType = eventType;
+      button.setAttribute("aria-pressed", String(selected.has(eventType)));
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.style.background = eventTypeColor(eventType);
+      dot.setAttribute("aria-hidden", "true");
+      const name = document.createElement("span");
+      name.textContent = eventType.replaceAll("_", " ");
+      const count = document.createElement("span");
+      count.className = "type-count";
+      count.textContent = String(history2.facets[eventType] ?? 0);
+      button.append(dot, name, count);
+      button.addEventListener("click", () => {
+        const nextTypes = new Set(selected);
+        if (nextTypes.has(eventType)) nextTypes.delete(eventType);
+        else nextTypes.add(eventType);
+        actions2.navigate({
+          kind: "timeline",
+          historyQuery: {
+            ...route.historyQuery,
+            after: void 0,
+            at: void 0,
+            type: nextTypes.size ? [...nextTypes].sort().join(",") : void 0
+          }
+        });
+      });
+      item.append(button);
+      return item;
+    });
+    if (!rows.length) {
+      const empty = document.createElement("li");
+      empty.className = "dim";
+      empty.textContent = "No event types available";
+      rows.push(empty);
+    }
+    menu.replaceChildren(...rows);
+  }
+  __name(syncTimelineTypeFacets, "syncTimelineTypeFacets");
+  function syncFilterChrome(route, history2, actions2) {
     if (route.kind === "invalid") return;
+    if (route.kind === "timeline" || route.kind === "event") {
+      const input2 = document.querySelector("#filter-text");
+      if (input2) input2.value = route.historyQuery.q ?? "";
+      const chips2 = document.querySelector("#filter-chips");
+      const values2 = [
+        ["search", route.historyQuery.q],
+        ["type", route.historyQuery.type],
+        ["track", route.historyQuery.track],
+        ["change", route.historyQuery.change],
+        ["revision", route.historyQuery.revision]
+      ].filter((value) => Boolean(value[1]));
+      chips2?.replaceChildren(
+        ...values2.map(([name, value]) => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "badge";
+          chip.textContent = `${name}: ${value} ×`;
+          chip.setAttribute("aria-label", `Remove ${name} filter: ${value}`);
+          chip.addEventListener("click", () => {
+            const next = {
+              ...route.historyQuery,
+              after: void 0,
+              at: void 0,
+              [name === "search" ? "q" : name]: void 0
+            };
+            if (name === "revision") next.artifactHash = void 0;
+            actions2.navigate({ kind: "timeline", historyQuery: next });
+          });
+          return chip;
+        })
+      );
+      document.querySelector("#filter-chips-empty")?.classList.toggle("hidden", values2.length > 0);
+      const toggle2 = document.querySelector("#filters-toggle");
+      if (toggle2)
+        toggle2.textContent = values2.length ? `Filters · ${values2.length}` : "Filters";
+      document.querySelectorAll(".timeline-filter").forEach((element) => {
+        element.classList.remove("hidden");
+      });
+      document.querySelectorAll(".change-filter").forEach((element) => {
+        element.classList.add("hidden");
+      });
+      if (history2 !== null) {
+        syncTimelineTypeFacets(route, history2, actions2);
+        replaceTimelineSelectOptions(
+          "timeline-filter-track",
+          history2.completion.trackIds.map((trackId) => ({
+            value: trackId,
+            label: trackId
+          })),
+          route.historyQuery.track
+        );
+        replaceTimelineSelectOptions(
+          "timeline-filter-change",
+          history2.completion.changeIds.map((changeId) => ({
+            value: changeId,
+            label: changeId
+          })),
+          route.historyQuery.change
+        );
+        replaceTimelineSelectOptions(
+          "timeline-filter-revision",
+          history2.completion.revisionRefs.map((revision2) => ({
+            value: exactRevisionOptionValue(
+              revision2.revisionId,
+              revision2.objectArtifactContentHash
+            ),
+            label: `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`,
+            artifactHash: revision2.objectArtifactContentHash,
+            revisionId: revision2.revisionId
+          })),
+          route.historyQuery.revision && route.historyQuery.artifactHash ? exactRevisionOptionValue(
+            route.historyQuery.revision,
+            route.historyQuery.artifactHash
+          ) : void 0
+        );
+      }
+      document.querySelector("#view-order-section")?.classList.remove("hidden");
+      const newest = document.querySelector("#order-newest");
+      const oldest = document.querySelector("#order-oldest");
+      if (newest) newest.checked = route.historyQuery.order !== "asc";
+      if (oldest) oldest.checked = route.historyQuery.order === "asc";
+      return;
+    }
+    document.querySelectorAll(".timeline-filter").forEach((element) => {
+      element.classList.add("hidden");
+    });
+    document.querySelectorAll(".change-filter").forEach((element) => {
+      element.classList.remove("hidden");
+    });
+    document.querySelector("#view-order-section")?.classList.add("hidden");
     const input = document.querySelector("#filter-text");
     if (input) input.value = route.query.q ?? "";
     for (const [name] of FILTER_OPTIONS) {
@@ -3661,6 +5377,152 @@
       toggle.textContent = values.length ? `Filters · ${values.length}` : "Filters";
   }
   __name(syncFilterChrome, "syncFilterChrome");
+  function renderEventDetail(event, actions2) {
+    const presentation = presentEvent(event);
+    const heading = detailHeading("Event");
+    const identity = detailLine(event.eventId, "mono");
+    const summary = document.createElement("section");
+    summary.className = "event-detail-summary";
+    summary.append(detailHeading(presentation.title, 3));
+    if (presentation.body) summary.append(detailLine(presentation.body));
+    const summaryFacts = document.createElement("dl");
+    summaryFacts.className = "kv";
+    for (const item of presentation.fields) {
+      const term = document.createElement("dt");
+      term.textContent = item.label;
+      const definition = document.createElement("dd");
+      definition.textContent = item.value;
+      summaryFacts.append(term, definition);
+    }
+    if (presentation.fields.length) summary.append(summaryFacts);
+    const attribution = document.createElement("section");
+    attribution.className = "event-detail-attribution";
+    attribution.append(detailHeading("Subject and attribution", 3));
+    const attributionFacts = document.createElement("dl");
+    attributionFacts.className = "kv";
+    const attributionAdd = /* @__PURE__ */ __name((name, value) => {
+      const term = document.createElement("dt");
+      term.textContent = name;
+      const definition = document.createElement("dd");
+      definition.textContent = value;
+      attributionFacts.append(term, definition);
+    }, "attributionAdd");
+    attributionAdd("subject", eventSubjectLabel(event.subject));
+    attributionAdd("writer", event.writer.actorId);
+    attributionAdd(
+      "producer",
+      `${event.writer.producer.name} ${event.writer.producer.version}`
+    );
+    attributionAdd("assertion", event.assertionMode.replaceAll("_", " "));
+    if (event.signer) attributionAdd("signer", event.signer);
+    if (event.sourceRef) {
+      attributionAdd(
+        "source",
+        `${event.sourceRef.sourceSystem} · ${event.sourceRef.sourceId}`
+      );
+    }
+    if (event.ingest) {
+      attributionAdd(
+        "ingest",
+        `${event.ingest.via} · ${event.ingest.receivedAt}`
+      );
+    }
+    attribution.append(attributionFacts);
+    const record = document.createElement("section");
+    record.className = "event-detail-record";
+    record.append(detailHeading("Event record", 3));
+    const facts = document.createElement("dl");
+    facts.className = "kv";
+    const add = /* @__PURE__ */ __name((name, value) => {
+      const term = document.createElement("dt");
+      term.textContent = name;
+      const definition = document.createElement("dd");
+      definition.textContent = value;
+      facts.append(term, definition);
+    }, "add");
+    add("type", event.eventType.replaceAll("_", " "));
+    add("occurred", event.occurredAt);
+    add("verification", event.verificationStatus.replaceAll("_", " "));
+    add("event payload", event.payloadHash);
+    add("journal", event.journalId);
+    if (event.trackId) add("track", event.trackId);
+    if (event.signer) add("signer", event.signer);
+    add("Changes", event.changeIds.join("; ") || "none");
+    add(
+      "exact Revisions",
+      event.revisionRefs.map(
+        (revision2) => `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`
+      ).join("; ") || "none"
+    );
+    if (event.unresolvedRevisionIds.length)
+      add("unresolved Revisions", event.unresolvedRevisionIds.join("; "));
+    record.append(facts);
+    const context = document.createElement("section");
+    context.className = "actions event-detail-actions";
+    const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
+    const onlyRevision = event.revisionRefs.length === 1 ? event.revisionRefs[0] : null;
+    if (onlyChange) {
+      const change = document.createElement("button");
+      change.type = "button";
+      change.className = "ghost";
+      change.textContent = "Open Change";
+      change.addEventListener(
+        "click",
+        () => actions2.navigate({ kind: "change", changeId: onlyChange, query: {} })
+      );
+      context.append(change);
+    }
+    if (onlyChange && onlyRevision) {
+      const revision2 = document.createElement("button");
+      revision2.type = "button";
+      revision2.className = "ghost";
+      revision2.textContent = "Open exact Revision";
+      revision2.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "revision",
+          changeId: onlyChange,
+          revision: onlyRevision,
+          query: {}
+        })
+      );
+      context.append(revision2);
+    }
+    if (!onlyChange || event.revisionRefs.length > 0 && !onlyRevision) {
+      context.append(
+        detailLine(
+          "This event has multiple contexts; choose an explicit Change and exact Revision from Changes.",
+          "dim"
+        )
+      );
+    }
+    const copyLink = document.createElement("button");
+    copyLink.type = "button";
+    copyLink.className = "ghost";
+    copyLink.textContent = "Copy link";
+    copyLink.addEventListener("click", () => copyExact(location.href));
+    context.append(copyLink);
+    const structured = document.createElement("details");
+    structured.className = "event-structured";
+    const structuredLabel = document.createElement("summary");
+    structuredLabel.textContent = "Structured event data";
+    const raw = document.createElement("pre");
+    raw.className = "anno-body mono";
+    raw.textContent = JSON.stringify(
+      {
+        summary: event.summary,
+        subject: event.subject,
+        writer: event.writer,
+        sourceRef: event.sourceRef,
+        ingest: event.ingest
+      },
+      null,
+      2
+    );
+    structured.append(structuredLabel, raw);
+    return [heading, identity, summary, attribution, record, context, structured];
+  }
+  __name(renderEventDetail, "renderEventDetail");
   function detailHeading(text, level = 2) {
     const heading = document.createElement(`h${level}`);
     heading.textContent = text;
@@ -3674,8 +5536,8 @@
     return line;
   }
   __name(detailLine, "detailLine");
-  function shortExact2(revision) {
-    return `${revision.revisionId} · ${revision.objectArtifactContentHash}`;
+  function shortExact2(revision2) {
+    return `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`;
   }
   __name(shortExact2, "shortExact");
   function renderedFactBody(content, contentType) {
@@ -3691,40 +5553,40 @@
     facts.className = "detail-facts";
     facts.append(detailHeading("Facts", 3));
     const groups = /* @__PURE__ */ new Map();
-    for (const fact of reading.document.factPresentations) {
-      const family = groups.get(fact.family) ?? [];
-      family.push(fact);
-      groups.set(fact.family, family);
+    for (const fact2 of reading.document.factPresentations) {
+      const family = groups.get(fact2.family) ?? [];
+      family.push(fact2);
+      groups.set(fact2.family, family);
     }
     for (const [family, items] of groups) {
       const group = document.createElement("section");
       group.append(detailHeading(family.replaceAll("_", " "), 4));
-      for (const fact of items) {
+      for (const fact2 of items) {
         const card = document.createElement("article");
         card.className = "unit-card";
-        card.dataset.factId = fact.factId;
+        card.dataset.factId = fact2.factId;
         card.tabIndex = -1;
         card.append(
-          detailLine(fact.factId, "mono"),
+          detailLine(fact2.factId, "mono"),
           detailLine(
-            `origin: ${shortExact2(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`
+            `origin: ${shortExact2(fact2.originRevision)} · context: ${fact2.contextChangeId ?? "unavailable"} · currency: ${fact2.revisionCurrency.replaceAll("_", " ")}`
           ),
           detailLine(
-            `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`
+            `family: ${fact2.familyState.replaceAll("_", " ")} · availability: ${fact2.availability.replaceAll("_", " ")} · actor: ${fact2.actorId}${fact2.trackId ? ` · track: ${fact2.trackId}` : ""}`
           )
         );
-        const presentedInRevision = fact.presentedInRevision;
+        const presentedInRevision = fact2.presentedInRevision;
         if (presentedInRevision) {
           const applicablePort = reading.document.factPorts.find(
-            (port) => port.applicability === "applicable" && port.originRevision.revisionId === fact.originRevision.revisionId && port.originRevision.objectArtifactContentHash === fact.originRevision.objectArtifactContentHash && port.targetRevision.revisionId === presentedInRevision.revisionId && port.targetRevision.objectArtifactContentHash === presentedInRevision.objectArtifactContentHash && factRefLabel(port.originFact) === factRefLabelFromFactId(fact)
+            (port) => port.applicability === "applicable" && port.originRevision.revisionId === fact2.originRevision.revisionId && port.originRevision.objectArtifactContentHash === fact2.originRevision.objectArtifactContentHash && port.targetRevision.revisionId === presentedInRevision.revisionId && port.targetRevision.objectArtifactContentHash === presentedInRevision.objectArtifactContentHash && factRefLabel(port.originFact) === factRefLabelFromFactId(fact2)
           );
           card.append(
             detailLine(
-              `presented in: ${shortExact2(presentedInRevision)} · port: ${fact.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`
+              `presented in: ${shortExact2(presentedInRevision)} · port: ${fact2.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`
             )
           );
         }
-        const content = reading.document.factContentPresentations?.[fact.factId];
+        const content = reading.document.factContentPresentations?.[fact2.factId];
         if (content) {
           card.append(
             detailLine(
@@ -3744,7 +5606,7 @@
             changeId: route.changeId,
             revision: route.revision,
             query: queryForExactNavigation(route),
-            focus: { factId: fact.factId }
+            focus: { factId: fact2.factId }
           })
         );
         card.append(focus);
@@ -3756,12 +5618,12 @@
     return facts;
   }
   __name(renderFacts, "renderFacts");
-  function factRefLabel(fact) {
-    return fact.kind === "observation" ? `observation: ${fact.observationId}` : `input request: ${fact.inputRequestId}`;
+  function factRefLabel(fact2) {
+    return fact2.kind === "observation" ? `observation: ${fact2.observationId}` : `input request: ${fact2.inputRequestId}`;
   }
   __name(factRefLabel, "factRefLabel");
-  function factRefLabelFromFactId(fact) {
-    return fact.family === "observation" ? `observation: ${fact.factId}` : fact.family === "input_request" ? `input request: ${fact.factId}` : "";
+  function factRefLabelFromFactId(fact2) {
+    return fact2.family === "observation" ? `observation: ${fact2.factId}` : fact2.family === "input_request" ? `input request: ${fact2.factId}` : "";
   }
   __name(factRefLabelFromFactId, "factRefLabelFromFactId");
   function renderFactPorts(reading) {
@@ -3872,17 +5734,17 @@
     return content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
   }
   __name(annotationBody, "annotationBody");
-  function annotationForFact(fact, presentation) {
+  function annotationForFact(fact2, presentation) {
     const content = presentation.content;
     const base = {
-      id: fact.factId,
+      id: fact2.factId,
       kind: content.kind === "input_request" ? "input-request" : content.kind,
       title: content.kind === "assessment" ? `assessment: ${content.assessment}` : content.kind === "validation" ? content.checkName : content.title,
-      track: fact.trackId ?? "untracked",
+      track: fact2.trackId ?? "untracked",
       body: annotationBody(content),
       bodyContentType: presentation.contentType,
       bodyContentState: presentation.bodyContentState,
-      ...fact.target ? { target: annotationTarget(fact.target) } : {}
+      ...fact2.target ? { target: annotationTarget(fact2.target) } : {}
     };
     if (content.kind === "input_request") {
       base.status = content.status;
@@ -3896,7 +5758,7 @@
       }));
     } else if (content.kind === "assessment") {
       base.assessment = content.assessment;
-      base.status = fact.familyState;
+      base.status = fact2.familyState;
     } else if (content.kind === "validation") {
       base.status = content.status;
       base.command = content.command;
@@ -3906,14 +5768,14 @@
   __name(annotationForFact, "annotationForFact");
   function annotationsForExactRevision(detail) {
     const annotations = [];
-    for (const fact of detail.factPresentations) {
-      const content = detail.factContentPresentations?.[fact.factId];
-      if (fact.family !== content?.content.kind || fact.originRevision.revisionId !== detail.revision.revisionId || fact.originRevision.objectArtifactContentHash !== detail.revision.objectArtifactContentHash || !content) {
+    for (const fact2 of detail.factPresentations) {
+      const content = detail.factContentPresentations?.[fact2.factId];
+      if (fact2.family !== content?.content.kind || fact2.originRevision.revisionId !== detail.revision.revisionId || fact2.originRevision.objectArtifactContentHash !== detail.revision.objectArtifactContentHash || !content) {
         continue;
       }
-      if (fact.target && fact.target.revisionId !== detail.revision.revisionId)
+      if (fact2.target && fact2.target.revisionId !== detail.revision.revisionId)
         continue;
-      annotations.push(annotationForFact(fact, content));
+      annotations.push(annotationForFact(fact2, content));
     }
     return annotations;
   }
@@ -4036,21 +5898,21 @@
       choices.append(message("No current Revision is available."));
       return choices;
     }
-    for (const revision of revisions) {
+    for (const revision2 of revisions) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ghost mono";
-      button.textContent = revision.revisionId;
+      button.textContent = revision2.revisionId;
       button.setAttribute(
         "aria-label",
-        `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`
+        `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}`
       );
       button.addEventListener(
         "click",
         () => actions2.navigate({
           kind: "revision",
           changeId,
-          revision,
+          revision: revision2,
           query
         })
       );
@@ -4185,17 +6047,17 @@
       }
       for (const diagnostic of reading.document.diagnostics)
         nodes.push(detailLine(diagnostic));
-      for (const revision of [route.from, route.to]) {
+      for (const revision2 of [route.from, route.to]) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "ghost";
-        button.textContent = `Open authoritative captured diff: ${revision.revisionId}`;
+        button.textContent = `Open authoritative captured diff: ${revision2.revisionId}`;
         button.addEventListener(
           "click",
           () => actions2.navigate({
             kind: "resource",
             changeId: route.changeId,
-            revision,
+            revision: revision2,
             query: route.query
           })
         );
@@ -4249,12 +6111,12 @@
     if (!focus) return null;
     const targets = [];
     if (focus.factId) {
-      const fact = Array.from(
+      const fact2 = Array.from(
         detail.querySelectorAll("[data-fact-id], [data-anno]")
       ).find(
         (element) => element.dataset.factId === focus.factId || element.dataset.anno === focus.factId
       );
-      if (fact) targets.push(fact);
+      if (fact2) targets.push(fact2);
     }
     if (focus.filePath) {
       const file = Array.from(
@@ -4292,8 +6154,23 @@
       replaceDetailWith(message(snapshot2.diagnostic));
       return;
     }
-    if (snapshot2.route.kind === "lens" || snapshot2.generation === null) {
+    if (snapshot2.route.kind === "timeline" || snapshot2.route.kind === "lens" || snapshot2.generation === null) {
       replaceDetailWith(message("Select a Change or exact Revision."));
+      return;
+    }
+    if (snapshot2.route.kind === "event") {
+      const route = snapshot2.route;
+      const event = snapshot2.generation.history?.entries.find(
+        (entry) => entry.eventId === route.eventId
+      );
+      replaceDetailWith(
+        ...event ? renderEventDetail(event, actions2) : [
+          detailHeading("Event"),
+          message(
+            "This exact event was not present in the bounded Timeline response."
+          )
+        ]
+      );
       return;
     }
     if (presentation.refusal !== null) {
@@ -4353,7 +6230,14 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       routeDiagnostic.textContent = snapshot2.diagnostic ?? "";
       routeDiagnostic.classList.toggle("hidden", snapshot2.diagnostic === null);
     }
-    syncFilterChrome(snapshot2.route);
+    syncFilterChrome(
+      snapshot2.route,
+      snapshot2.generation?.history ?? null,
+      actions2
+    );
+    if (snapshot2.route.kind !== "timeline") {
+      document.querySelector("#follow-toggle")?.classList.add("hidden");
+    }
     clearError();
     if (snapshot2.route.kind === "invalid") {
       replaceMasterWith(message("Cannot open this Inspector link."));
@@ -4363,6 +6247,54 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     const route = snapshot2.route;
     if (snapshot2.generation === null) {
       replaceMasterWith(message("Loading Change generation…"));
+      renderDetail(snapshot2, actions2, presentation);
+      return;
+    }
+    if (route.kind === "timeline" || route.kind === "event") {
+      if (snapshot2.generation.history === null) {
+        replaceMasterWith(message("Loading Timeline…"));
+        renderDetail(snapshot2, actions2, presentation);
+        return;
+      }
+      const monitor = route.kind === "timeline" ? presentation.timeline ?? null : null;
+      const history2 = monitor?.display ?? snapshot2.generation.history;
+      const follow = document.querySelector("#follow-toggle");
+      if (follow) {
+        follow.classList.toggle("hidden", monitor === null);
+        if (monitor !== null) {
+          const parked = monitor.mode === "parked";
+          follow.setAttribute("aria-pressed", String(!parked));
+          follow.textContent = parked ? monitor.newCount > 0 ? `Show ${monitor.newCount} new ${monitor.newCount === 1 ? "event" : "events"}` : "Parked" : "Following";
+          follow.setAttribute(
+            "aria-label",
+            parked ? "Show the latest filtered Timeline events and resume following" : "Park the Timeline at the current events"
+          );
+        }
+      }
+      const timelineRoute = route.kind === "timeline" ? route : { kind: "timeline", historyQuery: route.historyQuery };
+      renderChangeInspectorTimeline(
+        master,
+        history2,
+        actions2,
+        timelineRoute,
+        route.kind === "event" ? route.eventId : null
+      );
+      document.querySelectorAll("#lens-switcher [data-lens]").forEach((button) => {
+        button.setAttribute(
+          "aria-pressed",
+          String(button.dataset.lens === "timeline")
+        );
+      });
+      setText("#stat-events", `${history2.eventCount} events`);
+      setText(
+        "#stat-units",
+        `${snapshot2.generation.changes.changes.length} Changes`
+      );
+      setText(
+        "#stat-threads",
+        `${snapshot2.generation.attention.changes.length} need attention`
+      );
+      setText("#stat-hash", history2.timelineProjectionStamp);
       renderDetail(snapshot2, actions2, presentation);
       return;
     }
@@ -4569,12 +6501,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     return null;
   }
   __name(selectionDiagnostic, "selectionDiagnostic");
-  function stageGeneration(profile, changes, attention, postflight) {
+  function stageGeneration(profile, changes, attention, postflight, history2 = null) {
     requireCoherentGeneration(changes, attention);
     if (!sameProfileGeneration(profile, postflight)) {
       throw new ChangeInspectorGenerationChanged();
     }
-    return { profile, changes, attention };
+    if (history2 !== null && (history2.sourceChangeProjectionStamp !== changes.projectionStamp || !sameAuthorityCursor(history2.authorityCursor, profile.authorityCursor) || !sameAuthorityCursor(history2.authorityCursor, postflight.authorityCursor))) {
+      throw new ChangeInspectorGenerationChanged();
+    }
+    return { profile, changes, attention, history: history2 };
   }
   __name(stageGeneration, "stageGeneration");
   function createChangeInspectorState(initialRoute) {
@@ -4607,8 +6542,178 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   }
   __name(createChangeInspectorState, "createChangeInspectorState");
 
+  // src/change-inspector-timeline-boundary.ts
+  var ChangeInspectorTimelineTraversalRefused = class extends Error {
+    static {
+      __name(this, "ChangeInspectorTimelineTraversalRefused");
+    }
+  };
+  function canonical(value) {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value).sort(
+        ([left], [right]) => left.localeCompare(right)
+      );
+      return `{${entries.map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`).join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "null";
+  }
+  __name(canonical, "canonical");
+  function firstTimelineRoute(route) {
+    return {
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: void 0,
+        at: void 0
+      }
+    };
+  }
+  __name(firstTimelineRoute, "firstTimelineRoute");
+  function requireSameTimelineGeneration(anchor, page) {
+    if (page.sourceChangeProjectionStamp !== anchor.sourceChangeProjectionStamp || page.timelineProjectionStamp !== anchor.timelineProjectionStamp || page.eventCount !== anchor.eventCount || page.matchCount !== anchor.matchCount || page.order !== anchor.order || canonical(page.authorityCursor) !== canonical(anchor.authorityCursor)) {
+      throw new ChangeInspectorGenerationChanged();
+    }
+  }
+  __name(requireSameTimelineGeneration, "requireSameTimelineGeneration");
+  async function traverseTimelineTail(route, anchor, load) {
+    const first = firstTimelineRoute(route);
+    const limit = first.historyQuery.limit ?? 100;
+    const maximumPages = Math.max(1, Math.ceil(anchor.matchCount / limit));
+    let page = await load(first.historyQuery);
+    requireSameTimelineGeneration(anchor, page);
+    if (page.offset !== 0) {
+      throw new ChangeInspectorTimelineTraversalRefused(
+        "Timeline first page did not begin at the filtered head"
+      );
+    }
+    let pageCount = 1;
+    let finalAfter;
+    const seen = /* @__PURE__ */ new Set();
+    while (page.next !== void 0) {
+      const token = page.next;
+      if (seen.has(token)) {
+        throw new ChangeInspectorTimelineTraversalRefused(
+          "Timeline continuation chain contained a cycle"
+        );
+      }
+      if (pageCount >= maximumPages || page.entries.length === 0) {
+        throw new ChangeInspectorTimelineTraversalRefused(
+          "Timeline continuation chain exceeded its bounded match count"
+        );
+      }
+      seen.add(token);
+      const expectedOffset = page.offset + page.entries.length;
+      const next = await load({ ...first.historyQuery, after: token });
+      requireSameTimelineGeneration(anchor, next);
+      if (next.offset !== expectedOffset) {
+        throw new ChangeInspectorTimelineTraversalRefused(
+          "Timeline continuation chain was not contiguous"
+        );
+      }
+      page = next;
+      finalAfter = token;
+      pageCount += 1;
+    }
+    return {
+      route: {
+        kind: "timeline",
+        historyQuery: { ...first.historyQuery, after: finalAfter }
+      },
+      page,
+      pageCount
+    };
+  }
+  __name(traverseTimelineTail, "traverseTimelineTail");
+
+  // src/change-inspector-timeline-monitor.ts
+  function monitorKey(route) {
+    const query = route.historyQuery;
+    if (query.after !== void 0 || query.at !== void 0 || query.order === "asc")
+      return null;
+    return formatChangeInspectorRoute(route);
+  }
+  __name(monitorKey, "monitorKey");
+  function newEventsAheadOfParkedHead(parked, latest) {
+    const parkedIds = new Set(parked.entries.map((entry) => entry.eventId));
+    if (parkedIds.size > 0) {
+      const retainedIndex = latest.entries.findIndex(
+        (entry) => parkedIds.has(entry.eventId)
+      );
+      if (retainedIndex >= 0) return retainedIndex;
+    }
+    const countDelta = Math.max(0, latest.matchCount - parked.matchCount);
+    if (countDelta > 0) return countDelta;
+    return parkedIds.size > 0 ? latest.entries.length : 0;
+  }
+  __name(newEventsAheadOfParkedHead, "newEventsAheadOfParkedHead");
+  function createTimelineMonitor() {
+    let key = null;
+    let latest = null;
+    let parked = null;
+    let following = true;
+    const snapshot2 = /* @__PURE__ */ __name(() => {
+      if (key === null) return null;
+      const display = following ? latest : parked;
+      if (display === null) return null;
+      return {
+        mode: following ? "following" : "parked",
+        newCount: !following && latest !== null ? newEventsAheadOfParkedHead(display, latest) : 0,
+        display
+      };
+    }, "snapshot");
+    const park = /* @__PURE__ */ __name(() => {
+      if (latest === null) return null;
+      if (following) {
+        parked = latest;
+        following = false;
+      }
+      return snapshot2();
+    }, "park");
+    const follow = /* @__PURE__ */ __name(() => {
+      if (latest === null) return null;
+      parked = null;
+      following = true;
+      return snapshot2();
+    }, "follow");
+    return {
+      observe(route, document2) {
+        const nextKey = monitorKey(route);
+        if (nextKey === null) {
+          key = null;
+          latest = document2;
+          parked = null;
+          following = true;
+          return null;
+        }
+        if (key !== nextKey) {
+          key = nextKey;
+          parked = null;
+          following = true;
+        }
+        latest = document2;
+        return snapshot2();
+      },
+      toggle() {
+        if (latest === null) return null;
+        if (following) {
+          park();
+        } else {
+          follow();
+        }
+        return snapshot2();
+      },
+      /** Idempotently retain the reader's current head window. */
+      park,
+      /** Explicit catch-up resumes the newest successfully loaded head page. */
+      follow,
+      snapshot: snapshot2
+    };
+  }
+  __name(createTimelineMonitor, "createTimelineMonitor");
+
   // src/disclosure.ts
-  var active = null;
+  var active2 = null;
   function createDisclosure({
     container,
     trigger,
@@ -4637,14 +6742,14 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     controller = {
       isOpen: /* @__PURE__ */ __name(() => open, "isOpen"),
       open: /* @__PURE__ */ __name(() => {
-        if (active && active !== controller) active.close();
+        if (active2 && active2 !== controller) active2.close();
         open = true;
-        active = controller;
+        active2 = controller;
         controller.sync();
       }, "open"),
       close: /* @__PURE__ */ __name((returnFocus = false) => {
         open = false;
-        if (active === controller) active = null;
+        if (active2 === controller) active2 = null;
         controller.sync();
         if (returnFocus) $(trigger)?.focus();
       }, "close"),
@@ -4660,7 +6765,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         triggerElement?.removeEventListener("click", onTriggerClick);
         containerElement?.removeEventListener("keydown", onContainerKeydown);
         document.removeEventListener("click", onDocumentClick, true);
-        if (active === controller) active = null;
+        if (active2 === controller) active2 = null;
         open = false;
         controller.sync();
       }, "dispose")
@@ -4692,7 +6797,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var pollCoordinatorStop = null;
   var requestEpoch = 0;
   function currentRoute() {
-    return parseChangeInspectorRoute(location.hash || "#/changes");
+    return parseChangeInspectorRoute(location.hash || "#/timeline");
   }
   __name(currentRoute, "currentRoute");
   function newProjectionRetryBudget() {
@@ -4778,17 +6883,24 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     let reading = null;
     let readingRefusal = null;
     let visibleReading = "";
+    const timelineMonitor = createTimelineMonitor();
+    const parkTimelineMonitoring = /* @__PURE__ */ __name(() => {
+      if (timelineMonitor.park() !== null) paint();
+    }, "parkTimelineMonitoring");
     const paint = /* @__PURE__ */ __name((pollDraft = null) => {
       const draft = pollDraft !== null && filterInput === pollDraft.input ? snapshotFilterDraft(
         filterInput,
         document.activeElement === filterInput || document.activeElement === document.body && pollDraft.restoreFocus
       ) : null;
+      const snapshot2 = state.snapshot();
+      const monitor = timelineMonitor.snapshot();
       renderChangeInspector(
-        state.snapshot(),
-        { navigate },
+        snapshot2,
+        { navigate, parkTimelineMonitoring },
         {
           reading,
-          refusal: readingRefusal
+          refusal: readingRefusal,
+          timeline: monitor
         }
       );
       if (draft !== null && filterInput !== null) {
@@ -4802,10 +6914,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           );
         }
       }
-      interaction?.sync(state.snapshot());
+      interaction?.sync(
+        snapshot2,
+        snapshot2.route.kind === "timeline" ? monitor?.display ?? snapshot2.generation?.history ?? null : null
+      );
     }, "paint");
     let interaction = null;
-    const requestKey = /* @__PURE__ */ __name((query) => buildChangePageUrl("changes", query), "requestKey");
+    const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? buildEventHistoryUrl(
+      route.kind === "event" ? { ...route.historyQuery, after: void 0, at: route.eventId } : route.historyQuery
+    ) : buildChangePageUrl("changes", route.query), "requestKey");
     let visibleRequest = "";
     let pendingReading = null;
     let releaseQueuedPoll = /* @__PURE__ */ __name(() => {
@@ -4817,7 +6934,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       visibleReading = "";
     }, "clearReading");
     const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, retryBudget, pollDraft = null) => {
-      if (route.kind === "lens") {
+      if (route.kind === "lens" || route.kind === "timeline" || route.kind === "event") {
         clearReading();
         return;
       }
@@ -4857,7 +6974,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         paint(pollDraft);
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && error.code === "stale_projection") && consumeProjectionRetry(retryBudget)) {
+        if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
           await loadGeneration(route, retryBudget, pollDraft);
           return;
         }
@@ -4883,11 +7000,20 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           renderChangeInspectorUnavailable(profile.availability);
           return;
         }
-        const query = route.query;
+        const query = route.kind === "timeline" || route.kind === "event" ? {} : route.query;
         const activeLens = lensForRoute(route);
         const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
         const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
-        const [changes, attention] = await Promise.all([
+        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(
+          buildEventHistoryUrl(
+            route.kind === "event" ? {
+              ...route.historyQuery,
+              after: void 0,
+              at: route.eventId
+            } : route.historyQuery
+          )
+        ).then(decodeEventHistory) : Promise.resolve(null);
+        const [changes, attention, history2] = await Promise.all([
           fetchChangeInspectorJSON(
             buildChangePageUrl("changes", changesQuery)
           ).then(
@@ -4897,14 +7023,21 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             buildChangePageUrl("attention", attentionQuery)
           ).then(
             (value) => decodeChangePage(value, { lens: "attention", bounded: true })
-          )
+          ),
+          historyRequest
         ]);
         const postflight = decodeReaderProfile(
           await fetchChangeInspectorJSON("/api/v2/profile")
         );
         if (epoch !== requestEpoch) return;
-        const staged = stageGeneration(profile, changes, attention, postflight);
-        if (route.kind !== "lens") {
+        const staged = stageGeneration(
+          profile,
+          changes,
+          attention,
+          postflight,
+          history2
+        );
+        if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event") {
           const requestedReading = readingKey(route, changes.projectionStamp);
           if (visibleReading !== requestedReading) {
             reading = null;
@@ -4912,7 +7045,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           }
         }
         state.publish(staged);
-        visibleRequest = requestKey(query);
+        if (route.kind === "timeline" && history2 !== null) {
+          timelineMonitor.observe(route, history2);
+        }
+        visibleRequest = requestKey(route);
         paint(pollDraft);
         await loadReading(
           route,
@@ -4923,7 +7059,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if ((error instanceof ChangeInspectorPageFailure && error.code === "stale_projection" || error instanceof ChangeInspectorGenerationChanged) && consumeProjectionRetry(retryBudget)) {
+        if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged) && consumeProjectionRetry(retryBudget)) {
           await loadGeneration(route, retryBudget, pollDraft);
           return;
         }
@@ -4938,7 +7074,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       viewDisclosure?.close();
       const capability2 = bootstrapCapability();
       const route = parseChangeInspectorRoute(
-        capability2.cleanedHash || "#/changes"
+        capability2.cleanedHash || "#/timeline"
       );
       requestEpoch += 1;
       state.setRoute(route);
@@ -4951,7 +7087,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
       let request;
       try {
-        request = requestKey(route.query);
+        request = requestKey(route);
       } catch (error) {
         state.clearGeneration();
         renderChangeInspectorRefusal(error);
@@ -5000,7 +7136,78 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       initConnectionControls();
       connectionControlsInitialized = true;
     }
-    prepareChangeInspectorShell({ navigate });
+    const toggleTimelineMonitoring = /* @__PURE__ */ __name(() => {
+      if (currentRoute().kind !== "timeline") return;
+      if (timelineMonitor.toggle() !== null) paint();
+    }, "toggleTimelineMonitoring");
+    const navigateTimelineBoundary = /* @__PURE__ */ __name(async (boundary, route) => {
+      const first = firstTimelineRoute(route);
+      if (boundary === "first") {
+        navigate(first);
+        return first;
+      }
+      const retryBudget = newProjectionRetryBudget();
+      const requestedRoute = formatChangeInspectorRoute(route);
+      for (; ; ) {
+        const generation = state.snapshot().generation;
+        const anchor = timelineMonitor.snapshot()?.display ?? generation?.history;
+        if (generation === null || anchor === null || anchor === void 0) {
+          return null;
+        }
+        const epoch = ++requestEpoch;
+        try {
+          const preflight = decodeReaderProfile(
+            await fetchChangeInspectorJSON("/api/v2/profile")
+          );
+          if (epoch !== requestEpoch || currentRoute().kind === "invalid" || formatChangeInspectorRoute(
+            currentRoute()
+          ) !== requestedRoute) {
+            return null;
+          }
+          if (!sameProfileGeneration(generation.profile, preflight)) {
+            throw new ChangeInspectorGenerationChanged();
+          }
+          const tail = await traverseTimelineTail(
+            route,
+            anchor,
+            async (query) => {
+              const page = decodeEventHistory(
+                await fetchChangeInspectorJSON(buildEventHistoryUrl(query))
+              );
+              if (epoch !== requestEpoch) {
+                throw new ChangeInspectorGenerationChanged();
+              }
+              return page;
+            }
+          );
+          const postflight = decodeReaderProfile(
+            await fetchChangeInspectorJSON("/api/v2/profile")
+          );
+          if (epoch !== requestEpoch || !sameProfileGeneration(generation.profile, postflight)) {
+            throw new ChangeInspectorGenerationChanged();
+          }
+          navigate(tail.route);
+          return tail.route;
+        } catch (error) {
+          if (epoch !== requestEpoch) return null;
+          if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
+            await loadGeneration(route, retryBudget);
+            if (currentRoute().kind === "invalid" || formatChangeInspectorRoute(
+              currentRoute()
+            ) !== requestedRoute) {
+              return null;
+            }
+            continue;
+          }
+          visibleRequest = "";
+          clearReading();
+          state.clearGeneration();
+          renderChangeInspectorRefusal(error);
+          return null;
+        }
+      }
+    }, "navigateTimelineBoundary");
+    prepareChangeInspectorShell({ navigate, toggleTimelineMonitoring });
     filterDisclosure = createDisclosure({
       container: "#filter-controls",
       trigger: "#filters-toggle",
@@ -5011,20 +7218,38 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       trigger: "#view-toggle",
       panel: "#view-panel"
     });
-    interaction = installChangeInspectorInteraction({ navigate });
+    interaction = installChangeInspectorInteraction({
+      navigate,
+      navigateTimelineBoundary,
+      revealTimelineEvent: revealChangeInspectorTimelineEvent,
+      toggleTimelineMonitoring,
+      parkTimelineMonitoring
+    });
     interactionStop = interaction.stop;
     filterInput = document.querySelector("#filter-text");
     filterInputListener = /* @__PURE__ */ __name(() => {
       const route = currentRoute();
-      const base = route.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : route;
-      navigate({
-        ...base,
-        query: {
-          ...base.query,
-          after: void 0,
-          q: filterInput?.value || void 0
-        }
-      });
+      const base = route.kind === "invalid" ? { kind: "timeline", historyQuery: {} } : route;
+      if (base.kind === "timeline" || base.kind === "event") {
+        navigate({
+          kind: "timeline",
+          historyQuery: {
+            ...base.historyQuery,
+            after: void 0,
+            at: void 0,
+            q: filterInput?.value || void 0
+          }
+        });
+      } else {
+        navigate({
+          ...base,
+          query: {
+            ...base.query,
+            after: void 0,
+            q: filterInput?.value || void 0
+          }
+        });
+      }
     }, "filterInputListener");
     filterInput?.addEventListener("change", filterInputListener);
     await onRoute();
@@ -5040,7 +7265,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           return;
         }
         const generation = state.snapshot().generation;
-        if (route.kind !== "lens" && generation !== null && pendingReading?.key === readingKey(route, generation.changes.projectionStamp)) {
+        if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event" && generation !== null && pendingReading?.key === readingKey(route, generation.changes.projectionStamp)) {
           return;
         }
         pollRequested = false;

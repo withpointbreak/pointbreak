@@ -330,29 +330,19 @@ files or per-command output.
   documented startup/session credential carriers.
 - The server runs until interrupted with Ctrl-C.
 
-The bundled page negotiates `/api/v2/profile` before any semantic fetch or paint. On a ready root it
-renders Change cards, explicit current-Revision choices, relation-claim provenance, exact captured
-resources, fact origin/currency, association comparisons, and separately identified Revision interdiffs.
-Parallel current Revisions remain distinct from a divergent replacement graph; choosing a Revision never
-turns either topology into acceptance. On a legacy or in-progress root the page renders only the typed
-migration state.
+The bundled page negotiates `/api/v2/profile` before any semantic fetch or paint. On a ready root its
+default Timeline renders the typed event stream with free-text, event-type, track, Change, and exact
+Revision filters; oldest/newest ordering; signed previous/next pages; event details; keyboard navigation;
+and explicit follow/park behavior for incoming events. The server owns the filtered chronology and
+Change-aware attribution. The browser keeps only a bounded page-local window in the DOM and never infers
+one Change or Revision when an event has multiple contexts.
 
-The signed v0.9 page provided a chronological event timeline (filterable by track, revision, thread, and
-event type, newest-first by default), a per-event detail view, a composite per-revision page showing
-the current-assessment status plus grouped observations, input requests, assessments, and
-competing-head badges, a supersession-thread list/detail view showing heads, threaded revisions,
-diagnostics, and stale superseded-revision facts, and the captured diff for a revision annotated with
-the review facts anchored to each line. Validation checks recorded with `pointbreak validation add`
-appeared throughout — as a labeled timeline event type, a "Validation checks" section on the revision
-page (with the check name, status, trigger, and exit code), and on thread cards — for context only;
-they did not affect the current assessment or carry merge or acceptance authority. The
-reader-relative `verificationStatus` and `endorsements` readback (see
-[Verification status and endorsement readback](#verification-status-and-endorsement-readback))
-rendered beside events and review facts: the per-event signature status as a chip on the timeline,
-detail view, and revision fact cards, and the endorsement classification with its resolved
-`endorser` and `endorserAttributes` on the detail view and revision page. That information was
-advisory and render-only, never a gate or verdict. Long IDs rendered as truncated, clickable
-references, and the page auto-refreshed when the store changed or a freshness diagnostic changed.
+The Changes and Attention lenses render Change cards, explicit current-Revision choices,
+relation-claim provenance, exact captured resources, fact origin/currency, association comparisons,
+and separately identified Revision interdiffs. Parallel current Revisions remain distinct from a
+divergent replacement graph; choosing a Revision never turns either topology into acceptance.
+Validation evidence and reader-relative signature status remain advisory presentation, never a gate or
+verdict. On a legacy or in-progress root the page renders only the typed migration state.
 
 The inspector is a read-only, single-store, localhost developer tool. It reads through the same
 validated projections as `pointbreak history` and `pointbreak revision show` rather than parsing raw
@@ -366,12 +356,12 @@ fall back to them and paints only `migration_required`. Store activation is a se
 transition. Once a transition enters the in-progress state, legacy
 aggregate routes return a typed `409 Conflict` migration document.
 
-Three v1 bundled-pair
-documents are compatibility-advertised by `pointbreak version`: `/api/snapshots/{id}` returns
-`pointbreak.review-snapshot`, `/api/freshness` returns `pointbreak.inspect-freshness`, and JSON
-startup emits `pointbreak.inspect-startup`. `/api/version` mirrors the exact `pointbreak.version`
-v1 document emitted by `pointbreak version`. The remaining endpoints and inspector-private payloads are
-not promoted contracts.
+Three v1 bundled-pair documents are compatibility-advertised by `pointbreak version`:
+`/api/snapshots/{id}` returns `pointbreak.review-snapshot`, `/api/freshness` returns
+`pointbreak.inspect-freshness`, and JSON startup emits `pointbreak.inspect-startup`. `/api/version` mirrors
+the exact `pointbreak.version` v1 document emitted by `pointbreak version`. The self-described
+`pointbreak.inspect-event-history` document and the remaining Inspector-private payloads are not promoted
+contracts.
 
 The Inspector-private `/api/revisions` collection is snapshot-bound and paged. `limit` defaults to
 `100` and may not exceed `500`; `after` carries an opaque continuation for the page's `asOf`
@@ -1292,7 +1282,9 @@ pointbreak history [--repo <path>] [--revision <id>] [--track <track-id>] \
   describes the complete validated event population behind either page. Non-empty search filters, ref
   filters, watch mode, and unbounded reads deliberately use the authoritative journal.
 - `historyCount` is the number of returned entries after filters.
-- Entries are sorted by `occurredAt`, then `eventId`, as display chronology.
+- Entries are sorted by `occurredAt`, then `eventId`, as display chronology only. Writers may have
+  skewed clocks, and an event received later can therefore backfill an earlier visible position; this
+  order is neither append order nor causal precedence.
 - `--revision`, `--track`, and repeated `--event-type` narrow the returned entries.
 - `--ref <name>` filters to events of revisions associated with a ref (a short branch name is
   normalized to its full ref). `--by` chooses how `--ref` matches: `label` (the recorded label,

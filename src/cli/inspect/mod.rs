@@ -7,6 +7,9 @@ use clap::{Args, ValueEnum};
 mod api;
 mod cache;
 mod change_page;
+mod event_history_page;
+mod event_history_query;
+mod page_token;
 mod server;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

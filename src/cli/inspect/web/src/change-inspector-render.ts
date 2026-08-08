@@ -4,6 +4,11 @@ import {
   changeCardPresentation,
   exactRevisionAccessibleIdentity,
 } from "./change-inspector-cards";
+import {
+  eventSubjectLabel,
+  eventTypeColor,
+  presentEvent,
+} from "./change-inspector-event-presentation";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
@@ -13,9 +18,14 @@ import {
   queryForExactNavigation,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
+import { renderChangeInspectorTimeline } from "./change-inspector-timeline";
+import type { TimelineMonitorSnapshot } from "./change-inspector-timeline-monitor";
 import type {
   ChangeDetail,
   ChangePageQuery,
+  EventHistoryDocument,
+  EventHistoryEntry,
+  EventHistoryQuery,
   FactContent,
   FactTarget,
   RevisionRef,
@@ -31,11 +41,19 @@ import { renderBodyContent } from "./markdown";
 
 export interface ChangeInspectorRenderActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
+  navigateTimelineBoundary?(
+    boundary: "first" | "last",
+    route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+  ): Promise<Extract<ChangeInspectorRoute, { kind: "timeline" }> | null>;
+  revealTimelineEvent?(eventId: string): boolean;
+  toggleTimelineMonitoring?(): void;
+  parkTimelineMonitoring?(): void;
 }
 
 export interface ChangeInspectorDetailPresentation {
   reading: ChangeInspectorReading | null;
   refusal: string | null;
+  timeline?: TimelineMonitorSnapshot | null;
 }
 
 const FILTER_OPTIONS = [
@@ -64,6 +82,27 @@ function message(text: string): HTMLParagraphElement {
   return element;
 }
 
+function selectOption(
+  label: string,
+  value: string,
+  artifactHash?: string,
+  revisionId?: string,
+): HTMLOptionElement {
+  const option = document.createElement("option");
+  option.textContent = label;
+  option.value = value;
+  if (artifactHash) option.dataset.artifactHash = artifactHash;
+  if (revisionId) option.dataset.revisionId = revisionId;
+  return option;
+}
+
+function exactRevisionOptionValue(
+  revisionId: string,
+  objectArtifactContentHash: string,
+): string {
+  return JSON.stringify([revisionId, objectArtifactContentHash]);
+}
+
 function setText(selector: string, value: string): void {
   const element = document.querySelector<HTMLElement>(selector);
   if (element) element.textContent = value;
@@ -89,7 +128,7 @@ function replaceDetailWith(...children: Node[]): void {
   detail.replaceChildren(...children);
 }
 
-/** Prepare retained model-neutral chrome for the two Change lenses. */
+/** Prepare retained model-neutral chrome for Timeline and the Change lenses. */
 export function prepareChangeInspectorShell(
   actions: ChangeInspectorRenderActions,
 ): void {
@@ -104,46 +143,79 @@ export function prepareChangeInspectorShell(
     ?.closest(".control-section")
     ?.classList.add("hidden");
   document.querySelector("#derived-access-status")?.classList.add("hidden");
-  document.querySelector("#follow-toggle")?.classList.add("hidden");
+  const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+  if (follow) {
+    follow.classList.add("hidden");
+    follow.onclick = () => actions.toggleTimelineMonitoring?.();
+  }
   const switcher = document.querySelector<HTMLElement>("#lens-switcher");
   if (switcher) {
     switcher.replaceChildren();
-    for (const lens of ["changes", "attention"] as const) {
+    for (const lens of ["timeline", "changes", "attention"] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "lens-tab";
       button.dataset.lens = lens;
-      button.textContent = lens === "changes" ? "Changes" : "Attention";
+      button.textContent =
+        lens === "timeline"
+          ? "Timeline"
+          : lens === "changes"
+            ? "Changes"
+            : "Attention";
       button.addEventListener("click", () => {
-        const current = parseChangeInspectorRoute(location.hash || "#/changes");
-        actions.navigate({
-          kind: "lens",
-          lens,
-          query:
-            current.kind === "invalid"
-              ? {}
-              : { ...current.query, after: undefined },
-        });
+        const current = parseChangeInspectorRoute(
+          location.hash || "#/timeline",
+        );
+        if (lens === "timeline") {
+          actions.navigate({
+            kind: "timeline",
+            historyQuery:
+              current.kind === "timeline" || current.kind === "event"
+                ? { ...current.historyQuery, after: undefined, at: undefined }
+                : {},
+          });
+        } else {
+          actions.navigate({
+            kind: "lens",
+            lens,
+            query:
+              current.kind === "invalid" ||
+              current.kind === "timeline" ||
+              current.kind === "event"
+                ? {}
+                : { ...current.query, after: undefined },
+          });
+        }
       });
       switcher.append(button);
     }
   }
   const back = document.querySelector<HTMLButtonElement>("#detail-back");
   if (back) {
-    back.textContent = "‹ Changes";
+    back.textContent = "‹ Timeline";
   }
   const search = document.querySelector<HTMLInputElement>("#filter-text");
-  if (search) search.placeholder = "Search Changes and current Revisions";
+  if (search)
+    search.placeholder = "Search Timeline, Changes, and exact Revisions";
   const filterTypes = document.querySelector<HTMLElement>("#filter-types");
   if (filterTypes) {
     filterTypes.replaceChildren();
     const heading = document.createElement("h2");
     heading.id = "filter-types-label";
-    heading.className = "control-heading";
+    heading.className = "control-heading change-filter";
     heading.textContent = "Change status";
     filterTypes.append(heading);
+    const timelineHeading = document.createElement("h2");
+    timelineHeading.className = "control-heading timeline-filter hidden";
+    timelineHeading.textContent = "Event types";
+    const timelineMenu = document.createElement("ul");
+    timelineMenu.id = "filter-types-menu";
+    timelineMenu.className = "type-facet-menu timeline-filter hidden";
+    timelineMenu.setAttribute("aria-label", "event types");
+    filterTypes.append(timelineHeading, timelineMenu);
     for (const [name, values] of FILTER_OPTIONS) {
       const label = document.createElement("label");
+      label.className = "change-filter";
       label.textContent = name.replaceAll("_", " ");
       const select = document.createElement("select");
       select.id = `change-filter-${name}`;
@@ -157,9 +229,13 @@ export function prepareChangeInspectorShell(
         select.append(option);
       }
       select.addEventListener("change", () => {
-        const current = parseChangeInspectorRoute(location.hash || "#/changes");
+        const current = parseChangeInspectorRoute(
+          location.hash || "#/timeline",
+        );
         const base =
-          current.kind === "invalid"
+          current.kind === "invalid" ||
+          current.kind === "timeline" ||
+          current.kind === "event"
             ? { kind: "lens" as const, lens: "changes" as const, query: {} }
             : current;
         actions.navigate({
@@ -174,11 +250,84 @@ export function prepareChangeInspectorShell(
       label.append(select);
       filterTypes.append(label);
     }
+    const timelineChoice = (
+      label: string,
+      id: string,
+      update: (query: EventHistoryQuery) => void,
+    ) => {
+      const choiceLabel = document.createElement("label");
+      choiceLabel.className = "timeline-filter hidden";
+      choiceLabel.textContent = label;
+      const select = document.createElement("select");
+      select.id = id;
+      select.append(selectOption("Any", ""));
+      select.addEventListener("change", () => {
+        const current = parseChangeInspectorRoute(
+          location.hash || "#/timeline",
+        );
+        if (current.kind !== "timeline" && current.kind !== "event") return;
+        const query: EventHistoryQuery = {
+          ...current.historyQuery,
+          after: undefined,
+          at: undefined,
+        };
+        update(query);
+        actions.navigate({ kind: "timeline", historyQuery: query });
+      });
+      choiceLabel.append(select);
+      filterTypes.append(choiceLabel);
+    };
+    timelineChoice("track", "timeline-filter-track", (query) => {
+      query.track =
+        document.querySelector<HTMLSelectElement>("#timeline-filter-track")
+          ?.value || undefined;
+    });
+    timelineChoice("Change", "timeline-filter-change", (query) => {
+      query.change =
+        document.querySelector<HTMLSelectElement>("#timeline-filter-change")
+          ?.value || undefined;
+    });
+    timelineChoice("exact Revision", "timeline-filter-revision", (query) => {
+      const select = document.querySelector<HTMLSelectElement>(
+        "#timeline-filter-revision",
+      );
+      const selected = select?.selectedOptions[0];
+      query.revision = selected?.dataset.revisionId;
+      query.artifactHash = selected?.dataset.artifactHash;
+    });
+  }
+  for (const input of document.querySelectorAll<HTMLInputElement>(
+    "input[name='view-order']",
+  )) {
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      const current = parseChangeInspectorRoute(location.hash || "#/timeline");
+      if (current.kind !== "timeline" && current.kind !== "event") return;
+      actions.navigate({
+        kind: "timeline",
+        historyQuery: {
+          ...current.historyQuery,
+          after: undefined,
+          at: undefined,
+          order: input.value === "asc" ? "asc" : "desc",
+        },
+      });
+    });
   }
   const clear = document.querySelector<HTMLButtonElement>("#filter-clear");
   if (clear) {
     clear.onclick = () => {
-      const current = parseChangeInspectorRoute(location.hash || "#/changes");
+      const current = parseChangeInspectorRoute(location.hash || "#/timeline");
+      if (current.kind === "timeline" || current.kind === "event") {
+        actions.navigate({
+          kind: "timeline",
+          historyQuery: {
+            limit: current.historyQuery.limit,
+            order: current.historyQuery.order,
+          },
+        });
+        return;
+      }
       const base =
         current.kind === "invalid"
           ? { kind: "lens" as const, lens: "changes" as const, query: {} }
@@ -218,8 +367,199 @@ function filterValues(query: ChangePageQuery): Array<[string, string]> {
   return values;
 }
 
-function syncFilterChrome(route: ChangeInspectorRoute): void {
+function replaceTimelineSelectOptions(
+  id: string,
+  options: Array<{
+    value: string;
+    label: string;
+    artifactHash?: string;
+    revisionId?: string;
+  }>,
+  selected: string | undefined,
+): void {
+  const select = document.querySelector<HTMLSelectElement>(`#${id}`);
+  if (!select) return;
+  const key = JSON.stringify(options);
+  if (select.dataset.timelineOptions !== key) {
+    select.replaceChildren(selectOption("Any", ""));
+    for (const option of options) {
+      select.append(
+        selectOption(
+          option.label,
+          option.value,
+          option.artifactHash,
+          option.revisionId,
+        ),
+      );
+    }
+    select.dataset.timelineOptions = key;
+  }
+  select.value = selected ?? "";
+}
+
+function syncTimelineTypeFacets(
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" | "event" }>,
+  history: EventHistoryDocument,
+  actions: ChangeInspectorRenderActions,
+): void {
+  const menu = document.querySelector<HTMLUListElement>("#filter-types-menu");
+  if (!menu) return;
+  const selected = new Set(
+    route.historyQuery.type?.split(",").filter(Boolean) ?? [],
+  );
+  const rows = history.completion.eventTypes.map((eventType) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `type-facet-row${selected.has(eventType) ? "" : " type-facet-row-off"}`;
+    button.dataset.eventType = eventType;
+    button.setAttribute("aria-pressed", String(selected.has(eventType)));
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = eventTypeColor(eventType);
+    dot.setAttribute("aria-hidden", "true");
+    const name = document.createElement("span");
+    name.textContent = eventType.replaceAll("_", " ");
+    const count = document.createElement("span");
+    count.className = "type-count";
+    count.textContent = String(history.facets[eventType] ?? 0);
+    button.append(dot, name, count);
+    button.addEventListener("click", () => {
+      const nextTypes = new Set(selected);
+      if (nextTypes.has(eventType)) nextTypes.delete(eventType);
+      else nextTypes.add(eventType);
+      actions.navigate({
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          after: undefined,
+          at: undefined,
+          type: nextTypes.size ? [...nextTypes].sort().join(",") : undefined,
+        },
+      });
+    });
+    item.append(button);
+    return item;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("li");
+    empty.className = "dim";
+    empty.textContent = "No event types available";
+    rows.push(empty);
+  }
+  menu.replaceChildren(...rows);
+}
+
+function syncFilterChrome(
+  route: ChangeInspectorRoute,
+  history: EventHistoryDocument | null,
+  actions: ChangeInspectorRenderActions,
+): void {
   if (route.kind === "invalid") return;
+  if (route.kind === "timeline" || route.kind === "event") {
+    const input = document.querySelector<HTMLInputElement>("#filter-text");
+    if (input) input.value = route.historyQuery.q ?? "";
+    const chips = document.querySelector<HTMLElement>("#filter-chips");
+    const values = [
+      ["search", route.historyQuery.q],
+      ["type", route.historyQuery.type],
+      ["track", route.historyQuery.track],
+      ["change", route.historyQuery.change],
+      ["revision", route.historyQuery.revision],
+    ].filter((value): value is [string, string] => Boolean(value[1]));
+    chips?.replaceChildren(
+      ...values.map(([name, value]) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "badge";
+        chip.textContent = `${name}: ${value} ×`;
+        chip.setAttribute("aria-label", `Remove ${name} filter: ${value}`);
+        chip.addEventListener("click", () => {
+          const next = {
+            ...route.historyQuery,
+            after: undefined,
+            at: undefined,
+            [name === "search" ? "q" : name]: undefined,
+          };
+          if (name === "revision") next.artifactHash = undefined;
+          actions.navigate({ kind: "timeline", historyQuery: next });
+        });
+        return chip;
+      }),
+    );
+    document
+      .querySelector<HTMLElement>("#filter-chips-empty")
+      ?.classList.toggle("hidden", values.length > 0);
+    const toggle = document.querySelector<HTMLElement>("#filters-toggle");
+    if (toggle)
+      toggle.textContent = values.length
+        ? `Filters · ${values.length}`
+        : "Filters";
+    document
+      .querySelectorAll<HTMLElement>(".timeline-filter")
+      .forEach((element) => {
+        element.classList.remove("hidden");
+      });
+    document
+      .querySelectorAll<HTMLElement>(".change-filter")
+      .forEach((element) => {
+        element.classList.add("hidden");
+      });
+    if (history !== null) {
+      syncTimelineTypeFacets(route, history, actions);
+      replaceTimelineSelectOptions(
+        "timeline-filter-track",
+        history.completion.trackIds.map((trackId) => ({
+          value: trackId,
+          label: trackId,
+        })),
+        route.historyQuery.track,
+      );
+      replaceTimelineSelectOptions(
+        "timeline-filter-change",
+        history.completion.changeIds.map((changeId) => ({
+          value: changeId,
+          label: changeId,
+        })),
+        route.historyQuery.change,
+      );
+      replaceTimelineSelectOptions(
+        "timeline-filter-revision",
+        history.completion.revisionRefs.map((revision) => ({
+          value: exactRevisionOptionValue(
+            revision.revisionId,
+            revision.objectArtifactContentHash,
+          ),
+          label: `${revision.revisionId} · ${revision.objectArtifactContentHash}`,
+          artifactHash: revision.objectArtifactContentHash,
+          revisionId: revision.revisionId,
+        })),
+        route.historyQuery.revision && route.historyQuery.artifactHash
+          ? exactRevisionOptionValue(
+              route.historyQuery.revision,
+              route.historyQuery.artifactHash,
+            )
+          : undefined,
+      );
+    }
+    document.querySelector("#view-order-section")?.classList.remove("hidden");
+    const newest = document.querySelector<HTMLInputElement>("#order-newest");
+    const oldest = document.querySelector<HTMLInputElement>("#order-oldest");
+    if (newest) newest.checked = route.historyQuery.order !== "asc";
+    if (oldest) oldest.checked = route.historyQuery.order === "asc";
+    return;
+  }
+  document
+    .querySelectorAll<HTMLElement>(".timeline-filter")
+    .forEach((element) => {
+      element.classList.add("hidden");
+    });
+  document
+    .querySelectorAll<HTMLElement>(".change-filter")
+    .forEach((element) => {
+      element.classList.remove("hidden");
+    });
+  document.querySelector("#view-order-section")?.classList.add("hidden");
   const input = document.querySelector<HTMLInputElement>("#filter-text");
   if (input) input.value = route.query.q ?? "";
   for (const [name] of FILTER_OPTIONS) {
@@ -248,6 +588,161 @@ function syncFilterChrome(route: ChangeInspectorRoute): void {
     toggle.textContent = values.length
       ? `Filters · ${values.length}`
       : "Filters";
+}
+
+function renderEventDetail(
+  event: EventHistoryEntry,
+  actions: ChangeInspectorRenderActions,
+): Node[] {
+  const presentation = presentEvent(event);
+  const heading = detailHeading("Event");
+  const identity = detailLine(event.eventId, "mono");
+  const summary = document.createElement("section");
+  summary.className = "event-detail-summary";
+  summary.append(detailHeading(presentation.title, 3));
+  if (presentation.body) summary.append(detailLine(presentation.body));
+  const summaryFacts = document.createElement("dl");
+  summaryFacts.className = "kv";
+  for (const item of presentation.fields) {
+    const term = document.createElement("dt");
+    term.textContent = item.label;
+    const definition = document.createElement("dd");
+    definition.textContent = item.value;
+    summaryFacts.append(term, definition);
+  }
+  if (presentation.fields.length) summary.append(summaryFacts);
+
+  const attribution = document.createElement("section");
+  attribution.className = "event-detail-attribution";
+  attribution.append(detailHeading("Subject and attribution", 3));
+  const attributionFacts = document.createElement("dl");
+  attributionFacts.className = "kv";
+  const attributionAdd = (name: string, value: string) => {
+    const term = document.createElement("dt");
+    term.textContent = name;
+    const definition = document.createElement("dd");
+    definition.textContent = value;
+    attributionFacts.append(term, definition);
+  };
+  attributionAdd("subject", eventSubjectLabel(event.subject));
+  attributionAdd("writer", event.writer.actorId);
+  attributionAdd(
+    "producer",
+    `${event.writer.producer.name} ${event.writer.producer.version}`,
+  );
+  attributionAdd("assertion", event.assertionMode.replaceAll("_", " "));
+  if (event.signer) attributionAdd("signer", event.signer);
+  if (event.sourceRef) {
+    attributionAdd(
+      "source",
+      `${event.sourceRef.sourceSystem} · ${event.sourceRef.sourceId}`,
+    );
+  }
+  if (event.ingest) {
+    attributionAdd(
+      "ingest",
+      `${event.ingest.via} · ${event.ingest.receivedAt}`,
+    );
+  }
+  attribution.append(attributionFacts);
+
+  const record = document.createElement("section");
+  record.className = "event-detail-record";
+  record.append(detailHeading("Event record", 3));
+  const facts = document.createElement("dl");
+  facts.className = "kv";
+  const add = (name: string, value: string) => {
+    const term = document.createElement("dt");
+    term.textContent = name;
+    const definition = document.createElement("dd");
+    definition.textContent = value;
+    facts.append(term, definition);
+  };
+  add("type", event.eventType.replaceAll("_", " "));
+  add("occurred", event.occurredAt);
+  add("verification", event.verificationStatus.replaceAll("_", " "));
+  add("event payload", event.payloadHash);
+  add("journal", event.journalId);
+  if (event.trackId) add("track", event.trackId);
+  if (event.signer) add("signer", event.signer);
+  add("Changes", event.changeIds.join("; ") || "none");
+  add(
+    "exact Revisions",
+    event.revisionRefs
+      .map(
+        (revision) =>
+          `${revision.revisionId} · ${revision.objectArtifactContentHash}`,
+      )
+      .join("; ") || "none",
+  );
+  if (event.unresolvedRevisionIds.length)
+    add("unresolved Revisions", event.unresolvedRevisionIds.join("; "));
+  record.append(facts);
+
+  const context = document.createElement("section");
+  context.className = "actions event-detail-actions";
+  const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
+  const onlyRevision =
+    event.revisionRefs.length === 1 ? event.revisionRefs[0] : null;
+  if (onlyChange) {
+    const change = document.createElement("button");
+    change.type = "button";
+    change.className = "ghost";
+    change.textContent = "Open Change";
+    change.addEventListener("click", () =>
+      actions.navigate({ kind: "change", changeId: onlyChange, query: {} }),
+    );
+    context.append(change);
+  }
+  if (onlyChange && onlyRevision) {
+    const revision = document.createElement("button");
+    revision.type = "button";
+    revision.className = "ghost";
+    revision.textContent = "Open exact Revision";
+    revision.addEventListener("click", () =>
+      actions.navigate({
+        kind: "revision",
+        changeId: onlyChange,
+        revision: onlyRevision,
+        query: {},
+      }),
+    );
+    context.append(revision);
+  }
+  if (!onlyChange || (event.revisionRefs.length > 0 && !onlyRevision)) {
+    context.append(
+      detailLine(
+        "This event has multiple contexts; choose an explicit Change and exact Revision from Changes.",
+        "dim",
+      ),
+    );
+  }
+  const copyLink = document.createElement("button");
+  copyLink.type = "button";
+  copyLink.className = "ghost";
+  copyLink.textContent = "Copy link";
+  copyLink.addEventListener("click", () => copyExact(location.href));
+  context.append(copyLink);
+
+  const structured = document.createElement("details");
+  structured.className = "event-structured";
+  const structuredLabel = document.createElement("summary");
+  structuredLabel.textContent = "Structured event data";
+  const raw = document.createElement("pre");
+  raw.className = "anno-body mono";
+  raw.textContent = JSON.stringify(
+    {
+      summary: event.summary,
+      subject: event.subject,
+      writer: event.writer,
+      sourceRef: event.sourceRef,
+      ingest: event.ingest,
+    },
+    null,
+    2,
+  );
+  structured.append(structuredLabel, raw);
+  return [heading, identity, summary, attribution, record, context, structured];
 }
 
 function detailHeading(text: string, level = 2): HTMLHeadingElement {
@@ -1028,8 +1523,29 @@ function renderDetail(
     replaceDetailWith(message(snapshot.diagnostic));
     return;
   }
-  if (snapshot.route.kind === "lens" || snapshot.generation === null) {
+  if (
+    snapshot.route.kind === "timeline" ||
+    snapshot.route.kind === "lens" ||
+    snapshot.generation === null
+  ) {
     replaceDetailWith(message("Select a Change or exact Revision."));
+    return;
+  }
+  if (snapshot.route.kind === "event") {
+    const route = snapshot.route;
+    const event = snapshot.generation.history?.entries.find(
+      (entry) => entry.eventId === route.eventId,
+    );
+    replaceDetailWith(
+      ...(event
+        ? renderEventDetail(event, actions)
+        : [
+            detailHeading("Event"),
+            message(
+              "This exact event was not present in the bounded Timeline response.",
+            ),
+          ]),
+    );
     return;
   }
   if (presentation.refusal !== null) {
@@ -1110,7 +1626,14 @@ export function renderChangeInspector(
     routeDiagnostic.textContent = snapshot.diagnostic ?? "";
     routeDiagnostic.classList.toggle("hidden", snapshot.diagnostic === null);
   }
-  syncFilterChrome(snapshot.route);
+  syncFilterChrome(
+    snapshot.route,
+    snapshot.generation?.history ?? null,
+    actions,
+  );
+  if (snapshot.route.kind !== "timeline") {
+    document.querySelector("#follow-toggle")?.classList.add("hidden");
+  }
   clearError();
   if (snapshot.route.kind === "invalid") {
     replaceMasterWith(message("Cannot open this Inspector link."));
@@ -1120,6 +1643,66 @@ export function renderChangeInspector(
   const route = snapshot.route;
   if (snapshot.generation === null) {
     replaceMasterWith(message("Loading Change generation…"));
+    renderDetail(snapshot, actions, presentation);
+    return;
+  }
+  if (route.kind === "timeline" || route.kind === "event") {
+    if (snapshot.generation.history === null) {
+      replaceMasterWith(message("Loading Timeline…"));
+      renderDetail(snapshot, actions, presentation);
+      return;
+    }
+    const monitor =
+      route.kind === "timeline" ? (presentation.timeline ?? null) : null;
+    const history = monitor?.display ?? snapshot.generation.history;
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    if (follow) {
+      follow.classList.toggle("hidden", monitor === null);
+      if (monitor !== null) {
+        const parked = monitor.mode === "parked";
+        follow.setAttribute("aria-pressed", String(!parked));
+        follow.textContent = parked
+          ? monitor.newCount > 0
+            ? `Show ${monitor.newCount} new ${monitor.newCount === 1 ? "event" : "events"}`
+            : "Parked"
+          : "Following";
+        follow.setAttribute(
+          "aria-label",
+          parked
+            ? "Show the latest filtered Timeline events and resume following"
+            : "Park the Timeline at the current events",
+        );
+      }
+    }
+    const timelineRoute =
+      route.kind === "timeline"
+        ? route
+        : { kind: "timeline" as const, historyQuery: route.historyQuery };
+    renderChangeInspectorTimeline(
+      master,
+      history,
+      actions,
+      timelineRoute,
+      route.kind === "event" ? route.eventId : null,
+    );
+    document
+      .querySelectorAll<HTMLButtonElement>("#lens-switcher [data-lens]")
+      .forEach((button) => {
+        button.setAttribute(
+          "aria-pressed",
+          String(button.dataset.lens === "timeline"),
+        );
+      });
+    setText("#stat-events", `${history.eventCount} events`);
+    setText(
+      "#stat-units",
+      `${snapshot.generation.changes.changes.length} Changes`,
+    );
+    setText(
+      "#stat-threads",
+      `${snapshot.generation.attention.changes.length} need attention`,
+    );
+    setText("#stat-hash", history.timelineProjectionStamp);
     renderDetail(snapshot, actions, presentation);
     return;
   }
@@ -1246,7 +1829,7 @@ export function renderChangeInspector(
       next.addEventListener("click", () =>
         actions.navigate({
           kind: "lens",
-          lens,
+          lens: lens as "changes" | "attention",
           query: {
             ...route.query,
             after: nextPage,

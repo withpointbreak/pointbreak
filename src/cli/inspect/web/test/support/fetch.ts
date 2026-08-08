@@ -12,6 +12,7 @@ import revisionJson from "../fixtures/revision.json";
 import revisionsJson from "../fixtures/revisions.json";
 import snapshotJson from "../fixtures/snapshot.json";
 import threadsJson from "../fixtures/threads.json";
+import { authorityCursor } from "./authority";
 
 // The exact-path collection/list routes, keyed by request pathname. The path-member
 // routes (`/api/revisions/{id}`, `/api/snapshots/{id}`) are dispatched separately
@@ -23,7 +24,7 @@ const FIXTURES: Record<string, unknown> = {
     version: 1,
     availability: "ready",
     minimumReaderProfile: "review_change_revision_v1",
-    authorityCursor: { eventCount: 0 },
+    authorityCursor: authorityCursor(0),
     commitGraphStamp: "sha256:empty-change-generation",
     documents: { ...CHANGE_READER_DOCUMENTS },
   },

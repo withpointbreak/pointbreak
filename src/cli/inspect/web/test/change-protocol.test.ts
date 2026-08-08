@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { ChangePresentation, ChangeSummary } from "../src/change-protocol";
 import {
   buildChangePageUrl,
+  buildEventHistoryUrl,
   CHANGE_READER_DOCUMENTS,
+  decodeAuthorityCursorV2,
   decodeChangeDetail,
   decodeChangePage,
   decodeChangeRevisionDetail,
+  decodeEventHistory,
   decodeReaderProfile,
   decodeRevisionInterdiff,
   decodeRevisionResource,
@@ -13,6 +16,7 @@ import {
   sameProfileGeneration,
   trimUnicodeWhitespace,
 } from "../src/change-protocol";
+import { authorityCursor } from "./support/authority";
 
 const documents = CHANGE_READER_DOCUMENTS;
 
@@ -21,7 +25,7 @@ function profile(eventCount = 3) {
     schema: "pointbreak.inspect-reader-profile",
     version: 1,
     availability: "ready",
-    authorityCursor: { eventCount, eventSetHash: "sha256:authority" },
+    authorityCursor: authorityCursor(eventCount),
     commitGraphStamp: "sha256:commit-graph",
     minimumReaderProfile: "review_change_revision_v1",
     documents,
@@ -97,7 +101,192 @@ function page(
   };
 }
 
+function validEventHistoryValue() {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: authorityCursor(1),
+    sourceChangeProjectionStamp: "sha256:generation",
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: 1,
+    matchCount: 1,
+    offset: 0,
+    facets: { validation_check_recorded: 1 },
+    completion: {
+      eventTypes: ["validation_check_recorded"],
+      trackIds: ["author"],
+      changeIds: ["change:sha256:one"],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: [
+      {
+        eventId: "evt:sha256:one",
+        eventType: "validation_check_recorded",
+        occurredAt: "2026-08-08T00:00:00Z",
+        payloadHash: "sha256:payload",
+        journalId: "journal:sha256:one",
+        writer: {
+          actorId: "actor:author",
+          producer: { name: "pointbreak", version: "0.10.0" },
+        },
+        verificationStatus: "valid",
+        assertionMode: "advisory",
+        subject: {
+          kind: "review",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+        },
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [],
+        unresolvedRevisionIds: [],
+        sourceRef: {
+          sourceSystem: "legacy-review-journal",
+          sourceId: "event:legacy:one",
+        },
+        ingest: {
+          via: "ingest-events",
+          receivedAt: "2026-08-08T00:00:01Z",
+        },
+        summary: {
+          kind: "validation_check_recorded",
+          details: {
+            validationCheckId: "validation:sha256:one",
+            target: { kind: "revision", revisionId: "rev:sha256:one" },
+            checkName: "web",
+            status: "passed",
+            trigger: "manual",
+          },
+        },
+      },
+    ],
+  };
+}
+
 describe("bounded Change protocol", () => {
+  it("decodes only the complete closed authority cursor v2 shape", () => {
+    const cursor = authorityCursor(3);
+    const missingCapabilityHash: Record<string, unknown> = { ...cursor };
+    delete missingCapabilityHash.capabilitySetHash;
+    expect(decodeAuthorityCursorV2(cursor)).toEqual(cursor);
+
+    for (const invalid of [
+      { ...cursor, schema: "pointbreak.authority-cursor.v1" },
+      { ...cursor, eventCount: -1 },
+      { ...cursor, eventCount: cursor.journalRecordCount + 1 },
+      { ...cursor, journalRecordCount: Number.MAX_SAFE_INTEGER + 1 },
+      { ...cursor, eventSetHash: "" },
+      { ...cursor, journalRecordSetHash: "sha256:abc" },
+      {
+        ...cursor,
+        capabilitySetHash:
+          "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      },
+      missingCapabilityHash,
+      { ...cursor, futureGenerationField: "not admitted" },
+    ]) {
+      expect(() => decodeAuthorityCursorV2(invalid)).toThrow(
+        "invalid authority cursor DTO",
+      );
+    }
+  });
+
+  it("constructs and validates the bounded Change-aware Timeline document", () => {
+    expect(
+      buildEventHistoryUrl({
+        q: " Release ",
+        type: "validation_check_recorded",
+        order: "asc",
+      }),
+    ).toBe(
+      "/api/v2/history?limit=100&q=release&type=validation_check_recorded&order=asc",
+    );
+    const document = decodeEventHistory(validEventHistoryValue());
+    expect(document.entries[0]?.eventId).toBe("evt:sha256:one");
+    expect(document.entries[0]?.verificationStatus).toBe("valid");
+    expect(document.entries[0]?.sourceRef?.sourceSystem).toBe(
+      "legacy-review-journal",
+    );
+    expect(() =>
+      buildEventHistoryUrl({ at: "evt:one", after: "opaque" }),
+    ).toThrow("mutually exclusive");
+  });
+
+  it("closes Timeline query and document event types", () => {
+    expect(
+      buildEventHistoryUrl({
+        type: "validation_check_recorded,change_declared",
+      }),
+    ).toContain("type=change_declared%2Cvalidation_check_recorded");
+    expect(() => buildEventHistoryUrl({ type: "foreign_event" })).toThrow(
+      "unknown event type",
+    );
+    expect(() =>
+      buildEventHistoryUrl({
+        type: "validation_check_recorded,validation_check_recorded",
+      }),
+    ).toThrow("duplicate event type");
+
+    const unknown = structuredClone(validEventHistoryValue());
+    const unknownEvent = unknown.entries[0];
+    if (!unknownEvent) throw new Error("fixture needs an event");
+    unknownEvent.eventType = "foreign_event";
+    expect(() => decodeEventHistory(unknown)).toThrow(
+      "invalid event history DTO",
+    );
+
+    const mismatch = structuredClone(validEventHistoryValue());
+    const mismatchEvent = mismatch.entries[0];
+    if (!mismatchEvent) throw new Error("fixture needs an event");
+    mismatchEvent.summary.kind = "change_declared";
+    expect(() => decodeEventHistory(mismatch)).toThrow(
+      "invalid event history DTO",
+    );
+  });
+
+  it("rejects malformed event attribution and provenance", () => {
+    const malformed = [
+      (value: ReturnType<typeof validEventHistoryValue>) => {
+        const event = value.entries[0];
+        if (event) event.writer.actorId = "";
+      },
+      (value: ReturnType<typeof validEventHistoryValue>) => {
+        const event = value.entries[0];
+        if (event) event.assertionMode = "inferred";
+      },
+      (value: ReturnType<typeof validEventHistoryValue>) => {
+        const event = value.entries[0];
+        if (event) event.subject.kind = "task";
+      },
+      (value: ReturnType<typeof validEventHistoryValue>) => {
+        const event = value.entries[0];
+        if (event) event.sourceRef.sourceSystem = "";
+      },
+      (value: ReturnType<typeof validEventHistoryValue>) => {
+        const event = value.entries[0];
+        if (event) event.ingest.via = "filesystem-copy";
+      },
+    ];
+
+    for (const corrupt of malformed) {
+      const value = structuredClone(validEventHistoryValue());
+      corrupt(value);
+      expect(() => decodeEventHistory(value)).toThrow(
+        "invalid event history DTO",
+      );
+    }
+  });
+
+  it("rejects an impossible Timeline loaded range", () => {
+    const value = structuredClone(validEventHistoryValue());
+    value.matchCount = 0;
+    expect(() => decodeEventHistory(value)).toThrow(
+      "invalid event history DTO",
+    );
+  });
+
   it("constructs canonical bounded URLs with the sole default order", () => {
     expect(buildChangePageUrl("changes")).toBe(
       "/api/v2/changes?limit=50&order=change_id_asc",
@@ -188,6 +377,12 @@ describe("bounded Change protocol", () => {
     expect(() =>
       decodeReaderProfile({ ...profile(), commitGraphStamp: "" }),
     ).toThrow("commit graph stamp");
+    expect(() =>
+      decodeReaderProfile({
+        ...profile(),
+        documents: { ...documents, "pointbreak.inspect-event-history": 1 },
+      }),
+    ).toThrow("incompatible Inspector reader profile");
   });
 
   it("rejects rows outside the projected domains, too-large pages, and foreign presentation revisions", () => {

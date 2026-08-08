@@ -24,6 +24,7 @@ mod association_comparison;
 mod attention;
 mod capture;
 mod change;
+mod event_history;
 mod history;
 mod identity;
 mod input_request;
@@ -68,6 +69,11 @@ pub use change::{
     FactPresentationV1, INSPECT_ATTENTION_SCHEMA_V2, INSPECT_CHANGES_PAGE_SCHEMA,
     REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA,
     RevisionQualificationV1, RevisionSummarySourceV1, UnavailableChangeMemberRevisionV1,
+};
+pub use event_history::{
+    EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
+    EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,
+    INSPECT_EVENT_HISTORY_SCHEMA,
 };
 pub use history::{HistoryBody, derived_history_document, history_document};
 pub use identity::{

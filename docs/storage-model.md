@@ -328,7 +328,9 @@ Review history is the chronological read surface over durable events:
 - `eventSetHash` and `eventCount` describe the full event set read for the command, not only the
   returned entries after filters
 - `historyCount` describes the filtered entry count
-- entries are sorted by `occurredAt`, then `eventId`, as display chronology only
+- entries are sorted by `occurredAt`, then `eventId`, as display chronology only; clocks may differ
+  across writers, and a later-received event may backfill an earlier visible position, so this is not
+  an append ordinal or causal order
 - revision, track, and event-type filters narrow entries without changing freshness metadata or
   suppressing full-event-set diagnostics
 - `--include-body` hydrates body-like text from inline payloads or `artifacts/notes/`, while the

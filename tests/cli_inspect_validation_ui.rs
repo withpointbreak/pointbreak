@@ -143,10 +143,10 @@ fn served_change_reader_preserves_facade_fact_state_without_client_authority() {
 
     assert!(
         app.contains("Facts")
-            && app.contains("fact.originRevision.revisionId")
-            && app.contains("fact.revisionCurrency")
-            && app.contains("fact.familyState")
-            && app.contains("fact.availability"),
+            && app.contains(".originRevision.revisionId")
+            && app.contains(".revisionCurrency.replaceAll")
+            && app.contains(".familyState.replaceAll")
+            && app.contains(".availability.replaceAll"),
         "the Change reader must render facade-owned fact provenance, currency, state, and availability"
     );
 }

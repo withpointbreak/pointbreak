@@ -33,12 +33,19 @@
     await page.waitForFunction(() => document.querySelector("#connection-status")?.textContent === "connected");
     await page.waitForFunction((expectedRoute) => {
       const stamp = document.querySelector("#stat-hash")?.textContent?.trim();
+      if (!stamp || stamp === "—" || !document.querySelector("#master h1")) return false;
+      const [path, query = ""] = expectedRoute.split("?", 2);
+      const expectedLens = path.split("/", 1)[0] || "timeline";
+      if (expectedLens === "timeline") {
+        const expectedAfter = new URLSearchParams(query).get("after");
+        const current = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+        return Boolean(document.querySelector("#timeline"))
+          && current.get("after") === expectedAfter;
+      }
       const rawKey = document.querySelector("#master")?.dataset.changeListKey;
-      if (!stamp || stamp === "—" || !document.querySelector("#master h1") || !rawKey) return false;
+      if (!rawKey) return false;
       try {
         const key = JSON.parse(rawKey);
-        const [path, query = ""] = expectedRoute.split("?", 2);
-        const expectedLens = path.split("/", 1)[0];
         const expectedAfter = new URLSearchParams(query).get("after");
         return key.lens === expectedLens && (key.query?.after ?? null) === expectedAfter;
       } catch {
@@ -54,6 +61,7 @@
       width: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
       liveCards: document.querySelectorAll(".unit-card[data-change-id]").length,
+      liveEvents: document.querySelectorAll("#timeline [data-event-id]").length,
     }));
     expect(metrics.width === layout.width, label, `unexpected viewport width ${metrics.width}`);
     expect(metrics.scrollWidth <= metrics.width, label, `horizontal overflow ${metrics.scrollWidth}/${metrics.width}`);
@@ -61,6 +69,7 @@
   };
   const hash = () => page.evaluate(() => location.hash);
   const waitForLens = (lens) => page.waitForFunction((expectedLens) => {
+    if (expectedLens === "timeline") return Boolean(document.querySelector("#timeline"));
     const rawKey = document.querySelector("#master")?.dataset.changeListKey;
     if (!rawKey) return false;
     try {
@@ -102,6 +111,411 @@
         return node.getClientRects().length === 0 || style.display === "none" || style.visibility === "hidden";
       });
   });
+
+  const bootstrapUrl = (server) =>
+    `${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
+  const exerciseReaderState = async (server, label, expectedText, expectHistory) => {
+    const origin = new URL(server.baseUrl).origin;
+    const historyRequests = [];
+    const recordRequest = (request) => {
+      const requested = new URL(request.url());
+      if (requested.origin === origin && requested.pathname === "/api/v2/history") {
+        historyRequests.push(request.url());
+      }
+    };
+    page.on("request", recordRequest);
+    try {
+      await page.goto(bootstrapUrl(server), { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(
+        (text) => document.querySelector("#master")?.textContent?.includes(text),
+        expectedText,
+      );
+      expect(!(await hash()).includes("token="), label, "capability remained in the semantic route");
+      expect(
+        expectHistory ? historyRequests.length > 0 : historyRequests.length === 0,
+        label,
+        expectHistory
+          ? "ready empty L2 never requested authoritative history"
+          : `unready profile leaked ${historyRequests.length} history request(s)`,
+      );
+      await screenshot(`reader-${label}`);
+    } finally {
+      page.off("request", recordRequest);
+    }
+  };
+
+  // Readiness sequencing is exercised against real tiny Inspector servers.
+  // Unready profiles must stop before history; only the complete empty L2 root
+  // is allowed to request and paint a zero-event Timeline.
+  await exerciseReaderState(
+    config.readerServers.emptyReadyL2,
+    "empty-ready-l2",
+    "0 recorded events",
+    true,
+  );
+  await exerciseReaderState(
+    config.readerServers.l0,
+    "l0",
+    "Store migration required. No Change state was loaded.",
+    false,
+  );
+  await exerciseReaderState(
+    config.readerServers.m1,
+    "m1",
+    "Store migration in progress. Partial Change state is unavailable.",
+    false,
+  );
+
+  // A structurally incompatible profile is a separate refusal from L0/M1.
+  // Interception keeps the real authenticated request lifecycle while proving
+  // that profile validation happens before any history fetch is dispatched.
+  let mismatchHistoryRequests = 0;
+  const recordMismatchRequest = (request) => {
+    const requested = new URL(request.url());
+    if (
+      requested.origin === new URL(config.server.baseUrl).origin
+      && requested.pathname === "/api/v2/history"
+    ) mismatchHistoryRequests += 1;
+  };
+  await page.route("**/api/v2/profile", (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ schema: "pointbreak.inspect-reader-profile", version: 999 }),
+  }));
+  page.on("request", recordMismatchRequest);
+  try {
+    await page.goto(url(""), { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() =>
+      document.querySelector("#master")?.textContent?.includes(
+        "Reader refused: incompatible Inspector reader profile",
+      ));
+    expect(mismatchHistoryRequests === 0, "profile mismatch", `profile refusal leaked ${mismatchHistoryRequests} history request(s)`);
+    await screenshot("reader-profile-mismatch");
+  } finally {
+    page.off("request", recordMismatchRequest);
+    await page.unroute("**/api/v2/profile");
+  }
+
+  // The monitor is the default reader, including a capability-bearing startup
+  // URL whose token must never survive in the semantic fragment.  Its entries
+  // are virtualized; these checks deliberately assert a bounded live DOM, not
+  // the total authoritative event count.
+  const defaultTimeline = await open("", layouts[0], "default Timeline startup");
+  expect(defaultTimeline.liveEvents > 0 && defaultTimeline.liveEvents < 80, "default Timeline startup", `expected a bounded live Timeline window, saw ${defaultTimeline.liveEvents}`);
+  const initialTimelineText = await page.locator("#master").innerText();
+  const recordedEvents = Number((initialTimelineText.match(/([0-9]+) recorded events/) || [])[1]);
+  expect(recordedEvents >= 300, "default Timeline startup", `expected 300+ recorded public events, saw ${recordedEvents}`);
+  expect(initialTimelineText.includes("Newest first"), "descending chronology", "default Timeline did not declare newest-first chronology");
+  expect(await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.every((row) => {
+    const name = row.getAttribute("aria-label") || "";
+    return name.includes("event ") && name.length > 24;
+  })), "readable Timeline rows", "a live Timeline row lacked an accessible event identity");
+  const initialTimelineIds = await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
+  await screenshot("wide-timeline-default");
+
+  // Chronology is server-owned and continuations are opaque/signed.  Exercise
+  // both directions through the UI rather than constructing a token here.
+  const timelineKey = await page.locator("#master").getAttribute("data-timeline-key");
+  await page.getByRole("button", { name: "Next page" }).click();
+  await page.waitForFunction((key) => document.querySelector("#master")?.dataset.timelineKey !== key, timelineKey);
+  expect((await hash()).includes("after="), "signed Timeline continuation", "next Timeline page did not preserve a continuation in the route");
+  const staleTimelineRoute = (await hash()).replace(/^#\//, "");
+  expect(await page.locator("#timeline [data-event-id]").count() > 0, "signed Timeline continuation", "next Timeline page was empty");
+  const middlePageAnchor = await page.locator("#timeline [data-event-id]").first().getAttribute("data-event-id");
+  expect(Boolean(middlePageAnchor), "anchored Timeline paging", "middle Timeline page had no exact event anchor");
+  await page.getByRole("button", { name: "Previous page" }).click();
+  await page.waitForFunction((ids) => JSON.stringify(Array.from(document.querySelectorAll("#timeline [data-event-id]"), (row) => row.dataset.eventId)) === JSON.stringify(ids), initialTimelineIds);
+  expect(JSON.stringify(await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => row.dataset.eventId))) === JSON.stringify(initialTimelineIds), "opaque Timeline continuation", "Previous did not restore the original Timeline page identity");
+  const anchoredTimelineRoute = `timeline?limit=100&order=desc&at=${encodeURIComponent(middlePageAnchor)}`;
+  const followAnchoredNeighbor = async (name) => {
+    await open(anchoredTimelineRoute, layouts[0], `anchored Timeline ${name.toLowerCase()}`);
+    expect(
+      await page.getByRole("button", { name: "Previous page" }).count() === 1
+        && await page.getByRole("button", { name: "Next page" }).count() === 1,
+      "anchored Timeline paging",
+      "middle anchored page did not expose both adjacent signed continuations",
+    );
+    const before = await hash();
+    await page.getByRole("button", { name }).click();
+    await page.waitForFunction((prior) => {
+      const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+      return location.hash !== prior && query.has("after") && !query.has("at");
+    }, before);
+    expect(
+      !((await page.locator("#master").innerText()).includes("Reader refused")),
+      "anchored Timeline paging",
+      `${name} retained the mutually exclusive at locator`,
+    );
+  };
+  await followAnchoredNeighbor("Next page");
+  await followAnchoredNeighbor("Previous page");
+  await open("timeline?limit=100&order=asc", layouts[0], "ascending Timeline");
+  const ascendingText = await page.locator("#master").innerText();
+  expect(ascendingText.includes("Oldest first"), "ascending chronology", "ascending Timeline did not declare oldest-first chronology");
+  await screenshot("wide-timeline-ascending");
+
+  // Drive all typed filters through their reader controls. The browser does
+  // not invent query values: Track, Change, and exact Revision options are
+  // populated from the server's admitted completion facets.
+  const applyTimelineFilter = async (id, value, key, label, expectedQuery) => {
+    await open("timeline?limit=100&order=desc", layouts[0], `${label} base`);
+    const filtersToggle = page.locator("#filters-toggle");
+    if (await filtersToggle.getAttribute("aria-expanded") !== "true") {
+      await filtersToggle.click();
+    }
+    const select = page.locator(`#${id}`);
+    await select.selectOption(value);
+    await page.waitForFunction(({ expectedKey, expected }) => {
+      const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+      return query.has(expectedKey)
+        && Object.entries(expected).every(([name, expectedValue]) =>
+          query.get(name) === expectedValue);
+    }, { expectedKey: key, expected: expectedQuery });
+    expect(await page.locator("#timeline [data-event-id]").count() > 0, label, "typed public fixture filter produced no Timeline entry");
+    const remove = page.getByRole("button", { name: new RegExp(`^Remove ${key} filter:`) });
+    expect(await remove.count() === 1, label, "typed filter did not create one removable chip");
+    await remove.click();
+    await page.waitForFunction((expectedKey) => {
+      const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
+      return !query.has(expectedKey)
+        && (expectedKey !== "revision" || !query.has("artifactHash"));
+    }, key);
+  };
+  await applyTimelineFilter(
+    "timeline-filter-type",
+    "review_observation_recorded",
+    "type",
+    "Timeline type filter",
+    { type: "review_observation_recorded" },
+  );
+  await applyTimelineFilter(
+    "timeline-filter-track",
+    "agent:matrix-facts",
+    "track",
+    "Timeline track filter",
+    { track: "agent:matrix-facts" },
+  );
+  await applyTimelineFilter(
+    "timeline-filter-change",
+    config.fixture.rich.changeId,
+    "change",
+    "Timeline Change filter",
+    { change: config.fixture.rich.changeId },
+  );
+  await applyTimelineFilter(
+    "timeline-filter-revision",
+    JSON.stringify([config.fixture.rich.revisionId, config.fixture.rich.artifactHash]),
+    "revision",
+    "Timeline exact Revision filter",
+    {
+      revision: config.fixture.rich.revisionId,
+      artifactHash: config.fixture.rich.artifactHash,
+    },
+  );
+
+  const inspectExactTimelineEvent = async (eventId, label, expectedText) => {
+    await open(
+      `timeline?limit=100&order=asc&at=${encodeURIComponent(eventId)}`,
+      layouts[0],
+      label,
+    );
+    const row = page.locator(`#timeline [data-event-id="${eventId}"]`);
+    expect(await row.count() === 1, label, `exact event ${eventId} was not revealed`);
+    await row.click();
+    await page.waitForFunction(
+      (id) => location.hash.includes("/events/")
+        && document.querySelector("#detail-body")?.textContent?.includes(id),
+      eventId,
+    );
+    const detail = await page.locator("#detail-body").innerText();
+    for (const text of expectedText) {
+      expect(detail.includes(text), label, `event detail omitted ${text}`);
+    }
+    return detail;
+  };
+
+  await inspectExactTimelineEvent(
+    config.fixture.correction.eventId,
+    "Timeline correction event",
+    [config.fixture.correction.originObservationId, "Browser correction replacement"],
+  );
+  await inspectExactTimelineEvent(
+    config.fixture.factPort.eventId,
+    "Timeline fact-port event",
+    [config.fixture.factPort.portId, "context_only"],
+  );
+  await inspectExactTimelineEvent(
+    config.fixture.historicalMembership.withdrawEventId,
+    "Timeline membership-withdrawal event",
+    [
+      config.fixture.historicalMembership.claimId,
+      config.fixture.historicalMembership.historicalChangeId,
+      config.fixture.historicalMembership.revisionId,
+    ],
+  );
+
+  // The original proposal remains correlated with both its direct Change and
+  // the later-withdrawn historical membership. This is a server-derived
+  // plural context, not an effective-membership inference from the card list.
+  const historical = config.fixture.historicalMembership;
+  await open(
+    `timeline?limit=100&order=asc&type=work_object_proposed&change=${encodeURIComponent(historical.historicalChangeId)}&revision=${encodeURIComponent(historical.revisionId)}&artifactHash=${encodeURIComponent(historical.artifactHash)}`,
+    layouts[0],
+    "Timeline withdrawn historical membership",
+  );
+  const historicalProposal = page.locator("#timeline [data-event-id]").first();
+  expect(await historicalProposal.count() === 1, "Timeline withdrawn historical membership", "historical Change filter did not retain the Revision proposal");
+  await historicalProposal.click();
+  await page.waitForFunction(() => location.hash.includes("/events/") && !document.querySelector("#detail")?.inert);
+  const historicalProposalDetail = await page.locator("#detail-body").innerText();
+  for (const expectedChange of [historical.directChangeId, historical.historicalChangeId]) {
+    expect(
+      historicalProposalDetail.includes(expectedChange),
+      "Timeline withdrawn historical membership",
+      `proposal detail omitted correlated Change ${expectedChange}`,
+    );
+  }
+
+  await open(
+    "timeline?limit=100&order=asc&track=agent%3Abrowser-equal-time",
+    layouts[0],
+    "Timeline equal occurredAt pair",
+  );
+  for (const eventId of config.fixture.equalTimestamp.eventIds) {
+    const row = page.locator(`#timeline [data-event-id="${eventId}"]`);
+    expect(await row.count() === 1, "Timeline equal occurredAt pair", `equal-time event ${eventId} is absent`);
+    expect(
+      await row.locator("time").getAttribute("datetime") === config.fixture.equalTimestamp.occurredAt,
+      "Timeline equal occurredAt pair",
+      `event ${eventId} did not retain ${config.fixture.equalTimestamp.occurredAt}`,
+    );
+  }
+  const equalTimestampOrder = await page.locator("#timeline [data-event-id]").evaluateAll(
+    (rows, eventIds) => rows
+      .map((row) => row.dataset.eventId)
+      .filter((eventId) => eventIds.includes(eventId)),
+    config.fixture.equalTimestamp.eventIds,
+  );
+  expect(
+    config.fixture.equalTimestamp.tieBreak === "event_id_asc"
+      && JSON.stringify(equalTimestampOrder) === JSON.stringify(config.fixture.equalTimestamp.eventIds),
+    "Timeline equal occurredAt pair",
+    `equal-time order ${JSON.stringify(equalTimestampOrder)} did not use event_id_asc`,
+  );
+
+  // Timeline gets its own preference evidence rather than inheriting the
+  // Change-card captures below.
+  await open("timeline?limit=100&order=desc", layouts[0], "Timeline display preferences");
+  await page.locator("#view-toggle").click();
+  await page.locator("#theme-dark").check();
+  await page.locator("#density-compact").check();
+  await screenshot("wide-timeline-dark-compact");
+  await page.locator("#theme-light").check();
+  await page.locator("#density-comfortable").check();
+  await screenshot("wide-timeline-light-comfortable");
+  await page.locator("#view-toggle").click();
+
+  // Local cursor movement must remain bounded and must never redirect from a
+  // text input.  It is intentionally tested before clicking an event, which
+  // parks monitoring as reader activity.
+  await open("timeline?limit=100&order=desc", layouts[0], "Timeline keyboard navigation");
+  const listbox = page.locator("#timeline");
+  await listbox.focus();
+  const activeEvent = () => listbox.getAttribute("aria-activedescendant");
+  await page.keyboard.press("g");
+  const firstActive = await activeEvent();
+  expect(Boolean(firstActive), "Timeline g", "g did not select the first readable event");
+  await page.keyboard.press("j");
+  expect((await activeEvent()) !== firstActive, "Timeline j", "j did not advance the local event cursor");
+  await page.keyboard.press("k");
+  expect(await activeEvent() === firstActive, "Timeline k", "k did not restore the preceding local event cursor");
+  await page.keyboard.press("G");
+  const lastActive = await activeEvent();
+  expect(Boolean(lastActive) && lastActive !== firstActive, "Timeline G", "G did not select the last rendered event");
+  await page.keyboard.press("g");
+  await page.keyboard.press("f");
+  const fullForward = await activeEvent();
+  expect(Boolean(fullForward) && fullForward !== firstActive, "Timeline f", "f did not advance by a bounded page");
+  await page.keyboard.press("b");
+  expect(await activeEvent() === firstActive, "Timeline b", "b did not return across the bounded page movement");
+  await page.keyboard.press("d");
+  const halfForward = await activeEvent();
+  expect(Boolean(halfForward) && halfForward !== firstActive, "Timeline d", "d did not advance by a half page");
+  await page.keyboard.press("u");
+  expect(await activeEvent() === firstActive, "Timeline u", "u did not return across the half-page movement");
+  await page.keyboard.press("/");
+  expect(await page.evaluate(() => document.activeElement?.id === "filter-text"), "Timeline search shortcut", "/ did not focus the shared filter field");
+  const timelineHashBeforeTextGuard = await hash();
+  await page.keyboard.press("j");
+  await page.keyboard.press("?");
+  expect(await hash() === timelineHashBeforeTextGuard, "Timeline text guard", "Timeline shortcut fired from the text filter");
+  expect(await page.locator("#key-help:not(.hidden)").count() === 0, "Timeline text guard", "help opened from the text filter");
+  await page.keyboard.press("Escape");
+  await listbox.focus();
+  await page.keyboard.press("j");
+  expect(await listbox.getAttribute("aria-activedescendant"), "Timeline roving focus", "j did not expose a selected active descendant");
+
+  // Open one exact event from the Timeline. Wide and narrow must retain the
+  // same event route/detail, and browser history must restore the monitor.
+  const selectedEventId = await page.locator("#timeline [data-event-id]").first().getAttribute("data-event-id");
+  expect(Boolean(selectedEventId), "Timeline exact event", "Timeline row lacked an event ID");
+  await page.locator("#timeline [data-event-id]").first().click();
+  await page.waitForFunction((eventId) => location.hash.includes(`/timeline/events/${encodeURIComponent(eventId)}`), selectedEventId);
+  expect((await page.locator("#detail-body").innerText()).includes(selectedEventId), "Timeline exact event", "event detail did not retain its exact event identity");
+  await page.locator("#detail-read").click();
+  expect(await page.locator(".split").evaluate((node) => node.classList.contains("reading")), "Timeline event reading mode", "exact event did not enter reading mode");
+  await screenshot("wide-timeline-event-detail");
+  await page.locator("#master-rail").click();
+  expect(!(await page.locator(".split").evaluate((node) => node.classList.contains("reading"))), "Timeline event reading return", "master rail did not leave event reading mode");
+  await page.goBack();
+  await page.waitForFunction(() => location.hash.startsWith("#/timeline"));
+  await page.goForward();
+  await page.waitForFunction((eventId) => location.hash.includes(`/timeline/events/${encodeURIComponent(eventId)}`), selectedEventId);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForFunction((eventId) => location.hash.includes(`/timeline/events/${encodeURIComponent(eventId)}`) && Boolean(document.querySelector("#timeline")), selectedEventId);
+  expect((await page.locator("#detail-body").innerText()).includes(selectedEventId), "Timeline event reload", "reload lost the exact event detail");
+  await page.goBack();
+  await page.waitForFunction(() => location.hash.startsWith("#/timeline"));
+
+  await open("timeline?limit=100&order=desc", layouts[1], "narrow Timeline");
+  await page.locator("#timeline [data-event-id]").first().click();
+  await page.waitForFunction(() => location.hash.includes("/timeline/events/"));
+  expect(await page.locator("#detail").evaluate((node) => !node.inert && !node.hasAttribute("aria-hidden")), "narrow Timeline event", "narrow event detail remained inert");
+  await screenshot("narrow-timeline-event-detail");
+  await page.locator("#detail-back").click();
+  await page.waitForFunction(() => location.hash.startsWith("#/timeline"));
+
+  // A parked Timeline must not repaint when the shell's disposable worker
+  // appends an event.  The worker waits for this screenshot, then writes its
+  // receipt; explicit catch-up is the only action that adopts the new head.
+  await open("timeline?limit=100&order=desc", layouts[0], "Timeline follow park");
+  const follow = page.locator("#follow-toggle");
+  await follow.click();
+  expect((await follow.innerText()).includes("Parked"), "Timeline park", "follow control did not expose parked state");
+  const parkedRows = await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
+  await screenshot("timeline-parked-before-append");
+  // Wait for the normal poll/catch-up affordance. The shell worker's receipt
+  // remains a completion-last evidence record and is checked after this
+  // program returns; it is intentionally not exposed to the browser.
+  await page.waitForFunction(() => (document.querySelector("#follow-toggle")?.textContent || "").includes("Show "));
+  expect(JSON.stringify(await page.locator("#timeline [data-event-id]").evaluateAll((rows) => rows.map((row) => row.dataset.eventId))) === JSON.stringify(parkedRows), "Timeline parked stability", "parked Timeline adopted the appended head before explicit catch-up");
+  await follow.click();
+  await page.waitForFunction(() => document.querySelector("#follow-toggle")?.textContent === "Following");
+  await screenshot("timeline-followed-after-append");
+
+  // The continuation captured above names the pre-append projection. Exercise
+  // its real authenticated refusal, then prove the reader can recover by
+  // returning to the unpositioned filtered head instead of reusing the token.
+  const staleQuery = staleTimelineRoute.split("?", 2)[1] ?? "";
+  const staleResponse = await page.request.get(
+    `${config.server.baseUrl}/api/v2/history?${staleQuery}`,
+    { headers: { Authorization: `Bearer ${config.server.token}` } },
+  );
+  expect(staleResponse.status() === 409, "stale Timeline continuation", `old continuation returned HTTP ${staleResponse.status()}`);
+  const staleBody = await staleResponse.json();
+  expect(staleBody.code === "stale_projection", "stale Timeline continuation", `old continuation returned ${staleBody.code}`);
+  await open("timeline?limit=100&order=desc", layouts[0], "stale Timeline explicit head recovery");
+  expect(!(await hash()).includes("after="), "stale Timeline explicit head recovery", "head recovery retained the stale continuation");
 
   for (const layout of layouts) {
     const metrics = await open("changes?limit=100&order=change_id_asc", layout, `${layout.name} changes`);
@@ -158,15 +572,17 @@
   expect(lastId === await page.locator(".unit-card[data-change-id]").last().getAttribute("data-change-id"), "G boundary", "G did not select last loaded Change");
   await page.keyboard.press("g");
   expect(await selected().getAttribute("data-change-id") === await page.locator(".unit-card[data-change-id]").first().getAttribute("data-change-id"), "g boundary", "g did not select first loaded Change");
-  await page.keyboard.press("2");
+  await page.keyboard.press("3");
   await page.waitForFunction(() => location.hash.startsWith("#/attention?"));
   await waitForLens("attention");
-  await page.keyboard.press("1");
+  await page.keyboard.press("2");
   await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
   await waitForLens("changes");
-  const beforeThree = await hash();
-  await page.keyboard.press("3");
-  expect(await hash() === beforeThree, "inert 3", "3 unexpectedly changed route");
+  await page.keyboard.press("1");
+  await page.waitForFunction(() => location.hash.startsWith("#/timeline"));
+  await waitForLens("timeline");
+  await page.keyboard.press("2");
+  await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
 
   const search = page.locator("#filter-text");
   await search.focus();
@@ -297,7 +713,7 @@
     const next = document.querySelector("#detail-body")?.dataset.changeReadingKey;
     return Boolean(next && next !== key);
   }, resourceReadingKey);
-  await page.keyboard.press("2");
+  await page.keyboard.press("3");
   await page.waitForFunction(() => location.hash.startsWith("#/attention?"));
   await page.goBack();
   await page.waitForFunction(() => location.hash.includes("/revisions/"));

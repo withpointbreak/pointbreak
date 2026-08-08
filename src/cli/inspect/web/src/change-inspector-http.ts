@@ -28,10 +28,13 @@ export class ChangeInspectorRequestFailure extends Error {
 
 export class ChangeInspectorPageFailure extends ChangeInspectorRequestFailure {
   constructor(
-    readonly code: "invalid_query" | "stale_projection",
+    readonly code: "invalid_query" | "stale_projection" | "moving_journal",
     status: number,
   ) {
     super("protocol", status);
+    if (code === "moving_journal") {
+      this.message = "Timeline journal changed while loading; retry";
+    }
   }
 }
 
@@ -50,7 +53,8 @@ function typedPageFailure(
   if (typeof value !== "object" || value === null) return null;
   const document = value as Record<string, unknown>;
   if (
-    document.schema !== "pointbreak.inspect-change-page-error" ||
+    (document.schema !== "pointbreak.inspect-change-page-error" &&
+      document.schema !== "pointbreak.inspect-event-history-error") ||
     document.version !== 1
   )
     return null;
@@ -58,6 +62,13 @@ function typedPageFailure(
     return new ChangeInspectorPageFailure("invalid_query", status);
   if (document.code === "stale_projection" && status === 409)
     return new ChangeInspectorPageFailure("stale_projection", status);
+  if (
+    document.schema === "pointbreak.inspect-event-history-error" &&
+    document.code === "moving_journal" &&
+    status === 503
+  ) {
+    return new ChangeInspectorPageFailure("moving_journal", status);
+  }
   return null;
 }
 

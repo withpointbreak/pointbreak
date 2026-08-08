@@ -173,6 +173,272 @@ fn change_pages_preserve_bare_shape_and_reject_append_stale_continuations() {
 }
 
 #[test]
+fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profile() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+    capture(repo.path());
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let profile = inspector.get_json("/api/v2/profile");
+    assert_eq!(profile["availability"], "ready");
+    assert!(
+        profile["documents"]
+            .get("pointbreak.inspect-event-history")
+            .is_none(),
+        "the bundled Timeline must not widen the frozen shared profile: {profile}"
+    );
+
+    let first = inspector.get_json("/api/v2/history?limit=1&order=asc");
+    assert_eq!(first["schema"], "pointbreak.inspect-event-history");
+    assert_eq!(first["version"], 1);
+    assert_eq!(first["order"], "asc");
+    assert!(
+        first["authorityCursor"]["journalRecordSetHash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        first["sourceChangeProjectionStamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert!(
+        first["timelineProjectionStamp"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    let entry = &first["entries"][0];
+    assert!(
+        entry.get("payload").is_none(),
+        "raw payload leaked: {entry}"
+    );
+    assert!(entry.get("summary").is_some());
+
+    let (duplicate_type_status, duplicate_type) =
+        inspector.get_error("/api/v2/history?type=review_initialized,review_initialized");
+    assert!(duplicate_type_status.contains("400 Bad Request"));
+    assert_eq!(
+        duplicate_type["schema"],
+        "pointbreak.inspect-event-history-error"
+    );
+    assert_eq!(duplicate_type["code"], "invalid_query");
+
+    let event_id = entry["eventId"].as_str().unwrap();
+    let located = inspector.get_json(&format!(
+        "/api/v2/history?limit=1&order=asc&at={}",
+        urlencode(event_id)
+    ));
+    assert_eq!(located["matchIndex"], 0);
+    assert_eq!(located["entries"][0]["eventId"], event_id);
+
+    let all = inspector.get_json("/api/v2/history?limit=100&order=asc");
+    let revision_ref = all["entries"]
+        .as_array()
+        .expect("Timeline entries")
+        .iter()
+        .flat_map(|entry| entry["revisionRefs"].as_array().into_iter().flatten())
+        .next()
+        .expect("captured Timeline includes an exact Revision reference");
+    let revision_id = revision_ref["revisionId"]
+        .as_str()
+        .expect("exact Revision id");
+    let artifact_hash = revision_ref["objectArtifactContentHash"]
+        .as_str()
+        .expect("exact Revision artifact hash");
+    let selected = inspector.get_json(&format!(
+        "/api/v2/history?limit=100&order=asc&revision={}&artifactHash={}",
+        urlencode(revision_id),
+        urlencode(artifact_hash)
+    ));
+    assert!(
+        selected["entries"]
+            .as_array()
+            .expect("filtered Timeline entries")
+            .iter()
+            .all(|entry| entry["revisionRefs"]
+                .as_array()
+                .expect("revision refs")
+                .iter()
+                .any(|reference| {
+                    reference["revisionId"] == revision_id
+                        && reference["objectArtifactContentHash"] == artifact_hash
+                })),
+        "exact Revision filter admitted an unrelated event: {selected}"
+    );
+    let mismatched = inspector.get_json(&format!(
+        "/api/v2/history?limit=100&order=asc&revision={}&artifactHash={}",
+        urlencode(revision_id),
+        urlencode("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    ));
+    assert_eq!(
+        mismatched["matchCount"], 0,
+        "Revision ID alone must not match a different artifact identity: {mismatched}"
+    );
+
+    let next = first["next"]
+        .as_str()
+        .expect("multiple admitted events yield a continuation")
+        .to_owned();
+    capture(repo.path());
+    let (status, body) = inspector.get_error(&format!(
+        "/api/v2/history?limit=1&order=asc&after={}",
+        urlencode(&next)
+    ));
+    assert!(status.contains("409 Conflict"), "status: {status}");
+    assert_eq!(body["schema"], "pointbreak.inspect-event-history-error");
+    assert_eq!(body["code"], "stale_projection");
+
+    let (legacy_status, legacy) = inspector.get_error("/api/history");
+    assert!(legacy_status.contains("426 Upgrade Required"));
+    assert_eq!(legacy["code"], "reader_upgrade_required");
+}
+
+#[test]
+fn change_aware_timeline_preserves_m1_as_a_typed_migration_response() {
+    let repo = GitRepo::new();
+    std::fs::create_dir_all(repo.path().join(".pointbreak/data/events"))
+        .expect("create disposable M1 event directory");
+    std::fs::write(
+        repo.path().join(".pointbreak/store.local.json"),
+        b"{\"schema\":\"shore.store-config\",\"version\":1,\"mode\":\"ephemeral\"}\n",
+    )
+    .expect("write disposable M1 store configuration");
+    std::fs::write(
+        repo.path()
+            .join(".pointbreak/data/events/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"),
+        include_bytes!("support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"),
+    )
+    .expect("install M1 capability activation only");
+
+    let inspector = Inspector::spawn_current_unready(repo.path());
+    let (status, body) = inspector.get_error("/api/v2/history");
+
+    assert!(status.contains("409 Conflict"), "status: {status}");
+    assert_eq!(body["schema"], "pointbreak.store-migration-in-progress");
+    assert_eq!(body["state"], "migration_in_progress");
+    assert!(
+        body.get("entries").is_none(),
+        "partial Timeline leaked: {body}"
+    );
+}
+
+#[test]
+fn change_aware_timeline_filters_historical_change_membership_after_withdrawal() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let first: Value = serde_json::from_slice(
+        &support::pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout,
+    )
+    .expect("first capture receipt");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second: Value = serde_json::from_slice(
+        &support::pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout,
+    )
+    .expect("second capture receipt");
+    let first_change = first["changeId"].as_str().expect("first Change id");
+    let second_change = second["changeId"].as_str().expect("second Change id");
+    let second_revision = second["revision"]["id"]
+        .as_str()
+        .expect("second exact Revision id");
+    assert_ne!(
+        first_change, second_change,
+        "captures form distinct Changes"
+    );
+
+    let joined = support::pointbreak([
+        "change",
+        "join",
+        first_change,
+        second_revision,
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--operation-id",
+        "change-operation:timeline-historical-membership",
+    ]);
+    assert!(
+        joined.status.success(),
+        "join stderr:\n{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+    let claim_id = pointbreak::session::read_events(repo.path())
+        .expect("read joined authority")
+        .into_iter()
+        .rev()
+        .find(|event| {
+            event.event_type == pointbreak::session::event::EventType::ChangeMembershipAsserted
+                && event.payload["changeId"] == first_change
+                && event.payload["revisionId"] == second_revision
+        })
+        .expect("joined membership event")
+        .payload["membershipClaimId"]
+        .as_str()
+        .expect("membership claim id")
+        .to_owned();
+    let withdrawn = support::pointbreak([
+        "change",
+        "withdraw-membership",
+        &claim_id,
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--operation-id",
+        "change-operation:timeline-historical-withdrawal",
+    ]);
+    assert!(
+        withdrawn.status.success(),
+        "withdraw stderr:\n{}",
+        String::from_utf8_lossy(&withdrawn.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let all = inspector.get_json("/api/v2/history?limit=100&order=asc");
+    let proposal = all["entries"]
+        .as_array()
+        .expect("Timeline entries")
+        .iter()
+        .find(|entry| {
+            entry["eventType"] == "work_object_proposed"
+                && entry["revisionRefs"].as_array().is_some_and(|references| {
+                    references
+                        .iter()
+                        .any(|reference| reference["revisionId"] == second_revision)
+                })
+        })
+        .expect("second Revision proposal is present");
+    assert!(
+        proposal["changeIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == first_change)),
+        "withdrawn membership must remain visible in historical projection: {proposal}"
+    );
+    assert!(
+        proposal["changeIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == second_change)),
+        "the proposal must retain its direct Change beside historical membership: {proposal}"
+    );
+    let filtered = inspector.get_json(&format!(
+        "/api/v2/history?limit=100&order=asc&change={}",
+        urlencode(first_change)
+    ));
+    assert!(
+        filtered["entries"]
+            .as_array()
+            .expect("filtered Timeline entries")
+            .iter()
+            .any(|entry| entry["eventId"] == proposal["eventId"]),
+        "historical Change filter excluded its admitted proposal: {filtered}"
+    );
+}
+
+#[test]
 fn api_attention_serves_projection() {
     let store = representative_store();
     // The fixture's human assessment REPLACES the agent one, leaving a single

@@ -13,16 +13,18 @@ import type {
   AttentionPage,
   ChangeDetail,
   ChangesPage,
+  EventHistoryDocument,
   ReaderProfile,
   RevisionResource,
 } from "../src/change-protocol";
+import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
 const profile: ReaderProfile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
   availability: "ready",
-  authorityCursor: { eventCount: 2 },
+  authorityCursor: authorityCursor(2),
   commitGraphStamp: "sha256:stamp",
   minimumReaderProfile: "review_change_revision_v1",
   documents: {},
@@ -67,6 +69,71 @@ const attention: AttentionPage = {
   schema: "pointbreak.inspect-attention",
   version: 2,
 };
+
+function eventHistory(): EventHistoryDocument {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: authorityCursor(2),
+    sourceChangeProjectionStamp: "sha256:generation",
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: 1,
+    matchCount: 1,
+    offset: 0,
+    facets: { validation_check_recorded: 1, change_declared: 0 },
+    completion: {
+      eventTypes: ["validation_check_recorded", "change_declared"],
+      trackIds: ["author"],
+      changeIds: ["change:sha256:one"],
+      revisionRefs: [revision],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: [
+      {
+        eventId: "evt:sha256:one",
+        eventType: "validation_check_recorded",
+        occurredAt: "2026-08-08T00:00:00Z",
+        payloadHash: "sha256:payload",
+        journalId: "journal:sha256:one",
+        writer: {
+          actorId: "actor:author",
+          producer: { name: "pointbreak", version: "0.10.0" },
+        },
+        verificationStatus: "valid",
+        assertionMode: "advisory",
+        subject: {
+          kind: "review",
+          target: { kind: "revision", revisionId: revision.revisionId },
+        },
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [revision],
+        unresolvedRevisionIds: [],
+        sourceRef: {
+          sourceSystem: "legacy-review-journal",
+          sourceId: "event:legacy:one",
+        },
+        ingest: {
+          via: "ingest-events",
+          receivedAt: "2026-08-08T00:00:01Z",
+        },
+        summary: {
+          kind: "validation_check_recorded",
+          details: {
+            validationCheckId: "validation:sha256:web",
+            target: { kind: "revision", revisionId: revision.revisionId },
+            checkName: "Web checks",
+            status: "passed",
+            trigger: "manual",
+            summary: "The Inspector presentation checks passed.",
+          },
+        },
+      },
+    ],
+  };
+}
 
 function exactResource(): RevisionResource {
   return {
@@ -228,6 +295,195 @@ function interdiffReading(): Extract<
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
+  it("offers completion-backed Timeline filters and removable applied filters", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {
+        q: "web",
+        type: "validation_check_recorded",
+        track: "author",
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        limit: 20,
+        order: "asc",
+      },
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    expect(
+      document.querySelector<HTMLSelectElement>("#timeline-filter-track")
+        ?.value,
+    ).toBe("author");
+    expect(
+      document.querySelector<HTMLSelectElement>("#timeline-filter-change")
+        ?.value,
+    ).toBe("change:sha256:one");
+    expect(
+      document.querySelector<HTMLSelectElement>("#timeline-filter-revision")
+        ?.selectedOptions[0]?.dataset.artifactHash,
+    ).toBe(revision.objectArtifactContentHash);
+    expect(
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-event-type="validation_check_recorded"]',
+        )
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        '[data-event-type="change_declared"]',
+      )?.textContent,
+    ).toContain("0");
+    document
+      .querySelector<HTMLButtonElement>(
+        '[aria-label="Remove track filter: author"]',
+      )
+      ?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "web",
+        type: "validation_check_recorded",
+        track: undefined,
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        limit: 20,
+        order: "asc",
+        after: undefined,
+        at: undefined,
+      },
+    });
+
+    navigate.mockClear();
+    document
+      .querySelector<HTMLButtonElement>('[data-event-type="change_declared"]')
+      ?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "web",
+        type: "change_declared,validation_check_recorded",
+        track: "author",
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        limit: 20,
+        order: "asc",
+        after: undefined,
+        at: undefined,
+      },
+    });
+  });
+
+  it("keeps duplicate Revision IDs distinct by their exact artifact hash", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const duplicate = {
+      revisionId: revision.revisionId,
+      objectArtifactContentHash: "sha256:other-artifact",
+    };
+    const history = eventHistory();
+    history.completion.revisionRefs = [revision, duplicate];
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const select = document.querySelector<HTMLSelectElement>(
+      "#timeline-filter-revision",
+    );
+    const exactOptions = Array.from(select?.options ?? []).slice(1);
+    expect(exactOptions.map((option) => option.value)).toHaveLength(2);
+    expect(new Set(exactOptions.map((option) => option.value)).size).toBe(2);
+    const second = exactOptions[1];
+    if (!select || !second) throw new Error("missing duplicate exact option");
+    select.value = second.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        after: undefined,
+        at: undefined,
+        revision: revision.revisionId,
+        artifactHash: duplicate.objectArtifactContentHash,
+      },
+    });
+  });
+
+  it("renders a selected Timeline event as an exact readable surface", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: { q: "web" },
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Event",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "validation check recorded",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Web checks: passed",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "The Inspector presentation checks passed.",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Revision revision:sha256:one",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "actor:author",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "legacy-review-journal · event:legacy:one",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "ingest-events · 2026-08-08T00:00:01Z",
+    );
+    expect(document.querySelector("details.event-structured")).not.toBeNull();
+    expect(
+      document.querySelector("li.event")?.getAttribute("aria-selected"),
+    ).toBe("true");
+    const buttons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    );
+    buttons.find((button) => button.textContent === "Open Change")?.click();
+    buttons
+      .find((button) => button.textContent === "Open exact Revision")
+      ?.click();
+    expect(navigate).toHaveBeenNthCalledWith(1, {
+      kind: "change",
+      changeId: "change:sha256:one",
+      query: {},
+    });
+    expect(navigate).toHaveBeenNthCalledWith(2, {
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+  });
+
   it("retains the bounded card DOM for an unchanged polling generation", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });

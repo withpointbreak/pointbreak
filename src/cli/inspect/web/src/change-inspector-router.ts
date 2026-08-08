@@ -8,10 +8,21 @@
 import type {
   ChangeLens,
   ChangePageQuery,
+  EventHistoryQuery,
   RevisionRef,
 } from "./change-protocol";
 
 export type ChangeInspectorRoute =
+  | { kind: "timeline"; historyQuery: EventHistoryQuery }
+  | {
+      kind: "event";
+      eventId: string;
+      historyQuery: EventHistoryQuery;
+      // Event filters belong to `historyQuery`. The empty card query keeps an
+      // event compatible with the shared exact-surface navigation contract:
+      // back/close may fall back through a card lens without inventing filters.
+      query: ChangePageQuery;
+    }
   | { kind: "lens"; lens: ChangeLens; query: ChangePageQuery }
   | { kind: "change"; changeId: string; query: ChangePageQuery }
   | {
@@ -63,6 +74,19 @@ const ROUTE_QUERY_KEYS = new Set<string>([
   "toArtifactHash",
   "fact",
   "file",
+]);
+
+const TIMELINE_QUERY_KEYS = new Set<string>([
+  "limit",
+  "after",
+  "at",
+  "q",
+  "type",
+  "track",
+  "change",
+  "revision",
+  "artifactHash",
+  "order",
 ]);
 
 export interface ExactRouteFocus {
@@ -151,11 +175,98 @@ function isParseError(
   return "message" in value;
 }
 
+function parseTimelineQuery(
+  search: string,
+): EventHistoryQuery | { message: string } {
+  if (!validQueryEncoding(search)) {
+    return { message: "Malformed route query encoding." };
+  }
+  const params = new URLSearchParams(search);
+  const query: EventHistoryQuery = {};
+  for (const key of params.keys()) {
+    if (!TIMELINE_QUERY_KEYS.has(key)) {
+      return { message: `Unknown ${key} route query.` };
+    }
+    if (params.getAll(key).length !== 1) {
+      return { message: `Duplicate ${key} route query.` };
+    }
+  }
+  for (const key of TIMELINE_QUERY_KEYS) {
+    const value = params.get(key);
+    if (value === null) continue;
+    if (!value) return { message: `Empty ${key} route query.` };
+    if (key === "limit") {
+      const limit = Number(value);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+        return { message: "Invalid limit route query." };
+      query.limit = limit;
+    } else if (key === "order") {
+      if (value !== "asc" && value !== "desc")
+        return { message: "Invalid order route query." };
+      query.order = value;
+    } else if (
+      key === "after" ||
+      key === "at" ||
+      key === "q" ||
+      key === "type" ||
+      key === "track" ||
+      key === "change" ||
+      key === "revision" ||
+      key === "artifactHash"
+    ) {
+      query[key] = value;
+    }
+  }
+  if ((query.revision === undefined) !== (query.artifactHash === undefined)) {
+    return { message: "Timeline revision requires artifactHash." };
+  }
+  if (query.at !== undefined && query.after !== undefined) {
+    return { message: "Timeline at and after cannot be combined." };
+  }
+  return query;
+}
+
+function isTimelineParseError(
+  value: EventHistoryQuery | { message: string },
+): value is { message: string } {
+  return "message" in value;
+}
+
 export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
   const raw = hash.startsWith("#") ? hash.slice(1) : hash;
   const separator = raw.indexOf("?");
   const path = separator === -1 ? raw : raw.slice(0, separator);
   const search = separator === -1 ? "" : raw.slice(separator + 1);
+  const segments = path.split("/").filter(Boolean);
+  // The empty fragment intentionally opens the monitorable Timeline rather
+  // than silently falling back to a card lens.
+  if (
+    segments.length === 0 ||
+    (segments.length === 1 && segments[0] === "timeline")
+  ) {
+    const historyQuery = parseTimelineQuery(search);
+    return isTimelineParseError(historyQuery)
+      ? { kind: "invalid", message: historyQuery.message }
+      : { kind: "timeline", historyQuery };
+  }
+  if (
+    segments.length === 3 &&
+    segments[0] === "timeline" &&
+    segments[1] === "events"
+  ) {
+    const eventId = decodeSegment(segments[2]);
+    if (eventId === null)
+      return { kind: "invalid", message: "Event routes require an event ID." };
+    const historyQuery = parseTimelineQuery(search);
+    if (isTimelineParseError(historyQuery))
+      return { kind: "invalid", message: historyQuery.message };
+    if (historyQuery.at !== undefined)
+      return {
+        kind: "invalid",
+        message: "Event routes select their anchor from the event ID.",
+      };
+    return { kind: "event", eventId, historyQuery, query: {} };
+  }
   const parsed = parseQuery(search);
   if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
   const {
@@ -181,7 +292,6 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
     };
     return Object.keys(selected).length ? selected : undefined;
   };
-  const segments = path.split("/").filter(Boolean);
   if (
     segments.length === 1 &&
     (segments[0] === "changes" || segments[0] === "attention")
@@ -335,10 +445,41 @@ function appendQuery(query: ChangePageQuery, params: URLSearchParams): void {
   }
 }
 
+function appendTimelineQuery(
+  query: EventHistoryQuery,
+  params: URLSearchParams,
+): void {
+  const keys = [
+    "limit",
+    "after",
+    "at",
+    "q",
+    "type",
+    "track",
+    "change",
+    "revision",
+    "artifactHash",
+    "order",
+  ] as const;
+  for (const key of keys) {
+    const value = query[key];
+    if (value !== undefined) params.set(key, String(value));
+  }
+}
+
 export function formatChangeInspectorRoute(
   route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
 ): string {
   const params = new URLSearchParams();
+  if (route.kind === "timeline") {
+    appendTimelineQuery(route.historyQuery, params);
+    return `#/timeline${params.size ? `?${params}` : ""}`;
+  }
+  if (route.kind === "event") {
+    appendTimelineQuery(route.historyQuery, params);
+    const eventId = encodeURIComponent(route.eventId);
+    return `#/timeline/events/${eventId}${params.size ? `?${params}` : ""}`;
+  }
   appendQuery(route.query, params);
   if (
     route.kind === "revision" ||
@@ -367,8 +508,14 @@ export function formatChangeInspectorRoute(
   return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
 }
 
-export function lensForRoute(route: ChangeInspectorRoute): ChangeLens {
-  return route.kind === "lens" ? route.lens : "changes";
+export function lensForRoute(
+  route: ChangeInspectorRoute,
+): "timeline" | ChangeLens {
+  return route.kind === "timeline" || route.kind === "event"
+    ? "timeline"
+    : route.kind === "lens"
+      ? route.lens
+      : "changes";
 }
 
 /** Return the same bounded query at its first page. */
@@ -387,6 +534,7 @@ export function firstPageQuery(query: ChangePageQuery): ChangePageQuery {
 export function queryForExactNavigation(
   route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
 ): ChangePageQuery {
+  if (route.kind === "timeline" || route.kind === "event") return {};
   if (route.kind !== "lens" || route.lens !== "attention") return route.query;
   return firstPageQuery(route.query);
 }

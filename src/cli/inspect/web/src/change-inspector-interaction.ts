@@ -11,6 +11,16 @@ import {
   queryForExactNavigation,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
+import { scheduleChangeInspectorTimelineRemeasure } from "./change-inspector-timeline";
+import {
+  boundaryTimelineSelection,
+  moveTimelineSelection,
+  pageTimelineSelection,
+  resolveTimelinePageSelection,
+  type TimelineSelectionIntent,
+  type TimelineWindow,
+} from "./change-inspector-timeline-navigation";
+import type { EventHistoryDocument } from "./change-protocol";
 import {
   applyPrefs,
   applySplit,
@@ -45,6 +55,15 @@ function isNativeActionControl(target: EventTarget | null): boolean {
 }
 
 type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
+
+/**
+ * Timeline reader activity needs an idempotent park operation. The rendering
+ * contract currently exposes only the historical toggle, so retain this
+ * optional seam until the composition root wires `TimelineMonitor.park()`.
+ */
+type TimelineParkActions = ChangeInspectorRenderActions & {
+  parkTimelineMonitoring?: () => void;
+};
 
 function setSelected(changeId: string | null): void {
   document
@@ -93,6 +112,85 @@ function moveSelectionToBoundary(
   return changeId;
 }
 
+function timelineRows(): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("#timeline [data-event-id]"),
+  );
+}
+
+function timelineWindow(
+  eventIds: readonly string[],
+  selectedEventId: string | null,
+): TimelineWindow {
+  return {
+    eventIds: [...eventIds],
+    selectedEventId,
+  };
+}
+
+function timelineRowId(eventId: string): string {
+  return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
+}
+
+function setTimelineSelected(eventId: string | null): void {
+  const list = document.querySelector<HTMLOListElement>("#timeline");
+  const rows = timelineRows();
+  let activeId: string | null = null;
+  for (const row of rows) {
+    const rowEventId = row.dataset.eventId ?? null;
+    const selected = rowEventId === eventId;
+    // A listbox owns one tab stop. Individual rows remain pointer targets and
+    // active-descendant options, but do not add hundreds of Tab presses.
+    row.tabIndex = -1;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(selected));
+    if (selected && rowEventId !== null) {
+      row.id = timelineRowId(rowEventId);
+      activeId = row.id;
+    }
+  }
+  if (!list) return;
+  list.setAttribute("role", "listbox");
+  list.tabIndex = rows.length > 0 ? 0 : -1;
+  list.toggleAttribute("aria-disabled", rows.length === 0);
+  if (activeId) list.setAttribute("aria-activedescendant", activeId);
+  else list.removeAttribute("aria-activedescendant");
+}
+
+function focusTimelineSelection(eventId: string): void {
+  const row = timelineRows().find((item) => item.dataset.eventId === eventId);
+  row?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+  document
+    .querySelector<HTMLElement>("#timeline")
+    ?.focus({ preventScroll: true });
+}
+
+function visibleTimelineRows(): number {
+  const list = document.querySelector<HTMLElement>("#timeline");
+  const row = timelineRows()[0];
+  const rowHeight = row?.getBoundingClientRect().height ?? 0;
+  if (!list || rowHeight <= 0 || list.clientHeight <= 0) return 10;
+  return Math.max(1, Math.floor(list.clientHeight / rowHeight));
+}
+
+function timelinePager(
+  direction: "previous" | "next",
+): HTMLButtonElement | null {
+  const explicit = document.querySelector<HTMLButtonElement>(
+    `#timeline [data-timeline-page="${direction}"], [data-timeline-page="${direction}"]`,
+  );
+  if (explicit) return explicit;
+  return (
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#master button"),
+    ).find(
+      (button) =>
+        button.textContent?.trim() ===
+        `${direction === "next" ? "Next" : "Previous"} page`,
+    ) ?? null
+  );
+}
+
 function trapModalFocus(modal: HTMLElement, event: KeyboardEvent): void {
   if (event.key !== "Tab") return;
   const stops = Array.from(
@@ -119,14 +217,132 @@ function trapModalFocus(modal: HTMLElement, event: KeyboardEvent): void {
 /** Install once per active composition and return a sync hook for every paint. */
 export function installChangeInspectorInteraction(
   actions: ChangeInspectorRenderActions,
-): { sync(snapshot: ChangeInspectorSnapshot): void; stop(): void } {
+): {
+  sync(
+    snapshot: ChangeInspectorSnapshot,
+    timelinePage?: EventHistoryDocument | null,
+  ): void;
+  stop(): void;
+} {
   let selectedChangeId: string | null = null;
+  let selectedTimelineEventId: string | null = null;
+  let currentTimelineEventIds: string[] = [];
+  let pendingTimelineSelection: Extract<
+    TimelineSelectionIntent,
+    { kind: "adjacent-page" }
+  > | null = null;
+  let pendingGlobalTimelineSelection: {
+    boundary: "first" | "last";
+    route: string;
+  } | null = null;
   let modalReturnFocus: HTMLElement | null = null;
   let detailReturnFocus: HTMLElement | null = null;
   let detailWasOpen = false;
   let currentRoute: ValidRoute | null = null;
-  let exactOriginLens: "changes" | "attention" | null = null;
+  let exactOriginLens: "timeline" | "changes" | "attention" | null = null;
+  let timelineOriginRoute: Extract<ValidRoute, { kind: "timeline" }> | null =
+    null;
   let detailDomIdentity: ChildNode | null = null;
+
+  const parkTimelineForReaderActivity = () => {
+    (actions as TimelineParkActions).parkTimelineMonitoring?.();
+  };
+
+  const selectTimelineEvent = (eventId: string) => {
+    selectedTimelineEventId = eventId;
+    actions.revealTimelineEvent?.(eventId);
+    setTimelineSelected(eventId);
+    focusTimelineSelection(eventId);
+  };
+
+  const applyTimelineIntent = (intent: TimelineSelectionIntent | null) => {
+    if (intent === null) return false;
+    parkTimelineForReaderActivity();
+    if (intent.kind === "select") {
+      pendingTimelineSelection = null;
+      selectTimelineEvent(intent.eventId);
+      return true;
+    }
+    const pager = timelinePager(intent.direction);
+    if (!pager) return false;
+    pendingTimelineSelection = intent;
+    pager.click();
+    return true;
+  };
+
+  const syncTimelineDom = (route: ValidRoute | null = currentRoute) => {
+    const window = timelineWindow(
+      currentTimelineEventIds,
+      selectedTimelineEventId,
+    );
+    if (
+      pendingGlobalTimelineSelection !== null &&
+      route?.kind === "timeline" &&
+      formatChangeInspectorRoute(route) ===
+        pendingGlobalTimelineSelection.route &&
+      window.eventIds.length > 0
+    ) {
+      selectedTimelineEventId =
+        pendingGlobalTimelineSelection.boundary === "first"
+          ? (window.eventIds[0] ?? null)
+          : (window.eventIds.at(-1) ?? null);
+      pendingGlobalTimelineSelection = null;
+      if (selectedTimelineEventId !== null) {
+        actions.revealTimelineEvent?.(selectedTimelineEventId);
+      }
+    }
+    if (pendingTimelineSelection !== null && window.eventIds.length > 0) {
+      selectedTimelineEventId = resolveTimelinePageSelection(
+        window.eventIds,
+        pendingTimelineSelection,
+      );
+      pendingTimelineSelection = null;
+    }
+    if (
+      selectedTimelineEventId !== null &&
+      !window.eventIds.includes(selectedTimelineEventId)
+    ) {
+      // Virtual scrolling can temporarily unmount the active option. Keep the
+      // cursor identity so it is restored if that row re-enters the window,
+      // but do not advertise an off-DOM active descendant.
+      setTimelineSelected(null);
+      return;
+    }
+    setTimelineSelected(selectedTimelineEventId);
+  };
+
+  const applyGlobalTimelineBoundary = (
+    boundary: "first" | "last",
+    route: Extract<ValidRoute, { kind: "timeline" }>,
+  ): boolean => {
+    const navigateBoundary = actions.navigateTimelineBoundary;
+    if (navigateBoundary === undefined) {
+      return applyTimelineIntent(
+        boundaryTimelineSelection(
+          timelineWindow(currentTimelineEventIds, selectedTimelineEventId),
+          boundary,
+        ),
+      );
+    }
+    parkTimelineForReaderActivity();
+    pendingTimelineSelection = null;
+    void navigateBoundary(boundary, route)
+      .then((target) => {
+        if (target === null) return;
+        pendingGlobalTimelineSelection = {
+          boundary,
+          route: formatChangeInspectorRoute(target),
+        };
+        // Navigation usually paints after the promise settles. If a test host
+        // or cached same-route navigation painted synchronously, resolve the
+        // landing against that already-published page now.
+        syncTimelineDom();
+      })
+      .catch(() => {
+        pendingGlobalTimelineSelection = null;
+      });
+    return true;
+  };
 
   applyPrefs();
   if (!colorSchemeWatcherInstalled) {
@@ -134,8 +350,10 @@ export function installChangeInspectorInteraction(
     colorSchemeWatcherInstalled = true;
   }
 
-  const historyOrigin = (route: ValidRoute): "changes" | "attention" | null => {
-    if (route.kind === "lens") return null;
+  const historyOrigin = (
+    route: ValidRoute,
+  ): "timeline" | "changes" | "attention" | null => {
+    if (route.kind === "lens" || route.kind === "timeline") return null;
     const state = history.state;
     if (state === null || typeof state !== "object" || Array.isArray(state))
       return null;
@@ -143,16 +361,18 @@ export function installChangeInspectorInteraction(
     if (origin === null || typeof origin !== "object") return null;
     const record = origin as Record<string, unknown>;
     if (record.route !== formatChangeInspectorRoute(route)) return null;
-    return record.lens === "changes" || record.lens === "attention"
+    return record.lens === "timeline" ||
+      record.lens === "changes" ||
+      record.lens === "attention"
       ? record.lens
       : null;
   };
 
   const persistHistoryOrigin = (
     route: ValidRoute,
-    lens: "changes" | "attention",
+    lens: "timeline" | "changes" | "attention",
   ): void => {
-    if (route.kind === "lens") return;
+    if (route.kind === "lens" || route.kind === "timeline") return;
     const state = history.state;
     const retained =
       state !== null && typeof state === "object" && !Array.isArray(state)
@@ -171,18 +391,25 @@ export function installChangeInspectorInteraction(
     );
   };
 
-  const listRoute = (route: ValidRoute) => ({
-    kind: "lens" as const,
-    lens:
-      route.kind === "lens"
-        ? route.lens
-        : (historyOrigin(route) ?? exactOriginLens ?? "changes"),
-    query: route.query,
-  });
+  const listRoute = (route: ValidRoute): ValidRoute => {
+    if (route.kind === "timeline" || route.kind === "lens") return route;
+    const lens = historyOrigin(route) ?? exactOriginLens ?? "timeline";
+    if (lens !== "timeline") return { kind: "lens", lens, query: route.query };
+    // A direct event deep link has no preceding Timeline route to retain, but
+    // its typed history query is itself the reader's exact Timeline context.
+    // A captured Timeline origin still wins because it may include the signed
+    // continuation page from which the event was opened.
+    return (
+      timelineOriginRoute ??
+      (route.kind === "event"
+        ? { kind: "timeline", historyQuery: route.historyQuery }
+        : { kind: "timeline", historyQuery: {} })
+    );
+  };
 
   const focusFallback = (route: ValidRoute | null = currentRoute): void => {
     const target =
-      route !== null && route.kind !== "lens"
+      route !== null && route.kind !== "lens" && route.kind !== "timeline"
         ? window.matchMedia("(max-width: 760px)").matches
           ? document.querySelector<HTMLElement>("#detail-back")
           : document.querySelector<HTMLElement>("#detail-close")
@@ -221,6 +448,7 @@ export function installChangeInspectorInteraction(
     const input = event.target as HTMLInputElement;
     if (!input.checked) return;
     setDensity(input.value);
+    scheduleChangeInspectorTimelineRemeasure();
   };
   document
     .querySelectorAll<HTMLInputElement>("input[name='theme-mode']")
@@ -236,6 +464,7 @@ export function installChangeInspectorInteraction(
   const paletteInput = document.querySelector<HTMLInputElement>("#cmd-input");
   const paletteResults = document.querySelector<HTMLElement>("#cmd-results");
   const paletteCommands = [
+    ["Open Timeline", "timeline"],
     ["Open Changes", "changes"],
     ["Open Attention", "attention"],
   ] as const;
@@ -257,12 +486,20 @@ export function installChangeInspectorInteraction(
         button.addEventListener("click", () => {
           closeModal("#cmd-palette");
           const route = currentRoute;
-          if (route)
-            actions.navigate({
-              kind: "lens",
-              lens,
-              query: { ...route.query, after: undefined },
-            });
+          if (route) {
+            actions.navigate(
+              lens === "timeline"
+                ? { kind: "timeline", historyQuery: {} }
+                : {
+                    kind: "lens",
+                    lens,
+                    query:
+                      route.kind === "timeline"
+                        ? {}
+                        : { ...route.query, after: undefined },
+                  },
+            );
+          }
         });
         paletteResults.append(button);
       }
@@ -292,6 +529,7 @@ export function installChangeInspectorInteraction(
     const detailViewport = document.querySelector<HTMLElement>("#detail-body");
     const scrollTop = detailViewport?.scrollTop ?? 0;
     split?.classList.toggle("reading", enabled);
+    scheduleChangeInspectorTimelineRemeasure();
     if (readingButton) {
       readingButton.textContent = enabled ? "⤡" : "⤢";
       readingButton.setAttribute("aria-pressed", String(enabled));
@@ -320,6 +558,7 @@ export function installChangeInspectorInteraction(
   const divider = document.querySelector<HTMLElement>(".divider");
   const updateSplit = (value: number | null) => {
     applySplit(value);
+    scheduleChangeInspectorTimelineRemeasure();
     // `applySplit` clamps before persisting. Reflect that effective value so
     // assistive technology never hears an out-of-range width at either edge.
     divider?.setAttribute("aria-valuenow", String(preferredSplit() ?? 50));
@@ -404,9 +643,58 @@ export function installChangeInspectorInteraction(
     if (card && !target?.closest("button, a, input, select, textarea")) {
       selectedChangeId = card.dataset.changeId ?? null;
       setSelected(selectedChangeId);
+      return;
+    }
+    const timelineEvent = target?.closest<HTMLElement>(
+      "#timeline [data-event-id]",
+    );
+    if (
+      timelineEvent?.dataset.eventId &&
+      !target?.closest("button, a[href], input, select, textarea")
+    ) {
+      parkTimelineForReaderActivity();
+      const eventId = timelineEvent.dataset.eventId;
+      selectTimelineEvent(eventId);
+      const historyQuery =
+        currentRoute?.kind === "timeline" || currentRoute?.kind === "event"
+          ? currentRoute.historyQuery
+          : {};
+      actions.navigate({
+        kind: "event",
+        eventId,
+        historyQuery: { ...historyQuery, after: undefined },
+        query: {},
+      });
     }
   };
   document.addEventListener("click", onClick);
+  const onFocusIn = (event: FocusEvent) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const timelineEvent = target?.closest<HTMLElement>(
+      "#timeline [data-event-id]",
+    );
+    if (!timelineEvent?.dataset.eventId) return;
+    selectedTimelineEventId = timelineEvent.dataset.eventId;
+    setTimelineSelected(selectedTimelineEventId);
+  };
+  document.addEventListener("focusin", onFocusIn);
+  const onTimelineScroll = (event: Event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("#timeline")) parkTimelineForReaderActivity();
+  };
+  // Scroll does not bubble. Capture makes this an integration hook for the
+  // virtual list even though the renderer owns the list's own paint listener.
+  document.addEventListener("scroll", onTimelineScroll, true);
+  const timelineDomObserver = new MutationObserver(() => {
+    if (currentRoute?.kind === "timeline") syncTimelineDom();
+  });
+  const master = document.querySelector("#master");
+  if (master) {
+    timelineDomObserver.observe(master, {
+      childList: true,
+      subtree: true,
+    });
+  }
   const onKey = (event: KeyboardEvent) => {
     // Only the palette and key help belong to this interaction controller.
     // Authentication owns the reconnect dialog's settlement, focus trap, and
@@ -449,6 +737,103 @@ export function installChangeInspectorInteraction(
       document.querySelector<HTMLInputElement>("#filter-text")?.focus();
       return;
     }
+    if (route.kind === "timeline") {
+      const timeline = timelineWindow(
+        currentTimelineEventIds,
+        selectedTimelineEventId,
+      );
+      if (event.key === "j" || event.key === "ArrowDown") {
+        if (applyTimelineIntent(moveTimelineSelection(timeline, 1))) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "k" || event.key === "ArrowUp") {
+        if (applyTimelineIntent(moveTimelineSelection(timeline, -1))) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "g") {
+        if (applyGlobalTimelineBoundary("first", route)) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "G") {
+        if (applyGlobalTimelineBoundary("last", route)) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "f") {
+        if (
+          applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              "forward",
+              visibleTimelineRows(),
+              "full",
+            ),
+          )
+        ) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "b") {
+        if (
+          applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              "backward",
+              visibleTimelineRows(),
+              "full",
+            ),
+          )
+        ) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "d" || event.key === "u") {
+        if (
+          applyTimelineIntent(
+            pageTimelineSelection(
+              timeline,
+              event.key === "d" ? "forward" : "backward",
+              visibleTimelineRows(),
+              "half",
+            ),
+          )
+        ) {
+          event.preventDefault();
+        }
+        return;
+      }
+      // Lowercase f retains its historical full-page meaning. Shift-F is the
+      // non-conflicting, deliberate follow/park toggle; the visible Follow
+      // button remains the discoverable primary control.
+      if (event.key === "F") {
+        event.preventDefault();
+        actions.toggleTimelineMonitoring?.();
+        return;
+      }
+      if (
+        event.key === "Enter" &&
+        selectedTimelineEventId !== null &&
+        !isNativeActionControl(event.target)
+      ) {
+        event.preventDefault();
+        actions.navigate({
+          kind: "event",
+          eventId: selectedTimelineEventId,
+          historyQuery: route.historyQuery,
+          query: {},
+        });
+        return;
+      }
+    }
     if (event.key === "j" || event.key === "ArrowDown") {
       event.preventDefault();
       selectedChangeId = moveSelection(selectedChangeId, 1);
@@ -471,19 +856,26 @@ export function installChangeInspectorInteraction(
     }
     if (event.key === "1") {
       event.preventDefault();
-      actions.navigate({
-        kind: "lens",
-        lens: "changes",
-        query: { ...route.query, after: undefined },
-      });
+      actions.navigate({ kind: "timeline", historyQuery: {} });
       return;
     }
     if (event.key === "2") {
       event.preventDefault();
       actions.navigate({
         kind: "lens",
+        lens: "changes",
+        query:
+          route.kind === "timeline" ? {} : { ...route.query, after: undefined },
+      });
+      return;
+    }
+    if (event.key === "3") {
+      event.preventDefault();
+      actions.navigate({
+        kind: "lens",
         lens: "attention",
-        query: { ...route.query, after: undefined },
+        query:
+          route.kind === "timeline" ? {} : { ...route.query, after: undefined },
       });
       return;
     }
@@ -510,7 +902,11 @@ export function installChangeInspectorInteraction(
       updateSplit((preferredSplit() ?? 50) + 5);
       return;
     }
-    if (event.key === "Escape" && route.kind !== "lens") {
+    if (
+      event.key === "Escape" &&
+      route.kind !== "lens" &&
+      route.kind !== "timeline"
+    ) {
       event.preventDefault();
       actions.navigate(listRoute(route));
     }
@@ -531,7 +927,10 @@ export function installChangeInspectorInteraction(
 
   const stop = () => {
     document.removeEventListener("click", onClick);
+    document.removeEventListener("focusin", onFocusIn);
+    document.removeEventListener("scroll", onTimelineScroll, true);
     document.removeEventListener("keydown", onKey);
+    timelineDomObserver.disconnect();
     document
       .querySelectorAll<HTMLInputElement>("input[name='theme-mode']")
       .forEach((input) => {
@@ -571,25 +970,47 @@ export function installChangeInspectorInteraction(
     document.querySelector("#key-help")?.classList.add("hidden");
     paletteResults?.replaceChildren();
     selectedChangeId = null;
+    selectedTimelineEventId = null;
+    currentTimelineEventIds = [];
+    pendingTimelineSelection = null;
+    pendingGlobalTimelineSelection = null;
     setSelected(null);
+    setTimelineSelected(null);
     modalReturnFocus = null;
     detailReturnFocus = null;
     detailWasOpen = false;
     currentRoute = null;
     exactOriginLens = null;
+    timelineOriginRoute = null;
     detailDomIdentity = null;
   };
   return {
-    sync(snapshot) {
+    sync(snapshot, timelinePage = snapshot.generation?.history ?? null) {
       const nextRoute =
         snapshot.route.kind === "invalid" ? null : snapshot.route;
-      if (nextRoute !== null && nextRoute.kind !== "lens") {
+      currentTimelineEventIds =
+        nextRoute?.kind === "timeline" && timelinePage !== null
+          ? timelinePage.entries.map((entry) => entry.eventId)
+          : [];
+      if (
+        nextRoute !== null &&
+        nextRoute.kind !== "lens" &&
+        nextRoute.kind !== "timeline"
+      ) {
         const persistedOrigin = historyOrigin(nextRoute);
         const origin =
           persistedOrigin ??
           (currentRoute?.kind === "lens"
             ? currentRoute.lens
-            : (exactOriginLens ?? "changes"));
+            : currentRoute?.kind === "timeline"
+              ? "timeline"
+              : (exactOriginLens ?? "timeline"));
+        if (currentRoute?.kind === "timeline") {
+          // An exact Revision is deliberately a different route. Retain the
+          // originating Timeline route locally so Escape, Back, and Close
+          // preserve its server-owned filters and opaque continuation token.
+          timelineOriginRoute = currentRoute;
+        }
         exactOriginLens = origin;
         if (persistedOrigin === null) persistHistoryOrigin(nextRoute, origin);
       } else {
@@ -601,6 +1022,13 @@ export function installChangeInspectorInteraction(
       if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
         selectedChangeId = null;
       setSelected(selectedChangeId);
+      if (nextRoute?.kind === "timeline") {
+        syncTimelineDom(nextRoute);
+      } else {
+        selectedTimelineEventId = null;
+        pendingTimelineSelection = null;
+        pendingGlobalTimelineSelection = null;
+      }
       // Route state, not viewport CSS, owns whether detail is interactive.
       // A lens route keeps the retained narrow sheet off-canvas for animation,
       // but `inert` and `aria-hidden` remove it from keyboard/AT navigation.
@@ -608,7 +1036,9 @@ export function installChangeInspectorInteraction(
       // paints do not churn focus. Returning to a lens restores that opener (or
       // the programmatic master fallback if a generation replaced it).
       const detailOpen =
-        snapshot.route.kind !== "lens" && snapshot.route.kind !== "invalid";
+        snapshot.route.kind !== "lens" &&
+        snapshot.route.kind !== "timeline" &&
+        snapshot.route.kind !== "invalid";
       const detail = document.querySelector<HTMLElement>("#detail");
       const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
       const nextDetailDomIdentity =
@@ -621,8 +1051,10 @@ export function installChangeInspectorInteraction(
       const detailRouteChanged =
         currentRoute !== null &&
         currentRoute.kind !== "lens" &&
+        currentRoute.kind !== "timeline" &&
         nextRoute !== null &&
         nextRoute.kind !== "lens" &&
+        nextRoute.kind !== "timeline" &&
         formatChangeInspectorRoute(currentRoute) !==
           formatChangeInspectorRoute(nextRoute);
       document

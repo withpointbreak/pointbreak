@@ -1,7 +1,7 @@
 {
   "version": 1,
   "purpose": "The active Change-first Inspector may only import modules that preserve Change/Revision semantics or are explicitly adapted to its bounded reader contract. This inventory keeps retained presentation work visible while preventing the old aggregate-reader composition from returning through an incidental import.",
-  "keyboardAndFocusOwnership": "change-inspector.ts owns Change-first route intent and bounded read epochs. change-inspector-interaction.ts owns the local Change cursor, Change-first shortcuts, its palette/help dialogs, reader-local display controls, and route-transition focus entry/restoration after each DOM paint. auth.ts separately owns reconnect-dialog settlement, its focus trap, and focus restoration so authentication cannot be hidden while its request remains pending. change-inspector-render.ts owns focusable Change/Revision reading controls plus exact fact/file anchor focus inside the projected detail. Legacy keyboard, palette, detail, diff-controller, render, and main modules remain outside that composition until each is explicitly adapted with Change-first tests.",
+  "keyboardAndFocusOwnership": "change-inspector.ts owns Change-first route intent and bounded read epochs. change-inspector-interaction.ts owns the local Change and Timeline cursors, Change-first shortcuts, its palette/help dialogs, reader-local display controls, and route-transition focus entry/restoration after each DOM paint. change-inspector-timeline-navigation.ts owns pure page-local Timeline cursor intent, while change-inspector-timeline-boundary.ts owns opaque signed-continuation traversal to global boundaries. auth.ts separately owns reconnect-dialog settlement, its focus trap, and focus restoration so authentication cannot be hidden while its request remains pending. change-inspector-render.ts owns focusable Change/Revision reading controls plus exact fact/file anchor focus inside the projected detail. Legacy keyboard, palette, detail, diff-controller, render, and main modules remain outside that composition until each is explicitly adapted with Change-first tests.",
   "modules": [
     {
       "path": "auth.ts",
@@ -10,10 +10,100 @@
       "reason": "Owns capability recovery and the reconnect dialog's settlement, focus trap, and focus restoration. The Change-first interaction controller deliberately does not hide or settle that auth-owned dialog."
     },
     {
+      "path": "cards.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Contains argument-driven fact-card HTML emitters used only beneath exact Revision resources. It owns no selection, transport, aggregate store, or Change membership semantics."
+    },
+    {
+      "path": "change-inspector-cards.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Maps server-owned Change summaries and exact Revision pairs to accessible card presentation without inventing a title, choosing a current Revision, or deriving Change semantics in the browser."
+    },
+    {
+      "path": "change-inspector-event-presentation.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Maps one already-decoded typed Timeline event to stable labels, actor/track metadata, colors, and detail rows. It is argument-driven, has no transport or state, and cannot derive Change membership or select a Revision."
+    },
+    {
+      "path": "change-inspector-http.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the authenticated Change-reader HTTP leaf, bounded abort behavior, and typed request failures. It cannot construct or call legacy aggregate-reader routes."
+    },
+    {
       "path": "change-inspector-interaction.ts",
       "classification": "adapted",
       "activeImport": true,
-      "reason": "Owns only Change-first keyboard, route focus, palette/help dialogs, split, reading-mode, theme, and density behavior. Its local cursor can open a Change but never selects a Revision implicitly."
+      "reason": "Owns Change-first keyboard, route focus, palette/help dialogs, split, reading-mode, theme, density, and page-local Timeline cursor behavior. Its local cursors never choose a Revision implicitly."
+    },
+    {
+      "path": "change-inspector-reading.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Loads only typed Change detail, exact Revision detail/resource, association, and interdiff documents through versioned Change-reader routes and keeps each exact identity distinct."
+    },
+    {
+      "path": "change-inspector-render.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Projects one accepted Change-reader snapshot into the active shell, filters, Change cards, exact Revision reading surfaces, and Timeline detail. It fetches nothing and owns no semantic state."
+    },
+    {
+      "path": "change-inspector-router.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns Change-first fragments and bounded query syntax, including exact event routes and exact Revision pairs. URL state is request intent, never browser-derived Change state."
+    },
+    {
+      "path": "change-inspector-state.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the profile-to-staged-generation-to-route-to-paint state machine and refuses incoherent stamps. It preserves explicit Change and exact Revision selections across accepted generations."
+    },
+    {
+      "path": "change-inspector-timeline-boundary.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns honest global Timeline boundary traversal. It starts from a filtered first page, follows only opaque signed continuations from one immutable generation, detects refusal/no-progress, and returns a bounded route without owning DOM or history."
+    },
+    {
+      "path": "change-inspector-timeline-monitor.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns session-only follow, park, and new-event counts for an eligible Timeline head. It never reorders entries, decodes continuations, or replaces a parked window without explicit reader action."
+    },
+    {
+      "path": "change-inspector-timeline-navigation.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the pure page-local Timeline selection model for j/k, page movement, and local boundaries. It emits adjacent-page intent at a real page edge and never infers an unmaterialized event."
+    },
+    {
+      "path": "change-inspector-timeline.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Projects only the typed paged `/api/v2/history` document into a page-local virtualized Timeline. It preserves server-owned chronology and offers Change context only through explicit Change or exact Revision routes; it imports neither the legacy aggregate store nor legacy history endpoints."
+    },
+    {
+      "path": "change-inspector.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Is the sole served Change-first composition root. It owns request epochs, profile preflight/postflight, one staged generation, route resolution, Timeline monitoring and boundary traversal, then delegates a coherent snapshot for paint."
+    },
+    {
+      "path": "change-protocol.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Defines and validates the versioned Change-reader wire contract, exact Revision pairs, Timeline documents, authority cursor, projection stamps, and reader-profile invariants."
+    },
+    {
+      "path": "connection.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Owns only local connection and refresh presentation state plus reconnect/retry controls. It cannot fetch data or interpret Change, Revision, or Timeline semantics."
     },
     {
       "path": "detail.ts",
@@ -28,22 +118,46 @@
       "reason": "Its route, selection, and snapshot lifecycle are coupled to the legacy aggregate store. The active reader renders only an exact captured resource validated by the Change-first protocol."
     },
     {
+      "path": "diff/highlight.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Provides a pure fail-safe attributed-segment renderer for exact diff rows. It has no DOM, state, transport, identity selection, or Change semantics."
+    },
+    {
+      "path": "diff/render.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Provides argument-driven exact diff, file, and annotation rendering beneath a validated Revision resource. The stateful legacy diff controller remains quarantined."
+    },
+    {
+      "path": "disclosure.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Owns only anchored panel visibility, aria-expanded state, dismissal, and focus return for filter/view controls; it has no review-model or routing authority."
+    },
+    {
+      "path": "entry.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Is the served bootstrap leaf and imports only change-inspector.ts. Keeping it in the inventory makes the complete active TypeScript closure auditable from its actual root."
+    },
+    {
       "path": "keyboard.ts",
       "classification": "quarantined",
       "activeImport": false,
-      "reason": "Global shortcuts advance legacy Timeline/Revision cursors. Change-first keyboard behavior must be adapted from explicit Change and exact-Revision controls."
+      "reason": "Its global shortcuts advance legacy aggregate Timeline/Revision cursors. Change-aware Timeline, Change, and exact-Revision keyboard behavior lives in change-inspector-interaction.ts instead."
     },
     {
-      "path": "prefs.ts",
-      "classification": "model-neutral-retained",
-      "activeImport": true,
-      "reason": "Theme and density are reader-local display preferences; they neither fetch nor infer review semantics. Active composition may import only this model-neutral preference surface."
+      "path": "main.ts",
+      "classification": "quarantined",
+      "activeImport": false,
+      "reason": "Legacy aggregate composition root retained solely for its isolated historical tests; entry.ts is the sole served Change-first composition root."
     },
     {
-      "path": "thread-layout.ts",
+      "path": "markdown.ts",
       "classification": "model-neutral-retained",
       "activeImport": true,
-      "reason": "Defines only server-provided supersession graph geometry. Both retained legacy readers and active Change-first fact cards may consume this neutral wire contract without reaching the aggregate store."
+      "reason": "Provides pure escaped body rendering for server-provided content types. It owns no selection, transport, aggregate state, or Change inference."
     },
     {
       "path": "palette.ts",
@@ -52,16 +166,52 @@
       "reason": "Its command set targets legacy entity, lens, and selection state. It may be adapted only after Change-first command and focus contracts exist."
     },
     {
+      "path": "prefs.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Theme, density, and split are reader-local display preferences; they neither fetch nor infer review semantics. Active composition may import only this model-neutral preference surface."
+    },
+    {
+      "path": "projection.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Contains argument-driven fact and entry display helpers reused only beneath exact server-owned documents. It does not read the legacy store or resolve Change membership."
+    },
+    {
+      "path": "query.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Retains the pure bounded query grammar used within exact diff and card presentation. Timeline filtering remains server-owned and this helper cannot fetch or widen a result set."
+    },
+    {
+      "path": "refs.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Provides pure reference classification, safe linkification, and display short forms. It has no route, selection, store, or Change membership authority."
+    },
+    {
       "path": "render.ts",
       "classification": "quarantined",
       "activeImport": false,
       "reason": "The legacy store subscriber paints aggregate Timeline and Revision semantics. change-inspector-render.ts is the active bounded projection renderer."
     },
     {
-      "path": "main.ts",
-      "classification": "quarantined",
-      "activeImport": false,
-      "reason": "Legacy aggregate composition root retained solely for its isolated historical tests; entry.ts is the sole served Change-first composition root."
+      "path": "supersession.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Paints only server-computed, node-id-agnostic supersession geometry supplied to an exact fact card. It never computes topology or chooses a Revision."
+    },
+    {
+      "path": "thread-layout.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Defines only server-provided supersession graph geometry. Both retained legacy readers and active Change-first fact cards may consume this neutral wire contract without reaching the aggregate store."
+    },
+    {
+      "path": "types.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Provides shared pure view constants and structural types consumed by retained exact-resource renderers. It owns no state, transport, route, or Change/Revision resolution."
     }
   ]
 }

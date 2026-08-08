@@ -5,6 +5,7 @@ pub(crate) mod commit_oid_grouping;
 pub(crate) mod commit_range;
 pub(crate) mod cosignature;
 pub(crate) mod engagement;
+pub(crate) mod event_history;
 pub(crate) mod freshness;
 pub mod id_index;
 pub(crate) mod liveness;

@@ -5,8 +5,8 @@
 // section, and keep the markup a faithful **mirror of assets/index.html** (a
 // missing fixed id is a harness gap, not a module bug).
 //
-// The render-injected lens bodies (`#timeline` and the list/threads bodies) are
-// deliberately absent: `renderMaster` creates them inside `#master`, so the
+// The render-injected lens bodies (`#timeline` and the Change-card bodies) are
+// deliberately absent: the renderer creates them inside `#master`, so the
 // static mount leaves `#master` empty, exactly as index.html does.
 
 /** A verbatim mirror of `assets/index.html`'s `<body>` (minus the `<script>` tag). */
@@ -17,7 +17,8 @@ const INDEX_BODY = `
     <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
   </div>
   <nav id="lens-switcher" aria-label="Change lenses">
-    <button class="lens-tab" type="button" data-lens="changes" aria-pressed="true">Changes</button>
+    <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
+    <button class="lens-tab" type="button" data-lens="changes" aria-pressed="false">Changes</button>
     <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
   </nav>
   <div class="stats">
@@ -126,14 +127,14 @@ const INDEX_BODY = `
     <button id="follow-toggle" class="ghost follow-toggle" type="button" aria-pressed="true">Following</button>
   </div>
   <div class="split">
-    <button id="master-rail" class="master-rail" aria-label="Show Changes" title="Show Changes">›</button>
+    <button id="master-rail" class="master-rail" aria-label="Show Timeline" title="Show Timeline">›</button>
     <section id="master" class="master" aria-label="master pane" tabindex="-1"></section>
     <div class="divider" role="separator" aria-orientation="vertical" tabindex="0"
          aria-label="Resize panes — arrow keys adjust, Enter resets"
          aria-valuenow="50" aria-valuemin="25" aria-valuemax="75"></div>
     <aside id="detail" class="detail" aria-hidden="true" inert>
       <header class="detail-head">
-        <button id="detail-back" class="ghost detail-back" aria-label="Back to Changes">‹ Changes</button>
+        <button id="detail-back" class="ghost detail-back" aria-label="Back to Timeline">‹ Timeline</button>
         <button id="detail-read" class="ghost" aria-label="Reading mode" title="Reading mode">⤢</button>
         <button id="detail-close" class="ghost" aria-label="Close detail" title="Close detail (Esc)">✕</button>
       </header>
@@ -202,9 +203,13 @@ const INDEX_BODY = `
     <dl class="key-help-list">
       <dt><kbd>Cmd</kbd> / <kbd>Ctrl</kbd> + <kbd>K</kbd></dt><dd>open the command palette</dd>
       <dt><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></dt><dd>open the command palette</dd>
-      <dt><kbd>1</kbd> / <kbd>2</kbd></dt><dd>open the Changes / Attention lens</dd>
-      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the local Change cursor without choosing a Revision</dd>
-      <dt><kbd>Enter</kbd></dt><dd>open the selected Change; choose an explicit current Revision from there</dd>
+      <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>open Timeline / Changes / Attention</dd>
+      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the local event or Change cursor</dd>
+      <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>move a full Timeline viewport forward / backward</dd>
+      <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move a half Timeline viewport forward / backward</dd>
+      <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>move to the first / last filtered Timeline event or loaded Change</dd>
+      <dt><kbd>Shift</kbd> + <kbd>F</kbd></dt><dd>follow or park the filtered Timeline head</dd>
+      <dt><kbd>Enter</kbd></dt><dd>open the selected event or Change; choose an explicit current Revision from exact detail</dd>
       <dt><kbd>/</kbd></dt><dd>focus the search box</dd>
       <dt><kbd>Esc</kbd></dt><dd>close a dialog or return from an exact surface to its originating lens</dd>
       <dt><kbd>?</kbd></dt><dd>toggle this cheat sheet</dd>
@@ -241,8 +246,8 @@ export function mountInspectorDom(): void {
 
 /**
  * Mount the retired aggregate-reader controls for its quarantined historical
- * unit tests. The served Change-first shell deliberately contains only Changes
- * and Attention; keeping this fixture separate prevents old semantics from
+ * unit tests. The served Change-first shell presents Timeline, Changes, and
+ * Attention; keeping this fixture separate prevents old semantics from
  * leaking back into the active product merely to satisfy legacy tests.
  */
 export function mountLegacyInspectorDom(): void {

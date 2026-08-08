@@ -126,7 +126,10 @@ function assertRevisionDetail(
 
 /** Read one exact route, then reject any mismatch before a presenter sees it. */
 export async function loadChangeInspectorReading(
-  route: Exclude<ChangeInspectorRoute, { kind: "lens" | "invalid" }>,
+  route: Exclude<
+    ChangeInspectorRoute,
+    { kind: "lens" | "timeline" | "event" | "invalid" }
+  >,
   expectedProjectionStamp: string,
 ): Promise<ChangeInspectorReading> {
   if (route.kind === "change") {

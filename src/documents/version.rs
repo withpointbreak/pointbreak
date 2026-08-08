@@ -185,13 +185,19 @@ mod tests {
             .map(|(schema, _)| (*schema).to_owned())
             .filter(|schema| !schema.starts_with("pointbreak.inspect-"))
             .collect::<BTreeSet<_>>();
+        let inspector_private =
+            BTreeSet::from([crate::documents::INSPECT_EVENT_HISTORY_SCHEMA.to_owned()]);
         assert_eq!(
-            emitted,
+            emitted
+                .difference(&inspector_private)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
             cli_registered
                 .union(&headless_noninspect)
                 .cloned()
                 .collect()
         );
+        assert!(inspector_private.is_disjoint(&cli_registered));
 
         let promoted = crate::documents::promoted_inspect_document_registry()
             .iter()

@@ -37,10 +37,17 @@ import {
   createChangeInspectorState,
   stageGeneration,
 } from "./change-inspector-state";
+import { revealChangeInspectorTimelineEvent } from "./change-inspector-timeline";
+import {
+  firstTimelineRoute,
+  traverseTimelineTail,
+} from "./change-inspector-timeline-boundary";
+import { createTimelineMonitor } from "./change-inspector-timeline-monitor";
 import {
   buildChangePageUrl,
-  type ChangePageQuery,
+  buildEventHistoryUrl,
   decodeChangePage,
+  decodeEventHistory,
   decodeReaderProfile,
   sameProfileGeneration,
 } from "./change-protocol";
@@ -85,7 +92,7 @@ let pollCoordinatorStop: (() => void) | null = null;
 let requestEpoch = 0;
 
 function currentRoute(): ChangeInspectorRoute {
-  return parseChangeInspectorRoute(location.hash || "#/changes");
+  return parseChangeInspectorRoute(location.hash || "#/timeline");
 }
 
 function newProjectionRetryBudget(): ProjectionRetryBudget {
@@ -188,6 +195,13 @@ export async function bootstrapChangeInspector(
   let reading: ChangeInspectorReading | null = null;
   let readingRefusal: string | null = null;
   let visibleReading = "";
+  const timelineMonitor = createTimelineMonitor();
+  // Reader activity is a presentation-only reason to hold a live head page.
+  // The monitor's `park` operation is idempotent and never changes the route
+  // or server authority; repainting merely keeps the held window visible.
+  const parkTimelineMonitoring = () => {
+    if (timelineMonitor.park() !== null) paint();
+  };
   const paint = (pollDraft: FocusedFilterDraft | null = null) => {
     // A poll snapshots an uncommitted search before its asynchronous read
     // begins. Prefer the live draft if the user kept typing. Value preservation
@@ -202,12 +216,15 @@ export async function bootstrapChangeInspector(
                 pollDraft.restoreFocus),
           )
         : null;
+    const snapshot = state.snapshot();
+    const monitor = timelineMonitor.snapshot();
     renderChangeInspector(
-      state.snapshot(),
-      { navigate },
+      snapshot,
+      { navigate, parkTimelineMonitoring },
       {
         reading,
         refusal: readingRefusal,
+        timeline: monitor,
       },
     );
     if (draft !== null && filterInput !== null) {
@@ -221,18 +238,34 @@ export async function bootstrapChangeInspector(
         );
       }
     }
-    interaction?.sync(state.snapshot());
+    interaction?.sync(
+      snapshot,
+      snapshot.route.kind === "timeline"
+        ? (monitor?.display ?? snapshot.generation?.history ?? null)
+        : null,
+    );
   };
   let interaction: ReturnType<typeof installChangeInspectorInteraction> | null =
     null;
-  const requestKey = (query: ChangePageQuery): string =>
-    buildChangePageUrl("changes", query);
+  const requestKey = (
+    route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+  ): string =>
+    route.kind === "timeline" || route.kind === "event"
+      ? buildEventHistoryUrl(
+          route.kind === "event"
+            ? { ...route.historyQuery, after: undefined, at: route.eventId }
+            : route.historyQuery,
+        )
+      : buildChangePageUrl("changes", route.query);
   let visibleRequest = "";
   let pendingReading: { key: string; token: symbol } | null = null;
   let releaseQueuedPoll: () => void = () => {};
 
   const readingKey = (
-    route: Exclude<ChangeInspectorRoute, { kind: "lens" | "invalid" }>,
+    route: Exclude<
+      ChangeInspectorRoute,
+      { kind: "lens" | "timeline" | "event" | "invalid" }
+    >,
     projectionStamp: string,
   ): string => `${formatChangeInspectorRoute(route)}\u0000${projectionStamp}`;
 
@@ -249,7 +282,11 @@ export async function bootstrapChangeInspector(
     retryBudget: ProjectionRetryBudget,
     pollDraft: FocusedFilterDraft | null = null,
   ): Promise<void> => {
-    if (route.kind === "lens") {
+    if (
+      route.kind === "lens" ||
+      route.kind === "timeline" ||
+      route.kind === "event"
+    ) {
       clearReading();
       return;
     }
@@ -299,7 +336,8 @@ export async function bootstrapChangeInspector(
       if (
         (error instanceof ChangeInspectorGenerationChanged ||
           (error instanceof ChangeInspectorPageFailure &&
-            error.code === "stale_projection")) &&
+            (error.code === "stale_projection" ||
+              error.code === "moving_journal"))) &&
         consumeProjectionRetry(retryBudget)
       ) {
         await loadGeneration(route, retryBudget, pollDraft);
@@ -332,7 +370,8 @@ export async function bootstrapChangeInspector(
         renderChangeInspectorUnavailable(profile.availability);
         return;
       }
-      const query = route.query;
+      const query =
+        route.kind === "timeline" || route.kind === "event" ? {} : route.query;
       const activeLens = lensForRoute(route);
       // Continuations are signed to one exact lens/query/projection tuple.
       // Stage the active page beside the companion lens's first page; sending
@@ -342,7 +381,21 @@ export async function bootstrapChangeInspector(
         activeLens === "changes" ? query : firstPageQuery(query);
       const attentionQuery =
         activeLens === "attention" ? query : firstPageQuery(query);
-      const [changes, attention] = await Promise.all([
+      const historyRequest =
+        route.kind === "timeline" || route.kind === "event"
+          ? fetchChangeInspectorJSON(
+              buildEventHistoryUrl(
+                route.kind === "event"
+                  ? {
+                      ...route.historyQuery,
+                      after: undefined,
+                      at: route.eventId,
+                    }
+                  : route.historyQuery,
+              ),
+            ).then(decodeEventHistory)
+          : Promise.resolve(null);
+      const [changes, attention, history] = await Promise.all([
         fetchChangeInspectorJSON(
           buildChangePageUrl("changes", changesQuery),
         ).then((value) =>
@@ -353,13 +406,24 @@ export async function bootstrapChangeInspector(
         ).then((value) =>
           decodeChangePage(value, { lens: "attention", bounded: true }),
         ),
+        historyRequest,
       ]);
       const postflight = decodeReaderProfile(
         await fetchChangeInspectorJSON("/api/v2/profile"),
       );
       if (epoch !== requestEpoch) return;
-      const staged = stageGeneration(profile, changes, attention, postflight);
-      if (route.kind !== "lens") {
+      const staged = stageGeneration(
+        profile,
+        changes,
+        attention,
+        postflight,
+        history,
+      );
+      if (
+        route.kind !== "lens" &&
+        route.kind !== "timeline" &&
+        route.kind !== "event"
+      ) {
         const requestedReading = readingKey(route, changes.projectionStamp);
         if (visibleReading !== requestedReading) {
           // Never paint a detail from the prior generation beside a newly
@@ -370,7 +434,10 @@ export async function bootstrapChangeInspector(
         }
       }
       state.publish(staged);
-      visibleRequest = requestKey(query);
+      if (route.kind === "timeline" && history !== null) {
+        timelineMonitor.observe(route, history);
+      }
+      visibleRequest = requestKey(route);
       paint(pollDraft);
       await loadReading(
         route,
@@ -383,7 +450,8 @@ export async function bootstrapChangeInspector(
       if (epoch !== requestEpoch) return;
       if (
         ((error instanceof ChangeInspectorPageFailure &&
-          error.code === "stale_projection") ||
+          (error.code === "stale_projection" ||
+            error.code === "moving_journal")) ||
           error instanceof ChangeInspectorGenerationChanged) &&
         consumeProjectionRetry(retryBudget)
       ) {
@@ -410,7 +478,7 @@ export async function bootstrapChangeInspector(
     // before parsing semantic URL state.
     const capability = bootstrapCapability();
     const route = parseChangeInspectorRoute(
-      capability.cleanedHash || "#/changes",
+      capability.cleanedHash || "#/timeline",
     );
     // Every URL intent, including same-query detail/focus navigation, owns a
     // new read epoch. An older detail request may still finish, but it may not
@@ -426,7 +494,7 @@ export async function bootstrapChangeInspector(
     }
     let request: string;
     try {
-      request = requestKey(route.query);
+      request = requestKey(route);
     } catch (error) {
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
@@ -478,7 +546,104 @@ export async function bootstrapChangeInspector(
     initConnectionControls();
     connectionControlsInitialized = true;
   }
-  prepareChangeInspectorShell({ navigate });
+  const toggleTimelineMonitoring = () => {
+    if (currentRoute().kind !== "timeline") return;
+    if (timelineMonitor.toggle() !== null) paint();
+  };
+  const navigateTimelineBoundary = async (
+    boundary: "first" | "last",
+    route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+  ): Promise<Extract<ChangeInspectorRoute, { kind: "timeline" }> | null> => {
+    const first = firstTimelineRoute(route);
+    if (boundary === "first") {
+      navigate(first);
+      return first;
+    }
+
+    const retryBudget = newProjectionRetryBudget();
+    const requestedRoute = formatChangeInspectorRoute(route);
+    for (;;) {
+      const generation = state.snapshot().generation;
+      const anchor = timelineMonitor.snapshot()?.display ?? generation?.history;
+      if (generation === null || anchor === null || anchor === undefined) {
+        return null;
+      }
+      const epoch = ++requestEpoch;
+      try {
+        const preflight = decodeReaderProfile(
+          await fetchChangeInspectorJSON("/api/v2/profile"),
+        );
+        if (
+          epoch !== requestEpoch ||
+          currentRoute().kind === "invalid" ||
+          formatChangeInspectorRoute(
+            currentRoute() as Exclude<
+              ChangeInspectorRoute,
+              { kind: "invalid" }
+            >,
+          ) !== requestedRoute
+        ) {
+          return null;
+        }
+        if (!sameProfileGeneration(generation.profile, preflight)) {
+          throw new ChangeInspectorGenerationChanged();
+        }
+        const tail = await traverseTimelineTail(
+          route,
+          anchor,
+          async (query) => {
+            const page = decodeEventHistory(
+              await fetchChangeInspectorJSON(buildEventHistoryUrl(query)),
+            );
+            if (epoch !== requestEpoch) {
+              throw new ChangeInspectorGenerationChanged();
+            }
+            return page;
+          },
+        );
+        const postflight = decodeReaderProfile(
+          await fetchChangeInspectorJSON("/api/v2/profile"),
+        );
+        if (
+          epoch !== requestEpoch ||
+          !sameProfileGeneration(generation.profile, postflight)
+        ) {
+          throw new ChangeInspectorGenerationChanged();
+        }
+        navigate(tail.route);
+        return tail.route;
+      } catch (error) {
+        if (epoch !== requestEpoch) return null;
+        if (
+          (error instanceof ChangeInspectorGenerationChanged ||
+            (error instanceof ChangeInspectorPageFailure &&
+              (error.code === "stale_projection" ||
+                error.code === "moving_journal"))) &&
+          consumeProjectionRetry(retryBudget)
+        ) {
+          await loadGeneration(route, retryBudget);
+          if (
+            currentRoute().kind === "invalid" ||
+            formatChangeInspectorRoute(
+              currentRoute() as Exclude<
+                ChangeInspectorRoute,
+                { kind: "invalid" }
+              >,
+            ) !== requestedRoute
+          ) {
+            return null;
+          }
+          continue;
+        }
+        visibleRequest = "";
+        clearReading();
+        state.clearGeneration();
+        renderChangeInspectorRefusal(error);
+        return null;
+      }
+    }
+  };
+  prepareChangeInspectorShell({ navigate, toggleTimelineMonitoring });
   filterDisclosure = createDisclosure({
     container: "#filter-controls",
     trigger: "#filters-toggle",
@@ -489,23 +654,41 @@ export async function bootstrapChangeInspector(
     trigger: "#view-toggle",
     panel: "#view-panel",
   });
-  interaction = installChangeInspectorInteraction({ navigate });
+  interaction = installChangeInspectorInteraction({
+    navigate,
+    navigateTimelineBoundary,
+    revealTimelineEvent: revealChangeInspectorTimelineEvent,
+    toggleTimelineMonitoring,
+    parkTimelineMonitoring,
+  });
   interactionStop = interaction.stop;
   filterInput = document.querySelector<HTMLInputElement>("#filter-text");
   filterInputListener = () => {
     const route = currentRoute();
     const base =
       route.kind === "invalid"
-        ? { kind: "lens" as const, lens: "changes" as const, query: {} }
+        ? { kind: "timeline" as const, historyQuery: {} }
         : route;
-    navigate({
-      ...base,
-      query: {
-        ...base.query,
-        after: undefined,
-        q: filterInput?.value || undefined,
-      },
-    } as Exclude<ChangeInspectorRoute, { kind: "invalid" }>);
+    if (base.kind === "timeline" || base.kind === "event") {
+      navigate({
+        kind: "timeline",
+        historyQuery: {
+          ...base.historyQuery,
+          after: undefined,
+          at: undefined,
+          q: filterInput?.value || undefined,
+        },
+      });
+    } else {
+      navigate({
+        ...base,
+        query: {
+          ...base.query,
+          after: undefined,
+          q: filterInput?.value || undefined,
+        },
+      } as Exclude<ChangeInspectorRoute, { kind: "invalid" }>);
+    }
   };
   filterInput?.addEventListener("change", filterInputListener);
   await onRoute();
@@ -523,6 +706,8 @@ export async function bootstrapChangeInspector(
       const generation = state.snapshot().generation;
       if (
         route.kind !== "lens" &&
+        route.kind !== "timeline" &&
+        route.kind !== "event" &&
         generation !== null &&
         pendingReading?.key ===
           readingKey(route, generation.changes.projectionStamp)

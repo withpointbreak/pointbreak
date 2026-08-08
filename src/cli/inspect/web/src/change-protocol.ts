@@ -15,7 +15,413 @@ export type ReaderProfileAvailability =
   | "migration_in_progress"
   | "ready";
 
+/**
+ * Complete identity of one authoritative store generation. Journal records
+ * include capability records as well as review events, so neither record count
+ * nor either set hash may be inferred from the event-only fields.
+ */
+export interface AuthorityCursorV2 {
+  schema: "pointbreak.authority-cursor.v2";
+  journalRecordCount: number;
+  eventCount: number;
+  journalRecordSetHash: string;
+  eventSetHash: string;
+  capabilitySetHash: string;
+}
+
 export type ChangeLens = "changes" | "attention";
+
+/**
+ * Query for the Change-aware event Timeline. This is intentionally separate
+ * from the Change-card page query: Timeline chronology permits `asc`/`desc`,
+ * while card pages retain their one `change_id_asc` order.
+ */
+export interface EventHistoryQuery {
+  limit?: number;
+  after?: string;
+  at?: string;
+  q?: string;
+  type?: string;
+  track?: string;
+  change?: string;
+  revision?: string;
+  artifactHash?: string;
+  order?: "asc" | "desc";
+}
+
+export interface EventHistoryRevisionRef {
+  revisionId: string;
+  objectArtifactContentHash: string;
+}
+
+/** The review-domain event kinds admitted by `/api/v2/history`. */
+export const EVENT_HISTORY_EVENT_TYPES = [
+  "review_initialized",
+  "work_object_proposed",
+  "review_observation_recorded",
+  "review_assessment_recorded",
+  "input_request_opened",
+  "input_request_responded",
+  "review_note_imported",
+  "revision_ref_associated",
+  "revision_ref_withdrawn",
+  "revision_commit_associated",
+  "revision_commit_withdrawn",
+  "validation_check_recorded",
+  "change_declared",
+  "change_membership_asserted",
+  "change_membership_withdrawn",
+  "change_link_asserted",
+  "change_revision_relation_asserted",
+  "change_revision_relation_withdrawn",
+  "revision_relation_attested",
+  "review_fact_ported",
+] as const;
+
+export type EventHistoryEventType = (typeof EVENT_HISTORY_EVENT_TYPES)[number];
+
+export interface EventHistoryWriter {
+  actorId: string;
+  producer: {
+    name: string;
+    version: string;
+  };
+}
+
+export type EventHistoryAssertionMode = "advisory" | "operative";
+
+export interface EventHistorySourceRef {
+  sourceSystem: string;
+  sourceId: string;
+}
+
+export interface EventHistoryIngest {
+  via: "ingest-events" | "bundle-apply";
+  receivedAt: string;
+}
+
+export type EventHistorySubject =
+  | { kind: "journal"; journalId: string }
+  | { kind: "review"; target: FactTarget }
+  | { kind: "change"; changeId: string }
+  | { kind: "change_membership_claim"; membershipClaimId: string }
+  | { kind: "change_link_claim"; linkClaimId: string }
+  | {
+      kind: "change_revision_relation_claim";
+      relationClaimId: string;
+    }
+  | {
+      kind: "revision_relation_attestation";
+      relationAttestationId: string;
+      revision: EventHistoryRevisionRef;
+    }
+  | {
+      kind: "review_fact_port";
+      portId: string;
+      originRevision: EventHistoryRevisionRef;
+      originFact: FactRef;
+    };
+
+interface WorkObjectProposedSummary {
+  engagementId: string;
+  revision: {
+    id: string;
+    objectId: string;
+    gitProvenance?: unknown;
+  };
+  summary: string | null;
+  objectArtifactContentHash: string;
+  supersedes: string[];
+}
+
+interface ObservationSummary {
+  observationId: string;
+  target: FactTarget;
+  title: string;
+  body?: string;
+  tags?: string[];
+  confidence?: string;
+  supersedesObservationIds?: string[];
+  respondsToObservationIds?: string[];
+}
+
+interface AssessmentSummary {
+  assessmentId: string;
+  target: FactTarget;
+  assessment:
+    | "accepted"
+    | "accepted_with_follow_up"
+    | "needs_changes"
+    | "needs_clarification";
+  summary?: string;
+  replacesAssessmentIds?: string[];
+  relatedObservationIds?: string[];
+  relatedInputRequestIds?: string[];
+}
+
+interface InputRequestOpenedSummary {
+  inputRequestId: string;
+  target: FactTarget;
+  reasonCode:
+    | "ambiguous_state"
+    | "unsafe_action"
+    | "stale_revision"
+    | "failed_gate"
+    | "external_side_effect"
+    | "conflicting_event"
+    | "missing_permission"
+    | "manual_decision_required"
+    | "insufficient_evidence";
+  title: string;
+  body?: string;
+}
+
+interface InputRequestRespondedSummary {
+  inputRequestResponseId: string;
+  inputRequestId: string;
+  revisionId: string;
+  outcome: "approved" | "rejected" | "dismissed" | "superseded" | "abandoned";
+  reason?: string;
+}
+
+interface RevisionRefAssociatedSummary {
+  refAssociationId: string;
+  target: FactTarget;
+  refName: string;
+  headOid: string;
+}
+
+interface RevisionRefWithdrawnSummary {
+  refWithdrawalId: string;
+  target: FactTarget;
+  refAssociationId: string;
+}
+
+interface RevisionCommitAssociatedSummary {
+  commitAssociationId: string;
+  target: FactTarget;
+  commit:
+    | { kind: "git_commit"; commitOid: string; treeOid: string }
+    | { kind: "git_tree"; treeOid: string }
+    | { kind: "git_index"; treeOid: string }
+    | { kind: "git_working_tree"; worktreeRoot: string };
+}
+
+interface RevisionCommitWithdrawnSummary {
+  commitWithdrawalId: string;
+  target: FactTarget;
+  commitAssociationId: string;
+}
+
+interface ValidationCheckSummary {
+  validationCheckId: string;
+  target: { kind: "revision"; revisionId: string };
+  checkName: string;
+  command?: string;
+  status: "passed" | "failed" | "errored" | "skipped";
+  exitCode?: number;
+  trigger: "manual" | "push" | "pull_request";
+  summary?: string;
+}
+
+interface ChangeDeclaredSummary {
+  schema: "pointbreak.change-declared";
+  version: 1;
+  declarationClaimId: string;
+  changeId: string;
+  identityDescriptor:
+    | {
+        kind: "opaque_nonce";
+        schema: "pointbreak.change-identity.v1";
+        nonce: string;
+      }
+    | {
+        kind: "root_revision";
+        schema: "pointbreak.change-identity.v1";
+        revision_id: string;
+      };
+  claimNonce: string;
+}
+
+interface ChangeMembershipAssertedSummary {
+  schema: "pointbreak.change-membership-asserted";
+  version: 1;
+  membershipClaimId: string;
+  changeId: string;
+  revisionId: string;
+  claimNonce: string;
+}
+
+interface ChangeMembershipWithdrawnSummary {
+  schema: "pointbreak.change-membership-withdrawn";
+  version: 1;
+  membershipWithdrawalId: string;
+  membershipClaimId: string;
+  claimNonce: string;
+}
+
+interface ChangeLinkAssertedSummary {
+  schema: "pointbreak.change-link-asserted";
+  version: 1;
+  linkClaimId: string;
+  leftChangeId: string;
+  rightChangeId: string;
+  relation: "same_work" | "related_work";
+  claimNonce: string;
+}
+
+interface ChangeRevisionRelationAssertedSummary {
+  schema: "pointbreak.change-revision-relation-asserted";
+  version: 1;
+  relationClaimId: string;
+  changeId: string;
+  successor: EventHistoryRevisionRef;
+  predecessor: EventHistoryRevisionRef;
+  relation: "supersedes";
+  claimNonce: string;
+}
+
+interface ChangeRevisionRelationWithdrawnSummary {
+  schema: "pointbreak.change-revision-relation-withdrawn";
+  version: 1;
+  relationWithdrawalId: string;
+  relationClaimId: string;
+  claimNonce: string;
+}
+
+interface RevisionRelationAttestedSummary {
+  schema: "pointbreak.revision-relation-attested";
+  version: 1;
+  relationAttestationId: string;
+  revision: EventHistoryRevisionRef;
+  commitAssociationId: string;
+  semanticRelation:
+    | "exact_materialization"
+    | "equivalent_rewrite"
+    | "content_preserving_extension"
+    | "landing_provenance"
+    | "related_provenance"
+    | "unknown";
+  proofStatus:
+    | "verified"
+    | "asserted"
+    | "unverified"
+    | "indeterminate"
+    | "refuted";
+  proofMethod: string;
+  proofAlgorithmVersion: string;
+  captureScope: string[];
+  comparisonBaseOrParent: string | null;
+  endpointOids: string[];
+  evidenceContentHash: string | null;
+  resultDigest: string;
+}
+
+interface ReviewFactPortedSummary {
+  schema: "pointbreak.review-fact-ported";
+  version: 1;
+  portId: string;
+  originRevision: EventHistoryRevisionRef;
+  originFact: FactRef;
+  targetRevision: EventHistoryRevisionRef;
+  relation:
+    | "context_only"
+    | "reanchored_as"
+    | "carried_open_as"
+    | "resolved_by";
+  targetFact: FactRef | null;
+  rationaleContentHash: string | null;
+  contextChangeId: string | null;
+}
+
+export type EventHistorySummary =
+  | { kind: "review_initialized" }
+  | { kind: "work_object_proposed"; details: WorkObjectProposedSummary }
+  | { kind: "review_observation_recorded"; details: ObservationSummary }
+  | { kind: "review_assessment_recorded"; details: AssessmentSummary }
+  | { kind: "input_request_opened"; details: InputRequestOpenedSummary }
+  | { kind: "input_request_responded"; details: InputRequestRespondedSummary }
+  | { kind: "review_note_imported" }
+  | { kind: "revision_ref_associated"; details: RevisionRefAssociatedSummary }
+  | { kind: "revision_ref_withdrawn"; details: RevisionRefWithdrawnSummary }
+  | {
+      kind: "revision_commit_associated";
+      details: RevisionCommitAssociatedSummary;
+    }
+  | {
+      kind: "revision_commit_withdrawn";
+      details: RevisionCommitWithdrawnSummary;
+    }
+  | { kind: "validation_check_recorded"; details: ValidationCheckSummary }
+  | { kind: "change_declared"; details: ChangeDeclaredSummary }
+  | {
+      kind: "change_membership_asserted";
+      details: ChangeMembershipAssertedSummary;
+    }
+  | {
+      kind: "change_membership_withdrawn";
+      details: ChangeMembershipWithdrawnSummary;
+    }
+  | { kind: "change_link_asserted"; details: ChangeLinkAssertedSummary }
+  | {
+      kind: "change_revision_relation_asserted";
+      details: ChangeRevisionRelationAssertedSummary;
+    }
+  | {
+      kind: "change_revision_relation_withdrawn";
+      details: ChangeRevisionRelationWithdrawnSummary;
+    }
+  | {
+      kind: "revision_relation_attested";
+      details: RevisionRelationAttestedSummary;
+    }
+  | { kind: "review_fact_ported"; details: ReviewFactPortedSummary };
+
+export interface EventHistoryEntry {
+  eventId: string;
+  eventType: EventHistoryEventType;
+  occurredAt: string;
+  payloadHash: string;
+  journalId: string;
+  trackId?: string;
+  writer: EventHistoryWriter;
+  verificationStatus: "valid" | "invalid" | "untrusted_key" | "unsigned";
+  assertionMode: EventHistoryAssertionMode;
+  signer?: string;
+  sourceRef?: EventHistorySourceRef;
+  ingest?: EventHistoryIngest;
+  subject: EventHistorySubject;
+  changeIds: string[];
+  revisionRefs: EventHistoryRevisionRef[];
+  unresolvedRevisionIds: string[];
+  summary: EventHistorySummary;
+}
+
+export interface EventHistoryDocument {
+  schema: "pointbreak.inspect-event-history";
+  version: 1;
+  authorityCursor: AuthorityCursorV2;
+  sourceChangeProjectionStamp: string;
+  timelineProjectionStamp: string;
+  order: "asc" | "desc";
+  eventCount: number;
+  matchCount: number;
+  offset: number;
+  matchIndex?: number;
+  facets: Record<string, number>;
+  completion: {
+    eventTypes: EventHistoryEventType[];
+    trackIds: string[];
+    changeIds: string[];
+    revisionRefs: EventHistoryRevisionRef[];
+    unresolvedRevisionIds: string[];
+  };
+  diagnostics: string[];
+  queryNotices: string[];
+  entries: EventHistoryEntry[];
+  previous?: string;
+  next?: string;
+}
 
 export const CHANGE_PAGE_LIMIT = 50;
 export const MAX_LIVE_CHANGE_ROWS = 150;
@@ -93,7 +499,7 @@ export interface ReaderProfile {
   version: 1;
   availability: ReaderProfileAvailability;
   minimumReaderProfile?: string;
-  authorityCursor: Record<string, unknown>;
+  authorityCursor: AuthorityCursorV2;
   commitGraphStamp?: string;
   documents: Record<string, number>;
 }
@@ -685,10 +1091,513 @@ export function buildChangePageUrl(
   return `/api/v2/${lens}?${params}`;
 }
 
+/** Construct the strict bounded Timeline request without borrowing legacy URLs. */
+export function buildEventHistoryUrl(query: EventHistoryQuery = {}): string {
+  const limit = query.limit ?? 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("Timeline limit must be an integer from 1 through 100");
+  }
+  if (query.after !== undefined && query.at !== undefined) {
+    throw new Error("Timeline at and after are mutually exclusive");
+  }
+  if (
+    (query.revision === undefined) !== (query.artifactHash === undefined) ||
+    (query.revision !== undefined && (!query.revision || !query.artifactHash))
+  ) {
+    throw new Error("Timeline revision requires an exact artifact hash");
+  }
+  const eventTypes = query.type?.split(",");
+  if (eventTypes?.some((eventType) => !isEventHistoryEventType(eventType))) {
+    throw new Error("Timeline type contains an unknown event type");
+  }
+  if (eventTypes && new Set(eventTypes).size !== eventTypes.length) {
+    throw new Error("Timeline type contains a duplicate event type");
+  }
+  const canonicalTypes = eventTypes?.sort().join(",");
+  const params = new URLSearchParams({ limit: String(limit) });
+  const textFields = [
+    "after",
+    "at",
+    "q",
+    "track",
+    "change",
+    "revision",
+    "artifactHash",
+  ] as const;
+  for (const field of textFields) {
+    const value = query[field];
+    if (value === undefined) continue;
+    if (!value) throw new Error(`Timeline ${field} must be non-empty`);
+    params.set(
+      field,
+      field === "q" ? trimUnicodeWhitespace(value).toLowerCase() : value,
+    );
+  }
+  if (canonicalTypes) params.set("type", canonicalTypes);
+  if (
+    query.order !== undefined &&
+    query.order !== "asc" &&
+    query.order !== "desc"
+  ) {
+    throw new Error("Timeline order must be asc or desc");
+  }
+  params.set("order", query.order ?? "desc");
+  return `/api/v2/history?${params}`;
+}
+
+function isEventHistoryRevisionRef(
+  value: unknown,
+): value is EventHistoryRevisionRef {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.revisionId) &&
+    nonEmptyString(value.objectArtifactContentHash)
+  );
+}
+
+const EVENT_HISTORY_EVENT_TYPE_VALUES = new Set<string>(
+  EVENT_HISTORY_EVENT_TYPES,
+);
+
+function isEventHistoryEventType(
+  value: unknown,
+): value is EventHistoryEventType {
+  return (
+    typeof value === "string" && EVENT_HISTORY_EVENT_TYPE_VALUES.has(value)
+  );
+}
+
+function isEventHistoryWriter(value: unknown): value is EventHistoryWriter {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.actorId) &&
+    isRecord(value.producer) &&
+    nonEmptyString(value.producer.name) &&
+    nonEmptyString(value.producer.version)
+  );
+}
+
+function isReviewEndpoint(
+  value: unknown,
+): value is RevisionCommitAssociatedSummary["commit"] {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "git_commit":
+      return nonEmptyString(value.commitOid) && nonEmptyString(value.treeOid);
+    case "git_tree":
+    case "git_index":
+      return nonEmptyString(value.treeOid);
+    case "git_working_tree":
+      return nonEmptyString(value.worktreeRoot);
+    default:
+      return false;
+  }
+}
+
+function isEventHistorySubject(value: unknown): value is EventHistorySubject {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "journal":
+      return nonEmptyString(value.journalId);
+    case "review":
+      return isFactTarget(value.target);
+    case "change":
+      return nonEmptyString(value.changeId);
+    case "change_membership_claim":
+      return nonEmptyString(value.membershipClaimId);
+    case "change_link_claim":
+      return nonEmptyString(value.linkClaimId);
+    case "change_revision_relation_claim":
+      return nonEmptyString(value.relationClaimId);
+    case "revision_relation_attestation":
+      return (
+        nonEmptyString(value.relationAttestationId) &&
+        isEventHistoryRevisionRef(value.revision)
+      );
+    case "review_fact_port":
+      return (
+        nonEmptyString(value.portId) &&
+        isEventHistoryRevisionRef(value.originRevision) &&
+        isFactRef(value.originFact)
+      );
+    default:
+      return false;
+  }
+}
+
+function isOptionalStringArray(value: unknown): boolean {
+  return value === undefined || isStringArray(value);
+}
+
+function isNullableString(value: unknown): boolean {
+  return value === null || typeof value === "string";
+}
+
+function isReviewTargetSummary(value: unknown): value is FactTarget {
+  return isFactTarget(value);
+}
+
+function isEventHistorySummary(
+  value: unknown,
+  eventType: EventHistoryEventType,
+): value is EventHistorySummary {
+  if (!isRecord(value) || value.kind !== eventType) return false;
+  if (
+    eventType === "review_initialized" ||
+    eventType === "review_note_imported"
+  ) {
+    return value.details === undefined;
+  }
+  const details = value.details;
+  if (!isRecord(details)) return false;
+  switch (eventType) {
+    case "work_object_proposed":
+      return (
+        nonEmptyString(details.engagementId) &&
+        isRecord(details.revision) &&
+        nonEmptyString(details.revision.id) &&
+        nonEmptyString(details.revision.objectId) &&
+        isNullableString(details.summary) &&
+        nonEmptyString(details.objectArtifactContentHash) &&
+        isStringArray(details.supersedes)
+      );
+    case "review_observation_recorded":
+      return (
+        nonEmptyString(details.observationId) &&
+        isReviewTargetSummary(details.target) &&
+        nonEmptyString(details.title) &&
+        optionalString(details.body) &&
+        isOptionalStringArray(details.tags) &&
+        optionalString(details.confidence) &&
+        isOptionalStringArray(details.supersedesObservationIds) &&
+        isOptionalStringArray(details.respondsToObservationIds)
+      );
+    case "review_assessment_recorded":
+      return (
+        nonEmptyString(details.assessmentId) &&
+        isReviewTargetSummary(details.target) &&
+        (details.assessment === "accepted" ||
+          details.assessment === "accepted_with_follow_up" ||
+          details.assessment === "needs_changes" ||
+          details.assessment === "needs_clarification") &&
+        optionalString(details.summary) &&
+        isOptionalStringArray(details.replacesAssessmentIds) &&
+        isOptionalStringArray(details.relatedObservationIds) &&
+        isOptionalStringArray(details.relatedInputRequestIds)
+      );
+    case "input_request_opened":
+      return (
+        nonEmptyString(details.inputRequestId) &&
+        isReviewTargetSummary(details.target) &&
+        (details.reasonCode === "ambiguous_state" ||
+          details.reasonCode === "unsafe_action" ||
+          details.reasonCode === "stale_revision" ||
+          details.reasonCode === "failed_gate" ||
+          details.reasonCode === "external_side_effect" ||
+          details.reasonCode === "conflicting_event" ||
+          details.reasonCode === "missing_permission" ||
+          details.reasonCode === "manual_decision_required" ||
+          details.reasonCode === "insufficient_evidence") &&
+        nonEmptyString(details.title) &&
+        optionalString(details.body)
+      );
+    case "input_request_responded":
+      return (
+        nonEmptyString(details.inputRequestResponseId) &&
+        nonEmptyString(details.inputRequestId) &&
+        nonEmptyString(details.revisionId) &&
+        (details.outcome === "approved" ||
+          details.outcome === "rejected" ||
+          details.outcome === "dismissed" ||
+          details.outcome === "superseded" ||
+          details.outcome === "abandoned") &&
+        optionalString(details.reason)
+      );
+    case "revision_ref_associated":
+      return (
+        nonEmptyString(details.refAssociationId) &&
+        isReviewTargetSummary(details.target) &&
+        nonEmptyString(details.refName) &&
+        nonEmptyString(details.headOid)
+      );
+    case "revision_ref_withdrawn":
+      return (
+        nonEmptyString(details.refWithdrawalId) &&
+        isReviewTargetSummary(details.target) &&
+        nonEmptyString(details.refAssociationId)
+      );
+    case "revision_commit_associated":
+      return (
+        nonEmptyString(details.commitAssociationId) &&
+        isReviewTargetSummary(details.target) &&
+        isReviewEndpoint(details.commit)
+      );
+    case "revision_commit_withdrawn":
+      return (
+        nonEmptyString(details.commitWithdrawalId) &&
+        isReviewTargetSummary(details.target) &&
+        nonEmptyString(details.commitAssociationId)
+      );
+    case "validation_check_recorded":
+      return (
+        nonEmptyString(details.validationCheckId) &&
+        isRecord(details.target) &&
+        details.target.kind === "revision" &&
+        nonEmptyString(details.target.revisionId) &&
+        nonEmptyString(details.checkName) &&
+        optionalString(details.command) &&
+        (details.status === "passed" ||
+          details.status === "failed" ||
+          details.status === "errored" ||
+          details.status === "skipped") &&
+        (details.exitCode === undefined ||
+          (typeof details.exitCode === "number" &&
+            Number.isSafeInteger(details.exitCode))) &&
+        (details.trigger === "manual" ||
+          details.trigger === "push" ||
+          details.trigger === "pull_request") &&
+        optionalString(details.summary)
+      );
+    case "change_declared":
+      return (
+        details.schema === "pointbreak.change-declared" &&
+        details.version === 1 &&
+        nonEmptyString(details.declarationClaimId) &&
+        nonEmptyString(details.changeId) &&
+        isRecord(details.identityDescriptor) &&
+        details.identityDescriptor.schema === "pointbreak.change-identity.v1" &&
+        ((details.identityDescriptor.kind === "opaque_nonce" &&
+          nonEmptyString(details.identityDescriptor.nonce)) ||
+          (details.identityDescriptor.kind === "root_revision" &&
+            nonEmptyString(details.identityDescriptor.revision_id))) &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "change_membership_asserted":
+      return (
+        details.schema === "pointbreak.change-membership-asserted" &&
+        details.version === 1 &&
+        nonEmptyString(details.membershipClaimId) &&
+        nonEmptyString(details.changeId) &&
+        nonEmptyString(details.revisionId) &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "change_membership_withdrawn":
+      return (
+        details.schema === "pointbreak.change-membership-withdrawn" &&
+        details.version === 1 &&
+        nonEmptyString(details.membershipWithdrawalId) &&
+        nonEmptyString(details.membershipClaimId) &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "change_link_asserted":
+      return (
+        details.schema === "pointbreak.change-link-asserted" &&
+        details.version === 1 &&
+        nonEmptyString(details.linkClaimId) &&
+        nonEmptyString(details.leftChangeId) &&
+        nonEmptyString(details.rightChangeId) &&
+        (details.relation === "same_work" ||
+          details.relation === "related_work") &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "change_revision_relation_asserted":
+      return (
+        details.schema === "pointbreak.change-revision-relation-asserted" &&
+        details.version === 1 &&
+        nonEmptyString(details.relationClaimId) &&
+        nonEmptyString(details.changeId) &&
+        isEventHistoryRevisionRef(details.successor) &&
+        isEventHistoryRevisionRef(details.predecessor) &&
+        details.relation === "supersedes" &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "change_revision_relation_withdrawn":
+      return (
+        details.schema === "pointbreak.change-revision-relation-withdrawn" &&
+        details.version === 1 &&
+        nonEmptyString(details.relationWithdrawalId) &&
+        nonEmptyString(details.relationClaimId) &&
+        nonEmptyString(details.claimNonce)
+      );
+    case "revision_relation_attested":
+      return (
+        details.schema === "pointbreak.revision-relation-attested" &&
+        details.version === 1 &&
+        nonEmptyString(details.relationAttestationId) &&
+        isEventHistoryRevisionRef(details.revision) &&
+        nonEmptyString(details.commitAssociationId) &&
+        (details.semanticRelation === "exact_materialization" ||
+          details.semanticRelation === "equivalent_rewrite" ||
+          details.semanticRelation === "content_preserving_extension" ||
+          details.semanticRelation === "landing_provenance" ||
+          details.semanticRelation === "related_provenance" ||
+          details.semanticRelation === "unknown") &&
+        (details.proofStatus === "verified" ||
+          details.proofStatus === "asserted" ||
+          details.proofStatus === "unverified" ||
+          details.proofStatus === "indeterminate" ||
+          details.proofStatus === "refuted") &&
+        nonEmptyString(details.proofMethod) &&
+        nonEmptyString(details.proofAlgorithmVersion) &&
+        isStringArray(details.captureScope) &&
+        isNullableString(details.comparisonBaseOrParent) &&
+        isStringArray(details.endpointOids) &&
+        isNullableString(details.evidenceContentHash) &&
+        nonEmptyString(details.resultDigest)
+      );
+    case "review_fact_ported":
+      return (
+        details.schema === "pointbreak.review-fact-ported" &&
+        details.version === 1 &&
+        nonEmptyString(details.portId) &&
+        isEventHistoryRevisionRef(details.originRevision) &&
+        isFactRef(details.originFact) &&
+        isEventHistoryRevisionRef(details.targetRevision) &&
+        (details.relation === "context_only" ||
+          details.relation === "reanchored_as" ||
+          details.relation === "carried_open_as" ||
+          details.relation === "resolved_by") &&
+        (details.targetFact === null || isFactRef(details.targetFact)) &&
+        isNullableString(details.rationaleContentHash) &&
+        isNullableString(details.contextChangeId)
+      );
+  }
+}
+
+function isEventHistoryEntry(value: unknown): value is EventHistoryEntry {
+  if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
+    return false;
+  }
+  return (
+    nonEmptyString(value.eventId) &&
+    nonEmptyString(value.occurredAt) &&
+    nonEmptyString(value.payloadHash) &&
+    nonEmptyString(value.journalId) &&
+    optionalString(value.trackId) &&
+    isEventHistoryWriter(value.writer) &&
+    (value.verificationStatus === "valid" ||
+      value.verificationStatus === "invalid" ||
+      value.verificationStatus === "untrusted_key" ||
+      value.verificationStatus === "unsigned") &&
+    (value.assertionMode === "advisory" ||
+      value.assertionMode === "operative") &&
+    optionalString(value.signer) &&
+    (value.sourceRef === undefined ||
+      (isRecord(value.sourceRef) &&
+        nonEmptyString(value.sourceRef.sourceSystem) &&
+        nonEmptyString(value.sourceRef.sourceId))) &&
+    (value.ingest === undefined ||
+      (isRecord(value.ingest) &&
+        (value.ingest.via === "ingest-events" ||
+          value.ingest.via === "bundle-apply") &&
+        nonEmptyString(value.ingest.receivedAt))) &&
+    isEventHistorySubject(value.subject) &&
+    isStringArray(value.changeIds) &&
+    Array.isArray(value.revisionRefs) &&
+    value.revisionRefs.every(isEventHistoryRevisionRef) &&
+    isStringArray(value.unresolvedRevisionIds) &&
+    isEventHistorySummary(value.summary, value.eventType)
+  );
+}
+
+/** Validate the fully server-owned, paged Change-aware Timeline projection. */
+export function decodeEventHistory(value: unknown): EventHistoryDocument {
+  const document = object(value, "event history");
+  const completion = document.completion;
+  const authorityCursor = decodeAuthorityCursorV2(document.authorityCursor);
+  if (
+    document.schema !== "pointbreak.inspect-event-history" ||
+    document.version !== 1 ||
+    !nonEmptyString(document.sourceChangeProjectionStamp) ||
+    !nonEmptyString(document.timelineProjectionStamp) ||
+    (document.order !== "asc" && document.order !== "desc") ||
+    !Number.isSafeInteger(document.eventCount) ||
+    (document.eventCount as number) < 0 ||
+    !Number.isSafeInteger(document.matchCount) ||
+    (document.matchCount as number) < 0 ||
+    !Number.isSafeInteger(document.offset) ||
+    (document.offset as number) < 0 ||
+    (document.matchIndex !== undefined &&
+      (!Number.isSafeInteger(document.matchIndex) ||
+        (document.matchIndex as number) < 0)) ||
+    !isRecord(document.facets) ||
+    !Object.entries(document.facets).every(
+      ([eventType, count]) =>
+        isEventHistoryEventType(eventType) &&
+        typeof count === "number" &&
+        Number.isSafeInteger(count) &&
+        count >= 0,
+    ) ||
+    !isRecord(completion) ||
+    !isStringArray(completion.eventTypes) ||
+    !completion.eventTypes.every(isEventHistoryEventType) ||
+    new Set(completion.eventTypes).size !== completion.eventTypes.length ||
+    !isStringArray(completion.trackIds) ||
+    !isStringArray(completion.changeIds) ||
+    !Array.isArray(completion.revisionRefs) ||
+    !completion.revisionRefs.every(isEventHistoryRevisionRef) ||
+    !isStringArray(completion.unresolvedRevisionIds) ||
+    !isStringArray(document.diagnostics) ||
+    !isStringArray(document.queryNotices) ||
+    !Array.isArray(document.entries) ||
+    document.entries.length > 100 ||
+    !document.entries.every(isEventHistoryEntry) ||
+    (document.matchCount as number) > (document.eventCount as number) ||
+    (document.offset as number) > (document.matchCount as number) ||
+    (document.offset as number) + document.entries.length >
+      (document.matchCount as number) ||
+    (document.previous !== undefined && !nonEmptyString(document.previous)) ||
+    (document.next !== undefined && !nonEmptyString(document.next))
+  ) {
+    throw new Error("invalid event history DTO");
+  }
+  if (
+    (document.offset as number) + document.entries.length >
+    (document.matchCount as number)
+  ) {
+    throw new Error("event history page exceeds its match count");
+  }
+  return {
+    ...(document as unknown as EventHistoryDocument),
+    authorityCursor,
+  };
+}
+
+const AUTHORITY_CURSOR_V2_KEYS = new Set([
+  "schema",
+  "journalRecordCount",
+  "eventCount",
+  "journalRecordSetHash",
+  "eventSetHash",
+  "capabilitySetHash",
+]);
+const PREFIXED_SHA256 = /^sha256:[0-9a-f]{64}$/;
+
+/** Decode the closed authority-generation identity shared by all v2 readers. */
+export function decodeAuthorityCursorV2(value: unknown): AuthorityCursorV2 {
+  const cursor = object(value, "authority cursor");
+  if (
+    !hasExactKeys(cursor, AUTHORITY_CURSOR_V2_KEYS) ||
+    cursor.schema !== "pointbreak.authority-cursor.v2" ||
+    !isNonnegativeSafeInteger(cursor.journalRecordCount) ||
+    !isNonnegativeSafeInteger(cursor.eventCount) ||
+    cursor.eventCount > cursor.journalRecordCount ||
+    typeof cursor.journalRecordSetHash !== "string" ||
+    !PREFIXED_SHA256.test(cursor.journalRecordSetHash) ||
+    typeof cursor.eventSetHash !== "string" ||
+    !PREFIXED_SHA256.test(cursor.eventSetHash) ||
+    typeof cursor.capabilitySetHash !== "string" ||
+    !PREFIXED_SHA256.test(cursor.capabilitySetHash)
+  ) {
+    throw new Error("invalid authority cursor DTO");
+  }
+  return cursor as unknown as AuthorityCursorV2;
+}
+
 export function decodeReaderProfile(value: unknown): ReaderProfile {
   const profile = object(value, "Inspector reader profile");
   const availability = profile.availability;
-  const authorityCursor = profile.authorityCursor;
+  const authorityCursor = decodeAuthorityCursorV2(profile.authorityCursor);
   const documents = profile.documents;
   const minimumReaderProfile = profile.minimumReaderProfile;
   const commitGraphStamp = profile.commitGraphStamp;
@@ -696,7 +1605,6 @@ export function decodeReaderProfile(value: unknown): ReaderProfile {
     profile.schema !== "pointbreak.inspect-reader-profile" ||
     profile.version !== 1 ||
     !isReaderProfileAvailability(availability) ||
-    !isRecord(authorityCursor) ||
     !isDocumentMap(documents) ||
     !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)
   ) {
@@ -808,9 +1716,16 @@ export function sameProfileGeneration(
     initial.minimumReaderProfile === postflight.minimumReaderProfile &&
     initial.commitGraphStamp === postflight.commitGraphStamp &&
     sameDocumentMap(initial.documents, postflight.documents) &&
-    canonicalJson(initial.authorityCursor) ===
-      canonicalJson(postflight.authorityCursor)
+    sameAuthorityCursor(initial.authorityCursor, postflight.authorityCursor)
   );
+}
+
+/** Compare the canonical closed cursor value, independent of object key order. */
+export function sameAuthorityCursor(
+  left: AuthorityCursorV2,
+  right: AuthorityCursorV2,
+): boolean {
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 /** Match Rust's Unicode-whitespace edge trim before byte counting or folding. */
@@ -1414,6 +2329,20 @@ function sameDocumentMap(
         version === rightEntries[index]?.[1],
     )
   );
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: ReadonlySet<string>,
+): boolean {
+  const actual = Object.keys(value);
+  return (
+    actual.length === expected.size && actual.every((key) => expected.has(key))
+  );
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function canonicalJson(value: unknown): string {

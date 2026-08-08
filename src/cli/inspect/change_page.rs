@@ -1,28 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub(super) use super::page_token::PageTokenSigner;
+
 const TOKEN_SCHEMA: &str = "pointbreak.inspect-change-page-token.v1";
 const ORDER: &str = "change_id_asc";
-
-pub(super) struct PageTokenSigner(SigningKey);
-
-impl PageTokenSigner {
-    pub(super) fn generate() -> Result<Self, getrandom::Error> {
-        let mut seed = [0_u8; 32];
-        getrandom::fill(&mut seed)?;
-        Ok(Self(SigningKey::from_bytes(&seed)))
-    }
-
-    #[cfg(test)]
-    pub(super) fn from_seed(seed: [u8; 32]) -> Self {
-        Self(SigningKey::from_bytes(&seed))
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -298,33 +282,16 @@ impl Query {
 }
 
 fn encode_token(token: &Token, signer: &PageTokenSigner) -> String {
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(token).unwrap());
-    let signature = signer.0.sign(payload.as_bytes());
-    format!("{payload}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+    signer.encode(token)
 }
 
 fn decode_token(raw: &str, signer: &PageTokenSigner) -> Result<Token, PageError> {
     if raw.len() > 4096 {
         return Err(invalid("continuation is too long"));
     }
-    let (payload, encoded_signature) = raw
-        .split_once('.')
-        .filter(|(_, signature)| !signature.contains('.'))
-        .ok_or_else(|| invalid("malformed continuation"))?;
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(encoded_signature)
-        .map_err(|_| invalid("malformed continuation"))?;
-    let signature =
-        Signature::from_slice(&signature_bytes).map_err(|_| invalid("malformed continuation"))?;
-    signer
-        .0
-        .verifying_key()
-        .verify(payload.as_bytes(), &signature)
-        .map_err(|_| invalid("malformed continuation"))?;
-    let bytes = URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| invalid("malformed continuation"))?;
-    let t: Token = serde_json::from_slice(&bytes).map_err(|_| invalid("malformed continuation"))?;
+    let t: Token = signer
+        .decode(raw)
+        .map_err(|()| invalid("malformed continuation"))?;
     if t.schema != TOKEN_SCHEMA
         || t.order != ORDER
         || t.projection_stamp.is_empty()
@@ -382,6 +349,9 @@ fn invalid(message: &str) -> PageError {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
     use super::*;
     fn signer() -> PageTokenSigner {
         PageTokenSigner::from_seed([7_u8; 32])

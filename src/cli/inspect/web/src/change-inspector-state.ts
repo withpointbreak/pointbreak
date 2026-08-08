@@ -11,9 +11,11 @@ import {
   type AttentionPage,
   type ChangeSummary,
   type ChangesPage,
+  type EventHistoryDocument,
   type ReaderProfile,
   type RevisionRef,
   requireCoherentGeneration,
+  sameAuthorityCursor,
   sameProfileGeneration,
 } from "./change-protocol";
 
@@ -21,6 +23,7 @@ export interface ChangeInspectorGeneration {
   profile: ReaderProfile;
   changes: ChangesPage;
   attention: AttentionPage;
+  history: EventHistoryDocument | null;
 }
 
 export interface ChangeInspectorSnapshot {
@@ -73,12 +76,21 @@ export function stageGeneration(
   changes: ChangesPage,
   attention: AttentionPage,
   postflight: ReaderProfile,
+  history: EventHistoryDocument | null = null,
 ): ChangeInspectorGeneration {
   requireCoherentGeneration(changes, attention);
   if (!sameProfileGeneration(profile, postflight)) {
     throw new ChangeInspectorGenerationChanged();
   }
-  return { profile, changes, attention };
+  if (
+    history !== null &&
+    (history.sourceChangeProjectionStamp !== changes.projectionStamp ||
+      !sameAuthorityCursor(history.authorityCursor, profile.authorityCursor) ||
+      !sameAuthorityCursor(history.authorityCursor, postflight.authorityCursor))
+  ) {
+    throw new ChangeInspectorGenerationChanged();
+  }
+  return { profile, changes, attention, history };
 }
 
 export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
