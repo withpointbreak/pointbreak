@@ -221,6 +221,34 @@ describe("Change Revision graph renderer", () => {
     ).toContain(context.objectArtifactContentHash);
   });
 
+  it("names textual actions as actions while preserving exact graph identity", () => {
+    const figure = renderChangeRevisionGraph(changeGraph(), {
+      document,
+      onActivateRevision: vi.fn(),
+    });
+    const node = figure.querySelector<SVGGElement>(
+      `.change-revision-node[data-revision-id="${second.revisionId}"]`,
+    );
+    const nodeName = node?.getAttribute("aria-label");
+    const action = Array.from(
+      figure.querySelectorAll<HTMLButtonElement>(
+        "[data-graph-text-nodes] button",
+      ),
+    ).find((button) => button.title.includes(second.revisionId));
+    expect(action?.title).toBe(`Open ${nodeName}`);
+    expect(action?.getAttribute("aria-label")).toBe(`Open ${nodeName}`);
+
+    const contextNode = figure.querySelector<SVGGElement>(
+      `.change-revision-node[data-revision-id="${context.revisionId}"]`,
+    );
+    const contextItem = Array.from(
+      figure.querySelectorAll<HTMLLIElement>("[data-graph-text-nodes] > li"),
+    ).find(
+      (item) => item.textContent === contextNode?.getAttribute("aria-label"),
+    );
+    expect(contextItem?.querySelector("button")).toBeNull();
+  });
+
   it("shortens visible labels while retaining full exact identity everywhere semantic", () => {
     const figure = renderChangeRevisionGraph(changeGraph(), {
       document,

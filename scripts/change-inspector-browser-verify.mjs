@@ -1081,6 +1081,7 @@
     textualNodes: Array.from(graph.querySelectorAll("[data-graph-text-nodes] > li")).map((item) => ({
       text: item.textContent || "",
       actionTitle: item.querySelector("button")?.getAttribute("title") || "",
+      actionName: item.querySelector("button")?.getAttribute("aria-label") || "",
     })),
   }));
   const changeGraphAvailableNodes = changeGraphMetrics.nodePresentation
@@ -1124,11 +1125,13 @@
       && changeGraphAvailableNodes.length === 1
       && changeGraphAvailableNodes.every((node) =>
         node.role === "link" && node.disabled.length === 0
-          && changeGraphMetrics.textualNodes.some((item) => item.actionTitle === node.label))
+          && changeGraphMetrics.textualNodes.some((item) =>
+            item.actionTitle === `Open ${node.label}` && item.actionName === `Open ${node.label}`))
       && changeGraphContextNodes.length === 1
       && changeGraphContextNodes.every((node) =>
         node.role === "group" && node.disabled === "true"
-          && changeGraphMetrics.textualNodes.some((item) => item.text === node.label && item.actionTitle.length === 0)),
+          && changeGraphMetrics.textualNodes.some((item) =>
+            item.text === node.label && item.actionTitle.length === 0 && item.actionName.length === 0)),
     "Change Revision relationship graph",
     `invalid authoritative graph geometry: ${JSON.stringify(changeGraphMetrics)}`,
   );
@@ -1319,6 +1322,7 @@
     textualNodes: Array.from(graph.querySelectorAll("[data-graph-text-nodes] > li")).map((item) => ({
       text: item.textContent || "",
       actionTitle: item.querySelector("button")?.getAttribute("title") || "",
+      actionName: item.querySelector("button")?.getAttribute("aria-label") || "",
     })),
   }), config.fixture.factPort.portId);
   const factGraphAvailableNodes = factGraphMetrics.nodePresentation
@@ -1340,11 +1344,13 @@
       && factGraphAvailableNodes.length > 0
       && factGraphAvailableNodes.every((node) =>
         node.role === "link" && node.disabled.length === 0
-          && factGraphMetrics.textualNodes.some((item) => item.actionTitle === node.label))
+          && factGraphMetrics.textualNodes.some((item) =>
+            item.actionTitle === node.label && item.actionName === node.label))
       && factGraphContextNodes.length > 0
       && factGraphContextNodes.every((node) =>
         node.role === "group" && node.disabled === "true"
-          && factGraphMetrics.textualNodes.some((item) => item.text === node.label && item.actionTitle.length === 0)),
+          && factGraphMetrics.textualNodes.some((item) =>
+            item.text === node.label && item.actionTitle.length === 0 && item.actionName.length === 0)),
     "exact fact relationship graph",
     `rich exact Revision did not retain its relationship evidence: ${JSON.stringify(factGraphMetrics)}`,
   );
