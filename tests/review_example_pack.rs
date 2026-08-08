@@ -148,6 +148,15 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         script.contains(".currentRevisionRefs == $current"),
         "the product document must still match the complete canonical array exactly"
     );
+    for line in script
+        .lines()
+        .filter(|line| line.contains("--operation-id"))
+    {
+        assert!(
+            line.contains("--operation-id \"change-operation:"),
+            "browser fixture operation ID is outside the CLI namespace: {line}"
+        );
+    }
 }
 
 #[test]

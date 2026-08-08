@@ -244,7 +244,8 @@ POINTBREAK_HOME="$pointbreak_home" \
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
   "$pointbreak_binary" change join "$historical_change" "$primary_revision" \
-    --repo "$fixture_repo" --operation-id "browser-history-membership-join-v1" --format json \
+    --repo "$fixture_repo" \
+    --operation-id "change-operation:browser-history-membership-join-v1" --format json \
     >"$log_dir/historical-membership-join.json" \
     2>"$log_dir/historical-membership-join.log"
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change show \
@@ -258,7 +259,8 @@ historical_membership_claim="$(jq -er --arg revision "$primary_revision" '
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
   "$pointbreak_binary" change withdraw-membership "$historical_membership_claim" \
-    --repo "$fixture_repo" --operation-id "browser-history-membership-withdraw-v1" --format json \
+    --repo "$fixture_repo" \
+    --operation-id "change-operation:browser-history-membership-withdraw-v1" --format json \
     >"$log_dir/historical-membership-withdraw.json" \
     2>"$log_dir/historical-membership-withdraw.log"
 
