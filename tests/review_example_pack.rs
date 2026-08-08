@@ -171,6 +171,21 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         !browser_program.contains("new URLSearchParams((await hash())"),
         "route query parsing must stay in page context because the Playwright run-code sandbox does not expose URLSearchParams"
     );
+    let annotated_diff_round_trip = browser_program
+        .split_once("// An annotated diff is a first-class full-frame exact route")
+        .and_then(|(_, tail)| tail.split_once("await open(exact, layouts[1]"))
+        .map(|(round_trip, _)| round_trip)
+        .expect("browser gate retains the annotated-diff round-trip section");
+    assert!(
+        annotated_diff_round_trip
+            .contains("const focusedRevisionRoute = await page.evaluate((diffRoute) => {")
+            && annotated_diff_round_trip.contains("params.delete(\"fq\");")
+            && annotated_diff_round_trip
+                .matches("focusedRevisionRoute")
+                .count()
+                >= 3,
+        "annotated-diff close and Forward waits must expect the canonical focus-preserving Revision route"
+    );
     let first_response = materializer
         .find("actor:agent:pointbreak-matrix-response-one")
         .expect("matrix records the first response");

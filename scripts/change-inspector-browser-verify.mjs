@@ -1587,6 +1587,13 @@
     "the backward fact key did not retain the first-fact boundary",
   );
   const focusedDiffRoute = await hash();
+  const focusedRevisionRoute = await page.evaluate((diffRoute) => {
+    const [path, rawQuery = ""] = diffRoute.slice(2).split("?", 2);
+    const params = new URLSearchParams(rawQuery);
+    params.delete("fq");
+    const query = params.toString();
+    return `#/${path.replace(/\/diff$/, "")}${query ? `?${query}` : ""}`;
+  }, focusedDiffRoute);
   await screenshot("wide-annotated-diff-full-frame");
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForFunction((expectedRoute) =>
@@ -1600,7 +1607,7 @@
     "reload did not restore focus to the diff return action",
   );
   await page.locator("#diff-page-close").click();
-  await page.waitForFunction((expectedRoute) => location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), exact);
+  await page.waitForFunction((expectedRoute) => location.hash === expectedRoute && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), focusedRevisionRoute);
   expect(
     await page.locator("#detail-close").evaluate((node) => document.activeElement === node),
     "annotated diff return focus",
@@ -1611,7 +1618,7 @@
     location.hash === expectedRoute && !document.querySelector("#diff-page")?.classList.contains("hidden"), focusedDiffRoute);
   await page.goForward();
   await page.waitForFunction((expectedRoute) =>
-    location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), exact);
+    location.hash === expectedRoute && Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey), focusedRevisionRoute);
 
   await open(exact, layouts[1], "narrow exact revision");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
