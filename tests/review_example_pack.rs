@@ -139,6 +139,9 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = fs::read_to_string(root.join("scripts/change-inspector-browser-verify.sh"))
         .expect("read Change Inspector browser gate");
+    let browser_program =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
+            .expect("read Change Inspector browser program");
 
     assert!(
         script.contains("sort_by(.revisionId, .objectArtifactContentHash)"),
@@ -157,6 +160,10 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
             "browser fixture operation ID is outside the CLI namespace: {line}"
         );
     }
+    assert!(
+        !browser_program.contains("new URL("),
+        "the Playwright run-code sandbox does not expose the Web URL constructor"
+    );
 }
 
 #[test]

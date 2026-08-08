@@ -114,12 +114,14 @@
 
   const bootstrapUrl = (server) =>
     `${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
+  const isHistoryRequest = (requestUrl, server) => {
+    const endpoint = `${server.baseUrl}/api/v2/history`;
+    return requestUrl === endpoint || requestUrl.startsWith(`${endpoint}?`);
+  };
   const exerciseReaderState = async (server, label, expectedText, expectHistory) => {
-    const origin = new URL(server.baseUrl).origin;
     const historyRequests = [];
     const recordRequest = (request) => {
-      const requested = new URL(request.url());
-      if (requested.origin === origin && requested.pathname === "/api/v2/history") {
+      if (isHistoryRequest(request.url(), server)) {
         historyRequests.push(request.url());
       }
     };
@@ -171,11 +173,7 @@
   // that profile validation happens before any history fetch is dispatched.
   let mismatchHistoryRequests = 0;
   const recordMismatchRequest = (request) => {
-    const requested = new URL(request.url());
-    if (
-      requested.origin === new URL(config.server.baseUrl).origin
-      && requested.pathname === "/api/v2/history"
-    ) mismatchHistoryRequests += 1;
+    if (isHistoryRequest(request.url(), config.server)) mismatchHistoryRequests += 1;
   };
   await page.route("**/api/v2/profile", (route) => route.fulfill({
     status: 200,
