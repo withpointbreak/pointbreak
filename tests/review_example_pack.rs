@@ -164,6 +164,41 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         !browser_program.contains("new URL("),
         "the Playwright run-code sandbox does not expose the Web URL constructor"
     );
+
+    let explicit_cleanup = script
+        .rfind("\ncleanup strict || die \"browser session did not close cleanly\"\n")
+        .expect("browser gate explicitly completes cleanup");
+    let installed_trap = script
+        .find("\ntrap cleanup EXIT\n")
+        .expect("browser gate installs its cleanup trap");
+    let fixture_concurrency = script
+        .find("\nequal_timestamp_pids=()\n")
+        .expect("browser gate starts its concurrent fixture writers");
+    let disarmed_trap = script
+        .rfind("\ntrap - EXIT\n")
+        .expect("browser gate disarms its cleanup trap");
+    let manifest_publish = script
+        .rfind("mv \"$manifest_tmp\" \"$root/manifest.json\"")
+        .expect("browser gate publishes its completion marker");
+    assert!(
+        installed_trap < fixture_concurrency,
+        "failure cleanup must own fixture writers before concurrency begins"
+    );
+    for registration in [
+        "register_background_process \"$equal_timestamp_pid\"",
+        "reader_state_started_pid=$!\n  register_background_process \"$reader_state_started_pid\"",
+        "server_pid=$!\nregister_background_process \"$server_pid\"",
+        "timeline_append_pid=$!\nregister_background_process \"$timeline_append_pid\"",
+    ] {
+        assert!(
+            script.contains(registration),
+            "browser gate does not immediately register background child: {registration}"
+        );
+    }
+    assert!(
+        explicit_cleanup < disarmed_trap && disarmed_trap < manifest_publish,
+        "browser shutdown and child reaping must precede completion-last manifest publication"
+    );
 }
 
 #[test]

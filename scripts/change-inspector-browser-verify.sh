@@ -71,6 +71,64 @@ artifact_dir="$root/browser-artifacts"
 log_dir="$root/logs"
 mkdir -p "$fixture_root" "$pointbreak_home" "$artifact_dir" "$log_dir"
 
+# Own every asynchronous child from the moment it is spawned. The EXIT trap is
+# installed before fixture concurrency begins, while browser cleanup remains
+# disabled until its session command has been resolved.
+background_pids=()
+pwcli=()
+session=""
+browser_cleanup_enabled=false
+
+run_pw() {
+  (cd "$artifact_dir" && "${pwcli[@]}" -s="$session" "$@")
+}
+
+register_background_process() {
+  background_pids+=("$1")
+}
+
+forget_background_process() {
+  local completed_pid="$1"
+  local retained_pids=()
+  local pid
+  for pid in "${background_pids[@]}"; do
+    [ "$pid" = "$completed_pid" ] || retained_pids+=("$pid")
+  done
+  background_pids=("${retained_pids[@]}")
+}
+
+stop_background_process() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+  fi
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+  local mode="${1:-best-effort}"
+  local browser_close_status=0
+  local pid
+  if [ "$browser_cleanup_enabled" = true ]; then
+    if run_pw close >"$log_dir/browser-close.log" 2>&1; then
+      browser_close_status=0
+    else
+      browser_close_status=$?
+    fi
+    browser_cleanup_enabled=false
+  fi
+  for pid in "${background_pids[@]}"; do
+    stop_background_process "$pid"
+  done
+  background_pids=()
+  if [ "$mode" = strict ] && [ "$browser_close_status" -ne 0 ]; then
+    return "$browser_close_status"
+  fi
+  return 0
+}
+trap cleanup EXIT
+
 source_commit="$(git -C "$repo_root" rev-parse HEAD)"
 binary_sha256="$(shasum -a 256 "$pointbreak_binary" | awk '{print $1}')"
 "$pointbreak_binary" version --format json >"$log_dir/pointbreak-version.json"
@@ -277,11 +335,17 @@ for ordinal in $(seq 1 16); do
       --title "Browser equal-time writer $ordinal" \
       --idempotency-key "browser-equal-time-$ordinal-v1" --format json \
       >"$log_dir/equal-time-$ordinal.json" 2>"$log_dir/equal-time-$ordinal.log" &
-  equal_timestamp_pids+=("$!")
+  equal_timestamp_pid="$!"
+  equal_timestamp_pids+=("$equal_timestamp_pid")
+  register_background_process "$equal_timestamp_pid"
 done
 for equal_timestamp_pid in "${equal_timestamp_pids[@]}"; do
-  wait "$equal_timestamp_pid" \
-    || die "a supported concurrent equal-timestamp fixture write failed"
+  if wait "$equal_timestamp_pid"; then
+    forget_background_process "$equal_timestamp_pid"
+  else
+    forget_background_process "$equal_timestamp_pid"
+    die "a supported concurrent equal-timestamp fixture write failed"
+  fi
 done
 
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" store derived build \
@@ -427,11 +491,6 @@ completion_record="$ready_store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7a
 cp "$activation_record" "$completion_record" "$reader_empty_l2_repo/.pointbreak/data/events/"
 cp "$activation_record" "$reader_m1_repo/.pointbreak/data/events/"
 
-server_pid=""
-reader_empty_l2_pid=""
-reader_l0_pid=""
-reader_m1_pid=""
-timeline_append_pid=""
 session="pointbreak-change-browser-$$"
 if [ -n "${PLAYWRIGHT_CLI:-}" ]; then
   pwcli=("$PLAYWRIGHT_CLI")
@@ -441,24 +500,7 @@ else
   command -v npx >/dev/null 2>&1 || die "playwright-cli and npx are unavailable"
   pwcli=(npx --yes --package @playwright/cli@0.1.17 playwright-cli)
 fi
-
-run_pw() {
-  (cd "$artifact_dir" && "${pwcli[@]}" -s="$session" "$@")
-}
-
-cleanup() {
-  run_pw close >"$log_dir/browser-close.log" 2>&1 || true
-  if [ -n "$timeline_append_pid" ] && kill -0 "$timeline_append_pid" >/dev/null 2>&1; then
-    kill "$timeline_append_pid" >/dev/null 2>&1 || true
-    wait "$timeline_append_pid" >/dev/null 2>&1 || true
-  fi
-  [ -z "$server_pid" ] || kill "$server_pid" >/dev/null 2>&1 || true
-  [ -z "$reader_empty_l2_pid" ] \
-    || kill "$reader_empty_l2_pid" >/dev/null 2>&1 || true
-  [ -z "$reader_l0_pid" ] || kill "$reader_l0_pid" >/dev/null 2>&1 || true
-  [ -z "$reader_m1_pid" ] || kill "$reader_m1_pid" >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
+browser_cleanup_enabled=true
 
 start_reader_state_server() {
   local state="$1"
@@ -468,6 +510,7 @@ start_reader_state_server() {
   POINTBREAK_HOME="$reader_state_home" "$pointbreak_binary" inspect \
     --repo "$repo" --port 0 --format json >"$startup" 2>"$server_log" &
   reader_state_started_pid=$!
+  register_background_process "$reader_state_started_pid"
   for _ in $(seq 1 100); do
     [ -s "$startup" ] && break
     kill -0 "$reader_state_started_pid" >/dev/null 2>&1 \
@@ -481,11 +524,8 @@ start_reader_state_server() {
 }
 
 start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
-reader_empty_l2_pid="$reader_state_started_pid"
 start_reader_state_server "l0" "$reader_l0_repo"
-reader_l0_pid="$reader_state_started_pid"
 start_reader_state_server "m1" "$reader_m1_repo"
-reader_m1_pid="$reader_state_started_pid"
 reader_servers="$(jq -cn \
   --slurpfile empty "$log_dir/reader-empty-ready-l2-startup.json" \
   --slurpfile l0 "$log_dir/reader-l0-startup.json" \
@@ -500,6 +540,7 @@ reader_servers="$(jq -cn \
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json \
   >"$log_dir/inspect-startup.json" 2>"$log_dir/inspect-server.log" &
 server_pid=$!
+register_background_process "$server_pid"
 for _ in $(seq 1 100); do
   [ -s "$log_dir/inspect-startup.json" ] && break
   kill -0 "$server_pid" >/dev/null 2>&1 || die "Inspector exited before startup"
@@ -566,12 +607,17 @@ timeline_append_marker="$artifact_dir/timeline-parked-before-append.png"
       >"$log_dir/timeline-append.json" 2>"$log_dir/timeline-append.log"
 ) &
 timeline_append_pid=$!
+register_background_process "$timeline_append_pid"
 if ! run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1; then
   sed -n '1,240p' "$log_dir/browser-gate.log" >&2
   die "real-browser Change Inspector gate failed"
 fi
-wait "$timeline_append_pid" \
-  || die "disposable Timeline append did not complete after the parked screenshot"
+if wait "$timeline_append_pid"; then
+  forget_background_process "$timeline_append_pid"
+else
+  forget_background_process "$timeline_append_pid"
+  die "disposable Timeline append did not complete after the parked screenshot"
+fi
 test -s "$log_dir/timeline-append.json" \
   || die "disposable Timeline append did not leave its receipt"
 jq -e '
@@ -600,9 +646,15 @@ tool_versions="$(jq -n \
   --slurpfile pointbreak "$log_dir/pointbreak-version.json" \
   '{git: $git, node: $node, playwright: $playwright, pointbreak: $pointbreak[0]}')"
 
+# The completion marker must follow browser shutdown and every child log
+# flush. Run the normally trap-owned cleanup explicitly, reap each child, then
+# disarm the trap so no evidence file can be written after manifest.json.
+cleanup strict || die "browser session did not close cleanly"
+trap - EXIT
+
 # The temporary file may be incomplete if serialization fails. Only the final
 # atomic rename publishes manifest.json, so its presence remains the completion
-# marker for fixture, browser, screenshot, and identity verification.
+# marker for fixture, browser, screenshot, identity, and cleanup verification.
 manifest_tmp="$root/.manifest.json.tmp"
 jq -n \
   --arg sourceCommit "$source_commit" \
