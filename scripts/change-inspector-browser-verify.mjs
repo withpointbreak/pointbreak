@@ -126,6 +126,18 @@
     return metrics;
   };
   const hash = () => page.evaluate(() => location.hash);
+  const shortRef = (value) => {
+    let match = String(value).match(
+      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i,
+    );
+    if (match) return `${match[1]}:${match[2].slice(0, 8)}`;
+    match = String(value).match(/^sha256:([0-9a-f]{8,})$/i);
+    if (match) return `sha256:${match[1].slice(0, 8)}`;
+    if (/^[0-9a-f]{40}$/i.test(String(value))) return String(value).slice(0, 10);
+    return String(value);
+  };
+  const shortExact = (revisionId, artifactHash) =>
+    `${shortRef(revisionId)} · ${shortRef(artifactHash)}`;
   const waitForTimelineRoute = (route) => page.waitForFunction((expectedRoute) =>
     location.hash === expectedRoute
       && document.querySelector("#timeline")?.dataset.timelineRoute === expectedRoute,
@@ -1233,11 +1245,29 @@
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   const exactChoices = page.locator("#detail-body button[aria-label^='Current Revision:']");
   expect(await exactChoices.count() > 1, "parallel explicit chooser", "Change detail did not require a human exact-Revision choice");
-  expect(await exactChoices.evaluateAll((choices) => choices.every((choice) => {
-    const revisionId = choice.textContent?.trim() || "";
-    const name = choice.getAttribute("aria-label") || "";
-    return revisionId.length > 0 && name.includes(revisionId) && name.includes("; artifact sha256:");
-  })), "parallel explicit chooser", "Change detail exact-Revision names omitted the artifact identity");
+  const renderedExactChoices = await exactChoices.evaluateAll((choices) => choices
+    .map((choice) => ({
+      title: choice.getAttribute("title") || "",
+      name: choice.getAttribute("aria-label") || "",
+      visible: choice.textContent?.trim() || "",
+    }))
+    .sort((left, right) => left.title.localeCompare(right.title)));
+  expect(
+    JSON.stringify(renderedExactChoices.map((choice) => choice.title))
+      === JSON.stringify(expectedParallelPeers.map((peer) => peer.title)),
+    "parallel explicit chooser",
+    "Change detail choices did not represent the fixture's exact current Revisions",
+  );
+  expect(
+    renderedExactChoices.every((choice, index) =>
+      choice.name === `Current Revision: open ${expectedParallelPeers[index].title}; for Change ${parallelChange}`
+        && choice.visible === shortExact(
+          expectedParallelPeers[index].revisionId,
+          expectedParallelPeers[index].artifactHash,
+        )),
+    "parallel explicit chooser",
+    "Change detail did not pair shortened visible identities with complete accessible identities",
+  );
   const chosenExactTitle = await exactChoices.first().getAttribute("title");
   const chosenExactPeer = expectedParallelPeers.find((peer) => peer.title === chosenExactTitle);
   expect(Boolean(chosenExactPeer), "parallel explicit chooser", "Change detail offered an exact Revision outside the fixture's current peers");
@@ -1299,8 +1329,29 @@
     for (const changeId of config.fixture.matrix.shared_revision.changes) {
       const encodedMembershipChange = encodeURIComponent(changeId);
       await open(`changes/${encodedMembershipChange}?limit=100&order=change_id_asc`, layout, `${layout.name} shared Revision membership`);
-      await page.waitForFunction((revisionId) => document.querySelector("#detail-body")?.textContent?.includes(revisionId), config.fixture.matrix.shared_revision.revision);
-      expect((await page.locator("#detail-body").innerText()).includes(config.fixture.matrix.shared_revision.revision), `${layout.name} shared Revision membership`, `Change ${changeId} omitted shared exact Revision`);
+      const shared = config.fixture.matrix.shared_revision;
+      const sharedNode = page.locator(
+        `#detail-body .change-revision-graph [data-revision-id="${shared.revision}"][data-artifact-hash="${shared.artifact}"][data-member="true"]`,
+      );
+      await sharedNode.waitFor({ state: "attached" });
+      expect(await sharedNode.count() === 1, `${layout.name} shared Revision membership`, `Change ${changeId} omitted shared exact Revision`);
+      const sharedNodeName = await sharedNode.getAttribute("aria-label") || "";
+      const sharedNodeRole = await sharedNode.getAttribute("role");
+      const sharedNodeAvailability = await sharedNode.getAttribute("data-context-availability");
+      expect(
+        sharedNodeName.includes(`exact Revision ${shared.revision}; artifact ${shared.artifact}`)
+          && sharedNodeName.includes("Change member")
+          && sharedNodeName.includes("exact Change context available")
+          && sharedNodeRole === "link"
+          && sharedNodeAvailability === "available",
+        `${layout.name} shared Revision membership`,
+        `Change ${changeId} did not expose the shared Revision as an available exact member`,
+      );
+      expect(
+        (await sharedNode.locator("text").textContent())?.endsWith(shortRef(shared.revision)),
+        `${layout.name} shared Revision membership`,
+        `Change ${changeId} did not render the shared Revision's shortened visible identity`,
+      );
     }
     await screenshot(`${layout.name}-shared-revision-membership`);
   }
@@ -1560,8 +1611,26 @@
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   expect(await page.locator("#detail").evaluate((node) => !node.inert && !node.hasAttribute("aria-hidden")), "narrow exact revision", "open detail remained inert or hidden");
   expect(await page.evaluate(() => document.activeElement?.id === "detail-back"), "narrow detail focus", "opening the narrow detail did not move focus into the sheet");
+  const narrowExactIdentity = page.locator("#detail-body .detail-identity code");
+  expect(await narrowExactIdentity.count() === 1, "narrow exact revision", "exact Revision identity was not rendered once");
+  const narrowExactPresentation = {
+    visible: await narrowExactIdentity.textContent(),
+    title: await narrowExactIdentity.getAttribute("title"),
+    name: await narrowExactIdentity.getAttribute("aria-label"),
+  };
+  const narrowExactFullIdentity = `exact Revision ${config.fixture.rich.revisionId}; artifact ${config.fixture.rich.artifactHash}`;
+  expect(
+    narrowExactPresentation.visible === shortExact(
+      config.fixture.rich.revisionId,
+      config.fixture.rich.artifactHash,
+    )
+      && narrowExactPresentation.title === narrowExactFullIdentity
+      && narrowExactPresentation.name === narrowExactFullIdentity,
+    "narrow exact revision",
+    "exact Revision did not pair its shortened visible identity with complete title and accessible identity",
+  );
+  expect(await hash() === `#/${exact}`, "narrow exact revision", "exact Change, Revision, or artifact identity was lost from the route");
   const exactText = await page.locator("body").innerText();
-  expect(exactText.includes(config.fixture.rich.changeId) && exactText.includes(config.fixture.rich.revisionId), "narrow exact revision", "exact identities are missing");
   for (const expected of ["Matrix fact", "Open decision", "passed current", "Association comparisons"]) {
     expect(exactText.includes(expected), "narrow rich revision", `missing representative detail: ${expected}`);
   }
