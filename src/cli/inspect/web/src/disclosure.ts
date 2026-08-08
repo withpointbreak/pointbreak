@@ -10,6 +10,7 @@ export interface DisclosureController {
   close(returnFocus?: boolean): void;
   toggle(): void;
   sync(): void;
+  dispose(): void;
 }
 
 interface DisclosureOptions {
@@ -31,8 +32,29 @@ export function createDisclosure({
   panel,
 }: DisclosureOptions): DisclosureController {
   let open = false;
+  const triggerElement = $<HTMLElement>(trigger);
+  const containerElement = $<HTMLElement>(container);
+  let controller: DisclosureController;
 
-  const controller: DisclosureController = {
+  const onTriggerClick = (event: Event): void => {
+    event.stopPropagation();
+    controller.toggle();
+  };
+  const onContainerKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape" || !open) return;
+    event.preventDefault();
+    event.stopPropagation();
+    controller.close(true);
+  };
+  // Capture phase sees a panel row before a synchronous repaint can detach it.
+  const onDocumentClick = (event: MouseEvent): void => {
+    if (!open) return;
+    const root = $(container);
+    if (event.target instanceof Node && root?.contains(event.target)) return;
+    controller.close();
+  };
+
+  controller = {
     isOpen: () => open,
     open: () => {
       if (active && active !== controller) active.close();
@@ -54,29 +76,19 @@ export function createDisclosure({
       $(panel)?.classList.toggle("hidden", !open);
       $(trigger)?.setAttribute("aria-expanded", String(open));
     },
+    dispose: () => {
+      triggerElement?.removeEventListener("click", onTriggerClick);
+      containerElement?.removeEventListener("keydown", onContainerKeydown);
+      document.removeEventListener("click", onDocumentClick, true);
+      if (active === controller) active = null;
+      open = false;
+      controller.sync();
+    },
   };
 
-  $<HTMLElement>(trigger)?.addEventListener("click", (event) => {
-    event.stopPropagation();
-    controller.toggle();
-  });
-  $<HTMLElement>(container)?.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape" || !open) return;
-    event.preventDefault();
-    event.stopPropagation();
-    controller.close(true);
-  });
-  // Capture phase sees a panel row before a synchronous repaint can detach it.
-  document.addEventListener(
-    "click",
-    (event) => {
-      if (!open) return;
-      const root = $(container);
-      if (event.target instanceof Node && root?.contains(event.target)) return;
-      controller.close();
-    },
-    true,
-  );
+  triggerElement?.addEventListener("click", onTriggerClick);
+  containerElement?.addEventListener("keydown", onContainerKeydown);
+  document.addEventListener("click", onDocumentClick, true);
 
   controller.sync();
   return controller;

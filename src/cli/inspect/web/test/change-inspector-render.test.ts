@@ -3,6 +3,7 @@ import type { ChangeInspectorReading } from "../src/change-inspector-reading";
 import {
   prepareChangeInspectorShell,
   renderChangeInspector,
+  renderChangeInspectorRefusal,
 } from "../src/change-inspector-render";
 import {
   createChangeInspectorState,
@@ -187,7 +188,7 @@ function changeReading(): ChangeInspectorReading {
     links: [],
     effectiveSupersedes: [[successor, predecessor]],
     pendingOrConflictingEdges: [],
-    currentRevisionRefs: [],
+    currentRevisionRefs: [revision],
     perCurrentRevisionQualification: [],
     operativeObligations: [],
     diagnostics: [],
@@ -199,6 +200,61 @@ function changeReading(): ChangeInspectorReading {
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
+  it("retains the bounded card DOM for an unchanged polling generation", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    const firstCard = document.querySelector(".unit-card[data-change-id]");
+    const createElement = vi.spyOn(document, "createElement");
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(document.querySelector(".unit-card[data-change-id]")).toBe(
+      firstCard,
+    );
+    expect(
+      document.querySelectorAll(".unit-card[data-change-id]").length,
+    ).toBeLessThanOrEqual(150);
+    expect(
+      createElement.mock.calls.some(([tagName]) => tagName === "article"),
+    ).toBe(false);
+    createElement.mockRestore();
+  });
+
+  it("restores a same-generation list after a transient refusal replaced its DOM", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document.querySelector<HTMLElement>("#master")?.dataset.changeListKey,
+    ).toBeDefined();
+
+    renderChangeInspectorRefusal(new Error("temporary outage"));
+    expect(
+      document.querySelector<HTMLElement>("#master")?.dataset.changeListKey,
+    ).toBe(undefined);
+    expect(document.querySelector("#master")?.textContent).toContain(
+      "temporary outage",
+    );
+
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document
+        .querySelector(".unit-card[data-change-id]")
+        ?.getAttribute("data-change-id"),
+    ).toBe("change:sha256:one");
+  });
+
   it("projects server-owned cards and exact placeholder selection into the retained shell", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -216,6 +272,11 @@ describe("Change inspector render", () => {
     expect(document.querySelector("#master")?.textContent).toContain(
       "parallel current",
     );
+    expect(
+      document
+        .querySelector(".unit-card[data-change-id]")
+        ?.getAttribute("aria-label"),
+    ).toBe("Current Revision — Server proposal; Change change:sha256:one");
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );
@@ -249,6 +310,24 @@ describe("Change inspector render", () => {
     );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
+    );
+  });
+
+  it("names the Change-detail chooser before its exact Revision and Change identities", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "change",
+      changeId: "change:sha256:one",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    const chooser = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    ).find((button) => button.textContent === revision.revisionId);
+    expect(chooser?.getAttribute("aria-label")).toBe(
+      "Current Revision: open exact Revision revision:sha256:one for Change change:sha256:one",
     );
   });
 
@@ -310,6 +389,75 @@ describe("Change inspector render", () => {
         .querySelector<HTMLElement>('[data-fact-id="obs:sha256:focused"]')
         ?.querySelector("strong")?.textContent,
     ).toBe("Rendered");
+  });
+
+  it("retains an unchanged exact detail surface across a polling repaint", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const reading = revisionReading();
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    const detail = document.querySelector<HTMLElement>("#detail");
+    const fact = document.querySelector("[data-fact-id]");
+    if (detail) detail.scrollTop = 19;
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    expect(document.querySelector("[data-fact-id]")).toBe(fact);
+    expect(detail?.scrollTop).toBe(19);
+  });
+
+  it("re-renders an unchanged exact reading after closing and reopening its route", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const exactRoute = {
+      kind: "revision" as const,
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    };
+    const state = createChangeInspectorState(exactRoute);
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const reading = revisionReading();
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    expect(document.querySelector("[data-fact-id]")).not.toBeNull();
+
+    state.setRoute({ kind: "lens", lens: "changes", query: {} });
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey,
+    ).toBeUndefined();
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Select a Change",
+    );
+
+    state.setRoute(exactRoute);
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    expect(document.querySelector("[data-fact-id]")).not.toBeNull();
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Readable fact",
+    );
   });
 
   it("opens a collapsed captured file through the retained model-neutral handler", () => {
@@ -557,6 +705,19 @@ describe("Change inspector render", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "revision:sha256:predecessor · sha256:predecessor → revision:sha256:successor · sha256:successor",
     );
+    const chooser = document.querySelector<HTMLButtonElement>(
+      "#detail-body .detail-current-revisions button",
+    );
+    expect(chooser?.getAttribute("aria-label")).toBe(
+      "Current Revision: open exact Revision revision:sha256:one for Change change:sha256:one",
+    );
+    chooser?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
   });
 });
 

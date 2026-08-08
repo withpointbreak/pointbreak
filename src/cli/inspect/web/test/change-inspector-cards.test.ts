@@ -42,6 +42,9 @@ describe("Change cards", () => {
     expect(card.peers).toHaveLength(2);
     expect(card.peers[0]?.label).toContain("Review parser");
     expect(card.peers[1]?.label).toContain("revision:sha256");
+    expect(card.accessibleName).toBe(
+      "Current Revisions — Review parser; revision:sha256:bbb · sha256:b; Change change:sha256:one",
+    );
     expect(card.badges).toEqual([
       "parallel current",
       "in progress",

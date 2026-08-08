@@ -16,11 +16,8 @@ const INDEX_BODY = `
     <span class="brand-mark" aria-hidden="true"></span>
     <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
   </div>
-  <nav id="lens-switcher" aria-label="master pane lens">
-    <div class="lens-group-record">
-      <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-      <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
-    </div>
+  <nav id="lens-switcher" aria-label="Change lenses">
+    <button class="lens-tab" type="button" data-lens="changes" aria-pressed="true">Changes</button>
     <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
   </nav>
   <div class="stats">
@@ -52,9 +49,9 @@ const INDEX_BODY = `
     </div>
     <span id="refresh-word" class="store-live-word" role="status" aria-live="polite"></span>
     <div id="view-controls" class="disclosure">
-      <button id="view-toggle" class="ghost disclosure-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="view-panel">View · newest</button>
+      <button id="view-toggle" class="ghost disclosure-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="view-panel">View</button>
       <div id="view-panel" class="control-panel view-panel hidden" role="dialog" aria-label="View controls">
-        <section id="view-order-section" class="control-section" aria-labelledby="view-order-label">
+        <section id="view-order-section" class="control-section hidden" aria-labelledby="view-order-label">
           <h2 id="view-order-label" class="control-heading">Order</h2>
           <div class="control-choices">
             <label><input id="order-newest" type="radio" name="view-order" value="desc" checked /> Newest first</label>
@@ -68,7 +65,7 @@ const INDEX_BODY = `
             <option value="activity">latest activity</option>
           </select>
         </section>
-        <section class="control-section" aria-labelledby="view-navigation-label">
+        <section class="control-section hidden" aria-labelledby="view-navigation-label">
           <h2 id="view-navigation-label" class="control-heading">Navigate</h2>
           <div class="control-actions">
             <button id="jump-latest" class="ghost" type="button">Latest</button>
@@ -129,19 +126,19 @@ const INDEX_BODY = `
     <button id="follow-toggle" class="ghost follow-toggle" type="button" aria-pressed="true">Following</button>
   </div>
   <div class="split">
-    <button id="master-rail" class="master-rail" aria-label="Show timeline" title="Show timeline">›</button>
-    <section id="master" class="master" aria-label="master pane"></section>
+    <button id="master-rail" class="master-rail" aria-label="Show Changes" title="Show Changes">›</button>
+    <section id="master" class="master" aria-label="master pane" tabindex="-1"></section>
     <div class="divider" role="separator" aria-orientation="vertical" tabindex="0"
          aria-label="Resize panes — arrow keys adjust, Enter resets"
          aria-valuenow="50" aria-valuemin="25" aria-valuemax="75"></div>
-    <aside id="detail" class="detail">
+    <aside id="detail" class="detail" aria-hidden="true" inert>
       <header class="detail-head">
-        <button id="detail-back" class="ghost detail-back" aria-label="Back to timeline">‹ timeline</button>
+        <button id="detail-back" class="ghost detail-back" aria-label="Back to Changes">‹ Changes</button>
         <button id="detail-read" class="ghost" aria-label="Reading mode" title="Reading mode">⤢</button>
         <button id="detail-close" class="ghost" aria-label="Close detail" title="Close detail (Esc)">✕</button>
       </header>
       <div id="detail-body">
-        <p class="empty">Select an event or revision to inspect.</p>
+            <p class="empty">Select a Change or exact Revision.</p>
       </div>
     </aside>
   </div>
@@ -189,13 +186,10 @@ const INDEX_BODY = `
       id="cmd-input"
       class="cmd-input"
       type="text"
-      role="combobox"
-      aria-expanded="true"
-      aria-controls="cmd-results"
-      aria-autocomplete="list"
-      placeholder="Jump to a revision, snapshot, track, or run a command…"
+      aria-label="Filter commands"
+      placeholder="Filter commands…"
     />
-    <ul id="cmd-results" class="cmd-results" role="listbox" aria-label="commands"></ul>
+    <div id="cmd-results" class="cmd-results" aria-label="Commands"></div>
   </div>
 </div>
 
@@ -208,18 +202,11 @@ const INDEX_BODY = `
     <dl class="key-help-list">
       <dt><kbd>Cmd</kbd> / <kbd>Ctrl</kbd> + <kbd>K</kbd></dt><dd>open the command palette</dd>
       <dt><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></dt><dd>open the command palette</dd>
-      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the selection down / up in the active lens</dd>
-      <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>jump to the timeline / revisions / attention lens</dd>
-      <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>jump to the top / bottom of the timeline</dd>
-      <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>page forward / backward through visible timeline entries</dd>
-      <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move half a page down / up through visible timeline entries</dd>
-      <dt><kbd>h</kbd> / <kbd>l</kbd></dt><dd>resize the split: shrink / grow the timeline pane</dd>
-      <dt><kbd>Enter</kbd></dt><dd>open the cursor's detail, then its snapshot diff</dd>
-      <dt><kbd>n</kbd> / <kbd>p</kbd></dt><dd>jump to the next / previous review fact in the diff</dd>
-      <dt><kbd>]</kbd> / <kbd>[</kbd></dt><dd>jump to the next / previous change in the diff</dd>
+      <dt><kbd>1</kbd> / <kbd>2</kbd></dt><dd>open the Changes / Attention lens</dd>
+      <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the local Change cursor without choosing a Revision</dd>
+      <dt><kbd>Enter</kbd></dt><dd>open the selected Change; choose an explicit current Revision from there</dd>
       <dt><kbd>/</kbd></dt><dd>focus the search box</dd>
-      <dt><kbd>Space</kbd> / <kbd>Shift</kbd>+<kbd>Space</kbd></dt><dd>scroll the open detail pane</dd>
-      <dt><kbd>Esc</kbd></dt><dd>close the diff page or an overlay, restore the split, close the detail, clear the cursor, then the query</dd>
+      <dt><kbd>Esc</kbd></dt><dd>close a dialog or return from an exact surface to its originating lens</dd>
       <dt><kbd>?</kbd></dt><dd>toggle this cheat sheet</dd>
     </dl>
     <div class="key-help-workflow">
@@ -250,6 +237,33 @@ const INDEX_BODY = `
  */
 export function mountInspectorDom(): void {
   document.body.innerHTML = INDEX_BODY;
+}
+
+/**
+ * Mount the retired aggregate-reader controls for its quarantined historical
+ * unit tests. The served Change-first shell deliberately contains only Changes
+ * and Attention; keeping this fixture separate prevents old semantics from
+ * leaking back into the active product merely to satisfy legacy tests.
+ */
+export function mountLegacyInspectorDom(): void {
+  mountInspectorDom();
+  const switcher = document.querySelector<HTMLElement>("#lens-switcher");
+  if (switcher) {
+    switcher.innerHTML = `
+      <div class="lens-group-record">
+        <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
+        <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
+      </div>
+      <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
+    `;
+  }
+  document.querySelector("#view-order-section")?.classList.remove("hidden");
+  document
+    .querySelector("#jump-latest")
+    ?.closest(".control-section")
+    ?.classList.remove("hidden");
+  const toggle = document.querySelector<HTMLElement>("#view-toggle");
+  if (toggle) toggle.textContent = "View · newest";
 }
 
 /**

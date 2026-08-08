@@ -204,6 +204,7 @@
     const input = document.querySelector("#reconnect-input");
     const cancel = document.querySelector("#reconnect-cancel");
     if (!dialog || !form || !input || !cancel) return Promise.resolve(null);
+    const returnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
     dialog.classList.remove("hidden");
     input.value = "";
     input.focus();
@@ -214,8 +215,10 @@
         settled = true;
         form.removeEventListener("submit", onSubmit);
         cancel.removeEventListener("click", onCancel);
+        dialog.removeEventListener("keydown", onKeyDown);
         input.value = "";
         dialog.classList.add("hidden");
+        if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
         resolve(value);
       }, "finish");
       const onSubmit = /* @__PURE__ */ __name((event) => {
@@ -223,8 +226,34 @@
         finish(input.value);
       }, "onSubmit");
       const onCancel = /* @__PURE__ */ __name(() => finish(null), "onCancel");
+      const onKeyDown = /* @__PURE__ */ __name((event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          finish(null);
+          return;
+        }
+        if (event.key !== "Tab") return;
+        const stops = Array.from(
+          dialog.querySelectorAll(
+            "button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])"
+          )
+        );
+        const first = stops[0];
+        const last = stops.at(-1);
+        if (!first || !last) return;
+        const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        if (event.shiftKey && (active2 === first || !dialog.contains(active2))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (active2 === last || !dialog.contains(active2))) {
+          event.preventDefault();
+          first.focus();
+        }
+      }, "onKeyDown");
       form.addEventListener("submit", onSubmit);
       cancel.addEventListener("click", onCancel);
+      dialog.addEventListener("keydown", onKeyDown);
     });
   }
   __name(promptForCredential, "promptForCredential");
@@ -422,6 +451,824 @@
     throw failure("unauthorized", 401);
   }
   __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
+
+  // src/change-inspector-router.ts
+  var QUERY_KEYS = [
+    "q",
+    "topology",
+    "lifecycle",
+    "attention",
+    "availability",
+    "after",
+    "limit",
+    "order"
+  ];
+  var ROUTE_QUERY_KEYS = /* @__PURE__ */ new Set([
+    ...QUERY_KEYS,
+    "artifactHash",
+    "fromArtifactHash",
+    "toArtifactHash",
+    "fact",
+    "file"
+  ]);
+  function decodeSegment(value) {
+    try {
+      const decoded2 = decodeURIComponent(value);
+      return decoded2.length > 0 ? decoded2 : null;
+    } catch {
+      return null;
+    }
+  }
+  __name(decodeSegment, "decodeSegment");
+  function validQueryEncoding(search) {
+    if (!search) return true;
+    return search.split("&").every((component) => {
+      if (!component) return false;
+      const separator = component.indexOf("=");
+      const key = separator === -1 ? component : component.slice(0, separator);
+      const value = separator === -1 ? "" : component.slice(separator + 1);
+      try {
+        decodeURIComponent(key.replaceAll("+", " "));
+        decodeURIComponent(value.replaceAll("+", " "));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+  __name(validQueryEncoding, "validQueryEncoding");
+  function parseQuery(search) {
+    if (!validQueryEncoding(search)) {
+      return { message: "Malformed route query encoding." };
+    }
+    const params = new URLSearchParams(search);
+    const query = {};
+    for (const key of params.keys()) {
+      if (!ROUTE_QUERY_KEYS.has(key)) {
+        return { message: `Unknown ${key} route query.` };
+      }
+    }
+    for (const key of QUERY_KEYS) {
+      const values = params.getAll(key);
+      if (values.length > 1) return { message: `Duplicate ${key} route query.` };
+      const value = values[0];
+      if (value === void 0) continue;
+      if (key === "limit") {
+        const limit = Number(value);
+        if (!Number.isInteger(limit))
+          return { message: "Invalid limit route query." };
+        query.limit = limit;
+      } else if (key === "order") {
+        if (value !== "change_id_asc") {
+          return { message: "Invalid order route query." };
+        }
+        query.order = value;
+      } else {
+        query[key] = value;
+      }
+    }
+    return {
+      query,
+      artifactHashes: params.getAll("artifactHash"),
+      fromArtifactHashes: params.getAll("fromArtifactHash"),
+      toArtifactHashes: params.getAll("toArtifactHash"),
+      facts: params.getAll("fact"),
+      files: params.getAll("file")
+    };
+  }
+  __name(parseQuery, "parseQuery");
+  function isParseError(value) {
+    return "message" in value;
+  }
+  __name(isParseError, "isParseError");
+  function parseChangeInspectorRoute(hash) {
+    const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+    const separator = raw.indexOf("?");
+    const path = separator === -1 ? raw : raw.slice(0, separator);
+    const search = separator === -1 ? "" : raw.slice(separator + 1);
+    const parsed = parseQuery(search);
+    if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
+    const {
+      query,
+      artifactHashes,
+      fromArtifactHashes,
+      toArtifactHashes,
+      facts,
+      files
+    } = parsed;
+    const focus = /* @__PURE__ */ __name(() => {
+      if (facts.length > 1 || files.length > 1 || facts.some((value) => !value) || files.some((value) => !value)) {
+        return null;
+      }
+      const selected = {
+        ...facts[0] ? { factId: facts[0] } : {},
+        ...files[0] ? { filePath: files[0] } : {}
+      };
+      return Object.keys(selected).length ? selected : void 0;
+    }, "focus");
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
+        return {
+          kind: "invalid",
+          message: "artifactHash is only valid on an exact Revision route."
+        };
+      }
+      return { kind: "lens", lens: segments[0], query };
+    }
+    if (segments[0] !== "changes")
+      return { kind: "invalid", message: "Unknown Change Inspector route." };
+    const changeId = decodeSegment(segments[1] ?? "");
+    if (changeId === null)
+      return { kind: "invalid", message: "Change routes require a Change ID." };
+    if (segments.length === 2) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
+        return {
+          kind: "invalid",
+          message: "artifactHash is only valid on an exact Revision route."
+        };
+      }
+      return { kind: "change", changeId, query };
+    }
+    const exactRevision = /* @__PURE__ */ __name((revisionId) => {
+      if (revisionId === null || artifactHashes.length !== 1 || !artifactHashes[0])
+        return null;
+      return {
+        revisionId,
+        objectArtifactContentHash: artifactHashes[0]
+      };
+    }, "exactRevision");
+    const exactFailure = /* @__PURE__ */ __name(() => ({
+      kind: "invalid",
+      message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
+    }), "exactFailure");
+    if (segments[2] === "revisions" && segments.length >= 4) {
+      const revision = exactRevision(decodeSegment(segments[3]));
+      if (revision === null) return exactFailure();
+      const exactFocus = focus();
+      if (exactFocus === null)
+        return {
+          kind: "invalid",
+          message: "Exact route focus requires at most one non-empty fact and file."
+        };
+      if (fromArtifactHashes.length > 0 || toArtifactHashes.length > 0)
+        return {
+          kind: "invalid",
+          message: "Revision routes do not accept interdiff hashes."
+        };
+      if (segments.length === 4)
+        return {
+          kind: "revision",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+      if (segments.length === 5 && segments[4] === "resource")
+        return {
+          kind: "resource",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+      if (segments.length === 5 && segments[4] === "association")
+        return {
+          kind: "association",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+    }
+    if (segments[2] === "interdiff" && segments.length === 5) {
+      if (artifactHashes.length > 0)
+        return {
+          kind: "invalid",
+          message: "Interdiff routes use endpoint artifact hashes."
+        };
+      const fromRevisionId = decodeSegment(segments[3]);
+      const toRevisionId = decodeSegment(segments[4]);
+      if (fromRevisionId === null || toRevisionId === null)
+        return {
+          kind: "invalid",
+          message: "Interdiff routes require both Revision IDs."
+        };
+      if (fromArtifactHashes.length !== 1 || !fromArtifactHashes[0] || toArtifactHashes.length !== 1 || !toArtifactHashes[0])
+        return {
+          kind: "invalid",
+          message: "Interdiff routes require exactly one artifact hash for each endpoint."
+        };
+      const exactFocus = focus();
+      if (exactFocus === null)
+        return {
+          kind: "invalid",
+          message: "Exact route focus requires at most one non-empty fact and file."
+        };
+      return {
+        kind: "interdiff",
+        changeId,
+        from: {
+          revisionId: fromRevisionId,
+          objectArtifactContentHash: fromArtifactHashes[0]
+        },
+        to: {
+          revisionId: toRevisionId,
+          objectArtifactContentHash: toArtifactHashes[0]
+        },
+        query,
+        ...exactFocus ? { focus: exactFocus } : {}
+      };
+    }
+    return { kind: "invalid", message: "Unknown Change Inspector route." };
+  }
+  __name(parseChangeInspectorRoute, "parseChangeInspectorRoute");
+  function appendQuery(query, params) {
+    for (const key of QUERY_KEYS) {
+      const value = query[key];
+      if (value !== void 0) params.set(key, String(value));
+    }
+  }
+  __name(appendQuery, "appendQuery");
+  function formatChangeInspectorRoute(route) {
+    const params = new URLSearchParams();
+    appendQuery(route.query, params);
+    if (route.kind === "revision" || route.kind === "resource" || route.kind === "association")
+      params.set("artifactHash", route.revision.objectArtifactContentHash);
+    if (route.kind === "interdiff") {
+      params.set("fromArtifactHash", route.from.objectArtifactContentHash);
+      params.set("toArtifactHash", route.to.objectArtifactContentHash);
+    }
+    if ("focus" in route && route.focus?.factId)
+      params.set("fact", route.focus.factId);
+    if ("focus" in route && route.focus?.filePath)
+      params.set("file", route.focus.filePath);
+    const suffix = params.size ? `?${params}` : "";
+    if (route.kind === "lens") return `#/${route.lens}${suffix}`;
+    const change = encodeURIComponent(route.changeId);
+    if (route.kind === "change") return `#/changes/${change}${suffix}`;
+    if (route.kind === "revision")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+    if (route.kind === "resource")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
+    if (route.kind === "association")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
+    return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
+  }
+  __name(formatChangeInspectorRoute, "formatChangeInspectorRoute");
+  function lensForRoute(route) {
+    return route.kind === "lens" ? route.lens : "changes";
+  }
+  __name(lensForRoute, "lensForRoute");
+  function firstPageQuery(query) {
+    const { after: _after, ...firstPage } = query;
+    return firstPage;
+  }
+  __name(firstPageQuery, "firstPageQuery");
+  function queryForExactNavigation(route) {
+    if (route.kind !== "lens" || route.lens !== "attention") return route.query;
+    return firstPageQuery(route.query);
+  }
+  __name(queryForExactNavigation, "queryForExactNavigation");
+
+  // src/dom.ts
+  function $(sel) {
+    return document.querySelector(sel);
+  }
+  __name($, "$");
+
+  // src/prefs.ts
+  var THEME_KEY = "shore-inspect-theme";
+  var DENSITY_KEY = "shore-inspect-density";
+  var SPLIT_KEY = "shore-inspect-split";
+  var SPLIT_MIN = 25;
+  var SPLIT_MAX = 75;
+  var liveMediaQueries = [];
+  function preferredThemeMode() {
+    const stored = localStorage.getItem(THEME_KEY);
+    return stored === "light" || stored === "dark" ? stored : "system";
+  }
+  __name(preferredThemeMode, "preferredThemeMode");
+  function hasPinnedTheme() {
+    return preferredThemeMode() !== "system";
+  }
+  __name(hasPinnedTheme, "hasPinnedTheme");
+  function osTheme() {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  __name(osTheme, "osTheme");
+  function preferredTheme() {
+    const mode = preferredThemeMode();
+    return mode === "system" ? osTheme() : mode;
+  }
+  __name(preferredTheme, "preferredTheme");
+  function syncChoice(name, value) {
+    for (const input of document.querySelectorAll(
+      `input[name="${name}"]`
+    )) {
+      input.checked = input.value === value;
+    }
+  }
+  __name(syncChoice, "syncChoice");
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    syncChoice("theme-mode", preferredThemeMode());
+  }
+  __name(applyTheme, "applyTheme");
+  function setThemeMode(mode) {
+    const next = mode === "light" || mode === "dark" ? mode : "system";
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(preferredTheme());
+  }
+  __name(setThemeMode, "setThemeMode");
+  function preferredDensity() {
+    return localStorage.getItem(DENSITY_KEY) || "comfortable";
+  }
+  __name(preferredDensity, "preferredDensity");
+  function applyDensity(mode) {
+    const value = mode === "compact" ? "compact" : "comfortable";
+    document.documentElement.classList.toggle("compact", value === "compact");
+    syncChoice("density-mode", value);
+  }
+  __name(applyDensity, "applyDensity");
+  function setDensity(mode) {
+    const next = mode === "compact" ? "compact" : "comfortable";
+    localStorage.setItem(DENSITY_KEY, next);
+    applyDensity(next);
+  }
+  __name(setDensity, "setDensity");
+  function preferredSplit() {
+    const raw = localStorage.getItem(SPLIT_KEY);
+    const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isInteger(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : null;
+  }
+  __name(preferredSplit, "preferredSplit");
+  function applySplit(pct) {
+    if (pct === null) {
+      document.documentElement.style.removeProperty("--split-master");
+      localStorage.removeItem(SPLIT_KEY);
+      return;
+    }
+    const clamped = Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct)));
+    document.documentElement.style.setProperty("--split-master", `${clamped}%`);
+    localStorage.setItem(SPLIT_KEY, String(clamped));
+  }
+  __name(applySplit, "applySplit");
+  function applyPrefs() {
+    applyTheme(preferredTheme());
+    applyDensity(preferredDensity());
+    const split = preferredSplit();
+    if (split !== null) applySplit(split);
+  }
+  __name(applyPrefs, "applyPrefs");
+  function watchColorScheme() {
+    const query = window.matchMedia("(prefers-color-scheme: light)");
+    liveMediaQueries.push(query);
+    query.addEventListener("change", () => {
+      if (hasPinnedTheme()) return;
+      applyTheme(preferredTheme());
+    });
+  }
+  __name(watchColorScheme, "watchColorScheme");
+
+  // src/change-inspector-interaction.ts
+  var colorSchemeWatcherInstalled = false;
+  var HISTORY_ORIGIN_KEY = "__pointbreakChangeInspectorOrigin";
+  function isTextControl(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.isContentEditable || target.matches(
+      "input, textarea, select, [role='textbox'], [role='combobox']"
+    );
+  }
+  __name(isTextControl, "isTextControl");
+  function setSelected(changeId) {
+    document.querySelectorAll(".unit-card[data-change-id]").forEach((card) => {
+      const selected = card.dataset.changeId === changeId;
+      card.classList.toggle("change-card-selected", selected);
+      card.setAttribute("aria-current", selected ? "true" : "false");
+    });
+  }
+  __name(setSelected, "setSelected");
+  function moveSelection(selectedChangeId, delta) {
+    const cards = Array.from(
+      document.querySelectorAll(".unit-card[data-change-id]")
+    );
+    if (!cards.length) return selectedChangeId;
+    const current = cards.findIndex(
+      (card2) => card2.dataset.changeId === selectedChangeId
+    );
+    const next = Math.max(
+      0,
+      Math.min(cards.length - 1, current < 0 ? 0 : current + delta)
+    );
+    const card = cards[next];
+    const changeId = card.dataset.changeId ?? null;
+    setSelected(changeId);
+    card.scrollIntoView({ block: "nearest", behavior: "auto" });
+    return changeId;
+  }
+  __name(moveSelection, "moveSelection");
+  function moveSelectionToBoundary(selectedChangeId, boundary) {
+    const cards = Array.from(
+      document.querySelectorAll(".unit-card[data-change-id]")
+    );
+    const card = boundary === "first" ? cards[0] : cards.at(-1);
+    if (!card) return selectedChangeId;
+    const changeId = card.dataset.changeId ?? null;
+    setSelected(changeId);
+    card.scrollIntoView({ block: "nearest", behavior: "auto" });
+    return changeId;
+  }
+  __name(moveSelectionToBoundary, "moveSelectionToBoundary");
+  function trapModalFocus(modal, event) {
+    if (event.key !== "Tab") return;
+    const stops = Array.from(
+      modal.querySelectorAll(
+        "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+      )
+    );
+    if (!stops.length) return;
+    const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const first = stops[0];
+    const last = stops.at(-1) ?? first;
+    if (event.shiftKey && (active2 === first || !modal.contains(active2))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active2 === last || !modal.contains(active2))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  __name(trapModalFocus, "trapModalFocus");
+  function installChangeInspectorInteraction(actions2) {
+    let selectedChangeId = null;
+    let modalReturnFocus = null;
+    let detailReturnFocus = null;
+    let detailWasOpen = false;
+    let currentRoute2 = null;
+    let exactOriginLens = null;
+    let detailDomIdentity = null;
+    applyPrefs();
+    if (!colorSchemeWatcherInstalled) {
+      watchColorScheme();
+      colorSchemeWatcherInstalled = true;
+    }
+    const historyOrigin = /* @__PURE__ */ __name((route) => {
+      if (route.kind === "lens") return null;
+      const state = history.state;
+      if (state === null || typeof state !== "object" || Array.isArray(state))
+        return null;
+      const origin = state[HISTORY_ORIGIN_KEY];
+      if (origin === null || typeof origin !== "object") return null;
+      const record = origin;
+      if (record.route !== formatChangeInspectorRoute(route)) return null;
+      return record.lens === "changes" || record.lens === "attention" ? record.lens : null;
+    }, "historyOrigin");
+    const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens) => {
+      if (route.kind === "lens") return;
+      const state = history.state;
+      const retained = state !== null && typeof state === "object" && !Array.isArray(state) ? state : {};
+      history.replaceState(
+        {
+          ...retained,
+          [HISTORY_ORIGIN_KEY]: {
+            route: formatChangeInspectorRoute(route),
+            lens
+          }
+        },
+        "",
+        location.href
+      );
+    }, "persistHistoryOrigin");
+    const listRoute = /* @__PURE__ */ __name((route) => ({
+      kind: "lens",
+      lens: route.kind === "lens" ? route.lens : historyOrigin(route) ?? exactOriginLens ?? "changes",
+      query: route.query
+    }), "listRoute");
+    const focusFallback = /* @__PURE__ */ __name((route = currentRoute2) => {
+      const target = route !== null && route.kind !== "lens" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
+      target?.focus({ preventScroll: true });
+    }, "focusFallback");
+    const closeModal = /* @__PURE__ */ __name((id) => {
+      const modal = document.querySelector(id);
+      if (!modal || modal.classList.contains("hidden")) return;
+      modal.classList.add("hidden");
+      const focus = modalReturnFocus;
+      modalReturnFocus = null;
+      if (focus?.isConnected === true) focus.focus({ preventScroll: true });
+      else focusFallback();
+    }, "closeModal");
+    const openModal = /* @__PURE__ */ __name((id, initial) => {
+      const modal = document.querySelector(id);
+      if (!modal) return;
+      modalReturnFocus = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+      modal.classList.remove("hidden");
+      initial?.focus();
+    }, "openModal");
+    const changeTheme = /* @__PURE__ */ __name((event) => {
+      const input = event.target;
+      if (!input.checked) return;
+      setThemeMode(input.value);
+    }, "changeTheme");
+    const changeDensity = /* @__PURE__ */ __name((event) => {
+      const input = event.target;
+      if (!input.checked) return;
+      setDensity(input.value);
+    }, "changeDensity");
+    document.querySelectorAll("input[name='theme-mode']").forEach((input) => {
+      input.addEventListener("change", changeTheme);
+    });
+    document.querySelectorAll("input[name='density-mode']").forEach((input) => {
+      input.addEventListener("change", changeDensity);
+    });
+    const paletteInput = document.querySelector("#cmd-input");
+    const paletteResults = document.querySelector("#cmd-results");
+    const paletteCommands = [
+      ["Open Changes", "changes"],
+      ["Open Attention", "attention"]
+    ];
+    const renderPaletteResults = /* @__PURE__ */ __name(() => {
+      if (paletteResults) {
+        paletteResults.replaceChildren();
+        const query = paletteInput?.value.trim().toLocaleLowerCase() ?? "";
+        const matching = paletteCommands.filter(
+          ([label]) => label.toLocaleLowerCase().includes(query)
+        );
+        for (const [label, lens] of matching) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "ghost cmd-item";
+          const commandLabel = document.createElement("span");
+          commandLabel.className = "cmd-label";
+          commandLabel.textContent = label;
+          button.append(commandLabel);
+          button.addEventListener("click", () => {
+            closeModal("#cmd-palette");
+            const route = currentRoute2;
+            if (route)
+              actions2.navigate({
+                kind: "lens",
+                lens,
+                query: { ...route.query, after: void 0 }
+              });
+          });
+          paletteResults.append(button);
+        }
+        if (matching.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "cmd-empty";
+          empty.setAttribute("role", "status");
+          empty.textContent = "No matching commands.";
+          paletteResults.append(empty);
+        }
+      }
+    }, "renderPaletteResults");
+    const openPalette = /* @__PURE__ */ __name(() => {
+      if (paletteInput) paletteInput.value = "";
+      renderPaletteResults();
+      openModal("#cmd-palette", paletteInput);
+    }, "openPalette");
+    paletteInput?.addEventListener("input", renderPaletteResults);
+    const helpClose = /* @__PURE__ */ __name(() => closeModal("#key-help"), "helpClose");
+    const helpCloseButton = document.querySelector("#key-help-close");
+    helpCloseButton?.addEventListener("click", helpClose);
+    const readingButton = document.querySelector("#detail-read");
+    const masterRail = document.querySelector("#master-rail");
+    const setReading = /* @__PURE__ */ __name((enabled) => {
+      const split = document.querySelector(".split");
+      const detail = document.querySelector("#detail");
+      const scrollTop = detail?.scrollTop ?? 0;
+      split?.classList.toggle("reading", enabled);
+      if (readingButton) {
+        readingButton.textContent = enabled ? "⤡" : "⤢";
+        readingButton.setAttribute("aria-pressed", String(enabled));
+        readingButton.setAttribute(
+          "aria-label",
+          enabled ? "Exit reading mode" : "Enter reading mode"
+        );
+        readingButton.title = enabled ? "Exit reading mode" : "Reading mode";
+      }
+      if (detail) detail.scrollTop = scrollTop;
+    }, "setReading");
+    const toggleReading = /* @__PURE__ */ __name(() => {
+      setReading(
+        !document.querySelector(".split")?.classList.contains("reading")
+      );
+    }, "toggleReading");
+    readingButton?.addEventListener("click", toggleReading);
+    const restoreMaster = /* @__PURE__ */ __name(() => {
+      setReading(false);
+      document.querySelector("#master")?.focus({ preventScroll: true });
+    }, "restoreMaster");
+    masterRail?.addEventListener("click", restoreMaster);
+    const divider = document.querySelector(".divider");
+    const updateSplit = /* @__PURE__ */ __name((value) => {
+      applySplit(value);
+      divider?.setAttribute("aria-valuenow", String(preferredSplit() ?? 50));
+    }, "updateSplit");
+    updateSplit(preferredSplit());
+    const onDividerKey = /* @__PURE__ */ __name((event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        updateSplit(null);
+        return;
+      }
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const value = (preferredSplit() ?? 50) + (event.key === "ArrowLeft" ? -5 : 5);
+      updateSplit(value);
+    }, "onDividerKey");
+    divider?.addEventListener("keydown", onDividerKey);
+    const onClick = /* @__PURE__ */ __name((event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const card = target?.closest(".unit-card[data-change-id]");
+      if (card && !target?.closest("button, a, input, select, textarea")) {
+        selectedChangeId = card.dataset.changeId ?? null;
+        setSelected(selectedChangeId);
+      }
+    }, "onClick");
+    document.addEventListener("click", onClick);
+    const onKey = /* @__PURE__ */ __name((event) => {
+      const open = document.querySelector(
+        "#cmd-palette:not(.hidden), #key-help:not(.hidden)"
+      );
+      if (open) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeModal(`#${open.id}`);
+        } else {
+          trapModalFocus(open, event);
+        }
+        return;
+      }
+      if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
+      if (isTextControl(event.target)) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" || event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        openPalette();
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const route = currentRoute2;
+      if (!route) return;
+      if (event.key === "?") {
+        event.preventDefault();
+        openModal("#key-help", document.querySelector("#key-help-close"));
+        return;
+      }
+      if (event.key === "/") {
+        event.preventDefault();
+        document.querySelector("#filter-text")?.focus();
+        return;
+      }
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        selectedChangeId = moveSelection(selectedChangeId, 1);
+        return;
+      }
+      if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        selectedChangeId = moveSelection(selectedChangeId, -1);
+        return;
+      }
+      if (event.key === "g") {
+        event.preventDefault();
+        selectedChangeId = moveSelectionToBoundary(selectedChangeId, "first");
+        return;
+      }
+      if (event.key === "G") {
+        event.preventDefault();
+        selectedChangeId = moveSelectionToBoundary(selectedChangeId, "last");
+        return;
+      }
+      if (event.key === "1") {
+        event.preventDefault();
+        actions2.navigate({
+          kind: "lens",
+          lens: "changes",
+          query: { ...route.query, after: void 0 }
+        });
+        return;
+      }
+      if (event.key === "2") {
+        event.preventDefault();
+        actions2.navigate({
+          kind: "lens",
+          lens: "attention",
+          query: { ...route.query, after: void 0 }
+        });
+        return;
+      }
+      if (event.key === "Enter" && selectedChangeId) {
+        event.preventDefault();
+        actions2.navigate({
+          kind: "change",
+          changeId: selectedChangeId,
+          query: queryForExactNavigation(route)
+        });
+        return;
+      }
+      if (event.key === "h") {
+        event.preventDefault();
+        updateSplit((preferredSplit() ?? 50) - 5);
+        return;
+      }
+      if (event.key === "l") {
+        event.preventDefault();
+        updateSplit((preferredSplit() ?? 50) + 5);
+        return;
+      }
+      if (event.key === "Escape" && route.kind !== "lens") {
+        event.preventDefault();
+        actions2.navigate(listRoute(route));
+      }
+    }, "onKey");
+    document.addEventListener("keydown", onKey);
+    const onClose = /* @__PURE__ */ __name(() => {
+      const route = currentRoute2;
+      if (route) actions2.navigate(listRoute(route));
+    }, "onClose");
+    const closeButton = document.querySelector("#detail-close");
+    const backButton = document.querySelector("#detail-back");
+    if (closeButton) closeButton.onclick = onClose;
+    if (backButton) backButton.onclick = onClose;
+    const stop = /* @__PURE__ */ __name(() => {
+      document.removeEventListener("click", onClick);
+      document.removeEventListener("keydown", onKey);
+      document.querySelectorAll("input[name='theme-mode']").forEach((input) => {
+        input.removeEventListener("change", changeTheme);
+      });
+      document.querySelectorAll("input[name='density-mode']").forEach((input) => {
+        input.removeEventListener("change", changeDensity);
+      });
+      helpCloseButton?.removeEventListener("click", helpClose);
+      readingButton?.removeEventListener("click", toggleReading);
+      masterRail?.removeEventListener("click", restoreMaster);
+      divider?.removeEventListener("keydown", onDividerKey);
+      paletteInput?.removeEventListener("input", renderPaletteResults);
+      if (closeButton?.onclick === onClose) closeButton.onclick = null;
+      if (backButton?.onclick === onClose) backButton.onclick = null;
+      document.querySelector("#cmd-palette")?.classList.add("hidden");
+      document.querySelector("#key-help")?.classList.add("hidden");
+      paletteResults?.replaceChildren();
+      selectedChangeId = null;
+      setSelected(null);
+      modalReturnFocus = null;
+      detailReturnFocus = null;
+      detailWasOpen = false;
+      currentRoute2 = null;
+      exactOriginLens = null;
+      detailDomIdentity = null;
+    }, "stop");
+    return {
+      sync(snapshot2) {
+        const nextRoute = snapshot2.route.kind === "invalid" ? null : snapshot2.route;
+        if (nextRoute !== null && nextRoute.kind !== "lens") {
+          const persistedOrigin = historyOrigin(nextRoute);
+          const origin = persistedOrigin ?? (currentRoute2?.kind === "lens" ? currentRoute2.lens : exactOriginLens ?? "changes");
+          exactOriginLens = origin;
+          if (persistedOrigin === null) persistHistoryOrigin(nextRoute, origin);
+        } else {
+          exactOriginLens = null;
+        }
+        const cards = Array.from(
+          document.querySelectorAll(".unit-card[data-change-id]")
+        );
+        if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
+          selectedChangeId = null;
+        setSelected(selectedChangeId);
+        const detailOpen = snapshot2.route.kind !== "lens" && snapshot2.route.kind !== "invalid";
+        const detail = document.querySelector("#detail");
+        const nextDetailDomIdentity = document.querySelector("#detail-body")?.firstChild ?? null;
+        const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
+        document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
+        if (detail) {
+          detail.inert = !detailOpen;
+          if (detailOpen) detail.removeAttribute("aria-hidden");
+          else detail.setAttribute("aria-hidden", "true");
+        }
+        if (detailOpen && !detailWasOpen) {
+          const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          detailReturnFocus = active2 && active2 !== document.body ? active2 : null;
+          if (window.matchMedia("(max-width: 760px)").matches) {
+            document.querySelector("#detail-back")?.focus({ preventScroll: true });
+          }
+        } else if (detailOpen && detailWasOpen && detailDomChanged && (!(document.activeElement instanceof HTMLElement) || document.activeElement === document.body || !document.activeElement.isConnected)) {
+          focusFallback(nextRoute);
+        } else if (!detailOpen && detailWasOpen) {
+          setReading(false);
+          const candidate = detailReturnFocus?.isConnected === true ? detailReturnFocus : document.querySelector("#master");
+          detailReturnFocus = null;
+          candidate?.focus({ preventScroll: true });
+        }
+        detailWasOpen = detailOpen;
+        currentRoute2 = nextRoute;
+        detailDomIdentity = nextDetailDomIdentity;
+      },
+      stop
+    };
+  }
+  __name(installChangeInspectorInteraction, "installChangeInspectorInteraction");
 
   // ../../../documents/change_reader_profile_v1.json
   var change_reader_profile_v1_default = {
@@ -1223,297 +2070,31 @@
         entry
       ])
     );
+    const peers = summary.currentRevisionRefs.map((revision) => {
+      const entry = byExactIdentity.get(
+        `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+      );
+      const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
+      return {
+        revision,
+        label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision)}`,
+        copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`
+      };
+    });
+    const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].label : `Current Revisions — ${peers.map((peer) => peer.label.replace(/^Current Revision — /, "")).join("; ")}`;
     return {
       changeId: summary.changeId,
+      accessibleName: `${currentRevisionName}; Change ${summary.changeId}`,
       badges: [
         summary.topology,
         summary.lifecycle,
         summary.attentionSummary,
         summary.availabilitySummary
       ].map(words),
-      peers: summary.currentRevisionRefs.map((revision) => {
-        const entry = byExactIdentity.get(
-          `${revision.revisionId}\0${revision.objectArtifactContentHash}`
-        );
-        const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
-        return {
-          revision,
-          label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision)}`,
-          copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`
-        };
-      })
+      peers
     };
   }
   __name(changeCardPresentation, "changeCardPresentation");
-
-  // src/change-inspector-router.ts
-  var QUERY_KEYS = [
-    "q",
-    "topology",
-    "lifecycle",
-    "attention",
-    "availability",
-    "after",
-    "limit",
-    "order"
-  ];
-  var ROUTE_QUERY_KEYS = /* @__PURE__ */ new Set([
-    ...QUERY_KEYS,
-    "artifactHash",
-    "fromArtifactHash",
-    "toArtifactHash",
-    "fact",
-    "file"
-  ]);
-  function decodeSegment(value) {
-    try {
-      const decoded2 = decodeURIComponent(value);
-      return decoded2.length > 0 ? decoded2 : null;
-    } catch {
-      return null;
-    }
-  }
-  __name(decodeSegment, "decodeSegment");
-  function validQueryEncoding(search) {
-    if (!search) return true;
-    return search.split("&").every((component) => {
-      if (!component) return false;
-      const separator = component.indexOf("=");
-      const key = separator === -1 ? component : component.slice(0, separator);
-      const value = separator === -1 ? "" : component.slice(separator + 1);
-      try {
-        decodeURIComponent(key.replaceAll("+", " "));
-        decodeURIComponent(value.replaceAll("+", " "));
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  }
-  __name(validQueryEncoding, "validQueryEncoding");
-  function parseQuery(search) {
-    if (!validQueryEncoding(search)) {
-      return { message: "Malformed route query encoding." };
-    }
-    const params = new URLSearchParams(search);
-    const query = {};
-    for (const key of params.keys()) {
-      if (!ROUTE_QUERY_KEYS.has(key)) {
-        return { message: `Unknown ${key} route query.` };
-      }
-    }
-    for (const key of QUERY_KEYS) {
-      const values = params.getAll(key);
-      if (values.length > 1) return { message: `Duplicate ${key} route query.` };
-      const value = values[0];
-      if (value === void 0) continue;
-      if (key === "limit") {
-        const limit = Number(value);
-        if (!Number.isInteger(limit))
-          return { message: "Invalid limit route query." };
-        query.limit = limit;
-      } else if (key === "order") {
-        if (value !== "change_id_asc") {
-          return { message: "Invalid order route query." };
-        }
-        query.order = value;
-      } else {
-        query[key] = value;
-      }
-    }
-    return {
-      query,
-      artifactHashes: params.getAll("artifactHash"),
-      fromArtifactHashes: params.getAll("fromArtifactHash"),
-      toArtifactHashes: params.getAll("toArtifactHash"),
-      facts: params.getAll("fact"),
-      files: params.getAll("file")
-    };
-  }
-  __name(parseQuery, "parseQuery");
-  function isParseError(value) {
-    return "message" in value;
-  }
-  __name(isParseError, "isParseError");
-  function parseChangeInspectorRoute(hash) {
-    const raw = hash.startsWith("#") ? hash.slice(1) : hash;
-    const separator = raw.indexOf("?");
-    const path = separator === -1 ? raw : raw.slice(0, separator);
-    const search = separator === -1 ? "" : raw.slice(separator + 1);
-    const parsed = parseQuery(search);
-    if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
-    const {
-      query,
-      artifactHashes,
-      fromArtifactHashes,
-      toArtifactHashes,
-      facts,
-      files
-    } = parsed;
-    const focus = /* @__PURE__ */ __name(() => {
-      if (facts.length > 1 || files.length > 1 || facts.some((value) => !value) || files.some((value) => !value)) {
-        return null;
-      }
-      const selected = {
-        ...facts[0] ? { factId: facts[0] } : {},
-        ...files[0] ? { filePath: files[0] } : {}
-      };
-      return Object.keys(selected).length ? selected : void 0;
-    }, "focus");
-    const segments = path.split("/").filter(Boolean);
-    if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
-      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
-        return {
-          kind: "invalid",
-          message: "artifactHash is only valid on an exact Revision route."
-        };
-      }
-      return { kind: "lens", lens: segments[0], query };
-    }
-    if (segments[0] !== "changes")
-      return { kind: "invalid", message: "Unknown Change Inspector route." };
-    const changeId = decodeSegment(segments[1] ?? "");
-    if (changeId === null)
-      return { kind: "invalid", message: "Change routes require a Change ID." };
-    if (segments.length === 2) {
-      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
-        return {
-          kind: "invalid",
-          message: "artifactHash is only valid on an exact Revision route."
-        };
-      }
-      return { kind: "change", changeId, query };
-    }
-    const exactRevision = /* @__PURE__ */ __name((revisionId) => {
-      if (revisionId === null || artifactHashes.length !== 1 || !artifactHashes[0])
-        return null;
-      return {
-        revisionId,
-        objectArtifactContentHash: artifactHashes[0]
-      };
-    }, "exactRevision");
-    const exactFailure = /* @__PURE__ */ __name(() => ({
-      kind: "invalid",
-      message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
-    }), "exactFailure");
-    if (segments[2] === "revisions" && segments.length >= 4) {
-      const revision = exactRevision(decodeSegment(segments[3]));
-      if (revision === null) return exactFailure();
-      const exactFocus = focus();
-      if (exactFocus === null)
-        return {
-          kind: "invalid",
-          message: "Exact route focus requires at most one non-empty fact and file."
-        };
-      if (fromArtifactHashes.length > 0 || toArtifactHashes.length > 0)
-        return {
-          kind: "invalid",
-          message: "Revision routes do not accept interdiff hashes."
-        };
-      if (segments.length === 4)
-        return {
-          kind: "revision",
-          changeId,
-          revision,
-          query,
-          ...exactFocus ? { focus: exactFocus } : {}
-        };
-      if (segments.length === 5 && segments[4] === "resource")
-        return {
-          kind: "resource",
-          changeId,
-          revision,
-          query,
-          ...exactFocus ? { focus: exactFocus } : {}
-        };
-      if (segments.length === 5 && segments[4] === "association")
-        return {
-          kind: "association",
-          changeId,
-          revision,
-          query,
-          ...exactFocus ? { focus: exactFocus } : {}
-        };
-    }
-    if (segments[2] === "interdiff" && segments.length === 5) {
-      if (artifactHashes.length > 0)
-        return {
-          kind: "invalid",
-          message: "Interdiff routes use endpoint artifact hashes."
-        };
-      const fromRevisionId = decodeSegment(segments[3]);
-      const toRevisionId = decodeSegment(segments[4]);
-      if (fromRevisionId === null || toRevisionId === null)
-        return {
-          kind: "invalid",
-          message: "Interdiff routes require both Revision IDs."
-        };
-      if (fromArtifactHashes.length !== 1 || !fromArtifactHashes[0] || toArtifactHashes.length !== 1 || !toArtifactHashes[0])
-        return {
-          kind: "invalid",
-          message: "Interdiff routes require exactly one artifact hash for each endpoint."
-        };
-      const exactFocus = focus();
-      if (exactFocus === null)
-        return {
-          kind: "invalid",
-          message: "Exact route focus requires at most one non-empty fact and file."
-        };
-      return {
-        kind: "interdiff",
-        changeId,
-        from: {
-          revisionId: fromRevisionId,
-          objectArtifactContentHash: fromArtifactHashes[0]
-        },
-        to: {
-          revisionId: toRevisionId,
-          objectArtifactContentHash: toArtifactHashes[0]
-        },
-        query,
-        ...exactFocus ? { focus: exactFocus } : {}
-      };
-    }
-    return { kind: "invalid", message: "Unknown Change Inspector route." };
-  }
-  __name(parseChangeInspectorRoute, "parseChangeInspectorRoute");
-  function appendQuery(query, params) {
-    for (const key of QUERY_KEYS) {
-      const value = query[key];
-      if (value !== void 0) params.set(key, String(value));
-    }
-  }
-  __name(appendQuery, "appendQuery");
-  function formatChangeInspectorRoute(route) {
-    const params = new URLSearchParams();
-    appendQuery(route.query, params);
-    if (route.kind === "revision" || route.kind === "resource" || route.kind === "association")
-      params.set("artifactHash", route.revision.objectArtifactContentHash);
-    if (route.kind === "interdiff") {
-      params.set("fromArtifactHash", route.from.objectArtifactContentHash);
-      params.set("toArtifactHash", route.to.objectArtifactContentHash);
-    }
-    if ("focus" in route && route.focus?.factId)
-      params.set("fact", route.focus.factId);
-    if ("focus" in route && route.focus?.filePath)
-      params.set("file", route.focus.filePath);
-    const suffix = params.size ? `?${params}` : "";
-    if (route.kind === "lens") return `#/${route.lens}${suffix}`;
-    const change = encodeURIComponent(route.changeId);
-    if (route.kind === "change") return `#/changes/${change}${suffix}`;
-    if (route.kind === "revision")
-      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
-    if (route.kind === "resource")
-      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
-    if (route.kind === "association")
-      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
-    return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
-  }
-  __name(formatChangeInspectorRoute, "formatChangeInspectorRoute");
-  function lensForRoute(route) {
-    return route.kind === "lens" ? route.lens : "changes";
-  }
-  __name(lensForRoute, "lensForRoute");
 
   // src/classNames.ts
   var CLASS = {
@@ -2846,8 +3427,26 @@
     if (element) element.textContent = value;
   }
   __name(setText, "setText");
+  function replaceMasterWith(...children) {
+    const master = document.querySelector("#master");
+    if (!master) return;
+    delete master.dataset.changeListKey;
+    master.replaceChildren(...children);
+  }
+  __name(replaceMasterWith, "replaceMasterWith");
+  function replaceDetailWith(...children) {
+    const detail = document.querySelector("#detail-body");
+    if (!detail) return;
+    delete detail.dataset.changeReadingKey;
+    detail.replaceChildren(...children);
+  }
+  __name(replaceDetailWith, "replaceDetailWith");
   function prepareChangeInspectorShell(actions2) {
-    document.querySelector("#view-controls")?.classList.add("hidden");
+    document.querySelector("#view-controls")?.classList.remove("hidden");
+    setText("#view-toggle", "View");
+    document.querySelector("#view-order-section")?.classList.add("hidden");
+    document.querySelector("#view-sort-section")?.classList.add("hidden");
+    document.querySelector("#jump-latest")?.closest(".control-section")?.classList.add("hidden");
     document.querySelector("#derived-access-status")?.classList.add("hidden");
     document.querySelector("#follow-toggle")?.classList.add("hidden");
     const switcher = document.querySelector("#lens-switcher");
@@ -2859,17 +3458,20 @@
         button.className = "lens-tab";
         button.dataset.lens = lens;
         button.textContent = lens === "changes" ? "Changes" : "Attention";
-        button.addEventListener(
-          "click",
-          () => actions2.navigate({ kind: "lens", lens, query: {} })
-        );
+        button.addEventListener("click", () => {
+          const current = parseChangeInspectorRoute(location.hash || "#/changes");
+          actions2.navigate({
+            kind: "lens",
+            lens,
+            query: current.kind === "invalid" ? {} : { ...current.query, after: void 0 }
+          });
+        });
         switcher.append(button);
       }
     }
     const back = document.querySelector("#detail-back");
     if (back) {
       back.textContent = "‹ Changes";
-      back.onclick = () => actions2.navigate({ kind: "lens", lens: "changes", query: {} });
     }
     const search = document.querySelector("#filter-text");
     if (search) search.placeholder = "Search Changes and current Revisions";
@@ -2918,7 +3520,13 @@
         const base = current.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : current;
         actions2.navigate({
           ...base,
-          query: {}
+          // Clear only reader filters and the now-invalid continuation. Keep the
+          // bounded page shape in the URL so reset does not silently change the
+          // caller's explicit limit or stable ordering contract.
+          query: {
+            limit: base.query.limit,
+            order: base.query.order
+          }
         });
       };
     }
@@ -3055,7 +3663,7 @@
             kind: route.kind,
             changeId: route.changeId,
             revision: route.revision,
-            query: route.query,
+            query: queryForExactNavigation(route),
             focus: { factId: fact.factId }
           })
         );
@@ -3340,7 +3948,38 @@
     return nodes;
   }
   __name(renderCapturedResource, "renderCapturedResource");
-  function renderChangeDetail(detail) {
+  function renderCurrentRevisionChoices(changeId, revisions, query, actions2) {
+    const choices = document.createElement("section");
+    choices.className = "detail-current-revisions";
+    choices.append(detailHeading("Current Revisions", 3));
+    if (revisions.length === 0) {
+      choices.append(message("No current Revision is available."));
+      return choices;
+    }
+    for (const revision of revisions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost mono";
+      button.textContent = revision.revisionId;
+      button.setAttribute(
+        "aria-label",
+        `Current Revision: open exact Revision ${revision.revisionId} for Change ${changeId}`
+      );
+      button.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "revision",
+          changeId,
+          revision,
+          query
+        })
+      );
+      choices.append(button);
+    }
+    return choices;
+  }
+  __name(renderCurrentRevisionChoices, "renderCurrentRevisionChoices");
+  function renderChangeDetail(detail, route, actions2) {
     const nodes = [
       detailHeading("Change"),
       detailLine(detail.summary.changeId, "mono"),
@@ -3349,6 +3988,12 @@
       ),
       detailLine(
         `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact2).join("; ") || "none"}`
+      ),
+      renderCurrentRevisionChoices(
+        route.changeId,
+        detail.currentRevisionRefs,
+        route.query,
+        actions2
       )
     ];
     const sections = [
@@ -3432,8 +4077,8 @@
     copy.className = "ghost";
     copy.textContent = "Copy link";
     copy.addEventListener("click", () => copyExact(location.href));
-    if (reading.kind === "change") {
-      return [...renderChangeDetail(reading.document), copy];
+    if (reading.kind === "change" && route.kind === "change") {
+      return [...renderChangeDetail(reading.document, route, actions2), copy];
     }
     if (reading.kind === "resource" && route.kind === "resource")
       return [...renderCapturedResource(reading.document, route, actions2), copy];
@@ -3560,28 +4205,32 @@
     const detail = document.querySelector("#detail-body");
     if (!detail) return;
     if (snapshot2.route.kind === "invalid") {
-      detail.replaceChildren(message(snapshot2.route.message));
+      replaceDetailWith(message(snapshot2.route.message));
       return;
     }
     if (snapshot2.diagnostic) {
-      detail.replaceChildren(message(snapshot2.diagnostic));
+      replaceDetailWith(message(snapshot2.diagnostic));
       return;
     }
     if (snapshot2.route.kind === "lens" || snapshot2.generation === null) {
-      detail.replaceChildren(message("Select a Change or exact Revision."));
+      replaceDetailWith(message("Select a Change or exact Revision."));
       return;
     }
     if (presentation.refusal !== null) {
-      detail.replaceChildren(
+      replaceDetailWith(
         message(`Reader refused this exact surface: ${presentation.refusal}`)
       );
       return;
     }
     if (presentation.reading !== null) {
-      detail.replaceChildren(
-        ...renderReading(presentation.reading, snapshot2, actions2)
-      );
-      applyExactFocus(detail, snapshot2.route);
+      const readingKey = `${formatChangeInspectorRoute(snapshot2.route)}:${presentation.reading.document.projectionStamp}`;
+      if (detail.dataset.changeReadingKey !== readingKey) {
+        detail.replaceChildren(
+          ...renderReading(presentation.reading, snapshot2, actions2)
+        );
+        detail.dataset.changeReadingKey = readingKey;
+        applyExactFocus(detail, snapshot2.route);
+      }
       return;
     }
     const heading = document.createElement("h2");
@@ -3601,27 +4250,16 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     const peers = document.createElement("section");
     if (snapshot2.route.kind === "change" && snapshot2.selected !== null) {
       const changeRoute = snapshot2.route;
-      const peerHeading = document.createElement("h3");
-      peerHeading.textContent = "Current Revisions";
-      peers.append(peerHeading);
-      for (const revision of snapshot2.selected.currentRevisionRefs) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "ghost mono";
-        button.textContent = revision.revisionId;
-        button.addEventListener(
-          "click",
-          () => actions2.navigate({
-            kind: "revision",
-            changeId: changeRoute.changeId,
-            revision,
-            query: changeRoute.query
-          })
-        );
-        peers.append(button);
-      }
+      peers.append(
+        renderCurrentRevisionChoices(
+          changeRoute.changeId,
+          snapshot2.selected.currentRevisionRefs,
+          changeRoute.query,
+          actions2
+        )
+      );
     }
-    detail.replaceChildren(heading, identity, copyLink, placeholder, peers);
+    replaceDetailWith(heading, identity, copyLink, placeholder, peers);
   }
   __name(renderDetail, "renderDetail");
   function renderChangeInspector(snapshot2, actions2, presentation = {
@@ -3638,126 +4276,141 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     syncFilterChrome(snapshot2.route);
     clearError();
     if (snapshot2.route.kind === "invalid") {
-      master.replaceChildren(message("Cannot open this Inspector link."));
+      replaceMasterWith(message("Cannot open this Inspector link."));
       renderDetail(snapshot2, actions2, presentation);
       return;
     }
     const route = snapshot2.route;
     if (snapshot2.generation === null) {
-      master.replaceChildren(message("Loading Change generation…"));
+      replaceMasterWith(message("Loading Change generation…"));
       renderDetail(snapshot2, actions2, presentation);
       return;
     }
     const lens = lensForRoute(route);
     const page = lens === "changes" ? snapshot2.generation.changes : snapshot2.generation.attention;
-    const list = document.createElement("section");
-    list.className = "units";
-    const heading = document.createElement("h1");
-    heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
-    list.append(heading);
-    for (const summary of page.changes) {
-      const card = changeCardPresentation(
-        summary,
-        page.presentations?.[summary.changeId]
-      );
-      const element = document.createElement("article");
-      element.className = "unit-card";
-      element.dataset.changeId = summary.changeId;
-      const badges = document.createElement("p");
-      badges.className = "change-card-badges";
-      for (const value of card.badges) {
-        const badge = document.createElement("span");
-        badge.className = "badge";
-        badge.textContent = value;
-        badges.append(badge, " ");
-      }
-      element.append(badges);
-      if (card.peers.length === 0) {
-        const unavailable = document.createElement("h3");
-        unavailable.textContent = "Current Revision unavailable";
-        element.append(unavailable);
-      } else if (card.peers.length > 1) {
-        const peerHeading = document.createElement("h3");
-        peerHeading.textContent = "Current Revisions";
-        element.append(peerHeading);
-      }
-      for (const peer of card.peers) {
-        const peerRow = document.createElement("div");
-        peerRow.className = "change-card-peer";
-        const choose = document.createElement("button");
-        choose.type = "button";
-        choose.className = "ghost change-card-peer-open";
-        choose.textContent = peer.label;
-        choose.title = peer.copyText;
-        choose.addEventListener(
+    const listKey = JSON.stringify({
+      lens,
+      query: route.query,
+      projectionStamp: page.projectionStamp,
+      changes: page.changes.map((change) => change.changeId)
+    });
+    if (master.dataset.changeListKey !== listKey) {
+      const list = document.createElement("section");
+      list.className = "units";
+      const heading = document.createElement("h1");
+      heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
+      list.append(heading);
+      for (const summary of page.changes.slice(0, 150)) {
+        const card = changeCardPresentation(
+          summary,
+          page.presentations?.[summary.changeId]
+        );
+        const element = document.createElement("article");
+        element.className = "unit-card";
+        element.dataset.changeId = summary.changeId;
+        element.setAttribute("aria-label", card.accessibleName);
+        const badges = document.createElement("p");
+        badges.className = "change-card-badges";
+        for (const value of card.badges) {
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = value;
+          badges.append(badge, " ");
+        }
+        element.append(badges);
+        if (card.peers.length === 0) {
+          const unavailable = document.createElement("h3");
+          unavailable.textContent = "Current Revision unavailable";
+          element.append(unavailable);
+        } else if (card.peers.length > 1) {
+          const peerHeading = document.createElement("h3");
+          peerHeading.textContent = "Current Revisions";
+          element.append(peerHeading);
+        }
+        for (const peer of card.peers) {
+          const peerRow = document.createElement("div");
+          peerRow.className = "change-card-peer";
+          const choose = document.createElement("button");
+          choose.type = "button";
+          choose.className = "ghost change-card-peer-open";
+          choose.textContent = peer.label;
+          choose.title = peer.copyText;
+          choose.setAttribute(
+            "aria-label",
+            `${peer.label}: open exact Revision ${peer.revision.revisionId} for Change ${summary.changeId}`
+          );
+          choose.addEventListener(
+            "click",
+            () => actions2.navigate({
+              kind: "revision",
+              changeId: summary.changeId,
+              revision: peer.revision,
+              query: queryForExactNavigation(route)
+            })
+          );
+          const copyPeer = document.createElement("button");
+          copyPeer.type = "button";
+          copyPeer.className = "ghost";
+          copyPeer.textContent = "Copy exact Revision";
+          copyPeer.addEventListener("click", () => copyExact(peer.copyText));
+          peerRow.append(choose, copyPeer);
+          element.append(peerRow);
+        }
+        const actionsElement = document.createElement("div");
+        actionsElement.className = "actions change-card-actions";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "ghost";
+        open.textContent = "Open Change";
+        open.setAttribute("aria-label", `Open Change ${summary.changeId}`);
+        open.addEventListener(
           "click",
           () => actions2.navigate({
-            kind: "revision",
+            kind: "change",
             changeId: summary.changeId,
-            revision: peer.revision,
-            query: route.query
+            query: queryForExactNavigation(route)
           })
         );
-        const copyPeer = document.createElement("button");
-        copyPeer.type = "button";
-        copyPeer.className = "ghost";
-        copyPeer.textContent = "Copy exact Revision";
-        copyPeer.addEventListener("click", () => copyExact(peer.copyText));
-        peerRow.append(choose, copyPeer);
-        element.append(peerRow);
+        const changeIdentity = document.createElement("code");
+        changeIdentity.className = "mono";
+        changeIdentity.textContent = summary.changeId;
+        const copyChange = document.createElement("button");
+        copyChange.type = "button";
+        copyChange.className = "ghost";
+        copyChange.textContent = "Copy Change ID";
+        copyChange.addEventListener("click", () => copyExact(summary.changeId));
+        actionsElement.append(open, changeIdentity, copyChange);
+        element.append(actionsElement);
+        list.append(element);
       }
-      const actionsElement = document.createElement("div");
-      actionsElement.className = "actions change-card-actions";
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "ghost";
-      open.textContent = "Open Change";
-      open.addEventListener(
-        "click",
-        () => actions2.navigate({
-          kind: "change",
-          changeId: summary.changeId,
-          query: route.query
-        })
-      );
-      const changeIdentity = document.createElement("code");
-      changeIdentity.className = "mono";
-      changeIdentity.textContent = summary.changeId;
-      const copyChange = document.createElement("button");
-      copyChange.type = "button";
-      copyChange.className = "ghost";
-      copyChange.textContent = "Copy Change ID";
-      copyChange.addEventListener("click", () => copyExact(summary.changeId));
-      actionsElement.append(open, changeIdentity, copyChange);
-      element.append(actionsElement);
-      list.append(element);
+      if (page.changes.length === 0)
+        list.append(
+          message(
+            lens === "changes" ? "No Changes." : "No Changes need attention."
+          )
+        );
+      const nextPage = page.next;
+      if (nextPage !== null) {
+        const next = document.createElement("button");
+        next.type = "button";
+        next.className = "ghost";
+        next.textContent = "Next page";
+        next.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: "lens",
+            lens,
+            query: {
+              ...route.query,
+              after: nextPage
+            }
+          })
+        );
+        list.append(next);
+      }
+      master.replaceChildren(list);
+      master.dataset.changeListKey = listKey;
     }
-    if (page.changes.length === 0)
-      list.append(
-        message(
-          lens === "changes" ? "No Changes." : "No Changes need attention."
-        )
-      );
-    const nextPage = page.next;
-    if (nextPage !== null) {
-      const next = document.createElement("button");
-      next.type = "button";
-      next.className = "ghost";
-      next.textContent = "Next page";
-      next.addEventListener(
-        "click",
-        () => actions2.navigate({
-          kind: "lens",
-          lens,
-          query: {
-            ...route.query,
-            after: nextPage
-          }
-        })
-      );
-      list.append(next);
-    }
-    master.replaceChildren(list);
     document.querySelectorAll("#lens-switcher [data-lens]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.lens === lens));
     });
@@ -3779,19 +4432,18 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(renderChangeInspector, "renderChangeInspector");
   function renderChangeInspectorUnavailable(availability) {
     clearError();
-    const master = document.querySelector("#master");
-    master?.replaceChildren(
+    replaceMasterWith(
       message(
         availability === "migration_required" ? "Store migration required. No Change state was loaded." : "Store migration in progress. Partial Change state is unavailable."
       )
     );
-    document.querySelector("#detail-body")?.replaceChildren(message("Change state is unavailable."));
+    replaceDetailWith(message("Change state is unavailable."));
   }
   __name(renderChangeInspectorUnavailable, "renderChangeInspectorUnavailable");
   function renderChangeInspectorRefusal(error) {
     const text = error instanceof Error ? error.message : String(error);
-    document.querySelector("#master")?.replaceChildren(message(`Reader refused: ${text}`));
-    document.querySelector("#detail-body")?.replaceChildren(message("Change state was not published."));
+    replaceMasterWith(message(`Reader refused: ${text}`));
+    replaceDetailWith(message("Change state was not published."));
     const diagnostic = document.querySelector("#route-diagnostic");
     if (diagnostic) {
       diagnostic.textContent = "";
@@ -3871,12 +4523,6 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   }
   __name(createChangeInspectorState, "createChangeInspectorState");
 
-  // src/dom.ts
-  function $(sel) {
-    return document.querySelector(sel);
-  }
-  __name($, "$");
-
   // src/disclosure.ts
   var active = null;
   function createDisclosure({
@@ -3885,7 +4531,26 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     panel
   }) {
     let open = false;
-    const controller = {
+    const triggerElement = $(trigger);
+    const containerElement = $(container);
+    let controller;
+    const onTriggerClick = /* @__PURE__ */ __name((event) => {
+      event.stopPropagation();
+      controller.toggle();
+    }, "onTriggerClick");
+    const onContainerKeydown = /* @__PURE__ */ __name((event) => {
+      if (event.key !== "Escape" || !open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      controller.close(true);
+    }, "onContainerKeydown");
+    const onDocumentClick = /* @__PURE__ */ __name((event) => {
+      if (!open) return;
+      const root = $(container);
+      if (event.target instanceof Node && root?.contains(event.target)) return;
+      controller.close();
+    }, "onDocumentClick");
+    controller = {
       isOpen: /* @__PURE__ */ __name(() => open, "isOpen"),
       open: /* @__PURE__ */ __name(() => {
         if (active && active !== controller) active.close();
@@ -3906,49 +4571,99 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       sync: /* @__PURE__ */ __name(() => {
         $(panel)?.classList.toggle("hidden", !open);
         $(trigger)?.setAttribute("aria-expanded", String(open));
-      }, "sync")
+      }, "sync"),
+      dispose: /* @__PURE__ */ __name(() => {
+        triggerElement?.removeEventListener("click", onTriggerClick);
+        containerElement?.removeEventListener("keydown", onContainerKeydown);
+        document.removeEventListener("click", onDocumentClick, true);
+        if (active === controller) active = null;
+        open = false;
+        controller.sync();
+      }, "dispose")
     };
-    $(trigger)?.addEventListener("click", (event) => {
-      event.stopPropagation();
-      controller.toggle();
-    });
-    $(container)?.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !open) return;
-      event.preventDefault();
-      event.stopPropagation();
-      controller.close(true);
-    });
-    document.addEventListener(
-      "click",
-      (event) => {
-        if (!open) return;
-        const root = $(container);
-        if (event.target instanceof Node && root?.contains(event.target)) return;
-        controller.close();
-      },
-      true
-    );
+    triggerElement?.addEventListener("click", onTriggerClick);
+    containerElement?.addEventListener("keydown", onContainerKeydown);
+    document.addEventListener("click", onDocumentClick, true);
     controller.sync();
     return controller;
   }
   __name(createDisclosure, "createDisclosure");
 
   // src/change-inspector.ts
+  var EXACT_READING_TIMEOUT_MS = 1e4;
+  var POLL_CYCLE_TIMEOUT_MS = 15e3;
+  var ChangeInspectorTimeout = class extends Error {
+    static {
+      __name(this, "ChangeInspectorTimeout");
+    }
+  };
   var pollTimer = null;
   var routeListener = null;
   var filterInput = null;
   var filterInputListener = null;
   var connectionControlsInitialized = false;
-  var filterDisclosureInitialized = false;
+  var filterDisclosure = null;
+  var viewDisclosure = null;
+  var interactionStop = null;
+  var pollCoordinatorStop = null;
   var requestEpoch = 0;
   function currentRoute() {
     return parseChangeInspectorRoute(location.hash || "#/changes");
   }
   __name(currentRoute, "currentRoute");
+  function newProjectionRetryBudget() {
+    return { remaining: 1 };
+  }
+  __name(newProjectionRetryBudget, "newProjectionRetryBudget");
+  function consumeProjectionRetry(budget) {
+    if (budget.remaining === 0) return false;
+    budget.remaining -= 1;
+    return true;
+  }
+  __name(consumeProjectionRetry, "consumeProjectionRetry");
+  function snapshotFilterDraft(input, restoreFocus) {
+    return {
+      input,
+      restoreFocus,
+      value: input.value,
+      selectionStart: input.selectionStart,
+      selectionEnd: input.selectionEnd,
+      selectionDirection: input.selectionDirection
+    };
+  }
+  __name(snapshotFilterDraft, "snapshotFilterDraft");
+  function capturePollFilterDraft() {
+    if (filterInput === null) return null;
+    const route = currentRoute();
+    const committed = route.kind === "invalid" ? "" : route.query.q ?? "";
+    const focused = document.activeElement === filterInput;
+    if (!focused && filterInput.value === committed) return null;
+    return snapshotFilterDraft(filterInput, focused);
+  }
+  __name(capturePollFilterDraft, "capturePollFilterDraft");
+  async function withinTimeout(operation, timeoutMs, message2) {
+    let timer = null;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new ChangeInspectorTimeout(message2)),
+            timeoutMs
+          );
+        })
+      ]);
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+  __name(withinTimeout, "withinTimeout");
   function stopChangeInspector() {
     requestEpoch += 1;
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
+    pollCoordinatorStop?.();
+    pollCoordinatorStop = null;
     if (routeListener !== null)
       window.removeEventListener("hashchange", routeListener);
     routeListener = null;
@@ -3957,6 +4672,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }
     filterInput = null;
     filterInputListener = null;
+    filterDisclosure?.dispose();
+    filterDisclosure = null;
+    viewDisclosure?.dispose();
+    viewDisclosure = null;
+    interactionStop?.();
+    interactionStop = null;
   }
   __name(stopChangeInspector, "stopChangeInspector");
   async function bootstrapChangeInspector(options = {}) {
@@ -3976,39 +4697,72 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     let reading = null;
     let readingRefusal = null;
     let visibleReading = "";
-    const paint = /* @__PURE__ */ __name(() => renderChangeInspector(
-      state.snapshot(),
-      { navigate },
-      {
-        reading,
-        refusal: readingRefusal
+    const paint = /* @__PURE__ */ __name((pollDraft = null) => {
+      const draft = pollDraft !== null && filterInput === pollDraft.input ? snapshotFilterDraft(
+        filterInput,
+        document.activeElement === filterInput || document.activeElement === document.body && pollDraft.restoreFocus
+      ) : null;
+      renderChangeInspector(
+        state.snapshot(),
+        { navigate },
+        {
+          reading,
+          refusal: readingRefusal
+        }
+      );
+      if (draft !== null && filterInput !== null) {
+        filterInput.value = draft.value;
+        if (draft.restoreFocus) filterInput.focus({ preventScroll: true });
+        if (draft.selectionStart !== null && draft.selectionEnd !== null) {
+          filterInput.setSelectionRange(
+            draft.selectionStart,
+            draft.selectionEnd,
+            draft.selectionDirection ?? void 0
+          );
+        }
       }
-    ), "paint");
+      interaction?.sync(state.snapshot());
+    }, "paint");
+    let interaction = null;
     const requestKey = /* @__PURE__ */ __name((query) => buildChangePageUrl("changes", query), "requestKey");
     let visibleRequest = "";
+    let pendingReading = null;
+    let releaseQueuedPoll = /* @__PURE__ */ __name(() => {
+    }, "releaseQueuedPoll");
+    const readingKey = /* @__PURE__ */ __name((route, projectionStamp) => `${formatChangeInspectorRoute(route)}\0${projectionStamp}`, "readingKey");
     const clearReading = /* @__PURE__ */ __name(() => {
       reading = null;
       readingRefusal = null;
       visibleReading = "";
     }, "clearReading");
-    const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, restarted = false) => {
+    const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, retryBudget, pollDraft = null) => {
       if (route.kind === "lens") {
         clearReading();
         return;
       }
       const requested = formatChangeInspectorRoute(route);
-      if (visibleReading === requested && reading !== null) return;
+      const requestedReading = readingKey(route, expectedProjectionStamp);
+      if (visibleReading === requestedReading && reading !== null) return;
       reading = null;
       readingRefusal = null;
-      visibleReading = requested;
-      paint();
+      visibleReading = requestedReading;
+      paint(pollDraft);
+      const pendingToken = /* @__PURE__ */ Symbol("exact-reading");
+      pendingReading = { key: requestedReading, token: pendingToken };
       try {
-        const loaded = await loadChangeInspectorReading(
-          route,
-          expectedProjectionStamp
-        );
-        const postflight = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile")
+        const { loaded, postflight } = await withinTimeout(
+          (async () => {
+            const loaded2 = await loadChangeInspectorReading(
+              route,
+              expectedProjectionStamp
+            );
+            const postflight2 = decodeReaderProfile(
+              await fetchChangeInspectorJSON("/api/v2/profile")
+            );
+            return { loaded: loaded2, postflight: postflight2 };
+          })(),
+          EXACT_READING_TIMEOUT_MS,
+          "exact Change reading timed out"
         );
         if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
         const staged = state.snapshot().generation;
@@ -4019,19 +4773,22 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         }
         reading = loaded;
         readingRefusal = null;
-        paint();
+        paint(pollDraft);
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if (!restarted && (error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && error.code === "stale_projection")) {
-          await loadGeneration(route, true);
+        if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && error.code === "stale_projection") && consumeProjectionRetry(retryBudget)) {
+          await loadGeneration(route, retryBudget, pollDraft);
           return;
         }
         reading = null;
         readingRefusal = error instanceof Error ? error.message : String(error);
-        paint();
+        paint(pollDraft);
+      } finally {
+        if (pendingReading?.token === pendingToken) pendingReading = null;
+        releaseQueuedPoll();
       }
     }, "loadReading");
-    const loadGeneration = /* @__PURE__ */ __name(async (route, restarted = false) => {
+    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null) => {
       const epoch = ++requestEpoch;
       try {
         const profile = decodeReaderProfile(
@@ -4046,11 +4803,18 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           return;
         }
         const query = route.query;
+        const activeLens = lensForRoute(route);
+        const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
+        const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
         const [changes, attention] = await Promise.all([
-          fetchChangeInspectorJSON(buildChangePageUrl("changes", query)).then(
+          fetchChangeInspectorJSON(
+            buildChangePageUrl("changes", changesQuery)
+          ).then(
             (value) => decodeChangePage(value, { lens: "changes", bounded: true })
           ),
-          fetchChangeInspectorJSON(buildChangePageUrl("attention", query)).then(
+          fetchChangeInspectorJSON(
+            buildChangePageUrl("attention", attentionQuery)
+          ).then(
             (value) => decodeChangePage(value, { lens: "attention", bounded: true })
           )
         ]);
@@ -4058,14 +4822,28 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           await fetchChangeInspectorJSON("/api/v2/profile")
         );
         if (epoch !== requestEpoch) return;
-        state.publish(stageGeneration(profile, changes, attention, postflight));
+        const staged = stageGeneration(profile, changes, attention, postflight);
+        if (route.kind !== "lens") {
+          const requestedReading = readingKey(route, changes.projectionStamp);
+          if (visibleReading !== requestedReading) {
+            reading = null;
+            readingRefusal = null;
+          }
+        }
+        state.publish(staged);
         visibleRequest = requestKey(query);
-        paint();
-        await loadReading(route, changes.projectionStamp, epoch);
+        paint(pollDraft);
+        await loadReading(
+          route,
+          changes.projectionStamp,
+          epoch,
+          retryBudget,
+          pollDraft
+        );
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if (!restarted && (error instanceof ChangeInspectorPageFailure && error.code === "stale_projection" || error instanceof ChangeInspectorGenerationChanged)) {
-          await loadGeneration(route, true);
+        if ((error instanceof ChangeInspectorPageFailure && error.code === "stale_projection" || error instanceof ChangeInspectorGenerationChanged) && consumeProjectionRetry(retryBudget)) {
+          await loadGeneration(route, retryBudget, pollDraft);
           return;
         }
         visibleRequest = "";
@@ -4096,12 +4874,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (request === visibleRequest) {
         const generation = state.snapshot().generation;
         if (generation === null) {
-          await loadGeneration(route);
+          await loadGeneration(route, newProjectionRetryBudget());
         } else {
           await loadReading(
             route,
             generation.changes.projectionStamp,
-            requestEpoch
+            requestEpoch,
+            newProjectionRetryBudget()
           );
           paint();
         }
@@ -4110,7 +4889,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         clearReading();
         state.clearGeneration();
         paint();
-        await loadGeneration(route);
+        await loadGeneration(route, newProjectionRetryBudget());
       }
     }, "onRoute");
     routeListener = /* @__PURE__ */ __name(() => {
@@ -4123,7 +4902,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         await onRoute();
         return;
       }
-      await loadGeneration(route);
+      await loadGeneration(route, newProjectionRetryBudget());
     }, "reloadCurrent");
     configureConnectionActions({
       retry: reloadCurrent,
@@ -4136,14 +4915,18 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       connectionControlsInitialized = true;
     }
     prepareChangeInspectorShell({ navigate });
-    if (!filterDisclosureInitialized) {
-      createDisclosure({
-        container: "#filter-controls",
-        trigger: "#filters-toggle",
-        panel: "#filters-panel"
-      });
-      filterDisclosureInitialized = true;
-    }
+    filterDisclosure = createDisclosure({
+      container: "#filter-controls",
+      trigger: "#filters-toggle",
+      panel: "#filters-panel"
+    });
+    viewDisclosure = createDisclosure({
+      container: "#view-controls",
+      trigger: "#view-toggle",
+      panel: "#view-panel"
+    });
+    interaction = installChangeInspectorInteraction({ navigate });
+    interactionStop = interaction.stop;
     filterInput = document.querySelector("#filter-text");
     filterInputListener = /* @__PURE__ */ __name(() => {
       const route = currentRoute();
@@ -4159,11 +4942,52 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "filterInputListener");
     filterInput?.addEventListener("change", filterInputListener);
     await onRoute();
-    if (options.poll !== false)
-      pollTimer = setInterval(() => {
+    if (options.poll !== false) {
+      let pollRequested = false;
+      let pollRunning = false;
+      let pollActive = true;
+      const drainPoll = /* @__PURE__ */ __name(() => {
+        if (!pollActive || pollRunning || !pollRequested) return;
         const route = currentRoute();
-        if (route.kind !== "invalid") void loadGeneration(route);
-      }, 3e3);
+        if (route.kind === "invalid") {
+          pollRequested = false;
+          return;
+        }
+        const generation = state.snapshot().generation;
+        if (route.kind !== "lens" && generation !== null && pendingReading?.key === readingKey(route, generation.changes.projectionStamp)) {
+          return;
+        }
+        pollRequested = false;
+        pollRunning = true;
+        const operation = loadGeneration(
+          route,
+          newProjectionRetryBudget(),
+          capturePollFilterDraft()
+        );
+        void withinTimeout(
+          operation,
+          POLL_CYCLE_TIMEOUT_MS,
+          "Change generation poll timed out"
+        ).catch((error) => {
+          if (error instanceof ChangeInspectorTimeout) {
+            requestEpoch += 1;
+          }
+        }).finally(() => {
+          pollRunning = false;
+          drainPoll();
+        });
+      }, "drainPoll");
+      const requestPoll = /* @__PURE__ */ __name(() => {
+        pollRequested = true;
+        drainPoll();
+      }, "requestPoll");
+      releaseQueuedPoll = drainPoll;
+      pollCoordinatorStop = /* @__PURE__ */ __name(() => {
+        pollActive = false;
+        pollRequested = false;
+      }, "pollCoordinatorStop");
+      pollTimer = setInterval(requestPoll, 3e3);
+    }
   }
   __name(bootstrapChangeInspector, "bootstrapChangeInspector");
 

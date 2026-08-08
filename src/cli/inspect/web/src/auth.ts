@@ -241,6 +241,11 @@ export function promptForCredential(): Promise<string | null> {
   const cancel = document.querySelector<HTMLButtonElement>("#reconnect-cancel");
   if (!dialog || !form || !input || !cancel) return Promise.resolve(null);
 
+  const returnFocus =
+    document.activeElement instanceof HTMLElement &&
+    document.activeElement !== document.body
+      ? document.activeElement
+      : null;
   dialog.classList.remove("hidden");
   input.value = "";
   input.focus();
@@ -252,8 +257,10 @@ export function promptForCredential(): Promise<string | null> {
       settled = true;
       form.removeEventListener("submit", onSubmit);
       cancel.removeEventListener("click", onCancel);
+      dialog.removeEventListener("keydown", onKeyDown);
       input.value = "";
       dialog.classList.add("hidden");
+      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
       resolve(value);
     };
     const onSubmit = (event: SubmitEvent) => {
@@ -261,7 +268,39 @@ export function promptForCredential(): Promise<string | null> {
       finish(input.value);
     };
     const onCancel = () => finish(null);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(null);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const stops = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        ),
+      );
+      const first = stops[0];
+      const last = stops.at(-1);
+      if (!first || !last) return;
+      const active =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (
+        !event.shiftKey &&
+        (active === last || !dialog.contains(active))
+      ) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     form.addEventListener("submit", onSubmit);
     cancel.addEventListener("click", onCancel);
+    dialog.addEventListener("keydown", onKeyDown);
   });
 }

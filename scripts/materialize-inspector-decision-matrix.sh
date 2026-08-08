@@ -59,6 +59,8 @@ if [ -n "${POINTBREAK_HOME:-}" ]; then
     "$destination_parent"/*) ;;
     *) die "POINTBREAK_HOME must remain beneath the destination's temporary parent" ;;
   esac
+  [ -z "$(find "$pointbreak_home" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || die "POINTBREAK_HOME must be empty for deterministic materialization: $pointbreak_home"
 fi
 
 pointbreak_json() {
@@ -77,7 +79,7 @@ capture_revision() {
   local actor="$1"
   shift
   pointbreak_actor_json "$actor" capture --repo "$destination" "$@" \
-    | jq -er '.revision.id'
+    | jq -er '.revision.revisionId'
 }
 
 record_validation() {
@@ -96,12 +98,16 @@ git -C "$destination" symbolic-ref HEAD refs/heads/main
 git -C "$destination" config user.name "Pointbreak Matrix"
 git -C "$destination" config user.email "pointbreak-matrix@example.com"
 git -C "$destination" config commit.gpgsign false
-if [ -n "${POINTBREAK_CHANGE_READY_FIXTURE_DIR:-}" ]; then
-  [ -d "$POINTBREAK_CHANGE_READY_FIXTURE_DIR" ] || die "POINTBREAK_CHANGE_READY_FIXTURE_DIR is not a directory"
-  common_dir="$(git -C "$destination" rev-parse --path-format=absolute --git-common-dir)"
-  mkdir -p "$common_dir/pointbreak/events"
-  cp "$POINTBREAK_CHANGE_READY_FIXTURE_DIR"/*.json "$common_dir/pointbreak/events/"
-fi
+# The decision matrix is an L2-only product fixture.  Seed the two frozen,
+# public activation records before its first writer command; production stores
+# are never consulted or modified by this developer-only materializer.
+ready_store="${POINTBREAK_CHANGE_READY_FIXTURE_DIR:-$repo_root/tests/support/assets/change-ready-store}"
+[ -f "$ready_store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json" ] \
+  || die "public L2 activation fixture is missing"
+[ -f "$ready_store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json" ] \
+  || die "public L2 completion fixture is missing"
+mkdir -p "$destination/.git/pointbreak/events"
+cp "$ready_store"/*.json "$destination/.git/pointbreak/events/"
 
 mkdir -p "$destination/src"
 printf 'pub fn matrix_value() -> u32 { 1 }\n' > "$destination/src/lib.rs"
@@ -111,9 +117,12 @@ base_commit="$(git -C "$destination" rev-parse HEAD)"
 
 git -C "$destination" switch --quiet -c feat/decision-matrix
 printf 'pub fn matrix_value() -> u32 { 2 }\n' > "$destination/src/lib.rs"
-primary_revision="$(capture_revision \
+primary_capture="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-capture-writer" \
-  --summary "Decision continuity matrix")"
+  capture --repo "$destination" --summary "Decision continuity matrix")"
+primary_change="$(printf '%s\n' "$primary_capture" | jq -er '.changeId')"
+primary_revision="$(printf '%s\n' "$primary_capture" | jq -er '.revision.revisionId')"
+primary_artifact="$(printf '%s\n' "$primary_capture" | jq -er '.revision.objectArtifactContentHash')"
 
 pointbreak_actor_json "actor:agent:pointbreak-matrix-fact-writer" \
   observation add --repo "$destination" --exact-revision "$primary_revision" \
@@ -237,6 +246,122 @@ unassessed_revision="$(capture_revision \
   --summary "Unassessed matrix")"
 git -C "$destination" reset --quiet --hard main
 
+# Keep separate final-state Changes for the browser contract. Reuse the exact
+# A/B/C Revisions across explicit Change memberships so replacement,
+# parallel-current, divergent replacement, consolidation, and many-to-many
+# membership remain simultaneously observable instead of becoming transient
+# states in one graph.
+git -C "$destination" switch --quiet -c feat/topology-matrix main
+printf 'pub fn topology_value() -> u32 { 1 }\n' > "$destination/src/topology.rs"
+git -C "$destination" add src/topology.rs
+topology_root_capture="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  capture --repo "$destination" --summary "Topology initial matrix")"
+topology_root_cursor="$(printf '%s\n' "$topology_root_capture" | jq -er '.reviewCursor.token')"
+topology_replacement_change="$(printf '%s\n' "$topology_root_capture" | jq -er '.changeId')"
+topology_root_revision="$(printf '%s\n' "$topology_root_capture" | jq -er '.revision.revisionId')"
+topology_root_artifact="$(printf '%s\n' "$topology_root_capture" | jq -er '.revision.objectArtifactContentHash')"
+
+printf 'pub fn topology_value() -> u32 { 2 }\n' > "$destination/src/topology.rs"
+topology_left_capture="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  capture --repo "$destination" --summary "Topology replacement matrix" \
+  --review-cursor "$topology_root_cursor" --advance replace)"
+topology_left_revision="$(printf '%s\n' "$topology_left_capture" | jq -er '.revision.revisionId')"
+topology_left_artifact="$(printf '%s\n' "$topology_left_capture" | jq -er '.revision.objectArtifactContentHash')"
+
+# A second Change adopts A and B, then C advances in parallel before asserting
+# its own replacement of A. Reselection after B -> A is required because every
+# Change mutation invalidates older graph tokens.
+topology_divergent_change="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change create --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-divergent-create" \
+  --nonce "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" \
+  | jq -er '.changeId')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_divergent_change" "$topology_root_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-divergent-join-root" >/dev/null
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_divergent_change" "$topology_left_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-divergent-join-left" >/dev/null
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change assert-relation "$topology_divergent_change" \
+  "$topology_left_revision" "$topology_root_revision" \
+  --successor-artifact-hash "$topology_left_artifact" \
+  --predecessor-artifact-hash "$topology_root_artifact" \
+  --operation-id "change-operation:decision-matrix-divergent-left-root" \
+  --repo "$destination" >/dev/null
+topology_divergent_cursor="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change select "$topology_divergent_change" \
+  --revision "$topology_left_revision" --source captured --repo "$destination" \
+  | jq -er '.token')"
+
+printf 'pub fn topology_value() -> u32 { 3 }\n' > "$destination/src/topology.rs"
+topology_right_capture="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  capture --repo "$destination" --summary "Topology divergent matrix" \
+  --review-cursor "$topology_divergent_cursor" --advance parallel)"
+topology_right_revision="$(printf '%s\n' "$topology_right_capture" | jq -er '.revision.revisionId')"
+topology_right_artifact="$(printf '%s\n' "$topology_right_capture" | jq -er '.revision.objectArtifactContentHash')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change assert-relation "$topology_divergent_change" \
+  "$topology_right_revision" "$topology_root_revision" \
+  --successor-artifact-hash "$topology_right_artifact" \
+  --predecessor-artifact-hash "$topology_root_artifact" \
+  --operation-id "change-operation:decision-matrix-divergent-right-root" \
+  --repo "$destination" >/dev/null
+
+# A relation-free Change over B and C preserves a pure parallel-current row.
+topology_parallel_change="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change create --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-parallel-create" \
+  --nonce "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  | jq -er '.changeId')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_parallel_change" "$topology_left_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-parallel-join-left" >/dev/null
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_parallel_change" "$topology_right_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-parallel-join-right" >/dev/null
+
+# A fourth Change starts with the same B/C current pair and captures one
+# Revision that atomically supersedes both exact predecessors.
+topology_consolidation_change="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change create --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-consolidation-create" \
+  --nonce "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" \
+  | jq -er '.changeId')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_consolidation_change" "$topology_left_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-consolidation-join-left" >/dev/null
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$topology_consolidation_change" "$topology_right_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-consolidation-join-right" >/dev/null
+topology_consolidation_cursor="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change select "$topology_consolidation_change" \
+  --revision "$topology_left_revision" --source captured --repo "$destination" \
+  | jq -er '.token')"
+printf 'pub fn topology_value() -> u32 { 4 }\n' > "$destination/src/topology.rs"
+topology_consolidated_capture="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  capture --repo "$destination" --summary "Topology consolidation matrix" \
+  --review-cursor "$topology_consolidation_cursor" --advance replace \
+  --also-supersedes "$topology_right_revision@$topology_right_artifact")"
+topology_consolidated_revision="$(printf '%s\n' "$topology_consolidated_capture" | jq -er '.revision.revisionId')"
+topology_consolidated_artifact="$(printf '%s\n' "$topology_consolidated_capture" | jq -er '.revision.objectArtifactContentHash')"
+git -C "$destination" reset --quiet --hard main
+
 git -C "$destination" switch --quiet -c feat/competing-heads
 printf 'pub fn matrix_value() -> u32 { 6 }\n' > "$destination/src/lib.rs"
 superseded_capture="$(pointbreak_actor_json \
@@ -326,9 +451,13 @@ printf 'pub fn matrix_value() -> u32 { 12 }\n' > "$destination/src/lib.rs"
 git -C "$destination" add --all
 git -C "$destination" commit --quiet -m "missing object matrix target"
 missing_commit="$(git -C "$destination" rev-parse HEAD)"
-missing_revision="$(capture_revision \
+missing_capture="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-capture-writer" \
-  --base HEAD~1 --target HEAD --summary "Missing object matrix")"
+  capture --repo "$destination" --base HEAD~1 --target HEAD \
+  --summary "Missing object matrix")"
+missing_change="$(printf '%s\n' "$missing_capture" | jq -er '.changeId')"
+missing_revision="$(printf '%s\n' "$missing_capture" | jq -er '.revision.revisionId')"
+missing_artifact="$(printf '%s\n' "$missing_capture" | jq -er '.revision.objectArtifactContentHash')"
 git -C "$destination" switch --quiet main
 git -C "$destination" branch --delete --force feat/missing-object >/dev/null
 git -C "$destination" reflog expire --expire=now --all
@@ -346,7 +475,9 @@ case "$common_store_for_comparison" in
 esac
 
 jq -n \
+  --arg primary_change "$primary_change" \
   --arg primary_revision "$primary_revision" \
+  --arg primary_artifact "$primary_artifact" \
   --arg live_revision "$live_revision" \
   --arg unassessed_revision "$unassessed_revision" \
   --arg superseded_revision "$superseded_revision" \
@@ -357,7 +488,21 @@ jq -n \
   --arg staged_revision "$staged_revision" \
   --arg unstaged_revision "$unstaged_revision" \
   --arg detached_revision "$detached_revision" \
+  --arg missing_change "$missing_change" \
   --arg missing_revision "$missing_revision" \
+  --arg missing_artifact "$missing_artifact" \
+  --arg topology_root_revision "$topology_root_revision" \
+  --arg topology_root_artifact "$topology_root_artifact" \
+  --arg topology_replacement_change "$topology_replacement_change" \
+  --arg topology_left_revision "$topology_left_revision" \
+  --arg topology_left_artifact "$topology_left_artifact" \
+  --arg topology_parallel_change "$topology_parallel_change" \
+  --arg topology_divergent_change "$topology_divergent_change" \
+  --arg topology_right_revision "$topology_right_revision" \
+  --arg topology_right_artifact "$topology_right_artifact" \
+  --arg topology_consolidation_change "$topology_consolidation_change" \
+  --arg topology_consolidated_revision "$topology_consolidated_revision" \
+  --arg topology_consolidated_artifact "$topology_consolidated_artifact" \
   --arg base_commit "$base_commit" \
   --arg first_landing "$first_landing" \
   --arg second_landing "$second_landing" \
@@ -374,7 +519,52 @@ jq -n \
     staged_revision: $staged_revision,
     unstaged_revision: $unstaged_revision,
     detached_revision: $detached_revision,
+    missing_change: $missing_change,
     missing_revision: $missing_revision,
+    missing_artifact: $missing_artifact,
+    topology: {
+      initial: {
+        change: $primary_change,
+        current: {revision: $primary_revision, artifact: $primary_artifact}
+      },
+      replacement: {
+        change: $topology_replacement_change,
+        current: {revision: $topology_left_revision, artifact: $topology_left_artifact},
+        predecessor: {revision: $topology_root_revision, artifact: $topology_root_artifact}
+      },
+      parallel_current: {
+        change: $topology_parallel_change,
+        current: [
+          {revision: $topology_left_revision, artifact: $topology_left_artifact},
+          {revision: $topology_right_revision, artifact: $topology_right_artifact}
+        ]
+      },
+      replacement_divergent: {
+        change: $topology_divergent_change,
+        current: [
+          {revision: $topology_left_revision, artifact: $topology_left_artifact},
+          {revision: $topology_right_revision, artifact: $topology_right_artifact}
+        ]
+      },
+      consolidation: {
+        change: $topology_consolidation_change,
+        current: {revision: $topology_consolidated_revision, artifact: $topology_consolidated_artifact},
+        predecessors: [
+          {revision: $topology_left_revision, artifact: $topology_left_artifact},
+          {revision: $topology_right_revision, artifact: $topology_right_artifact}
+        ]
+      }
+    },
+    shared_revision: {
+      revision: $topology_left_revision,
+      artifact: $topology_left_artifact,
+      changes: [
+        $topology_replacement_change,
+        $topology_divergent_change,
+        $topology_parallel_change,
+        $topology_consolidation_change
+      ]
+    },
     base_commit: $base_commit,
     first_landing: $first_landing,
     second_landing: $second_landing,

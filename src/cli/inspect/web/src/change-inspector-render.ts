@@ -4,8 +4,10 @@ import { changeCardPresentation } from "./change-inspector-cards";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
+  formatChangeInspectorRoute,
   lensForRoute,
   parseChangeInspectorRoute,
+  queryForExactNavigation,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
 import type {
@@ -13,6 +15,7 @@ import type {
   ChangePageQuery,
   FactContent,
   FactTarget,
+  RevisionRef,
   RevisionResource,
 } from "./change-protocol";
 import {
@@ -63,11 +66,40 @@ function setText(selector: string, value: string): void {
   if (element) element.textContent = value;
 }
 
+function replaceMasterWith(...children: Node[]): void {
+  const master = document.querySelector<HTMLElement>("#master");
+  if (!master) return;
+  // `changeListKey` is valid only while the keyed list DOM is still mounted.
+  // A loading or refusal plane replaces that DOM, so retaining the key would
+  // cause a same-generation recovery paint to skip restoring the cards.
+  delete master.dataset.changeListKey;
+  master.replaceChildren(...children);
+}
+
+function replaceDetailWith(...children: Node[]): void {
+  const detail = document.querySelector<HTMLElement>("#detail-body");
+  if (!detail) return;
+  // `changeReadingKey` describes the exact reading DOM, not merely the route.
+  // Clear it whenever a placeholder/refusal replaces that DOM so reopening the
+  // same exact route can render the reading again.
+  delete detail.dataset.changeReadingKey;
+  detail.replaceChildren(...children);
+}
+
 /** Prepare retained model-neutral chrome for the two Change lenses. */
 export function prepareChangeInspectorShell(
   actions: ChangeInspectorRenderActions,
 ): void {
-  document.querySelector("#view-controls")?.classList.add("hidden");
+  // Display preferences are reader-local presentation state. They do not alter
+  // the server-owned Change generation, so keep them available in this reader.
+  document.querySelector("#view-controls")?.classList.remove("hidden");
+  setText("#view-toggle", "View");
+  document.querySelector("#view-order-section")?.classList.add("hidden");
+  document.querySelector("#view-sort-section")?.classList.add("hidden");
+  document
+    .querySelector("#jump-latest")
+    ?.closest(".control-section")
+    ?.classList.add("hidden");
   document.querySelector("#derived-access-status")?.classList.add("hidden");
   document.querySelector("#follow-toggle")?.classList.add("hidden");
   const switcher = document.querySelector<HTMLElement>("#lens-switcher");
@@ -79,17 +111,23 @@ export function prepareChangeInspectorShell(
       button.className = "lens-tab";
       button.dataset.lens = lens;
       button.textContent = lens === "changes" ? "Changes" : "Attention";
-      button.addEventListener("click", () =>
-        actions.navigate({ kind: "lens", lens, query: {} }),
-      );
+      button.addEventListener("click", () => {
+        const current = parseChangeInspectorRoute(location.hash || "#/changes");
+        actions.navigate({
+          kind: "lens",
+          lens,
+          query:
+            current.kind === "invalid"
+              ? {}
+              : { ...current.query, after: undefined },
+        });
+      });
       switcher.append(button);
     }
   }
   const back = document.querySelector<HTMLButtonElement>("#detail-back");
   if (back) {
     back.textContent = "‹ Changes";
-    back.onclick = () =>
-      actions.navigate({ kind: "lens", lens: "changes", query: {} });
   }
   const search = document.querySelector<HTMLInputElement>("#filter-text");
   if (search) search.placeholder = "Search Changes and current Revisions";
@@ -144,7 +182,13 @@ export function prepareChangeInspectorShell(
           : current;
       actions.navigate({
         ...base,
-        query: {},
+        // Clear only reader filters and the now-invalid continuation. Keep the
+        // bounded page shape in the URL so reset does not silently change the
+        // caller's explicit limit or stable ordering contract.
+        query: {
+          limit: base.query.limit,
+          order: base.query.order,
+        },
       } as Exclude<ChangeInspectorRoute, { kind: "invalid" }>);
     };
   }
@@ -312,7 +356,7 @@ function renderFacts(
           kind: route.kind,
           changeId: route.changeId,
           revision: route.revision,
-          query: route.query,
+          query: queryForExactNavigation(route),
           focus: { factId: fact.factId },
         }),
       );
@@ -668,7 +712,46 @@ function renderCapturedResource(
   return nodes;
 }
 
-function renderChangeDetail(detail: ChangeDetail): Node[] {
+function renderCurrentRevisionChoices(
+  changeId: string,
+  revisions: RevisionRef[],
+  query: ChangePageQuery,
+  actions: ChangeInspectorRenderActions,
+): HTMLElement {
+  const choices = document.createElement("section");
+  choices.className = "detail-current-revisions";
+  choices.append(detailHeading("Current Revisions", 3));
+  if (revisions.length === 0) {
+    choices.append(message("No current Revision is available."));
+    return choices;
+  }
+  for (const revision of revisions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost mono";
+    button.textContent = revision.revisionId;
+    button.setAttribute(
+      "aria-label",
+      `Current Revision: open exact Revision ${revision.revisionId} for Change ${changeId}`,
+    );
+    button.addEventListener("click", () =>
+      actions.navigate({
+        kind: "revision",
+        changeId,
+        revision,
+        query,
+      }),
+    );
+    choices.append(button);
+  }
+  return choices;
+}
+
+function renderChangeDetail(
+  detail: ChangeDetail,
+  route: Extract<ChangeInspectorRoute, { kind: "change" }>,
+  actions: ChangeInspectorRenderActions,
+): Node[] {
   const nodes: Node[] = [
     detailHeading("Change"),
     detailLine(detail.summary.changeId, "mono"),
@@ -677,6 +760,12 @@ function renderChangeDetail(detail: ChangeDetail): Node[] {
     ),
     detailLine(
       `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact).join("; ") || "none"}`,
+    ),
+    renderCurrentRevisionChoices(
+      route.changeId,
+      detail.currentRevisionRefs,
+      route.query,
+      actions,
     ),
   ];
   const sections: Array<[string, string[]]> = [
@@ -774,8 +863,8 @@ function renderReading(
   copy.className = "ghost";
   copy.textContent = "Copy link";
   copy.addEventListener("click", () => copyExact(location.href));
-  if (reading.kind === "change") {
-    return [...renderChangeDetail(reading.document), copy];
+  if (reading.kind === "change" && route.kind === "change") {
+    return [...renderChangeDetail(reading.document, route, actions), copy];
   }
   if (reading.kind === "resource" && route.kind === "resource")
     return [...renderCapturedResource(reading.document, route, actions), copy];
@@ -929,28 +1018,32 @@ function renderDetail(
   const detail = document.querySelector<HTMLElement>("#detail-body");
   if (!detail) return;
   if (snapshot.route.kind === "invalid") {
-    detail.replaceChildren(message(snapshot.route.message));
+    replaceDetailWith(message(snapshot.route.message));
     return;
   }
   if (snapshot.diagnostic) {
-    detail.replaceChildren(message(snapshot.diagnostic));
+    replaceDetailWith(message(snapshot.diagnostic));
     return;
   }
   if (snapshot.route.kind === "lens" || snapshot.generation === null) {
-    detail.replaceChildren(message("Select a Change or exact Revision."));
+    replaceDetailWith(message("Select a Change or exact Revision."));
     return;
   }
   if (presentation.refusal !== null) {
-    detail.replaceChildren(
+    replaceDetailWith(
       message(`Reader refused this exact surface: ${presentation.refusal}`),
     );
     return;
   }
   if (presentation.reading !== null) {
-    detail.replaceChildren(
-      ...renderReading(presentation.reading, snapshot, actions),
-    );
-    applyExactFocus(detail, snapshot.route);
+    const readingKey = `${formatChangeInspectorRoute(snapshot.route)}:${presentation.reading.document.projectionStamp}`;
+    if (detail.dataset.changeReadingKey !== readingKey) {
+      detail.replaceChildren(
+        ...renderReading(presentation.reading, snapshot, actions),
+      );
+      detail.dataset.changeReadingKey = readingKey;
+      applyExactFocus(detail, snapshot.route);
+    }
     return;
   }
   const heading = document.createElement("h2");
@@ -985,26 +1078,16 @@ function renderDetail(
   const peers = document.createElement("section");
   if (snapshot.route.kind === "change" && snapshot.selected !== null) {
     const changeRoute = snapshot.route;
-    const peerHeading = document.createElement("h3");
-    peerHeading.textContent = "Current Revisions";
-    peers.append(peerHeading);
-    for (const revision of snapshot.selected.currentRevisionRefs) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "ghost mono";
-      button.textContent = revision.revisionId;
-      button.addEventListener("click", () =>
-        actions.navigate({
-          kind: "revision",
-          changeId: changeRoute.changeId,
-          revision,
-          query: changeRoute.query,
-        }),
-      );
-      peers.append(button);
-    }
+    peers.append(
+      renderCurrentRevisionChoices(
+        changeRoute.changeId,
+        snapshot.selected.currentRevisionRefs,
+        changeRoute.query,
+        actions,
+      ),
+    );
   }
-  detail.replaceChildren(heading, identity, copyLink, placeholder, peers);
+  replaceDetailWith(heading, identity, copyLink, placeholder, peers);
 }
 
 /** Paint a single already-published generation and its independently resolved route. */
@@ -1027,13 +1110,13 @@ export function renderChangeInspector(
   syncFilterChrome(snapshot.route);
   clearError();
   if (snapshot.route.kind === "invalid") {
-    master.replaceChildren(message("Cannot open this Inspector link."));
+    replaceMasterWith(message("Cannot open this Inspector link."));
     renderDetail(snapshot, actions, presentation);
     return;
   }
   const route = snapshot.route;
   if (snapshot.generation === null) {
-    master.replaceChildren(message("Loading Change generation…"));
+    replaceMasterWith(message("Loading Change generation…"));
     renderDetail(snapshot, actions, presentation);
     return;
   }
@@ -1042,111 +1125,132 @@ export function renderChangeInspector(
     lens === "changes"
       ? snapshot.generation.changes
       : snapshot.generation.attention;
-  const list = document.createElement("section");
-  list.className = "units";
-  const heading = document.createElement("h1");
-  heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
-  list.append(heading);
-  for (const summary of page.changes) {
-    const card = changeCardPresentation(
-      summary,
-      page.presentations?.[summary.changeId],
-    );
-    const element = document.createElement("article");
-    element.className = "unit-card";
-    element.dataset.changeId = summary.changeId;
-    const badges = document.createElement("p");
-    badges.className = "change-card-badges";
-    for (const value of card.badges) {
-      const badge = document.createElement("span");
-      badge.className = "badge";
-      badge.textContent = value;
-      badges.append(badge, " ");
-    }
-    element.append(badges);
-    if (card.peers.length === 0) {
-      const unavailable = document.createElement("h3");
-      unavailable.textContent = "Current Revision unavailable";
-      element.append(unavailable);
-    } else if (card.peers.length > 1) {
-      const peerHeading = document.createElement("h3");
-      peerHeading.textContent = "Current Revisions";
-      element.append(peerHeading);
-    }
-    for (const peer of card.peers) {
-      const peerRow = document.createElement("div");
-      peerRow.className = "change-card-peer";
-      const choose = document.createElement("button");
-      choose.type = "button";
-      choose.className = "ghost change-card-peer-open";
-      choose.textContent = peer.label;
-      choose.title = peer.copyText;
-      choose.addEventListener("click", () =>
+  // Polling often republishes the same stamped generation. Compute the cache
+  // key before allocating card nodes so an unchanged tick does not build and
+  // discard the complete bounded tree every three seconds.
+  const listKey = JSON.stringify({
+    lens,
+    query: route.query,
+    projectionStamp: page.projectionStamp,
+    changes: page.changes.map((change) => change.changeId),
+  });
+  if (master.dataset.changeListKey !== listKey) {
+    const list = document.createElement("section");
+    list.className = "units";
+    const heading = document.createElement("h1");
+    heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
+    list.append(heading);
+    // The protocol caps individual responses lower than this guard. Keep the
+    // render-side bound as a second line of defence against an over-full server
+    // page: a large store must never create an unbounded live DOM.
+    for (const summary of page.changes.slice(0, 150)) {
+      const card = changeCardPresentation(
+        summary,
+        page.presentations?.[summary.changeId],
+      );
+      const element = document.createElement("article");
+      element.className = "unit-card";
+      element.dataset.changeId = summary.changeId;
+      element.setAttribute("aria-label", card.accessibleName);
+      const badges = document.createElement("p");
+      badges.className = "change-card-badges";
+      for (const value of card.badges) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = value;
+        badges.append(badge, " ");
+      }
+      element.append(badges);
+      if (card.peers.length === 0) {
+        const unavailable = document.createElement("h3");
+        unavailable.textContent = "Current Revision unavailable";
+        element.append(unavailable);
+      } else if (card.peers.length > 1) {
+        const peerHeading = document.createElement("h3");
+        peerHeading.textContent = "Current Revisions";
+        element.append(peerHeading);
+      }
+      for (const peer of card.peers) {
+        const peerRow = document.createElement("div");
+        peerRow.className = "change-card-peer";
+        const choose = document.createElement("button");
+        choose.type = "button";
+        choose.className = "ghost change-card-peer-open";
+        choose.textContent = peer.label;
+        choose.title = peer.copyText;
+        choose.setAttribute(
+          "aria-label",
+          `${peer.label}: open exact Revision ${peer.revision.revisionId} for Change ${summary.changeId}`,
+        );
+        choose.addEventListener("click", () =>
+          actions.navigate({
+            kind: "revision",
+            changeId: summary.changeId,
+            revision: peer.revision,
+            query: queryForExactNavigation(route),
+          }),
+        );
+        const copyPeer = document.createElement("button");
+        copyPeer.type = "button";
+        copyPeer.className = "ghost";
+        copyPeer.textContent = "Copy exact Revision";
+        copyPeer.addEventListener("click", () => copyExact(peer.copyText));
+        peerRow.append(choose, copyPeer);
+        element.append(peerRow);
+      }
+      const actionsElement = document.createElement("div");
+      actionsElement.className = "actions change-card-actions";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "ghost";
+      open.textContent = "Open Change";
+      open.setAttribute("aria-label", `Open Change ${summary.changeId}`);
+      open.addEventListener("click", () =>
         actions.navigate({
-          kind: "revision",
+          kind: "change",
           changeId: summary.changeId,
-          revision: peer.revision,
-          query: route.query,
+          query: queryForExactNavigation(route),
         }),
       );
-      const copyPeer = document.createElement("button");
-      copyPeer.type = "button";
-      copyPeer.className = "ghost";
-      copyPeer.textContent = "Copy exact Revision";
-      copyPeer.addEventListener("click", () => copyExact(peer.copyText));
-      peerRow.append(choose, copyPeer);
-      element.append(peerRow);
+      const changeIdentity = document.createElement("code");
+      changeIdentity.className = "mono";
+      changeIdentity.textContent = summary.changeId;
+      const copyChange = document.createElement("button");
+      copyChange.type = "button";
+      copyChange.className = "ghost";
+      copyChange.textContent = "Copy Change ID";
+      copyChange.addEventListener("click", () => copyExact(summary.changeId));
+      actionsElement.append(open, changeIdentity, copyChange);
+      element.append(actionsElement);
+      list.append(element);
     }
-    const actionsElement = document.createElement("div");
-    actionsElement.className = "actions change-card-actions";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "ghost";
-    open.textContent = "Open Change";
-    open.addEventListener("click", () =>
-      actions.navigate({
-        kind: "change",
-        changeId: summary.changeId,
-        query: route.query,
-      }),
-    );
-    const changeIdentity = document.createElement("code");
-    changeIdentity.className = "mono";
-    changeIdentity.textContent = summary.changeId;
-    const copyChange = document.createElement("button");
-    copyChange.type = "button";
-    copyChange.className = "ghost";
-    copyChange.textContent = "Copy Change ID";
-    copyChange.addEventListener("click", () => copyExact(summary.changeId));
-    actionsElement.append(open, changeIdentity, copyChange);
-    element.append(actionsElement);
-    list.append(element);
+    if (page.changes.length === 0)
+      list.append(
+        message(
+          lens === "changes" ? "No Changes." : "No Changes need attention.",
+        ),
+      );
+    const nextPage = page.next;
+    if (nextPage !== null) {
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "ghost";
+      next.textContent = "Next page";
+      next.addEventListener("click", () =>
+        actions.navigate({
+          kind: "lens",
+          lens,
+          query: {
+            ...route.query,
+            after: nextPage,
+          },
+        }),
+      );
+      list.append(next);
+    }
+    master.replaceChildren(list);
+    master.dataset.changeListKey = listKey;
   }
-  if (page.changes.length === 0)
-    list.append(
-      message(
-        lens === "changes" ? "No Changes." : "No Changes need attention.",
-      ),
-    );
-  const nextPage = page.next;
-  if (nextPage !== null) {
-    const next = document.createElement("button");
-    next.type = "button";
-    next.className = "ghost";
-    next.textContent = "Next page";
-    next.addEventListener("click", () =>
-      actions.navigate({
-        kind: "lens",
-        lens,
-        query: {
-          ...route.query,
-          after: nextPage,
-        },
-      }),
-    );
-    list.append(next);
-  }
-  master.replaceChildren(list);
   document
     .querySelectorAll<HTMLButtonElement>("#lens-switcher [data-lens]")
     .forEach((button) => {
@@ -1172,27 +1276,20 @@ export function renderChangeInspectorUnavailable(
   availability: "migration_required" | "migration_in_progress",
 ): void {
   clearError();
-  const master = document.querySelector<HTMLElement>("#master");
-  master?.replaceChildren(
+  replaceMasterWith(
     message(
       availability === "migration_required"
         ? "Store migration required. No Change state was loaded."
         : "Store migration in progress. Partial Change state is unavailable.",
     ),
   );
-  document
-    .querySelector<HTMLElement>("#detail-body")
-    ?.replaceChildren(message("Change state is unavailable."));
+  replaceDetailWith(message("Change state is unavailable."));
 }
 
 export function renderChangeInspectorRefusal(error: unknown): void {
   const text = error instanceof Error ? error.message : String(error);
-  document
-    .querySelector<HTMLElement>("#master")
-    ?.replaceChildren(message(`Reader refused: ${text}`));
-  document
-    .querySelector<HTMLElement>("#detail-body")
-    ?.replaceChildren(message("Change state was not published."));
+  replaceMasterWith(message(`Reader refused: ${text}`));
+  replaceDetailWith(message("Change state was not published."));
   const diagnostic = document.querySelector<HTMLElement>("#route-diagnostic");
   if (diagnostic) {
     diagnostic.textContent = "";

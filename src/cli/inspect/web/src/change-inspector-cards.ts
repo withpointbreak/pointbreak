@@ -8,6 +8,7 @@ import type {
 
 export interface ChangeCardPresentation {
   changeId: string;
+  accessibleName: string;
   badges: string[];
   peers: Array<{ revision: RevisionRef; label: string; copyText: string }>;
 }
@@ -38,29 +39,39 @@ export function changeCardPresentation(
       entry,
     ]),
   );
+  const peers = summary.currentRevisionRefs.map((revision) => {
+    const entry = byExactIdentity.get(
+      `${revision.revisionId}\u0000${revision.objectArtifactContentHash}`,
+    );
+    const summaryLabel =
+      entry?.summarySource === "revision_proposal_summary"
+        ? entry.revisionProposalSummary
+        : undefined;
+    return {
+      revision,
+      label: summaryLabel
+        ? `Current Revision — ${summaryLabel}`
+        : `Current Revision — ${shortExact(revision)}`,
+      copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`,
+    };
+  });
+  const currentRevisionName =
+    peers.length === 0
+      ? "Current Revision unavailable"
+      : peers.length === 1
+        ? peers[0].label
+        : `Current Revisions — ${peers
+            .map((peer) => peer.label.replace(/^Current Revision — /, ""))
+            .join("; ")}`;
   return {
     changeId: summary.changeId,
+    accessibleName: `${currentRevisionName}; Change ${summary.changeId}`,
     badges: [
       summary.topology,
       summary.lifecycle,
       summary.attentionSummary,
       summary.availabilitySummary,
     ].map(words),
-    peers: summary.currentRevisionRefs.map((revision) => {
-      const entry = byExactIdentity.get(
-        `${revision.revisionId}\u0000${revision.objectArtifactContentHash}`,
-      );
-      const summaryLabel =
-        entry?.summarySource === "revision_proposal_summary"
-          ? entry.revisionProposalSummary
-          : undefined;
-      return {
-        revision,
-        label: summaryLabel
-          ? `Current Revision — ${summaryLabel}`
-          : `Current Revision — ${shortExact(revision)}`,
-        copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`,
-      };
-    }),
+    peers,
   };
 }

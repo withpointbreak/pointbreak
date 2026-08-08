@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import revisionsJson from "../fixtures/revisions.json";
 import threadsJson from "../fixtures/threads.json";
-import { mountInspectorDom, resetDom } from "../support/dom";
+import { mountLegacyInspectorDom, resetDom } from "../support/dom";
 import {
   installFetchMock,
   resetHistoryResponse,
@@ -46,7 +46,7 @@ beforeEach(async () => {
   vi.resetModules();
   store = await import("../../src/store");
   main = await import("../../src/main");
-  mountInspectorDom();
+  mountLegacyInspectorDom();
   installFetchMock();
   history.replaceState(null, "", "/");
   // Apply a stored theme so the prefs-before-paint step is observable.

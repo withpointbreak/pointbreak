@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   formatChangeInspectorRoute,
   parseChangeInspectorRoute,
+  queryForExactNavigation,
 } from "../src/change-inspector-router";
 
 describe("Change inspector routes", () => {
@@ -158,5 +159,23 @@ describe("Change inspector routes", () => {
         route as Exclude<typeof route, { kind: "invalid" }>,
       ),
     ).toContain("after=opaque");
+  });
+
+  it("retains filters but drops a lens-bound Attention continuation before exact navigation", () => {
+    const attention = parseChangeInspectorRoute(
+      "#/attention?q=release&after=attention-page&limit=20&order=change_id_asc",
+    );
+    if (attention.kind === "invalid") throw new Error(attention.message);
+    expect(queryForExactNavigation(attention)).toEqual({
+      q: "release",
+      limit: 20,
+      order: "change_id_asc",
+    });
+
+    const changes = parseChangeInspectorRoute(
+      "#/changes?after=changes-page&limit=20&order=change_id_asc",
+    );
+    if (changes.kind === "invalid") throw new Error(changes.message);
+    expect(queryForExactNavigation(changes)).toEqual(changes.query);
   });
 });

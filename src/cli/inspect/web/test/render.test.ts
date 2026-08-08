@@ -11,7 +11,7 @@ import attentionJson from "./fixtures/attention.json";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 import threadsJson from "./fixtures/threads.json";
-import { mountInspectorDom, resetDom } from "./support/dom";
+import { mountLegacyInspectorDom, resetDom } from "./support/dom";
 import {
   installFetchMock,
   resetSnapshotResponse,
@@ -47,7 +47,7 @@ beforeEach(async () => {
   vitest.vi.resetModules();
   store = await import("../src/store");
   render = await import("../src/render");
-  mountInspectorDom();
+  mountLegacyInspectorDom();
   installFetchMock();
   history.replaceState(null, "", "/");
   store.commit({

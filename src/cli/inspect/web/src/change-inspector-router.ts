@@ -370,3 +370,23 @@ export function formatChangeInspectorRoute(
 export function lensForRoute(route: ChangeInspectorRoute): ChangeLens {
   return route.kind === "lens" ? route.lens : "changes";
 }
+
+/** Return the same bounded query at its first page. */
+export function firstPageQuery(query: ChangePageQuery): ChangePageQuery {
+  const { after: _after, ...firstPage } = query;
+  return firstPage;
+}
+
+/**
+ * Exact routes use the Changes page as their bounded companion generation.
+ * Attention continuations are signed to the Attention lens, so leaving a
+ * paginated Attention page must retain its filters while returning to page one
+ * before the route becomes exact. Changes continuations remain valid because
+ * exact routes keep Changes as their companion lens.
+ */
+export function queryForExactNavigation(
+  route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+): ChangePageQuery {
+  if (route.kind !== "lens" || route.lens !== "attention") return route.query;
+  return firstPageQuery(route.query);
+}

@@ -530,3 +530,14 @@ review-decision-browser-verify root:
       POINTBREAK_BINARY="$PWD/target/debug/pointbreak" \
         ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
     fi
+
+# Verify the Change-first Inspector with an injected exact binary and a disposable public L2 matrix.
+[group('review-evidence')]
+change-inspector-browser-verify root:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -n "${POINTBREAK_BINARY:-}" ] || {
+      echo "error: set POINTBREAK_BINARY to the absolute exact worktree binary" >&2
+      exit 1
+    }
+    ./scripts/change-inspector-browser-verify.sh --root "{{ root }}"
