@@ -265,7 +265,21 @@ describe("Change Inspector interaction lifecycle", () => {
     });
   });
 
-  it("hands focus between the full-frame diff and visible exact Revision chrome", () => {
+  it("hands focus across full-frame diff hydration and back to exact Revision chrome", () => {
+    let narrow = false;
+    vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)" && narrow,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
     const { controller } = install();
     const revision = {
       revisionId: "revision:sha256:focus-handoff",
@@ -293,14 +307,88 @@ describe("Change Inspector interaction lifecycle", () => {
       throw new Error("diff focus-handoff fixture is missing");
     }
 
-    // Match the renderer's full-frame shell transition before the controller
-    // observes the routed diff.
-    diffPage.classList.remove("hidden");
-    split.classList.add("hidden");
+    // Loading publishes the exact diff route before its asynchronous reading
+    // is available. Keep entry focus pending while the full-frame surface is
+    // hidden, then consume it when that same exact diff hydrates visibly.
     input.focus();
     controller.sync({
       generation: null,
       route: diffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(input);
+
+    diffPage.classList.remove("hidden");
+    split.classList.add("hidden");
+    controller.sync({
+      generation: null,
+      route: diffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(close);
+
+    // Same-exact-diff file/fact/search refinements also pass through a hidden
+    // loading paint. Their hydrated renderer-selected target owns focus; the
+    // entry lifecycle must not re-arm merely because route refinements changed.
+    narrow = true;
+    const refinedDiffRoute: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      ...diffRoute,
+      focus: {
+        filePath: "src/refined.rs",
+        factId: "obs:refined",
+        fileQuery: "has:facts",
+      },
+    };
+    diffPage.classList.add("hidden");
+    controller.sync({
+      generation: null,
+      route: refinedDiffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    const refinedFact = document.createElement("button");
+    refinedFact.dataset.anno = "obs:refined";
+    refinedFact.textContent = "refined fact";
+    document.querySelector("#diff-page-body")?.append(refinedFact);
+    diffPage.classList.remove("hidden");
+    refinedFact.focus();
+    controller.sync({
+      generation: null,
+      route: refinedDiffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(refinedFact);
+
+    // Artifact identity is part of exact Revision identity. A different
+    // artifact under the same Change and Revision ID is a fresh diff entry,
+    // so its hidden paint arms focus for the matching visible hydration.
+    narrow = false;
+    const replacementDiffRoute: Extract<
+      ChangeInspectorRoute,
+      { kind: "diff" }
+    > = {
+      ...refinedDiffRoute,
+      revision: {
+        ...revision,
+        objectArtifactContentHash: "sha256:artifact-focus-replacement",
+      },
+    };
+    diffPage.classList.add("hidden");
+    refinedFact.focus();
+    controller.sync({
+      generation: null,
+      route: replacementDiffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(refinedFact);
+    diffPage.classList.remove("hidden");
+    controller.sync({
+      generation: null,
+      route: replacementDiffRoute,
       selected: null,
       diagnostic: null,
     });

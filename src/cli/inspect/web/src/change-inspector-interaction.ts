@@ -153,6 +153,34 @@ type PendingTimelineSelection = {
   route: string;
   restoreFocus: boolean;
 };
+type DiffIdentity = {
+  changeId: string;
+  revisionId: string;
+  objectArtifactContentHash: string;
+};
+
+function diffIdentity(
+  route: Extract<ValidRoute, { kind: "diff" }>,
+): DiffIdentity {
+  return {
+    changeId: route.changeId,
+    revisionId: route.revision.revisionId,
+    objectArtifactContentHash: route.revision.objectArtifactContentHash,
+  };
+}
+
+function sameDiffIdentity(
+  left: DiffIdentity | null,
+  right: DiffIdentity | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.changeId === right.changeId &&
+    left.revisionId === right.revisionId &&
+    left.objectArtifactContentHash === right.objectArtifactContentHash
+  );
+}
 
 function companionTimelineRoute(
   route: ValidRoute | null,
@@ -340,6 +368,7 @@ export function installChangeInspectorInteraction(
   let timelineOriginRoute: Extract<ValidRoute, { kind: "timeline" }> | null =
     null;
   let detailDomIdentity: ChildNode | null = null;
+  let pendingDiffEntryFocus: DiffIdentity | null = null;
 
   const parkTimelineForReaderActivity = () => {
     (actions as TimelineParkActions).parkTimelineMonitoring?.();
@@ -594,6 +623,10 @@ export function installChangeInspectorInteraction(
       detailWasOpen && window.matchMedia("(max-width: 760px)").matches;
     setCoveredPageInert(covered);
     const detail = document.querySelector<HTMLElement>("#detail");
+    const routeSurface =
+      currentRoute?.kind === "diff"
+        ? document.querySelector<HTMLElement>("#diff-page")
+        : detail;
     const active =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
@@ -610,8 +643,8 @@ export function installChangeInspectorInteraction(
       return;
     }
     if (
-      detail !== null &&
-      (active === null || !detail.contains(active)) &&
+      routeSurface !== null &&
+      (active === null || !routeSurface.contains(active)) &&
       (active === null || active.closest(".modal:not(.hidden)") === null)
     ) {
       focusFallback();
@@ -1276,6 +1309,7 @@ export function installChangeInspectorInteraction(
     exactOriginLens = null;
     timelineOriginRoute = null;
     detailDomIdentity = null;
+    pendingDiffEntryFocus = null;
     setCoveredPageInert(false);
   };
   return {
@@ -1347,6 +1381,10 @@ export function installChangeInspectorInteraction(
       if (!coveredPage) setCoveredPageInert(false);
       const nextDetailDomIdentity =
         document.querySelector<HTMLElement>("#detail-body")?.firstChild ?? null;
+      const routeSurface =
+        nextRoute?.kind === "diff"
+          ? document.querySelector<HTMLElement>("#diff-page")
+          : detail;
       const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
       const active =
         document.activeElement instanceof HTMLElement
@@ -1361,11 +1399,18 @@ export function installChangeInspectorInteraction(
         nextRoute.kind !== "timeline" &&
         formatChangeInspectorRoute(currentRoute) !==
           formatChangeInspectorRoute(nextRoute);
+      const nextDiffIdentity =
+        nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
+      const currentDiffIdentity =
+        currentRoute?.kind === "diff" ? diffIdentity(currentRoute) : null;
+      if (nextDiffIdentity === null) {
+        pendingDiffEntryFocus = null;
+      } else if (!sameDiffIdentity(currentDiffIdentity, nextDiffIdentity)) {
+        pendingDiffEntryFocus = nextDiffIdentity;
+      }
       const entersVisibleDiff =
         nextRoute?.kind === "diff" &&
-        (currentRoute?.kind !== "diff" ||
-          formatChangeInspectorRoute(currentRoute) !==
-            formatChangeInspectorRoute(nextRoute)) &&
+        sameDiffIdentity(pendingDiffEntryFocus, nextDiffIdentity) &&
         document.querySelector("#diff-page:not(.hidden)") !== null;
       const leavesDiffForExactSurface =
         currentRoute?.kind === "diff" &&
@@ -1382,6 +1427,7 @@ export function installChangeInspectorInteraction(
         else detail.setAttribute("aria-hidden", "true");
       }
       if (entersVisibleDiff) {
+        pendingDiffEntryFocus = null;
         // The full-frame diff replaces the split reader. Put focus on its
         // visible Back control rather than leaving it on the now-hidden exact
         // Revision action that opened the diff.
@@ -1393,7 +1439,7 @@ export function installChangeInspectorInteraction(
         focusFallback(nextRoute);
       } else if (detailOpen && !detailWasOpen) {
         detailReturnFocus = active && active !== document.body ? active : null;
-        if (viewportIsNarrow) {
+        if (viewportIsNarrow && nextRoute?.kind !== "diff") {
           document
             .querySelector<HTMLButtonElement>("#detail-back")
             ?.focus({ preventScroll: true });
@@ -1402,6 +1448,7 @@ export function installChangeInspectorInteraction(
         detailOpen &&
         detailWasOpen &&
         detailRouteChanged &&
+        nextRoute?.kind !== "diff" &&
         viewportIsNarrow &&
         detail !== null &&
         (active === null || !detail.contains(active)) &&
@@ -1443,8 +1490,8 @@ export function installChangeInspectorInteraction(
             ? document.activeElement
             : null;
         if (
-          detail !== null &&
-          (coveredActive === null || !detail.contains(coveredActive)) &&
+          routeSurface !== null &&
+          (coveredActive === null || !routeSurface.contains(coveredActive)) &&
           (coveredActive === null ||
             coveredActive.closest(".modal:not(.hidden)") === null)
         ) {

@@ -2287,6 +2287,18 @@
     };
   }
   __name(revisionRouteFromDiff, "revisionRouteFromDiff");
+  function diffIdentity(route) {
+    return {
+      changeId: route.changeId,
+      revisionId: route.revision.revisionId,
+      objectArtifactContentHash: route.revision.objectArtifactContentHash
+    };
+  }
+  __name(diffIdentity, "diffIdentity");
+  function sameDiffIdentity(left, right) {
+    return left !== null && right !== null && left.changeId === right.changeId && left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
+  }
+  __name(sameDiffIdentity, "sameDiffIdentity");
   function companionTimelineRoute(route) {
     if (route?.kind === "timeline") return route;
     if (route?.kind === "event") {
@@ -2433,6 +2445,7 @@
     let exactOriginLens = null;
     let timelineOriginRoute = null;
     let detailDomIdentity = null;
+    let pendingDiffEntryFocus = null;
     const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
       actions2.parkTimelineMonitoring?.();
     }, "parkTimelineForReaderActivity");
@@ -2593,6 +2606,7 @@
       const covered = detailWasOpen && window.matchMedia("(max-width: 760px)").matches;
       setCoveredPageInert(covered);
       const detail = document.querySelector("#detail");
+      const routeSurface = currentRoute2?.kind === "diff" ? document.querySelector("#diff-page") : detail;
       const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       if (!covered) {
         if (detailWasOpen && active3?.id === "detail-back") {
@@ -2600,7 +2614,7 @@
         }
         return;
       }
-      if (detail !== null && (active3 === null || !detail.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
+      if (routeSurface !== null && (active3 === null || !routeSurface.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
         focusFallback();
       }
     }, "onViewportResize");
@@ -3148,6 +3162,7 @@
       exactOriginLens = null;
       timelineOriginRoute = null;
       detailDomIdentity = null;
+      pendingDiffEntryFocus = null;
       setCoveredPageInert(false);
     }, "stop");
     return {
@@ -3187,10 +3202,18 @@
         const coveredPage = detailOpen && viewportIsNarrow;
         if (!coveredPage) setCoveredPageInert(false);
         const nextDetailDomIdentity = document.querySelector("#detail-body")?.firstChild ?? null;
+        const routeSurface = nextRoute?.kind === "diff" ? document.querySelector("#diff-page") : detail;
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
         const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
         const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
-        const entersVisibleDiff = nextRoute?.kind === "diff" && (currentRoute2?.kind !== "diff" || formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute)) && document.querySelector("#diff-page:not(.hidden)") !== null;
+        const nextDiffIdentity = nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
+        const currentDiffIdentity = currentRoute2?.kind === "diff" ? diffIdentity(currentRoute2) : null;
+        if (nextDiffIdentity === null) {
+          pendingDiffEntryFocus = null;
+        } else if (!sameDiffIdentity(currentDiffIdentity, nextDiffIdentity)) {
+          pendingDiffEntryFocus = nextDiffIdentity;
+        }
+        const entersVisibleDiff = nextRoute?.kind === "diff" && sameDiffIdentity(pendingDiffEntryFocus, nextDiffIdentity) && document.querySelector("#diff-page:not(.hidden)") !== null;
         const leavesDiffForExactSurface = currentRoute2?.kind === "diff" && nextRoute !== null && nextRoute.kind !== "diff" && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline";
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
@@ -3199,15 +3222,16 @@
           else detail.setAttribute("aria-hidden", "true");
         }
         if (entersVisibleDiff) {
+          pendingDiffEntryFocus = null;
           focusFallback(nextRoute);
         } else if (leavesDiffForExactSurface) {
           focusFallback(nextRoute);
         } else if (detailOpen && !detailWasOpen) {
           detailReturnFocus = active3 && active3 !== document.body ? active3 : null;
-          if (viewportIsNarrow) {
+          if (viewportIsNarrow && nextRoute?.kind !== "diff") {
             document.querySelector("#detail-back")?.focus({ preventScroll: true });
           }
-        } else if (detailOpen && detailWasOpen && detailRouteChanged && viewportIsNarrow && detail !== null && (active3 === null || !detail.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
+        } else if (detailOpen && detailWasOpen && detailRouteChanged && nextRoute?.kind !== "diff" && viewportIsNarrow && detail !== null && (active3 === null || !detail.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
           focusFallback(nextRoute);
         } else if (detailOpen && detailWasOpen && detailDomChanged && (!(document.activeElement instanceof HTMLElement) || document.activeElement === document.body || !document.activeElement.isConnected)) {
           focusFallback(nextRoute);
@@ -3219,7 +3243,7 @@
         }
         if (coveredPage) {
           const coveredActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-          if (detail !== null && (coveredActive === null || !detail.contains(coveredActive)) && (coveredActive === null || coveredActive.closest(".modal:not(.hidden)") === null)) {
+          if (routeSurface !== null && (coveredActive === null || !routeSurface.contains(coveredActive)) && (coveredActive === null || coveredActive.closest(".modal:not(.hidden)") === null)) {
             focusFallback(nextRoute);
           }
           setCoveredPageInert(true);
