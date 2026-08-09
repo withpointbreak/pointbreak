@@ -14,6 +14,7 @@
 import { parseMs } from "./format";
 import {
   ASSESSMENT_LABELS,
+  CHANGE_TIMELINE_QUERY_FIELDS,
   EVENT_QUERY_FIELDS,
   KNOWN_QUERY_KEYS,
   type QueryDiagnostic,
@@ -98,7 +99,11 @@ export function parseSearchQueryFor(
   surface: QuerySurface,
 ): ParsedQuery {
   const fields =
-    surface === "revision" ? REVISION_QUERY_FIELDS : EVENT_QUERY_FIELDS;
+    surface === "revision"
+      ? REVISION_QUERY_FIELDS
+      : surface === "change-timeline"
+        ? CHANGE_TIMELINE_QUERY_FIELDS
+        : EVENT_QUERY_FIELDS;
   const valueSets =
     surface === "revision" ? REVISION_VALUE_SETS : EVENT_VALUE_SETS;
   const clauses: QueryClause[] = [];
@@ -121,6 +126,17 @@ export function parseSearchQueryFor(
       .toLowerCase();
     const [field, deprecatedFrom] = resolveAlias(key, surface);
     if (fields.includes(field)) {
+      if (isIdentityField(field) && (value === "" || /\s/.test(value))) {
+        diagnostics.push({
+          code: "unsupported-value",
+          key,
+          message:
+            value === ""
+              ? `\`${key}:\` requires an identity fragment`
+              : `\`${key}:\` identity fragments cannot contain whitespace`,
+        });
+        continue;
+      }
       const allowed = valueSets[field];
       if (allowed && !allowed.includes(value)) {
         diagnostics.push({
@@ -189,9 +205,14 @@ function resolveAlias(
   surface: QuerySurface,
 ): [string, string | null] {
   if (key === "object") return ["snapshot", null]; // silent alias
+  if (key === "rev") return ["revision", null]; // silent alias
   if (key === "status")
     return [surface === "revision" ? "assessment" : "check", "status"];
   return [key, null];
+}
+
+function isIdentityField(field: string): boolean {
+  return field === "revision" || field === "change";
 }
 
 /**

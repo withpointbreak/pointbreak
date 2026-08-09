@@ -65,9 +65,10 @@ describe("Change cards", () => {
       copyText: `${first.revisionId} ${first.objectArtifactContentHash}`,
       title: `exact Revision ${first.revisionId}; artifact ${first.objectArtifactContentHash}`,
     });
-    expect(card.visibleChangeId).toContain("…");
-    expect(card.visibleChangeId).not.toContain("abcdef");
-    expect(card.peers[0]?.visibleIdentity).toContain("…");
+    expect(card.visibleChangeId).toBe("change:01234567");
+    expect(card.peers[0]?.visibleIdentity).toBe(
+      "revision:aaaaaaaa · sha256:11111111",
+    );
     expect(card.accessibleName).toContain(longChangeId);
     expect(card.peers[0]?.accessibleName).toContain(first.revisionId);
   });
@@ -166,7 +167,7 @@ describe("Change card Attention", () => {
       },
       expected: {
         reason: "Unresolved operative requests",
-        ask: "Respond to operative requests: request:sha256:aaaaaaaaa…, request:sha256:bbbbbbbbb….",
+        ask: "Respond to operative requests: request:aaaaaaaa, request:bbbbbbbb.",
         actionLabel: "Respond to requests",
         copyText:
           "request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrequest:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -176,7 +177,7 @@ describe("Change card Attention", () => {
       reason: { kind: "current_revisions_need_assessment", revisions: [first] },
       expected: {
         reason: "Current Revisions need assessment",
-        ask: "Assess current Revisions: revision:sha256:aaaaaaaa… · sha256:11111111111….",
+        ask: "Assess current Revisions: revision:aaaaaaaa · sha256:11111111.",
         actionLabel: "Assess current Revisions",
         copyText: `${first.revisionId} ${first.objectArtifactContentHash}`,
       },

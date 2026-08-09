@@ -122,14 +122,15 @@ pub use fact_port::{FactPortOptions, FactPortResultV1, port_review_fact};
 #[cfg(test)]
 pub(crate) use history::history_base_from_events;
 pub use history::{
-    BaseEntry, BaseHistoryProjection, BaseProjectionConfig, DistinctValues, EVENT_QUERY_FIELDS,
-    EventRecordExtras, HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery, KNOWN_QUERY_KEYS,
-    ParsedQuery, QueriedHistory, QueryClause, QueryDiagnostic, QueryDiagnosticCode, QuerySurface,
-    RANGE_ANCHOR_FIELD, REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, ReviewHistoryEntry,
-    ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult, ReviewHistorySummary,
-    SearchRecord, apply_history_query, build_haystack, count_new_since,
-    default_history_page_projection, history_base_projection, matches_query, parse_search_query,
-    parse_search_query_for, redact_history_bodies, review_history,
+    BaseEntry, BaseHistoryProjection, BaseProjectionConfig, CHANGE_TIMELINE_QUERY_FIELDS,
+    DistinctValues, EVENT_QUERY_FIELDS, EventRecordExtras, HistoryCursor, HistoryOrder,
+    HistoryPage, HistoryQuery, KNOWN_QUERY_KEYS, ParsedQuery, QueriedHistory, QueryClause,
+    QueryDiagnostic, QueryDiagnosticCode, QuerySurface, RANGE_ANCHOR_FIELD,
+    REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, ReviewHistoryEntry, ReviewHistoryFilters,
+    ReviewHistoryOptions, ReviewHistoryResult, ReviewHistorySummary, SearchRecord,
+    apply_history_query, build_haystack, count_new_since, default_history_page_projection,
+    history_base_projection, matches_query, parse_search_query, parse_search_query_for,
+    redact_history_bodies, review_history,
 };
 pub(crate) use history::{history_entries_from_selected_events, tag_completion_key};
 #[cfg(any(test, feature = "bench"))]

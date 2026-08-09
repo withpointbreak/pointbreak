@@ -7,6 +7,13 @@ import type {
   ChangeSummary,
   RevisionRef,
 } from "./change-protocol";
+import {
+  exactRevisionAccessibleIdentity,
+  shortExactRevision,
+  shortRef,
+} from "./refs";
+
+export { exactRevisionAccessibleIdentity } from "./refs";
 
 export interface ChangeCardStateAxis {
   label: "Topology" | "Lifecycle" | "Attention" | "Availability";
@@ -74,17 +81,6 @@ function words(value: string): string {
   return value.replaceAll("_", " ");
 }
 
-function shortened(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit)}…` : value;
-}
-
-function shortExact(revision: RevisionRef): string {
-  return `${shortened(revision.revisionId, 24)} · ${shortened(
-    revision.objectArtifactContentHash,
-    18,
-  )}`;
-}
-
 function exactRevisionCopyText(revisions: RevisionRef[]): string {
   return revisions
     .map(
@@ -92,11 +88,6 @@ function exactRevisionCopyText(revisions: RevisionRef[]): string {
         `${revision.revisionId} ${revision.objectArtifactContentHash}`,
     )
     .join("\n");
-}
-
-/** One spoken form for the complete identity of an exact Revision resource. */
-export function exactRevisionAccessibleIdentity(revision: RevisionRef): string {
-  return `exact Revision ${revision.revisionId}; artifact ${revision.objectArtifactContentHash}`;
 }
 
 function attentionReasonCopy(
@@ -137,9 +128,7 @@ function attentionReasonCopy(
         copyText: "no_current_revision",
       };
     case "unresolved_operative_requests": {
-      const visibleRequestIds = reason.requestIds.map((id) =>
-        shortened(id, 24),
-      );
+      const visibleRequestIds = reason.requestIds.map(shortRef);
       const requestList = visibleRequestIds.join(", ");
       const fullRequestList = reason.requestIds.join(", ");
       return {
@@ -153,7 +142,9 @@ function attentionReasonCopy(
       };
     }
     case "current_revisions_need_assessment": {
-      const visibleRevisions = reason.revisions.map(shortExact).join(", ");
+      const visibleRevisions = reason.revisions
+        .map(shortExactRevision)
+        .join(", ");
       const fullRevisions = reason.revisions
         .map(exactRevisionAccessibleIdentity)
         .join("; ");
@@ -209,7 +200,7 @@ export function changeCardPresentation(
     return {
       revision,
       label: summaryLabel || "Current Revision",
-      visibleIdentity: shortExact(revision),
+      visibleIdentity: shortExactRevision(revision),
       accessibleName: summaryLabel
         ? `Current Revision — ${summaryLabel}; ${identity}`
         : `Current Revision — ${identity}`,
@@ -240,7 +231,7 @@ export function changeCardPresentation(
       : undefined;
   return {
     changeId: summary.changeId,
-    visibleChangeId: shortened(summary.changeId, 28),
+    visibleChangeId: shortRef(summary.changeId),
     accessibleName: `${headline}; ${currentRevisionName}; Change ${summary.changeId}`,
     title: `Change ${summary.changeId}`,
     copyText: summary.changeId,

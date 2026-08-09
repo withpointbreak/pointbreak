@@ -124,6 +124,7 @@ pub enum QueryClause {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuerySurface {
     Event,
+    ChangeTimeline,
     Revision,
 }
 
@@ -182,6 +183,12 @@ pub fn parse_search_query_for(query: &str, surface: QuerySurface) -> ParsedQuery
             strip_wrapping_quotes(&token[colon.expect("key implies a colon") + 1..]).to_lowercase();
         let (field, deprecated_from) = resolve_alias(&key, surface);
         if surface_fields(surface).contains(&field.as_str()) {
+            if is_identity_field(&field)
+                && (value.is_empty() || value.chars().any(char::is_whitespace))
+            {
+                diagnostics.push(QueryDiagnostic::invalid_identity_value(&key, &value));
+                continue;
+            }
             if let Some(allowed) = value_set(surface, &field)
                 && !allowed.contains(&value.as_str())
             {
@@ -243,6 +250,7 @@ fn push_text(clauses: &mut Vec<QueryClause>, token: &str, negate: bool) {
 fn surface_fields(surface: QuerySurface) -> &'static [&'static str] {
     match surface {
         QuerySurface::Event => EVENT_QUERY_FIELDS,
+        QuerySurface::ChangeTimeline => CHANGE_TIMELINE_QUERY_FIELDS,
         QuerySurface::Revision => REVISION_QUERY_FIELDS,
     }
 }
@@ -252,9 +260,10 @@ fn surface_fields(surface: QuerySurface) -> &'static [&'static str] {
 fn resolve_alias(key: &str, surface: QuerySurface) -> (String, Option<String>) {
     match key {
         "object" => ("snapshot".to_owned(), None),
+        "rev" => ("revision".to_owned(), None),
         "status" => {
             let target = match surface {
-                QuerySurface::Event => "check",
+                QuerySurface::Event | QuerySurface::ChangeTimeline => "check",
                 QuerySurface::Revision => "assessment",
             };
             (target.to_owned(), Some("status".to_owned()))
@@ -267,7 +276,7 @@ fn resolve_alias(key: &str, surface: QuerySurface) -> (String, Option<String>) {
 /// surface; `None` means the qualifier's value is not enumerated.
 fn value_set(surface: QuerySurface, field: &str) -> Option<&'static [&'static str]> {
     match (surface, field) {
-        (QuerySurface::Event, "is") => Some(&["open", "answered"]),
+        (QuerySurface::Event | QuerySurface::ChangeTimeline, "is") => Some(&["open", "answered"]),
         (QuerySurface::Revision, "is") => Some(&[
             "open",
             "answered",
@@ -285,7 +294,7 @@ fn value_set(surface: QuerySurface, field: &str) -> Option<&'static [&'static st
 impl QuerySurface {
     fn label(self) -> &'static str {
         match self {
-            QuerySurface::Event => "timeline",
+            QuerySurface::Event | QuerySurface::ChangeTimeline => "timeline",
             QuerySurface::Revision => "revisions",
         }
     }
@@ -313,6 +322,23 @@ impl QueryDiagnostic {
             message: format!("`{key}:{value}` — expected one of: {}", allowed.join(", ")),
         }
     }
+
+    fn invalid_identity_value(key: &str, value: &str) -> Self {
+        let message = if value.is_empty() {
+            format!("`{key}:` requires an identity fragment")
+        } else {
+            format!("`{key}:` identity fragments cannot contain whitespace")
+        };
+        Self {
+            code: QueryDiagnosticCode::UnsupportedValue,
+            key: key.to_owned(),
+            message,
+        }
+    }
+}
+
+fn is_identity_field(field: &str) -> bool {
+    matches!(field, "revision" | "change")
 }
 
 /// AND every clause against a record, honoring negation — parity with
@@ -343,6 +369,24 @@ pub const EVENT_QUERY_FIELDS: &[&str] = &[
     "track",
     "actor",
     "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after",
+];
+
+/// The Change-aware `/api/v2/history` qualifier set. It extends the legacy
+/// event grammar with Change identity without pretending legacy history rows
+/// can derive that correlation.
+pub const CHANGE_TIMELINE_QUERY_FIELDS: &[&str] = &[
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "change",
     "snapshot",
     "check",
     "assessment",
@@ -386,6 +430,8 @@ pub const KNOWN_QUERY_KEYS: &[&str] = &[
     "after",
     "status",
     "object",
+    "rev",
+    "change",
 ];
 
 /// The revision `attention:` value set — the single source shared by the validator,
@@ -1324,6 +1370,116 @@ mod tests {
             }],
         );
         assert!(parsed.diagnostics.is_empty()); // silent alias, unchanged
+    }
+
+    #[test]
+    fn event_and_revision_surfaces_accept_the_new_revision_alias() {
+        let full_revision = "rev:sha256:0123456789abcdef";
+        let record = record(
+            "review_observation_recorded",
+            &[("revision", full_revision)],
+            "",
+        );
+
+        for surface in [QuerySurface::Event, QuerySurface::Revision] {
+            for query in [
+                "revision:01234567",
+                "revision:rev:sha256:0123456789abcdef",
+                "rev:01234567",
+                "rev:rev:sha256:0123456789abcdef",
+                "revision:\"01234567\"",
+                "rev:\"01234567\"",
+            ] {
+                let parsed = parse_search_query_for(query, surface);
+                assert!(
+                    parsed.diagnostics.is_empty(),
+                    "{surface:?} {query}: {parsed:?}"
+                );
+                assert_eq!(parsed.clauses.len(), 1, "{surface:?} {query}: {parsed:?}");
+                assert!(
+                    matches_query(&record, &parsed.clauses),
+                    "{surface:?} {query}"
+                );
+            }
+
+            let mixed =
+                parse_search_query_for("revision:01234567 rev:01234567 -revision:absent", surface);
+            assert!(mixed.diagnostics.is_empty(), "{surface:?}: {mixed:?}");
+            assert_eq!(mixed.clauses.len(), 3, "{surface:?}: {mixed:?}");
+            assert!(matches_query(&record, &mixed.clauses));
+
+            for query in ["revision:missing", "rev:missing"] {
+                let parsed = parse_search_query_for(query, surface);
+                assert!(
+                    parsed.diagnostics.is_empty(),
+                    "{surface:?} {query}: {parsed:?}"
+                );
+                assert!(
+                    !matches_query(&record, &parsed.clauses),
+                    "{surface:?} {query}"
+                );
+            }
+
+            for query in ["change:fedcba98", "change:\"fedcba98\""] {
+                let parsed = parse_search_query_for(query, surface);
+                assert!(parsed.clauses.is_empty(), "{surface:?} {query}: {parsed:?}");
+                assert_eq!(
+                    parsed.diagnostics.len(),
+                    1,
+                    "{surface:?} {query}: {parsed:?}"
+                );
+                assert_eq!(
+                    parsed.diagnostics[0].code,
+                    QueryDiagnosticCode::UnsupportedQualifier
+                );
+                assert_eq!(parsed.diagnostics[0].key, "change");
+            }
+        }
+
+        // Unknown qualifiers remain free text. The identity additions must not
+        // turn that established behavior into an unsupported-qualifier error.
+        for surface in [QuerySurface::Event, QuerySurface::Revision] {
+            let unknown = parse_search_query_for("future:identity", surface);
+            assert_eq!(
+                unknown.clauses,
+                vec![QueryClause::Text {
+                    value: "future:identity".into(),
+                    negate: false,
+                }]
+            );
+            assert!(unknown.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn event_identity_query_values_refuse_empty_clauses() {
+        for (query, key) in [
+            ("revision:", "revision"),
+            ("rev:", "rev"),
+            ("-revision:\"\"", "revision"),
+            ("-rev:\"\"", "rev"),
+            ("revision:\"0123 4567\"", "revision"),
+            ("rev:\"0123 4567\"", "rev"),
+        ] {
+            let parsed = parse_search_query_for(query, QuerySurface::Event);
+            assert!(parsed.clauses.is_empty(), "{query}: {parsed:?}");
+            assert_eq!(parsed.diagnostics.len(), 1, "{query}: {parsed:?}");
+            assert_eq!(
+                parsed.diagnostics[0].code,
+                QueryDiagnosticCode::UnsupportedValue
+            );
+            assert_eq!(parsed.diagnostics[0].key, key);
+        }
+
+        for surface in [QuerySurface::Event, QuerySurface::Revision] {
+            let parsed = parse_search_query_for("change:", surface);
+            assert!(parsed.clauses.is_empty(), "{surface:?}: {parsed:?}");
+            assert_eq!(
+                parsed.diagnostics[0].code,
+                QueryDiagnosticCode::UnsupportedQualifier
+            );
+            assert_eq!(parsed.diagnostics[0].key, "change");
+        }
     }
 
     #[test]

@@ -410,7 +410,7 @@ fn parse_q(raw: Option<String>) -> Result<Option<String>, PageError> {
     }
     let value = value.map(|value| value.to_lowercase());
     if let Some(value) = &value {
-        let parsed = parse_search_query_for(value, QuerySurface::Event);
+        let parsed = parse_search_query_for(value, QuerySurface::ChangeTimeline);
         if let Some(fatal) = parsed.diagnostics.iter().find(|diagnostic| {
             matches!(
                 diagnostic.code,
@@ -703,6 +703,17 @@ mod tests {
             parse(Some("revision=not-rev&artifactHash=sha256%3Atwo")),
             Err(PageError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn structured_identity_query_stays_separate_from_exact_filters() {
+        let request = query("q=revision%3A01234567+rev%3A01234567+change%3Afedcba98");
+        assert_eq!(
+            request.q(),
+            Some("revision:01234567 rev:01234567 change:fedcba98")
+        );
+        assert!(request.change().is_none());
+        assert!(request.revision().is_none());
     }
 
     #[test]

@@ -26,6 +26,12 @@ export interface WorkLabel {
   source?: "commit_subject" | "current_ref" | "source_fallback";
 }
 
+/** The exact resource identity carried by a Revision route or action. */
+export interface ExactRevisionIdentity {
+  revisionId: string;
+  objectArtifactContentHash: string;
+}
+
 /** Server-derived, path-private display metadata for a revision's target. */
 export interface TargetDisplay {
   label?: string;
@@ -58,6 +64,28 @@ export function shortRef(id: unknown): string {
   if (match) return `sha256:${match[1].slice(0, 8)}`;
   if (/^[0-9a-f]{40}$/i.test(value)) return value.slice(0, 10);
   return value;
+}
+
+/** One visual form for an exact Revision and its required artifact identity. */
+export function shortExactRevision(revision: ExactRevisionIdentity): string {
+  return `${shortRef(revision.revisionId)} · ${shortRef(
+    revision.objectArtifactContentHash,
+  )}`;
+}
+
+/** One spoken/full form for an exact Revision and its required artifact. */
+export function exactRevisionAccessibleIdentity(
+  revision: ExactRevisionIdentity,
+): string {
+  return `exact Revision ${revision.revisionId}; artifact ${revision.objectArtifactContentHash}`;
+}
+
+const OPAQUE_ID_RE =
+  /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
+
+/** Compact every recognized opaque identity in prose without changing its words. */
+export function compactIdentityText(value: string): string {
+  return value.replace(OPAQUE_ID_RE, (identity) => shortRef(identity));
 }
 
 /** Path-private target label with an honest floor for non-Git revisions. */
@@ -134,9 +162,9 @@ export function linkifyEscaped(
     if (!info) return token;
     const display = escapeHtml(shortRef(token));
     if (!info.clickable) {
-      return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
+      return `<span class="${refClass(info.kind)}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}" aria-label="${escapeHtml(token)}">${display}</span>`;
     }
-    return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+    return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}" aria-label="${escapeHtml(token)}">${display}</span>`;
   });
 }
 

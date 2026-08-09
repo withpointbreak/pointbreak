@@ -79,7 +79,7 @@ export const DEFAULT_LENS = "timeline";
 
 // The surface a query is parsed for — the per-surface key sets and value sets
 // hang off this. Mirrors the Rust QuerySurface.
-export type QuerySurface = "event" | "revision";
+export type QuerySurface = "event" | "change-timeline" | "revision";
 
 // One parse diagnostic: the code, the user-typed key it concerns, and a
 // human-readable message. Mirrors the Rust QueryDiagnostic (kebab-case codes).
@@ -103,6 +103,22 @@ export const EVENT_QUERY_FIELDS: readonly string[] = [
   "track",
   "actor",
   "revision",
+  "snapshot",
+  "check",
+  "assessment",
+  "is",
+  "tag",
+  "before",
+  "after",
+];
+// The active Change-aware Timeline extends the legacy event grammar at its own
+// boundary. Legacy history records do not carry authoritative Change sets.
+export const CHANGE_TIMELINE_QUERY_FIELDS: readonly string[] = [
+  "type",
+  "track",
+  "actor",
+  "revision",
+  "change",
   "snapshot",
   "check",
   "assessment",
@@ -143,6 +159,8 @@ export const KNOWN_QUERY_KEYS: readonly string[] = [
   "after",
   "status",
   "object",
+  "rev",
+  "change",
 ];
 // The revision attention: value set — single source for the validator, the revision
 // index builder, and autocomplete. Exactly the projection.ts attentionTokens tokens.

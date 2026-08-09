@@ -346,8 +346,8 @@ describe("Change-aware Timeline renderer", () => {
       eventId,
       changeA,
       changeB,
-      revisionA,
-      revisionB,
+      `exact Revision ${revisionA}; artifact ${artifactA}`,
+      `exact Revision ${revisionB}; artifact ${artifactB}`,
     ]);
     expect(contexts[1]?.getAttribute("href")).toContain(
       encodeURIComponent(changeA),
@@ -358,6 +358,10 @@ describe("Change-aware Timeline renderer", () => {
     expect(contexts[3]?.getAttribute("href")).toContain(
       `artifactHash=${encodeURIComponent(artifactA)}`,
     );
+    expect(contexts[3]?.dataset.revisionId).toBe(revisionA);
+    expect(contexts[3]?.dataset.artifactHash).toBe(artifactA);
+    expect(contexts[3]?.getAttribute("aria-label")).toContain(revisionA);
+    expect(contexts[3]?.getAttribute("aria-label")).toContain(artifactA);
     // The two exact Revision filters stand alone: neither silently picks one
     // of the two explicit Change contexts as their owner.
     expect(contexts[3]?.getAttribute("href")).not.toContain("change=");

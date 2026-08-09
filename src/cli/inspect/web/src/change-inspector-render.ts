@@ -1,9 +1,6 @@
 /** DOM projection for the Change-first shell. It fetches nothing and owns no history. */
 
-import {
-  changeCardPresentation,
-  exactRevisionAccessibleIdentity,
-} from "./change-inspector-cards";
+import { changeCardPresentation } from "./change-inspector-cards";
 import {
   hideChangeInspectorDiffPage,
   renderChangeInspectorDiffPage,
@@ -47,7 +44,12 @@ import {
   renderDiffFileBody,
 } from "./diff/render";
 import { renderBodyContent } from "./markdown";
-import { shortRef } from "./refs";
+import {
+  compactIdentityText,
+  exactRevisionAccessibleIdentity,
+  shortExactRevision,
+  shortRef,
+} from "./refs";
 
 export interface ChangeInspectorRenderActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
@@ -128,10 +130,23 @@ const FILTER_OPTIONS = [
   ["availability", ["available", "incomplete"]],
 ] as const;
 
+function setCompactIdentityText(
+  element: HTMLElement,
+  text: string,
+  accessibleName = text,
+): void {
+  const visible = compactIdentityText(text);
+  element.textContent = visible;
+  if (visible !== text) {
+    element.title = text;
+    element.setAttribute("aria-label", accessibleName);
+  }
+}
+
 function message(text: string): HTMLParagraphElement {
   const element = document.createElement("p");
   element.className = "empty";
-  element.textContent = text;
+  setCompactIdentityText(element, text);
   return element;
 }
 
@@ -140,12 +155,16 @@ function selectOption(
   value: string,
   artifactHash?: string,
   revisionId?: string,
+  title?: string,
+  accessibleName?: string,
 ): HTMLOptionElement {
   const option = document.createElement("option");
   option.textContent = label;
   option.value = value;
   if (artifactHash) option.dataset.artifactHash = artifactHash;
   if (revisionId) option.dataset.revisionId = revisionId;
+  if (title) option.title = title;
+  if (accessibleName) option.setAttribute("aria-label", accessibleName);
   return option;
 }
 
@@ -422,6 +441,8 @@ function replaceTimelineSelectOptions(
     label: string;
     artifactHash?: string;
     revisionId?: string;
+    title?: string;
+    accessibleName?: string;
   }>,
   selected: string | undefined,
 ): void {
@@ -437,6 +458,8 @@ function replaceTimelineSelectOptions(
           option.value,
           option.artifactHash,
           option.revisionId,
+          option.title,
+          option.accessibleName,
         ),
       );
     }
@@ -520,8 +543,27 @@ function syncFilterChrome(
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "badge";
-        chip.textContent = `${name}: ${value} ×`;
-        chip.setAttribute("aria-label", `Remove ${name} filter: ${value}`);
+        const exactRevision =
+          name === "revision" && route.historyQuery.artifactHash
+            ? {
+                revisionId: value,
+                objectArtifactContentHash: route.historyQuery.artifactHash,
+              }
+            : null;
+        const visible = exactRevision
+          ? shortExactRevision(exactRevision)
+          : compactIdentityText(value);
+        const full = exactRevision
+          ? `${value} · ${exactRevision.objectArtifactContentHash}`
+          : value;
+        chip.textContent = `${name}: ${visible} ×`;
+        chip.title = full;
+        chip.setAttribute(
+          "aria-label",
+          exactRevision
+            ? `Remove revision filter: ${value}; artifact ${exactRevision.objectArtifactContentHash}`
+            : `Remove ${name} filter: ${value}`,
+        );
         chip.addEventListener("click", () => {
           const next = {
             ...route.historyQuery,
@@ -567,7 +609,9 @@ function syncFilterChrome(
         "timeline-filter-change",
         history.completion.changeIds.map((changeId) => ({
           value: changeId,
-          label: changeId,
+          label: shortRef(changeId),
+          title: changeId,
+          accessibleName: `Change ${changeId}`,
         })),
         route.historyQuery.change,
       );
@@ -578,9 +622,11 @@ function syncFilterChrome(
             revision.revisionId,
             revision.objectArtifactContentHash,
           ),
-          label: `${revision.revisionId} · ${revision.objectArtifactContentHash}`,
+          label: shortExactRevision(revision),
           artifactHash: revision.objectArtifactContentHash,
           revisionId: revision.revisionId,
+          title: exactRevisionAccessibleIdentity(revision),
+          accessibleName: exactRevisionAccessibleIdentity(revision),
         })),
         route.historyQuery.revision && route.historyQuery.artifactHash
           ? exactRevisionOptionValue(
@@ -642,12 +688,14 @@ function appendDefinition(
   list: HTMLDListElement,
   label: string,
   value: string,
-): void {
+  accessibleName = value,
+): HTMLElement {
   const term = document.createElement("dt");
   term.textContent = label;
   const definition = document.createElement("dd");
-  definition.textContent = value;
+  setCompactIdentityText(definition, value, accessibleName);
   list.append(term, definition);
+  return definition;
 }
 
 function renderEventDetail(
@@ -657,6 +705,9 @@ function renderEventDetail(
   const presentation = presentEvent(event);
   const heading = detailHeading("Event");
   const identity = detailLine(event.eventId, "mono");
+  identity.title = event.eventId;
+  identity.setAttribute("aria-label", `event ${event.eventId}`);
+  identity.dataset.eventId = event.eventId;
   const summary = document.createElement("section");
   summary.className = "event-detail-summary";
   summary.append(detailHeading(presentation.title, 3));
@@ -702,13 +753,19 @@ function renderEventDetail(
   record.append(detailHeading("Event record", 3));
   const facts = document.createElement("dl");
   facts.className = "kv";
-  const add = (name: string, value: string) =>
-    appendDefinition(facts, name, value);
+  const add = (name: string, value: string, accessibleName = value) =>
+    appendDefinition(facts, name, value, accessibleName);
   add("type", event.eventType.replaceAll("_", " "));
   add("occurred", event.occurredAt);
   add("verification", event.verificationStatus.replaceAll("_", " "));
-  add("event payload", event.payloadHash);
-  add("journal", event.journalId);
+  const payload = add(
+    "event payload",
+    event.payloadHash,
+    `artifact ${event.payloadHash}`,
+  );
+  payload.dataset.artifactHash = event.payloadHash;
+  const journal = add("journal", event.journalId, `journal ${event.journalId}`);
+  journal.dataset.journalId = event.journalId;
   if (event.trackId) add("track", event.trackId);
   if (event.signer) add("signer", event.signer);
   add("Changes", event.changeIds.join("; ") || "none");
@@ -743,8 +800,13 @@ function renderEventDetail(
     change.type = "button";
     change.className = "ghost";
     change.dataset.eventChangeChoice = changeId;
+    change.dataset.changeId = changeId;
     change.textContent =
-      event.changeIds.length === 1 ? "Open Change" : `Open Change ${changeId}`;
+      event.changeIds.length === 1
+        ? "Open Change"
+        : `Open Change ${shortRef(changeId)}`;
+    change.title = `Change ${changeId}`;
+    change.setAttribute("aria-label", `Open Change ${changeId}`);
     change.addEventListener("click", () =>
       actions.navigate({ kind: "change", changeId, query: {} }),
     );
@@ -765,6 +827,14 @@ function renderEventDetail(
         event.revisionRefs.length === 1
           ? "Open exact Revision"
           : `Open exact Revision ${shortExact(exactRevision)}`;
+      revision.title = exactRevisionAccessibleIdentity(exactRevision);
+      revision.setAttribute(
+        "aria-label",
+        `Open ${exactRevisionAccessibleIdentity(exactRevision)} for Change ${onlyChange}`,
+      );
+      revision.dataset.changeId = onlyChange;
+      revision.dataset.revisionId = exactRevision.revisionId;
+      revision.dataset.artifactHash = exactRevision.objectArtifactContentHash;
       revision.addEventListener("click", () =>
         actions.navigate({
           kind: "revision",
@@ -816,14 +886,14 @@ function renderEventDetail(
 
 function detailHeading(text: string, level = 2): HTMLHeadingElement {
   const heading = document.createElement(`h${level}`) as HTMLHeadingElement;
-  heading.textContent = text;
+  setCompactIdentityText(heading, text);
   return heading;
 }
 
 function detailLine(text: string, className?: string): HTMLParagraphElement {
   const line = document.createElement("p");
   if (className) line.className = className;
-  line.textContent = text;
+  setCompactIdentityText(line, text);
   return line;
 }
 
@@ -836,7 +906,7 @@ function detailState(
     const term = document.createElement("dt");
     term.textContent = label;
     const description = document.createElement("dd");
-    description.textContent = value;
+    setCompactIdentityText(description, value);
     list.append(term, description);
   }
   return list;
@@ -886,9 +956,14 @@ function shortExact(revision: {
   revisionId: string;
   objectArtifactContentHash: string;
 }): string {
-  return `${shortRef(revision.revisionId)} · ${shortRef(
-    revision.objectArtifactContentHash,
-  )}`;
+  return shortExactRevision(revision);
+}
+
+function exactRevisionText(revision: {
+  revisionId: string;
+  objectArtifactContentHash: string;
+}): string {
+  return `${revision.revisionId} · ${revision.objectArtifactContentHash}`;
 }
 
 function exactRevisionIdentity(
@@ -903,6 +978,8 @@ function exactRevisionIdentity(
     "aria-label",
     exactRevisionAccessibleIdentity(revision),
   );
+  identity.dataset.revisionId = revision.revisionId;
+  identity.dataset.artifactHash = revision.objectArtifactContentHash;
   return identity;
 }
 
@@ -969,7 +1046,7 @@ function renderFacts(
       card.append(
         factIdentity,
         detailLine(
-          `origin: ${shortExact(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`,
+          `origin: ${exactRevisionText(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`,
         ),
         detailLine(
           `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`,
@@ -990,7 +1067,7 @@ function renderFacts(
         );
         card.append(
           detailLine(
-            `presented in: ${shortExact(presentedInRevision)} · port: ${fact.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`,
+            `presented in: ${exactRevisionText(presentedInRevision)} · port: ${fact.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`,
           ),
         );
       }
@@ -1058,10 +1135,10 @@ function renderFactPorts(
     item.append(
       detailLine(port.portId, "mono"),
       detailLine(
-        `origin: ${factRefLabel(port.originFact)} · ${shortExact(port.originRevision)}`,
+        `origin: ${factRefLabel(port.originFact)} · ${exactRevisionText(port.originRevision)}`,
       ),
       detailLine(
-        `target: ${shortExact(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`,
+        `target: ${exactRevisionText(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`,
       ),
       detailLine(
         `target fact: ${port.targetFact ? factRefLabel(port.targetFact) : "none"} · applicability: ${port.applicability.replaceAll("_", " ")}`,
@@ -1247,7 +1324,7 @@ function renderCapturedResource(
 ): Node[] {
   const nodes: Node[] = [
     detailHeading("Authoritative captured diff"),
-    detailLine(shortExact(resource.resource.revision), "mono"),
+    detailLine(exactRevisionText(resource.resource.revision), "mono"),
     detailLine(`availability: ${resource.availability.replaceAll("_", " ")}`),
   ];
   if (resource.availability !== "available") {
@@ -1304,6 +1381,9 @@ function renderCurrentRevisionChoices(
       "aria-label",
       `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`,
     );
+    button.dataset.changeId = changeId;
+    button.dataset.revisionId = revision.revisionId;
+    button.dataset.artifactHash = revision.objectArtifactContentHash;
     button.addEventListener("click", () =>
       actions.navigate({
         kind: "revision",
@@ -1433,7 +1513,7 @@ function renderChangeDetail(
       "Member Revisions",
       detail.memberRevisions.map(
         (member) =>
-          `${shortExact(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`,
+          `${exactRevisionText(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`,
       ),
     ],
     [
@@ -1461,7 +1541,7 @@ function renderChangeDetail(
       "Revision Relation Claims",
       detail.relationClaims.map(
         (claim) =>
-          `${claim.claimId} · ${shortExact(claim.predecessor)} → ${shortExact(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
+          `${claim.claimId} · ${exactRevisionText(claim.predecessor)} → ${exactRevisionText(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
       ),
     ],
     [
@@ -1475,14 +1555,14 @@ function renderChangeDetail(
       "Effective Supersedes",
       detail.effectiveSupersedes.map(
         ([successor, predecessor]) =>
-          `${shortExact(predecessor)} → ${shortExact(successor)}`,
+          `${exactRevisionText(predecessor)} → ${exactRevisionText(successor)}`,
       ),
     ],
     [
       "Pending or Conflicting Edges",
       detail.pendingOrConflictingEdges.map(
         (claim) =>
-          `${claim.claimId} · ${shortExact(claim.predecessor)} → ${shortExact(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
+          `${claim.claimId} · ${exactRevisionText(claim.predecessor)} → ${exactRevisionText(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
       ),
     ],
     [
@@ -1496,7 +1576,7 @@ function renderChangeDetail(
       "Current Revision Qualification",
       detail.perCurrentRevisionQualification.map(
         (qualification) =>
-          `${shortExact(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`,
+          `${exactRevisionText(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`,
       ),
     ],
     ["Diagnostics", detail.diagnostics],
@@ -1537,7 +1617,7 @@ function renderReading(
     const nodes: Node[] = [
       detailHeading("Ordered Revision interdiff"),
       detailLine(
-        `${shortExact(reading.document.interdiff.from)} → ${shortExact(reading.document.interdiff.to)}`,
+        `${exactRevisionText(reading.document.interdiff.from)} → ${exactRevisionText(reading.document.interdiff.to)}`,
         "mono",
       ),
       detailLine(
@@ -1560,7 +1640,15 @@ function renderReading(
       const button = document.createElement("button");
       button.type = "button";
       button.className = "ghost";
-      button.textContent = `Open authoritative captured diff: ${revision.revisionId}`;
+      button.textContent = `Open authoritative captured diff: ${shortExact(revision)}`;
+      button.title = exactRevisionAccessibleIdentity(revision);
+      button.setAttribute(
+        "aria-label",
+        `Open authoritative captured diff for ${exactRevisionAccessibleIdentity(revision)}; Change ${route.changeId}`,
+      );
+      button.dataset.changeId = route.changeId;
+      button.dataset.revisionId = revision.revisionId;
+      button.dataset.artifactHash = revision.objectArtifactContentHash;
       button.addEventListener("click", () =>
         actions.navigate({
           kind: "resource",
@@ -1755,12 +1843,13 @@ function renderDetail(
             : "Exact Revision";
   const identity = document.createElement("p");
   identity.className = "mono";
-  identity.textContent =
+  const identityText =
     snapshot.route.kind === "change"
       ? `Change ID: ${snapshot.route.changeId}`
       : snapshot.route.kind === "interdiff"
         ? `From: ${snapshot.route.from.revisionId} · ${snapshot.route.from.objectArtifactContentHash}\nTo: ${snapshot.route.to.revisionId} · ${snapshot.route.to.objectArtifactContentHash}`
         : `Revision ID: ${snapshot.route.revision.revisionId} · artifact hash: ${snapshot.route.revision.objectArtifactContentHash}`;
+  setCompactIdentityText(identity, identityText);
   const placeholder = message(
     snapshot.route.kind === "change"
       ? "Select an explicit current Revision to inspect its exact context."
@@ -1946,7 +2035,10 @@ export function renderChangeInspector(
       if (card.attention) {
         const attention = document.createElement("section");
         attention.className = "change-card-attention";
-        attention.setAttribute("aria-label", "Why this Change needs attention");
+        attention.setAttribute(
+          "aria-label",
+          card.attention.primary.accessibleName,
+        );
         const reason = document.createElement("strong");
         reason.className = "change-card-attention-reason";
         reason.textContent = card.attention.reason;
@@ -1966,6 +2058,7 @@ export function renderChangeInspector(
             const row = document.createElement("li");
             row.textContent = `${item.reason}: ${item.ask}`;
             row.title = item.title;
+            row.setAttribute("aria-label", item.accessibleName);
             additional.append(row);
           }
           attention.append(additional);
@@ -2009,10 +2102,7 @@ export function renderChangeInspector(
         const current = document.createElement("p");
         current.className = "change-card-current";
         current.append("Current Revision · ");
-        const exact = document.createElement("code");
-        exact.className = "mono";
-        exact.textContent = peer.visibleIdentity;
-        exact.title = peer.title;
+        const exact = exactRevisionIdentity(peer.revision);
         current.append(exact);
         element.append(current);
       } else {
@@ -2031,6 +2121,9 @@ export function renderChangeInspector(
             "aria-label",
             `${peer.accessibleName}; open for Change ${summary.changeId}`,
           );
+          choose.dataset.changeId = summary.changeId;
+          choose.dataset.revisionId = peer.revision.revisionId;
+          choose.dataset.artifactHash = peer.revision.objectArtifactContentHash;
           choose.addEventListener("click", () =>
             actions.navigate({
               kind: "revision",

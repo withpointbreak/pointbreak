@@ -1676,6 +1676,21 @@
     return value;
   }
   __name(shortRef, "shortRef");
+  function shortExactRevision(revision2) {
+    return `${shortRef(revision2.revisionId)} · ${shortRef(
+      revision2.objectArtifactContentHash
+    )}`;
+  }
+  __name(shortExactRevision, "shortExactRevision");
+  function exactRevisionAccessibleIdentity(revision2) {
+    return `exact Revision ${revision2.revisionId}; artifact ${revision2.objectArtifactContentHash}`;
+  }
+  __name(exactRevisionAccessibleIdentity, "exactRevisionAccessibleIdentity");
+  var OPAQUE_ID_RE = /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
+  function compactIdentityText(value) {
+    return value.replace(OPAQUE_ID_RE, (identity) => shortRef(identity));
+  }
+  __name(compactIdentityText, "compactIdentityText");
   var NON_CLICKABLE_KINDS = /* @__PURE__ */ new Set([
     "validation",
     "obj",
@@ -1716,9 +1731,9 @@
       if (!info) return token;
       const display = escapeHtml(shortRef(token));
       if (!info.clickable) {
-        return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
+        return `<span class="${refClass(info.kind)}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}" aria-label="${escapeHtml(token)}">${display}</span>`;
       }
-      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}" aria-label="${escapeHtml(token)}">${display}</span>`;
     });
   }
   __name(linkifyEscaped, "linkifyEscaped");
@@ -1756,9 +1771,8 @@
   __name(label, "label");
   var MAX_TIMELINE_TITLE = 120;
   var MAX_TIMELINE_EXCERPT = 180;
-  var OPAQUE_ID = /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
   function compactTimelineText(value, limit) {
-    const compact = value.replace(OPAQUE_ID, (identity) => shortRef(identity)).replace(/\s+/g, " ").trim();
+    const compact = compactIdentityText(value).replace(/\s+/g, " ").trim();
     if (compact.length <= limit) return compact;
     return `${compact.slice(0, limit - 1).trimEnd()}…`;
   }
@@ -1782,10 +1796,11 @@
     link.setAttribute("aria-label", `Open ${kind} ${identity}`);
     link.textContent = shortRef(identity);
     parent.append(link);
+    return link;
   }
   __name(appendTimelineLink, "appendTimelineLink");
   function appendExactRevisionLink(parent, reference, route) {
-    appendTimelineLink(
+    const link = appendTimelineLink(
       parent,
       reference.revisionId,
       "Revision",
@@ -1801,6 +1816,12 @@
         }
       })
     );
+    const fullIdentity = exactRevisionAccessibleIdentity(reference);
+    link.textContent = shortExactRevision(reference);
+    link.title = fullIdentity;
+    link.setAttribute("aria-label", `Filter Timeline to ${fullIdentity}`);
+    link.dataset.revisionId = reference.revisionId;
+    link.dataset.artifactHash = reference.objectArtifactContentHash;
   }
   __name(appendExactRevisionLink, "appendExactRevisionLink");
   function optionId(eventId) {
@@ -4705,27 +4726,12 @@
     return value.replaceAll("_", " ");
   }
   __name(words2, "words");
-  function shortened(value, limit) {
-    return value.length > limit ? `${value.slice(0, limit)}…` : value;
-  }
-  __name(shortened, "shortened");
-  function shortExact(revision2) {
-    return `${shortened(revision2.revisionId, 24)} · ${shortened(
-      revision2.objectArtifactContentHash,
-      18
-    )}`;
-  }
-  __name(shortExact, "shortExact");
   function exactRevisionCopyText(revisions) {
     return revisions.map(
       (revision2) => `${revision2.revisionId} ${revision2.objectArtifactContentHash}`
     ).join("\n");
   }
   __name(exactRevisionCopyText, "exactRevisionCopyText");
-  function exactRevisionAccessibleIdentity(revision2) {
-    return `exact Revision ${revision2.revisionId}; artifact ${revision2.objectArtifactContentHash}`;
-  }
-  __name(exactRevisionAccessibleIdentity, "exactRevisionAccessibleIdentity");
   function attentionReasonCopy(reason) {
     switch (reason.kind) {
       case "conflicted":
@@ -4759,9 +4765,7 @@
           copyText: "no_current_revision"
         };
       case "unresolved_operative_requests": {
-        const visibleRequestIds = reason.requestIds.map(
-          (id) => shortened(id, 24)
-        );
+        const visibleRequestIds = reason.requestIds.map(shortRef);
         const requestList = visibleRequestIds.join(", ");
         const fullRequestList = reason.requestIds.join(", ");
         return {
@@ -4775,7 +4779,7 @@
         };
       }
       case "current_revisions_need_assessment": {
-        const visibleRevisions = reason.revisions.map(shortExact).join(", ");
+        const visibleRevisions = reason.revisions.map(shortExactRevision).join(", ");
         const fullRevisions = reason.revisions.map(exactRevisionAccessibleIdentity).join("; ");
         return {
           kind: reason.kind,
@@ -4819,7 +4823,7 @@
       return {
         revision: revision2,
         label: summaryLabel || "Current Revision",
-        visibleIdentity: shortExact(revision2),
+        visibleIdentity: shortExactRevision(revision2),
         accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
@@ -4833,7 +4837,7 @@
     const unavailableReason = peers.length === 0 ? "No exact current Revision is available for this Change." : void 0;
     return {
       changeId: summary.changeId,
-      visibleChangeId: shortened(summary.changeId, 28),
+      visibleChangeId: shortRef(summary.changeId),
       accessibleName: `${headline}; ${currentRevisionName}; Change ${summary.changeId}`,
       title: `Change ${summary.changeId}`,
       copyText: summary.changeId,
@@ -6740,19 +6744,30 @@
     ["attention", ["clear", "in_progress", "incomplete", "conflicted"]],
     ["availability", ["available", "incomplete"]]
   ];
+  function setCompactIdentityText(element, text, accessibleName = text) {
+    const visible = compactIdentityText(text);
+    element.textContent = visible;
+    if (visible !== text) {
+      element.title = text;
+      element.setAttribute("aria-label", accessibleName);
+    }
+  }
+  __name(setCompactIdentityText, "setCompactIdentityText");
   function message(text) {
     const element = document.createElement("p");
     element.className = "empty";
-    element.textContent = text;
+    setCompactIdentityText(element, text);
     return element;
   }
   __name(message, "message");
-  function selectOption(label2, value, artifactHash, revisionId) {
+  function selectOption(label2, value, artifactHash, revisionId, title, accessibleName) {
     const option = document.createElement("option");
     option.textContent = label2;
     option.value = value;
     if (artifactHash) option.dataset.artifactHash = artifactHash;
     if (revisionId) option.dataset.revisionId = revisionId;
+    if (title) option.title = title;
+    if (accessibleName) option.setAttribute("aria-label", accessibleName);
     return option;
   }
   __name(selectOption, "selectOption");
@@ -6989,7 +7004,9 @@
             option.label,
             option.value,
             option.artifactHash,
-            option.revisionId
+            option.revisionId,
+            option.title,
+            option.accessibleName
           )
         );
       }
@@ -7065,8 +7082,18 @@
           const chip = document.createElement("button");
           chip.type = "button";
           chip.className = "badge";
-          chip.textContent = `${name}: ${value} ×`;
-          chip.setAttribute("aria-label", `Remove ${name} filter: ${value}`);
+          const exactRevision = name === "revision" && route.historyQuery.artifactHash ? {
+            revisionId: value,
+            objectArtifactContentHash: route.historyQuery.artifactHash
+          } : null;
+          const visible = exactRevision ? shortExactRevision(exactRevision) : compactIdentityText(value);
+          const full = exactRevision ? `${value} · ${exactRevision.objectArtifactContentHash}` : value;
+          chip.textContent = `${name}: ${visible} ×`;
+          chip.title = full;
+          chip.setAttribute(
+            "aria-label",
+            exactRevision ? `Remove revision filter: ${value}; artifact ${exactRevision.objectArtifactContentHash}` : `Remove ${name} filter: ${value}`
+          );
           chip.addEventListener("click", () => {
             const next = {
               ...route.historyQuery,
@@ -7104,7 +7131,9 @@
           "timeline-filter-change",
           history2.completion.changeIds.map((changeId) => ({
             value: changeId,
-            label: changeId
+            label: shortRef(changeId),
+            title: changeId,
+            accessibleName: `Change ${changeId}`
           })),
           route.historyQuery.change
         );
@@ -7115,9 +7144,11 @@
               revision2.revisionId,
               revision2.objectArtifactContentHash
             ),
-            label: `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`,
+            label: shortExactRevision(revision2),
             artifactHash: revision2.objectArtifactContentHash,
-            revisionId: revision2.revisionId
+            revisionId: revision2.revisionId,
+            title: exactRevisionAccessibleIdentity(revision2),
+            accessibleName: exactRevisionAccessibleIdentity(revision2)
           })),
           route.historyQuery.revision && route.historyQuery.artifactHash ? exactRevisionOptionValue(
             route.historyQuery.revision,
@@ -7165,18 +7196,22 @@
       toggle.textContent = values.length ? `Filters · ${values.length}` : "Filters";
   }
   __name(syncFilterChrome, "syncFilterChrome");
-  function appendDefinition(list, label2, value) {
+  function appendDefinition(list, label2, value, accessibleName = value) {
     const term = document.createElement("dt");
     term.textContent = label2;
     const definition = document.createElement("dd");
-    definition.textContent = value;
+    setCompactIdentityText(definition, value, accessibleName);
     list.append(term, definition);
+    return definition;
   }
   __name(appendDefinition, "appendDefinition");
   function renderEventDetail(event, actions2) {
     const presentation = presentEvent(event);
     const heading = detailHeading("Event");
     const identity = detailLine(event.eventId, "mono");
+    identity.title = event.eventId;
+    identity.setAttribute("aria-label", `event ${event.eventId}`);
+    identity.dataset.eventId = event.eventId;
     const summary = document.createElement("section");
     summary.className = "event-detail-summary";
     summary.append(detailHeading(presentation.title, 3));
@@ -7219,12 +7254,18 @@
     record.append(detailHeading("Event record", 3));
     const facts = document.createElement("dl");
     facts.className = "kv";
-    const add = /* @__PURE__ */ __name((name, value) => appendDefinition(facts, name, value), "add");
+    const add = /* @__PURE__ */ __name((name, value, accessibleName = value) => appendDefinition(facts, name, value, accessibleName), "add");
     add("type", event.eventType.replaceAll("_", " "));
     add("occurred", event.occurredAt);
     add("verification", event.verificationStatus.replaceAll("_", " "));
-    add("event payload", event.payloadHash);
-    add("journal", event.journalId);
+    const payload = add(
+      "event payload",
+      event.payloadHash,
+      `artifact ${event.payloadHash}`
+    );
+    payload.dataset.artifactHash = event.payloadHash;
+    const journal = add("journal", event.journalId, `journal ${event.journalId}`);
+    journal.dataset.journalId = event.journalId;
     if (event.trackId) add("track", event.trackId);
     if (event.signer) add("signer", event.signer);
     add("Changes", event.changeIds.join("; ") || "none");
@@ -7255,7 +7296,10 @@
       change.type = "button";
       change.className = "ghost";
       change.dataset.eventChangeChoice = changeId;
-      change.textContent = event.changeIds.length === 1 ? "Open Change" : `Open Change ${changeId}`;
+      change.dataset.changeId = changeId;
+      change.textContent = event.changeIds.length === 1 ? "Open Change" : `Open Change ${shortRef(changeId)}`;
+      change.title = `Change ${changeId}`;
+      change.setAttribute("aria-label", `Open Change ${changeId}`);
       change.addEventListener(
         "click",
         () => actions2.navigate({ kind: "change", changeId, query: {} })
@@ -7273,7 +7317,15 @@
           revision: exactRevision,
           query: {}
         });
-        revision2.textContent = event.revisionRefs.length === 1 ? "Open exact Revision" : `Open exact Revision ${shortExact2(exactRevision)}`;
+        revision2.textContent = event.revisionRefs.length === 1 ? "Open exact Revision" : `Open exact Revision ${shortExact(exactRevision)}`;
+        revision2.title = exactRevisionAccessibleIdentity(exactRevision);
+        revision2.setAttribute(
+          "aria-label",
+          `Open ${exactRevisionAccessibleIdentity(exactRevision)} for Change ${onlyChange}`
+        );
+        revision2.dataset.changeId = onlyChange;
+        revision2.dataset.revisionId = exactRevision.revisionId;
+        revision2.dataset.artifactHash = exactRevision.objectArtifactContentHash;
         revision2.addEventListener(
           "click",
           () => actions2.navigate({
@@ -7325,14 +7377,14 @@
   __name(renderEventDetail, "renderEventDetail");
   function detailHeading(text, level = 2) {
     const heading = document.createElement(`h${level}`);
-    heading.textContent = text;
+    setCompactIdentityText(heading, text);
     return heading;
   }
   __name(detailHeading, "detailHeading");
   function detailLine(text, className) {
     const line = document.createElement("p");
     if (className) line.className = className;
-    line.textContent = text;
+    setCompactIdentityText(line, text);
     return line;
   }
   __name(detailLine, "detailLine");
@@ -7343,7 +7395,7 @@
       const term = document.createElement("dt");
       term.textContent = label2;
       const description = document.createElement("dd");
-      description.textContent = value;
+      setCompactIdentityText(description, value);
       list.append(term, description);
     }
     return list;
@@ -7386,21 +7438,25 @@
     return link;
   }
   __name(showRevisionInTimeline, "showRevisionInTimeline");
-  function shortExact2(revision2) {
-    return `${shortRef(revision2.revisionId)} · ${shortRef(
-      revision2.objectArtifactContentHash
-    )}`;
+  function shortExact(revision2) {
+    return shortExactRevision(revision2);
   }
-  __name(shortExact2, "shortExact");
+  __name(shortExact, "shortExact");
+  function exactRevisionText(revision2) {
+    return `${revision2.revisionId} · ${revision2.objectArtifactContentHash}`;
+  }
+  __name(exactRevisionText, "exactRevisionText");
   function exactRevisionIdentity2(revision2, className = "mono") {
     const identity = document.createElement("code");
     identity.className = className;
-    identity.textContent = shortExact2(revision2);
+    identity.textContent = shortExact(revision2);
     identity.title = exactRevisionAccessibleIdentity(revision2);
     identity.setAttribute(
       "aria-label",
       exactRevisionAccessibleIdentity(revision2)
     );
+    identity.dataset.revisionId = revision2.revisionId;
+    identity.dataset.artifactHash = revision2.objectArtifactContentHash;
     return identity;
   }
   __name(exactRevisionIdentity2, "exactRevisionIdentity");
@@ -7445,7 +7501,7 @@
         card.append(
           factIdentity,
           detailLine(
-            `origin: ${shortExact2(fact2.originRevision)} · context: ${fact2.contextChangeId ?? "unavailable"} · currency: ${fact2.revisionCurrency.replaceAll("_", " ")}`
+            `origin: ${exactRevisionText(fact2.originRevision)} · context: ${fact2.contextChangeId ?? "unavailable"} · currency: ${fact2.revisionCurrency.replaceAll("_", " ")}`
           ),
           detailLine(
             `family: ${fact2.familyState.replaceAll("_", " ")} · availability: ${fact2.availability.replaceAll("_", " ")} · actor: ${fact2.actorId}${fact2.trackId ? ` · track: ${fact2.trackId}` : ""}`
@@ -7458,7 +7514,7 @@
           );
           card.append(
             detailLine(
-              `presented in: ${shortExact2(presentedInRevision)} · port: ${fact2.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`
+              `presented in: ${exactRevisionText(presentedInRevision)} · port: ${fact2.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`
             )
           );
         }
@@ -7510,10 +7566,10 @@
       item.append(
         detailLine(port.portId, "mono"),
         detailLine(
-          `origin: ${factRefLabel(port.originFact)} · ${shortExact2(port.originRevision)}`
+          `origin: ${factRefLabel(port.originFact)} · ${exactRevisionText(port.originRevision)}`
         ),
         detailLine(
-          `target: ${shortExact2(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`
+          `target: ${exactRevisionText(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`
         ),
         detailLine(
           `target fact: ${port.targetFact ? factRefLabel(port.targetFact) : "none"} · applicability: ${port.applicability.replaceAll("_", " ")}`
@@ -7681,7 +7737,7 @@
   function renderCapturedResource(resource, route, actions2) {
     const nodes = [
       detailHeading("Authoritative captured diff"),
-      detailLine(shortExact2(resource.resource.revision), "mono"),
+      detailLine(exactRevisionText(resource.resource.revision), "mono"),
       detailLine(`availability: ${resource.availability.replaceAll("_", " ")}`)
     ];
     if (resource.availability !== "available") {
@@ -7728,12 +7784,15 @@
       const button2 = document.createElement("button");
       button2.type = "button";
       button2.className = "ghost mono";
-      button2.textContent = shortExact2(revision2);
+      button2.textContent = shortExact(revision2);
       button2.title = exactRevisionAccessibleIdentity(revision2);
       button2.setAttribute(
         "aria-label",
         `Current Revision: open ${exactRevisionAccessibleIdentity(revision2)}; for Change ${changeId}`
       );
+      button2.dataset.changeId = changeId;
+      button2.dataset.revisionId = revision2.revisionId;
+      button2.dataset.artifactHash = revision2.objectArtifactContentHash;
       button2.addEventListener(
         "click",
         () => actions2.navigate({
@@ -7846,7 +7905,7 @@
       [
         "Member Revisions",
         detail.memberRevisions.map(
-          (member) => `${shortExact2(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`
+          (member) => `${exactRevisionText(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`
         )
       ],
       [
@@ -7870,7 +7929,7 @@
       [
         "Revision Relation Claims",
         detail.relationClaims.map(
-          (claim) => `${claim.claimId} · ${shortExact2(claim.predecessor)} → ${shortExact2(claim.successor)} · ${claim.active ? "active" : "inactive"}`
+          (claim) => `${claim.claimId} · ${exactRevisionText(claim.predecessor)} → ${exactRevisionText(claim.successor)} · ${claim.active ? "active" : "inactive"}`
         )
       ],
       [
@@ -7882,13 +7941,13 @@
       [
         "Effective Supersedes",
         detail.effectiveSupersedes.map(
-          ([successor, predecessor]) => `${shortExact2(predecessor)} → ${shortExact2(successor)}`
+          ([successor, predecessor]) => `${exactRevisionText(predecessor)} → ${exactRevisionText(successor)}`
         )
       ],
       [
         "Pending or Conflicting Edges",
         detail.pendingOrConflictingEdges.map(
-          (claim) => `${claim.claimId} · ${shortExact2(claim.predecessor)} → ${shortExact2(claim.successor)} · ${claim.active ? "active" : "inactive"}`
+          (claim) => `${claim.claimId} · ${exactRevisionText(claim.predecessor)} → ${exactRevisionText(claim.successor)} · ${claim.active ? "active" : "inactive"}`
         )
       ],
       [
@@ -7900,7 +7959,7 @@
       [
         "Current Revision Qualification",
         detail.perCurrentRevisionQualification.map(
-          (qualification) => `${shortExact2(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`
+          (qualification) => `${exactRevisionText(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`
         )
       ],
       ["Diagnostics", detail.diagnostics]
@@ -7937,7 +7996,7 @@
       const nodes = [
         detailHeading("Ordered Revision interdiff"),
         detailLine(
-          `${shortExact2(reading.document.interdiff.from)} → ${shortExact2(reading.document.interdiff.to)}`,
+          `${exactRevisionText(reading.document.interdiff.from)} → ${exactRevisionText(reading.document.interdiff.to)}`,
           "mono"
         ),
         detailLine(
@@ -7960,7 +8019,15 @@
         const button2 = document.createElement("button");
         button2.type = "button";
         button2.className = "ghost";
-        button2.textContent = `Open authoritative captured diff: ${revision2.revisionId}`;
+        button2.textContent = `Open authoritative captured diff: ${shortExact(revision2)}`;
+        button2.title = exactRevisionAccessibleIdentity(revision2);
+        button2.setAttribute(
+          "aria-label",
+          `Open authoritative captured diff for ${exactRevisionAccessibleIdentity(revision2)}; Change ${route.changeId}`
+        );
+        button2.dataset.changeId = route.changeId;
+        button2.dataset.revisionId = revision2.revisionId;
+        button2.dataset.artifactHash = revision2.objectArtifactContentHash;
         button2.addEventListener(
           "click",
           () => actions2.navigate({
@@ -8110,8 +8177,9 @@
     heading.textContent = snapshot2.route.kind === "change" ? "Change" : snapshot2.route.kind === "resource" ? "Captured resource" : snapshot2.route.kind === "association" ? "Association comparison" : snapshot2.route.kind === "interdiff" ? "Revision interdiff" : "Exact Revision";
     const identity = document.createElement("p");
     identity.className = "mono";
-    identity.textContent = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : snapshot2.route.kind === "interdiff" ? `From: ${snapshot2.route.from.revisionId} · ${snapshot2.route.from.objectArtifactContentHash}
+    const identityText = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : snapshot2.route.kind === "interdiff" ? `From: ${snapshot2.route.from.revisionId} · ${snapshot2.route.from.objectArtifactContentHash}
 To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactContentHash}` : `Revision ID: ${snapshot2.route.revision.revisionId} · artifact hash: ${snapshot2.route.revision.objectArtifactContentHash}`;
+    setCompactIdentityText(identity, identityText);
     const placeholder = message(
       snapshot2.route.kind === "change" ? "Select an explicit current Revision to inspect its exact context." : "Exact reading surface is loading."
     );
@@ -8269,7 +8337,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (card.attention) {
           const attention = document.createElement("section");
           attention.className = "change-card-attention";
-          attention.setAttribute("aria-label", "Why this Change needs attention");
+          attention.setAttribute(
+            "aria-label",
+            card.attention.primary.accessibleName
+          );
           const reason = document.createElement("strong");
           reason.className = "change-card-attention-reason";
           reason.textContent = card.attention.reason;
@@ -8289,6 +8360,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               const row = document.createElement("li");
               row.textContent = `${item.reason}: ${item.ask}`;
               row.title = item.title;
+              row.setAttribute("aria-label", item.accessibleName);
               additional.append(row);
             }
             attention.append(additional);
@@ -8330,10 +8402,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           const current = document.createElement("p");
           current.className = "change-card-current";
           current.append("Current Revision · ");
-          const exact = document.createElement("code");
-          exact.className = "mono";
-          exact.textContent = peer.visibleIdentity;
-          exact.title = peer.title;
+          const exact = exactRevisionIdentity2(peer.revision);
           current.append(exact);
           element.append(current);
         } else {
@@ -8352,6 +8421,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               "aria-label",
               `${peer.accessibleName}; open for Change ${summary.changeId}`
             );
+            choose.dataset.changeId = summary.changeId;
+            choose.dataset.revisionId = peer.revision.revisionId;
+            choose.dataset.artifactHash = peer.revision.objectArtifactContentHash;
             choose.addEventListener(
               "click",
               () => actions2.navigate({

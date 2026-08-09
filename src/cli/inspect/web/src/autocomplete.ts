@@ -15,6 +15,7 @@ import type { DistinctValues } from "./store";
 import { getState } from "./store";
 import {
   ASSESSMENT_LABELS,
+  CHANGE_TIMELINE_QUERY_FIELDS,
   EVENT_QUERY_FIELDS,
   REVISION_ATTENTION_VALUES,
   REVISION_QUERY_FIELDS,
@@ -42,7 +43,11 @@ const REVISION_IS_VALUES = [
 ];
 
 function keysFor(surface: QuerySurface): readonly string[] {
-  return surface === "revision" ? REVISION_QUERY_FIELDS : EVENT_QUERY_FIELDS;
+  return surface === "revision"
+    ? REVISION_QUERY_FIELDS
+    : surface === "change-timeline"
+      ? CHANGE_TIMELINE_QUERY_FIELDS
+      : EVENT_QUERY_FIELDS;
 }
 
 function valuesForKey(

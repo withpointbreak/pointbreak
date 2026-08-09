@@ -628,6 +628,56 @@ describe("Change inspector render", () => {
     });
   });
 
+  it("keeps plural Event Change choices short while their actions stay exact", () => {
+    const navigate = vi.fn();
+    const changeIds = [
+      `change:sha256:${"a".repeat(64)}`,
+      `change:sha256:${"b".repeat(64)}`,
+    ];
+    const history = eventHistory();
+    const entry = history.entries[0];
+    if (!entry) throw new Error("fixture needs an event");
+    history.entries = [{ ...entry, changeIds }];
+
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: entry.eventId,
+      historyQuery: {},
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const choices = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        "#detail-body [data-event-change-choice]",
+      ),
+    );
+    expect(choices.map((choice) => choice.textContent)).toEqual([
+      "Open Change change:aaaaaaaa",
+      "Open Change change:bbbbbbbb",
+    ]);
+    for (const [index, choice] of choices.entries()) {
+      const changeId = changeIds[index];
+      expect(changeId).toBeDefined();
+      expect(choice.textContent).not.toContain(changeId);
+      expect(choice.title).toBe(`Change ${changeId}`);
+      expect(choice.getAttribute("aria-label")).toBe(`Open Change ${changeId}`);
+      expect(choice.dataset.eventChangeChoice).toBe(changeId);
+      expect(choice.dataset.changeId).toBe(changeId);
+    }
+
+    choices[1]?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "change",
+      changeId: changeIds[1],
+      query: {},
+    });
+  });
+
   it("retains the bounded card DOM for an unchanged polling generation", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -808,6 +858,14 @@ describe("Change inspector render", () => {
         .querySelector(".change-card-current code")
         ?.getAttribute("title"),
     ).toContain("exact Revision revision:sha256:one; artifact sha256:artifact");
+    const currentRevision = document.querySelector<HTMLElement>(
+      ".change-card-current code",
+    );
+    expect(currentRevision?.getAttribute("aria-label")).toBe(
+      "exact Revision revision:sha256:one; artifact sha256:artifact",
+    );
+    expect(currentRevision?.dataset.revisionId).toBe("revision:sha256:one");
+    expect(currentRevision?.dataset.artifactHash).toBe("sha256:artifact");
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );
@@ -1101,6 +1159,11 @@ describe("Change inspector render", () => {
   it("opens a collapsed captured file through the retained model-neutral handler", () => {
     const navigate = vi.fn();
     const resource = exactResource();
+    const exactRevision = {
+      revisionId: `revision:sha256:${"a".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"b".repeat(64)}`,
+    };
+    resource.resource.revision = exactRevision;
     if (!resource.capturedDocument)
       throw new Error("fixture needs captured bytes");
     resource.capturedDocument.snapshot.files = [
@@ -1115,7 +1178,7 @@ describe("Change inspector render", () => {
     const state = createChangeInspectorState({
       kind: "resource",
       changeId: "change:sha256:one",
-      revision,
+      revision: exactRevision,
       query: {},
     });
     state.publish(stageGeneration(profile, changes, attention, profile));
@@ -1134,6 +1197,13 @@ describe("Change inspector render", () => {
     file?.querySelector<HTMLElement>(".dfile-head")?.click();
     expect(file?.dataset.expanded).toBe("true");
     expect(file?.textContent).toContain("mode 100644 → 100755");
+    const identity = document.querySelector<HTMLElement>(
+      "#detail-body > p.mono",
+    );
+    const fullIdentity = `${exactRevision.revisionId} · ${exactRevision.objectArtifactContentHash}`;
+    expect(identity?.textContent).toBe("revision:aaaaaaaa · sha256:bbbbbbbb");
+    expect(identity?.title).toBe(fullIdentity);
+    expect(identity?.getAttribute("aria-label")).toBe(fullIdentity);
   });
 
   it("focuses an old rename path without substituting a live diff", () => {
@@ -1177,8 +1247,8 @@ describe("Change inspector render", () => {
     const navigate = vi.fn();
     const reading = revisionReading();
     const origin = {
-      revisionId: "revision:sha256:origin",
-      objectArtifactContentHash: "sha256:origin-artifact",
+      revisionId: `revision:sha256:${"1".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"2".repeat(64)}`,
     };
     const fact = reading.document.factPresentations[0];
     if (!fact) throw new Error("fixture needs a fact");
@@ -1214,6 +1284,17 @@ describe("Change inspector render", () => {
       document.querySelector<HTMLElement>('[data-fact-id="obs:sha256:focused"]')
         ?.textContent,
     ).toContain("port: carried open as (fact-port:sha256:one)");
+    const originLine = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '[data-fact-id="obs:sha256:focused"] p',
+      ),
+    ).find((line) => line.textContent?.startsWith("origin:"));
+    expect(originLine?.textContent).toContain(
+      "revision:11111111 · sha256:22222222",
+    );
+    expect(originLine?.title).toContain(origin.revisionId);
+    expect(originLine?.title).toContain(origin.objectArtifactContentHash);
+    expect(originLine?.getAttribute("aria-label")).toContain(origin.revisionId);
   });
 
   it("retains all exact-local fact families in the captured diff presentation", () => {
@@ -1326,6 +1407,14 @@ describe("Change inspector render", () => {
   it("keeps an interdiff distinct from either authoritative captured Revision", () => {
     const navigate = vi.fn();
     const reading = interdiffReading();
+    reading.document.interdiff.from = {
+      revisionId: `revision:sha256:${"c".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"d".repeat(64)}`,
+    };
+    reading.document.interdiff.to = {
+      revisionId: `revision:sha256:${"e".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"f".repeat(64)}`,
+    };
     const route = {
       kind: "interdiff" as const,
       changeId: "change:sha256:one",
@@ -1347,8 +1436,11 @@ describe("Change inspector render", () => {
     expect(detail?.textContent).toContain(
       "This is a comparison, not the authoritative captured diff.",
     );
-    expect(detail?.textContent).toContain(route.from.revisionId);
-    expect(detail?.textContent).toContain(route.to.revisionId);
+    expect(detail?.textContent).toContain(
+      "revision:cccccccc · sha256:dddddddd → revision:eeeeeeee · sha256:ffffffff",
+    );
+    expect(detail?.textContent).not.toContain(route.from.revisionId);
+    expect(detail?.textContent).not.toContain(route.to.revisionId);
     expect(detail?.textContent).not.toContain("Decision context");
     expect(detail?.querySelector(".diff-decision-context")).toBeNull();
 
@@ -1358,6 +1450,18 @@ describe("Change inspector render", () => {
       button.textContent?.startsWith("Open authoritative captured diff:"),
     );
     expect(capturedDiffButtons).toHaveLength(2);
+    expect(capturedDiffButtons[0]?.textContent).toBe(
+      "Open authoritative captured diff: revision:cccccccc · sha256:dddddddd",
+    );
+    expect(capturedDiffButtons[0]?.title).toBe(
+      `exact Revision ${route.from.revisionId}; artifact ${route.from.objectArtifactContentHash}`,
+    );
+    expect(capturedDiffButtons[0]?.dataset.revisionId).toBe(
+      route.from.revisionId,
+    );
+    expect(capturedDiffButtons[0]?.dataset.artifactHash).toBe(
+      route.from.objectArtifactContentHash,
+    );
     capturedDiffButtons[0]?.click();
     expect(navigate).toHaveBeenCalledWith({
       kind: "resource",
@@ -1419,6 +1523,179 @@ describe("Change inspector render", () => {
       revision,
       query: {},
     });
+  });
+
+  it("keeps supplemental Timeline filter labels short while their values stay exact", () => {
+    const navigate = vi.fn();
+    const changeId = `change:sha256:${"a".repeat(64)}`;
+    const exactRevision = {
+      revisionId: `revision:sha256:${"b".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"c".repeat(64)}`,
+    };
+    const history = eventHistory();
+    history.completion.changeIds = [changeId];
+    history.completion.revisionRefs = [exactRevision];
+    const entry = history.entries[0];
+    if (!entry) throw new Error("fixture needs an event");
+    history.entries = [
+      {
+        ...entry,
+        changeIds: [changeId],
+        revisionRefs: [exactRevision],
+      },
+    ];
+
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {
+        change: changeId,
+        revision: exactRevision.revisionId,
+        artifactHash: exactRevision.objectArtifactContentHash,
+      },
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const change = document.querySelector<HTMLSelectElement>(
+      "#timeline-filter-change",
+    )?.selectedOptions[0];
+    expect(change?.textContent).toBe("change:aaaaaaaa");
+    expect(change?.value).toBe(changeId);
+    expect(change?.getAttribute("title")).toBe(changeId);
+    expect(change?.getAttribute("aria-label")).toBe(`Change ${changeId}`);
+
+    const exact = document.querySelector<HTMLSelectElement>(
+      "#timeline-filter-revision",
+    )?.selectedOptions[0];
+    expect(exact?.textContent).toBe("revision:bbbbbbbb · sha256:cccccccc");
+    expect(exact?.value).toBe(
+      JSON.stringify([
+        exactRevision.revisionId,
+        exactRevision.objectArtifactContentHash,
+      ]),
+    );
+    expect(exact?.dataset.revisionId).toBe(exactRevision.revisionId);
+    expect(exact?.dataset.artifactHash).toBe(
+      exactRevision.objectArtifactContentHash,
+    );
+    expect(exact?.getAttribute("title")).toBe(
+      `exact Revision ${exactRevision.revisionId}; artifact ${exactRevision.objectArtifactContentHash}`,
+    );
+    expect(exact?.getAttribute("aria-label")).toBe(
+      `exact Revision ${exactRevision.revisionId}; artifact ${exactRevision.objectArtifactContentHash}`,
+    );
+
+    const chips = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#filter-chips button"),
+    );
+    expect(chips.map((chip) => chip.textContent)).toEqual([
+      "change: change:aaaaaaaa ×",
+      "revision: revision:bbbbbbbb · sha256:cccccccc ×",
+    ]);
+    expect(chips[0]?.title).toBe(changeId);
+    expect(chips[0]?.getAttribute("aria-label")).toBe(
+      `Remove change filter: ${changeId}`,
+    );
+    expect(chips[1]?.title).toBe(
+      `${exactRevision.revisionId} · ${exactRevision.objectArtifactContentHash}`,
+    );
+    expect(chips[1]?.getAttribute("aria-label")).toBe(
+      `Remove revision filter: ${exactRevision.revisionId}; artifact ${exactRevision.objectArtifactContentHash}`,
+    );
+  });
+
+  it("keeps loading and refusal identities visually short and fully accessible", () => {
+    const navigate = vi.fn();
+    const changeId = `change:sha256:${"a".repeat(64)}`;
+    const exactRevision = {
+      revisionId: `revision:sha256:${"b".repeat(64)}`,
+      objectArtifactContentHash: `sha256:${"c".repeat(64)}`,
+    };
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId,
+      revision: exactRevision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const identity = document.querySelector<HTMLElement>("#detail-body .mono");
+    const full = `Revision ID: ${exactRevision.revisionId} · artifact hash: ${exactRevision.objectArtifactContentHash}`;
+    expect(identity?.textContent).toBe(
+      "Revision ID: revision:bbbbbbbb · artifact hash: sha256:cccccccc",
+    );
+    expect(identity?.getAttribute("title")).toBe(full);
+    expect(identity?.getAttribute("aria-label")).toBe(full);
+
+    const refusal = `cannot load ${exactRevision.revisionId} with ${exactRevision.objectArtifactContentHash}`;
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: null, refusal },
+    );
+    const message = document.querySelector<HTMLElement>("#detail-body .empty");
+    const fullMessage = `Reader refused this exact surface: ${refusal}`;
+    expect(message?.textContent).toBe(
+      "Reader refused this exact surface: cannot load revision:bbbbbbbb with sha256:cccccccc",
+    );
+    expect(message?.getAttribute("title")).toBe(fullMessage);
+    expect(message?.getAttribute("aria-label")).toBe(fullMessage);
+  });
+
+  it("keeps Event, journal, and artifact record values short without losing their exact data", () => {
+    const navigate = vi.fn();
+    const eventId = `evt:sha256:${"d".repeat(64)}`;
+    const journalId = `journal:sha256:${"e".repeat(64)}`;
+    const payloadHash = `sha256:${"f".repeat(64)}`;
+    const history = eventHistory();
+    const entry = history.entries[0];
+    if (!entry) throw new Error("fixture needs an event");
+    history.entries = [{ ...entry, eventId, journalId, payloadHash }];
+
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId,
+      historyQuery: {},
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const identity = document.querySelector<HTMLElement>(
+      "#detail-body > .mono",
+    );
+    expect(identity?.textContent).toBe("evt:dddddddd");
+    expect(identity?.getAttribute("title")).toBe(eventId);
+    expect(identity?.getAttribute("aria-label")).toBe(`event ${eventId}`);
+    expect(identity?.dataset.eventId).toBe(eventId);
+
+    const recordValue = (label: string): HTMLElement | null => {
+      const term = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "#detail-body .event-detail-record dt",
+        ),
+      ).find((candidate) => candidate.textContent === label);
+      return term?.nextElementSibling as HTMLElement | null;
+    };
+    const payload = recordValue("event payload");
+    expect(payload?.textContent).toBe("sha256:ffffffff");
+    expect(payload?.getAttribute("title")).toBe(payloadHash);
+    expect(payload?.getAttribute("aria-label")).toBe(`artifact ${payloadHash}`);
+    expect(payload?.dataset.artifactHash).toBe(payloadHash);
+
+    const journal = recordValue("journal");
+    expect(journal?.textContent).toBe("journal:eeeeeeee");
+    expect(journal?.getAttribute("title")).toBe(journalId);
+    expect(journal?.getAttribute("aria-label")).toBe(`journal ${journalId}`);
+    expect(journal?.dataset.journalId).toBe(journalId);
   });
 });
 

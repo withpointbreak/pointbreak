@@ -21,7 +21,12 @@ import type {
   EventHistoryRevisionRef,
 } from "./change-protocol";
 import { registerDensityListener } from "./prefs";
-import { shortRef } from "./refs";
+import {
+  compactIdentityText,
+  exactRevisionAccessibleIdentity,
+  shortExactRevision,
+  shortRef,
+} from "./refs";
 
 const FALLBACK_ROW_HEIGHT = 72;
 const OVERSCAN = 8;
@@ -47,17 +52,8 @@ function label(value: string): string {
 const MAX_TIMELINE_TITLE = 120;
 const MAX_TIMELINE_EXCERPT = 180;
 
-// Timeline rows intentionally use one display form for every opaque identity.
-// The exact value remains available in the native link title, aria label, and
-// data attribute; the detail surface remains the place for full provenance.
-const OPAQUE_ID =
-  /\b(?:[a-z][a-z-]*:(?:git:|worktree:)?sha256:[0-9a-f]{6,}|sha256:[0-9a-f]{16,}|[0-9a-f]{40})\b/gi;
-
 function compactTimelineText(value: string, limit: number): string {
-  const compact = value
-    .replace(OPAQUE_ID, (identity) => shortRef(identity))
-    .replace(/\s+/g, " ")
-    .trim();
+  const compact = compactIdentityText(value).replace(/\s+/g, " ").trim();
   if (compact.length <= limit) return compact;
   return `${compact.slice(0, limit - 1).trimEnd()}…`;
 }
@@ -75,7 +71,7 @@ function appendTimelineLink(
   identity: string,
   kind: "Change" | "Revision" | "event",
   href: string,
-): void {
+): HTMLAnchorElement {
   const link = document.createElement("a");
   link.className = "ref";
   link.href = href;
@@ -86,6 +82,7 @@ function appendTimelineLink(
   link.setAttribute("aria-label", `Open ${kind} ${identity}`);
   link.textContent = shortRef(identity);
   parent.append(link);
+  return link;
 }
 
 function appendExactRevisionLink(
@@ -95,7 +92,7 @@ function appendExactRevisionLink(
 ): void {
   // An event may name several Changes. A Timeline filter gives this exact
   // Revision an honest action without inventing which Change owns it.
-  appendTimelineLink(
+  const link = appendTimelineLink(
     parent,
     reference.revisionId,
     "Revision",
@@ -111,6 +108,12 @@ function appendExactRevisionLink(
       },
     }),
   );
+  const fullIdentity = exactRevisionAccessibleIdentity(reference);
+  link.textContent = shortExactRevision(reference);
+  link.title = fullIdentity;
+  link.setAttribute("aria-label", `Filter Timeline to ${fullIdentity}`);
+  link.dataset.revisionId = reference.revisionId;
+  link.dataset.artifactHash = reference.objectArtifactContentHash;
 }
 
 function optionId(eventId: string): string {

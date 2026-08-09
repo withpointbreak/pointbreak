@@ -179,6 +179,9 @@ describe("linkify / linkifyEscaped", () => {
       "rev:sha256:abcdef0123456789",
     );
     expect(span?.getAttribute("title")).toBe("rev:sha256:abcdef0123456789");
+    expect(span?.getAttribute("aria-label")).toBe(
+      "rev:sha256:abcdef0123456789",
+    );
     expect(span?.textContent).toBe("rev:abcdef01");
   });
 
@@ -196,8 +199,11 @@ describe("linkify / linkifyEscaped", () => {
       "span.ref",
     );
     expect(span?.getAttribute("data-ref-kind")).toBeNull();
+    expect(span?.getAttribute("data-ref-id")).toBe("sha256:abcdef0123456789");
     expect(span?.getAttribute("role")).toBeNull();
     expect(span?.classList.contains("ref-hash")).toBe(true);
+    expect(span?.getAttribute("title")).toBe("sha256:abcdef0123456789");
+    expect(span?.getAttribute("aria-label")).toBe("sha256:abcdef0123456789");
     expect(span?.textContent).toBe("sha256:abcdef01");
   });
 

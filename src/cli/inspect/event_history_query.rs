@@ -46,7 +46,8 @@ pub(super) fn apply(
     }
 
     let query = request.query();
-    let parsed = parse_search_query_for(query.q().unwrap_or_default(), QuerySurface::Event);
+    let parsed =
+        parse_search_query_for(query.q().unwrap_or_default(), QuerySurface::ChangeTimeline);
     if let Some(fatal) = parsed.diagnostics.iter().find(|diagnostic| {
         matches!(
             diagnostic.code,
@@ -233,6 +234,17 @@ fn search_record(entry: &EventHistoryEntryV1) -> SearchRecord {
                     .iter()
                     .map(|revision| revision.as_str()),
             )
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    // These are partial query sets only. Exact Change/Revision selection stays
+    // in the separately parsed outer request fields and is never derived here.
+    fields.insert(
+        "change".to_owned(),
+        entry
+            .change_ids
+            .iter()
+            .map(|change| change.as_str())
             .collect::<Vec<_>>()
             .join(" "),
     );
@@ -555,6 +567,86 @@ mod tests {
                 .iter()
                 .any(|entry| { entry.event_id == document(4).entries[3].event_id })
         );
+    }
+
+    #[test]
+    fn change_timeline_identity_fragments_are_set_filters_not_exact_selectors() {
+        let by_historical_short = apply(
+            document(7),
+            &parse("order=asc&q=revision%3Aexact"),
+            &signer(),
+        )
+        .unwrap();
+        let by_historical_full = apply(
+            document(7),
+            &parse("order=asc&q=revision%3Arev%3Asha256%3Aexact"),
+            &signer(),
+        )
+        .unwrap();
+        let by_short_alias =
+            apply(document(7), &parse("order=asc&q=rev%3Aexact"), &signer()).unwrap();
+        let by_full_alias = apply(
+            document(7),
+            &parse("order=asc&q=rev%3Arev%3Asha256%3Aexact"),
+            &signer(),
+        )
+        .unwrap();
+        for page in [
+            &by_historical_short,
+            &by_historical_full,
+            &by_short_alias,
+            &by_full_alias,
+        ] {
+            assert_eq!(page.match_count, 7, "{page:?}");
+            assert!(page.entries.iter().all(|entry| {
+                entry
+                    .revision_refs
+                    .iter()
+                    .any(|reference| reference.revision_id.as_str() == "rev:sha256:exact")
+                    || entry
+                        .unresolved_revision_ids
+                        .iter()
+                        .any(|revision| revision.as_str() == "rev:sha256:exact")
+            }));
+        }
+
+        // `/api/v2/history` has its own Change-aware query surface. These
+        // partial fragments select Timeline rows only; exact navigation still
+        // requires the separate Change, Revision, and artifact-hash selectors.
+        let by_change_short =
+            apply(document(7), &parse("order=asc&q=change%3Aone"), &signer()).unwrap();
+        let by_change_full = apply(
+            document(7),
+            &parse("order=asc&q=change%3Achange%3Asha256%3Aone"),
+            &signer(),
+        )
+        .unwrap();
+        let mixed = apply(
+            document(7),
+            &parse("order=asc&q=rev%3Aexact+change%3Aone+-type%3Aobservation"),
+            &signer(),
+        )
+        .unwrap();
+        assert_eq!(by_change_short.match_count, 5);
+        assert_eq!(by_change_full.match_count, 5);
+        assert_eq!(mixed.match_count, 3);
+
+        let no_match = apply(
+            document(7),
+            &parse("order=asc&q=rev%3Amissing+change%3Amissing"),
+            &signer(),
+        )
+        .unwrap();
+        assert_eq!(no_match.match_count, 0);
+
+        for query in [
+            "revision%3A",
+            "rev%3A",
+            "change%3A",
+            "change%3A%22one+two%22",
+        ] {
+            assert!(parse_signed(Some(&format!("q={query}")), &signer()).is_err());
+        }
     }
 
     #[test]

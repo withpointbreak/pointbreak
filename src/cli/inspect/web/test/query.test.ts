@@ -8,7 +8,7 @@ import {
   parseSearchQueryFor,
   tokenizeQuery,
 } from "../src/query";
-import type { HistoryEntry, SearchIndex } from "../src/types";
+import type { HistoryEntry, QuerySurface, SearchIndex } from "../src/types";
 import historyJson from "./fixtures/history.json";
 
 const history = historyJson as unknown as { entries: HistoryEntry[] };
@@ -105,6 +105,143 @@ describe("fieldMatches", () => {
 
   it("treats a missing field as no match", () => {
     expect(fieldMatches(idx, "snapshot", "anything")).toBe(false);
+  });
+});
+
+describe("event and Revision query surface identity aliases", () => {
+  const index: SearchIndex = {
+    text: "",
+    type: "review_observation_recorded",
+    revision: "rev:sha256:0123456789abcdef",
+  };
+
+  it("keeps historical revision: and adds silent rev: on both existing surfaces", () => {
+    for (const query of [
+      "revision:01234567",
+      "revision:rev:sha256:0123456789abcdef",
+      "rev:01234567",
+      "rev:rev:sha256:0123456789abcdef",
+      'revision:"01234567"',
+      'rev:"01234567"',
+    ]) {
+      for (const surface of ["event", "revision"] as const) {
+        const parsed = parseSearchQueryFor(query, surface);
+        expect(parsed.diagnostics, `${surface} ${query}`).toEqual([]);
+        expect(parsed.clauses, `${surface} ${query}`).toHaveLength(1);
+        expect(matchesQuery(index, parsed.clauses), `${surface} ${query}`).toBe(
+          true,
+        );
+      }
+    }
+
+    for (const surface of ["event", "revision"] as const) {
+      const mixed = parseSearchQueryFor(
+        "revision:01234567 rev:01234567 -revision:absent",
+        surface,
+      );
+      expect(mixed.diagnostics, surface).toEqual([]);
+      expect(mixed.clauses, surface).toHaveLength(3);
+      expect(matchesQuery(index, mixed.clauses), surface).toBe(true);
+
+      for (const query of ["revision:missing", "rev:missing"]) {
+        const parsed = parseSearchQueryFor(query, surface);
+        expect(parsed.diagnostics, `${surface} ${query}`).toEqual([]);
+        expect(matchesQuery(index, parsed.clauses), `${surface} ${query}`).toBe(
+          false,
+        );
+      }
+
+      for (const query of ["change:fedcba98", 'change:"fedcba98"']) {
+        expect(parseSearchQueryFor(query, surface)).toMatchObject({
+          clauses: [],
+          diagnostics: [{ code: "unsupported-qualifier", key: "change" }],
+        });
+      }
+    }
+
+    expect(parseSearchQueryFor("future:identity", "event")).toEqual({
+      clauses: [{ kind: "text", value: "future:identity", negate: false }],
+      diagnostics: [],
+    });
+  });
+
+  it("refuses empty identity values instead of widening the Timeline", () => {
+    for (const [query, key] of [
+      ["revision:", "revision"],
+      ["rev:", "rev"],
+      ['-revision:""', "revision"],
+      ['-rev:""', "rev"],
+      ['revision:"0123 4567"', "revision"],
+      ['rev:"0123 4567"', "rev"],
+    ]) {
+      const parsed = parseSearchQueryFor(query, "event");
+      expect(parsed.clauses, query).toEqual([]);
+      expect(parsed.diagnostics, query).toMatchObject([
+        { code: "unsupported-value", key },
+      ]);
+    }
+
+    for (const surface of ["event", "revision"] as const) {
+      expect(parseSearchQueryFor("change:", surface)).toMatchObject({
+        clauses: [],
+        diagnostics: [{ code: "unsupported-qualifier", key: "change" }],
+      });
+    }
+  });
+});
+
+describe("Change-aware Timeline identity query surface", () => {
+  const index: SearchIndex = {
+    text: "",
+    type: "review_observation_recorded",
+    revision: "rev:sha256:0123456789abcdef",
+    change: "change:sha256:fedcba9876543210",
+  };
+
+  const surface: QuerySurface = "change-timeline";
+
+  it("admits change: only as a partial Timeline set filter", () => {
+    for (const query of [
+      "revision:01234567",
+      "rev:01234567",
+      "change:fedcba98",
+      "change:change:sha256:fedcba9876543210",
+      'change:"fedcba98"',
+    ]) {
+      const parsed = parseSearchQueryFor(query, surface);
+      expect(parsed.diagnostics, query).toEqual([]);
+      expect(parsed.clauses, query).toHaveLength(1);
+      expect(matchesQuery(index, parsed.clauses), query).toBe(true);
+    }
+
+    const mixed = parseSearchQueryFor(
+      "revision:01234567 rev:01234567 change:fedcba98 -change:absent",
+      surface,
+    );
+    expect(mixed.diagnostics).toEqual([]);
+    expect(mixed.clauses).toHaveLength(4);
+    expect(matchesQuery(index, mixed.clauses)).toBe(true);
+    expect(
+      matchesQuery(
+        index,
+        parseSearchQueryFor("change:missing", surface).clauses,
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses empty Change-aware identity values", () => {
+    for (const [query, key] of [
+      ["revision:", "revision"],
+      ["rev:", "rev"],
+      ["change:", "change"],
+      ['-change:""', "change"],
+      ['change:"fedcba98 01234567"', "change"],
+    ]) {
+      expect(parseSearchQueryFor(query, surface)).toMatchObject({
+        clauses: [],
+        diagnostics: [{ code: "unsupported-value", key }],
+      });
+    }
   });
 });
 

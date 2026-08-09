@@ -22,10 +22,10 @@ pub use self::query::{
 };
 pub use self::result::ReviewHistoryResult;
 pub use self::search::{
-    EVENT_QUERY_FIELDS, EventRecordExtras, KNOWN_QUERY_KEYS, ParsedQuery, QueryClause,
-    QueryDiagnostic, QueryDiagnosticCode, QuerySurface, RANGE_ANCHOR_FIELD,
-    REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord, build_haystack, matches_query,
-    parse_search_query, parse_search_query_for,
+    CHANGE_TIMELINE_QUERY_FIELDS, EVENT_QUERY_FIELDS, EventRecordExtras, KNOWN_QUERY_KEYS,
+    ParsedQuery, QueryClause, QueryDiagnostic, QueryDiagnosticCode, QuerySurface,
+    RANGE_ANCHOR_FIELD, REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord,
+    build_haystack, matches_query, parse_search_query, parse_search_query_for,
 };
 pub(crate) use self::search::{enum_wire, tag_completion_key, tag_index_tokens, wrap_set};
 pub use self::summary::{ReviewHistoryEntry, ReviewHistorySummary};

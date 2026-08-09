@@ -50,6 +50,28 @@ describe("Change inspector routes", () => {
     });
   });
 
+  it("keeps partial identity queries on the Timeline instead of constructing exact routes", () => {
+    const route = parseChangeInspectorRoute(
+      "#/timeline?q=revision%3A01234567+rev%3A01234567+change%3Afedcba98",
+    );
+    expect(route).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        q: "revision:01234567 rev:01234567 change:fedcba98",
+      },
+    });
+    if (route.kind !== "timeline") throw new Error("expected Timeline route");
+    expect(formatChangeInspectorRoute(route)).toBe(
+      "#/timeline?q=revision%3A01234567+rev%3A01234567+change%3Afedcba98",
+    );
+
+    // Only the dedicated selector fields can carry an exact Revision identity;
+    // a partial q clause must never synthesize an artifact hash or a detail route.
+    expect(route.kind).toBe("timeline");
+    expect(route.historyQuery.revision).toBeUndefined();
+    expect(route.historyQuery.artifactHash).toBeUndefined();
+  });
+
   it("round trips the two Change lenses, Change detail, and an exact contextual Revision", () => {
     expect(
       parseChangeInspectorRoute("#/changes?q=ready&lifecycle=in_progress"),

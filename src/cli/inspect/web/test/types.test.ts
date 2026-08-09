@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CHANGE_TIMELINE_QUERY_FIELDS,
   DEFAULT_LENS,
   DEFAULT_OPEN_FILES,
   EVENT_QUERY_FIELDS,
@@ -122,6 +123,22 @@ describe("shared constants", () => {
       "after",
       "status",
       "object",
+      "rev",
+      "change",
+    ]);
+    expect(CHANGE_TIMELINE_QUERY_FIELDS).toEqual([
+      "type",
+      "track",
+      "actor",
+      "revision",
+      "change",
+      "snapshot",
+      "check",
+      "assessment",
+      "is",
+      "tag",
+      "before",
+      "after",
     ]);
     // The legacy exported name is the event alias.
     expect(QUERY_FIELDS).toBe(EVENT_QUERY_FIELDS);

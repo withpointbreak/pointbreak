@@ -467,6 +467,11 @@ describe("exact fact graph renderer", () => {
     expect(fact?.getAttribute("aria-label")).toContain(
       first.objectArtifactContentHash,
     );
+    expect(fact?.dataset.revisionId).toBe(first.revisionId);
+    expect(fact?.dataset.artifactHash).toBe(first.objectArtifactContentHash);
+    expect(fact?.querySelector("text")?.textContent).toBe(
+      "observation · observation:55555555",
+    );
     expect(fact?.dataset.graphFactFocus).toBe(
       JSON.stringify({
         revisionId: first.revisionId,
@@ -475,6 +480,9 @@ describe("exact fact graph renderer", () => {
         factId: newObservation,
       }),
     );
+    expect(
+      figure.querySelector("[data-graph-textual-equivalent]")?.textContent,
+    ).toContain(newObservation);
     fact?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(focusFact).toHaveBeenCalledWith({
       revision: first,

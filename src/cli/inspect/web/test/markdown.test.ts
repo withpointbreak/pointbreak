@@ -70,10 +70,15 @@ describe("renderMarkdownInline", () => {
   });
 
   it("linkifies embedded refs in inline text", () => {
-    const span = parse(
-      renderMarkdownInline("see rev:sha256:abcdef0123456789"),
-    ).querySelector("span.ref");
+    const revision = "rev:sha256:abcdef0123456789";
+    const span = parse(renderMarkdownInline(`see ${revision}`)).querySelector(
+      "span.ref",
+    );
     expect(span?.getAttribute("data-ref-kind")).toBe("rev");
+    expect(span?.getAttribute("data-ref-id")).toBe(revision);
+    expect(span?.textContent).toBe("rev:abcdef01");
+    expect(span?.getAttribute("title")).toBe(revision);
+    expect(span?.getAttribute("aria-label")).toBe(revision);
   });
 
   it("honors backslash escapes outside inline code", () => {
