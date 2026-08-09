@@ -1,5 +1,6 @@
 // Internal browser program injected by change-inspector-browser-verify.sh.
 // It only reads the disposable Inspector page and writes screenshots under its configured root.
+// biome-ignore format: playwright-cli run-code wraps this file as one function expression.
 ((config) => async (page) => {
 	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
 	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
@@ -4471,4 +4472,4 @@
 	if (completion.status === "failed")
 		throw new BrowserDiagnosticFailure(report);
 	return completion;
-})(__POINTBREAK_CHANGE_BROWSER_CONFIG__);
+})(__POINTBREAK_CHANGE_BROWSER_CONFIG__)

@@ -17,6 +17,29 @@ const context = () => ({
 	log: "logs/browser-gate.log",
 });
 
+test("browser program remains one expression for the Playwright runner", async () => {
+	let source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	for (const [marker, replacement] of [
+		[
+			"__POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__",
+			BrowserDiagnosticFailure.toString(),
+		],
+		["__POINTBREAK_BROWSER_DIAGNOSTICS__", createBrowserDiagnostics.toString()],
+		["__POINTBREAK_CHANGE_BROWSER_CONFIG__", "{}"],
+	]) {
+		assert.ok(source.includes(marker), `missing browser marker ${marker}`);
+		source = source.replace(marker, replacement);
+	}
+
+	assert.doesNotThrow(
+		() => new Function(`return (${source}\n)`),
+		"playwright-cli run-code parses the file as one function expression",
+	);
+});
+
 test("reports failures from independently recoverable sections together", async () => {
 	const diagnostics = createBrowserDiagnostics({ context });
 
