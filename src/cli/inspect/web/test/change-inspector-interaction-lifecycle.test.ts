@@ -120,13 +120,16 @@ function timelineDocument(eventIds: string[]): EventHistoryDocument {
 
 function install() {
   const navigate = vi.fn();
+  const replace = vi.fn();
   const toggleTimelineMonitoring = vi.fn();
-  const controller = installChangeInspectorInteraction({
+  const actions = {
     navigate,
+    replace,
     toggleTimelineMonitoring,
-  });
+  };
+  const controller = installChangeInspectorInteraction(actions);
   activeControllers.push(controller);
-  return { controller, navigate, toggleTimelineMonitoring };
+  return { controller, navigate, replace, toggleTimelineMonitoring };
 }
 
 function mountTimelineRows(
@@ -151,6 +154,25 @@ function mountTimelineRows(
   }
   document.querySelector("#master")?.append(list);
   return list;
+}
+
+function mountChangeCards(changeIds: string[]): HTMLButtonElement[] {
+  const list = document.createElement("section");
+  list.className = "units";
+  const buttons = changeIds.map((changeId) => {
+    const card = document.createElement("article");
+    card.className = "unit-card";
+    card.dataset.changeId = changeId;
+    const primary = document.createElement("button");
+    primary.type = "button";
+    primary.className = "change-card-primary";
+    primary.textContent = `Review ${changeId}`;
+    card.append(primary);
+    list.append(card);
+    return primary;
+  });
+  document.querySelector("#master")?.replaceChildren(list);
+  return buttons;
 }
 
 beforeEach(() => {
@@ -193,6 +215,392 @@ describe("Change Inspector interaction lifecycle", () => {
       new KeyboardEvent("keydown", { key: "F", bubbles: true }),
     );
     expect(toggleTimelineMonitoring).toHaveBeenCalledOnce();
+  });
+
+  it("opens the contextual command palette from search and owns an accessible option cursor", () => {
+    const { controller } = install();
+    controller.sync(lensSnapshot());
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const palette = document.querySelector<HTMLElement>("#cmd-palette");
+    const input = document.querySelector<HTMLInputElement>("#cmd-input");
+    const results = document.querySelector<HTMLElement>("#cmd-results");
+    if (!search || !palette || !input || !results) {
+      throw new Error("missing command palette fixture");
+    }
+    search.focus();
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "k",
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(palette.classList).not.toContain("hidden");
+    expect(document.activeElement).toBe(input);
+    expect(input.getAttribute("role")).toBe("combobox");
+    expect(input.getAttribute("aria-controls")).toBe("cmd-results");
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+    expect(results.getAttribute("role")).toBe("listbox");
+    expect(results.textContent).toContain("Copy current link");
+    expect(results.textContent).toContain("Clear filters");
+    const first = input.getAttribute("aria-activedescendant");
+    expect(first).not.toBeNull();
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(input.getAttribute("aria-activedescendant")).not.toBe(first);
+    expect(
+      results.querySelector("[role='option'][aria-selected='true']")?.id,
+    ).toBe(input.getAttribute("aria-activedescendant"));
+
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(palette.classList).toContain("hidden");
+    expect(document.activeElement).toBe(search);
+  });
+
+  it("runs presentation-local palette commands through their typed owners", () => {
+    const clipboard = { writeText: vi.fn(async () => undefined) };
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: clipboard,
+    });
+    const { controller, replace, toggleTimelineMonitoring } = install();
+    controller.sync(timelineSnapshot(), timelineDocument([]));
+    const open = () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "k",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    };
+    const command = (label: string) =>
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>("#cmd-results button"),
+      ).find((button) => button.textContent === label);
+
+    open();
+    command("Copy current link")?.click();
+    expect(clipboard.writeText).toHaveBeenCalledWith(location.href);
+
+    open();
+    command("Clear filters")?.click();
+    expect(replace).toHaveBeenLastCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: undefined,
+        type: undefined,
+        after: undefined,
+        at: undefined,
+        track: undefined,
+        change: undefined,
+        revision: undefined,
+        artifactHash: undefined,
+      },
+    });
+
+    open();
+    command("Show Timeline oldest first")?.click();
+    expect(replace).toHaveBeenLastCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "assessment",
+        type: "assessment_recorded",
+        after: undefined,
+        at: undefined,
+        order: "asc",
+      },
+    });
+
+    open();
+    command("Follow or park Timeline")?.click();
+    expect(toggleTimelineMonitoring).toHaveBeenCalledOnce();
+    Reflect.deleteProperty(navigator, "clipboard");
+  });
+
+  it("announces palette copy success and failure after the dialog closes", async () => {
+    const clipboard = { writeText: vi.fn<() => Promise<void>>() };
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: clipboard,
+    });
+    const { controller } = install();
+    controller.sync(timelineSnapshot(), timelineDocument([]));
+    const openCopyCommand = () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "k",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      Array.from(
+        document.querySelectorAll<HTMLButtonElement>("#cmd-results button"),
+      )
+        .find((button) => button.textContent === "Copy current link")
+        ?.click();
+    };
+
+    clipboard.writeText.mockResolvedValueOnce();
+    openCopyCommand();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#command-feedback")?.textContent).toBe(
+        "Current link copied",
+      );
+    });
+
+    clipboard.writeText.mockRejectedValueOnce(new Error("permission denied"));
+    openCopyCommand();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#command-feedback")?.textContent).toBe(
+        "Could not copy current link",
+      );
+    });
+    Reflect.deleteProperty(navigator, "clipboard");
+  });
+
+  it("exposes honest event, Change, and exact-Revision palette actions", () => {
+    const { controller } = install();
+    const openLabels = () => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "k",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      return document.querySelector("#cmd-results")?.textContent ?? "";
+    };
+    const close = () =>
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+
+    const timeline = timelineDocument(["evt:sha256:selected"]);
+    mountTimelineRows(["evt:sha256:selected"]);
+    controller.sync(timelineSnapshot(), timeline);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(openLabels()).toContain("Open selected event");
+    close();
+
+    const event = eventSnapshot();
+    const exactEvent = timelineDocument(["evt:sha256:deep-link"]);
+    const entry = exactEvent.entries[0];
+    if (!entry) throw new Error("missing event palette fixture");
+    entry.changeIds = ["change:sha256:event"];
+    entry.revisionRefs = [
+      {
+        revisionId: "revision:sha256:event",
+        objectArtifactContentHash: "sha256:artifact-event",
+      },
+    ];
+    controller.sync(event, exactEvent);
+    expect(openLabels()).toContain("Open selected annotated diff");
+    close();
+
+    const changePrimary = mountChangeCards(["change:sha256:selected"])[0];
+    controller.sync(lensSnapshot());
+    changePrimary?.focus();
+    expect(openLabels()).toContain("Open selected Change");
+    close();
+
+    controller.sync({
+      generation: null,
+      route: {
+        kind: "revision",
+        changeId: "change:sha256:exact",
+        revision: {
+          revisionId: "revision:sha256:exact",
+          objectArtifactContentHash: "sha256:artifact-exact",
+        },
+        query: {},
+      },
+      selected: null,
+      diagnostic: null,
+    });
+    const exactLabels = openLabels();
+    expect(exactLabels).toContain("Open annotated diff");
+    expect(exactLabels).toContain("Show exact Revision in Timeline");
+  });
+
+  it("layers Escape through search blur, reading mode, exact return, local cursor, and query replacement", () => {
+    const { controller, navigate, replace } = install();
+    controller.sync(attentionSnapshot());
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing search input");
+    search.focus();
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).not.toBe(search);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+
+    controller.sync(exactSnapshot());
+    document.querySelector<HTMLButtonElement>("#detail-read")?.click();
+    expect(document.querySelector(".split")?.classList).toContain("reading");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.querySelector(".split")?.classList).not.toContain(
+      "reading",
+    );
+    expect(navigate).not.toHaveBeenCalled();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(navigate).toHaveBeenCalledOnce();
+
+    const cards = ["change:sha256:one", "change:sha256:two"].map((changeId) => {
+      const card = document.createElement("article");
+      card.className = "unit-card";
+      card.dataset.changeId = changeId;
+      card.setAttribute("aria-current", "false");
+      document.querySelector("#master")?.append(card);
+      return card;
+    });
+    controller.sync(attentionSnapshot());
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(cards[0]?.getAttribute("aria-current")).toBe("true");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(
+      cards.every((card) => card.getAttribute("aria-current") === "false"),
+    ).toBe(true);
+    expect(replace).not.toHaveBeenCalled();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(replace).toHaveBeenCalledWith({
+      kind: "lens",
+      lens: "attention",
+      query: { q: undefined, after: undefined },
+    });
+  });
+
+  it("pages exact detail with Space while leaving native controls and list routes alone", () => {
+    const { controller } = install();
+    const detail = document.querySelector<HTMLElement>("#detail-body");
+    if (!detail) throw new Error("missing detail viewport");
+    Object.defineProperty(detail, "clientHeight", {
+      configurable: true,
+      value: 1000,
+    });
+    controller.sync(exactSnapshot());
+    detail.scrollTop = 100;
+    const pageDown = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(pageDown);
+    expect(pageDown.defaultPrevented).toBe(true);
+    expect(detail.scrollTop).toBe(950);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(detail.scrollTop).toBe(100);
+
+    const button = document.createElement("button");
+    detail.append(button);
+    button.focus();
+    button.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(detail.scrollTop).toBe(100);
+
+    controller.sync(lensSnapshot());
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(detail.scrollTop).toBe(100);
+  });
+
+  it("toggles keyboard help closed on the second question mark and restores focus", () => {
+    const { controller } = install();
+    controller.sync(lensSnapshot());
+    const opener = document.createElement("button");
+    document.querySelector("#master")?.append(opener);
+    opener.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "?",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    const help = document.querySelector<HTMLElement>("#key-help");
+    expect(help?.classList).not.toContain("hidden");
+    expect(help?.textContent).toContain("Space");
+    expect(help?.textContent).toContain("page the exact detail");
+    expect(help?.textContent).toContain("return one layer");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "?",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(help?.classList).toContain("hidden");
+    expect(document.activeElement).toBe(opener);
   });
 
   it("keeps the routed annotated-diff keys inside its exact Change and Revision", () => {
@@ -736,6 +1144,76 @@ describe("Change Inspector interaction lifecycle", () => {
     });
   });
 
+  it("clears the local Timeline cursor before replacing Timeline filters", () => {
+    const { controller, replace } = install();
+    const list = mountTimelineRows(["evt:one", "evt:two"]);
+    controller.sync(
+      timelineSnapshot(),
+      timelineDocument(["evt:one", "evt:two"]),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Aone");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("keeps independently announced roving cursors for Changes and Attention", () => {
+    const { controller } = install();
+    let buttons = mountChangeCards([
+      "change:sha256:changes-one",
+      "change:sha256:changes-two",
+    ]);
+    controller.sync(lensSnapshot());
+
+    expect(buttons.map((button) => button.tabIndex)).toEqual([0, -1]);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(buttons[1]);
+    expect(buttons.map((button) => button.tabIndex)).toEqual([-1, 0]);
+    expect(
+      buttons[1]?.closest(".unit-card")?.getAttribute("aria-current"),
+    ).toBe("true");
+
+    buttons = mountChangeCards([
+      "change:sha256:changes-two",
+      "change:sha256:attention-only",
+    ]);
+    controller.sync(attentionSnapshot());
+    expect(buttons.map((button) => button.tabIndex)).toEqual([0, -1]);
+    expect(
+      document.querySelector(".unit-card[aria-current='true']"),
+    ).toBeNull();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(buttons[0]);
+
+    buttons = mountChangeCards([
+      "change:sha256:changes-one",
+      "change:sha256:changes-two",
+    ]);
+    controller.sync(lensSnapshot());
+    expect(buttons.map((button) => button.tabIndex)).toEqual([-1, 0]);
+    expect(
+      buttons[1]?.closest(".unit-card")?.getAttribute("aria-current"),
+    ).toBe("true");
+  });
+
   it("opens a clicked Timeline event exactly once through the interaction owner", () => {
     const { controller, navigate } = install();
     const timeline = timelineDocument(["evt:one", "evt:two"]);
@@ -782,6 +1260,7 @@ describe("Change Inspector interaction lifecycle", () => {
     const navigateTimelineBoundary = vi.fn(async () => target);
     const controller = installChangeInspectorInteraction({
       navigate,
+      replace: vi.fn(),
       navigateTimelineBoundary,
     });
     activeControllers.push(controller);
@@ -1018,7 +1497,7 @@ describe("Change Inspector interaction lifecycle", () => {
           dispatchEvent: vi.fn(() => true),
         }) as unknown as MediaQueryList,
     );
-    const { controller } = install();
+    const { controller, navigate } = install();
     const snapshot = eventSnapshot();
     if (snapshot.route.kind !== "event") throw new Error("missing event route");
     const list = mountTimelineRows(
@@ -1042,13 +1521,30 @@ describe("Change Inspector interaction lifecycle", () => {
     );
     const splitBefore =
       document.documentElement.style.getPropertyValue("--split-master");
-    for (const key of ["/", "h", "l"]) {
+    for (const key of [
+      "/",
+      "k",
+      "ArrowDown",
+      "g",
+      "G",
+      "f",
+      "b",
+      "d",
+      "u",
+      "F",
+      "h",
+      "l",
+      "1",
+      "2",
+      "3",
+    ]) {
       back?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
       expect(document.activeElement).toBe(back);
       expect(
         document.documentElement.style.getPropertyValue("--split-master"),
       ).toBe(splitBefore);
     }
+    expect(navigate).not.toHaveBeenCalled();
 
     narrow = false;
     window.dispatchEvent(new Event("resize"));
@@ -1061,6 +1557,115 @@ describe("Change Inspector interaction lifecycle", () => {
     window.dispatchEvent(new Event("resize"));
     expect(document.activeElement).toBe(back);
     expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(true);
+  });
+
+  it("does not activate a retained Change cursor through a narrow exact-detail Enter", () => {
+    vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)",
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
+    const { controller, navigate } = install();
+    const card = document.createElement("article");
+    card.className = "unit-card";
+    card.dataset.changeId = "change:sha256:covered";
+    document.querySelector("#master")?.append(card);
+    controller.sync(lensSnapshot());
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    controller.sync(exactSnapshot("change:sha256:detail"));
+    const detailTarget = document.createElement("p");
+    detailTarget.tabIndex = 0;
+    document.querySelector("#detail-body")?.append(detailTarget);
+    detailTarget.focus();
+
+    detailTarget.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(detailTarget);
+  });
+
+  it("moves focus off the reading control when a wide exact detail becomes narrow", () => {
+    let narrow = false;
+    vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)" && narrow,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
+    const { controller } = install();
+    controller.sync(exactSnapshot());
+    const reading = document.querySelector<HTMLButtonElement>("#detail-read");
+    reading?.focus();
+    expect(document.activeElement).toBe(reading);
+
+    narrow = true;
+    window.dispatchEvent(new Event("resize"));
+
+    expect(document.activeElement).toBe(document.querySelector("#detail-back"));
+  });
+
+  it("restores modal focus to visible detail chrome across breakpoints", () => {
+    let narrow = true;
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)" && narrow,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
+    const { controller } = install();
+    controller.sync(exactSnapshot());
+    const back = document.querySelector<HTMLButtonElement>("#detail-back");
+    const close = document.querySelector<HTMLButtonElement>("#detail-close");
+    back?.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "?", bubbles: true }),
+    );
+    narrow = false;
+    window.dispatchEvent(new Event("resize"));
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(close);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "?", bubbles: true }),
+    );
+    narrow = true;
+    window.dispatchEvent(new Event("resize"));
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(back);
   });
 
   it("moves consecutively through a full 100-entry page beyond the mounted virtual slice", () => {
@@ -1095,6 +1700,7 @@ describe("Change Inspector interaction lifecycle", () => {
 
     const controller = installChangeInspectorInteraction({
       navigate,
+      replace: vi.fn(),
       revealTimelineEvent: revealChangeInspectorTimelineEvent,
     });
     activeControllers.push(controller);

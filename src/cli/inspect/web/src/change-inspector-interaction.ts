@@ -4,13 +4,15 @@
  * exact request).  In particular, moving with j/k never chooses a Revision.
  */
 
-import type { ChangeInspectorNavigationActions } from "./change-inspector-render";
+import type { ChangeInspectorRenderActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
   eventAnnotatedDiffRoute,
   formatChangeInspectorRoute,
   parseChangeInspectorRoute,
   queryForExactNavigation,
+  showChangeInTimelineRoute,
+  showRevisionInTimelineRoute,
   timelineEventRoute,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
@@ -24,6 +26,7 @@ import {
   type TimelineWindow,
 } from "./change-inspector-timeline-navigation";
 import type {
+  ChangeLens,
   EventHistoryDocument,
   EventHistoryEntry,
 } from "./change-protocol";
@@ -54,6 +57,9 @@ const MASTER_SURFACE_KEYS = new Set([
   "F",
   "h",
   "l",
+  "1",
+  "2",
+  "3",
 ]);
 
 function isTextControl(target: EventTarget | null): boolean {
@@ -145,7 +151,7 @@ type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
  * contract currently exposes only the historical toggle, so retain this
  * optional seam until the composition root wires `TimelineMonitor.park()`.
  */
-type TimelineParkActions = ChangeInspectorNavigationActions & {
+type TimelineParkActions = ChangeInspectorRenderActions & {
   parkTimelineMonitoring?: () => void;
 };
 
@@ -158,6 +164,13 @@ type AdjacentTimelineIntent = Extract<
 type PendingTimelineSelection = {
   intent: AdjacentTimelineIntent;
   route: string;
+  restoreFocus: boolean;
+};
+type PendingChangePageSelection = {
+  lens: ChangeLens;
+  sourceRoute: string;
+  targetRoute: string;
+  boundary: "first" | "last";
   restoreFocus: boolean;
 };
 type DiffIdentity = {
@@ -206,50 +219,22 @@ function companionTimelineRoute(
 }
 
 function setSelected(changeId: string | null): void {
-  document
-    .querySelectorAll<HTMLElement>(".unit-card[data-change-id]")
-    .forEach((card) => {
-      const selected = card.dataset.changeId === changeId;
-      card.classList.toggle("change-card-selected", selected);
-      card.setAttribute("aria-current", selected ? "true" : "false");
-    });
-}
-
-function moveSelection(
-  selectedChangeId: string | null,
-  delta: number,
-): string | null {
   const cards = Array.from(
     document.querySelectorAll<HTMLElement>(".unit-card[data-change-id]"),
   );
-  if (!cards.length) return selectedChangeId;
-  const current = cards.findIndex(
-    (card) => card.dataset.changeId === selectedChangeId,
-  );
-  const next = Math.max(
-    0,
-    Math.min(cards.length - 1, current < 0 ? 0 : current + delta),
-  );
-  const card = cards[next];
-  const changeId = card.dataset.changeId ?? null;
-  setSelected(changeId);
-  card.scrollIntoView({ block: "nearest", behavior: "auto" });
-  return changeId;
-}
-
-function moveSelectionToBoundary(
-  selectedChangeId: string | null,
-  boundary: "first" | "last",
-): string | null {
-  const cards = Array.from(
-    document.querySelectorAll<HTMLElement>(".unit-card[data-change-id]"),
-  );
-  const card = boundary === "first" ? cards[0] : cards.at(-1);
-  if (!card) return selectedChangeId;
-  const changeId = card.dataset.changeId ?? null;
-  setSelected(changeId);
-  card.scrollIntoView({ block: "nearest", behavior: "auto" });
-  return changeId;
+  const roving =
+    cards.find((card) => card.dataset.changeId === changeId) ??
+    cards[0] ??
+    null;
+  for (const card of cards) {
+    const selected = card.dataset.changeId === changeId;
+    card.classList.toggle("change-card-selected", selected);
+    card.setAttribute("aria-current", selected ? "true" : "false");
+    const primary = card.querySelector<HTMLButtonElement>(
+      ":scope > .change-card-primary",
+    );
+    if (primary) primary.tabIndex = card === roving ? 0 : -1;
+  }
 }
 
 function timelineRows(): HTMLElement[] {
@@ -335,7 +320,7 @@ function trapModalFocus(modal: HTMLElement, event: KeyboardEvent): void {
   if (event.key !== "Tab") return;
   const stops = Array.from(
     modal.querySelectorAll<HTMLElement>(
-      "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+      "button:not([disabled]):not([tabindex='-1']), a[href]:not([tabindex='-1']), input:not([disabled]):not([tabindex='-1']), select:not([disabled]):not([tabindex='-1']), textarea:not([disabled]):not([tabindex='-1']), [tabindex]:not([tabindex='-1'])",
     ),
   );
   if (!stops.length) return;
@@ -356,7 +341,7 @@ function trapModalFocus(modal: HTMLElement, event: KeyboardEvent): void {
 
 /** Install once per active composition and return a sync hook for every paint. */
 export function installChangeInspectorInteraction(
-  actions: ChangeInspectorNavigationActions,
+  actions: ChangeInspectorRenderActions,
 ): {
   sync(
     snapshot: ChangeInspectorSnapshot,
@@ -364,7 +349,10 @@ export function installChangeInspectorInteraction(
   ): void;
   stop(): void;
 } {
-  let selectedChangeId: string | null = null;
+  const selectedChangeId = {
+    changes: null as string | null,
+    attention: null as string | null,
+  };
   let selectedTimelineEventId: string | null = null;
   let currentTimelineEventIds: string[] = [];
   let currentTimelineEntries = new Map<string, EventHistoryEntry>();
@@ -374,6 +362,7 @@ export function installChangeInspectorInteraction(
     route: string;
     restoreFocus: boolean;
   } | null = null;
+  let pendingChangePageSelection: PendingChangePageSelection | null = null;
   let modalReturnFocus: HTMLElement | null = null;
   let detailReturnFocus: HTMLElement | null = null;
   let detailWasOpen = false;
@@ -386,6 +375,41 @@ export function installChangeInspectorInteraction(
   let pendingDiffExitFocus: string | null = null;
   let pendingExactActivationFocus: string | null = null;
   let diffReturnRoute: DiffReturnRoute | null = null;
+  let commandFeedbackTimer: number | null = null;
+  let copyAttempt = 0;
+
+  const announceCommandFeedback = (message: string) => {
+    const feedback = document.querySelector<HTMLElement>("#command-feedback");
+    if (!feedback) return;
+    if (commandFeedbackTimer !== null)
+      window.clearTimeout(commandFeedbackTimer);
+    feedback.textContent = message;
+    feedback.classList.remove("hidden");
+    commandFeedbackTimer = window.setTimeout(() => {
+      feedback.classList.add("hidden");
+      commandFeedbackTimer = null;
+    }, 1_500);
+  };
+
+  const copyCurrentLink = () => {
+    const attempt = ++copyAttempt;
+    const settle = (message: string) => {
+      if (attempt === copyAttempt) announceCommandFeedback(message);
+    };
+    try {
+      const write = navigator.clipboard?.writeText(location.href);
+      if (write === undefined) {
+        settle("Could not copy current link");
+        return;
+      }
+      void write.then(
+        () => settle("Current link copied"),
+        () => settle("Could not copy current link"),
+      );
+    } catch {
+      settle("Could not copy current link");
+    }
+  };
 
   const parkTimelineForReaderActivity = () => {
     (actions as TimelineParkActions).parkTimelineMonitoring?.();
@@ -718,7 +742,7 @@ export function installChangeInspectorInteraction(
       currentRoute.kind !== "diff" &&
       currentRoute.kind !== "lens" &&
       currentRoute.kind !== "timeline" &&
-      active?.id === "detail-close"
+      (active?.id === "detail-close" || active?.id === "detail-read")
     ) {
       // The wide Close affordance disappears when retained detail becomes a
       // narrow sheet. Move focus to its visible Back counterpart instead of
@@ -736,13 +760,24 @@ export function installChangeInspectorInteraction(
   };
   window.addEventListener("resize", onViewportResize);
 
+  const modalReturnIsVisible = (focus: HTMLElement | null): boolean => {
+    if (focus?.isConnected !== true) return false;
+    if (focus.closest(".hidden, [inert]")) return false;
+    const narrow = window.matchMedia("(max-width: 760px)").matches;
+    if (narrow && (focus.id === "detail-close" || focus.id === "detail-read"))
+      return false;
+    return narrow || focus.id !== "detail-back";
+  };
+
   const closeModal = (id: string): void => {
     const modal = document.querySelector<HTMLElement>(id);
     if (!modal || modal.classList.contains("hidden")) return;
     modal.classList.add("hidden");
+    if (id === "#cmd-palette")
+      paletteInput?.setAttribute("aria-expanded", "false");
     const focus = modalReturnFocus;
     modalReturnFocus = null;
-    if (focus?.isConnected === true) focus.focus({ preventScroll: true });
+    if (modalReturnIsVisible(focus)) focus?.focus({ preventScroll: true });
     else focusFallback();
   };
 
@@ -782,61 +817,415 @@ export function installChangeInspectorInteraction(
 
   const paletteInput = document.querySelector<HTMLInputElement>("#cmd-input");
   const paletteResults = document.querySelector<HTMLElement>("#cmd-results");
-  const paletteCommands = [
-    ["Open Timeline", "timeline"],
-    ["Open Changes", "changes"],
-    ["Open Attention", "attention"],
-  ] as const;
+  type PaletteCommand = {
+    id: string;
+    label: string;
+    run(): void;
+  };
+  let paletteActiveIndex = 0;
+  let visiblePaletteCommands: PaletteCommand[] = [];
+
+  const clearRouteFilters = (route: ValidRoute): ValidRoute => {
+    if (route.kind === "timeline" || route.kind === "event") {
+      const historyQuery = {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        q: undefined,
+        type: undefined,
+        track: undefined,
+        change: undefined,
+        revision: undefined,
+        artifactHash: undefined,
+      };
+      return route.kind === "timeline"
+        ? { kind: "timeline", historyQuery }
+        : { ...route, historyQuery };
+    }
+    return {
+      ...route,
+      query: {
+        ...route.query,
+        q: undefined,
+        topology: undefined,
+        lifecycle: undefined,
+        attention: undefined,
+        availability: undefined,
+        after: undefined,
+      },
+    };
+  };
+
+  const activeChangeLens = (
+    route: ValidRoute | null = currentRoute,
+  ): ChangeLens | null => {
+    if (route?.kind === "lens") return route.lens;
+    return exactOriginLens === "changes" || exactOriginLens === "attention"
+      ? exactOriginLens
+      : null;
+  };
+
+  const mountedChangePageTarget = (
+    lens: ChangeLens,
+    direction: "previous" | "next" | "last",
+  ): Extract<ValidRoute, { kind: "lens" }> | null => {
+    const encoded = document.querySelector<HTMLElement>(
+      `[data-change-page="${direction}"]`,
+    )?.dataset.changeTargetRoute;
+    if (!encoded) return null;
+    const target = parseChangeInspectorRoute(encoded);
+    return target.kind === "lens" && target.lens === lens ? target : null;
+  };
+
+  const beginChangePageNavigation = (
+    lens: ChangeLens,
+    target: Extract<ValidRoute, { kind: "lens" }>,
+    boundary: "first" | "last",
+  ): void => {
+    if (currentRoute?.kind !== "lens") return;
+    pendingChangePageSelection = {
+      lens,
+      sourceRoute: formatChangeInspectorRoute(currentRoute),
+      targetRoute: formatChangeInspectorRoute(target),
+      boundary,
+      restoreFocus:
+        document.activeElement instanceof Element &&
+        document.activeElement.closest(".change-card-primary") !== null,
+    };
+    actions.navigate(target);
+  };
+
+  const followChangePage = (
+    lens: ChangeLens,
+    direction: "previous" | "next" | "last",
+    boundary: "first" | "last",
+  ): boolean => {
+    if (currentRoute?.kind !== "lens" || currentRoute.lens !== lens)
+      return false;
+    const target = mountedChangePageTarget(lens, direction);
+    if (target === null) return false;
+    beginChangePageNavigation(lens, target, boundary);
+    return true;
+  };
+
+  const changeCards = (): HTMLElement[] =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(".unit-card[data-change-id]"),
+    );
+
+  const selectChangeCard = (
+    lens: ChangeLens,
+    card: HTMLElement,
+    focus: boolean,
+  ): boolean => {
+    const changeId = card.dataset.changeId;
+    if (!changeId) return false;
+    selectedChangeId[lens] = changeId;
+    setSelected(changeId);
+    card.scrollIntoView({ block: "nearest", behavior: "auto" });
+    if (focus) {
+      card
+        .querySelector<HTMLElement>(":scope > .change-card-primary")
+        ?.focus({ preventScroll: true });
+    }
+    return true;
+  };
+
+  const moveChangeCursor = (lens: ChangeLens, delta: number): boolean => {
+    const cards = changeCards();
+    if (cards.length === 0) return false;
+    const current = cards.findIndex(
+      (card) => card.dataset.changeId === selectedChangeId[lens],
+    );
+    if (current < 0)
+      return selectChangeCard(lens, cards[0] as HTMLElement, true);
+    const target = Math.max(0, Math.min(cards.length - 1, current + delta));
+    if (target !== current)
+      return selectChangeCard(lens, cards[target] as HTMLElement, true);
+    return delta > 0
+      ? followChangePage(lens, "next", "first")
+      : followChangePage(lens, "previous", "last");
+  };
+
+  const visibleChangeCards = (): number => {
+    const master = document.querySelector<HTMLElement>("#master");
+    const first = changeCards()[0];
+    const rowHeight = first?.getBoundingClientRect().height ?? 0;
+    if (!master || master.clientHeight <= 0 || rowHeight <= 0) return 10;
+    return Math.max(1, Math.floor(master.clientHeight / rowHeight));
+  };
+
+  const moveChangePage = (
+    lens: ChangeLens,
+    direction: "forward" | "backward",
+    fraction: "full" | "half",
+  ): boolean => {
+    const rows = visibleChangeCards();
+    const distance =
+      fraction === "full" ? rows : Math.max(1, Math.floor(rows / 2));
+    return moveChangeCursor(
+      lens,
+      (direction === "forward" ? 1 : -1) * distance,
+    );
+  };
+
+  const syncPendingChangePage = (
+    route: ValidRoute | null,
+    cards: HTMLElement[],
+  ): void => {
+    const pending = pendingChangePageSelection;
+    if (pending === null) return;
+    const routeKey = route ? formatChangeInspectorRoute(route) : null;
+    if (routeKey === pending.sourceRoute) return;
+    if (
+      route?.kind !== "lens" ||
+      route.lens !== pending.lens ||
+      routeKey !== pending.targetRoute
+    ) {
+      pendingChangePageSelection = null;
+      return;
+    }
+    const target = pending.boundary === "first" ? cards[0] : cards.at(-1);
+    // A route change paints a loading plane before its signed page arrives.
+    // Retain the intent until the destination list itself mounts; an empty
+    // mounted `.units` list is final and clears the intent without focusing.
+    if (!target && document.querySelector("#master .units") === null) return;
+    pendingChangePageSelection = null;
+    if (!target) return;
+    selectChangeCard(pending.lens, target, pending.restoreFocus);
+  };
+
+  const paletteCommands = (): PaletteCommand[] => {
+    const route = currentRoute;
+    if (route === null) return [];
+    const commands: PaletteCommand[] = [
+      {
+        id: "copy-link",
+        label: "Copy current link",
+        run: copyCurrentLink,
+      },
+      {
+        id: "clear-filters",
+        label: "Clear filters",
+        run: () => actions.replace(clearRouteFilters(route)),
+      },
+      {
+        id: "open-timeline",
+        label: "Open Timeline",
+        run: () => actions.navigate({ kind: "timeline", historyQuery: {} }),
+      },
+      {
+        id: "open-changes",
+        label: "Open Changes",
+        run: () =>
+          actions.navigate({ kind: "lens", lens: "changes", query: {} }),
+      },
+      {
+        id: "open-attention",
+        label: "Open Attention",
+        run: () =>
+          actions.navigate({ kind: "lens", lens: "attention", query: {} }),
+      },
+      {
+        id: "narrow-master",
+        label: "Narrow master pane",
+        run: () => updateSplit((preferredSplit() ?? 50) - 5),
+      },
+      {
+        id: "widen-master",
+        label: "Widen master pane",
+        run: () => updateSplit((preferredSplit() ?? 50) + 5),
+      },
+    ];
+    if (route.kind === "timeline") {
+      commands.push(
+        {
+          id: "toggle-order",
+          label: `Show Timeline ${route.historyQuery.order === "asc" ? "newest first" : "oldest first"}`,
+          run: () =>
+            actions.replace({
+              kind: "timeline",
+              historyQuery: {
+                ...route.historyQuery,
+                after: undefined,
+                at: undefined,
+                order: route.historyQuery.order === "asc" ? "desc" : "asc",
+              },
+            }),
+        },
+        {
+          id: "toggle-follow",
+          label: "Follow or park Timeline",
+          run: () => actions.toggleTimelineMonitoring?.(),
+        },
+      );
+      if (selectedTimelineEventId !== null) {
+        const eventId = selectedTimelineEventId;
+        commands.push({
+          id: "open-selected-event",
+          label: "Open selected event",
+          run: () => navigateToTimelineEvent(eventId, route.historyQuery),
+        });
+      }
+    }
+    if (route.kind === "event" && selectedTimelineEventId !== null) {
+      const entry = currentTimelineEntries.get(selectedTimelineEventId);
+      const diff = entry ? eventAnnotatedDiffRoute(entry) : null;
+      if (diff !== null) {
+        commands.push({
+          id: "open-event-diff",
+          label: "Open selected annotated diff",
+          run: () => {
+            diffReturnRoute = route;
+            actions.navigate(diff);
+          },
+        });
+      }
+    }
+    const changeLens = activeChangeLens(route);
+    const changeId =
+      changeLens === null ? null : (selectedChangeId[changeLens] ?? null);
+    if (changeId !== null) {
+      commands.push({
+        id: "open-selected-change",
+        label: "Open selected Change",
+        run: () =>
+          actions.navigate({
+            kind: "change",
+            changeId,
+            query: queryForExactNavigation(route),
+          }),
+      });
+    }
+    if (route.kind === "change") {
+      commands.push({
+        id: "show-change-timeline",
+        label: "Show Change in Timeline",
+        run: () => actions.navigate(showChangeInTimelineRoute(route.changeId)),
+      });
+    }
+    if (route.kind === "revision") {
+      commands.push(
+        {
+          id: "open-revision-diff",
+          label: "Open annotated diff",
+          run: () => {
+            diffReturnRoute = route;
+            actions.navigate({
+              kind: "diff",
+              changeId: route.changeId,
+              revision: route.revision,
+              query: route.query,
+              ...(route.focus ? { focus: route.focus } : {}),
+            });
+          },
+        },
+        {
+          id: "show-revision-timeline",
+          label: "Show exact Revision in Timeline",
+          run: () =>
+            actions.navigate(
+              showRevisionInTimelineRoute(route.changeId, route.revision),
+            ),
+        },
+      );
+    }
+    return commands;
+  };
+
+  const syncPaletteActiveOption = () => {
+    const options = Array.from(
+      paletteResults?.querySelectorAll<HTMLElement>("[role='option']") ?? [],
+    );
+    if (options.length === 0) {
+      paletteInput?.removeAttribute("aria-activedescendant");
+      return;
+    }
+    paletteActiveIndex = Math.max(
+      0,
+      Math.min(options.length - 1, paletteActiveIndex),
+    );
+    for (const [index, option] of options.entries()) {
+      option.setAttribute(
+        "aria-selected",
+        String(index === paletteActiveIndex),
+      );
+    }
+    paletteInput?.setAttribute(
+      "aria-activedescendant",
+      options[paletteActiveIndex]?.id ?? "",
+    );
+  };
+
+  const runPaletteCommand = (command: PaletteCommand): void => {
+    closeModal("#cmd-palette");
+    command.run();
+  };
+
   const renderPaletteResults = () => {
     if (paletteResults) {
       paletteResults.replaceChildren();
       const query = paletteInput?.value.trim().toLocaleLowerCase() ?? "";
-      const matching = paletteCommands.filter(([label]) =>
-        label.toLocaleLowerCase().includes(query),
+      visiblePaletteCommands = paletteCommands().filter((command) =>
+        command.label.toLocaleLowerCase().includes(query),
       );
-      for (const [label, lens] of matching) {
+      paletteActiveIndex = 0;
+      for (const command of visiblePaletteCommands) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "ghost cmd-item";
+        button.id = `cmd-option-${command.id}`;
+        button.setAttribute("role", "option");
+        button.tabIndex = -1;
         const commandLabel = document.createElement("span");
         commandLabel.className = "cmd-label";
-        commandLabel.textContent = label;
+        commandLabel.textContent = command.label;
         button.append(commandLabel);
-        button.addEventListener("click", () => {
-          closeModal("#cmd-palette");
-          const route = currentRoute;
-          if (route) {
-            actions.navigate(
-              lens === "timeline"
-                ? { kind: "timeline", historyQuery: {} }
-                : {
-                    kind: "lens",
-                    lens,
-                    query:
-                      route.kind === "timeline"
-                        ? {}
-                        : { ...route.query, after: undefined },
-                  },
-            );
-          }
-        });
+        button.addEventListener("click", () => runPaletteCommand(command));
         paletteResults.append(button);
       }
-      if (matching.length === 0) {
+      if (visiblePaletteCommands.length === 0) {
         const empty = document.createElement("p");
         empty.className = "cmd-empty";
         empty.setAttribute("role", "status");
         empty.textContent = "No matching commands.";
         paletteResults.append(empty);
       }
+      syncPaletteActiveOption();
     }
   };
   const openPalette = () => {
     if (paletteInput) paletteInput.value = "";
+    paletteInput?.setAttribute("aria-expanded", "true");
     renderPaletteResults();
     openModal("#cmd-palette", paletteInput);
   };
+  const onPaletteKey = (event: KeyboardEvent): void => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (visiblePaletteCommands.length === 0) return;
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      paletteActiveIndex =
+        (paletteActiveIndex + delta + visiblePaletteCommands.length) %
+        visiblePaletteCommands.length;
+      syncPaletteActiveOption();
+      return;
+    }
+    if (event.key === "Enter") {
+      const command = visiblePaletteCommands[paletteActiveIndex];
+      if (command) {
+        event.preventDefault();
+        runPaletteCommand(command);
+      }
+    }
+  };
+  paletteInput?.setAttribute("role", "combobox");
+  paletteInput?.setAttribute("aria-autocomplete", "list");
+  paletteInput?.setAttribute("aria-controls", "cmd-results");
+  paletteInput?.setAttribute("aria-expanded", "false");
+  paletteResults?.setAttribute("role", "listbox");
   paletteInput?.addEventListener("input", renderPaletteResults);
+  paletteInput?.addEventListener("keydown", onPaletteKey);
   const helpClose = () => closeModal("#key-help");
   const helpCloseButton = document.querySelector("#key-help-close");
   helpCloseButton?.addEventListener("click", helpClose);
@@ -960,8 +1349,11 @@ export function installChangeInspectorInteraction(
     const target = event.target instanceof Element ? event.target : null;
     const card = target?.closest<HTMLElement>(".unit-card[data-change-id]");
     if (card && !target?.closest("button, a, input, select, textarea")) {
-      selectedChangeId = card.dataset.changeId ?? null;
-      setSelected(selectedChangeId);
+      const lens = activeChangeLens();
+      if (lens !== null) {
+        selectedChangeId[lens] = card.dataset.changeId ?? null;
+        setSelected(selectedChangeId[lens]);
+      }
       return;
     }
     const timelineEvent = target?.closest<HTMLElement>(
@@ -984,14 +1376,33 @@ export function installChangeInspectorInteraction(
   document.addEventListener("click", onClick);
   const onFocusIn = (event: FocusEvent) => {
     const target = event.target instanceof Element ? event.target : null;
+    if (pendingChangePageSelection !== null && !target?.closest("#master")) {
+      pendingChangePageSelection.restoreFocus = false;
+    }
     const timelineEvent = target?.closest<HTMLElement>(
       "#timeline [data-event-id]",
     );
-    if (!timelineEvent?.dataset.eventId) return;
-    selectedTimelineEventId = timelineEvent.dataset.eventId;
-    setTimelineSelected(selectedTimelineEventId);
+    if (timelineEvent?.dataset.eventId) {
+      selectedTimelineEventId = timelineEvent.dataset.eventId;
+      setTimelineSelected(selectedTimelineEventId);
+      return;
+    }
+    const primary = target?.closest<HTMLElement>(
+      ".unit-card[data-change-id] > .change-card-primary",
+    );
+    const card = primary?.closest<HTMLElement>(".unit-card[data-change-id]");
+    const lens = activeChangeLens();
+    if (card?.dataset.changeId && lens !== null) {
+      selectedChangeId[lens] = card.dataset.changeId;
+      setSelected(selectedChangeId[lens]);
+    }
   };
   document.addEventListener("focusin", onFocusIn);
+  const onPointerDown = () => {
+    if (pendingChangePageSelection !== null)
+      pendingChangePageSelection.restoreFocus = false;
+  };
+  document.addEventListener("pointerdown", onPointerDown, true);
   const onTimelineScroll = (event: Event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest("#timeline")) parkTimelineForReaderActivity();
@@ -1000,6 +1411,13 @@ export function installChangeInspectorInteraction(
   // virtual list even though the renderer owns the list's own paint listener.
   document.addEventListener("scroll", onTimelineScroll, true);
   const timelineDomObserver = new MutationObserver(() => {
+    if (pendingChangePageSelection !== null) {
+      if (document.querySelector("#error:not(.hidden)")) {
+        pendingChangePageSelection = null;
+      } else {
+        syncPendingChangePage(currentRoute, changeCards());
+      }
+    }
     if (companionTimelineRoute(currentRoute) !== null) syncTimelineDom();
   });
   const master = document.querySelector("#master");
@@ -1014,11 +1432,17 @@ export function installChangeInspectorInteraction(
     // Authentication owns the reconnect dialog's settlement, focus trap, and
     // focus restoration; treating every `.modal` as ours could hide that
     // dialog without resolving the pending credential request.
+    // Authentication is a separate owner and takes precedence even if a
+    // presentation-local dialog happened to be open when reconnect began.
+    if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
     const open = document.querySelector<HTMLElement>(
       "#cmd-palette:not(.hidden), #key-help:not(.hidden)",
     );
     if (open) {
-      if (event.key === "Escape") {
+      if (
+        event.key === "Escape" ||
+        (open.id === "key-help" && event.key === "?")
+      ) {
         event.preventDefault();
         closeModal(`#${open.id}`);
       } else {
@@ -1026,18 +1450,6 @@ export function installChangeInspectorInteraction(
       }
       return;
     }
-    // An auth-owned dialog still blocks shortcuts from reaching the page
-    // beneath it. Its own listener handles Tab and Escape settlement.
-    if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
-    const route = currentRoute;
-    // Escape exits a routed diff even while its file-search control owns focus.
-    // Other text-control keystrokes remain native and never trigger page keys.
-    if (route?.kind === "diff" && event.key === "Escape") {
-      event.preventDefault();
-      actions.navigate(routeReturningFromDiff(route));
-      return;
-    }
-    if (isTextControl(event.target)) return;
     if (
       ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") ||
       (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "p")
@@ -1046,6 +1458,20 @@ export function installChangeInspectorInteraction(
       openPalette();
       return;
     }
+    const route = currentRoute;
+    // Escape exits a routed diff even while its file-search control owns focus.
+    // Other text-control keystrokes remain native and never trigger page keys.
+    if (route?.kind === "diff" && event.key === "Escape") {
+      event.preventDefault();
+      actions.navigate(routeReturningFromDiff(route));
+      return;
+    }
+    if (event.key === "Escape" && isTextControl(event.target)) {
+      event.preventDefault();
+      (event.target as HTMLElement).blur();
+      return;
+    }
+    if (isTextControl(event.target)) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (!route) return;
     if (route.kind === "diff") {
@@ -1096,6 +1522,20 @@ export function installChangeInspectorInteraction(
     if (event.key === "?") {
       event.preventDefault();
       openModal("#key-help", document.querySelector("#key-help-close"));
+      return;
+    }
+    if (
+      event.key === " " &&
+      route.kind !== "lens" &&
+      route.kind !== "timeline" &&
+      !isNativeActionControl(event.target)
+    ) {
+      const detail = document.querySelector<HTMLElement>("#detail-body");
+      if (detail) {
+        event.preventDefault();
+        detail.scrollTop +=
+          detail.clientHeight * 0.85 * (event.shiftKey ? -1 : 1);
+      }
       return;
     }
     // A narrow exact detail is a modal sheet over an inert master surface.
@@ -1269,23 +1709,68 @@ export function installChangeInspectorInteraction(
       return;
     }
     if (event.key === "j" || event.key === "ArrowDown") {
-      event.preventDefault();
-      selectedChangeId = moveSelection(selectedChangeId, 1);
+      const lens = activeChangeLens(route);
+      if (lens !== null && moveChangeCursor(lens, 1)) event.preventDefault();
       return;
     }
     if (event.key === "k" || event.key === "ArrowUp") {
-      event.preventDefault();
-      selectedChangeId = moveSelection(selectedChangeId, -1);
+      const lens = activeChangeLens(route);
+      if (lens !== null && moveChangeCursor(lens, -1)) event.preventDefault();
+      return;
+    }
+    if (event.key === "f" || event.key === "d") {
+      const lens = activeChangeLens(route);
+      if (
+        lens !== null &&
+        moveChangePage(lens, "forward", event.key === "f" ? "full" : "half")
+      ) {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (event.key === "b" || event.key === "u") {
+      const lens = activeChangeLens(route);
+      if (
+        lens !== null &&
+        moveChangePage(lens, "backward", event.key === "b" ? "full" : "half")
+      ) {
+        event.preventDefault();
+      }
       return;
     }
     if (event.key === "g") {
-      event.preventDefault();
-      selectedChangeId = moveSelectionToBoundary(selectedChangeId, "first");
+      const lens = activeChangeLens(route);
+      if (lens !== null && route.kind === "lens") {
+        if (route.query.after !== undefined) {
+          const target = {
+            ...route,
+            query: { ...route.query, after: undefined },
+          };
+          event.preventDefault();
+          beginChangePageNavigation(lens, target, "first");
+          return;
+        }
+        const first = changeCards()[0];
+        if (first && selectChangeCard(lens, first, true))
+          event.preventDefault();
+      }
       return;
     }
     if (event.key === "G") {
-      event.preventDefault();
-      selectedChangeId = moveSelectionToBoundary(selectedChangeId, "last");
+      const lens = activeChangeLens(route);
+      if (lens !== null && followChangePage(lens, "last", "last")) {
+        event.preventDefault();
+        return;
+      }
+      if (
+        lens !== null &&
+        route.kind === "lens" &&
+        route.query.after === undefined &&
+        mountedChangePageTarget(lens, "next") === null
+      ) {
+        const last = changeCards().at(-1);
+        if (last && selectChangeCard(lens, last, true)) event.preventDefault();
+      }
       return;
     }
     if (event.key === "1") {
@@ -1313,17 +1798,21 @@ export function installChangeInspectorInteraction(
       });
       return;
     }
-    if (
-      event.key === "Enter" &&
-      selectedChangeId &&
-      !isNativeActionControl(event.target)
-    ) {
-      event.preventDefault();
-      actions.navigate({
-        kind: "change",
-        changeId: selectedChangeId,
-        query: queryForExactNavigation(route),
-      });
+    if (event.key === "Enter") {
+      const lens = activeChangeLens(route);
+      const changeId = lens === null ? null : selectedChangeId[lens];
+      if (
+        changeId !== null &&
+        !narrowDetailOwnsFocus(event.target) &&
+        !isNativeActionControl(event.target)
+      ) {
+        event.preventDefault();
+        actions.navigate({
+          kind: "change",
+          changeId,
+          query: queryForExactNavigation(route),
+        });
+      }
       return;
     }
     if (event.key === "h") {
@@ -1336,13 +1825,54 @@ export function installChangeInspectorInteraction(
       updateSplit((preferredSplit() ?? 50) + 5);
       return;
     }
-    if (
-      event.key === "Escape" &&
-      route.kind !== "lens" &&
-      route.kind !== "timeline"
-    ) {
-      event.preventDefault();
-      actions.navigate(listRoute(route));
+    if (event.key === "Escape") {
+      if (document.querySelector(".split")?.classList.contains("reading")) {
+        event.preventDefault();
+        setReading(false);
+        return;
+      }
+      if (route.kind !== "lens" && route.kind !== "timeline") {
+        event.preventDefault();
+        actions.navigate(listRoute(route));
+        return;
+      }
+      if (route.kind === "timeline" && selectedTimelineEventId !== null) {
+        event.preventDefault();
+        selectedTimelineEventId = null;
+        pendingTimelineSelection = null;
+        pendingGlobalTimelineSelection = null;
+        setTimelineSelected(null);
+        return;
+      }
+      const lens = activeChangeLens(route);
+      if (lens !== null && selectedChangeId[lens] !== null) {
+        event.preventDefault();
+        selectedChangeId[lens] = null;
+        setSelected(null);
+        return;
+      }
+      const query =
+        route.kind === "timeline" ? route.historyQuery.q : route.query.q;
+      if (query !== undefined) {
+        event.preventDefault();
+        actions.replace(
+          route.kind === "timeline"
+            ? {
+                kind: "timeline",
+                historyQuery: {
+                  ...route.historyQuery,
+                  after: undefined,
+                  at: undefined,
+                  q: undefined,
+                },
+              }
+            : {
+                ...route,
+                query: { ...route.query, after: undefined, q: undefined },
+              },
+        );
+      }
+      return;
     }
   };
   document.addEventListener("keydown", onKey);
@@ -1362,6 +1892,7 @@ export function installChangeInspectorInteraction(
   const stop = () => {
     document.removeEventListener("click", onClick);
     document.removeEventListener("focusin", onFocusIn);
+    document.removeEventListener("pointerdown", onPointerDown, true);
     document.removeEventListener("scroll", onTimelineScroll, true);
     document.removeEventListener("keydown", onKey);
     timelineDomObserver.disconnect();
@@ -1399,17 +1930,21 @@ export function installChangeInspectorInteraction(
     activeDividerPointerId = null;
     divider?.classList.remove("dragging");
     paletteInput?.removeEventListener("input", renderPaletteResults);
+    paletteInput?.removeEventListener("keydown", onPaletteKey);
+    paletteInput?.setAttribute("aria-expanded", "false");
     if (closeButton?.onclick === onClose) closeButton.onclick = null;
     if (backButton?.onclick === onClose) backButton.onclick = null;
     document.querySelector("#cmd-palette")?.classList.add("hidden");
     document.querySelector("#key-help")?.classList.add("hidden");
     paletteResults?.replaceChildren();
-    selectedChangeId = null;
+    selectedChangeId.changes = null;
+    selectedChangeId.attention = null;
     selectedTimelineEventId = null;
     currentTimelineEventIds = [];
     currentTimelineEntries = new Map();
     pendingTimelineSelection = null;
     pendingGlobalTimelineSelection = null;
+    pendingChangePageSelection = null;
     setSelected(null);
     setTimelineSelected(null);
     modalReturnFocus = null;
@@ -1423,6 +1958,15 @@ export function installChangeInspectorInteraction(
     pendingDiffExitFocus = null;
     pendingExactActivationFocus = null;
     diffReturnRoute = null;
+    copyAttempt += 1;
+    if (commandFeedbackTimer !== null) {
+      window.clearTimeout(commandFeedbackTimer);
+      commandFeedbackTimer = null;
+    }
+    const commandFeedback =
+      document.querySelector<HTMLElement>("#command-feedback");
+    commandFeedback?.classList.add("hidden");
+    if (commandFeedback) commandFeedback.textContent = "";
     const diffClose =
       document.querySelector<HTMLButtonElement>("#diff-page-close");
     if (diffClose?.onclick === onDiffClose) diffClose.onclick = null;
@@ -1513,9 +2057,19 @@ export function installChangeInspectorInteraction(
       const cards = Array.from(
         document.querySelectorAll<HTMLElement>(".unit-card[data-change-id]"),
       );
-      if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
-        selectedChangeId = null;
-      setSelected(selectedChangeId);
+      const changeLens = activeChangeLens(nextRoute);
+      if (
+        changeLens !== null &&
+        !cards.some(
+          (card) => card.dataset.changeId === selectedChangeId[changeLens],
+        )
+      ) {
+        selectedChangeId[changeLens] = null;
+      }
+      setSelected(
+        changeLens === null ? null : (selectedChangeId[changeLens] ?? null),
+      );
+      syncPendingChangePage(nextRoute, cards);
       if (companionTimelineRoute(nextRoute) !== null) {
         syncTimelineDom(nextRoute);
       } else {

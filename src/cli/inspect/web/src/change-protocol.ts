@@ -564,8 +564,10 @@ interface ChangePageBase {
   diagnostics?: string[];
   presentations?: Record<string, ChangePresentation>;
   projectionStamp: string;
-  /** Opaque server continuation. It is absent on cohort-compatible bare responses. */
+  /** Opaque server capabilities. Optional members are absent on older bare responses. */
+  previous?: string | null;
   next: string | null;
+  last?: string | null;
 }
 
 export interface ChangesPage extends ChangePageBase {
@@ -1859,10 +1861,21 @@ export function decodeChangePage(
   ) {
     throw new Error(`invalid ${expected.lens} Change page DTO`);
   }
-  const next = page.next;
-  if (next !== undefined && next !== null && !nonEmptyString(next)) {
-    throw new Error("invalid Change page next continuation");
-  }
+  const capability = (name: "previous" | "next" | "last") => {
+    const candidate = page[name];
+    if (
+      candidate !== undefined &&
+      candidate !== null &&
+      (!nonEmptyString(candidate) ||
+        new TextEncoder().encode(candidate).length > 4096)
+    ) {
+      throw new Error(`invalid Change page ${name} continuation`);
+    }
+    return candidate as string | null | undefined;
+  };
+  const previous = capability("previous");
+  const next = capability("next");
+  const last = capability("last");
   if (expected.bounded && next === undefined)
     throw new Error("bounded Change page is missing next continuation");
   const common = {
@@ -1870,7 +1883,9 @@ export function decodeChangePage(
     diagnostics,
     presentations,
     projectionStamp: stamp,
+    ...(previous === undefined ? {} : { previous }),
     next: next ?? null,
+    ...(last === undefined ? {} : { last }),
   };
   return expected.lens === "changes"
     ? {

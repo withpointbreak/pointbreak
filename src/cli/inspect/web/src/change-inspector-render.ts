@@ -418,8 +418,28 @@ export function prepareChangeInspectorShell(
   }
 }
 
-function copyExact(value: string): void {
-  if (navigator.clipboard) void navigator.clipboard.writeText(value);
+function copyExact(control: HTMLButtonElement, value: string): void {
+  const original = control.textContent ?? "Copy link";
+  const settle = (label: "Copied" | "Copy failed") => {
+    control.textContent = label;
+    window.setTimeout(() => {
+      if (control.isConnected && control.textContent === label)
+        control.textContent = original;
+    }, 1_500);
+  };
+  try {
+    const write = navigator.clipboard?.writeText(value);
+    if (write === undefined) {
+      settle("Copy failed");
+      return;
+    }
+    void write.then(
+      () => settle("Copied"),
+      () => settle("Copy failed"),
+    );
+  } catch {
+    settle("Copy failed");
+  }
 }
 
 function clearError(): void {
@@ -895,7 +915,7 @@ function renderEventDetail(
   copyLink.type = "button";
   copyLink.className = "ghost";
   copyLink.textContent = "Copy link";
-  copyLink.addEventListener("click", () => copyExact(location.href));
+  copyLink.addEventListener("click", () => copyExact(copyLink, location.href));
   context.append(copyLink);
 
   const structured = document.createElement("details");
@@ -1642,7 +1662,7 @@ function renderReading(
   copy.type = "button";
   copy.className = "ghost";
   copy.textContent = "Copy link";
-  copy.addEventListener("click", () => copyExact(location.href));
+  copy.addEventListener("click", () => copyExact(copy, location.href));
   if (reading.kind === "change" && route.kind === "change") {
     return [...renderChangeDetail(reading.document, route, actions), copy];
   }
@@ -1894,7 +1914,7 @@ function renderDetail(
   copyLink.type = "button";
   copyLink.className = "ghost";
   copyLink.textContent = "Copy link";
-  copyLink.addEventListener("click", () => copyExact(location.href));
+  copyLink.addEventListener("click", () => copyExact(copyLink, location.href));
   const peers = document.createElement("section");
   if (snapshot.route.kind === "change" && snapshot.selected !== null) {
     const changeRoute = snapshot.route;
@@ -2021,6 +2041,9 @@ export function renderChangeInspector(
     lens,
     query: route.query,
     projectionStamp: page.projectionStamp,
+    previous: page.previous ?? null,
+    next: page.next,
+    last: page.last ?? null,
     changes: page.changes.map((change) => change.changeId),
   });
   if (master.dataset.changeListKey !== listKey) {
@@ -2047,7 +2070,7 @@ export function renderChangeInspector(
       primary.className = "change-card-primary";
       primary.setAttribute(
         "aria-label",
-        `${card.primaryAction.label}. ${card.accessibleName}`,
+        `${card.primaryAction.label}. ${card.attention ? `${card.attention.primary.accessibleName}. ` : ""}${card.accessibleName}`,
       );
       primary.title = card.title;
       const headline = document.createElement("span");
@@ -2179,24 +2202,28 @@ export function renderChangeInspector(
           lens === "changes" ? "No Changes." : "No Changes need attention.",
         ),
       );
-    const nextPage = page.next;
-    if (nextPage !== null) {
-      const next = document.createElement("button");
-      next.type = "button";
-      next.className = "ghost";
-      next.textContent = "Next page";
-      next.addEventListener("click", () =>
-        actions.navigate({
-          kind: "lens",
-          lens: lens as "changes" | "attention",
-          query: {
-            ...route.query,
-            after: nextPage,
-          },
-        }),
-      );
-      list.append(next);
-    }
+    const appendPager = (
+      direction: "previous" | "next" | "last",
+      continuation: string | null | undefined,
+    ) => {
+      if (continuation == null) return;
+      const target = {
+        kind: "lens" as const,
+        lens: lens as "changes" | "attention",
+        query: { ...route.query, after: continuation },
+      };
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      button.dataset.changePage = direction;
+      button.dataset.changeTargetRoute = formatChangeInspectorRoute(target);
+      button.textContent = `${direction === "previous" ? "Previous" : direction === "next" ? "Next" : "Last"} page`;
+      button.addEventListener("click", () => actions.navigate(target));
+      list.append(button);
+    };
+    appendPager("previous", page.previous);
+    appendPager("next", page.next);
+    if (page.next !== null) appendPager("last", page.last);
     master.replaceChildren(list);
     master.dataset.changeListKey = listKey;
   }

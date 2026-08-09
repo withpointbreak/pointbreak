@@ -332,6 +332,66 @@ describe("bounded Change protocol", () => {
     expect(decoded.next).toBe("opaque-server-token");
   });
 
+  it("preserves optional opaque previous and last capabilities without interpreting them", () => {
+    const response = {
+      ...page("pointbreak.inspect-changes-page"),
+      previous: null,
+      last: "opaque.last/capability+with=punctuation",
+    };
+    const decoded = decodeChangePage(response, {
+      lens: "changes",
+      bounded: true,
+    }) as typeof response;
+
+    expect(decoded.previous).toBeNull();
+    expect(decoded.last).toBe("opaque.last/capability+with=punctuation");
+
+    const tailResponse = {
+      ...page("pointbreak.inspect-changes-page"),
+      previous: "opaque.previous/capability+with=punctuation",
+      last: null,
+    };
+    const tail = decodeChangePage(tailResponse, {
+      lens: "changes",
+      bounded: true,
+    }) as typeof tailResponse;
+    expect(tail.previous).toBe("opaque.previous/capability+with=punctuation");
+    expect(tail.last).toBeNull();
+  });
+
+  it.each([
+    "next",
+    "previous",
+    "last",
+  ] as const)("accepts only bounded non-empty strings or null for %s", (field) => {
+    for (const value of ["", 3, "x".repeat(4097)]) {
+      expect(() =>
+        decodeChangePage(
+          {
+            ...page("pointbreak.inspect-changes-page"),
+            [field]: value,
+          },
+          { lens: "changes", bounded: true },
+        ),
+      ).toThrow(field);
+    }
+
+    const maximum = decodeChangePage(
+      {
+        ...page("pointbreak.inspect-changes-page"),
+        [field]: "x".repeat(4096),
+      },
+      { lens: "changes", bounded: true },
+    ) as unknown as Record<typeof field, string | null>;
+    expect(maximum[field]).toHaveLength(4096);
+
+    const absent = page("pointbreak.inspect-changes-page");
+    if (field !== "next") delete (absent as Record<string, unknown>)[field];
+    expect(() =>
+      decodeChangePage(absent, { lens: "changes", bounded: true }),
+    ).not.toThrow();
+  });
+
   it("rejects a bounded page that omits its explicit continuation member", () => {
     const response = page("pointbreak.inspect-attention");
     delete (response as { next?: string }).next;

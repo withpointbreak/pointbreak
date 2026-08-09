@@ -98,6 +98,7 @@ const INDEX_BODY = `
 
 <div id="diagnostics" class="diagnostics hidden"></div>
 <div id="route-diagnostic" class="route-diagnostic hidden" role="status" aria-live="polite"></div>
+<div id="command-feedback" class="route-diagnostic hidden" role="status" aria-live="polite"></div>
 
 <main>
   <div id="toolbar" class="toolbar">
@@ -213,13 +214,17 @@ const INDEX_BODY = `
       <dt><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></dt><dd>open the command palette</dd>
       <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>open Timeline / Changes / Attention</dd>
       <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the local event or Change cursor</dd>
-      <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>move a full Timeline viewport forward / backward</dd>
-      <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move a half Timeline viewport forward / backward</dd>
-      <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>move to the first / last filtered Timeline event or loaded Change</dd>
+      <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>move a full event or Change viewport forward / backward</dd>
+      <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move a half event or Change viewport forward / backward</dd>
+      <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>move to the first / last filtered event or Change</dd>
       <dt><kbd>Shift</kbd> + <kbd>F</kbd></dt><dd>follow or park the filtered Timeline head</dd>
       <dt><kbd>Enter</kbd></dt><dd>open the selected event or Change; choose an explicit current Revision from exact detail</dd>
+      <dt><kbd>Space</kbd> / <kbd>Shift</kbd> + <kbd>Space</kbd></dt><dd>page the exact detail forward / backward</dd>
+      <dt><kbd>h</kbd> / <kbd>l</kbd></dt><dd>shrink / grow the Change list pane</dd>
+      <dt><kbd>[</kbd> / <kbd>]</kbd></dt><dd>move to the previous / next file in an annotated diff</dd>
+      <dt><kbd>p</kbd> / <kbd>n</kbd></dt><dd>move to the previous / next inline fact in an annotated diff</dd>
       <dt><kbd>/</kbd></dt><dd>focus the search box</dd>
-      <dt><kbd>Esc</kbd></dt><dd>close a dialog or return from an exact surface to its originating lens</dd>
+      <dt><kbd>Esc</kbd></dt><dd>return one layer: close a dialog, leave reading mode or exact detail, clear the local cursor, then clear the query</dd>
       <dt><kbd>?</kbd></dt><dd>toggle this cheat sheet</dd>
     </dl>
     <div class="key-help-workflow">

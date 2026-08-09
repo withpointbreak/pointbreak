@@ -721,6 +721,7 @@ export async function bootstrapChangeInspector(
   });
   interaction = installChangeInspectorInteraction({
     navigate,
+    replace,
     navigateTimelineBoundary,
     revealTimelineEvent: revealChangeInspectorTimelineEvent,
     toggleTimelineMonitoring,

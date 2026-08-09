@@ -1039,6 +1039,77 @@ describe("Change-first composition", () => {
     expect(document.activeElement).toBe(viewToggle);
   });
 
+  it("opens the accessible command palette from a focused served search input", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const palette = document.querySelector<HTMLElement>("#cmd-palette");
+    const input = document.querySelector<HTMLInputElement>("#cmd-input");
+    const results = document.querySelector<HTMLElement>("#cmd-results");
+    if (!search || !palette || !input || !results) {
+      throw new Error("missing served command palette");
+    }
+    search.focus();
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "k",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(palette.classList).not.toContain("hidden");
+    expect(document.activeElement).toBe(input);
+    expect(input.getAttribute("role")).toBe("combobox");
+    expect(results.getAttribute("role")).toBe("listbox");
+    expect(results.textContent).toContain("Copy current link");
+    expect(results.textContent).toContain("Clear filters");
+  });
+
+  it("blurs served search before clearing its query through route replacement", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20&q=review");
+    const replaceState = vi.spyOn(history, "replaceState");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing served search input");
+    search.focus();
+
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).not.toBe(search);
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: { limit: 20, q: "review" },
+    });
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: { limit: 20 },
+    });
+    expect(replaceState).toHaveBeenCalled();
+  });
+
   it("keeps Change-page search plain instead of advertising Timeline grammar", async () => {
     history.replaceState(null, "", "/#/changes");
     serveComposition(searchableHistoryPage());
@@ -1266,7 +1337,7 @@ describe("Change-first composition", () => {
     expect(document.querySelector("#route-diagnostic")?.textContent).toBe("");
   });
 
-  it("keeps keyboard selection local until Enter and leaves text entry alone", async () => {
+  it("keeps keyboard selection local until Enter while the palette chord remains global", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/v2/profile")
@@ -1309,9 +1380,115 @@ describe("Change-first composition", () => {
         bubbles: true,
       }),
     );
-    expect(document.querySelector("#cmd-palette")?.classList).toContain(
+    expect(document.querySelector("#cmd-palette")?.classList).not.toContain(
       "hidden",
     );
+    expect(document.activeElement).toBe(document.querySelector("#cmd-input"));
+  });
+
+  it("crosses served Change pages only through signed renderer capabilities", async () => {
+    history.replaceState(null, "", "/#/changes?limit=1");
+    const requests: string[] = [];
+    const changesPage = (
+      changeId: string,
+      capabilities: {
+        previous: string | null;
+        next: string | null;
+        last: string | null;
+      },
+    ) => {
+      const source = page("changes");
+      const summary = source.changes[0];
+      if (!summary) throw new Error("missing served Change summary");
+      return {
+        ...source,
+        ...capabilities,
+        changes: [{ ...summary, changeId }],
+      };
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      if (path.startsWith("/api/v2/changes?")) {
+        const after = new URL(path, "http://pointbreak.test").searchParams.get(
+          "after",
+        );
+        const response =
+          after === "signed-last"
+            ? changesPage("change:sha256:last", {
+                previous: "signed-first",
+                next: null,
+                last: null,
+              })
+            : changesPage("change:sha256:first", {
+                previous: null,
+                next: "signed-next",
+                last: "signed-last",
+              });
+        return new Response(JSON.stringify(response));
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const first = document.querySelector<HTMLButtonElement>(
+      ".change-card-primary",
+    );
+    first?.focus();
+
+    first?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "G",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "lens",
+        lens: "changes",
+        query: { after: "signed-last", limit: 1 },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>(".unit-card[aria-current='true']")
+          ?.dataset.changeId,
+      ).toBe("change:sha256:last"),
+    );
+    const last = document.querySelector<HTMLButtonElement>(
+      ".change-card-primary",
+    );
+    expect(document.activeElement).toBe(last);
+
+    last?.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "b",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "lens",
+        lens: "changes",
+        query: { after: "signed-first", limit: 1 },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(
+        requests.some((request) => request.includes("after=signed-last")),
+      ).toBe(true);
+      expect(
+        requests.some((request) => request.includes("after=signed-first")),
+      ).toBe(true);
+    });
   });
 
   it("makes the closed narrow detail inert and restores focus after an exact reading", async () => {
@@ -1647,10 +1824,10 @@ describe("Change-first composition", () => {
     );
     const paletteInput = document.querySelector<HTMLInputElement>("#cmd-input");
     expect(document.activeElement).toBe(paletteInput);
-    expect(paletteInput?.getAttribute("role")).toBeNull();
-    expect(
-      document.querySelector("#cmd-results")?.getAttribute("role"),
-    ).toBeNull();
+    expect(paletteInput?.getAttribute("role")).toBe("combobox");
+    expect(document.querySelector("#cmd-results")?.getAttribute("role")).toBe(
+      "listbox",
+    );
     if (paletteInput) {
       paletteInput.value = "attention";
       paletteInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1664,9 +1841,6 @@ describe("Change-first composition", () => {
       paletteInput.value = "";
       paletteInput.dispatchEvent(new Event("input", { bubbles: true }));
     }
-    const paletteButtons = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("#cmd-results button"),
-    );
     paletteInput?.dispatchEvent(
       new KeyboardEvent("keydown", {
         key: "Tab",
@@ -1674,12 +1848,10 @@ describe("Change-first composition", () => {
         bubbles: true,
       }),
     );
-    expect(document.activeElement).toBe(paletteButtons.at(-1));
-    paletteButtons
-      .at(-1)
-      ?.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
-      );
+    expect(document.activeElement).toBe(paletteInput);
+    paletteInput?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
     expect(document.activeElement).toBe(paletteInput);
     paletteInput?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),

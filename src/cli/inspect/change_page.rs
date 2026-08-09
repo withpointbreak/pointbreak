@@ -7,6 +7,7 @@ pub(super) use super::page_token::PageTokenSigner;
 
 const TOKEN_SCHEMA: &str = "pointbreak.inspect-change-page-token.v1";
 const ORDER: &str = "change_id_asc";
+const MAX_TOKEN_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +49,9 @@ struct Token {
     query: String,
     limit: usize,
     order: String,
-    last_change_id: String,
+    /// The Change immediately before the target page, or `None` for page one.
+    /// This boundary is always server-issued and covered by the token signature.
+    last_change_id: Option<String>,
 }
 
 pub(super) fn parse_signed(
@@ -174,7 +177,7 @@ pub(super) fn apply_signed(
         if token.projection_stamp != stamp {
             return Err(PageError::Stale);
         }
-        Some(token.last_change_id.as_str())
+        token.last_change_id.as_deref()
     } else {
         None
     };
@@ -187,11 +190,57 @@ pub(super) fn apply_signed(
     }
     changes.retain(|c| query.matches(c, &document["presentations"]));
     changes.sort_by(|a, b| a["changeId"].as_str().cmp(&b["changeId"].as_str()));
-    if let Some(last) = after {
-        changes.retain(|c| c["changeId"].as_str().is_some_and(|id| id > last));
-    }
-    let has_more = changes.len() > query.limit;
-    changes.truncate(query.limit);
+    let page_start = after
+        .map(|last| {
+            changes
+                .partition_point(|change| change["changeId"].as_str().is_some_and(|id| id <= last))
+        })
+        .unwrap_or(0);
+    let page_end = changes.len().min(page_start.saturating_add(query.limit));
+    let last_page_start = changes
+        .len()
+        .checked_sub(1)
+        .map(|last_index| (last_index / query.limit) * query.limit);
+    let boundary_before = |start: usize| {
+        start.checked_sub(1).map(|index| {
+            changes[index]["changeId"]
+                .as_str()
+                .expect("validated Change page entries have Change IDs")
+                .to_owned()
+        })
+    };
+    let issue = |last_change_id: Option<String>| {
+        encode_token(
+            &Token {
+                schema: TOKEN_SCHEMA.into(),
+                lens: query.lens,
+                projection_stamp: stamp.clone(),
+                query: identity.clone(),
+                limit: query.limit,
+                order: ORDER.into(),
+                last_change_id,
+            },
+            signer,
+        )
+    };
+    let previous = (page_start > 0)
+        .then(|| {
+            let previous_start = page_start.saturating_sub(query.limit);
+            issue(boundary_before(previous_start))
+        })
+        .transpose()?;
+    let next = (page_end < changes.len())
+        .then(|| issue(boundary_before(page_end)))
+        .transpose()?;
+    let last = last_page_start
+        .filter(|last_start| *last_start != page_start)
+        .map(|last_start| issue(boundary_before(last_start)))
+        .transpose()?;
+    changes = changes
+        .into_iter()
+        .skip(page_start)
+        .take(query.limit)
+        .collect();
     let emitted: BTreeSet<_> = changes
         .iter()
         .filter_map(|c| c["changeId"].as_str())
@@ -202,22 +251,13 @@ pub(super) fn apply_signed(
     {
         map.retain(|id, _| emitted.contains(id.as_str()));
     }
-    // The client treats the continuation as opaque. Signing makes that boundary
-    // enforceable: a caller cannot alter the last emitted ChangeId and silently
-    // skip eligible rows, and a token dies with the Inspector process that issued it.
-    let next = has_more
-        .then(|| Token {
-            schema: TOKEN_SCHEMA.into(),
-            lens: query.lens,
-            projection_stamp: stamp,
-            query: identity,
-            limit: query.limit,
-            order: ORDER.into(),
-            last_change_id: changes.last().unwrap()["changeId"].as_str().unwrap().into(),
-        })
-        .map(|t| encode_token(&t, signer));
+    // The client treats every page capability as opaque. Signing makes that
+    // boundary enforceable: callers cannot alter a target boundary to skip or
+    // revisit rows, and capabilities die with the Inspector process that issued them.
     document["changes"] = Value::Array(changes);
+    document["previous"] = previous.map(Value::String).unwrap_or(Value::Null);
     document["next"] = next.map(Value::String).unwrap_or(Value::Null);
+    document["last"] = last.map(Value::String).unwrap_or(Value::Null);
     Ok(document)
 }
 
@@ -281,12 +321,17 @@ impl Query {
     }
 }
 
-fn encode_token(token: &Token, signer: &PageTokenSigner) -> String {
-    signer.encode(token)
+fn encode_token(token: &Token, signer: &PageTokenSigner) -> Result<String, PageError> {
+    let encoded = signer.encode(token);
+    if encoded.len() > MAX_TOKEN_BYTES {
+        Err(invalid("continuation is too long"))
+    } else {
+        Ok(encoded)
+    }
 }
 
 fn decode_token(raw: &str, signer: &PageTokenSigner) -> Result<Token, PageError> {
-    if raw.len() > 4096 {
+    if raw.len() > MAX_TOKEN_BYTES {
         return Err(invalid("continuation is too long"));
     }
     let t: Token = signer
@@ -295,7 +340,7 @@ fn decode_token(raw: &str, signer: &PageTokenSigner) -> Result<Token, PageError>
     if t.schema != TOKEN_SCHEMA
         || t.order != ORDER
         || t.projection_stamp.is_empty()
-        || t.last_change_id.is_empty()
+        || t.last_change_id.as_ref().is_some_and(String::is_empty)
     {
         Err(invalid("malformed continuation"))
     } else {
@@ -536,6 +581,87 @@ mod tests {
         assert_eq!(third["changes"][0]["changeId"], "change:03");
         assert!(third["next"].is_null());
     }
+
+    #[test]
+    fn first_page_declares_no_previous_and_issues_an_opaque_last_capability() {
+        let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
+            panic!()
+        };
+        let first = apply(doc(), *q).unwrap();
+
+        assert!(
+            first.as_object().unwrap().contains_key("previous"),
+            "a bounded first page must explicitly declare previous: null"
+        );
+        assert!(first["previous"].is_null());
+        let last = first["last"]
+            .as_str()
+            .expect("the server must issue an opaque last-page capability");
+        assert!(!last.is_empty());
+        assert!(last.len() <= 4096);
+    }
+
+    #[test]
+    fn capability_issuance_refuses_an_oversized_projected_boundary() {
+        let mut document = doc();
+        document["changes"][1]["changeId"] = format!("change:02{}", "x".repeat(4096)).into();
+        let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
+            panic!()
+        };
+
+        assert_eq!(
+            apply(document, *q),
+            Err(PageError::Invalid("continuation is too long".into()))
+        );
+    }
+
+    #[test]
+    fn continuation_page_issues_previous_that_returns_to_the_first_page() {
+        let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
+            panic!()
+        };
+        let first = apply(doc(), *q).unwrap();
+        let next = first["next"].as_str().unwrap();
+        let Request::Bounded(q) =
+            parse(Lens::Changes, Some(&format!("limit=1&after={next}"))).unwrap()
+        else {
+            panic!()
+        };
+        let second = apply(doc(), *q).unwrap();
+        assert_eq!(second["changes"][0]["changeId"], "change:02");
+
+        let previous = second["previous"]
+            .as_str()
+            .expect("a continuation page must receive a server-issued previous capability");
+        let Request::Bounded(q) =
+            parse(Lens::Changes, Some(&format!("limit=1&after={previous}"))).unwrap()
+        else {
+            panic!()
+        };
+        let returned = apply(doc(), *q).unwrap();
+        assert_eq!(returned["changes"][0]["changeId"], "change:01");
+        assert!(returned["previous"].is_null());
+    }
+
+    #[test]
+    fn last_capability_reaches_the_tail_without_a_client_derived_predecessor() {
+        let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
+            panic!()
+        };
+        let first = apply(doc(), *q).unwrap();
+        let last = first["last"]
+            .as_str()
+            .expect("the server must issue an opaque last-page capability");
+        let Request::Bounded(q) =
+            parse(Lens::Changes, Some(&format!("limit=1&after={last}"))).unwrap()
+        else {
+            panic!()
+        };
+        let tail = apply(doc(), *q).unwrap();
+
+        assert_eq!(tail["changes"][0]["changeId"], "change:03");
+        assert!(tail["next"].is_null());
+    }
     #[test]
     fn tokens_are_lens_query_and_projection_bound() {
         let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
@@ -625,7 +751,7 @@ mod tests {
         let mut value: Value = serde_json::from_slice(&bytes).unwrap();
         mutate(&mut value);
         let token: Token = serde_json::from_value(value).unwrap();
-        encode_token(&token, &signer())
+        encode_token(&token, &signer()).unwrap()
     }
 
     fn tamper_payload_keep_signature(token: &str) -> String {
@@ -683,5 +809,71 @@ mod tests {
             panic!()
         };
         assert_eq!(apply(doc(), *q), Err(PageError::Stale));
+    }
+
+    #[test]
+    fn previous_and_last_keep_typed_lens_query_tamper_and_stale_refusals() {
+        let Request::Bounded(q) = parse(Lens::Changes, Some("limit=1")).unwrap() else {
+            panic!()
+        };
+        let first = apply(doc(), *q).unwrap();
+        let next = first["next"].as_str().unwrap();
+        let last = first["last"]
+            .as_str()
+            .expect("the server must issue an opaque last-page capability")
+            .to_owned();
+        let Request::Bounded(q) =
+            parse(Lens::Changes, Some(&format!("limit=1&after={next}"))).unwrap()
+        else {
+            panic!()
+        };
+        let second = apply(doc(), *q).unwrap();
+        let previous = second["previous"]
+            .as_str()
+            .expect("a continuation page must receive a server-issued previous capability")
+            .to_owned();
+
+        for (name, token) in [("previous", previous), ("last", last)] {
+            let Request::Bounded(q) =
+                parse(Lens::Attention, Some(&format!("limit=1&after={token}"))).unwrap()
+            else {
+                panic!()
+            };
+            assert!(
+                matches!(apply(doc(), *q), Err(PageError::Invalid(_))),
+                "{name} must remain bound to its issuing lens"
+            );
+
+            for query in [
+                format!("limit=2&after={token}"),
+                format!("limit=1&q=other&after={token}"),
+            ] {
+                let Request::Bounded(q) = parse(Lens::Changes, Some(&query)).unwrap() else {
+                    panic!()
+                };
+                assert!(
+                    matches!(apply(doc(), *q), Err(PageError::Invalid(_))),
+                    "{name} must remain bound to its issuing query"
+                );
+            }
+
+            assert!(matches!(
+                parse(Lens::Changes, Some(&format!("limit=1&after={token}x"))),
+                Err(PageError::Invalid(_))
+            ));
+
+            let mut stale = doc();
+            stale["projectionStamp"] = "stamp-2".into();
+            let Request::Bounded(q) =
+                parse(Lens::Changes, Some(&format!("limit=1&after={token}"))).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(
+                apply(stale, *q),
+                Err(PageError::Stale),
+                "{name} must retain typed stale-projection refusal"
+            );
+        }
     }
 }

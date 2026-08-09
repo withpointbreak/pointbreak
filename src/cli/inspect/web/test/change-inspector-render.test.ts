@@ -6,6 +6,7 @@ import {
   renderChangeInspectorRefusal,
   renderChangeInspector as renderChangeInspectorSource,
 } from "../src/change-inspector-render";
+import { formatChangeInspectorRoute } from "../src/change-inspector-router";
 import {
   createChangeInspectorState,
   stageGeneration,
@@ -814,6 +815,93 @@ describe("Change inspector render", () => {
       card?.querySelector(".change-card-attention-diagnostics")?.textContent,
     ).toContain("assessment coverage is incomplete for revision:sha256:one");
     expect(card?.querySelectorAll("button")).toHaveLength(1);
+    const primaryName = card
+      ?.querySelector(".change-card-primary")
+      ?.getAttribute("aria-label");
+    expect(primaryName).toContain("Current Revisions need assessment");
+    expect(primaryName).toContain(
+      "Assess exact Revision revision:sha256:one; artifact sha256:artifact",
+    );
+    expect(primaryName).toContain("Change change:sha256:one");
+  });
+
+  it("rebinds a retained Change pager when the server rotates its opaque capability", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: { q: "review" },
+    });
+    const firstPage = { ...changes, next: "signed-next-one" };
+    state.publish(stageGeneration(profile, firstPage, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    const firstPager = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#master button"),
+    ).find((button) => button.textContent === "Next page");
+    expect(firstPager).toBeDefined();
+
+    const rotatedPage = { ...changes, next: "signed-next-two" };
+    state.publish(stageGeneration(profile, rotatedPage, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    const rotatedPager = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#master button"),
+    ).find((button) => button.textContent === "Next page");
+    rotatedPager?.click();
+
+    expect(rotatedPager).not.toBe(firstPager);
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "lens",
+      lens: "changes",
+      query: { q: "review", after: "signed-next-two" },
+    });
+  });
+
+  it("projects server-issued previous, next, and last capabilities into exact lens routes", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: { q: "review", after: "signed-current" },
+    });
+    state.publish(
+      stageGeneration(
+        profile,
+        {
+          ...changes,
+          previous: "signed-previous",
+          next: "signed-next",
+          last: "signed-last",
+        },
+        attention,
+        profile,
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    for (const [direction, continuation] of [
+      ["previous", "signed-previous"],
+      ["next", "signed-next"],
+      ["last", "signed-last"],
+    ] as const) {
+      const button = document.querySelector<HTMLButtonElement>(
+        `[data-change-page="${direction}"]`,
+      );
+      expect(button?.dataset.changeTargetRoute).toBe(
+        formatChangeInspectorRoute({
+          kind: "lens",
+          lens: "changes",
+          query: { q: "review", after: continuation },
+        }),
+      );
+      button?.click();
+      expect(navigate).toHaveBeenLastCalledWith({
+        kind: "lens",
+        lens: "changes",
+        query: { q: "review", after: continuation },
+      });
+    }
   });
 
   it("restores a same-generation list after a transient refusal replaced its DOM", () => {
@@ -979,6 +1067,54 @@ describe("Change inspector render", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );
+  });
+
+  it.each([
+    {
+      name: "successful",
+      clipboard: { writeText: vi.fn(async () => undefined) },
+      expected: "Copied",
+    },
+    {
+      name: "failed",
+      clipboard: { writeText: vi.fn(async () => Promise.reject()) },
+      expected: "Copy failed",
+    },
+    {
+      name: "unavailable",
+      clipboard: undefined,
+      expected: "Copy failed",
+    },
+  ])("reports $name exact-link copy feedback without navigation", async ({
+    clipboard,
+    expected,
+  }) => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: clipboard,
+    });
+    const navigate = vi.fn();
+    const state = createChangeInspectorState({
+      kind: "change",
+      changeId: "change:sha256:one",
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    const copy = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    ).find((button) => button.textContent === "Copy link");
+    if (!copy) throw new Error("missing exact-link copy control");
+
+    copy.click();
+    await vi.waitFor(() => expect(copy.textContent).toBe(expected));
+
+    expect(navigate).not.toHaveBeenCalled();
+    if (clipboard)
+      expect(clipboard.writeText).toHaveBeenCalledWith(location.href);
+    Reflect.deleteProperty(navigator, "clipboard");
   });
 
   it("names the Change-detail chooser before its exact Revision and Change identities", () => {

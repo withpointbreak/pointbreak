@@ -2282,7 +2282,10 @@
     "u",
     "F",
     "h",
-    "l"
+    "l",
+    "1",
+    "2",
+    "3"
   ]);
   function isTextControl(target) {
     if (!(target instanceof HTMLElement)) return false;
@@ -2361,44 +2364,21 @@
   }
   __name(companionTimelineRoute, "companionTimelineRoute");
   function setSelected(changeId) {
-    document.querySelectorAll(".unit-card[data-change-id]").forEach((card) => {
+    const cards = Array.from(
+      document.querySelectorAll(".unit-card[data-change-id]")
+    );
+    const roving = cards.find((card) => card.dataset.changeId === changeId) ?? cards[0] ?? null;
+    for (const card of cards) {
       const selected = card.dataset.changeId === changeId;
       card.classList.toggle("change-card-selected", selected);
       card.setAttribute("aria-current", selected ? "true" : "false");
-    });
+      const primary = card.querySelector(
+        ":scope > .change-card-primary"
+      );
+      if (primary) primary.tabIndex = card === roving ? 0 : -1;
+    }
   }
   __name(setSelected, "setSelected");
-  function moveSelection(selectedChangeId, delta) {
-    const cards = Array.from(
-      document.querySelectorAll(".unit-card[data-change-id]")
-    );
-    if (!cards.length) return selectedChangeId;
-    const current = cards.findIndex(
-      (card2) => card2.dataset.changeId === selectedChangeId
-    );
-    const next = Math.max(
-      0,
-      Math.min(cards.length - 1, current < 0 ? 0 : current + delta)
-    );
-    const card = cards[next];
-    const changeId = card.dataset.changeId ?? null;
-    setSelected(changeId);
-    card.scrollIntoView({ block: "nearest", behavior: "auto" });
-    return changeId;
-  }
-  __name(moveSelection, "moveSelection");
-  function moveSelectionToBoundary(selectedChangeId, boundary) {
-    const cards = Array.from(
-      document.querySelectorAll(".unit-card[data-change-id]")
-    );
-    const card = boundary === "first" ? cards[0] : cards.at(-1);
-    if (!card) return selectedChangeId;
-    const changeId = card.dataset.changeId ?? null;
-    setSelected(changeId);
-    card.scrollIntoView({ block: "nearest", behavior: "auto" });
-    return changeId;
-  }
-  __name(moveSelectionToBoundary, "moveSelectionToBoundary");
   function timelineRows() {
     return Array.from(
       document.querySelectorAll("#timeline [data-event-id]")
@@ -2469,7 +2449,7 @@
     if (event.key !== "Tab") return;
     const stops = Array.from(
       modal.querySelectorAll(
-        "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+        "button:not([disabled]):not([tabindex='-1']), a[href]:not([tabindex='-1']), input:not([disabled]):not([tabindex='-1']), select:not([disabled]):not([tabindex='-1']), textarea:not([disabled]):not([tabindex='-1']), [tabindex]:not([tabindex='-1'])"
       )
     );
     if (!stops.length) return;
@@ -2486,12 +2466,16 @@
   }
   __name(trapModalFocus, "trapModalFocus");
   function installChangeInspectorInteraction(actions2) {
-    let selectedChangeId = null;
+    const selectedChangeId = {
+      changes: null,
+      attention: null
+    };
     let selectedTimelineEventId = null;
     let currentTimelineEventIds = [];
     let currentTimelineEntries = /* @__PURE__ */ new Map();
     let pendingTimelineSelection = null;
     let pendingGlobalTimelineSelection = null;
+    let pendingChangePageSelection = null;
     let modalReturnFocus = null;
     let detailReturnFocus = null;
     let detailWasOpen = false;
@@ -2503,6 +2487,39 @@
     let pendingDiffExitFocus = null;
     let pendingExactActivationFocus = null;
     let diffReturnRoute = null;
+    let commandFeedbackTimer = null;
+    let copyAttempt = 0;
+    const announceCommandFeedback = /* @__PURE__ */ __name((message2) => {
+      const feedback = document.querySelector("#command-feedback");
+      if (!feedback) return;
+      if (commandFeedbackTimer !== null)
+        window.clearTimeout(commandFeedbackTimer);
+      feedback.textContent = message2;
+      feedback.classList.remove("hidden");
+      commandFeedbackTimer = window.setTimeout(() => {
+        feedback.classList.add("hidden");
+        commandFeedbackTimer = null;
+      }, 1500);
+    }, "announceCommandFeedback");
+    const copyCurrentLink = /* @__PURE__ */ __name(() => {
+      const attempt = ++copyAttempt;
+      const settle = /* @__PURE__ */ __name((message2) => {
+        if (attempt === copyAttempt) announceCommandFeedback(message2);
+      }, "settle");
+      try {
+        const write = navigator.clipboard?.writeText(location.href);
+        if (write === void 0) {
+          settle("Could not copy current link");
+          return;
+        }
+        void write.then(
+          () => settle("Current link copied"),
+          () => settle("Could not copy current link")
+        );
+      } catch {
+        settle("Could not copy current link");
+      }
+    }, "copyCurrentLink");
     const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
       actions2.parkTimelineMonitoring?.();
     }, "parkTimelineForReaderActivity");
@@ -2702,7 +2719,7 @@
         }
         return;
       }
-      if (currentRoute2 !== null && currentRoute2.kind !== "diff" && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && active3?.id === "detail-close") {
+      if (currentRoute2 !== null && currentRoute2.kind !== "diff" && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && (active3?.id === "detail-close" || active3?.id === "detail-read")) {
         focusFallback();
         return;
       }
@@ -2711,13 +2728,23 @@
       }
     }, "onViewportResize");
     window.addEventListener("resize", onViewportResize);
+    const modalReturnIsVisible = /* @__PURE__ */ __name((focus) => {
+      if (focus?.isConnected !== true) return false;
+      if (focus.closest(".hidden, [inert]")) return false;
+      const narrow = window.matchMedia("(max-width: 760px)").matches;
+      if (narrow && (focus.id === "detail-close" || focus.id === "detail-read"))
+        return false;
+      return narrow || focus.id !== "detail-back";
+    }, "modalReturnIsVisible");
     const closeModal = /* @__PURE__ */ __name((id) => {
       const modal = document.querySelector(id);
       if (!modal || modal.classList.contains("hidden")) return;
       modal.classList.add("hidden");
+      if (id === "#cmd-palette")
+        paletteInput?.setAttribute("aria-expanded", "false");
       const focus = modalReturnFocus;
       modalReturnFocus = null;
-      if (focus?.isConnected === true) focus.focus({ preventScroll: true });
+      if (modalReturnIsVisible(focus)) focus?.focus({ preventScroll: true });
       else focusFallback();
     }, "closeModal");
     const openModal = /* @__PURE__ */ __name((id, initial) => {
@@ -2746,56 +2773,344 @@
     });
     const paletteInput = document.querySelector("#cmd-input");
     const paletteResults = document.querySelector("#cmd-results");
-    const paletteCommands = [
-      ["Open Timeline", "timeline"],
-      ["Open Changes", "changes"],
-      ["Open Attention", "attention"]
-    ];
+    let paletteActiveIndex = 0;
+    let visiblePaletteCommands = [];
+    const clearRouteFilters = /* @__PURE__ */ __name((route) => {
+      if (route.kind === "timeline" || route.kind === "event") {
+        const historyQuery = {
+          ...route.historyQuery,
+          after: void 0,
+          at: void 0,
+          q: void 0,
+          type: void 0,
+          track: void 0,
+          change: void 0,
+          revision: void 0,
+          artifactHash: void 0
+        };
+        return route.kind === "timeline" ? { kind: "timeline", historyQuery } : { ...route, historyQuery };
+      }
+      return {
+        ...route,
+        query: {
+          ...route.query,
+          q: void 0,
+          topology: void 0,
+          lifecycle: void 0,
+          attention: void 0,
+          availability: void 0,
+          after: void 0
+        }
+      };
+    }, "clearRouteFilters");
+    const activeChangeLens = /* @__PURE__ */ __name((route = currentRoute2) => {
+      if (route?.kind === "lens") return route.lens;
+      return exactOriginLens === "changes" || exactOriginLens === "attention" ? exactOriginLens : null;
+    }, "activeChangeLens");
+    const mountedChangePageTarget = /* @__PURE__ */ __name((lens, direction) => {
+      const encoded2 = document.querySelector(
+        `[data-change-page="${direction}"]`
+      )?.dataset.changeTargetRoute;
+      if (!encoded2) return null;
+      const target = parseChangeInspectorRoute(encoded2);
+      return target.kind === "lens" && target.lens === lens ? target : null;
+    }, "mountedChangePageTarget");
+    const beginChangePageNavigation = /* @__PURE__ */ __name((lens, target, boundary) => {
+      if (currentRoute2?.kind !== "lens") return;
+      pendingChangePageSelection = {
+        lens,
+        sourceRoute: formatChangeInspectorRoute(currentRoute2),
+        targetRoute: formatChangeInspectorRoute(target),
+        boundary,
+        restoreFocus: document.activeElement instanceof Element && document.activeElement.closest(".change-card-primary") !== null
+      };
+      actions2.navigate(target);
+    }, "beginChangePageNavigation");
+    const followChangePage = /* @__PURE__ */ __name((lens, direction, boundary) => {
+      if (currentRoute2?.kind !== "lens" || currentRoute2.lens !== lens)
+        return false;
+      const target = mountedChangePageTarget(lens, direction);
+      if (target === null) return false;
+      beginChangePageNavigation(lens, target, boundary);
+      return true;
+    }, "followChangePage");
+    const changeCards = /* @__PURE__ */ __name(() => Array.from(
+      document.querySelectorAll(".unit-card[data-change-id]")
+    ), "changeCards");
+    const selectChangeCard = /* @__PURE__ */ __name((lens, card, focus) => {
+      const changeId = card.dataset.changeId;
+      if (!changeId) return false;
+      selectedChangeId[lens] = changeId;
+      setSelected(changeId);
+      card.scrollIntoView({ block: "nearest", behavior: "auto" });
+      if (focus) {
+        card.querySelector(":scope > .change-card-primary")?.focus({ preventScroll: true });
+      }
+      return true;
+    }, "selectChangeCard");
+    const moveChangeCursor = /* @__PURE__ */ __name((lens, delta) => {
+      const cards = changeCards();
+      if (cards.length === 0) return false;
+      const current = cards.findIndex(
+        (card) => card.dataset.changeId === selectedChangeId[lens]
+      );
+      if (current < 0)
+        return selectChangeCard(lens, cards[0], true);
+      const target = Math.max(0, Math.min(cards.length - 1, current + delta));
+      if (target !== current)
+        return selectChangeCard(lens, cards[target], true);
+      return delta > 0 ? followChangePage(lens, "next", "first") : followChangePage(lens, "previous", "last");
+    }, "moveChangeCursor");
+    const visibleChangeCards = /* @__PURE__ */ __name(() => {
+      const master2 = document.querySelector("#master");
+      const first = changeCards()[0];
+      const rowHeight = first?.getBoundingClientRect().height ?? 0;
+      if (!master2 || master2.clientHeight <= 0 || rowHeight <= 0) return 10;
+      return Math.max(1, Math.floor(master2.clientHeight / rowHeight));
+    }, "visibleChangeCards");
+    const moveChangePage = /* @__PURE__ */ __name((lens, direction, fraction) => {
+      const rows = visibleChangeCards();
+      const distance = fraction === "full" ? rows : Math.max(1, Math.floor(rows / 2));
+      return moveChangeCursor(
+        lens,
+        (direction === "forward" ? 1 : -1) * distance
+      );
+    }, "moveChangePage");
+    const syncPendingChangePage = /* @__PURE__ */ __name((route, cards) => {
+      const pending = pendingChangePageSelection;
+      if (pending === null) return;
+      const routeKey = route ? formatChangeInspectorRoute(route) : null;
+      if (routeKey === pending.sourceRoute) return;
+      if (route?.kind !== "lens" || route.lens !== pending.lens || routeKey !== pending.targetRoute) {
+        pendingChangePageSelection = null;
+        return;
+      }
+      const target = pending.boundary === "first" ? cards[0] : cards.at(-1);
+      if (!target && document.querySelector("#master .units") === null) return;
+      pendingChangePageSelection = null;
+      if (!target) return;
+      selectChangeCard(pending.lens, target, pending.restoreFocus);
+    }, "syncPendingChangePage");
+    const paletteCommands = /* @__PURE__ */ __name(() => {
+      const route = currentRoute2;
+      if (route === null) return [];
+      const commands = [
+        {
+          id: "copy-link",
+          label: "Copy current link",
+          run: copyCurrentLink
+        },
+        {
+          id: "clear-filters",
+          label: "Clear filters",
+          run: /* @__PURE__ */ __name(() => actions2.replace(clearRouteFilters(route)), "run")
+        },
+        {
+          id: "open-timeline",
+          label: "Open Timeline",
+          run: /* @__PURE__ */ __name(() => actions2.navigate({ kind: "timeline", historyQuery: {} }), "run")
+        },
+        {
+          id: "open-changes",
+          label: "Open Changes",
+          run: /* @__PURE__ */ __name(() => actions2.navigate({ kind: "lens", lens: "changes", query: {} }), "run")
+        },
+        {
+          id: "open-attention",
+          label: "Open Attention",
+          run: /* @__PURE__ */ __name(() => actions2.navigate({ kind: "lens", lens: "attention", query: {} }), "run")
+        },
+        {
+          id: "narrow-master",
+          label: "Narrow master pane",
+          run: /* @__PURE__ */ __name(() => updateSplit((preferredSplit() ?? 50) - 5), "run")
+        },
+        {
+          id: "widen-master",
+          label: "Widen master pane",
+          run: /* @__PURE__ */ __name(() => updateSplit((preferredSplit() ?? 50) + 5), "run")
+        }
+      ];
+      if (route.kind === "timeline") {
+        commands.push(
+          {
+            id: "toggle-order",
+            label: `Show Timeline ${route.historyQuery.order === "asc" ? "newest first" : "oldest first"}`,
+            run: /* @__PURE__ */ __name(() => actions2.replace({
+              kind: "timeline",
+              historyQuery: {
+                ...route.historyQuery,
+                after: void 0,
+                at: void 0,
+                order: route.historyQuery.order === "asc" ? "desc" : "asc"
+              }
+            }), "run")
+          },
+          {
+            id: "toggle-follow",
+            label: "Follow or park Timeline",
+            run: /* @__PURE__ */ __name(() => actions2.toggleTimelineMonitoring?.(), "run")
+          }
+        );
+        if (selectedTimelineEventId !== null) {
+          const eventId = selectedTimelineEventId;
+          commands.push({
+            id: "open-selected-event",
+            label: "Open selected event",
+            run: /* @__PURE__ */ __name(() => navigateToTimelineEvent(eventId, route.historyQuery), "run")
+          });
+        }
+      }
+      if (route.kind === "event" && selectedTimelineEventId !== null) {
+        const entry = currentTimelineEntries.get(selectedTimelineEventId);
+        const diff = entry ? eventAnnotatedDiffRoute(entry) : null;
+        if (diff !== null) {
+          commands.push({
+            id: "open-event-diff",
+            label: "Open selected annotated diff",
+            run: /* @__PURE__ */ __name(() => {
+              diffReturnRoute = route;
+              actions2.navigate(diff);
+            }, "run")
+          });
+        }
+      }
+      const changeLens = activeChangeLens(route);
+      const changeId = changeLens === null ? null : selectedChangeId[changeLens] ?? null;
+      if (changeId !== null) {
+        commands.push({
+          id: "open-selected-change",
+          label: "Open selected Change",
+          run: /* @__PURE__ */ __name(() => actions2.navigate({
+            kind: "change",
+            changeId,
+            query: queryForExactNavigation(route)
+          }), "run")
+        });
+      }
+      if (route.kind === "change") {
+        commands.push({
+          id: "show-change-timeline",
+          label: "Show Change in Timeline",
+          run: /* @__PURE__ */ __name(() => actions2.navigate(showChangeInTimelineRoute(route.changeId)), "run")
+        });
+      }
+      if (route.kind === "revision") {
+        commands.push(
+          {
+            id: "open-revision-diff",
+            label: "Open annotated diff",
+            run: /* @__PURE__ */ __name(() => {
+              diffReturnRoute = route;
+              actions2.navigate({
+                kind: "diff",
+                changeId: route.changeId,
+                revision: route.revision,
+                query: route.query,
+                ...route.focus ? { focus: route.focus } : {}
+              });
+            }, "run")
+          },
+          {
+            id: "show-revision-timeline",
+            label: "Show exact Revision in Timeline",
+            run: /* @__PURE__ */ __name(() => actions2.navigate(
+              showRevisionInTimelineRoute(route.changeId, route.revision)
+            ), "run")
+          }
+        );
+      }
+      return commands;
+    }, "paletteCommands");
+    const syncPaletteActiveOption = /* @__PURE__ */ __name(() => {
+      const options = Array.from(
+        paletteResults?.querySelectorAll("[role='option']") ?? []
+      );
+      if (options.length === 0) {
+        paletteInput?.removeAttribute("aria-activedescendant");
+        return;
+      }
+      paletteActiveIndex = Math.max(
+        0,
+        Math.min(options.length - 1, paletteActiveIndex)
+      );
+      for (const [index, option] of options.entries()) {
+        option.setAttribute(
+          "aria-selected",
+          String(index === paletteActiveIndex)
+        );
+      }
+      paletteInput?.setAttribute(
+        "aria-activedescendant",
+        options[paletteActiveIndex]?.id ?? ""
+      );
+    }, "syncPaletteActiveOption");
+    const runPaletteCommand = /* @__PURE__ */ __name((command) => {
+      closeModal("#cmd-palette");
+      command.run();
+    }, "runPaletteCommand");
     const renderPaletteResults = /* @__PURE__ */ __name(() => {
       if (paletteResults) {
         paletteResults.replaceChildren();
         const query = paletteInput?.value.trim().toLocaleLowerCase() ?? "";
-        const matching = paletteCommands.filter(
-          ([label2]) => label2.toLocaleLowerCase().includes(query)
+        visiblePaletteCommands = paletteCommands().filter(
+          (command) => command.label.toLocaleLowerCase().includes(query)
         );
-        for (const [label2, lens] of matching) {
+        paletteActiveIndex = 0;
+        for (const command of visiblePaletteCommands) {
           const button2 = document.createElement("button");
           button2.type = "button";
           button2.className = "ghost cmd-item";
+          button2.id = `cmd-option-${command.id}`;
+          button2.setAttribute("role", "option");
+          button2.tabIndex = -1;
           const commandLabel = document.createElement("span");
           commandLabel.className = "cmd-label";
-          commandLabel.textContent = label2;
+          commandLabel.textContent = command.label;
           button2.append(commandLabel);
-          button2.addEventListener("click", () => {
-            closeModal("#cmd-palette");
-            const route = currentRoute2;
-            if (route) {
-              actions2.navigate(
-                lens === "timeline" ? { kind: "timeline", historyQuery: {} } : {
-                  kind: "lens",
-                  lens,
-                  query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
-                }
-              );
-            }
-          });
+          button2.addEventListener("click", () => runPaletteCommand(command));
           paletteResults.append(button2);
         }
-        if (matching.length === 0) {
+        if (visiblePaletteCommands.length === 0) {
           const empty = document.createElement("p");
           empty.className = "cmd-empty";
           empty.setAttribute("role", "status");
           empty.textContent = "No matching commands.";
           paletteResults.append(empty);
         }
+        syncPaletteActiveOption();
       }
     }, "renderPaletteResults");
     const openPalette = /* @__PURE__ */ __name(() => {
       if (paletteInput) paletteInput.value = "";
+      paletteInput?.setAttribute("aria-expanded", "true");
       renderPaletteResults();
       openModal("#cmd-palette", paletteInput);
     }, "openPalette");
+    const onPaletteKey = /* @__PURE__ */ __name((event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (visiblePaletteCommands.length === 0) return;
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        paletteActiveIndex = (paletteActiveIndex + delta + visiblePaletteCommands.length) % visiblePaletteCommands.length;
+        syncPaletteActiveOption();
+        return;
+      }
+      if (event.key === "Enter") {
+        const command = visiblePaletteCommands[paletteActiveIndex];
+        if (command) {
+          event.preventDefault();
+          runPaletteCommand(command);
+        }
+      }
+    }, "onPaletteKey");
+    paletteInput?.setAttribute("role", "combobox");
+    paletteInput?.setAttribute("aria-autocomplete", "list");
+    paletteInput?.setAttribute("aria-controls", "cmd-results");
+    paletteInput?.setAttribute("aria-expanded", "false");
+    paletteResults?.setAttribute("role", "listbox");
     paletteInput?.addEventListener("input", renderPaletteResults);
+    paletteInput?.addEventListener("keydown", onPaletteKey);
     const helpClose = /* @__PURE__ */ __name(() => closeModal("#key-help"), "helpClose");
     const helpCloseButton = document.querySelector("#key-help-close");
     helpCloseButton?.addEventListener("click", helpClose);
@@ -2901,8 +3216,11 @@
       const target = event.target instanceof Element ? event.target : null;
       const card = target?.closest(".unit-card[data-change-id]");
       if (card && !target?.closest("button, a, input, select, textarea")) {
-        selectedChangeId = card.dataset.changeId ?? null;
-        setSelected(selectedChangeId);
+        const lens = activeChangeLens();
+        if (lens !== null) {
+          selectedChangeId[lens] = card.dataset.changeId ?? null;
+          setSelected(selectedChangeId[lens]);
+        }
         return;
       }
       const timelineEvent = target?.closest(
@@ -2919,20 +3237,46 @@
     document.addEventListener("click", onClick);
     const onFocusIn = /* @__PURE__ */ __name((event) => {
       const target = event.target instanceof Element ? event.target : null;
+      if (pendingChangePageSelection !== null && !target?.closest("#master")) {
+        pendingChangePageSelection.restoreFocus = false;
+      }
       const timelineEvent = target?.closest(
         "#timeline [data-event-id]"
       );
-      if (!timelineEvent?.dataset.eventId) return;
-      selectedTimelineEventId = timelineEvent.dataset.eventId;
-      setTimelineSelected(selectedTimelineEventId);
+      if (timelineEvent?.dataset.eventId) {
+        selectedTimelineEventId = timelineEvent.dataset.eventId;
+        setTimelineSelected(selectedTimelineEventId);
+        return;
+      }
+      const primary = target?.closest(
+        ".unit-card[data-change-id] > .change-card-primary"
+      );
+      const card = primary?.closest(".unit-card[data-change-id]");
+      const lens = activeChangeLens();
+      if (card?.dataset.changeId && lens !== null) {
+        selectedChangeId[lens] = card.dataset.changeId;
+        setSelected(selectedChangeId[lens]);
+      }
     }, "onFocusIn");
     document.addEventListener("focusin", onFocusIn);
+    const onPointerDown = /* @__PURE__ */ __name(() => {
+      if (pendingChangePageSelection !== null)
+        pendingChangePageSelection.restoreFocus = false;
+    }, "onPointerDown");
+    document.addEventListener("pointerdown", onPointerDown, true);
     const onTimelineScroll = /* @__PURE__ */ __name((event) => {
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest("#timeline")) parkTimelineForReaderActivity();
     }, "onTimelineScroll");
     document.addEventListener("scroll", onTimelineScroll, true);
     const timelineDomObserver = new MutationObserver(() => {
+      if (pendingChangePageSelection !== null) {
+        if (document.querySelector("#error:not(.hidden)")) {
+          pendingChangePageSelection = null;
+        } else {
+          syncPendingChangePage(currentRoute2, changeCards());
+        }
+      }
       if (companionTimelineRoute(currentRoute2) !== null) syncTimelineDom();
     });
     const master = document.querySelector("#master");
@@ -2943,11 +3287,12 @@
       });
     }
     const onKey = /* @__PURE__ */ __name((event) => {
+      if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
       const open = document.querySelector(
         "#cmd-palette:not(.hidden), #key-help:not(.hidden)"
       );
       if (open) {
-        if (event.key === "Escape") {
+        if (event.key === "Escape" || open.id === "key-help" && event.key === "?") {
           event.preventDefault();
           closeModal(`#${open.id}`);
         } else {
@@ -2955,19 +3300,23 @@
         }
         return;
       }
-      if (document.querySelector("#reconnect-dialog:not(.hidden)")) return;
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" || event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        openPalette();
+        return;
+      }
       const route = currentRoute2;
       if (route?.kind === "diff" && event.key === "Escape") {
         event.preventDefault();
         actions2.navigate(routeReturningFromDiff(route));
         return;
       }
-      if (isTextControl(event.target)) return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" || event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "p") {
+      if (event.key === "Escape" && isTextControl(event.target)) {
         event.preventDefault();
-        openPalette();
+        event.target.blur();
         return;
       }
+      if (isTextControl(event.target)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (!route) return;
       if (route.kind === "diff") {
@@ -3016,6 +3365,14 @@
       if (event.key === "?") {
         event.preventDefault();
         openModal("#key-help", document.querySelector("#key-help-close"));
+        return;
+      }
+      if (event.key === " " && route.kind !== "lens" && route.kind !== "timeline" && !isNativeActionControl(event.target)) {
+        const detail = document.querySelector("#detail-body");
+        if (detail) {
+          event.preventDefault();
+          detail.scrollTop += detail.clientHeight * 0.85 * (event.shiftKey ? -1 : 1);
+        }
         return;
       }
       if (MASTER_SURFACE_KEYS.has(event.key) && narrowDetailOwnsFocus(event.target)) {
@@ -3144,23 +3501,57 @@
         return;
       }
       if (event.key === "j" || event.key === "ArrowDown") {
-        event.preventDefault();
-        selectedChangeId = moveSelection(selectedChangeId, 1);
+        const lens = activeChangeLens(route);
+        if (lens !== null && moveChangeCursor(lens, 1)) event.preventDefault();
         return;
       }
       if (event.key === "k" || event.key === "ArrowUp") {
-        event.preventDefault();
-        selectedChangeId = moveSelection(selectedChangeId, -1);
+        const lens = activeChangeLens(route);
+        if (lens !== null && moveChangeCursor(lens, -1)) event.preventDefault();
+        return;
+      }
+      if (event.key === "f" || event.key === "d") {
+        const lens = activeChangeLens(route);
+        if (lens !== null && moveChangePage(lens, "forward", event.key === "f" ? "full" : "half")) {
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "b" || event.key === "u") {
+        const lens = activeChangeLens(route);
+        if (lens !== null && moveChangePage(lens, "backward", event.key === "b" ? "full" : "half")) {
+          event.preventDefault();
+        }
         return;
       }
       if (event.key === "g") {
-        event.preventDefault();
-        selectedChangeId = moveSelectionToBoundary(selectedChangeId, "first");
+        const lens = activeChangeLens(route);
+        if (lens !== null && route.kind === "lens") {
+          if (route.query.after !== void 0) {
+            const target = {
+              ...route,
+              query: { ...route.query, after: void 0 }
+            };
+            event.preventDefault();
+            beginChangePageNavigation(lens, target, "first");
+            return;
+          }
+          const first = changeCards()[0];
+          if (first && selectChangeCard(lens, first, true))
+            event.preventDefault();
+        }
         return;
       }
       if (event.key === "G") {
-        event.preventDefault();
-        selectedChangeId = moveSelectionToBoundary(selectedChangeId, "last");
+        const lens = activeChangeLens(route);
+        if (lens !== null && followChangePage(lens, "last", "last")) {
+          event.preventDefault();
+          return;
+        }
+        if (lens !== null && route.kind === "lens" && route.query.after === void 0 && mountedChangePageTarget(lens, "next") === null) {
+          const last = changeCards().at(-1);
+          if (last && selectChangeCard(lens, last, true)) event.preventDefault();
+        }
         return;
       }
       if (event.key === "1") {
@@ -3186,13 +3577,17 @@
         });
         return;
       }
-      if (event.key === "Enter" && selectedChangeId && !isNativeActionControl(event.target)) {
-        event.preventDefault();
-        actions2.navigate({
-          kind: "change",
-          changeId: selectedChangeId,
-          query: queryForExactNavigation(route)
-        });
+      if (event.key === "Enter") {
+        const lens = activeChangeLens(route);
+        const changeId = lens === null ? null : selectedChangeId[lens];
+        if (changeId !== null && !narrowDetailOwnsFocus(event.target) && !isNativeActionControl(event.target)) {
+          event.preventDefault();
+          actions2.navigate({
+            kind: "change",
+            changeId,
+            query: queryForExactNavigation(route)
+          });
+        }
         return;
       }
       if (event.key === "h") {
@@ -3205,9 +3600,51 @@
         updateSplit((preferredSplit() ?? 50) + 5);
         return;
       }
-      if (event.key === "Escape" && route.kind !== "lens" && route.kind !== "timeline") {
-        event.preventDefault();
-        actions2.navigate(listRoute(route));
+      if (event.key === "Escape") {
+        if (document.querySelector(".split")?.classList.contains("reading")) {
+          event.preventDefault();
+          setReading(false);
+          return;
+        }
+        if (route.kind !== "lens" && route.kind !== "timeline") {
+          event.preventDefault();
+          actions2.navigate(listRoute(route));
+          return;
+        }
+        if (route.kind === "timeline" && selectedTimelineEventId !== null) {
+          event.preventDefault();
+          selectedTimelineEventId = null;
+          pendingTimelineSelection = null;
+          pendingGlobalTimelineSelection = null;
+          setTimelineSelected(null);
+          return;
+        }
+        const lens = activeChangeLens(route);
+        if (lens !== null && selectedChangeId[lens] !== null) {
+          event.preventDefault();
+          selectedChangeId[lens] = null;
+          setSelected(null);
+          return;
+        }
+        const query = route.kind === "timeline" ? route.historyQuery.q : route.query.q;
+        if (query !== void 0) {
+          event.preventDefault();
+          actions2.replace(
+            route.kind === "timeline" ? {
+              kind: "timeline",
+              historyQuery: {
+                ...route.historyQuery,
+                after: void 0,
+                at: void 0,
+                q: void 0
+              }
+            } : {
+              ...route,
+              query: { ...route.query, after: void 0, q: void 0 }
+            }
+          );
+        }
+        return;
       }
     }, "onKey");
     document.addEventListener("keydown", onKey);
@@ -3222,6 +3659,7 @@
     const stop = /* @__PURE__ */ __name(() => {
       document.removeEventListener("click", onClick);
       document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("scroll", onTimelineScroll, true);
       document.removeEventListener("keydown", onKey);
       timelineDomObserver.disconnect();
@@ -3251,17 +3689,21 @@
       activeDividerPointerId = null;
       divider?.classList.remove("dragging");
       paletteInput?.removeEventListener("input", renderPaletteResults);
+      paletteInput?.removeEventListener("keydown", onPaletteKey);
+      paletteInput?.setAttribute("aria-expanded", "false");
       if (closeButton?.onclick === onClose) closeButton.onclick = null;
       if (backButton?.onclick === onClose) backButton.onclick = null;
       document.querySelector("#cmd-palette")?.classList.add("hidden");
       document.querySelector("#key-help")?.classList.add("hidden");
       paletteResults?.replaceChildren();
-      selectedChangeId = null;
+      selectedChangeId.changes = null;
+      selectedChangeId.attention = null;
       selectedTimelineEventId = null;
       currentTimelineEventIds = [];
       currentTimelineEntries = /* @__PURE__ */ new Map();
       pendingTimelineSelection = null;
       pendingGlobalTimelineSelection = null;
+      pendingChangePageSelection = null;
       setSelected(null);
       setTimelineSelected(null);
       modalReturnFocus = null;
@@ -3275,6 +3717,14 @@
       pendingDiffExitFocus = null;
       pendingExactActivationFocus = null;
       diffReturnRoute = null;
+      copyAttempt += 1;
+      if (commandFeedbackTimer !== null) {
+        window.clearTimeout(commandFeedbackTimer);
+        commandFeedbackTimer = null;
+      }
+      const commandFeedback = document.querySelector("#command-feedback");
+      commandFeedback?.classList.add("hidden");
+      if (commandFeedback) commandFeedback.textContent = "";
       const diffClose = document.querySelector("#diff-page-close");
       if (diffClose?.onclick === onDiffClose) diffClose.onclick = null;
       setCoveredPageInert(false);
@@ -3328,9 +3778,16 @@
         const cards = Array.from(
           document.querySelectorAll(".unit-card[data-change-id]")
         );
-        if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
-          selectedChangeId = null;
-        setSelected(selectedChangeId);
+        const changeLens = activeChangeLens(nextRoute);
+        if (changeLens !== null && !cards.some(
+          (card) => card.dataset.changeId === selectedChangeId[changeLens]
+        )) {
+          selectedChangeId[changeLens] = null;
+        }
+        setSelected(
+          changeLens === null ? null : selectedChangeId[changeLens] ?? null
+        );
+        syncPendingChangePage(nextRoute, cards);
         if (companionTimelineRoute(nextRoute) !== null) {
           syncTimelineDom(nextRoute);
         } else {
@@ -3987,10 +4444,16 @@
     if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
       throw new Error(`invalid ${expected.lens} Change page DTO`);
     }
-    const next = page.next;
-    if (next !== void 0 && next !== null && !nonEmptyString(next)) {
-      throw new Error("invalid Change page next continuation");
-    }
+    const capability = /* @__PURE__ */ __name((name) => {
+      const candidate = page[name];
+      if (candidate !== void 0 && candidate !== null && (!nonEmptyString(candidate) || new TextEncoder().encode(candidate).length > 4096)) {
+        throw new Error(`invalid Change page ${name} continuation`);
+      }
+      return candidate;
+    }, "capability");
+    const previous = capability("previous");
+    const next = capability("next");
+    const last = capability("last");
     if (expected.bounded && next === void 0)
       throw new Error("bounded Change page is missing next continuation");
     const common = {
@@ -3998,7 +4461,9 @@
       diagnostics,
       presentations,
       projectionStamp: stamp,
-      next: next ?? null
+      ...previous === void 0 ? {} : { previous },
+      next: next ?? null,
+      ...last === void 0 ? {} : { last }
     };
     return expected.lens === "changes" ? {
       schema: "pointbreak.inspect-changes-page",
@@ -7164,8 +7629,28 @@
     }
   }
   __name(prepareChangeInspectorShell, "prepareChangeInspectorShell");
-  function copyExact(value) {
-    if (navigator.clipboard) void navigator.clipboard.writeText(value);
+  function copyExact(control, value) {
+    const original = control.textContent ?? "Copy link";
+    const settle = /* @__PURE__ */ __name((label2) => {
+      control.textContent = label2;
+      window.setTimeout(() => {
+        if (control.isConnected && control.textContent === label2)
+          control.textContent = original;
+      }, 1500);
+    }, "settle");
+    try {
+      const write = navigator.clipboard?.writeText(value);
+      if (write === void 0) {
+        settle("Copy failed");
+        return;
+      }
+      void write.then(
+        () => settle("Copied"),
+        () => settle("Copy failed")
+      );
+    } catch {
+      settle("Copy failed");
+    }
   }
   __name(copyExact, "copyExact");
   function clearError() {
@@ -7577,7 +8062,7 @@
     copyLink.type = "button";
     copyLink.className = "ghost";
     copyLink.textContent = "Copy link";
-    copyLink.addEventListener("click", () => copyExact(location.href));
+    copyLink.addEventListener("click", () => copyExact(copyLink, location.href));
     context.append(copyLink);
     const structured = document.createElement("details");
     structured.className = "event-structured";
@@ -8211,7 +8696,7 @@
     copy.type = "button";
     copy.className = "ghost";
     copy.textContent = "Copy link";
-    copy.addEventListener("click", () => copyExact(location.href));
+    copy.addEventListener("click", () => copyExact(copy, location.href));
     if (reading.kind === "change" && route.kind === "change") {
       return [...renderChangeDetail(reading.document, route, actions2), copy];
     }
@@ -8412,7 +8897,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     copyLink.type = "button";
     copyLink.className = "ghost";
     copyLink.textContent = "Copy link";
-    copyLink.addEventListener("click", () => copyExact(location.href));
+    copyLink.addEventListener("click", () => copyExact(copyLink, location.href));
     const peers = document.createElement("section");
     if (snapshot2.route.kind === "change" && snapshot2.selected !== null) {
       const changeRoute = snapshot2.route;
@@ -8517,6 +9002,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       lens,
       query: route.query,
       projectionStamp: page.projectionStamp,
+      previous: page.previous ?? null,
+      next: page.next,
+      last: page.last ?? null,
       changes: page.changes.map((change) => change.changeId)
     });
     if (master.dataset.changeListKey !== listKey) {
@@ -8539,7 +9027,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         primary.className = "change-card-primary";
         primary.setAttribute(
           "aria-label",
-          `${card.primaryAction.label}. ${card.accessibleName}`
+          `${card.primaryAction.label}. ${card.attention ? `${card.attention.primary.accessibleName}. ` : ""}${card.accessibleName}`
         );
         primary.title = card.title;
         const headline = document.createElement("span");
@@ -8670,25 +9158,25 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             lens === "changes" ? "No Changes." : "No Changes need attention."
           )
         );
-      const nextPage = page.next;
-      if (nextPage !== null) {
-        const next = document.createElement("button");
-        next.type = "button";
-        next.className = "ghost";
-        next.textContent = "Next page";
-        next.addEventListener(
-          "click",
-          () => actions2.navigate({
-            kind: "lens",
-            lens,
-            query: {
-              ...route.query,
-              after: nextPage
-            }
-          })
-        );
-        list.append(next);
-      }
+      const appendPager = /* @__PURE__ */ __name((direction, continuation) => {
+        if (continuation == null) return;
+        const target = {
+          kind: "lens",
+          lens,
+          query: { ...route.query, after: continuation }
+        };
+        const button2 = document.createElement("button");
+        button2.type = "button";
+        button2.className = "ghost";
+        button2.dataset.changePage = direction;
+        button2.dataset.changeTargetRoute = formatChangeInspectorRoute(target);
+        button2.textContent = `${direction === "previous" ? "Previous" : direction === "next" ? "Next" : "Last"} page`;
+        button2.addEventListener("click", () => actions2.navigate(target));
+        list.append(button2);
+      }, "appendPager");
+      appendPager("previous", page.previous);
+      appendPager("next", page.next);
+      if (page.next !== null) appendPager("last", page.last);
       master.replaceChildren(list);
       master.dataset.changeListKey = listKey;
     }
@@ -9935,6 +10423,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     });
     interaction = installChangeInspectorInteraction({
       navigate,
+      replace,
       navigateTimelineBoundary,
       revealTimelineEvent: revealChangeInspectorTimelineEvent,
       toggleTimelineMonitoring,
