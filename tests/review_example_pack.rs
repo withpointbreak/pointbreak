@@ -145,6 +145,12 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let browser_program =
         fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
             .expect("read Change Inspector browser program");
+    let browser_diagnostics =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-diagnostics.mjs"))
+            .expect("read Change Inspector browser diagnostics");
+    let manifest_publisher =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-manifest.mjs"))
+            .expect("read Change Inspector browser manifest publisher");
 
     assert!(
         script.contains("sort_by(.revisionId, .objectArtifactContentHash)"),
@@ -218,8 +224,115 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let disarmed_trap = script
         .rfind("\ntrap - EXIT\n")
         .expect("browser gate disarms its cleanup trap");
+    for section in [
+        "Reader readiness",
+        "Timeline overview and chronology",
+        "Timeline search and correlation",
+        "Timeline preferences",
+        "Timeline keyboard and exact detail",
+        "Timeline follow and stale continuation",
+        "Changes and Attention paging",
+        "Attention guidance",
+        "Changes keyboard and filters",
+        "Change topology cards",
+        "Change relationship graph",
+        "Exact Revision selection and history",
+        "Shared Revision membership",
+        "Split, preferences, and dialogs",
+        "Fact relationship graph",
+        "Annotated diff",
+        "Exact detail and reading",
+        "Exact resource availability",
+        "Polling retention and reduced motion",
+        "Browser runtime",
+    ] {
+        assert!(
+            browser_program.contains(&format!("diagnostics.section(\"{section}\"")),
+            "browser diagnostics must retain the independently recoverable {section:?} section"
+        );
+    }
+    assert!(
+        browser_diagnostics.contains("status: stopped ? \"stopped\"")
+            && browser_diagnostics.contains("failures.map((failure)")
+            && browser_diagnostics.contains("throw new BrowserDiagnosticFailure(result)")
+            && browser_diagnostics.contains("browserDiagnosticRecorded")
+            && browser_diagnostics.contains("requireCondition")
+            && browser_diagnostics.contains("condition: label")
+            && browser_diagnostics.contains("outcome: \"satisfied\"")
+            && !browser_diagnostics.contains("comparison.expected ?? true")
+            && !browser_diagnostics.contains("comparison.actual ?? Boolean(condition)"),
+        "browser diagnostics must distinguish section stops, aggregate failures, and refuse completion"
+    );
+    assert!(
+        browser_program.matches("compare(").count() >= 100
+            && browser_program.contains("\"1..79\"")
+            && browser_program.contains("defaultTimeline.liveEvents")
+            && browser_program.contains("expectedParallelPeers")
+            && browser_program.contains("diffMetrics"),
+        "browser checks must preserve explicit expected and observed values for stable product contracts"
+    );
+    assert!(
+        browser_program.matches("requireCondition(").count() >= 12
+            && browser_program
+                .contains("const actualExactRevisionRoute = await page.evaluate(() =>")
+            && !browser_program.contains("exactRevisionRouteMatches"),
+        "authority-bearing browser prerequisites must stop their section and exact routes must be sampled once"
+    );
+    assert!(
+        script.contains(".status == \"passed\" and .globalInvalid == false")
+            && script.contains("(.failures | length == 0)")
+            && script.contains("(.sections | all(.status == \"passed\"")
+            && script.contains("browser-result.json"),
+        "browser orchestration must preserve and reject the structured aggregate report"
+    );
+    for source in [
+        "change-inspector-browser-verify.sh",
+        "change-inspector-browser-verify.mjs",
+        "change-inspector-browser-diagnostics.mjs",
+        "change-inspector-browser-manifest.mjs",
+        "materialize-inspector-decision-matrix.sh",
+    ] {
+        assert!(
+            script.contains(&format!("$source_commit:scripts/{source}")),
+            "browser gate must snapshot committed harness source {source:?} before qualification"
+        );
+    }
+    for fixture in [
+        "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+        "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
+    ] {
+        assert!(
+            script.contains(fixture),
+            "browser gate must snapshot committed activation fixture {fixture:?} for the isolated materializer"
+        );
+    }
+    assert!(
+        script
+            .contains("$source_commit:tests/support/assets/change-ready-store/$activation_fixture")
+            && script.contains(
+                "$source_commit:tests/support/assets/change-ready-store/$completion_fixture",
+            )
+            && script.contains("ready_store=\"$snapshot_ready_store\""),
+        "browser gate must execute both materializer and reader fixtures from the committed snapshot"
+    );
+    assert!(
+        script.contains("binary_snapshot=")
+            && script.contains("pointbreak_binary=\"$binary_snapshot\"")
+            && script.contains("harness-digests.json")
+            && script.contains("harness_record_sha256=")
+            && script.contains("--slurpfile harness"),
+        "browser gate must execute source-bound harness and binary snapshots and bind them in evidence"
+    );
+    assert!(
+        manifest_publisher.contains("browserResult.failures.length > 0")
+            && manifest_publisher.contains("await rename(candidatePath, manifestPath)"),
+        "manifest publication must reject recorded failures before its atomic rename"
+    );
+
     let manifest_publish = script
-        .rfind("mv \"$manifest_tmp\" \"$root/manifest.json\"")
+        .rfind(
+            "node \"$browser_manifest_publisher\" \"$manifest_tmp\" \"$root/manifest.json\" \"$browser_result\"",
+        )
         .expect("browser gate publishes its completion marker");
     assert!(
         installed_trap < fixture_concurrency,

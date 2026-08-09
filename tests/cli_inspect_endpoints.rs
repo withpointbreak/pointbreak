@@ -2333,7 +2333,7 @@ fn browser_program_checks_narrow_keyboard_bounds_for_both_relationship_graphs() 
         ),
     ] {
         let selector = format!("#detail-body .{graph} [data-graph-viewport]");
-        let declaration = format!("const {variable} = page.locator(\"{selector}\");");
+        let declaration = format!("const {variable} = page.locator(");
         let start = browser
             .find(&declaration)
             .unwrap_or_else(|| panic!("browser program must select the narrow {graph} viewport"));
@@ -2344,6 +2344,7 @@ fn browser_program_checks_narrow_keyboard_bounds_for_both_relationship_graphs() 
         let block = &tail[..end];
         let focus = format!("await {variable}.focus();");
         for marker in [
+            selector.as_str(),
             focus.as_str(),
             "keyboard.press(\"End\")",
             "keyboard.press(\"Home\")",

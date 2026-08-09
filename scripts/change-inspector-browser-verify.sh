@@ -20,13 +20,15 @@ remain under that root.
 EOF
 }
 
-for command in git jq node rg shasum find wc tr mv curl; do
+for command in git jq node rg shasum find wc tr mv curl cp chmod; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 browser_program_template="$script_dir/change-inspector-browser-verify.mjs"
+browser_diagnostics="$script_dir/change-inspector-browser-diagnostics.mjs"
+browser_manifest_publisher="$script_dir/change-inspector-browser-manifest.mjs"
 matrix_materializer="$script_dir/materialize-inspector-decision-matrix.sh"
 pointbreak_binary="${POINTBREAK_BINARY:-}"
 root=""
@@ -47,6 +49,8 @@ case "$pointbreak_binary" in
   *) die "POINTBREAK_BINARY must be an absolute executable path" ;;
 esac
 [ -f "$browser_program_template" ] || die "browser program is missing: $browser_program_template"
+[ -f "$browser_diagnostics" ] || die "browser diagnostics are missing: $browser_diagnostics"
+[ -f "$browser_manifest_publisher" ] || die "browser manifest publisher is missing: $browser_manifest_publisher"
 [ -x "$matrix_materializer" ] || die "matrix materializer is not executable: $matrix_materializer"
 
 [ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ] \
@@ -130,7 +134,86 @@ cleanup() {
 trap cleanup EXIT
 
 source_commit="$(git -C "$repo_root" rev-parse HEAD)"
+requested_binary="$pointbreak_binary"
 binary_sha256="$(shasum -a 256 "$pointbreak_binary" | awk '{print $1}')"
+snapshot_root="$root/harness"
+snapshot_scripts="$snapshot_root/scripts"
+snapshot_ready_store="$snapshot_root/tests/support/assets/change-ready-store"
+activation_fixture="5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+completion_fixture="f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+mkdir -p "$snapshot_scripts" "$snapshot_ready_store"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-verify.sh" \
+  >"$snapshot_scripts/change-inspector-browser-verify.sh"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-verify.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-verify.mjs"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-diagnostics.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-diagnostics.mjs"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-manifest.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-manifest.mjs"
+git -C "$repo_root" show "$source_commit:scripts/materialize-inspector-decision-matrix.sh" \
+  >"$snapshot_scripts/materialize-inspector-decision-matrix.sh"
+git -C "$repo_root" show "$source_commit:tests/support/assets/change-ready-store/$activation_fixture" \
+  >"$snapshot_ready_store/$activation_fixture"
+git -C "$repo_root" show "$source_commit:tests/support/assets/change-ready-store/$completion_fixture" \
+  >"$snapshot_ready_store/$completion_fixture"
+chmod 0444 \
+  "$snapshot_scripts/change-inspector-browser-verify.mjs" \
+  "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" \
+  "$snapshot_scripts/change-inspector-browser-manifest.mjs" \
+  "$snapshot_ready_store/$activation_fixture" \
+  "$snapshot_ready_store/$completion_fixture"
+chmod 0555 \
+  "$snapshot_scripts/change-inspector-browser-verify.sh" \
+  "$snapshot_scripts/materialize-inspector-decision-matrix.sh"
+
+binary_snapshot="$snapshot_root/pointbreak"
+cp "$pointbreak_binary" "$binary_snapshot"
+chmod 0555 "$binary_snapshot"
+[ "$(shasum -a 256 "$binary_snapshot" | awk '{print $1}')" = "$binary_sha256" ] \
+  || die "binary snapshot did not match the injected executable"
+
+shell_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-verify.sh" | awk '{print $1}')"
+template_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-verify.mjs" | awk '{print $1}')"
+diagnostics_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" | awk '{print $1}')"
+publisher_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-manifest.mjs" | awk '{print $1}')"
+materializer_sha256="$(shasum -a 256 "$snapshot_scripts/materialize-inspector-decision-matrix.sh" | awk '{print $1}')"
+activation_fixture_sha256="$(shasum -a 256 "$snapshot_ready_store/$activation_fixture" | awk '{print $1}')"
+completion_fixture_sha256="$(shasum -a 256 "$snapshot_ready_store/$completion_fixture" | awk '{print $1}')"
+[ "$(shasum -a 256 "$script_dir/change-inspector-browser-verify.sh" | awk '{print $1}')" = "$shell_sha256" ] \
+  || die "running browser verifier did not match the exact source commit"
+jq -n \
+  --arg sourceCommit "$source_commit" \
+  --arg requestedBinary "$requested_binary" \
+  --arg executedBinary "$binary_snapshot" \
+  --arg binarySha256 "$binary_sha256" \
+  --arg shellSha256 "$shell_sha256" \
+  --arg templateSha256 "$template_sha256" \
+  --arg diagnosticsSha256 "$diagnostics_sha256" \
+  --arg publisherSha256 "$publisher_sha256" \
+  --arg materializerSha256 "$materializer_sha256" \
+  --arg activationFixture "$activation_fixture" \
+  --arg activationFixtureSha256 "$activation_fixture_sha256" \
+  --arg completionFixture "$completion_fixture" \
+  --arg completionFixtureSha256 "$completion_fixture_sha256" \
+  '{schema: "pointbreak.change-inspector-browser-harness", version: 1,
+    sourceCommit: $sourceCommit,
+    binary: {requestedPath: $requestedBinary, executedPath: $executedBinary, sha256: $binarySha256},
+    files: [
+      {path: "scripts/change-inspector-browser-verify.sh", sha256: $shellSha256},
+      {path: "scripts/change-inspector-browser-verify.mjs", sha256: $templateSha256},
+      {path: "scripts/change-inspector-browser-diagnostics.mjs", sha256: $diagnosticsSha256},
+      {path: "scripts/change-inspector-browser-manifest.mjs", sha256: $publisherSha256},
+      {path: "scripts/materialize-inspector-decision-matrix.sh", sha256: $materializerSha256},
+      {path: ("tests/support/assets/change-ready-store/" + $activationFixture), sha256: $activationFixtureSha256},
+      {path: ("tests/support/assets/change-ready-store/" + $completionFixture), sha256: $completionFixtureSha256}
+    ]}' >"$log_dir/harness-digests.json"
+harness_record_sha256="$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')"
+
+pointbreak_binary="$binary_snapshot"
+browser_program_template="$snapshot_scripts/change-inspector-browser-verify.mjs"
+browser_diagnostics="$snapshot_scripts/change-inspector-browser-diagnostics.mjs"
+browser_manifest_publisher="$snapshot_scripts/change-inspector-browser-manifest.mjs"
+matrix_materializer="$snapshot_scripts/materialize-inspector-decision-matrix.sh"
 "$pointbreak_binary" version --format json >"$log_dir/pointbreak-version.json"
 jq -e --arg source_commit "$source_commit" '
   .schema == "pointbreak.version" and .version == 1 and
@@ -546,9 +629,9 @@ for reader_repo in "$reader_empty_l2_repo" "$reader_l0_repo" "$reader_m1_repo"; 
   git -C "$reader_repo" add README.md
   git -C "$reader_repo" commit --quiet -m "reader fixture base"
 done
-ready_store="$repo_root/tests/support/assets/change-ready-store"
-activation_record="$ready_store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
-completion_record="$ready_store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+ready_store="$snapshot_ready_store"
+activation_record="$ready_store/$activation_fixture"
+completion_record="$ready_store/$completion_fixture"
 [ -f "$activation_record" ] && [ -f "$completion_record" ] \
   || die "public reader-state activation fixtures are unavailable"
 cp "$activation_record" "$completion_record" "$reader_empty_l2_repo/.pointbreak/data/events/"
@@ -635,13 +718,24 @@ browser_config="$(jq -cn \
     readerServers: $readerServers,
     fixture: ($fixture[0] + {matrix: $matrix[0]})}')"
 browser_program="$log_dir/browser-program.mjs"
-node -e '
-const fs = require("node:fs");
+# shellcheck disable=SC2016 # JavaScript template literals are intentionally single-quoted from Bash.
+node --input-type=module -e '
+import fs from "node:fs";
+import { pathToFileURL } from "node:url";
 const source = fs.readFileSync(process.argv[1], "utf8");
-const marker = "__POINTBREAK_CHANGE_BROWSER_CONFIG__";
-if (!source.includes(marker)) throw new Error("browser config marker is missing");
-fs.writeFileSync(process.argv[3], source.replace(marker, process.argv[2]));
-' "$browser_program_template" "$browser_config" "$browser_program"
+const diagnostics = await import(pathToFileURL(process.argv[2]));
+const replacements = new Map([
+  ["__POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__", diagnostics.BrowserDiagnosticFailure.toString()],
+  ["__POINTBREAK_BROWSER_DIAGNOSTICS__", diagnostics.createBrowserDiagnostics.toString()],
+  ["__POINTBREAK_CHANGE_BROWSER_CONFIG__", process.argv[3]],
+]);
+let rendered = source;
+for (const [marker, value] of replacements) {
+  if (!rendered.includes(marker)) throw new Error(`browser program marker is missing: ${marker}`);
+  rendered = rendered.replace(marker, value);
+}
+fs.writeFileSync(process.argv[4], rendered);
+' "$browser_program_template" "$browser_diagnostics" "$browser_config" "$browser_program"
 
 # Startup intentionally has no semantic fragment: the Change-aware Inspector
 # must select the Timeline monitor by default while the one-time capability is
@@ -671,10 +765,35 @@ timeline_append_marker="$artifact_dir/timeline-parked-before-append.png"
 ) &
 timeline_append_pid=$!
 register_background_process "$timeline_append_pid"
-if ! run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1; then
+browser_gate_status=0
+run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1 \
+  || browser_gate_status=$?
+browser_result="$log_dir/browser-result.json"
+browser_result_line="$(rg -o 'POINTBREAK_BROWSER_RESULT=\{.*\}' "$log_dir/browser-gate.log" | tail -1 || true)"
+if [ -n "$browser_result_line" ]; then
+  printf '%s\n' "${browser_result_line#POINTBREAK_BROWSER_RESULT=}" >"$browser_result"
+  jq -e '
+    .schema == "pointbreak.change-inspector-browser-report" and .version == 1 and
+    (.status == "passed" or .status == "failed") and
+    (.assertionCount | type == "number") and (.assertionCount >= 0) and
+    (.screenshotCount | type == "number") and (.screenshotCount >= 0) and
+    (.sectionCount | type == "number") and (.sectionCount > 0) and
+    (.globalInvalid | type == "boolean") and
+    (.sections | type == "array") and ((.sections | length) == .sectionCount) and
+    (.failures | type == "array")
+  ' "$browser_result" >/dev/null || die "browser emitted an invalid diagnostic report"
+fi
+if [ "$browser_gate_status" -ne 0 ]; then
   sed -n '1,240p' "$log_dir/browser-gate.log" >&2
   die "real-browser Change Inspector gate failed"
 fi
+[ -s "$browser_result" ] || die "browser did not emit its diagnostic report"
+jq -e '
+  .status == "passed" and .globalInvalid == false and
+  (.failures | length == 0) and
+  (.sections | all(.status == "passed" and .failureCount == 0))
+' "$browser_result" >/dev/null \
+  || die "browser diagnostic report did not pass"
 if wait "$timeline_append_pid"; then
   forget_background_process "$timeline_append_pid"
 else
@@ -696,12 +815,27 @@ if rg -q '^### Error' "$log_dir/browser-gate.log"; then
 fi
 
 screenshot_count="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
-assertion_line="$(rg -o '\{"assertionCount":[0-9]+,"screenshotCount":[0-9]+\}' "$log_dir/browser-gate.log" | tail -1)"
-assertion_count="$(jq -er '.assertionCount' <<<"$assertion_line")"
-reported_screenshot_count="$(jq -er '.screenshotCount' <<<"$assertion_line")"
+assertion_count="$(jq -er '.assertionCount' "$browser_result")"
+reported_screenshot_count="$(jq -er '.screenshotCount' "$browser_result")"
 [ "$screenshot_count" -eq "$reported_screenshot_count" ] \
   || die "browser reported $reported_screenshot_count screenshots but preserved $screenshot_count"
 [ "$screenshot_count" -ge 12 ] || die "expected at least 12 browser screenshots, found $screenshot_count"
+[ "$(shasum -a 256 "$pointbreak_binary" | awk '{print $1}')" = "$binary_sha256" ] \
+  || die "executed binary snapshot changed during browser qualification"
+[ "$(shasum -a 256 "$browser_program_template" | awk '{print $1}')" = "$template_sha256" ] \
+  || die "browser program snapshot changed during qualification"
+[ "$(shasum -a 256 "$browser_diagnostics" | awk '{print $1}')" = "$diagnostics_sha256" ] \
+  || die "browser diagnostics snapshot changed during qualification"
+[ "$(shasum -a 256 "$browser_manifest_publisher" | awk '{print $1}')" = "$publisher_sha256" ] \
+  || die "manifest publisher snapshot changed during qualification"
+[ "$(shasum -a 256 "$matrix_materializer" | awk '{print $1}')" = "$materializer_sha256" ] \
+  || die "fixture materializer snapshot changed during qualification"
+[ "$(shasum -a 256 "$snapshot_ready_store/$activation_fixture" | awk '{print $1}')" = "$activation_fixture_sha256" ] \
+  || die "activation fixture snapshot changed during qualification"
+[ "$(shasum -a 256 "$snapshot_ready_store/$completion_fixture" | awk '{print $1}')" = "$completion_fixture_sha256" ] \
+  || die "completion fixture snapshot changed during qualification"
+[ "$(shasum -a 256 "$script_dir/change-inspector-browser-verify.sh" | awk '{print $1}')" = "$shell_sha256" ] \
+  || die "browser verifier source changed during qualification"
 tool_versions="$(jq -n \
   --arg git "$(git --version)" \
   --arg node "$(node --version)" \
@@ -719,22 +853,30 @@ trap - EXIT
 # atomic rename publishes manifest.json, so its presence remains the completion
 # marker for fixture, browser, screenshot, identity, and cleanup verification.
 manifest_tmp="$root/.manifest.json.tmp"
+[ "$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')" = "$harness_record_sha256" ] \
+  || die "browser harness digest record changed during qualification"
 jq -n \
   --arg sourceCommit "$source_commit" \
-  --arg binary "$pointbreak_binary" \
+  --arg binary "$requested_binary" \
+  --arg executedBinary "$pointbreak_binary" \
   --arg binarySha256 "$binary_sha256" \
   --arg root "$root" \
   --arg fixture "$fixture_identity" \
   --argjson fixtureData "$(cat "$log_dir/fixture.json")" \
   --argjson timelineAppend "$(cat "$log_dir/timeline-append.json")" \
   --argjson toolVersions "$tool_versions" \
+  --slurpfile harness "$log_dir/harness-digests.json" \
+  --arg harnessSha256 "$harness_record_sha256" \
   --argjson assertionCount "$assertion_count" \
   --argjson screenshotCount "$screenshot_count" \
   '{gate: "change-inspector-browser-verify", status: "passed", sourceCommit: $sourceCommit,
-    binary: $binary, binarySha256: $binarySha256, root: $root, fixture: $fixture,
+    binary: $binary, executedBinary: $executedBinary, binarySha256: $binarySha256,
+    harness: $harness[0], harnessSha256: $harnessSha256, root: $root, fixture: $fixture,
     fixtureData: $fixtureData, timelineAppend: $timelineAppend,
     toolVersions: $toolVersions, assertionCount: $assertionCount,
     screenshotCount: $screenshotCount}' \
   >"$manifest_tmp"
-mv "$manifest_tmp" "$root/manifest.json"
+[ "$(shasum -a 256 "$browser_manifest_publisher" | awk '{print $1}')" = "$publisher_sha256" ] \
+  || die "manifest publisher snapshot changed before completion publication"
+node "$browser_manifest_publisher" "$manifest_tmp" "$root/manifest.json" "$browser_result"
 cat "$root/manifest.json"
