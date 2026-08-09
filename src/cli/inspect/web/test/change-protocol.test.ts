@@ -1076,6 +1076,7 @@ describe("bounded Change protocol", () => {
         {
           id: revisionNodeId(predecessor),
           revision: predecessor,
+          displayLabel: "rev:predecessor",
           x: 0,
           y: 0,
           w: 1,
@@ -1088,6 +1089,7 @@ describe("bounded Change protocol", () => {
         {
           id: revisionNodeId(successor),
           revision: successor,
+          displayLabel: "current · rev:successor",
           x: 2,
           y: 0,
           w: 1,
@@ -1100,6 +1102,7 @@ describe("bounded Change protocol", () => {
         {
           id: revisionNodeId(context),
           revision: context,
+          displayLabel: "context · rev:claim-context",
           x: 4,
           y: 0,
           w: 1,
@@ -1176,6 +1179,24 @@ describe("bounded Change protocol", () => {
     expect(
       decodeChangeDetail(detail).inspectorPresentation?.revisionGraph,
     ).toEqual(graph);
+
+    const missingDisplayLabel = structuredClone(detail) as unknown as {
+      inspectorPresentation: {
+        revisionGraph: { nodes: Array<Record<string, unknown>> };
+      };
+    };
+    delete missingDisplayLabel.inspectorPresentation.revisionGraph.nodes[0]
+      .displayLabel;
+    expect(() => decodeChangeDetail(missingDisplayLabel)).toThrow(
+      "Change detail DTO",
+    );
+
+    const overlongDisplayLabel = structuredClone(detail);
+    overlongDisplayLabel.inspectorPresentation.revisionGraph.nodes[0].displayLabel =
+      "x".repeat(257);
+    expect(() => decodeChangeDetail(overlongDisplayLabel)).toThrow(
+      "Change detail DTO",
+    );
 
     const nonFinite = structuredClone(detail);
     nonFinite.inspectorPresentation.revisionGraph.nodes[0].x = Infinity;
@@ -1270,6 +1291,7 @@ describe("bounded Change protocol", () => {
           revision,
           factId: fact.factId,
           family: fact.family,
+          displayLabel: `${fact.family} · ${fact.factId}`,
           x: 0,
           y: 0,
           w: 1,
@@ -1281,6 +1303,7 @@ describe("bounded Change protocol", () => {
           id: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
           kind: "revision" as const,
           revision,
+          displayLabel: "Revision · rev:one",
           x: 2,
           y: 0,
           w: 1,
@@ -1294,6 +1317,7 @@ describe("bounded Change protocol", () => {
           revision: contextRevision,
           factId: contextFactId,
           family: "observation",
+          displayLabel: "observation · obs:port-context",
           x: 4,
           y: 0,
           w: 1,
@@ -1380,6 +1404,17 @@ describe("bounded Change protocol", () => {
     expect(
       decodeChangeRevisionDetail(detail).inspectorPresentation?.factGraph,
     ).toEqual(graph);
+
+    const missingDisplayLabel = structuredClone(detail) as unknown as {
+      inspectorPresentation: {
+        factGraph: { nodes: Array<Record<string, unknown>> };
+      };
+    };
+    delete missingDisplayLabel.inspectorPresentation.factGraph.nodes[0]
+      .displayLabel;
+    expect(() => decodeChangeRevisionDetail(missingDisplayLabel)).toThrow(
+      "Revision detail DTO",
+    );
 
     const invalidObservationFamily = structuredClone(detail);
     invalidObservationFamily.inspectorPresentation.factGraph.observationSupersedes[0].from =

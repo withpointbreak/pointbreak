@@ -132,6 +132,21 @@ test("exact detail identities wrap below persistent non-scrolling controls", () 
   expect(css).toMatch(/\.detail-head \{[^}]*background: var\(--bg\);/s);
 });
 
+test("narrow Attention cards keep their headline, reason, and exact Revision artifact inside the card", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.units \{[^}]*min-width: 0;/s);
+  expect(css).toMatch(/\.unit-card \{[^}]*min-width: 0;/s);
+  expect(css).toMatch(/\.change-card-primary \{[^}]*min-width: 0;/s);
+  expect(css).toMatch(
+    /\.change-card-headline \{[^}]*overflow-wrap: anywhere;/s,
+  );
+  expect(css).toMatch(/\.change-card-attention \{[^}]*min-width: 0;/s);
+  expect(css).toMatch(
+    /\.change-card-attention-reason,[\s\S]*?\.change-card-attention-additional \{[^}]*overflow-wrap: anywhere;/s,
+  );
+  expect(css).toMatch(/\.change-card-current \{[^}]*overflow-wrap: anywhere;/s);
+});
+
 test("the compact preset overrides the card token", () => {
   const tokens = readFileSync(TOKENS_CSS_PATH, "utf8");
   expect(tokens).toMatch(/\.compact \{[^}]*--card-pad:/s);

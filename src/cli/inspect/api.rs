@@ -881,6 +881,7 @@ struct ChangeRevisionGraphPresentation {
 struct ChangeRevisionGraphNode {
     id: String,
     revision: RevisionRefV1,
+    display_label: String,
     x: f64,
     y: f64,
     w: f64,
@@ -934,6 +935,7 @@ struct FactRelationshipGraphNode {
     id: String,
     kind: &'static str,
     revision: RevisionRefV1,
+    display_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     fact_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1054,11 +1056,24 @@ fn change_revision_graph(
         .iter()
         .map(|(_, predecessor)| exact_revision_graph_key(predecessor))
         .collect::<BTreeSet<_>>();
-    let nodes = exact
+    let display_labels = exact
         .iter()
-        .map(|(id, revision)| SupersessionLayoutNode {
+        .map(|(id, revision)| {
+            (
+                id.clone(),
+                change_revision_graph_node_label(
+                    revision.revision_id.as_str(),
+                    current_keys.contains(id),
+                    member_keys.contains(id),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let nodes = exact
+        .keys()
+        .map(|id| SupersessionLayoutNode {
             id: id.clone(),
-            label: short_node_label(revision.revision_id.as_str()),
+            label: display_labels[id].clone(),
             is_head: current_keys.contains(id),
             is_superseded: superseded.contains(id),
         })
@@ -1092,6 +1107,7 @@ fn change_revision_graph(
         .map(|node| ChangeRevisionGraphNode {
             id: node.id.clone(),
             revision: exact[&node.id].clone(),
+            display_label: display_labels[&node.id].clone(),
             x: node.x,
             y: node.y,
             w: node.w,
@@ -1237,6 +1253,26 @@ fn fact_relationship_graph(
     if inputs.is_empty() {
         return Ok(None);
     }
+    let display_labels = inputs
+        .iter()
+        .map(|(id, input)| {
+            let label = input.fact_id.as_deref().map_or_else(
+                || {
+                    format!(
+                        "Revision · {}",
+                        short_graph_ref(input.revision.revision_id.as_str())
+                    )
+                },
+                |fact_id| {
+                    fact_graph_node_label(
+                        input.family.as_deref().expect("fact graph family"),
+                        fact_id,
+                    )
+                },
+            );
+            (id.clone(), label)
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut topology = BTreeSet::<(String, String)>::new();
     for relationship in relationships {
         topology.insert((
@@ -1267,11 +1303,7 @@ fn fact_relationship_graph(
         .iter()
         .map(|(id, input)| SupersessionLayoutNode {
             id: id.clone(),
-            label: input
-                .fact_id
-                .as_deref()
-                .map(short_node_label)
-                .unwrap_or_else(|| short_node_label(input.revision.revision_id.as_str())),
+            label: display_labels[id].clone(),
             is_head: input.is_head,
             is_superseded: input.is_superseded,
         })
@@ -1295,6 +1327,7 @@ fn fact_relationship_graph(
                 id: node.id.clone(),
                 kind: input.kind,
                 revision: input.revision.clone(),
+                display_label: display_labels[&node.id].clone(),
                 fact_id: input.fact_id.clone(),
                 family: input.family.clone(),
                 x: node.x,
@@ -2816,6 +2849,83 @@ fn short_node_label(id: &str) -> String {
     tail.chars().take(12).collect()
 }
 
+/// Namespace-preserving short form painted by the Change-aware SVG renderer.
+/// The server uses the same label for mmdflux sizing so the thin client never
+/// paints text wider than the authoritative node geometry.
+fn short_graph_ref(id: &str) -> String {
+    const NAMESPACE_MAX_BYTES: usize = 24;
+    const FALLBACK_MAX_BYTES: usize = 32;
+
+    let parts = id.split(':').collect::<Vec<_>>();
+    let digest = match parts.as_slice() {
+        [_, "sha256", digest]
+        | [_, "git", "sha256", digest]
+        | [_, "worktree", "sha256", digest]
+            if digest.len() >= 6 && digest.chars().all(|ch| ch.is_ascii_hexdigit()) =>
+        {
+            Some(*digest)
+        }
+        _ => None,
+    };
+    if let Some(digest) = digest {
+        let namespace = utf8_prefix(parts[0], NAMESPACE_MAX_BYTES);
+        return format!(
+            "{}:{}",
+            namespace,
+            digest.chars().take(8).collect::<String>()
+        );
+    }
+    if let Some(digest) = id.strip_prefix("sha256:")
+        && digest.len() >= 8
+        && digest.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        return format!("sha256:{}", digest.chars().take(8).collect::<String>());
+    }
+    if id.len() == 40 && id.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return id.chars().take(10).collect();
+    }
+    if let Some((namespace, _)) = id.split_once(':') {
+        let namespace = utf8_prefix(namespace, NAMESPACE_MAX_BYTES);
+        let fragment = utf8_prefix(id.rsplit(':').next().unwrap_or(""), 12);
+        if !namespace.is_empty() && !fragment.is_empty() {
+            return format!("{namespace}:{fragment}");
+        }
+    }
+    utf8_prefix(id, FALLBACK_MAX_BYTES)
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn change_revision_graph_node_label(
+    revision_id: &str,
+    is_current: bool,
+    is_member: bool,
+) -> String {
+    let mut parts = Vec::with_capacity(3);
+    if is_current {
+        parts.push("current".to_owned());
+    }
+    if !is_member {
+        parts.push("context".to_owned());
+    }
+    parts.push(short_graph_ref(revision_id));
+    parts.join(" · ")
+}
+
+fn fact_graph_node_label(family: &str, fact_id: &str) -> String {
+    format!(
+        "{} · {}",
+        utf8_prefix(&family.replace('_', " "), 32),
+        short_graph_ref(fact_id)
+    )
+}
+
 /// One node fed to `layout_supersession_graph`: an opaque id, the short label used
 /// to SIZE the box (never for identity), and the projection-derived head/superseded
 /// standing. Node-id-agnostic — shared by the revision and fact adapters.
@@ -3980,6 +4090,46 @@ mod tests {
             .collect();
         assert_eq!(heads.len(), 2);
         assert!(laid.bounds.w > 0.0 && laid.bounds.h > 0.0);
+    }
+
+    #[test]
+    fn graph_display_labels_bound_unfamiliar_opaque_namespaces() {
+        assert_eq!(
+            short_graph_ref("obs_v2:sha256:abcdef0123456789"),
+            "obs_v2:abcdef01"
+        );
+        assert_eq!(
+            change_revision_graph_node_label("revision_v2:sha256:abcdef0123456789", true, false,),
+            "current · context · revision_v2:abcdef01"
+        );
+        let label = fact_graph_node_label(
+            "a_very_long_imported_fact_family_that_must_be_bounded",
+            "an_extremely_long_imported_namespace:opaque:identifier-that-keeps-going",
+        );
+        assert!(label.chars().count() <= 32 + 3 + 24 + 1 + 12);
+        assert!(label.starts_with("a very long imported fact family"));
+        assert!(label.contains("an_extremely_long_import:identifier-t"));
+
+        let recognized_namespace = format!("{}:sha256:{}", "n".repeat(300), "a".repeat(64));
+        let recognized_label = fact_graph_node_label("observation", &recognized_namespace);
+        assert!(
+            recognized_label.len() <= 256,
+            "recognized opaque namespaces must fit the browser wire limit"
+        );
+        assert!(
+            recognized_label.ends_with(":aaaaaaaa"),
+            "the compact digest fragment must survive namespace bounding"
+        );
+
+        let multibyte_label = fact_graph_node_label(&"é".repeat(200), &"界".repeat(200));
+        assert!(
+            multibyte_label.len() <= 256,
+            "multibyte labels must be bounded by UTF-8 bytes"
+        );
+        assert!(
+            std::str::from_utf8(multibyte_label.as_bytes()).is_ok(),
+            "byte bounding must retain valid UTF-8"
+        );
     }
 
     #[test]

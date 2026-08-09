@@ -284,6 +284,7 @@ function revisionReading(): Extract<
               revision,
               factId: "obs:sha256:focused",
               family: "observation",
+              displayLabel: "observation · obs:focused",
               x: 80,
               y: 30,
               w: 140,
@@ -336,6 +337,7 @@ function changeReading(): ChangeInspectorReading {
           {
             id: `revision:${revision.revisionId}@${revision.objectArtifactContentHash}`,
             revision,
+            displayLabel: "current · revision:one",
             x: 80,
             y: 30,
             w: 128,
@@ -348,6 +350,7 @@ function changeReading(): ChangeInspectorReading {
           {
             id: `revision:${predecessor.revisionId}@${predecessor.objectArtifactContentHash}`,
             revision: predecessor,
+            displayLabel: "revision:predecessor",
             x: 80,
             y: 110,
             w: 128,

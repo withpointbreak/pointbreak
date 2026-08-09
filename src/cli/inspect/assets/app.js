@@ -4845,7 +4845,7 @@
   }
   __name(isChangeRevisionGraphPresentation, "isChangeRevisionGraphPresentation");
   function isChangeRevisionGraphNode(value) {
-    return isRecord(value) && nonEmptyString2(value.id) && isRevisionRef(value.revision) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
+    return isRecord(value) && nonEmptyString2(value.id) && isRevisionRef(value.revision) && isGraphDisplayLabel(value.displayLabel) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
   }
   __name(isChangeRevisionGraphNode, "isChangeRevisionGraphNode");
   function isChangeRevisionGraphEffectiveEdge(value, nodes) {
@@ -4871,7 +4871,7 @@
   }
   __name(isFactRelationshipGraphPresentation, "isFactRelationshipGraphPresentation");
   function isFactRelationshipGraphNode(value) {
-    if (!isRecord(value) || !nonEmptyString2(value.id) || !isRevisionRef(value.revision) || !isFiniteGeometry(value) || !isGraphContext(value)) {
+    if (!isRecord(value) || !nonEmptyString2(value.id) || !isRevisionRef(value.revision) || !isGraphDisplayLabel(value.displayLabel) || !isFiniteGeometry(value) || !isGraphContext(value)) {
       return false;
     }
     if (value.kind === "fact") {
@@ -4887,6 +4887,10 @@
     return value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0;
   }
   __name(isGraphContext, "isGraphContext");
+  function isGraphDisplayLabel(value) {
+    return typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= 256;
+  }
+  __name(isGraphDisplayLabel, "isGraphDisplayLabel");
   function isFactRelationshipEdge(value, family, nodes) {
     return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.originRevision) && nonEmptyString2(value.fromFactId) && nonEmptyString2(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
   }
@@ -7207,7 +7211,7 @@
         "dominant-baseline": "middle",
         "aria-hidden": true
       });
-      label2.textContent = `${node.isCurrent ? "current · " : ""}${canActivate ? "" : "context · "}${shortRef(node.revision.revisionId)}`;
+      label2.textContent = node.displayLabel;
       group.append(label2);
       const activate = canActivate ? () => options.onActivateRevision(activationRevision) : void 0;
       if (activate) wireAction(group, activate, true);
@@ -7404,7 +7408,7 @@
         "dominant-baseline": "middle",
         "aria-hidden": true
       });
-      label2.textContent = focus ? `${words3(focus.family)} · ${shortRef(focus.factId)}` : `Revision · ${shortRef(node.revision.revisionId)}`;
+      label2.textContent = node.displayLabel;
       group.append(label2);
       const activate = canActivate ? focus ? () => options.onFocusFact({
         ...focus,

@@ -399,6 +399,103 @@ test("rendered browser program logs and returns failed diagnostics normally", as
 	);
 });
 
+test("reduced-motion evidence waits for a semantically painted retained Changes surface", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf(
+		'await diagnostics.section("Polling retention and reduced motion"',
+	);
+	const end = source.indexOf(
+		'await diagnostics.section("Browser runtime"',
+		start,
+	);
+	assert.notEqual(start, -1, "missing reduced-motion browser section");
+	assert.notEqual(
+		end,
+		-1,
+		"reduced-motion section must precede Browser runtime",
+	);
+	const section = source.slice(start, end);
+
+	const pollWait = section.indexOf("await page.waitForTimeout(3500);");
+	const retainedCardAssertion = section.indexOf(
+		"locator('.unit-card[data-browser-retention=\"same-generation\"]')",
+	);
+	const semanticPaintWait = section.indexOf(
+		"const semanticChangeSurface = await page.waitForFunction",
+	);
+	const screenshot = section.indexOf(
+		'await screenshot("wide-reduced-motion");',
+	);
+	assert.ok(
+		pollWait >= 0,
+		"reduced-motion evidence must observe a poll interval",
+	);
+	assert.ok(
+		retainedCardAssertion > pollWait,
+		"the same-generation DOM-retention assertion must remain after polling",
+	);
+	assert.ok(
+		semanticPaintWait > retainedCardAssertion,
+		"the screenshot must wait for semantic Change paint after retaining the card node",
+	);
+	assert.ok(
+		screenshot > semanticPaintWait,
+		"the reduced-motion screenshot must follow the semantic Change-paint wait",
+	);
+	assert.match(
+		section.slice(semanticPaintWait, screenshot),
+		/#master[\s\S]*data-change-list-key[\s\S]*\.unit-card\[data-change-id\][\s\S]*change-card-primary/,
+		"semantic paint must require a live Changes generation, exact Change identity, and a primary review action",
+	);
+});
+
+test("fact-graph evidence checks painted labels against server-sized node frames", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf(
+		'await diagnostics.section("Fact relationship graph"',
+	);
+	const end = source.indexOf(
+		'await diagnostics.section("Annotated diff"',
+		start,
+	);
+	assert.notEqual(start, -1, "missing fact relationship graph section");
+	assert.notEqual(end, -1, "fact graph section must precede annotated diff");
+	const section = source.slice(start, end);
+	assert.match(
+		section,
+		/nodeLabelGeometry:[\s\S]*?getBBox\(\)[\s\S]*?clippedFactGraphLabels[\s\S]*?!Number\.isFinite\(node\.frameWidth\)[\s\S]*?node\.frameWidth <= 0[\s\S]*?node\.labelWidth <= 0[\s\S]*?node\.labelLeft < node\.frameLeft[\s\S]*?node\.labelRight > node\.frameRight/,
+		"browser evidence must refuse a fact label painted outside its server-sized frame",
+	);
+});
+
+test("Change-graph evidence checks painted labels against server-sized node frames", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf(
+		'await diagnostics.section("Change relationship graph"',
+	);
+	const end = source.indexOf(
+		'await diagnostics.section("Fact relationship graph"',
+		start,
+	);
+	assert.notEqual(start, -1, "missing Change relationship graph section");
+	assert.notEqual(end, -1, "Change graph section must precede fact graph");
+	const section = source.slice(start, end);
+	assert.match(
+		section,
+		/nodeLabelGeometry:[\s\S]*?getBBox\(\)[\s\S]*?clippedChangeGraphLabels[\s\S]*?!Number\.isFinite\(node\.frameWidth\)[\s\S]*?node\.frameWidth <= 0[\s\S]*?node\.labelWidth <= 0[\s\S]*?node\.labelLeft < node\.frameLeft[\s\S]*?node\.labelRight > node\.frameRight/,
+		"browser evidence must refuse a Change graph label painted outside its server-sized frame",
+	);
+});
+
 test("an aggregate failure cannot publish a passing completion manifest", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-diagnostics-"));
 	const candidatePath = join(root, ".manifest.json.tmp");

@@ -2813,6 +2813,28 @@
 							disabled: node.getAttribute("aria-disabled") || "",
 						};
 					}),
+					nodeLabelGeometry: Array.from(
+						graph.querySelectorAll("g.change-revision-node"),
+						(node) => {
+							const frame = node.querySelector("rect");
+							const label = node.querySelector("text");
+							const frameLeft = Number(frame?.getAttribute("x") || 0);
+							const frameWidth = Number(frame?.getAttribute("width") || 0);
+							const labelBounds = label?.getBBox();
+							return {
+								nodeId: node.getAttribute("data-graph-node-id") || "",
+								label: label?.textContent || "",
+								frameLeft,
+								frameWidth,
+								frameRight: frameLeft + frameWidth,
+								labelLeft: labelBounds?.x ?? Number.NEGATIVE_INFINITY,
+								labelWidth: labelBounds?.width ?? 0,
+								labelRight:
+									(labelBounds?.x ?? Number.POSITIVE_INFINITY) +
+									(labelBounds?.width ?? 0),
+							};
+						},
+					),
 					textualNodes: Array.from(
 						graph.querySelectorAll("[data-graph-text-nodes] > li"),
 					).map((item) => ({
@@ -2831,6 +2853,28 @@
 				changeGraphMetrics.nodePresentation.filter(
 					(node) => node.availability === "relationship_context_only",
 				);
+			const clippedChangeGraphLabels =
+				changeGraphMetrics.nodeLabelGeometry.filter(
+					(node) =>
+						!Number.isFinite(node.frameLeft) ||
+						!Number.isFinite(node.frameWidth) ||
+						!Number.isFinite(node.frameRight) ||
+						!Number.isFinite(node.labelLeft) ||
+						!Number.isFinite(node.labelWidth) ||
+						!Number.isFinite(node.labelRight) ||
+						node.label.length === 0 ||
+						node.frameWidth <= 0 ||
+						node.labelWidth <= 0 ||
+						node.labelLeft < node.frameLeft ||
+						node.labelRight > node.frameRight,
+				);
+			compare(
+				clippedChangeGraphLabels.length === 0,
+				"Change Revision graph label geometry",
+				"one or more Change-graph labels escaped their server-sized node frame",
+				[],
+				clippedChangeGraphLabels,
+			);
 			const graphSuccessor = config.fixture.graph.successor;
 			const graphContext = config.fixture.graph.context;
 			const expectedNodeIdentities = [
@@ -3788,8 +3832,30 @@
 									node.getAttribute("data-context-availability") || "",
 								role: node.getAttribute("role") || "",
 								disabled: node.getAttribute("aria-disabled") || "",
-							};
-						}),
+								};
+							}),
+						nodeLabelGeometry: Array.from(
+							graph.querySelectorAll("g.fact-relationship-node"),
+							(node) => {
+								const frame = node.querySelector("rect");
+								const label = node.querySelector("text");
+								const frameLeft = Number(frame?.getAttribute("x") || 0);
+								const frameWidth = Number(frame?.getAttribute("width") || 0);
+								const labelBounds = label?.getBBox();
+								return {
+									nodeId: node.getAttribute("data-graph-node-id") || "",
+									label: label?.textContent || "",
+									frameLeft,
+									frameWidth,
+									frameRight: frameLeft + frameWidth,
+									labelLeft: labelBounds?.x ?? Number.NEGATIVE_INFINITY,
+									labelWidth: labelBounds?.width ?? 0,
+									labelRight:
+										(labelBounds?.x ?? Number.POSITIVE_INFINITY) +
+										(labelBounds?.width ?? 0),
+								};
+							},
+						),
 						textualNodes: Array.from(
 							graph.querySelectorAll("[data-graph-text-nodes] > li"),
 						).map((item) => ({
@@ -3807,6 +3873,28 @@
 			);
 			const factGraphContextNodes = factGraphMetrics.nodePresentation.filter(
 				(node) => node.availability === "relationship_context_only",
+			);
+			const clippedFactGraphLabels =
+				factGraphMetrics.nodeLabelGeometry.filter(
+					(node) =>
+						!Number.isFinite(node.frameLeft) ||
+						!Number.isFinite(node.frameWidth) ||
+						!Number.isFinite(node.frameRight) ||
+						!Number.isFinite(node.labelLeft) ||
+						!Number.isFinite(node.labelWidth) ||
+						!Number.isFinite(node.labelRight) ||
+						node.label.length === 0 ||
+						node.frameWidth <= 0 ||
+						node.labelWidth <= 0 ||
+						node.labelLeft < node.frameLeft ||
+						node.labelRight > node.frameRight,
+				);
+			compare(
+				clippedFactGraphLabels.length === 0,
+				"exact fact graph label geometry",
+				"one or more fact-graph labels escaped their server-sized node frame",
+				[],
+				clippedFactGraphLabels,
 			);
 			const expectedFactGraphStructure = {
 				viewports: 1,
@@ -4735,6 +4823,52 @@
 				"polling repainted an unchanged Change generation",
 				1,
 				retainedCardCount,
+			);
+			const semanticChangeSurface = await page.waitForFunction(() => {
+				const master = document.querySelector(
+					"#master[data-change-list-key]",
+				);
+				if (
+					!master ||
+					master.textContent?.includes("Loading Change generation")
+				)
+					return false;
+				const cards = Array.from(
+					master.querySelectorAll(".unit-card[data-change-id]"),
+				);
+				return (
+					cards.length > 0 &&
+					cards.every((card) => {
+						const primary = card.querySelector(".change-card-primary");
+						if (!(primary instanceof HTMLElement)) return false;
+						const style = getComputedStyle(primary);
+						const bounds = primary.getBoundingClientRect();
+						return (
+							(card.getAttribute("data-change-id") || "").trim().length > 0 &&
+							primary.innerText.trim().length > 0 &&
+							style.display !== "none" &&
+							style.visibility === "visible" &&
+							style.opacity !== "0" &&
+							bounds.width > 0 &&
+							bounds.height > 0
+						);
+					})
+				);
+			});
+			const semanticChangeSurfaceReady =
+				await semanticChangeSurface.jsonValue();
+			compare(
+				semanticChangeSurfaceReady === true,
+				"reduced-motion semantic Change paint",
+				"retained Changes were not fully painted before visual capture",
+				true,
+				semanticChangeSurfaceReady,
+			);
+			await page.evaluate(
+				() =>
+					new Promise((resolve) => {
+						requestAnimationFrame(() => requestAnimationFrame(resolve));
+					}),
 			);
 			const reducedMotion = await page.evaluate(() => {
 				const detail = document.querySelector("#detail");

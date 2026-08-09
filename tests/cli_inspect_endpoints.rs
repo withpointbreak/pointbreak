@@ -282,6 +282,19 @@ fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
         "available"
     );
     assert_eq!(revision_graph["nodes"][0]["activationRevision"], *exact);
+    let revision_digest = exact["revisionId"]
+        .as_str()
+        .expect("exact Revision identity")
+        .rsplit(':')
+        .next()
+        .expect("Revision digest")
+        .chars()
+        .take(8)
+        .collect::<String>();
+    assert_eq!(
+        revision_graph["nodes"][0]["displayLabel"],
+        format!("current · rev:{revision_digest}")
+    );
     assert!(revision_graph["nodes"][0]["x"].as_f64().is_some());
     assert!(revision_graph["nodes"][0]["y"].as_f64().is_some());
     assert!(revision_graph["bounds"]["w"].as_f64().is_some());
@@ -300,11 +313,27 @@ fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     assert_eq!(fact_graph["nodes"][0]["revision"], *exact);
     assert_eq!(fact_graph["nodes"][0]["contextAvailability"], "available");
     assert_eq!(fact_graph["nodes"][0]["activationRevision"], *exact);
+    let fact_id = fact_graph["nodes"][0]["factId"]
+        .as_str()
+        .expect("fact identity");
+    assert!(fact_id.starts_with("obs:sha256:"));
+    let fact_node_width = fact_graph["nodes"][0]["w"]
+        .as_f64()
+        .expect("fact node width");
+    let digest_fragment = fact_id
+        .rsplit(':')
+        .next()
+        .expect("fact digest")
+        .chars()
+        .take(8)
+        .collect::<String>();
+    let visible_label = format!("observation · obs:{digest_fragment}");
+    assert_eq!(fact_graph["nodes"][0]["displayLabel"], visible_label);
+    let minimum_readable_width = visible_label.chars().count() as f64 * 7.0 + 16.0;
     assert!(
-        fact_graph["nodes"][0]["factId"]
-            .as_str()
-            .unwrap()
-            .starts_with("obs:sha256:")
+        fact_node_width >= minimum_readable_width,
+        "server geometry must size the namespace-bearing label `{visible_label}`: \
+         width={fact_node_width}, minimum={minimum_readable_width}"
     );
 
     let profile = inspector.get_json("/api/v2/profile");

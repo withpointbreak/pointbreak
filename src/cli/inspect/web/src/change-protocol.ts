@@ -644,6 +644,7 @@ export interface ChangeRevisionGraphPresentation {
 export interface ChangeRevisionGraphNode {
   id: string;
   revision: RevisionRef;
+  displayLabel: string;
   x: number;
   y: number;
   w: number;
@@ -863,6 +864,7 @@ export type FactRelationshipGraphNode =
       id: string;
       kind: "fact";
       revision: RevisionRef;
+      displayLabel: string;
       factId: string;
       family: string;
       x: number;
@@ -876,6 +878,7 @@ export type FactRelationshipGraphNode =
       id: string;
       kind: "revision";
       revision: RevisionRef;
+      displayLabel: string;
       x: number;
       y: number;
       w: number;
@@ -2493,6 +2496,7 @@ function isChangeRevisionGraphNode(
     isRecord(value) &&
     nonEmptyString(value.id) &&
     isRevisionRef(value.revision) &&
+    isGraphDisplayLabel(value.displayLabel) &&
     value.id === revisionGraphNodeId(value.revision) &&
     isFiniteGeometry(value) &&
     typeof value.isCurrent === "boolean" &&
@@ -2573,6 +2577,7 @@ function isFactRelationshipGraphNode(
     !isRecord(value) ||
     !nonEmptyString(value.id) ||
     !isRevisionRef(value.revision) ||
+    !isGraphDisplayLabel(value.displayLabel) ||
     !isFiniteGeometry(value) ||
     !isGraphContext(value)
   ) {
@@ -2600,6 +2605,14 @@ function isGraphContext(value: Record<string, unknown>): boolean {
   return (
     value.contextAvailability === "relationship_context_only" &&
     value.activationRevision === undefined
+  );
+}
+
+function isGraphDisplayLabel(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    new TextEncoder().encode(value).length <= 256
   );
 }
 

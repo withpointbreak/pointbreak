@@ -51,6 +51,7 @@ function changeGraph(): ChangeRevisionGraphPresentation {
       {
         id: revisionKey(peer),
         revision: peer,
+        displayLabel: "current · rev:33333333",
         x: 260,
         y: 40,
         w: 128,
@@ -63,6 +64,7 @@ function changeGraph(): ChangeRevisionGraphPresentation {
       {
         id: revisionKey(first),
         revision: first,
+        displayLabel: "rev:11111111",
         x: 150,
         y: 150,
         w: 128,
@@ -75,6 +77,7 @@ function changeGraph(): ChangeRevisionGraphPresentation {
       {
         id: revisionKey(second),
         revision: second,
+        displayLabel: "current · rev:22222222",
         x: 40,
         y: 40,
         w: 128,
@@ -87,6 +90,7 @@ function changeGraph(): ChangeRevisionGraphPresentation {
       {
         id: revisionKey(context),
         revision: context,
+        displayLabel: "context · rev:44444444",
         x: 370,
         y: 150,
         w: 128,
@@ -128,6 +132,21 @@ function changeGraph(): ChangeRevisionGraphPresentation {
 }
 
 describe("Change Revision graph renderer", () => {
+  it("paints the exact server-sized Revision label", () => {
+    const graph = changeGraph();
+    const node = graph.nodes[0];
+    if (!node) throw new Error("fixture needs a Change Revision node");
+    node.displayLabel = "current · revision_v2:33333333";
+    const figure = renderChangeRevisionGraph(graph, {
+      document,
+      onActivateRevision: vi.fn(),
+    });
+    expect(
+      figure.querySelector(`[data-graph-node-id="${node.id}"] text`)
+        ?.textContent,
+    ).toBe(node.displayLabel);
+  });
+
   it("keeps effective state distinct from claims and exposes a readable equivalent", () => {
     const graph = changeGraph();
     const activate = vi.fn();
@@ -309,6 +328,7 @@ function factGraph(): FactRelationshipGraphPresentation {
         revision: first,
         factId: oldObservation,
         family: "observation",
+        displayLabel: "observation · observation:44444444",
         x: 60,
         y: 150,
         w: 150,
@@ -322,6 +342,7 @@ function factGraph(): FactRelationshipGraphPresentation {
         revision: first,
         factId: newObservation,
         family: "observation",
+        displayLabel: "observation · observation:55555555",
         x: 60,
         y: 40,
         w: 150,
@@ -335,6 +356,7 @@ function factGraph(): FactRelationshipGraphPresentation {
         revision: first,
         factId: oldAssessment,
         family: "assessment",
+        displayLabel: "assessment · assessment:66666666",
         x: 240,
         y: 150,
         w: 150,
@@ -348,6 +370,7 @@ function factGraph(): FactRelationshipGraphPresentation {
         revision: first,
         factId: newAssessment,
         family: "assessment",
+        displayLabel: "assessment · assessment:77777777",
         x: 240,
         y: 40,
         w: 150,
@@ -359,6 +382,7 @@ function factGraph(): FactRelationshipGraphPresentation {
         id: revisionKey(second),
         kind: "revision",
         revision: second,
+        displayLabel: "Revision · rev:22222222",
         x: 400,
         y: 150,
         w: 150,
@@ -434,6 +458,7 @@ function largeFactGraph(nodeCount = 36): FactRelationshipGraphPresentation {
       revision,
       factId,
       family: "observation",
+      displayLabel: `observation · observation:${serial.slice(0, 8)}`,
       x: nodeWidth / 2 + index * columnWidth,
       y: index % 2 === 0 ? 40 : 110,
       w: nodeWidth,
@@ -465,6 +490,28 @@ function renderLargeFactGraph(
 }
 
 describe("exact fact graph renderer", () => {
+  it("paints server-sized labels verbatim for otherwise unfamiliar opaque identities", () => {
+    const graph = factGraph();
+    const fact = graph.nodes.find(
+      (node) => node.kind === "fact" && node.factId === newAssessment,
+    );
+    const revision = graph.nodes.find((node) => node.kind === "revision");
+    if (!fact || !revision)
+      throw new Error("fixture needs both graph node kinds");
+    fact.displayLabel = "assessment · assess_v2:77777777";
+    revision.displayLabel = "Revision · revision_v2:22222222";
+
+    const figure = renderLargeFactGraph(graph);
+    expect(
+      figure.querySelector(`[data-graph-node-id="${fact.id}"] text`)
+        ?.textContent,
+    ).toBe(fact.displayLabel);
+    expect(
+      figure.querySelector(`[data-graph-node-id="${revision.id}"] text`)
+        ?.textContent,
+    ).toBe(revision.displayLabel);
+  });
+
   it.each([
     ["wide", 1_200],
     ["narrow", 360],

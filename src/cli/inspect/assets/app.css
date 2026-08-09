@@ -1291,12 +1291,14 @@ main {
 
 .units {
   overflow-y: auto;
+  min-width: 0;
   padding: 14px 16px;
   display: grid;
   align-content: start;
   gap: 10px;
 }
 .unit-card {
+  min-width: 0;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -1353,6 +1355,7 @@ html.compact .unit-card {
 .change-card-primary {
   display: grid;
   gap: 3px;
+  min-width: 0;
   width: 100%;
   padding: 0;
   border: 0;
@@ -1371,6 +1374,7 @@ html.compact .unit-card {
   font-size: var(--fs-lg);
   font-weight: var(--font-weight-semibold);
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 .change-card-id,
 .change-card-current {
@@ -1398,6 +1402,7 @@ html.compact .unit-card {
   margin-left: 12px;
 }
 .change-card-attention {
+  min-width: 0;
   margin: 10px 0 0;
   padding: 8px 10px;
   border-left: 3px solid var(--warning);
@@ -1417,6 +1422,13 @@ html.compact .unit-card {
 .change-card-attention-evidence,
 .change-card-attention-action {
   color: var(--fg-dim);
+}
+.change-card-attention-reason,
+.change-card-attention-ask,
+.change-card-attention-evidence,
+.change-card-attention-action,
+.change-card-attention-additional {
+  overflow-wrap: anywhere;
 }
 .change-card-attention-additional {
   padding-left: 18px;

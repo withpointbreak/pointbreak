@@ -12,7 +12,6 @@ import type {
   FactRelationshipGraphPresentation,
   RevisionRef,
 } from "./change-protocol";
-import { shortRef } from "./refs";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -426,7 +425,7 @@ export function renderChangeRevisionGraph(
       "dominant-baseline": "middle",
       "aria-hidden": true,
     });
-    label.textContent = `${node.isCurrent ? "current · " : ""}${canActivate ? "" : "context · "}${shortRef(node.revision.revisionId)}`;
+    label.textContent = node.displayLabel;
     group.append(label);
     const activate = canActivate
       ? (): void => options.onActivateRevision(activationRevision)
@@ -666,9 +665,7 @@ export function renderFactRelationshipGraph(
       "dominant-baseline": "middle",
       "aria-hidden": true,
     });
-    label.textContent = focus
-      ? `${words(focus.family)} · ${shortRef(focus.factId)}`
-      : `Revision · ${shortRef(node.revision.revisionId)}`;
+    label.textContent = node.displayLabel;
     group.append(label);
     const activate = canActivate
       ? focus
