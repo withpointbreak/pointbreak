@@ -380,15 +380,19 @@ describe("Change-first composition", () => {
       ),
     );
 
-    const activation = document.querySelector<HTMLButtonElement>(
-      "[data-exact-diff-activation]",
-    );
-    expect(activation?.textContent).toBe("Open annotated diff");
-    expect(document.activeElement).toBe(activation);
+    await vi.waitFor(() => {
+      const activation = document.querySelector<HTMLButtonElement>(
+        "[data-exact-diff-activation]",
+      );
+      expect(activation?.textContent).toBe("Open annotated diff");
+      expect(document.activeElement).toBe(activation);
+    });
     // HTMLElement.click() models the native button activation synthesized by
     // Enter; the document controller intentionally leaves native controls
     // alone.
-    activation?.click();
+    document
+      .querySelector<HTMLButtonElement>("[data-exact-diff-activation]")
+      ?.click();
     await vi.waitFor(() =>
       expect(parseChangeInspectorRoute(location.hash)).toEqual({
         kind: "diff",

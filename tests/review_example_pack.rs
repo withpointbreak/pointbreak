@@ -138,13 +138,15 @@ fn inspector_decision_continuity_browser_gate_uses_isolated_pointbreak_surfaces(
 fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = fs::read_to_string(root.join("scripts/change-inspector-browser-verify.sh"))
-        .expect("read Change Inspector browser gate");
+        .expect("read Change Inspector browser gate")
+        .replace("\r\n", "\n");
     let materializer =
         fs::read_to_string(root.join("scripts/materialize-inspector-decision-matrix.sh"))
             .expect("read decision matrix materializer");
     let browser_program =
         fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
-            .expect("read Change Inspector browser program");
+            .expect("read Change Inspector browser program")
+            .replace("\r\n", "\n");
     let browser_diagnostics =
         fs::read_to_string(root.join("scripts/change-inspector-browser-diagnostics.mjs"))
             .expect("read Change Inspector browser diagnostics");
@@ -455,7 +457,8 @@ fn change_inspector_browser_gate_rejects_frozen_exact_identity_false_negatives()
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let browser_program =
         fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
-            .expect("read Change Inspector browser program");
+            .expect("read Change Inspector browser program")
+            .replace("\r\n", "\n");
 
     let exact_timeline_details = browser_program
         .split_once("const inspectExactTimelineEvent = async (")
