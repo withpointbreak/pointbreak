@@ -1,61 +1,54 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Filter toolbar</p>
+    <p class="ds-label">Search and structured filters</p>
     <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--r-lg)">
-      <input type="search" placeholder="filter by text (title, id, track…)" />
-      <select><option>all tracks</option></select>
-      <select><option>all revisions</option></select>
-      <select><option>all objects</option></select>
-      <button class="ghost">newest first</button>
-      <button class="ghost">clear</button>
+      <input type="search" role="combobox" aria-expanded="true" aria-controls="filter-suggestions-preview" value="change:8c2d revision:58fe" placeholder="search — text or field:value" />
+      <ul id="filter-suggestions-preview" class="filter-suggestions" role="listbox" aria-label="Search suggestions">
+        <li role="option" aria-selected="true"><span>change:8c2d3a91</span></li>
+        <li role="option" aria-selected="false"><span>revision:58fe0c5f</span></li>
+      </ul>
+      <button class="ghost">Filters</button>
+      <button class="ghost">Following</button>
+      <button class="ghost">View</button>
+    </div>
+    <div class="filter-chips" aria-label="applied filters">
+      <button class="filter-chip">change:8c2d <span aria-hidden="true">×</span></button>
+      <button class="filter-chip">revision:58fe <span aria-hidden="true">×</span></button>
     </div>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Ghost buttons</p>
+    <p class="ds-label">Context actions</p>
     <div class="ds-row">
-      <button class="ghost">clear</button>
-      <button class="ghost">newest first</button>
-      <button class="ghost">← units</button>
-      <button class="ghost">view snapshot diff</button>
-      <button class="ghost">show in timeline</button>
+      <button class="ghost">Clear all</button>
+      <button class="ghost">Open selected Change</button>
+      <button class="ghost">Open annotated diff</button>
+      <button class="ghost">Show Change in Timeline</button>
+      <button class="ghost">Show exact Revision in Timeline</button>
     </div>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Theme &amp; density toggles — glyph carries the mode, word the value</p>
+    <p class="ds-label">Theme and density</p>
     <div class="ds-row">
-      <button class="ghost">◐ dark</button>
-      <button class="ghost">☼ light</button>
-      <button class="ghost">☾ dark</button>
-      <button class="ghost">≡ comfortable</button>
-      <button class="ghost">≡ compact</button>
+      <label><input type="radio" name="preview-theme" checked /> System</label>
+      <label><input type="radio" name="preview-theme" /> Light</label>
+      <label><input type="radio" name="preview-theme" /> Dark</label>
+      <label><input type="radio" name="preview-density" checked /> Comfortable</label>
+      <label><input type="radio" name="preview-density" /> Compact</label>
     </div>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Event-type toggles (on / off)</p>
-    <div class="type-toggles">
-      <span class="type-toggle"><span class="dot" style="background:var(--accent)"></span>capture</span>
-      <span class="type-toggle"><span class="dot" style="background:var(--success)"></span>observation</span>
-      <span class="type-toggle"><span class="dot" style="background:var(--assess)"></span>assessment</span>
-      <span class="type-toggle"><span class="dot" style="background:var(--warning)"></span>request</span>
-      <span class="type-toggle"><span class="dot" style="background:var(--teal)"></span>response</span>
-      <span class="type-toggle"><span class="dot" style="background:var(--validation)"></span>validation</span>
-      <span class="type-toggle off"><span class="dot" style="background:var(--fg-dim)"></span>revision_withdrawn</span>
-    </div>
-  </div>
-
-  <div class="ds-group">
-    <p class="ds-label">Command palette — active and empty states</p>
+    <p class="ds-label">Command palette · contextual Change actions</p>
     <div id="cmd-palette" class="modal">
       <div class="modal-card cmd-card">
-        <input id="cmd-input" class="cmd-input" type="text" value="diff" role="combobox" aria-expanded="true" aria-controls="cmd-results" />
-        <ul id="cmd-results" class="cmd-results" role="listbox" aria-label="commands">
-          <li class="cmd-item active" role="option" aria-selected="true"><span class="cmd-label">Open selected revision diff</span><span class="cmd-hint">Enter</span></li>
-          <li class="cmd-item" role="option"><span class="cmd-label">Copy current view link</span><span class="cmd-hint">⌘C</span></li>
-          <li class="cmd-empty">No commands match “timeline filter”.</li>
-        </ul>
+        <input id="cmd-input" class="cmd-input" type="text" value="timeline" aria-label="Filter commands" />
+        <div id="cmd-results" class="cmd-results" role="listbox" aria-label="Commands">
+          <button class="cmd-item active" role="option" aria-selected="true"><span class="cmd-label">Show exact Revision in Timeline</span><span class="cmd-hint">Enter</span></button>
+          <button class="cmd-item" role="option" aria-selected="false"><span class="cmd-label">Copy current view link</span><span class="cmd-hint">Enter</span></button>
+          <p class="cmd-empty">No commands match “unavailable action”.</p>
+        </div>
       </div>
     </div>
   </div>
@@ -66,18 +59,17 @@
       <div class="modal-card key-help-card">
         <header class="modal-head"><h2>Keyboard shortcuts</h2><button class="ghost">close</button></header>
         <dl class="key-help-list">
-          <dt><kbd>⌘K</kbd></dt><dd>open the command palette</dd>
-          <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the selection down / up</dd>
-          <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>jump to timeline / revisions / threads</dd>
-          <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>jump to the top / bottom of the timeline</dd>
-          <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>page through visible timeline entries</dd>
-          <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move half a page down / up</dd>
-          <dt><kbd>Esc</kbd></dt><dd>close the active overlay</dd>
+          <dt><kbd>Cmd</kbd> / <kbd>Ctrl</kbd> + <kbd>K</kbd></dt><dd>open the command palette</dd>
+          <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>open Timeline / Changes / Attention</dd>
+          <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the local event or Change cursor</dd>
+          <dt><kbd>Enter</kbd></dt><dd>open the selected event or Change; choose an explicit current Revision from exact detail</dd>
+          <dt><kbd>Space</kbd> / <kbd>Shift</kbd> + <kbd>Space</kbd></dt><dd>page the exact detail forward / backward</dd>
+          <dt><kbd>Esc</kbd></dt><dd>return one layer without discarding unrelated state</dd>
         </dl>
         <div class="key-help-workflow">
           <h3>Review stages and the CLI</h3>
-          <p>Work -> Claims -> Evidence -> Questions -> Call maps to <code>capture</code>/<code>revision</code>/<code>inspect</code>, then <code>observation</code>, <code>validation</code>, <code>input-request</code>, and <code>assessment</code>. <code>attention</code> lists outstanding judgment; <code>association</code> records where the same revision landed. Validation is evidence, never a verdict or merge gate.</p>
-          <p>Review is local, read-only, and advisory: it shows and copies commands but never runs them. Copied commands keep visible placeholder tokens like <code>&lt;your-track&gt;</code> — replace each placeholder before running.</p>
+          <p>Work -> Claims -> Evidence -> Questions -> Call maps to <code>capture</code> of one exact Revision in a stable Change, then <code>observation</code>, <code>validation</code>, <code>input-request</code>, and <code>assessment</code>. <code>change attention</code> lists outstanding judgment; <code>association</code> records where that exact Revision landed—the same revision already under review.</p>
+          <p>Review is local, read-only, and advisory. Validation is evidence, never a verdict or merge gate.</p>
         </div>
       </div>
     </div>

@@ -200,6 +200,27 @@
         return node.getClientRects().length === 0 || style.display === "none" || style.visibility === "hidden";
       });
   });
+  const expectLensHierarchy = async (expectedLens) => {
+    const hierarchy = await page.evaluate(() => {
+      const headings = Array.from(document.querySelectorAll("#master h1"));
+      const current = document.querySelector("#lens-switcher .lens-tab[aria-current='page']");
+      const metadata = document.querySelector("#master .lens-meta");
+      return {
+        headingCount: headings.length,
+        heading: headings[0]?.textContent?.trim() || "",
+        selectedTab: current?.textContent?.trim() || "",
+        metadata: metadata?.textContent?.trim() || "",
+      };
+    });
+    expect(
+      hierarchy.headingCount === 1
+        && hierarchy.heading === expectedLens
+        && hierarchy.selectedTab.startsWith(expectedLens)
+        && hierarchy.metadata.length > 0,
+      `${expectedLens} lens hierarchy`,
+      `lens heading, selected tab, or count/order metadata drifted: ${JSON.stringify(hierarchy)}`,
+    );
+  };
 
   const bootstrapUrl = (server) =>
     `${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
@@ -244,6 +265,14 @@
     "0 recorded events",
     true,
   );
+  await page.goto(`${config.readerServers.emptyReadyL2.baseUrl}/#/changes`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelector("#master")?.textContent?.includes("No Changes."));
+  expect(
+    await page.locator("#master").innerText().then((text) => text.includes("No Changes.")),
+    "empty ready Changes",
+    "an activated empty store did not expose the Change-aware empty state",
+  );
+  await screenshot("reader-empty-ready-l2-changes");
   await exerciseReaderState(
     config.readerServers.l0,
     "l0",
@@ -288,6 +317,41 @@
   // are virtualized; these checks deliberately assert a bounded live DOM, not
   // the total authoritative event count.
   const defaultTimeline = await open("", layouts[0], "default Timeline startup");
+  await page.waitForFunction(() => {
+    const repository = document.querySelector("#store-chip-repo")?.textContent?.trim();
+    const labels = Array.from(document.querySelectorAll("#store-identity-rows dt"), (item) => item.textContent?.trim());
+    return repository && repository !== "local server"
+      && labels.includes("repository") && labels.includes("store");
+  });
+  const identityChrome = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll("#store-identity-rows dt")).map((term) => ({
+      label: term.textContent?.trim() || "",
+      value: term.nextElementSibling?.textContent?.trim() || "",
+    }));
+    return {
+      repository: document.querySelector("#store-chip-repo")?.textContent?.trim() || "",
+      chipName: document.querySelector("#store-chip")?.getAttribute("aria-label") || "",
+      rows,
+      title: document.title,
+      connection: document.querySelector("#connection-status")?.textContent?.trim() || "",
+      refresh: document.querySelector("#refresh-status")?.textContent?.trim() || "",
+      refreshState: document.querySelector("#refresh")?.getAttribute("data-state") || "",
+    };
+  });
+  expect(
+    identityChrome.repository.length > 0
+      && identityChrome.repository !== "local server"
+      && identityChrome.rows.some((row) => row.label === "repository" && row.value === identityChrome.repository)
+      && identityChrome.rows.some((row) => row.label === "store" && row.value.endsWith(" store"))
+      && identityChrome.rows.every((row) => row.value.length > 0 && identityChrome.chipName.includes(row.value))
+      && identityChrome.title === `${identityChrome.repository} · Pointbreak Review`
+      && identityChrome.connection === "connected"
+      && identityChrome.refresh === "watching"
+      && identityChrome.refreshState === "watching",
+    "repository identity chrome",
+    `repository identity or accepted refresh state was incomplete: ${JSON.stringify(identityChrome)}`,
+  );
+  await expectLensHierarchy("Timeline");
   expect(defaultTimeline.liveEvents > 0 && defaultTimeline.liveEvents < 80, "default Timeline startup", `expected a bounded live Timeline window, saw ${defaultTimeline.liveEvents}`);
   const initialTimelineText = await page.locator("#master").innerText();
   const recordedEvents = Number((initialTimelineText.match(/([0-9]+) recorded events/) || [])[1]);
@@ -633,7 +697,23 @@
   await open("timeline?limit=100&order=desc", layouts[0], "Timeline display preferences");
   await page.locator("#view-toggle").click();
   await page.locator("#theme-dark").check();
+  await page.locator("#density-comfortable").check();
+  const comfortableRowPadding = await page.locator("#timeline .event").first().evaluate((row) => {
+    const style = getComputedStyle(row);
+    return Number.parseFloat(style.paddingBlockStart) + Number.parseFloat(style.paddingBlockEnd);
+  });
   await page.locator("#density-compact").check();
+  const compactRowPadding = await page.locator("#timeline .event").first().evaluate((row) => {
+    const style = getComputedStyle(row);
+    return Number.parseFloat(style.paddingBlockStart) + Number.parseFloat(style.paddingBlockEnd);
+  });
+  expect(
+    Number.isFinite(comfortableRowPadding)
+      && Number.isFinite(compactRowPadding)
+      && compactRowPadding < comfortableRowPadding,
+    "Timeline density geometry",
+    `compact Timeline row padding ${compactRowPadding} did not tighten comfortable padding ${comfortableRowPadding}`,
+  );
   await screenshot("wide-timeline-dark-compact");
   await page.locator("#theme-light").check();
   await page.locator("#density-comfortable").check();
@@ -843,6 +923,15 @@
   await page.locator("#timeline").evaluate((node) => {
     node.dataset.browserRetention = "parked-window";
   });
+  await page.evaluate(() => {
+    const status = document.querySelector("#refresh-status");
+    const states = [status?.textContent?.trim() || ""];
+    window.__pointbreakRefreshStates = states;
+    if (status) {
+      new MutationObserver(() => states.push(status.textContent?.trim() || ""))
+        .observe(status, { childList: true, characterData: true, subtree: true });
+    }
+  });
   await screenshot("timeline-parked-before-append");
   // Wait for the normal poll/catch-up affordance. The shell worker's receipt
   // remains a completion-last evidence record and is checked after this
@@ -858,6 +947,16 @@
   await follow.click();
   await page.waitForFunction(() => document.querySelector("#follow-toggle")?.textContent === "Following");
   await page.waitForFunction((key) => document.querySelector("#master")?.dataset.timelineKey !== key, parkedTimelineKey);
+  await page.waitForFunction(() => window.__pointbreakRefreshStates?.includes("updated"));
+  await page.waitForFunction(() => document.querySelector("#refresh-status")?.textContent === "watching");
+  const acceptedRefreshStates = await page.evaluate(() => window.__pointbreakRefreshStates ?? []);
+  expect(
+    acceptedRefreshStates[0] === "watching"
+      && acceptedRefreshStates.includes("updated")
+      && acceptedRefreshStates.at(-1) === "watching",
+    "accepted refresh lifecycle",
+    `refresh did not move watching -> updated -> watching after the accepted append: ${JSON.stringify(acceptedRefreshStates)}`,
+  );
   await screenshot("timeline-followed-after-append");
 
   // The continuation captured above names the pre-append projection. Exercise
@@ -876,6 +975,7 @@
 
   for (const layout of layouts) {
     const metrics = await open("changes?limit=100&order=change_id_asc", layout, `${layout.name} changes`);
+    await expectLensHierarchy("Changes");
     expect(metrics.liveCards > 0 && metrics.liveCards <= 100, `${layout.name} changes`, `expected bounded live card count, saw ${metrics.liveCards}`);
     expect(await page.getByRole("button", { name: /Next page/ }).count() > 0, `${layout.name} changes`, "363+ fixture did not offer pagination");
     expect(await cardNamesAreUseful(), `${layout.name} card names`, "card accessible names must lead with human Revision presentation and retain exact identity");
@@ -898,6 +998,23 @@
     expect(firstPageIds.at(-1) < nextPageIds[0], `${layout.name} page boundary`, "next page does not follow the first page in change_id_asc order");
 
     const attentionMetrics = await open("attention?limit=50&order=change_id_asc", layout, `${layout.name} attention`);
+    await expectLensHierarchy("Attention");
+    const attentionCountCopy = await page.evaluate(() => ({
+      metadata: document.querySelector("#master .lens-meta")?.textContent?.trim() || "",
+      tabName: document.querySelector('[data-lens="attention"]')?.getAttribute("aria-label") || "",
+      visibleCount: document.querySelector('[data-lens="attention"] .lens-count')?.textContent?.trim() || "",
+      topbarStat: document.querySelector("#stat-threads")?.textContent?.trim() || "",
+      topbarStatTitle: document.querySelector("#stat-threads")?.getAttribute("title") || "",
+    }));
+    expect(
+      attentionCountCopy.metadata.includes("on this page")
+        && attentionCountCopy.tabName.includes("shown on this page")
+        && attentionCountCopy.visibleCount.endsWith(" shown")
+        && attentionCountCopy.topbarStat.endsWith(" shown on this page")
+        && attentionCountCopy.topbarStatTitle === "Changes shown on this Attention page",
+      `${layout.name} bounded Attention count`,
+      `Attention count was presented as an unbounded total: ${JSON.stringify(attentionCountCopy)}`,
+    );
     expect(attentionMetrics.liveCards <= 100, `${layout.name} attention`, `attention page exceeded live card bound: ${attentionMetrics.liveCards}`);
     await screenshot(`${layout.name}-attention`);
   }
@@ -910,6 +1027,7 @@
   const attentionPresentation = await page.locator(".unit-card[data-change-id]").evaluateAll((cards) => cards.map((card) => {
     const reason = card.querySelector(".change-card-attention-reason");
     const ask = card.querySelector(".change-card-attention-ask");
+    const evidence = card.querySelector(".change-card-attention-evidence");
     const action = card.querySelector(".change-card-attention-action");
     const diagnostics = Array.from(
       card.querySelectorAll(".change-card-attention-diagnostics li"),
@@ -920,6 +1038,7 @@
       reason: reason?.textContent?.trim() || "",
       reasonTitle: reason?.getAttribute("title") || "",
       ask: ask?.textContent?.trim() || "",
+      evidence: evidence?.textContent?.trim() || "",
       action: action?.textContent?.trim() || "",
       diagnostics,
     };
@@ -931,11 +1050,13 @@
       && card.reason.length > 0
       && card.reasonTitle.length > 0
       && card.ask.length > 0
+      && card.evidence.length > 0
       && card.action.startsWith("Next: ")
+      && new Set([card.reason, card.ask, card.evidence, card.action]).size === 4
       && card.diagnostics.every((diagnostic) => diagnostic.length > 0),
     ),
     "reason-bearing Attention",
-    "an attention card omitted its reason, evidence request, next action, or supplied diagnostic",
+    "an attention card omitted or collapsed its reason, ask, evidence, next action, or supplied diagnostic",
   );
   await screenshot("wide-attention-reasons");
 
@@ -1189,6 +1310,33 @@
   await page.goBack();
   await page.waitForFunction((expectedRoute) => location.hash === `#/${expectedRoute}` && Boolean(document.querySelector("#detail-body .change-revision-graph")), graphRoute);
 
+  await open(graphRoute, layouts[1], "narrow Change Revision relationship graph");
+  const narrowChangeGraphViewport = page.locator("#detail-body .change-revision-graph [data-graph-viewport]");
+  const narrowChangeGraphGeometry = await narrowChangeGraphViewport.evaluate((viewport) => ({
+    clientWidth: viewport.clientWidth,
+    scrollWidth: viewport.scrollWidth,
+    svgWidth: viewport.querySelector("svg")?.getBoundingClientRect().width || 0,
+  }));
+  expect(
+    narrowChangeGraphGeometry.clientWidth > 0
+      && narrowChangeGraphGeometry.scrollWidth > narrowChangeGraphGeometry.clientWidth
+      && narrowChangeGraphGeometry.svgWidth > narrowChangeGraphGeometry.clientWidth,
+    "narrow intrinsic Change graph viewport",
+    `Change graph was compressed instead of pannable: ${JSON.stringify(narrowChangeGraphGeometry)}`,
+  );
+  await narrowChangeGraphViewport.focus();
+  await page.keyboard.press("End");
+  const changeGraphEnd = await narrowChangeGraphViewport.evaluate((viewport) => viewport.scrollLeft);
+  await page.keyboard.press("Home");
+  const changeGraphHome = await narrowChangeGraphViewport.evaluate((viewport) => viewport.scrollLeft);
+  expect(
+    changeGraphEnd === narrowChangeGraphGeometry.scrollWidth - narrowChangeGraphGeometry.clientWidth
+      && changeGraphHome === 0,
+    "narrow Change graph keyboard panning",
+    `Home/End panning produced ${changeGraphHome}/${changeGraphEnd} for ${JSON.stringify(narrowChangeGraphGeometry)}`,
+  );
+  await screenshot("narrow-change-revision-graph");
+
   const expectedParallelChange = topologyFixture.parallel_current.change;
   const parallelRoute = `changes?limit=100&order=change_id_asc&topology=parallel_current&q=${encodeURIComponent(expectedParallelChange)}`;
   await open(parallelRoute, layouts[0], "parallel explicit chooser");
@@ -1401,6 +1549,14 @@
   const help = page.locator("#key-help");
   expect(await help.evaluate((node) => !node.classList.contains("hidden")), "help overlay", "? did not open help");
   expect(await page.evaluate(() => document.activeElement?.id === "key-help-close"), "help focus", "help did not move focus into its dialog");
+  const helpText = await help.innerText();
+  expect(
+    helpText.includes("Timeline / Changes / Attention")
+      && helpText.includes("one exact Revision in a stable Change")
+      && helpText.includes("change attention"),
+    "Change-aware help",
+    "help did not describe the served Change lenses and exact-Revision workflow",
+  );
   await page.keyboard.press("Shift+Tab");
   expect(await page.evaluate(() => document.querySelector("#key-help")?.contains(document.activeElement)), "help modal trap", "Shift+Tab escaped the help dialog");
   await page.keyboard.press("Escape");
@@ -1428,7 +1584,14 @@
   await open(exact, layouts[0], "exact fact relationship graph");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body .fact-relationship-graph")));
   const factGraphMetrics = await page.locator("#detail-body .fact-relationship-graph").evaluate((graph, factPortId) => ({
+    viewports: graph.querySelectorAll("[data-graph-viewport]").length,
+    viewportTabIndex: graph.querySelector("[data-graph-viewport]")?.getAttribute("tabindex") || "",
+    viewportInstructions: graph.querySelector("[data-graph-viewport]")?.getAttribute("aria-label") || "",
     svg: graph.querySelectorAll("svg.fact-relationship-graph-svg").length,
+    svgWidth: Number(graph.querySelector("svg.fact-relationship-graph-svg")?.getAttribute("width") || 0),
+    svgMaxWidth: graph.querySelector("svg.fact-relationship-graph-svg")
+      ? getComputedStyle(graph.querySelector("svg.fact-relationship-graph-svg")).maxWidth
+      : "",
     nodes: graph.querySelectorAll("g.fact-relationship-node").length,
     edges: graph.querySelectorAll("g.fact-relationship-edge").length,
     observationSupersedes: graph.querySelectorAll('g.fact-relationship-edge[data-edge-kind="observation-supersedes"]').length,
@@ -1437,6 +1600,7 @@
     expectedFactPort: Array.from(graph.querySelectorAll("g.fact-relationship-edge"))
       .some((edge) => edge.getAttribute("data-port-id") === factPortId),
     textual: graph.querySelectorAll("details[data-graph-textual-equivalent]").length,
+    textualOutsideViewport: graph.querySelector("[data-graph-viewport] details[data-graph-textual-equivalent]") === null,
     nodePresentation: Array.from(graph.querySelectorAll("g.fact-relationship-node")).map((node) => {
       const revision = node.getAttribute("data-revision-id") || "";
       const artifact = node.getAttribute("data-artifact-hash") || "";
@@ -1461,13 +1625,20 @@
   const factGraphContextNodes = factGraphMetrics.nodePresentation
     .filter((node) => node.availability === "relationship_context_only");
   expect(
-    factGraphMetrics.svg === 1
+    factGraphMetrics.viewports === 1
+      && factGraphMetrics.viewportTabIndex === "0"
+      && factGraphMetrics.viewportInstructions.includes("Left")
+      && factGraphMetrics.viewportInstructions.includes("End")
+      && factGraphMetrics.svg === 1
+      && factGraphMetrics.svgWidth > 0
+      && factGraphMetrics.svgMaxWidth === "none"
       && factGraphMetrics.nodes >= 2
       && factGraphMetrics.edges >= 2
       && factGraphMetrics.observationSupersedes >= 1
       && factGraphMetrics.factPorts >= 1
       && factGraphMetrics.expectedFactPort
       && factGraphMetrics.textual === 1
+      && factGraphMetrics.textualOutsideViewport
       && factGraphMetrics.nodePresentation.every((node) =>
         node.revision.length > 0 && node.artifact.length > 0
           && node.label.includes(node.revision) && node.label.includes(node.artifact))
@@ -1530,6 +1701,7 @@
     "entering the full-frame diff did not move focus to its explicit return action",
   );
   const diffMetrics = await page.locator("#diff-page").evaluate((diff) => ({
+    headingCount: diff.querySelectorAll("h1").length,
     title: diff.querySelector("#diff-page-title")?.textContent || "",
     titleSource: diff.querySelector("#diff-page-title")?.getAttribute("title") || "",
     keyHints: diff.querySelector(".diff-page-keys")?.textContent?.replace(/\s+/g, " ").trim() || "",
@@ -1539,7 +1711,8 @@
     splitVisible: !document.querySelector(".split")?.classList.contains("hidden"),
   }));
   expect(
-    diffMetrics.title.length > 0
+    diffMetrics.headingCount === 1
+      && diffMetrics.title.length > 0
       && diffMetrics.titleSource.includes(config.fixture.rich.revisionId)
       && diffMetrics.titleSource.includes(config.fixture.rich.artifactHash)
       && diffMetrics.keyHints.includes("[")
@@ -1647,6 +1820,29 @@
   for (const expected of ["Matrix fact", "Open decision", "passed current", "Association comparisons"]) {
     expect(exactText.includes(expected), "narrow rich revision", `missing representative detail: ${expected}`);
   }
+  const narrowFactGraphViewport = page.locator("#detail-body .fact-relationship-graph [data-graph-viewport]");
+  const narrowGraphGeometry = await narrowFactGraphViewport.evaluate((viewport) => ({
+    clientWidth: viewport.clientWidth,
+    scrollWidth: viewport.scrollWidth,
+    svgWidth: viewport.querySelector("svg")?.getBoundingClientRect().width || 0,
+  }));
+  expect(
+    narrowGraphGeometry.clientWidth > 0
+      && narrowGraphGeometry.scrollWidth > narrowGraphGeometry.clientWidth
+      && narrowGraphGeometry.svgWidth > narrowGraphGeometry.clientWidth,
+    "narrow intrinsic graph viewport",
+    `fact graph was compressed instead of pannable: ${JSON.stringify(narrowGraphGeometry)}`,
+  );
+  await narrowFactGraphViewport.focus();
+  await page.keyboard.press("End");
+  const graphEnd = await narrowFactGraphViewport.evaluate((viewport) => viewport.scrollLeft);
+  await page.keyboard.press("Home");
+  const graphHome = await narrowFactGraphViewport.evaluate((viewport) => viewport.scrollLeft);
+  expect(
+    graphEnd === narrowGraphGeometry.scrollWidth - narrowGraphGeometry.clientWidth && graphHome === 0,
+    "narrow graph keyboard panning",
+    `Home/End panning produced ${graphHome}/${graphEnd} for ${JSON.stringify(narrowGraphGeometry)}`,
+  );
   await screenshot("narrow-exact-detail");
   await page.locator("#detail-body").evaluate((node) => { node.scrollTop = node.scrollHeight; });
   const narrowBackBounds = await page.evaluate(() => {

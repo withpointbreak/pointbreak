@@ -1808,6 +1808,12 @@ fn design_system_gallery_covers_live_shell_and_overlay_states() {
         "class=\"cmd-empty\"",
         "id=\"key-help\"",
         "class=\"key-help-list\"",
+        "class=\"lens-heading\">Timeline",
+        "class=\"lens-meta\"",
+        "data-lens=\"changes\"",
+        "data-lens=\"attention\"",
+        "data-state=\"degraded\"",
+        "id=\"diff-page\"",
         "class=\"advisory-note\"",
         "class=\"reader-scope-note\"",
         "class=\"modal\"",
@@ -1822,6 +1828,9 @@ fn design_system_gallery_covers_live_shell_and_overlay_states() {
         ".route-diagnostic",
         ".cmd-item",
         ".key-help-list",
+        ".lens-heading",
+        ".lens-meta",
+        ".diff-page",
         ".advisory-note",
         ".reader-scope-note",
         ".modal-card",
@@ -1865,26 +1874,25 @@ fn design_system_gallery_covers_the_shipped_attention_lens() {
         .expect("gallery styles exist");
 
     for marker in [
-        "attention-card",
-        "attention-tier",
-        "attention-kind",
-        "attention-freshness",
+        "change-card-attention",
+        "change-card-attention-reason",
+        "change-card-attention-ask",
+        "change-card-attention-evidence",
+        "change-card-attention-action",
+        "change-card-attention-diagnostics",
     ] {
         assert!(
             body.contains(marker) || styles.contains(marker),
             "missing {marker}"
         );
     }
-    assert!(body.contains("Needs input"));
-    assert!(body.contains("Advisory"));
     for marker in [
-        "open-input-request",
-        "ambiguous-assessment",
-        "stale-assessment",
-        "failed-validation",
-        "manual_decision_required",
-        "accepted · current",
-        "superseded by",
+        "Current Revision assessment coverage is incomplete.",
+        "Assess every current Revision.",
+        "Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222",
+        "Next: Open an exact Revision and record its assessment.",
+        "Operative requests remain unresolved.",
+        "Open request input-request:sha256:4f67c810.",
     ] {
         assert!(
             body.contains(marker),
@@ -2007,8 +2015,15 @@ fn design_system_final_state_has_no_temporary_visual_system() {
     }
     let attention =
         include_str!("../src/cli/inspect/design-system/_bodies/data-attention.body.html");
-    assert!(attention.contains("stale-assessment"));
-    assert!(attention.contains("accepted · current"));
+    for marker in [
+        "change-card-attention-reason",
+        "change-card-attention-evidence",
+        "change-card-attention-action",
+        "accepted with follow-up",
+    ] {
+        assert!(attention.contains(marker));
+    }
+    assert!(!attention.contains("stale-assessment"));
 
     let large_identity =
         include_str!("../src/cli/inspect/design-system/_bodies/identity-large.body.html");
@@ -2112,42 +2127,234 @@ fn review_visual_promotion_leaves_terminal_palettes_compatibility_frozen() {
 }
 
 #[test]
-fn design_system_gallery_keeps_dag_edges_and_current_copy_in_sync() {
+fn design_system_gallery_keeps_change_graph_panning_and_exact_copy_in_sync() {
     let styles = include_str!("../src/cli/inspect/design-system/styles.css");
     let data_cards = include_str!("../src/cli/inspect/design-system/_bodies/data-cards.body.html");
 
     assert!(
-        styles.contains("--dag-edge"),
-        "gallery DAG styles should carry the same default edge token as the live inspector"
-    );
-    let edge_block = styles
-        .split(".dag-edge {")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect(".dag-edge block");
-    assert!(
-        edge_block.contains("stroke: var(--dag-edge)")
-            && !edge_block.contains("stroke: var(--border)"),
-        "gallery DAG edges should not fall back to only the quiet border token: {edge_block}"
-    );
-    let arrow_block = styles
-        .split(".dag-arrow-head {")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect(".dag-arrow-head block");
-    assert!(
-        arrow_block.contains("fill: var(--dag-edge)")
-            && !arrow_block.contains("fill: var(--border)"),
-        "gallery DAG arrowheads should share the stronger edge token: {arrow_block}"
+        styles.contains(".relationship-graph-viewport")
+            && styles.contains("overflow-x: auto")
+            && styles.contains("max-width: none"),
+        "gallery Change graph should retain the live intrinsic-width panning contract"
     );
     assert!(
-        data_cards.contains("current in thread"),
-        "gallery revision-card examples should use the live current-state wording"
+        data_cards.contains("data-graph-viewport")
+            && data_cards.contains("tabindex=\"0\"")
+            && data_cards.contains("data-graph-textual-equivalent"),
+        "gallery Change graph should expose keyboard panning and a complete text alternative"
     );
     assert!(
-        !data_cards.contains(">head</span>") && !data_cards.contains("revision thread · head "),
-        "gallery examples should avoid the old bare head copy"
+        data_cards.contains("exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7")
+            && data_cards.contains("Choose an exact current Revision"),
+        "gallery Change cards should retain full exact identity and explicit plural choices"
     );
+    assert!(
+        !data_cards.contains("revision thread") && !data_cards.contains("current in thread"),
+        "gallery examples should not revive Revision-thread ownership"
+    );
+}
+
+#[test]
+fn public_inspector_fixtures_describe_the_served_change_review() {
+    let navigation_gallery =
+        include_str!("../src/cli/inspect/design-system/_bodies/navigation-topbar.body.html");
+    let input_gallery =
+        include_str!("../src/cli/inspect/design-system/_bodies/inputs-controls.body.html");
+    let timeline_gallery =
+        include_str!("../src/cli/inspect/design-system/_bodies/data-timeline.body.html");
+    let card_gallery =
+        include_str!("../src/cli/inspect/design-system/_bodies/data-cards.body.html");
+    let attention_gallery =
+        include_str!("../src/cli/inspect/design-system/_bodies/data-attention.body.html");
+    let diff_gallery = include_str!("../src/cli/inspect/design-system/_bodies/data-diff.body.html");
+    let gallery = [
+        navigation_gallery,
+        input_gallery,
+        timeline_gallery,
+        card_gallery,
+        attention_gallery,
+        diff_gallery,
+    ]
+    .join("\n");
+    for marker in [
+        "Timeline",
+        "Changes",
+        "Attention",
+        "Change card",
+        "reason",
+        "evidence",
+        "next action",
+        "data-state=\"degraded\"",
+        "class=\"lens-heading\"",
+        "id=\"diff-page\"",
+        "data-graph-viewport",
+    ] {
+        assert!(
+            gallery.contains(marker),
+            "design gallery must present the served Change review's {marker:?}"
+        );
+    }
+    for retired in [
+        "data-lens=\"list\"",
+        "data-lens=\"threads\"",
+        "data-state=\"stalled\"",
+        "Unit card",
+        "revision thread",
+        "diff-demo",
+    ] {
+        assert!(
+            !gallery.contains(retired),
+            "canonical gallery must not present retired composition marker {retired:?}"
+        );
+    }
+
+    let gallery_about = include_str!("../src/cli/inspect/design-system/ABOUT.md");
+    let gallery_readme = include_str!("../src/cli/inspect/design-system/README.md");
+    assert!(gallery_about.contains("`pointbreak inspect`"));
+    assert!(!gallery_about.contains("`shore inspect`"));
+    assert!(gallery_readme.contains("Timeline, Changes, and Attention"));
+
+    let (_repo, inspector) = served_asset_inspector();
+    let help = inspector.get_text("/");
+    for marker in [
+        "open Timeline / Changes / Attention",
+        "open the selected event or Change",
+        "id=\"diff-page\"",
+    ] {
+        assert!(
+            help.contains(marker),
+            "served help and shell must describe the active Change review's {marker:?}"
+        );
+    }
+
+    let manual = include_str!("../docs/manual-testing.md");
+    for marker in [
+        "Timeline",
+        "Changes",
+        "Attention",
+        "No Changes.",
+        ".revision.revisionId",
+    ] {
+        assert!(
+            manual.contains(marker),
+            "manual testing must cover the served Change review's {marker:?}"
+        );
+    }
+
+    let density = include_str!("../src/cli/inspect/design-system/density-check.mjs");
+    for marker in ["Timeline", "Changes", "Attention"] {
+        assert!(
+            density.contains(marker),
+            "density fixtures must include the active {marker} lens"
+        );
+    }
+
+    let browser = [
+        include_str!("../scripts/change-inspector-browser-verify.sh"),
+        include_str!("../scripts/change-inspector-browser-verify.mjs"),
+    ]
+    .join("\n");
+    for marker in [
+        ".revision.revisionId",
+        "#connection-status",
+        "#store-chip-repo",
+        "#store-identity-rows",
+        "#refresh-status",
+        "degraded",
+        "#master h1",
+        "No Changes.",
+        "change-card-attention-reason",
+        "change-card-attention-evidence",
+        "change-card-attention-action",
+        "exact fact relationship graph",
+        "data-graph-viewport",
+        "density-compact",
+        "#diff-page",
+    ] {
+        assert!(
+            browser.contains(marker),
+            "browser verification must retain the active Change review's {marker:?} marker"
+        );
+    }
+    assert!(
+        !browser.contains("data-state=\"stalled\"") && !browser.contains("\"stalled\""),
+        "browser verification must describe recoverable liveness as degraded, not stalled"
+    );
+}
+
+#[test]
+fn canonical_change_cards_match_the_served_axes_and_keyboard_semantics() {
+    let cards = include_str!("../src/cli/inspect/design-system/_bodies/data-cards.body.html");
+    let topbar =
+        include_str!("../src/cli/inspect/design-system/_bodies/navigation-topbar.body.html");
+
+    for axis in [
+        "<dt>Topology</dt>",
+        "<dt>Lifecycle</dt>",
+        "<dt>Attention</dt>",
+        "<dt>Availability</dt>",
+    ] {
+        assert!(
+            cards.contains(axis),
+            "canonical Change cards must show the served {axis:?} state axis"
+        );
+    }
+    assert!(
+        !cards.contains("<dt>Qualification</dt>"),
+        "canonical Change cards must not retain a non-served Qualification axis"
+    );
+    assert!(
+        topbar.contains("class=\"lens-count\""),
+        "canonical top bar must use the served Attention lens-count marker"
+    );
+    assert!(
+        !topbar.contains("class=\"attention-badge\""),
+        "canonical top bar must not retain the retired Attention badge marker"
+    );
+    assert!(
+        !cards.contains("change-revision-node is-context\" tabindex=\"0\""),
+        "relationship-only Change graph context must remain out of the tab order"
+    );
+}
+
+#[test]
+fn browser_program_checks_narrow_keyboard_bounds_for_both_relationship_graphs() {
+    let browser = include_str!("../scripts/change-inspector-browser-verify.mjs");
+    for (graph, variable, screenshot) in [
+        (
+            "change-revision-graph",
+            "narrowChangeGraphViewport",
+            "narrow-change-revision-graph",
+        ),
+        (
+            "fact-relationship-graph",
+            "narrowFactGraphViewport",
+            "narrow-exact-detail",
+        ),
+    ] {
+        let selector = format!("#detail-body .{graph} [data-graph-viewport]");
+        let declaration = format!("const {variable} = page.locator(\"{selector}\");");
+        let start = browser
+            .find(&declaration)
+            .unwrap_or_else(|| panic!("browser program must select the narrow {graph} viewport"));
+        let tail = &browser[start..];
+        let end = tail
+            .find(screenshot)
+            .unwrap_or_else(|| panic!("browser program must capture the exercised narrow {graph}"));
+        let block = &tail[..end];
+        let focus = format!("await {variable}.focus();");
+        for marker in [
+            focus.as_str(),
+            "keyboard.press(\"End\")",
+            "keyboard.press(\"Home\")",
+            "scrollWidth >",
+        ] {
+            assert!(
+                block.contains(marker),
+                "browser program must exercise {marker:?} after selecting the narrow {graph} viewport"
+            );
+        }
+    }
 }
 
 // The theme flip, the OS-preference default, and the localStorage round-trip are

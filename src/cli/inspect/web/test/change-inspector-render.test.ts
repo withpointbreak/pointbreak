@@ -98,6 +98,18 @@ const attention: AttentionPage = {
         reasons: [
           { kind: "current_revisions_need_assessment", revisions: [revision] },
         ],
+        reasonPresentations: [
+          {
+            cause: {
+              kind: "current_revisions_need_assessment",
+              revisions: [revision],
+            },
+            ask: "ASK SENTINEL",
+            reason: "REASON SENTINEL",
+            evidence: "EVIDENCE SENTINEL",
+            nextAction: "NEXT ACTION SENTINEL",
+          },
+        ],
         diagnostics: [
           "assessment coverage is incomplete for revision:sha256:one",
         ],
@@ -408,10 +420,14 @@ describe("Change inspector render", () => {
       {
         route: { kind: "timeline" as const, historyQuery: {} },
         current: "timeline",
+        heading: "Timeline",
+        meta: "1 event · newest first",
       },
       {
         route: { kind: "lens" as const, lens: "changes" as const, query: {} },
         current: "changes",
+        heading: "Changes",
+        meta: "1 Change on this page · Change ID order",
       },
       {
         route: {
@@ -420,10 +436,12 @@ describe("Change inspector render", () => {
           query: {},
         },
         current: "attention",
+        heading: "Attention",
+        meta: "1 Change on this page · Change ID order",
       },
     ];
 
-    for (const { route, current } of cases) {
+    for (const { route, current, heading, meta } of cases) {
       const state = createChangeInspectorState(route);
       state.publish(
         stageGeneration(profile, changes, attention, profile, eventHistory()),
@@ -436,6 +454,13 @@ describe("Change inspector render", () => {
         ),
       );
       expect(links).toHaveLength(3);
+      expect(document.querySelectorAll("#master h1")).toHaveLength(1);
+      expect(
+        document.querySelector("#master h1.lens-heading")?.textContent,
+      ).toBe(heading);
+      expect(document.querySelector("#master .lens-meta")?.textContent).toBe(
+        meta,
+      );
       expect(
         links.map((link) => ({
           lens: link.dataset.lens,
@@ -459,7 +484,84 @@ describe("Change inspector render", () => {
           current: current === "attention" ? "page" : null,
         },
       ]);
+      const attentionLink = links.find(
+        (link) => link.dataset.lens === "attention",
+      );
+      expect(attentionLink?.querySelector(".lens-count")?.textContent).toBe(
+        "1 shown",
+      );
+      expect(attentionLink?.getAttribute("aria-label")).toBe(
+        "Attention, 1 Change shown on this page",
+      );
     }
+  });
+
+  it("refreshes the bounded Attention count from each accepted generation", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    const second = {
+      ...attention.changes[0],
+      changeId: "change:sha256:two",
+    };
+    state.publish(
+      stageGeneration(
+        profile,
+        changes,
+        { ...attention, changes: [...attention.changes, second] },
+        profile,
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document.querySelector('[data-lens="attention"] .lens-count')
+        ?.textContent,
+    ).toBe("2 shown");
+
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document.querySelector('[data-lens="attention"] .lens-count')
+        ?.textContent,
+    ).toBe("1 shown");
+  });
+
+  it("qualifies bounded Attention counts as page-local when more results remain", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "attention",
+      query: { limit: 1 },
+    });
+    state.publish(
+      stageGeneration(
+        profile,
+        changes,
+        { ...attention, next: "opaque-next-page" },
+        profile,
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    expect(document.querySelector("#master .lens-meta")?.textContent).toMatch(
+      /on this page/i,
+    );
+    expect(
+      document
+        .querySelector('[data-lens="attention"]')
+        ?.getAttribute("aria-label"),
+    ).toMatch(/on this page/i);
+    expect(document.querySelector("#stat-threads")?.textContent).toBe(
+      "1 shown on this page",
+    );
+    expect(document.querySelector("#stat-threads")?.getAttribute("title")).toBe(
+      "Changes shown on this Attention page",
+    );
   });
 
   it("offers completion-backed Timeline filters and removable applied filters", () => {
@@ -773,7 +875,7 @@ describe("Change inspector render", () => {
       firstCard?.querySelector(".change-card-state")?.textContent,
     ).toContain("conflicted");
     expect(document.querySelector("#stat-threads")?.textContent).toBe(
-      "1 need attention",
+      "1 shown on this page",
     );
     const createElement = vi.spyOn(document, "createElement");
     renderChangeInspector(state.snapshot(), { navigate });
@@ -804,13 +906,16 @@ describe("Change inspector render", () => {
     const card = document.querySelector(".unit-card[data-change-id]");
     expect(
       card?.querySelector(".change-card-attention-reason")?.textContent,
-    ).toBe("Current Revisions need assessment");
+    ).toBe("REASON SENTINEL");
+    expect(card?.querySelector(".change-card-attention-ask")?.textContent).toBe(
+      "ASK SENTINEL",
+    );
     expect(
-      card?.querySelector(".change-card-attention-ask")?.textContent,
-    ).toContain("revision:sha256:one");
+      card?.querySelector(".change-card-attention-evidence")?.textContent,
+    ).toBe("EVIDENCE SENTINEL");
     expect(
       card?.querySelector(".change-card-attention-action")?.textContent,
-    ).toBe("Next: Assess current Revisions");
+    ).toBe("Next: NEXT ACTION SENTINEL");
     expect(
       card?.querySelector(".change-card-attention-diagnostics")?.textContent,
     ).toContain("assessment coverage is incomplete for revision:sha256:one");
@@ -818,10 +923,10 @@ describe("Change inspector render", () => {
     const primaryName = card
       ?.querySelector(".change-card-primary")
       ?.getAttribute("aria-label");
-    expect(primaryName).toContain("Current Revisions need assessment");
-    expect(primaryName).toContain(
-      "Assess exact Revision revision:sha256:one; artifact sha256:artifact",
-    );
+    expect(primaryName).toContain("REASON SENTINEL");
+    expect(primaryName).toContain("ASK SENTINEL");
+    expect(primaryName).toContain("EVIDENCE SENTINEL");
+    expect(primaryName).toContain("NEXT ACTION SENTINEL");
     expect(primaryName).toContain("Change change:sha256:one");
   });
 
@@ -1044,6 +1149,82 @@ describe("Change inspector render", () => {
     );
   });
 
+  it("renders one exact current Revision as a native secondary anchor without changing the card primary", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: { q: "review" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const card = document.querySelector<HTMLElement>(
+      '.unit-card[data-change-id="change:sha256:one"]',
+    );
+    const anchor = card?.querySelector<HTMLAnchorElement>(
+      ".change-card-current a[data-revision-id][data-artifact-hash]",
+    );
+    expect(anchor?.getAttribute("href")).toBe(
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?q=review&artifactHash=sha256%3Aartifact",
+    );
+    expect(anchor?.getAttribute("aria-label")).toBe(
+      "Open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
+    );
+    expect(anchor?.dataset.revisionId).toBe(revision.revisionId);
+    expect(anchor?.dataset.artifactHash).toBe(
+      revision.objectArtifactContentHash,
+    );
+    card?.querySelector<HTMLButtonElement>(".change-card-primary")?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "change",
+      changeId: "change:sha256:one",
+      query: { q: "review" },
+    });
+  });
+
+  it("keeps plural current Revisions as explicit controls without a synthesized anchor", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const secondRevision = {
+      revisionId: "revision:sha256:two",
+      objectArtifactContentHash: "sha256:artifact-two",
+    };
+    const pluralChanges: ChangesPage = {
+      ...changes,
+      changes: [
+        {
+          ...changes.changes[0],
+          currentRevisionRefs: [revision, secondRevision],
+        },
+      ],
+      presentations: {
+        "change:sha256:one": {
+          currentRevisions: [
+            ...(changes.presentations?.["change:sha256:one"]
+              ?.currentRevisions ?? []),
+            {
+              revision: secondRevision,
+              revisionProposalSummary: "Parallel proposal",
+              summarySource: "revision_proposal_summary",
+            },
+          ],
+        },
+      },
+    };
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, pluralChanges, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    expect(document.querySelector(".change-card-current a")).toBeNull();
+    expect(document.querySelectorAll(".change-card-peer-open")).toHaveLength(2);
+  });
+
   it("keeps an off-page exact deep link visible without claiming list absence is refusal", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
@@ -1237,6 +1418,7 @@ describe("Change inspector render", () => {
       "hidden",
     );
     expect(document.querySelector(".split")?.classList).toContain("hidden");
+    expect(document.querySelectorAll("#diff-page h1")).toHaveLength(1);
     expect(document.querySelector("#diff-page-body")?.textContent).toContain(
       "pub fn restored() {}",
     );

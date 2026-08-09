@@ -12,7 +12,7 @@ stays in the live inspector.
 
 | Path | Role |
 | --- | --- |
-| `ABOUT.md` | Product context for Claude Design (what Pointbreak Review/`shore inspect` is, the design language, UI vocabulary). Synced to the project alongside the cards. |
+| `ABOUT.md` | Product context for Claude Design (what Pointbreak Review/`pointbreak inspect` is, the design language, UI vocabulary). Synced to the project alongside the cards. |
 | `../assets/tokens.css` | Review's live token source and single source of truth for the palette (the only `:root`). |
 | `styles.css` | Component rules only — references the tokens via `var(--…)`. |
 | `_bodies/*.body.html` | Per-card markup fragments (the authored content of each card). |
@@ -31,8 +31,8 @@ are grouped as **Foundations, Navigation, Inputs, Data, Feedback**. The
 Foundations card (`_bodies/foundations.body.html`) carries its own swatch JS and
 reads the inlined token values via `getComputedStyle`.
 
-The Data group includes static mirrors of the shipped Attention lens and the
-append-only assessment lifecycle. The Identity group documents the sanctioned
+The Data group includes static mirrors of the shipped Timeline, Changes, and Attention
+lenses plus the routed exact-diff surface. The Identity group documents the sanctioned
 large multiband treatment without changing the mono compact topbar mark.
 
 Run the final audit against the live product tokens with:
@@ -57,7 +57,7 @@ node design-system/density-check.mjs
 The command audits the live `.compact` token block in both directions: compact
 may declare only `--row-pad`, `--line`, and `--card-pad`, and it must declare all
 three. It prints the comfortable-to-compact values, then writes dark/light
-comfortable/compact pairs for Timeline, Revisions, and Attention plus a
+comfortable/compact pairs for Timeline, Changes, and Attention plus a
 side-by-side index to the git-ignored `output-density/` directory.
 
 This is a manual release gate, not part of CI or `just check`. A passing audit

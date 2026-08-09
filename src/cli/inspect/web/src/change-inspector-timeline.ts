@@ -9,6 +9,7 @@ import {
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
+import { createLensHeading } from "./change-inspector-lens";
 import type { ChangeInspectorNavigationActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
@@ -405,13 +406,15 @@ export function renderChangeInspectorTimeline(
   }
   const section = document.createElement("section");
   section.className = "timeline-shell";
-  const heading = document.createElement("h1");
-  heading.textContent = `Timeline · ${timeline.matchCount}`;
+  const [heading, metadata] = createLensHeading(
+    "Timeline",
+    `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first`,
+  );
   const notice = document.createElement("p");
   notice.className = "timeline-summary dim";
   const loadedStart = timeline.entries.length ? timeline.offset + 1 : 0;
   const loadedEnd = timeline.offset + timeline.entries.length;
-  notice.textContent = `${timeline.order === "desc" ? "Newest" : "Oldest"} first · loaded ${loadedStart}-${loadedEnd} of ${timeline.matchCount} matches · ${timeline.eventCount} recorded events. Presentation chronology uses writer timestamps; late events can backfill when writer clocks differ.`;
+  notice.textContent = `loaded ${loadedStart}-${loadedEnd} of ${timeline.matchCount} matches · ${timeline.eventCount} recorded events. Presentation chronology uses writer timestamps; late events can backfill when writer clocks differ.`;
   const notices = document.createElement("div");
   notices.className = "timeline-notices";
   notices.setAttribute("aria-live", "polite");
@@ -474,7 +477,7 @@ export function renderChangeInspectorTimeline(
   list.setAttribute("role", "listbox");
   list.setAttribute("aria-label", "event timeline");
   if (!timeline.entries.length) list.setAttribute("aria-disabled", "true");
-  section.append(heading, notice, notices, page);
+  section.append(heading, metadata, notice, notices, page);
   if (timeline.matchCount === 0) {
     const empty = document.createElement("p");
     empty.className = "timeline-empty dim";

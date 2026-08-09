@@ -1,34 +1,33 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Top bar</p>
+    <p class="ds-label">Top bar · Change lenses and repository identity</p>
     <header id="topbar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
         <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
       </div>
-      <nav id="lens-switcher" aria-label="master pane lens">
-        <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-        <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
-        <button class="lens-tab" type="button" data-lens="threads" aria-pressed="false">Threads</button>
+      <nav id="lens-switcher" aria-label="Change lenses">
+        <a class="lens-tab" data-lens="timeline" href="#/timeline" aria-current="page">Timeline</a>
+        <a class="lens-tab" data-lens="changes" href="#/changes">Changes</a>
+        <a class="lens-tab" data-lens="attention" href="#/attention" aria-label="Attention, 42 Changes shown on this page">Attention <span class="lens-count" aria-hidden="true" title="Changes shown on this page">42 shown</span></a>
       </nav>
       <div class="stats">
         <span class="store-identity" style="position:static">
-          <span class="store-identity-chip" tabindex="0">
+          <span class="store-identity-chip" tabindex="0" aria-label="repository pointbreak, store family store, family pointbreak, worktree feat-change-aware-inspector">
             <span class="store-live" data-state="watching"></span>
             <span class="store-identity-repo">pointbreak</span>
             <span class="store-identity-caret" aria-hidden="true">▾</span>
           </span>
         </span>
-        <button class="ghost">◐ dark</button>
-        <button class="ghost">≡ comfortable</button>
+        <button class="ghost">View</button>
       </div>
     </header>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Store identity — chip &amp; detail popover</p>
+    <p class="ds-label">Repository identity · verified metadata independent from liveness</p>
     <div class="store-identity" style="position:static">
-      <span class="store-identity-chip" tabindex="0">
+      <span class="store-identity-chip" tabindex="0" aria-label="repository pointbreak, store family store, family pointbreak, worktree feat-change-aware-inspector">
         <span class="store-live" data-state="watching"></span>
         <span class="store-identity-repo">pointbreak</span>
         <span class="store-identity-caret" aria-hidden="true">▾</span>
@@ -38,55 +37,55 @@
           <dt>repository</dt><dd>pointbreak</dd>
           <dt>store</dt><dd>family store</dd>
           <dt>family</dt><dd>pointbreak</dd>
+          <dt>worktree</dt><dd>feat-change-aware-inspector</dd>
         </dl>
         <div class="store-identity-stats">
           <span class="stat">858 events</span>
-          <span class="stat">33 units</span>
-          <span class="stat">38 threads</span>
-          <span class="stat mono">cd9181a6</span>
+          <span class="stat">363 Changes</span>
+          <span class="stat">42 need attention</span>
+          <span class="stat mono">sha256:40c9aa31</span>
         </div>
-        <p class="store-live-row">status <span class="store-live-status" data-state="watching">watching</span></p>
+        <dl class="connection-status-rows">
+          <dt>connection</dt><dd>connected</dd>
+          <dt>refresh</dt><dd class="store-live-status" data-state="watching">watching</dd>
+        </dl>
         <p class="store-identity-note">Recorded state only — never gates writes; signature checks are reader-relative to your committed allow-list.</p>
       </div>
     </div>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Lens tabs — selected vs. rest</p>
-    <nav id="lens-switcher" aria-label="master pane lens">
-      <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-      <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
-      <button class="lens-tab" type="button" data-lens="threads" aria-pressed="false">Threads</button>
-    </nav>
-  </div>
-
-  <div class="ds-group">
-    <p class="ds-label">Auto-refresh liveness — chip dot states</p>
+    <p class="ds-label">Accepted refresh lifecycle</p>
     <div class="stats" style="margin-left:0; gap:16px; flex-wrap:wrap">
-      <span class="store-identity-chip" tabindex="0"><span class="store-live" data-state="idle"></span><span class="store-identity-repo">idle</span></span>
-      <span class="store-identity-chip" tabindex="0"><span class="store-live" data-state="watching"></span><span class="store-identity-repo">watching</span></span>
-      <span class="store-identity-chip" tabindex="0"><span class="store-live" data-state="updated"></span><span class="store-identity-repo">updated</span></span>
-      <span class="store-identity-chip" tabindex="0"><span class="store-live" data-state="stalled"></span><span class="store-identity-repo">stalled</span></span>
+      <span class="store-identity-chip"><span class="store-live" data-state="idle"></span><span class="store-identity-repo">idle</span></span>
+      <span class="store-identity-chip"><span class="store-live" data-state="watching"></span><span class="store-identity-repo">watching</span></span>
+      <span class="store-identity-chip"><span class="store-live" data-state="updated"></span><span class="store-identity-repo">updated</span></span>
+      <span class="store-identity-chip"><span class="store-live" data-state="degraded"></span><span class="store-identity-repo">degraded</span></span>
     </div>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Master/detail shell</p>
+    <p class="ds-label">Timeline master/detail shell · one accessible lens heading</p>
     <div class="split">
       <section id="master" class="master" aria-label="master pane">
-        <ol class="timeline" aria-label="event timeline" tabindex="0">
-          <li class="event" aria-selected="true">
-            <span class="time">18:42:11</span><span class="rail" style="background:var(--accent)"></span>
-            <span class="body"><span class="title">accepted reviewer assessment recorded</span><span class="meta"><span>assessment</span><span>agent:codex-review</span></span></span>
-          </li>
-          <li class="event">
-            <span class="time">18:40:17</span><span class="rail" style="background:var(--success)"></span>
-            <span class="body"><span class="title">route diagnostic observation added</span><span class="meta"><span>observation</span><span>agent:codex</span></span></span>
-          </li>
-        </ol>
+        <div class="timeline-shell">
+          <h1 class="lens-heading">Timeline</h1>
+          <p class="lens-meta">858 events · newest first</p>
+          <ol class="timeline" aria-label="event timeline" tabindex="0">
+            <li class="event" aria-selected="true">
+              <span class="time">18:42:11</span><span class="rail" style="background:var(--accent)"></span>
+              <span class="body"><span class="title">accepted reviewer assessment recorded</span><span class="meta"><span>assessment</span><span>agent:review</span><a class="ref" href="#/changes/change%3Asha256%3A8c2d">change:8c2d3a91</a></span></span>
+            </li>
+            <li class="event">
+              <span class="time">18:40:17</span><span class="rail" style="background:var(--success)"></span>
+              <span class="body"><span class="title">route diagnostic observation added</span><span class="meta"><span>observation</span><span>agent:author</span></span></span>
+            </li>
+          </ol>
+        </div>
       </section>
       <aside id="detail" class="detail">
         <h2>Current assessment</h2>
+        <p class="mono">event:4f67c810</p>
         <div class="verdict verdict-accepted"><span class="verdict-status">resolved</span><span class="verdict-value">accepted</span></div>
         <p class="advisory-note">advisory — a recorded judgement, not a merge gate</p>
       </aside>
@@ -94,21 +93,19 @@
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Narrow shell stress</p>
+    <p class="ds-label">Narrow Change lenses</p>
     <div class="ds-viewport" data-ds-state="narrow">
       <header id="topbar">
-        <div class="brand">
-          <span class="brand-mark" aria-hidden="true"></span>
-          <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
-        </div>
-        <nav id="lens-switcher" aria-label="master pane lens">
-          <button class="lens-tab" type="button" aria-pressed="true">Timeline</button>
-          <button class="lens-tab" type="button" aria-pressed="false">Revisions</button>
+        <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span></div>
+        <nav id="lens-switcher" aria-label="Change lenses">
+          <a class="lens-tab" href="#/timeline" aria-current="page">Timeline</a>
+          <a class="lens-tab" href="#/changes">Changes</a>
+          <a class="lens-tab" href="#/attention">Attention</a>
         </nav>
       </header>
       <div class="split">
-        <section id="master" class="master" aria-label="master pane"><p class="empty">Compact master pane</p></section>
-        <aside id="detail" class="detail"><p class="empty">Detail stacks below when space is tight.</p></aside>
+        <section id="master" class="master" aria-label="master pane"><h1 class="lens-heading">Timeline</h1><p class="lens-meta">858 events · newest first</p></section>
+        <aside id="detail" class="detail"><p class="empty">Exact detail becomes an isolated sheet.</p></aside>
       </div>
     </div>
   </div>

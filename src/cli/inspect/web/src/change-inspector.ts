@@ -9,11 +9,16 @@ import {
   bootstrapCapability,
   installDefaultAuthCoordinator,
   requestReconnect,
+  sessionCredentialVersion,
 } from "./auth";
 import {
   ChangeInspectorPageFailure,
   fetchChangeInspectorJSON,
 } from "./change-inspector-http";
+import {
+  decodeInspectorIdentity,
+  type InspectorIdentity,
+} from "./change-inspector-identity";
 import { installChangeInspectorInteraction } from "./change-inspector-interaction";
 import {
   type ChangeInspectorReading,
@@ -22,6 +27,7 @@ import {
 import {
   prepareChangeInspectorShell,
   renderChangeInspector,
+  renderChangeInspectorIdentity,
   renderChangeInspectorRefusal,
   renderChangeInspectorUnavailable,
 } from "./change-inspector-render";
@@ -58,6 +64,7 @@ import {
 import {
   configureConnectionActions,
   initConnectionControls,
+  setRefreshState,
 } from "./connection";
 import { createDisclosure, type DisclosureController } from "./disclosure";
 
@@ -70,6 +77,13 @@ interface ProjectionRetryBudget {
   remaining: number;
 }
 
+type GenerationLoadOrigin = "route" | "poll" | "recovery";
+
+type ChangeInspectorExactRoute = Exclude<
+  ChangeInspectorRoute,
+  { kind: "lens" | "timeline" | "event" | "invalid" }
+>;
+
 interface FocusedFilterDraft {
   input: HTMLInputElement;
   restoreFocus: boolean;
@@ -79,10 +93,17 @@ interface FocusedFilterDraft {
   selectionDirection: "forward" | "backward" | "none" | null;
 }
 
+interface CredentialedInspectorIdentity {
+  identity: InspectorIdentity;
+  credentialVersion: number;
+}
+
 const EXACT_READING_TIMEOUT_MS = 10_000;
+const IDENTITY_TIMEOUT_MS = 3_000;
 const POLL_CYCLE_TIMEOUT_MS = 15_000;
 
 class ChangeInspectorTimeout extends Error {}
+class ChangeInspectorSessionChanged extends Error {}
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let routeListener: (() => void) | null = null;
@@ -94,7 +115,14 @@ let viewDisclosure: DisclosureController | null = null;
 let interactionStop: (() => void) | null = null;
 let timelineSearchFocusIntentStop: (() => void) | null = null;
 let pollCoordinatorStop: (() => void) | null = null;
+let refreshSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let requestEpoch = 0;
+let compositionEpoch = 0;
+
+function clearRefreshSettleTimer(): void {
+  if (refreshSettleTimer !== null) clearTimeout(refreshSettleTimer);
+  refreshSettleTimer = null;
+}
 
 function currentRoute(): ChangeInspectorRoute {
   return parseChangeInspectorRoute(location.hash || "#/timeline");
@@ -157,11 +185,13 @@ async function withinTimeout<T>(
 
 /** Stop the active composition without touching the quarantined legacy reader. */
 export function stopChangeInspector(): void {
+  compositionEpoch += 1;
   requestEpoch += 1;
   if (pollTimer !== null) clearInterval(pollTimer);
   pollTimer = null;
   pollCoordinatorStop?.();
   pollCoordinatorStop = null;
+  clearRefreshSettleTimer();
   if (routeListener !== null)
     window.removeEventListener("hashchange", routeListener);
   routeListener = null;
@@ -183,13 +213,39 @@ export async function bootstrapChangeInspector(
   options: ChangeInspectorOptions = {},
 ): Promise<void> {
   stopChangeInspector();
+  const composition = compositionEpoch;
+  const isCurrentComposition = (): boolean => composition === compositionEpoch;
   const capability = bootstrapCapability();
   if (capability.token !== null) {
     (options.reload ?? (() => location.reload()))();
     return;
   }
   installDefaultAuthCoordinator();
+  const refreshEnabled = options.poll !== false;
   const state = createChangeInspectorState(currentRoute());
+  const credentialSessionChanged = (startedAt: number): boolean =>
+    sessionCredentialVersion() !== startedAt;
+  const showAcceptedPublication = (
+    transition: "initial" | "unchanged" | "changed",
+    origin: GenerationLoadOrigin,
+  ): void => {
+    if (!refreshEnabled) return;
+    clearRefreshSettleTimer();
+    if (transition === "changed" && origin !== "route") {
+      setRefreshState("updated");
+      refreshSettleTimer = setTimeout(() => {
+        refreshSettleTimer = null;
+        setRefreshState("watching");
+      }, 1200);
+      return;
+    }
+    setRefreshState("watching");
+  };
+  const showPollFailure = (): void => {
+    if (!refreshEnabled) return;
+    clearRefreshSettleTimer();
+    setRefreshState("degraded");
+  };
   const navigate = (
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
   ) => {
@@ -319,12 +375,10 @@ export async function bootstrapChangeInspector(
   let visibleRequest = "";
   let pendingReading: { key: string; token: symbol } | null = null;
   let releaseQueuedPoll: () => void = () => {};
+  let revalidateIdentityForCurrentSession: () => void = () => {};
 
   const readingKey = (
-    route: Exclude<
-      ChangeInspectorRoute,
-      { kind: "lens" | "timeline" | "event" | "invalid" }
-    >,
+    route: ChangeInspectorExactRoute,
     projectionStamp: string,
   ): string => `${formatChangeInspectorRoute(route)}\u0000${projectionStamp}`;
 
@@ -340,6 +394,8 @@ export async function bootstrapChangeInspector(
     epoch: number,
     retryBudget: ProjectionRetryBudget,
     pollDraft: FocusedFilterDraft | null = null,
+    origin: GenerationLoadOrigin = "route",
+    credentialVersion = sessionCredentialVersion(),
   ): Promise<void> => {
     if (
       route.kind === "lens" ||
@@ -377,6 +433,9 @@ export async function bootstrapChangeInspector(
         "exact Change reading timed out",
       );
       if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
+      if (credentialSessionChanged(credentialVersion)) {
+        throw new ChangeInspectorSessionChanged();
+      }
       const staged = state.snapshot().generation;
       if (
         staged === null ||
@@ -392,14 +451,18 @@ export async function bootstrapChangeInspector(
       paint(pollDraft);
     } catch (error) {
       if (epoch !== requestEpoch) return;
+      const sessionChanged =
+        error instanceof ChangeInspectorSessionChanged && origin === "route";
       if (
         (error instanceof ChangeInspectorGenerationChanged ||
+          sessionChanged ||
           (error instanceof ChangeInspectorPageFailure &&
             (error.code === "stale_projection" ||
               error.code === "moving_journal"))) &&
         consumeProjectionRetry(retryBudget)
       ) {
-        await loadGeneration(route, retryBudget, pollDraft);
+        if (sessionChanged) revalidateIdentityForCurrentSession();
+        await loadGeneration(route, retryBudget, pollDraft, origin);
         return;
       }
       reading = null;
@@ -415,7 +478,9 @@ export async function bootstrapChangeInspector(
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
     retryBudget: ProjectionRetryBudget,
     pollDraft: FocusedFilterDraft | null = null,
+    origin: GenerationLoadOrigin = "route",
   ): Promise<void> => {
+    const credentialVersion = sessionCredentialVersion();
     const epoch = ++requestEpoch;
     try {
       const profile = decodeReaderProfile(
@@ -423,6 +488,10 @@ export async function bootstrapChangeInspector(
       );
       if (epoch !== requestEpoch) return;
       if (profile.availability !== "ready") {
+        if (origin !== "route" && state.snapshot().generation !== null) {
+          showPollFailure();
+          return;
+        }
         pendingTimelineSearchFocus = false;
         visibleRequest = "";
         clearReading();
@@ -479,7 +548,50 @@ export async function bootstrapChangeInspector(
         postflight,
         history,
       );
+      const refreshesExactReading =
+        origin !== "route" &&
+        route.kind !== "lens" &&
+        route.kind !== "timeline" &&
+        route.kind !== "event";
+      let acceptedReading: ChangeInspectorReading | null = null;
+      let acceptedReadingKey = "";
+      if (refreshesExactReading) {
+        acceptedReadingKey = readingKey(route, changes.projectionStamp);
+        if (visibleReading === acceptedReadingKey && reading !== null) {
+          acceptedReading = reading;
+        } else {
+          const result = await withinTimeout(
+            (async () => {
+              const loaded = await loadChangeInspectorReading(
+                route,
+                changes.projectionStamp,
+              );
+              const readingPostflight = decodeReaderProfile(
+                await fetchChangeInspectorJSON("/api/v2/profile"),
+              );
+              return { loaded, readingPostflight };
+            })(),
+            EXACT_READING_TIMEOUT_MS,
+            "exact Change reading timed out",
+          );
+          if (epoch !== requestEpoch) return;
+          const browserRoute = currentRoute();
+          if (
+            browserRoute.kind === "invalid" ||
+            formatChangeInspectorRoute(browserRoute) !==
+              formatChangeInspectorRoute(route) ||
+            !sameProfileGeneration(staged.profile, result.readingPostflight)
+          ) {
+            throw new ChangeInspectorGenerationChanged();
+          }
+          acceptedReading = result.loaded;
+        }
+      }
+      if (credentialSessionChanged(credentialVersion)) {
+        throw new ChangeInspectorSessionChanged();
+      }
       if (
+        origin === "route" &&
         route.kind !== "lens" &&
         route.kind !== "timeline" &&
         route.kind !== "event"
@@ -492,30 +604,47 @@ export async function bootstrapChangeInspector(
           reading = null;
           readingRefusal = null;
         }
+      } else if (refreshesExactReading) {
+        reading = acceptedReading;
+        readingRefusal = null;
+        visibleReading = acceptedReadingKey;
       }
-      state.publish(staged);
+      const publication = state.publish(staged, credentialVersion);
+      showAcceptedPublication(publication.transition, origin);
       if (route.kind === "timeline" && history !== null) {
         timelineMonitor.observe(route, history);
       }
       visibleRequest = requestKey(route);
       paint(pollDraft);
-      await loadReading(
-        route,
-        changes.projectionStamp,
-        epoch,
-        retryBudget,
-        pollDraft,
-      );
+      if (!refreshesExactReading) {
+        await loadReading(
+          route,
+          changes.projectionStamp,
+          epoch,
+          retryBudget,
+          pollDraft,
+          origin,
+          credentialVersion,
+        );
+      }
     } catch (error) {
       if (epoch !== requestEpoch) return;
+      const sessionChanged =
+        error instanceof ChangeInspectorSessionChanged && origin === "route";
       if (
         ((error instanceof ChangeInspectorPageFailure &&
           (error.code === "stale_projection" ||
             error.code === "moving_journal")) ||
-          error instanceof ChangeInspectorGenerationChanged) &&
+          error instanceof ChangeInspectorGenerationChanged ||
+          sessionChanged) &&
         consumeProjectionRetry(retryBudget)
       ) {
-        await loadGeneration(route, retryBudget, pollDraft);
+        if (sessionChanged) revalidateIdentityForCurrentSession();
+        await loadGeneration(route, retryBudget, pollDraft, origin);
+        return;
+      }
+      if (origin !== "route" && state.snapshot().generation !== null) {
+        showPollFailure();
         return;
       }
       visibleRequest = "";
@@ -589,13 +718,89 @@ export async function bootstrapChangeInspector(
     void onRoute();
   };
   window.addEventListener("hashchange", routeListener);
+  const readIdentity = async (
+    reportConnection: boolean,
+  ): Promise<CredentialedInspectorIdentity | null> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const credentialVersion = sessionCredentialVersion();
+      try {
+        const identity = decodeInspectorIdentity(
+          await withinTimeout(
+            fetchChangeInspectorJSON("/api/identity", { reportConnection }),
+            IDENTITY_TIMEOUT_MS,
+            "Inspector identity timed out",
+          ),
+        );
+        if (!isCurrentComposition()) return null;
+        if (sessionCredentialVersion() === credentialVersion) {
+          return { identity, credentialVersion };
+        }
+      } catch {
+        if (
+          !isCurrentComposition() ||
+          sessionCredentialVersion() === credentialVersion
+        ) {
+          return null;
+        }
+      }
+    }
+    return null;
+  };
+  let verifiedIdentityCredentialVersion: number | null = null;
+  let identityHydration: Promise<void> | null = null;
+  const hydrateIdentity = (): Promise<void> => {
+    if (identityHydration !== null) return identityHydration;
+    const operation = (async () => {
+      const verified = await readIdentity(false);
+      if (verified === null || !isCurrentComposition()) return;
+      verifiedIdentityCredentialVersion = verified.credentialVersion;
+      const next = state.publishIdentity(
+        verified.identity,
+        verified.credentialVersion,
+      );
+      renderChangeInspectorIdentity(next.identity ?? null);
+    })();
+    identityHydration = operation.finally(() => {
+      identityHydration = null;
+    });
+    return identityHydration;
+  };
+  revalidateIdentityForCurrentSession = () => {
+    if (verifiedIdentityCredentialVersion === sessionCredentialVersion()) {
+      return;
+    }
+    void hydrateIdentity();
+  };
   const reloadCurrent = async (): Promise<void> => {
     const route = currentRoute();
     if (route.kind === "invalid") {
       await onRoute();
       return;
     }
-    await loadGeneration(route, newProjectionRetryBudget());
+    const verified = await readIdentity(true);
+    if (verified === null || !isCurrentComposition()) {
+      showPollFailure();
+      return;
+    }
+    const identity = verified.identity;
+    verifiedIdentityCredentialVersion = verified.credentialVersion;
+    const prior = state.snapshot();
+    const continuesSession =
+      prior.identity !== null &&
+      prior.identity !== undefined &&
+      prior.identity.storeIdentity === identity.storeIdentity &&
+      prior.identity.contextIdentity === identity.contextIdentity;
+    const mustRetireGeneration = prior.generation !== null && !continuesSession;
+    if (mustRetireGeneration) {
+      visibleRequest = "";
+      pendingTimelineSearchFocus = false;
+      clearReading();
+      state.clearGeneration();
+    }
+    const next = state.publishIdentity(identity, verified.credentialVersion);
+    if (mustRetireGeneration) paint();
+    else renderChangeInspectorIdentity(next.identity ?? null);
+    await loadGeneration(route, newProjectionRetryBudget(), null, "recovery");
   };
   configureConnectionActions({
     retry: reloadCurrent,
@@ -808,7 +1013,10 @@ export async function bootstrapChangeInspector(
       },
     });
   }
-  await onRoute();
+  const initialRouteLoad = onRoute();
+  void hydrateIdentity();
+  await initialRouteLoad;
+  if (!isCurrentComposition()) return;
   if (options.poll !== false) {
     let pollRequested = false;
     let pollRunning = false;
@@ -837,18 +1045,25 @@ export async function bootstrapChangeInspector(
         route,
         newProjectionRetryBudget(),
         capturePollFilterDraft(),
+        "poll",
       );
+      const pollEpoch = requestEpoch;
       void withinTimeout(
         operation,
         POLL_CYCLE_TIMEOUT_MS,
         "Change generation poll timed out",
       )
         .catch((error) => {
-          if (error instanceof ChangeInspectorTimeout) {
+          if (
+            error instanceof ChangeInspectorTimeout &&
+            isCurrentComposition() &&
+            requestEpoch === pollEpoch
+          ) {
             // The fetch cannot be forcibly cancelled at this layer. Advancing
             // the epoch makes its eventual completion observationally inert
             // before the coalesced successor poll is allowed to publish.
             requestEpoch += 1;
+            showPollFailure();
           }
         })
         .finally(() => {

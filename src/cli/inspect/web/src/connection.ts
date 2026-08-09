@@ -77,10 +77,17 @@ export function markRequestSuccess(): void {
   renderConnectionChrome();
 }
 
-export function markRequestFailure(kind: RequestFailureKind): void {
+export function markRequestFailure(
+  kind: RequestFailureKind,
+  options: { degradeRefresh?: boolean } = {},
+): void {
   snapshot =
     kind === "protocol"
-      ? { connection: "connected", refresh: "degraded" }
+      ? {
+          connection: "connected",
+          refresh:
+            options.degradeRefresh === false ? snapshot.refresh : "degraded",
+        }
       : { ...snapshot, connection: kind };
   renderConnectionChrome();
 }

@@ -207,11 +207,22 @@ pub(super) fn change_attention_v2_json(
 #[serde(rename_all = "camelCase")]
 struct ChangeAttentionPresentation {
     primary_reason: ChangeAttentionReason,
-    /// Primary-first, deterministic reasons. Consumers may choose wording but
-    /// must not re-rank model causes.
+    /// Primary-first, deterministic causes. Consumers must not re-rank them.
     reasons: Vec<ChangeAttentionReason>,
+    /// Server-owned product copy, exactly parallel to `reasons`.
+    reason_presentations: Vec<ChangeAttentionReasonPresentation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangeAttentionReasonPresentation {
+    cause: ChangeAttentionReason,
+    ask: String,
+    reason: String,
+    evidence: String,
+    next_action: String,
 }
 
 /// Closed, user-neutral causes for a Change appearing in the Attention lens.
@@ -229,6 +240,68 @@ enum ChangeAttentionReason {
     NoCurrentRevision,
     UnresolvedOperativeRequests { request_ids: Vec<InputRequestId> },
     CurrentRevisionsNeedAssessment { revisions: Vec<RevisionRefV1> },
+}
+
+fn change_attention_reason_presentation(
+    cause: &ChangeAttentionReason,
+) -> ChangeAttentionReasonPresentation {
+    let (ask, reason, evidence, next_action) = match cause {
+        ChangeAttentionReason::Conflicted => (
+            "Resolve the conflicting Change state.".to_owned(),
+            "The Change has conflicting current state.".to_owned(),
+            "Lifecycle is conflicted.".to_owned(),
+            "Review the conflicting Change records.".to_owned(),
+        ),
+        ChangeAttentionReason::Incomplete => (
+            "Complete the missing Change state.".to_owned(),
+            "The Change state is incomplete.".to_owned(),
+            "Lifecycle is incomplete.".to_owned(),
+            "Review the missing Change records.".to_owned(),
+        ),
+        ChangeAttentionReason::NoCurrentRevision => (
+            "Establish one exact current Revision.".to_owned(),
+            "No current Revision is available for review.".to_owned(),
+            "The current Revision set is empty.".to_owned(),
+            "Review the Change and establish a current Revision.".to_owned(),
+        ),
+        ChangeAttentionReason::UnresolvedOperativeRequests { request_ids } => (
+            "Respond to every operative request.".to_owned(),
+            "Operative requests remain unresolved.".to_owned(),
+            format!(
+                "Open requests: {}.",
+                request_ids
+                    .iter()
+                    .map(InputRequestId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "Open the Change and respond to each request.".to_owned(),
+        ),
+        ChangeAttentionReason::CurrentRevisionsNeedAssessment { revisions } => (
+            "Assess every current Revision.".to_owned(),
+            "Current Revision assessment coverage is incomplete.".to_owned(),
+            format!(
+                "Unassessed exact Revisions: {}.",
+                revisions
+                    .iter()
+                    .map(|revision| format!(
+                        "{}; artifact {}",
+                        revision.revision_id.as_str(),
+                        revision.object_artifact_content_hash
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            "Open an exact Revision and record its assessment.".to_owned(),
+        ),
+    };
+    ChangeAttentionReasonPresentation {
+        cause: cause.clone(),
+        ask,
+        reason,
+        evidence,
+        next_action,
+    }
 }
 
 struct ChangeAttentionReasonSource {
@@ -285,9 +358,14 @@ fn change_attention_presentation(
         .first()
         .cloned()
         .ok_or_else(|| "non-accepted Change has no model-derived Attention reason".to_owned())?;
+    let reason_presentations = reasons
+        .iter()
+        .map(change_attention_reason_presentation)
+        .collect();
     Ok(ChangeAttentionPresentation {
         primary_reason,
         reasons,
+        reason_presentations,
         diagnostics: source.diagnostics.clone(),
     })
 }
@@ -3550,7 +3628,80 @@ mod tests {
                         "revisions": [first, second],
                     },
                 ],
+                "reasonPresentations": [
+                    {
+                        "cause": {"kind": "conflicted"},
+                        "ask": "Resolve the conflicting Change state.",
+                        "reason": "The Change has conflicting current state.",
+                        "evidence": "Lifecycle is conflicted.",
+                        "nextAction": "Review the conflicting Change records.",
+                    },
+                    {
+                        "cause": {
+                            "kind": "unresolved_operative_requests",
+                            "requestIds": ["input-request:sha256:open"],
+                        },
+                        "ask": "Respond to every operative request.",
+                        "reason": "Operative requests remain unresolved.",
+                        "evidence": "Open requests: input-request:sha256:open.",
+                        "nextAction": "Open the Change and respond to each request.",
+                    },
+                    {
+                        "cause": {
+                            "kind": "current_revisions_need_assessment",
+                            "revisions": [first, second],
+                        },
+                        "ask": "Assess every current Revision.",
+                        "reason": "Current Revision assessment coverage is incomplete.",
+                        "evidence": format!(
+                            "Unassessed exact Revisions: rev:sha256:first; artifact sha256:{}; rev:sha256:second; artifact sha256:{}.",
+                            "a".repeat(64),
+                            "b".repeat(64),
+                        ),
+                        "nextAction": "Open an exact Revision and record its assessment.",
+                    },
+                ],
                 "diagnostics": ["change_relation_revision_artifact_conflict"],
+            })
+        );
+    }
+
+    #[test]
+    fn change_attention_lifecycle_copy_is_server_owned_and_primary_first() {
+        let source = ChangeAttentionReasonSource {
+            lifecycle: pointbreak::session::ChangeLifecycleV1::Incomplete,
+            current_revisions: Vec::new(),
+            qualification: Vec::new(),
+            operative_requests: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        let value = serde_json::to_value(change_attention_presentation(&source).unwrap()).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "primaryReason": {"kind": "incomplete"},
+                "reasons": [
+                    {"kind": "incomplete"},
+                    {"kind": "no_current_revision"},
+                ],
+                "reasonPresentations": [
+                    {
+                        "cause": {"kind": "incomplete"},
+                        "ask": "Complete the missing Change state.",
+                        "reason": "The Change state is incomplete.",
+                        "evidence": "Lifecycle is incomplete.",
+                        "nextAction": "Review the missing Change records.",
+                    },
+                    {
+                        "cause": {"kind": "no_current_revision"},
+                        "ask": "Establish one exact current Revision.",
+                        "reason": "No current Revision is available for review.",
+                        "evidence": "The current Revision set is empty.",
+                        "nextAction": "Review the Change and establish a current Revision.",
+                    },
+                ],
             })
         );
     }

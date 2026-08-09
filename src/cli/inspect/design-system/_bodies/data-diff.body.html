@@ -1,7 +1,12 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Annotated diff — file accordion, fact navigator &amp; low-signal collapse</p>
-    <div class="diff-demo">
+    <p class="ds-label">Routed exact annotated diff — whole-frame file and fact navigation</p>
+    <section id="diff-page" class="diff-page" aria-label="annotated diff">
+      <header class="diff-page-head">
+        <h1 class="diff-page-title mono" title="exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7">Annotated diff · rev:58fe0c5f · sha256:b8ecfc8f</h1>
+        <span class="diff-page-keys"><kbd>[</kbd>/<kbd>]</kbd> files · <kbd>p</kbd>/<kbd>n</kbd> facts</span>
+        <button class="ghost" aria-label="Back to the record">‹ back</button>
+      </header>
       <div class="diff-layout">
         <nav class="diff-nav" aria-label="diff files">
           <ol class="diff-nav-files">
@@ -14,21 +19,21 @@
             <h3>3 not anchored to a diff line</h3>
             <ol>
               <li><button class="diff-nav-fact" data-anno="u1">Capture base is the parent, not the working tree</button></li>
-              <li><button class="diff-nav-fact" data-anno="u2">Revision supersedes rev:9c1aee30</button></li>
+              <li><button class="diff-nav-fact" data-anno="u2">Exact Revision replaces rev:9c1aee30</button></li>
               <li><button class="diff-nav-fact" data-anno="u3">Should low-signal collapse be sticky per file?</button></li>
             </ol>
           </section>
         </nav>
         <div class="diff-body">
-          <div class="anno-summary">5 review facts on this revision · 3 observations, 1 input request, 1 assessment · 3 not anchored to a diff line</div>
+          <div class="anno-summary">5 review facts on this exact Revision · 3 observations, 1 input request, 1 assessment · 3 not anchored to a diff line</div>
           <div class="anno-group">
             <div class="anno anno-observation" data-anno="u1">
               <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:claude-code-0081</span><span class="anno-title">Capture base is the parent, not the working tree</span> <span class="anno-loc">src/cli/inspect/server.rs:142</span></div>
               <div class="anno-body">The snapshot diff is taken against the captured base commit, so this fact targets a line outside the captured changeset.</div>
             </div>
             <div class="anno anno-observation" data-anno="u2">
-              <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:codex-insdiff</span><span class="anno-title">Revision supersedes rev:9c1aee30</span></div>
-              <div class="anno-body">This revision is the superseding head of the thread; the prior head's facts read as stale.</div>
+              <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:codex-insdiff</span><span class="anno-title">Exact Revision replaces rev:9c1aee30</span></div>
+              <div class="anno-body">This exact Revision replaces the prior content state inside the same Change; the earlier facts remain attributed to their original Revision.</div>
             </div>
             <div class="anno anno-input-request" data-anno="u3">
               <div class="anno-head"><span class="anno-kind anno-kind-input-request">input-request</span><span class="anno-track">agent:codex-insdiff</span><span class="anno-title">Should low-signal collapse be sticky per file?</span> <span class="fact-status open">advisory</span></div>
@@ -45,15 +50,15 @@
                 <div class="anno-head"><span class="anno-kind anno-kind-assessment">assessment</span><span class="anno-track">agent:codex-insdiff</span><span class="anno-title">accepted — arrowheads orient by node identity</span></div>
                 <div class="anno-body">Round-1 fixpoint. The two-marker swap is Safari-verified; no further changes requested.</div>
               </div>
-              <div class="dhunk">@@ -174,2 +174,4 @@ .revision-dag</div>
-              <div class="drow drow-context"><span class="ln">174</span><span class="ln">174</span><span class="sign"> </span><span class="dtext"><span class="tok tok-type">.dag-edge</span> { <span class="tok tok-keyword">fill</span>: <span class="tok tok-constant">none</span>; <span class="tok tok-keyword">stroke</span>: <span class="tok tok-function">var</span>(<span class="tok tok-variable">--dag-edge</span>); <span class="tok tok-keyword">stroke-width</span>: <span class="tok tok-number">1.5</span>; }</span></div>
-              <div class="drow drow-added drow-noted" data-anno="a-obs" tabindex="0" role="button"><span class="ln"></span><span class="ln">175</span><span class="sign">+</span><span class="dtext"><span class="tok tok-type">.dag-arrow-head</span> { <span class="tok tok-keyword">fill</span>: <span class="tok tok-function">var</span>(<span class="tok tok-variable">--dag-edge</span>); }</span></div>
+              <div class="dhunk">@@ -1787,2 +1787,6 @@ .relationship-graph-viewport</div>
+              <div class="drow drow-context"><span class="ln">1787</span><span class="ln">1787</span><span class="sign"> </span><span class="dtext"><span class="tok tok-type">.relationship-graph-viewport</span> { <span class="tok tok-keyword">overflow-x</span>: <span class="tok tok-constant">auto</span>; }</span></div>
+              <div class="drow drow-added drow-noted" data-anno="a-obs" tabindex="0" role="button"><span class="ln"></span><span class="ln">1791</span><span class="sign">+</span><span class="dtext"><span class="tok tok-type">.relationship-graph-viewport:focus-visible</span> { <span class="tok tok-keyword">outline</span>: <span class="tok tok-number">2px</span> <span class="tok tok-constant">solid</span> <span class="tok tok-function">var</span>(<span class="tok tok-variable">--accent</span>); }</span></div>
               <div class="anno anno-observation" data-anno="a-obs">
                 <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:claude-code-0081</span><span class="anno-title">Two arrowhead fills, swapped on trace</span></div>
                 <div class="anno-body">A traced edge swaps its marker-end to #dag-arrow-traced; context-stroke is not painted by Safari, so two markers are needed.</div>
               </div>
-              <div class="drow drow-added"><span class="ln"></span><span class="ln">176</span><span class="sign">+</span><span class="dtext"><span class="tok tok-type">.dag-arrow-head-traced</span> { <span class="tok tok-keyword">fill</span>: <span class="tok tok-function">var</span>(<span class="tok tok-variable">--accent</span>); }</span></div>
-              <div class="drow drow-context"><span class="ln">175</span><span class="ln">177</span><span class="sign"> </span><span class="dtext"><span class="tok tok-type">.dag-node</span> { <span class="tok tok-keyword">cursor</span>: <span class="tok tok-constant">pointer</span>; }</span></div>
+              <div class="drow drow-added"><span class="ln"></span><span class="ln">1795</span><span class="sign">+</span><span class="dtext"><span class="tok tok-type">.fact-relationship-graph-svg</span> { <span class="tok tok-keyword">max-width</span>: <span class="tok tok-constant">none</span>; }</span></div>
+              <div class="drow drow-context"><span class="ln">1796</span><span class="ln">1796</span><span class="sign"> </span><span class="dtext"><span class="tok tok-type">.fact-relationship-node</span> { <span class="tok tok-keyword">cursor</span>: <span class="tok tok-constant">pointer</span>; }</span></div>
               <div class="drow drow-meta"><span class="dtext">(24 unchanged lines hidden)</span></div>
             </div>
           </section>
@@ -79,7 +84,7 @@
           </section>
         </div>
       </div>
-    </div>
+    </section>
   </div>
   <div class="ds-group">
     <p class="ds-label">Syntax highlighting — read-time token kinds across a TypeScript hunk</p>

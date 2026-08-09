@@ -309,11 +309,19 @@
     renderConnectionChrome();
   }
   __name(markRequestSuccess, "markRequestSuccess");
-  function markRequestFailure(kind) {
-    snapshot = kind === "protocol" ? { connection: "connected", refresh: "degraded" } : { ...snapshot, connection: kind };
+  function markRequestFailure(kind, options = {}) {
+    snapshot = kind === "protocol" ? {
+      connection: "connected",
+      refresh: options.degradeRefresh === false ? snapshot.refresh : "degraded"
+    } : { ...snapshot, connection: kind };
     renderConnectionChrome();
   }
   __name(markRequestFailure, "markRequestFailure");
+  function setRefreshState(refresh) {
+    snapshot = { ...snapshot, refresh };
+    renderConnectionChrome();
+  }
+  __name(setRefreshState, "setRefreshState");
   var actions = null;
   function configureConnectionActions(next) {
     actions = next;
@@ -391,8 +399,8 @@
       __name(this, "ChangeInspectorPageFailure");
     }
   };
-  function failure(kind, status) {
-    markRequestFailure(kind);
+  function failure(kind, status, reportConnection = true) {
+    if (reportConnection) markRequestFailure(kind, { degradeRefresh: false });
     return new ChangeInspectorRequestFailure(kind, status);
   }
   __name(failure, "failure");
@@ -411,7 +419,7 @@
     return null;
   }
   __name(typedPageFailure, "typedPageFailure");
-  async function fetchOnce(path) {
+  async function fetchOnce(path, reportConnection) {
     const headers = {};
     const token = getSessionToken();
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -425,7 +433,7 @@
         headers
       });
     } catch {
-      throw failure("unreachable");
+      throw failure("unreachable", void 0, reportConnection);
     }
     if (response.status === 401)
       throw new ChangeInspectorRequestFailure("unauthorized", 401);
@@ -433,30 +441,85 @@
     try {
       data = JSON.parse(await response.text());
     } catch {
-      throw failure("protocol", response.status);
+      throw failure("protocol", response.status, reportConnection);
     }
     if (!response.ok)
-      throw typedPageFailure(data, response.status) ?? failure("protocol", response.status);
+      throw typedPageFailure(data, response.status) ?? failure("protocol", response.status, reportConnection);
     if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error)) {
-      throw failure("protocol", response.status);
+      throw failure("protocol", response.status, reportConnection);
     }
-    markRequestSuccess();
+    if (reportConnection) markRequestSuccess();
     return data;
   }
   __name(fetchOnce, "fetchOnce");
-  async function fetchChangeInspectorJSON(path) {
+  async function fetchChangeInspectorJSON(path, options = {}) {
+    const reportConnection = options.reportConnection !== false;
     const credentialVersion2 = sessionCredentialVersion();
     try {
-      return await fetchOnce(path);
+      return await fetchOnce(path, reportConnection);
     } catch (error) {
       if (!(error instanceof ChangeInspectorRequestFailure) || error.kind !== "unauthorized")
         throw error;
     }
     if (sessionCredentialVersion() !== credentialVersion2 || await recoverUnauthorized())
-      return fetchOnce(path);
-    throw failure("unauthorized", 401);
+      return fetchOnce(path, reportConnection);
+    throw failure("unauthorized", 401, reportConnection);
   }
   __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
+
+  // src/change-inspector-identity.ts
+  function record(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+  }
+  __name(record, "record");
+  function hasOnlyKeys(value, allowed) {
+    const keys = new Set(allowed);
+    return Object.keys(value).every((key) => keys.has(key));
+  }
+  __name(hasOnlyKeys, "hasOnlyKeys");
+  function nonEmptyString(value) {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+  __name(nonEmptyString, "nonEmptyString");
+  function basename(value) {
+    return typeof value === "string" && value.length > 0 && !value.includes("/") && !value.includes("\\");
+  }
+  __name(basename, "basename");
+  function familySlug(value) {
+    return typeof value === "string" && value.length <= 64 && /^[a-z0-9-]+$/.test(value);
+  }
+  __name(familySlug, "familySlug");
+  function decodeInspectorIdentity(value) {
+    const document2 = record(value);
+    const placement = record(document2?.placement);
+    const family = document2?.family === void 0 ? void 0 : record(document2.family);
+    const tier = placement?.tier;
+    const expectedLabel = tier === "clone" ? "clone store" : tier === "family" ? "family store" : tier === "ephemeral" ? "ephemeral store" : null;
+    if (document2 === null || !hasOnlyKeys(document2, [
+      "schema",
+      "storeIdentity",
+      "contextIdentity",
+      "repository",
+      "worktree",
+      "placement",
+      "family"
+    ]) || document2.schema !== "pointbreak.inspect-identity" || !nonEmptyString(document2.storeIdentity) || !nonEmptyString(document2.contextIdentity) || !basename(document2.repository) || document2.worktree !== void 0 && !basename(document2.worktree) || placement === null || !hasOnlyKeys(placement, ["tier", "label"]) || expectedLabel === null || placement.label !== expectedLabel || family !== void 0 && (family === null || !hasOnlyKeys(family, ["id"]) || !familySlug(family.id)) || tier === "family" !== (family !== void 0)) {
+      throw new Error("invalid Inspector identity DTO");
+    }
+    return {
+      schema: "pointbreak.inspect-identity",
+      storeIdentity: document2.storeIdentity,
+      contextIdentity: document2.contextIdentity,
+      repository: document2.repository,
+      ...document2.worktree === void 0 ? {} : { worktree: document2.worktree },
+      placement: {
+        tier,
+        label: expectedLabel
+      },
+      ...family === void 0 ? {} : { family: { id: family.id } }
+    };
+  }
+  __name(decodeInspectorIdentity, "decodeInspectorIdentity");
 
   // src/change-inspector-router.ts
   var QUERY_KEYS = [
@@ -1243,111 +1306,6 @@
   }
   __name(presentEvent, "presentEvent");
 
-  // src/dom.ts
-  function $(sel) {
-    return document.querySelector(sel);
-  }
-  __name($, "$");
-
-  // src/prefs.ts
-  var THEME_KEY = "shore-inspect-theme";
-  var DENSITY_KEY = "shore-inspect-density";
-  var SPLIT_KEY = "shore-inspect-split";
-  var SPLIT_MIN = 25;
-  var SPLIT_MAX = 75;
-  var liveMediaQueries = [];
-  var densityListeners = [];
-  function registerDensityListener(listener) {
-    densityListeners.push(listener);
-  }
-  __name(registerDensityListener, "registerDensityListener");
-  function preferredThemeMode() {
-    const stored = localStorage.getItem(THEME_KEY);
-    return stored === "light" || stored === "dark" ? stored : "system";
-  }
-  __name(preferredThemeMode, "preferredThemeMode");
-  function hasPinnedTheme() {
-    return preferredThemeMode() !== "system";
-  }
-  __name(hasPinnedTheme, "hasPinnedTheme");
-  function osTheme() {
-    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  }
-  __name(osTheme, "osTheme");
-  function preferredTheme() {
-    const mode = preferredThemeMode();
-    return mode === "system" ? osTheme() : mode;
-  }
-  __name(preferredTheme, "preferredTheme");
-  function syncChoice(name, value) {
-    for (const input of document.querySelectorAll(
-      `input[name="${name}"]`
-    )) {
-      input.checked = input.value === value;
-    }
-  }
-  __name(syncChoice, "syncChoice");
-  function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme);
-    syncChoice("theme-mode", preferredThemeMode());
-  }
-  __name(applyTheme, "applyTheme");
-  function setThemeMode(mode) {
-    const next = mode === "light" || mode === "dark" ? mode : "system";
-    localStorage.setItem(THEME_KEY, next);
-    applyTheme(preferredTheme());
-  }
-  __name(setThemeMode, "setThemeMode");
-  function preferredDensity() {
-    return localStorage.getItem(DENSITY_KEY) || "comfortable";
-  }
-  __name(preferredDensity, "preferredDensity");
-  function applyDensity(mode) {
-    const value = mode === "compact" ? "compact" : "comfortable";
-    document.documentElement.classList.toggle("compact", value === "compact");
-    syncChoice("density-mode", value);
-  }
-  __name(applyDensity, "applyDensity");
-  function setDensity(mode) {
-    const next = mode === "compact" ? "compact" : "comfortable";
-    localStorage.setItem(DENSITY_KEY, next);
-    applyDensity(next);
-  }
-  __name(setDensity, "setDensity");
-  function preferredSplit() {
-    const raw = localStorage.getItem(SPLIT_KEY);
-    const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
-    return Number.isInteger(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : null;
-  }
-  __name(preferredSplit, "preferredSplit");
-  function applySplit(pct) {
-    if (pct === null) {
-      document.documentElement.style.removeProperty("--split-master");
-      localStorage.removeItem(SPLIT_KEY);
-      return;
-    }
-    const clamped = Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct)));
-    document.documentElement.style.setProperty("--split-master", `${clamped}%`);
-    localStorage.setItem(SPLIT_KEY, String(clamped));
-  }
-  __name(applySplit, "applySplit");
-  function applyPrefs() {
-    applyTheme(preferredTheme());
-    applyDensity(preferredDensity());
-    const split = preferredSplit();
-    if (split !== null) applySplit(split);
-  }
-  __name(applyPrefs, "applyPrefs");
-  function watchColorScheme() {
-    const query = window.matchMedia("(prefers-color-scheme: light)");
-    liveMediaQueries.push(query);
-    query.addEventListener("change", () => {
-      if (hasPinnedTheme()) return;
-      applyTheme(preferredTheme());
-    });
-  }
-  __name(watchColorScheme, "watchColorScheme");
-
   // src/classNames.ts
   var CLASS = {
     // App chrome, master-detail panes, lens containers, and shared chips.
@@ -1371,6 +1329,9 @@
     actions: "actions",
     timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
+    lensHeading: "lens-heading",
+    lensMeta: "lens-meta",
+    lensCount: "lens-count",
     // (The app-shell store-identity chip + detail popover is static markup in
     // index.html — `store-identity*` classes live there and in app.css, not here —
     // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
@@ -1649,6 +1610,123 @@
       ])
     )
   ];
+
+  // src/change-inspector-lens.ts
+  function createLensHeading(label2, metadata) {
+    const heading = document.createElement("h1");
+    heading.className = CLASS.lensHeading;
+    heading.textContent = label2;
+    const meta = document.createElement("p");
+    meta.className = CLASS.lensMeta;
+    meta.textContent = metadata;
+    return [heading, meta];
+  }
+  __name(createLensHeading, "createLensHeading");
+
+  // src/dom.ts
+  function $(sel) {
+    return document.querySelector(sel);
+  }
+  __name($, "$");
+
+  // src/prefs.ts
+  var THEME_KEY = "shore-inspect-theme";
+  var DENSITY_KEY = "shore-inspect-density";
+  var SPLIT_KEY = "shore-inspect-split";
+  var SPLIT_MIN = 25;
+  var SPLIT_MAX = 75;
+  var liveMediaQueries = [];
+  var densityListeners = [];
+  function registerDensityListener(listener) {
+    densityListeners.push(listener);
+  }
+  __name(registerDensityListener, "registerDensityListener");
+  function preferredThemeMode() {
+    const stored = localStorage.getItem(THEME_KEY);
+    return stored === "light" || stored === "dark" ? stored : "system";
+  }
+  __name(preferredThemeMode, "preferredThemeMode");
+  function hasPinnedTheme() {
+    return preferredThemeMode() !== "system";
+  }
+  __name(hasPinnedTheme, "hasPinnedTheme");
+  function osTheme() {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  __name(osTheme, "osTheme");
+  function preferredTheme() {
+    const mode = preferredThemeMode();
+    return mode === "system" ? osTheme() : mode;
+  }
+  __name(preferredTheme, "preferredTheme");
+  function syncChoice(name, value) {
+    for (const input of document.querySelectorAll(
+      `input[name="${name}"]`
+    )) {
+      input.checked = input.value === value;
+    }
+  }
+  __name(syncChoice, "syncChoice");
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    syncChoice("theme-mode", preferredThemeMode());
+  }
+  __name(applyTheme, "applyTheme");
+  function setThemeMode(mode) {
+    const next = mode === "light" || mode === "dark" ? mode : "system";
+    localStorage.setItem(THEME_KEY, next);
+    applyTheme(preferredTheme());
+  }
+  __name(setThemeMode, "setThemeMode");
+  function preferredDensity() {
+    return localStorage.getItem(DENSITY_KEY) || "comfortable";
+  }
+  __name(preferredDensity, "preferredDensity");
+  function applyDensity(mode) {
+    const value = mode === "compact" ? "compact" : "comfortable";
+    document.documentElement.classList.toggle("compact", value === "compact");
+    syncChoice("density-mode", value);
+  }
+  __name(applyDensity, "applyDensity");
+  function setDensity(mode) {
+    const next = mode === "compact" ? "compact" : "comfortable";
+    localStorage.setItem(DENSITY_KEY, next);
+    applyDensity(next);
+  }
+  __name(setDensity, "setDensity");
+  function preferredSplit() {
+    const raw = localStorage.getItem(SPLIT_KEY);
+    const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isInteger(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : null;
+  }
+  __name(preferredSplit, "preferredSplit");
+  function applySplit(pct) {
+    if (pct === null) {
+      document.documentElement.style.removeProperty("--split-master");
+      localStorage.removeItem(SPLIT_KEY);
+      return;
+    }
+    const clamped = Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct)));
+    document.documentElement.style.setProperty("--split-master", `${clamped}%`);
+    localStorage.setItem(SPLIT_KEY, String(clamped));
+  }
+  __name(applySplit, "applySplit");
+  function applyPrefs() {
+    applyTheme(preferredTheme());
+    applyDensity(preferredDensity());
+    const split = preferredSplit();
+    if (split !== null) applySplit(split);
+  }
+  __name(applyPrefs, "applyPrefs");
+  function watchColorScheme() {
+    const query = window.matchMedia("(prefers-color-scheme: light)");
+    liveMediaQueries.push(query);
+    query.addEventListener("change", () => {
+      if (hasPinnedTheme()) return;
+      applyTheme(preferredTheme());
+    });
+  }
+  __name(watchColorScheme, "watchColorScheme");
 
   // src/escape.ts
   var ENTITIES = {
@@ -2065,13 +2143,15 @@
     }
     const section = document.createElement("section");
     section.className = "timeline-shell";
-    const heading = document.createElement("h1");
-    heading.textContent = `Timeline · ${timeline.matchCount}`;
+    const [heading, metadata] = createLensHeading(
+      "Timeline",
+      `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first`
+    );
     const notice = document.createElement("p");
     notice.className = "timeline-summary dim";
     const loadedStart = timeline.entries.length ? timeline.offset + 1 : 0;
     const loadedEnd = timeline.offset + timeline.entries.length;
-    notice.textContent = `${timeline.order === "desc" ? "Newest" : "Oldest"} first · loaded ${loadedStart}-${loadedEnd} of ${timeline.matchCount} matches · ${timeline.eventCount} recorded events. Presentation chronology uses writer timestamps; late events can backfill when writer clocks differ.`;
+    notice.textContent = `loaded ${loadedStart}-${loadedEnd} of ${timeline.matchCount} matches · ${timeline.eventCount} recorded events. Presentation chronology uses writer timestamps; late events can backfill when writer clocks differ.`;
     const notices = document.createElement("div");
     notices.className = "timeline-notices";
     notices.setAttribute("aria-live", "polite");
@@ -2133,7 +2213,7 @@
     list.setAttribute("role", "listbox");
     list.setAttribute("aria-label", "event timeline");
     if (!timeline.entries.length) list.setAttribute("aria-disabled", "true");
-    section.append(heading, notice, notices, page);
+    section.append(heading, metadata, notice, notices, page);
     if (timeline.matchCount === 0) {
       const empty = document.createElement("p");
       empty.className = "timeline-empty dim";
@@ -2643,14 +2723,14 @@
         return null;
       const origin = state[HISTORY_ORIGIN_KEY];
       if (origin === null || typeof origin !== "object") return null;
-      const record = origin;
-      if (record.route !== formatChangeInspectorRoute(route)) return null;
-      return record;
+      const record2 = origin;
+      if (record2.route !== formatChangeInspectorRoute(route)) return null;
+      return record2;
     }, "historyOriginRecord");
     const historyOrigin = /* @__PURE__ */ __name((route) => {
-      const record = historyOriginRecord(route);
-      if (record === null) return null;
-      return record.lens === "timeline" || record.lens === "changes" || record.lens === "attention" ? record.lens : null;
+      const record2 = historyOriginRecord(route);
+      if (record2 === null) return null;
+      return record2.lens === "timeline" || record2.lens === "changes" || record2.lens === "attention" ? record2.lens : null;
     }, "historyOrigin");
     const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens, returnRoute = null) => {
       if (route.kind === "lens" || route.kind === "timeline") return;
@@ -4013,7 +4093,7 @@
     const operativeObligations = detail.operativeObligations;
     const diagnostics = detail.diagnostics;
     const inspectorPresentation = detail.inspectorPresentation;
-    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
+    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString2(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
       (claim) => isRelationClaim(claim, summary.changeId)
     ) || !isClaimWithdrawals(relationWithdrawals) || !isChangeLinks(links) || !isEffectiveSupersedes(effectiveSupersedes) || !Array.isArray(pendingOrConflictingEdges) || !pendingOrConflictingEdges.every(
       (claim) => isRelationClaim(claim, summary.changeId)
@@ -4068,12 +4148,12 @@
     const relationClassification = detail.relationClassification;
     const availability = detail.availability;
     const inspectorPresentation = detail.inspectorPresentation;
-    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
+    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString2(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
       factPorts,
       detail.changeId,
       factPresentations,
       revision2
-    ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
+    ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString2(detail.projectionStamp)) {
       throw new Error("invalid Change Revision detail DTO");
     }
     if (!isChangeRevisionDetailInspectorPresentation(inspectorPresentation, {
@@ -4112,11 +4192,11 @@
     const capturedDocumentHash = document2.capturedDocumentHash;
     const projectionStamp = document2.projectionStamp;
     const cacheKey = document2.cacheKey;
-    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString(resource.objectId) || !isResourceProjection(projection) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString(capturedDocumentHash) || availability === "available" && (capturedDocumentHash === void 0 || !isCapturedReviewSnapshot(
+    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString2(resource.objectId) || !isResourceProjection(projection) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString2(capturedDocumentHash) || availability === "available" && (capturedDocumentHash === void 0 || !isCapturedReviewSnapshot(
       document2.capturedDocument,
       resource.revision.objectArtifactContentHash,
       resource.objectId
-    )) || availability !== "available" && (capturedDocumentHash !== void 0 || document2.capturedDocument !== void 0) || !nonEmptyString(projectionStamp) || !nonEmptyString(cacheKey) || !isStringArray(diagnostics)) {
+    )) || availability !== "available" && (capturedDocumentHash !== void 0 || document2.capturedDocument !== void 0) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || !isStringArray(diagnostics)) {
       throw new Error("invalid Revision resource DTO");
     }
     return {
@@ -4140,7 +4220,7 @@
     const availability = document2.availability;
     const projectionStamp = document2.projectionStamp;
     const cacheKey = document2.cacheKey;
-    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !nonEmptyString(interdiff.algorithmVersion) || !isStringArray(interdiff.scope) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || !nonEmptyString(projectionStamp) || !nonEmptyString(cacheKey) || availability === "available" !== (document2.comparison !== void 0)) {
+    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !nonEmptyString2(interdiff.algorithmVersion) || !isStringArray(interdiff.scope) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || availability === "available" !== (document2.comparison !== void 0)) {
       throw new Error("invalid Revision interdiff DTO");
     }
     return {
@@ -4253,7 +4333,7 @@
   }
   __name(buildEventHistoryUrl, "buildEventHistoryUrl");
   function isEventHistoryRevisionRef(value) {
-    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
+    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
   }
   __name(isEventHistoryRevisionRef, "isEventHistoryRevisionRef");
   var EVENT_HISTORY_EVENT_TYPE_VALUES = new Set(
@@ -4264,19 +4344,19 @@
   }
   __name(isEventHistoryEventType, "isEventHistoryEventType");
   function isEventHistoryWriter(value) {
-    return isRecord(value) && nonEmptyString(value.actorId) && isRecord(value.producer) && nonEmptyString(value.producer.name) && nonEmptyString(value.producer.version);
+    return isRecord(value) && nonEmptyString2(value.actorId) && isRecord(value.producer) && nonEmptyString2(value.producer.name) && nonEmptyString2(value.producer.version);
   }
   __name(isEventHistoryWriter, "isEventHistoryWriter");
   function isReviewEndpoint(value) {
     if (!isRecord(value)) return false;
     switch (value.kind) {
       case "git_commit":
-        return nonEmptyString(value.commitOid) && nonEmptyString(value.treeOid);
+        return nonEmptyString2(value.commitOid) && nonEmptyString2(value.treeOid);
       case "git_tree":
       case "git_index":
-        return nonEmptyString(value.treeOid);
+        return nonEmptyString2(value.treeOid);
       case "git_working_tree":
-        return nonEmptyString(value.worktreeRoot);
+        return nonEmptyString2(value.worktreeRoot);
       default:
         return false;
     }
@@ -4286,21 +4366,21 @@
     if (!isRecord(value)) return false;
     switch (value.kind) {
       case "journal":
-        return nonEmptyString(value.journalId);
+        return nonEmptyString2(value.journalId);
       case "review":
         return isFactTarget(value.target);
       case "change":
-        return nonEmptyString(value.changeId);
+        return nonEmptyString2(value.changeId);
       case "change_membership_claim":
-        return nonEmptyString(value.membershipClaimId);
+        return nonEmptyString2(value.membershipClaimId);
       case "change_link_claim":
-        return nonEmptyString(value.linkClaimId);
+        return nonEmptyString2(value.linkClaimId);
       case "change_revision_relation_claim":
-        return nonEmptyString(value.relationClaimId);
+        return nonEmptyString2(value.relationClaimId);
       case "revision_relation_attestation":
-        return nonEmptyString(value.relationAttestationId) && isEventHistoryRevisionRef(value.revision);
+        return nonEmptyString2(value.relationAttestationId) && isEventHistoryRevisionRef(value.revision);
       case "review_fact_port":
-        return nonEmptyString(value.portId) && isEventHistoryRevisionRef(value.originRevision) && isFactRef(value.originFact);
+        return nonEmptyString2(value.portId) && isEventHistoryRevisionRef(value.originRevision) && isFactRef(value.originFact);
       default:
         return false;
     }
@@ -4327,41 +4407,41 @@
     if (!isRecord(details)) return false;
     switch (eventType) {
       case "work_object_proposed":
-        return nonEmptyString(details.engagementId) && isRecord(details.revision) && nonEmptyString(details.revision.id) && nonEmptyString(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString(details.objectArtifactContentHash) && isStringArray(details.supersedes);
+        return nonEmptyString2(details.engagementId) && isRecord(details.revision) && nonEmptyString2(details.revision.id) && nonEmptyString2(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString2(details.objectArtifactContentHash) && isStringArray(details.supersedes);
       case "review_observation_recorded":
-        return nonEmptyString(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds);
+        return nonEmptyString2(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds);
       case "review_assessment_recorded":
-        return nonEmptyString(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds);
+        return nonEmptyString2(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds);
       case "input_request_opened":
-        return nonEmptyString(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString(details.title) && optionalString(details.body);
+        return nonEmptyString2(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString2(details.title) && optionalString(details.body);
       case "input_request_responded":
-        return nonEmptyString(details.inputRequestResponseId) && nonEmptyString(details.inputRequestId) && nonEmptyString(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason);
+        return nonEmptyString2(details.inputRequestResponseId) && nonEmptyString2(details.inputRequestId) && nonEmptyString2(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason);
       case "revision_ref_associated":
-        return nonEmptyString(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString(details.refName) && nonEmptyString(details.headOid);
+        return nonEmptyString2(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refName) && nonEmptyString2(details.headOid);
       case "revision_ref_withdrawn":
-        return nonEmptyString(details.refWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString(details.refAssociationId);
+        return nonEmptyString2(details.refWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refAssociationId);
       case "revision_commit_associated":
-        return nonEmptyString(details.commitAssociationId) && isReviewTargetSummary(details.target) && isReviewEndpoint(details.commit);
+        return nonEmptyString2(details.commitAssociationId) && isReviewTargetSummary(details.target) && isReviewEndpoint(details.commit);
       case "revision_commit_withdrawn":
-        return nonEmptyString(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString(details.commitAssociationId);
+        return nonEmptyString2(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.commitAssociationId);
       case "validation_check_recorded":
-        return nonEmptyString(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString(details.target.revisionId) && nonEmptyString(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary);
+        return nonEmptyString2(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString2(details.target.revisionId) && nonEmptyString2(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary);
       case "change_declared":
-        return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString(details.declarationClaimId) && nonEmptyString(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString(details.identityDescriptor.revision_id)) && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString2(details.declarationClaimId) && nonEmptyString2(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString2(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString2(details.identityDescriptor.revision_id)) && nonEmptyString2(details.claimNonce);
       case "change_membership_asserted":
-        return details.schema === "pointbreak.change-membership-asserted" && details.version === 1 && nonEmptyString(details.membershipClaimId) && nonEmptyString(details.changeId) && nonEmptyString(details.revisionId) && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-membership-asserted" && details.version === 1 && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.changeId) && nonEmptyString2(details.revisionId) && nonEmptyString2(details.claimNonce);
       case "change_membership_withdrawn":
-        return details.schema === "pointbreak.change-membership-withdrawn" && details.version === 1 && nonEmptyString(details.membershipWithdrawalId) && nonEmptyString(details.membershipClaimId) && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-membership-withdrawn" && details.version === 1 && nonEmptyString2(details.membershipWithdrawalId) && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.claimNonce);
       case "change_link_asserted":
-        return details.schema === "pointbreak.change-link-asserted" && details.version === 1 && nonEmptyString(details.linkClaimId) && nonEmptyString(details.leftChangeId) && nonEmptyString(details.rightChangeId) && (details.relation === "same_work" || details.relation === "related_work") && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-link-asserted" && details.version === 1 && nonEmptyString2(details.linkClaimId) && nonEmptyString2(details.leftChangeId) && nonEmptyString2(details.rightChangeId) && (details.relation === "same_work" || details.relation === "related_work") && nonEmptyString2(details.claimNonce);
       case "change_revision_relation_asserted":
-        return details.schema === "pointbreak.change-revision-relation-asserted" && details.version === 1 && nonEmptyString(details.relationClaimId) && nonEmptyString(details.changeId) && isEventHistoryRevisionRef(details.successor) && isEventHistoryRevisionRef(details.predecessor) && details.relation === "supersedes" && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-revision-relation-asserted" && details.version === 1 && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.changeId) && isEventHistoryRevisionRef(details.successor) && isEventHistoryRevisionRef(details.predecessor) && details.relation === "supersedes" && nonEmptyString2(details.claimNonce);
       case "change_revision_relation_withdrawn":
-        return details.schema === "pointbreak.change-revision-relation-withdrawn" && details.version === 1 && nonEmptyString(details.relationWithdrawalId) && nonEmptyString(details.relationClaimId) && nonEmptyString(details.claimNonce);
+        return details.schema === "pointbreak.change-revision-relation-withdrawn" && details.version === 1 && nonEmptyString2(details.relationWithdrawalId) && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.claimNonce);
       case "revision_relation_attested":
-        return details.schema === "pointbreak.revision-relation-attested" && details.version === 1 && nonEmptyString(details.relationAttestationId) && isEventHistoryRevisionRef(details.revision) && nonEmptyString(details.commitAssociationId) && (details.semanticRelation === "exact_materialization" || details.semanticRelation === "equivalent_rewrite" || details.semanticRelation === "content_preserving_extension" || details.semanticRelation === "landing_provenance" || details.semanticRelation === "related_provenance" || details.semanticRelation === "unknown") && (details.proofStatus === "verified" || details.proofStatus === "asserted" || details.proofStatus === "unverified" || details.proofStatus === "indeterminate" || details.proofStatus === "refuted") && nonEmptyString(details.proofMethod) && nonEmptyString(details.proofAlgorithmVersion) && isStringArray(details.captureScope) && isNullableString(details.comparisonBaseOrParent) && isStringArray(details.endpointOids) && isNullableString(details.evidenceContentHash) && nonEmptyString(details.resultDigest);
+        return details.schema === "pointbreak.revision-relation-attested" && details.version === 1 && nonEmptyString2(details.relationAttestationId) && isEventHistoryRevisionRef(details.revision) && nonEmptyString2(details.commitAssociationId) && (details.semanticRelation === "exact_materialization" || details.semanticRelation === "equivalent_rewrite" || details.semanticRelation === "content_preserving_extension" || details.semanticRelation === "landing_provenance" || details.semanticRelation === "related_provenance" || details.semanticRelation === "unknown") && (details.proofStatus === "verified" || details.proofStatus === "asserted" || details.proofStatus === "unverified" || details.proofStatus === "indeterminate" || details.proofStatus === "refuted") && nonEmptyString2(details.proofMethod) && nonEmptyString2(details.proofAlgorithmVersion) && isStringArray(details.captureScope) && isNullableString(details.comparisonBaseOrParent) && isStringArray(details.endpointOids) && isNullableString(details.evidenceContentHash) && nonEmptyString2(details.resultDigest);
       case "review_fact_ported":
-        return details.schema === "pointbreak.review-fact-ported" && details.version === 1 && nonEmptyString(details.portId) && isEventHistoryRevisionRef(details.originRevision) && isFactRef(details.originFact) && isEventHistoryRevisionRef(details.targetRevision) && (details.relation === "context_only" || details.relation === "reanchored_as" || details.relation === "carried_open_as" || details.relation === "resolved_by") && (details.targetFact === null || isFactRef(details.targetFact)) && isNullableString(details.rationaleContentHash) && isNullableString(details.contextChangeId);
+        return details.schema === "pointbreak.review-fact-ported" && details.version === 1 && nonEmptyString2(details.portId) && isEventHistoryRevisionRef(details.originRevision) && isFactRef(details.originFact) && isEventHistoryRevisionRef(details.targetRevision) && (details.relation === "context_only" || details.relation === "reanchored_as" || details.relation === "carried_open_as" || details.relation === "resolved_by") && (details.targetFact === null || isFactRef(details.targetFact)) && isNullableString(details.rationaleContentHash) && isNullableString(details.contextChangeId);
     }
   }
   __name(isEventHistorySummary, "isEventHistorySummary");
@@ -4369,16 +4449,16 @@
     if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
       return false;
     }
-    return nonEmptyString(value.eventId) && nonEmptyString(value.occurredAt) && nonEmptyString(value.payloadHash) && nonEmptyString(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString(value.sourceRef.sourceSystem) && nonEmptyString(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
+    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
   }
   __name(isEventHistoryEntry, "isEventHistoryEntry");
   function decodeEventHistory(value) {
     const document2 = object(value, "event history");
     const completion = document2.completion;
     const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
-    if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString(document2.sourceChangeProjectionStamp) || !nonEmptyString(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
+    if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString2(document2.sourceChangeProjectionStamp) || !nonEmptyString2(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
       ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
-    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString(document2.previous) || document2.next !== void 0 && !nonEmptyString(document2.next)) {
+    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
       throw new Error("invalid event history DTO");
     }
     if (document2.offset + document2.entries.length > document2.matchCount) {
@@ -4441,12 +4521,12 @@
     const changes = page.changes;
     const diagnostics = page.diagnostics;
     const presentations = page.presentations;
-    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
+    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString2(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
       throw new Error(`invalid ${expected.lens} Change page DTO`);
     }
     const capability = /* @__PURE__ */ __name((name) => {
       const candidate = page[name];
-      if (candidate !== void 0 && candidate !== null && (!nonEmptyString(candidate) || new TextEncoder().encode(candidate).length > 4096)) {
+      if (candidate !== void 0 && candidate !== null && (!nonEmptyString2(candidate) || new TextEncoder().encode(candidate).length > 4096)) {
         throw new Error(`invalid Change page ${name} continuation`);
       }
       return candidate;
@@ -4506,11 +4586,11 @@
   __name(isReaderProfileAvailability, "isReaderProfileAvailability");
   function isChangeSummary(value, stamp) {
     if (!isRecord(value)) return false;
-    return nonEmptyString(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
+    return nonEmptyString2(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
   }
   __name(isChangeSummary, "isChangeSummary");
   function isClaimSupport(value) {
-    return isRecord(value) && nonEmptyString(value.eventId) && nonEmptyString(value.actorId) && optionalString(value.trackId);
+    return isRecord(value) && nonEmptyString2(value.eventId) && nonEmptyString2(value.actorId) && optionalString(value.trackId);
   }
   __name(isClaimSupport, "isClaimSupport");
   function isChangeMemberRevisions(value) {
@@ -4521,25 +4601,25 @@
   __name(isChangeMemberRevisions, "isChangeMemberRevisions");
   function isUnavailableChangeMemberRevisions(value) {
     return Array.isArray(value) && value.every(
-      (member) => isRecord(member) && nonEmptyString(member.revisionId) && (member.reason === "invalid_revision_id" || member.reason === "invalid_object_artifact_content_hash") && isStringArray(member.supportingClaimIds)
+      (member) => isRecord(member) && nonEmptyString2(member.revisionId) && (member.reason === "invalid_revision_id" || member.reason === "invalid_object_artifact_content_hash") && isStringArray(member.supportingClaimIds)
     );
   }
   __name(isUnavailableChangeMemberRevisions, "isUnavailableChangeMemberRevisions");
   function isMembershipClaims(value, changeId) {
     return Array.isArray(value) && value.every(
-      (claim) => isRecord(claim) && nonEmptyString(claim.claimId) && claim.changeId === changeId && nonEmptyString(claim.revisionId) && Array.isArray(claim.supports) && claim.supports.every(isClaimSupport) && Array.isArray(claim.withdrawals) && claim.withdrawals.every(isClaimSupport) && typeof claim.active === "boolean" && isStringArray(claim.diagnostics)
+      (claim) => isRecord(claim) && nonEmptyString2(claim.claimId) && claim.changeId === changeId && nonEmptyString2(claim.revisionId) && Array.isArray(claim.supports) && claim.supports.every(isClaimSupport) && Array.isArray(claim.withdrawals) && claim.withdrawals.every(isClaimSupport) && typeof claim.active === "boolean" && isStringArray(claim.diagnostics)
     );
   }
   __name(isMembershipClaims, "isMembershipClaims");
   function isClaimWithdrawals(value) {
     return Array.isArray(value) && value.every(
-      (withdrawal) => isRecord(withdrawal) && nonEmptyString(withdrawal.claimId) && Array.isArray(withdrawal.supports) && withdrawal.supports.every(isClaimSupport) && isStringArray(withdrawal.diagnostics)
+      (withdrawal) => isRecord(withdrawal) && nonEmptyString2(withdrawal.claimId) && Array.isArray(withdrawal.supports) && withdrawal.supports.every(isClaimSupport) && isStringArray(withdrawal.diagnostics)
     );
   }
   __name(isClaimWithdrawals, "isClaimWithdrawals");
   function isChangeLinks(value) {
     return Array.isArray(value) && value.every(
-      (link) => isRecord(link) && nonEmptyString(link.leftChangeId) && nonEmptyString(link.rightChangeId) && nonEmptyString(link.relation)
+      (link) => isRecord(link) && nonEmptyString2(link.leftChangeId) && nonEmptyString2(link.rightChangeId) && nonEmptyString2(link.relation)
     );
   }
   __name(isChangeLinks, "isChangeLinks");
@@ -4596,12 +4676,32 @@
   }
   __name(isPresentations, "isPresentations");
   function isAttentionPresentation(value) {
-    if (!isRecord(value) || !isAttentionReason(value.primaryReason) || !Array.isArray(value.reasons) || value.reasons.length === 0 || !value.reasons.every(isAttentionReason) || !sameAttentionReason(value.primaryReason, value.reasons[0]) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+    if (!isRecord(value)) return false;
+    const reasons = value.reasons;
+    const reasonPresentations = value.reasonPresentations;
+    if (!isAttentionReason(value.primaryReason) || !Array.isArray(reasons) || reasons.length === 0 || !reasons.every(isAttentionReason) || !sameAttentionReason(value.primaryReason, reasons[0]) || !Array.isArray(reasonPresentations) || reasonPresentations.length !== reasons.length || !reasonPresentations.every(
+      (presentation, index) => isAttentionReasonPresentation(presentation) && sameAttentionReason(presentation.cause, reasons[index])
+    ) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
       return false;
     }
     return true;
   }
   __name(isAttentionPresentation, "isAttentionPresentation");
+  var ATTENTION_REASON_PRESENTATION_KEYS = /* @__PURE__ */ new Set([
+    "cause",
+    "ask",
+    "reason",
+    "evidence",
+    "nextAction"
+  ]);
+  function nonBlankAttentionCopy(value) {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+  __name(nonBlankAttentionCopy, "nonBlankAttentionCopy");
+  function isAttentionReasonPresentation(value) {
+    return isRecord(value) && hasExactKeys(value, ATTENTION_REASON_PRESENTATION_KEYS) && isAttentionReason(value.cause) && nonBlankAttentionCopy(value.ask) && nonBlankAttentionCopy(value.reason) && nonBlankAttentionCopy(value.evidence) && nonBlankAttentionCopy(value.nextAction);
+  }
+  __name(isAttentionReasonPresentation, "isAttentionReasonPresentation");
   function isAttentionReason(value) {
     if (!isRecord(value)) return false;
     switch (value.kind) {
@@ -4610,7 +4710,7 @@
       case "no_current_revision":
         return Object.keys(value).length === 1;
       case "unresolved_operative_requests":
-        return Object.keys(value).length === 2 && Array.isArray(value.requestIds) && value.requestIds.length > 0 && value.requestIds.every(nonEmptyString) && new Set(value.requestIds).size === value.requestIds.length;
+        return Object.keys(value).length === 2 && Array.isArray(value.requestIds) && value.requestIds.length > 0 && value.requestIds.every(nonEmptyString2) && new Set(value.requestIds).size === value.requestIds.length;
       case "current_revisions_need_assessment":
         return Object.keys(value).length === 2 && Array.isArray(value.revisions) && value.revisions.length > 0 && value.revisions.every(isRevisionRef) && uniqueRevisionKeys(value.revisions).size === value.revisions.length;
       default:
@@ -4634,11 +4734,11 @@
   }
   __name(sameAttentionReason, "sameAttentionReason");
   function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
-    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
+    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
   }
   __name(isRevisionRef, "isRevisionRef");
   function isChangeDetailInspectorPresentation(value, detail) {
@@ -4745,17 +4845,17 @@
   }
   __name(isChangeRevisionGraphPresentation, "isChangeRevisionGraphPresentation");
   function isChangeRevisionGraphNode(value) {
-    return isRecord(value) && nonEmptyString(value.id) && isRevisionRef(value.revision) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
+    return isRecord(value) && nonEmptyString2(value.id) && isRevisionRef(value.revision) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
   }
   __name(isChangeRevisionGraphNode, "isChangeRevisionGraphNode");
   function isChangeRevisionGraphEffectiveEdge(value, nodes) {
-    return isRecord(value) && nonEmptyString(value.from) && nonEmptyString(value.to) && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && value.from === revisionGraphNodeId(value.successor) && value.to === revisionGraphNodeId(value.predecessor) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && value.from === revisionGraphNodeId(value.successor) && value.to === revisionGraphNodeId(value.predecessor) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
   }
   __name(isChangeRevisionGraphEffectiveEdge, "isChangeRevisionGraphEffectiveEdge");
   function isChangeRevisionGraphClaimEdge(value, nodes) {
     if (!isRecord(value) || !isChangeRevisionGraphEffectiveEdge(value, nodes))
       return false;
-    return nonEmptyString(value.claimId) && isStringArray(value.diagnostics);
+    return nonEmptyString2(value.claimId) && isStringArray(value.diagnostics);
   }
   __name(isChangeRevisionGraphClaimEdge, "isChangeRevisionGraphClaimEdge");
   function isFactRelationshipGraphPresentation(value) {
@@ -4771,11 +4871,11 @@
   }
   __name(isFactRelationshipGraphPresentation, "isFactRelationshipGraphPresentation");
   function isFactRelationshipGraphNode(value) {
-    if (!isRecord(value) || !nonEmptyString(value.id) || !isRevisionRef(value.revision) || !isFiniteGeometry(value) || !isGraphContext(value)) {
+    if (!isRecord(value) || !nonEmptyString2(value.id) || !isRevisionRef(value.revision) || !isFiniteGeometry(value) || !isGraphContext(value)) {
       return false;
     }
     if (value.kind === "fact") {
-      return nonEmptyString(value.factId) && nonEmptyString(value.family) && value.id === factGraphNodeId(value.revision, value.family, value.factId);
+      return nonEmptyString2(value.factId) && nonEmptyString2(value.family) && value.id === factGraphNodeId(value.revision, value.family, value.factId);
     }
     return value.kind === "revision" && value.factId === void 0 && value.family === void 0 && value.id === revisionGraphNodeId(value.revision);
   }
@@ -4788,11 +4888,11 @@
   }
   __name(isGraphContext, "isGraphContext");
   function isFactRelationshipEdge(value, family, nodes) {
-    return isRecord(value) && nonEmptyString(value.from) && nonEmptyString(value.to) && isRevisionRef(value.originRevision) && nonEmptyString(value.fromFactId) && nonEmptyString(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.originRevision) && nonEmptyString2(value.fromFactId) && nonEmptyString2(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
   }
   __name(isFactRelationshipEdge, "isFactRelationshipEdge");
   function isFactPortRelationshipEdge(value, nodes) {
-    if (!isRecord(value) || !nonEmptyString(value.portId) || !nonEmptyString(value.from) || !nonEmptyString(value.to) || !isRevisionRef(value.originRevision) || !isFactRef(value.originFact) || !isRevisionRef(value.targetRevision) || value.targetFact !== void 0 && !isFactRef(value.targetFact) || value.relation !== "context_only" && value.relation !== "reanchored_as" && value.relation !== "carried_open_as" && value.relation !== "resolved_by" || value.applicability !== "applicable" && value.applicability !== "conflicted" && value.applicability !== "unavailable" || !isGraphPath(value.path) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+    if (!isRecord(value) || !nonEmptyString2(value.portId) || !nonEmptyString2(value.from) || !nonEmptyString2(value.to) || !isRevisionRef(value.originRevision) || !isFactRef(value.originFact) || !isRevisionRef(value.targetRevision) || value.targetFact !== void 0 && !isFactRef(value.targetFact) || value.relation !== "context_only" && value.relation !== "reanchored_as" && value.relation !== "carried_open_as" && value.relation !== "resolved_by" || value.applicability !== "applicable" && value.applicability !== "conflicted" && value.applicability !== "unavailable" || !isGraphPath(value.path) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
       return false;
     }
     const from = factGraphNodeId(
@@ -4867,25 +4967,25 @@
   }
   __name(uniqueRevisionKeys, "uniqueRevisionKeys");
   function isRelationClaim(value, changeId) {
-    return isRecord(value) && nonEmptyString(value.claimId) && value.changeId === changeId && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport) && isStringArray(value.diagnostics);
+    return isRecord(value) && nonEmptyString2(value.claimId) && value.changeId === changeId && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport) && isStringArray(value.diagnostics);
   }
   __name(isRelationClaim, "isRelationClaim");
   function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString(value.factId) && nonEmptyString(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString(value.actorId) && (value.trackId === void 0 || nonEmptyString(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
   }
   __name(isFactPresentation, "isFactPresentation");
   function isFactTarget(value) {
-    if (!isRecord(value) || !nonEmptyString(value.revisionId)) return false;
+    if (!isRecord(value) || !nonEmptyString2(value.revisionId)) return false;
     if (value.kind === "revision") return true;
-    if (value.kind === "file") return nonEmptyString(value.filePath);
+    if (value.kind === "file") return nonEmptyString2(value.filePath);
     if (value.kind === "range") {
-      return nonEmptyString(value.filePath) && (value.side === "old" || value.side === "new") && Number.isSafeInteger(value.startLine) && value.startLine > 0 && Number.isSafeInteger(value.endLine) && value.endLine >= value.startLine;
+      return nonEmptyString2(value.filePath) && (value.side === "old" || value.side === "new") && Number.isSafeInteger(value.startLine) && value.startLine > 0 && Number.isSafeInteger(value.endLine) && value.endLine >= value.startLine;
     }
-    if (value.kind === "observation") return nonEmptyString(value.observationId);
+    if (value.kind === "observation") return nonEmptyString2(value.observationId);
     if (value.kind === "input_request")
-      return nonEmptyString(value.inputRequestId);
-    if (value.kind === "assessment") return nonEmptyString(value.assessmentId);
-    return value.kind === "event" && nonEmptyString(value.eventId);
+      return nonEmptyString2(value.inputRequestId);
+    if (value.kind === "assessment") return nonEmptyString2(value.assessmentId);
+    return value.kind === "event" && nonEmptyString2(value.eventId);
   }
   __name(isFactTarget, "isFactTarget");
   function uniqueFactPresentationIds(facts) {
@@ -4893,14 +4993,14 @@
   }
   __name(uniqueFactPresentationIds, "uniqueFactPresentationIds");
   function isResourceProjection(value) {
-    return isRecord(value) && typeof value.includeBody === "boolean" && (value.trackId === void 0 || nonEmptyString(value.trackId));
+    return isRecord(value) && typeof value.includeBody === "boolean" && (value.trackId === void 0 || nonEmptyString2(value.trackId));
   }
   __name(isResourceProjection, "isResourceProjection");
   function isCapturedReviewSnapshot(value, expectedContentHash, expectedObjectId) {
     if (!isRecord(value) || value.schema !== "pointbreak.review-snapshot" || value.version !== 1 || value.contentHash !== expectedContentHash || !isRecord(value.snapshot)) {
       return false;
     }
-    return nonEmptyString(value.snapshot.review_id) && value.snapshot.object_id === expectedObjectId && Array.isArray(value.snapshot.files);
+    return nonEmptyString2(value.snapshot.review_id) && value.snapshot.object_id === expectedObjectId && Array.isArray(value.snapshot.files);
   }
   __name(isCapturedReviewSnapshot, "isCapturedReviewSnapshot");
   function isFactContentPresentations(value) {
@@ -4952,16 +5052,16 @@
   }
   __name(applicableFactPortHasExactEndpoints, "applicableFactPortHasExactEndpoints");
   function isFactPortPresentation(value) {
-    return isRecord(value) && nonEmptyString(value.portId) && isRevisionRef(value.originRevision) && isFactRef(value.originFact) && isRevisionRef(value.targetRevision) && (value.relation === "context_only" || value.relation === "reanchored_as" || value.relation === "carried_open_as" || value.relation === "resolved_by") && (value.targetFact === void 0 || isFactRef(value.targetFact)) && optionalString(value.rationaleContentHash) && optionalString(value.contextChangeId) && nonEmptyString(value.actorId) && nonEmptyString(value.trackId) && isStringArray(value.sourceEventIds) && (value.applicability === "applicable" || value.applicability === "conflicted" || value.applicability === "unavailable") && isStringArray(value.diagnostics);
+    return isRecord(value) && nonEmptyString2(value.portId) && isRevisionRef(value.originRevision) && isFactRef(value.originFact) && isRevisionRef(value.targetRevision) && (value.relation === "context_only" || value.relation === "reanchored_as" || value.relation === "carried_open_as" || value.relation === "resolved_by") && (value.targetFact === void 0 || isFactRef(value.targetFact)) && optionalString(value.rationaleContentHash) && optionalString(value.contextChangeId) && nonEmptyString2(value.actorId) && nonEmptyString2(value.trackId) && isStringArray(value.sourceEventIds) && (value.applicability === "applicable" || value.applicability === "conflicted" || value.applicability === "unavailable") && isStringArray(value.diagnostics);
   }
   __name(isFactPortPresentation, "isFactPortPresentation");
   function isFactRef(value) {
     if (!isRecord(value)) return false;
     if (value.kind === "observation") {
-      return nonEmptyString(value.observationId) && value.inputRequestId === void 0;
+      return nonEmptyString2(value.observationId) && value.inputRequestId === void 0;
     }
     if (value.kind === "input_request") {
-      return nonEmptyString(value.inputRequestId) && value.observationId === void 0;
+      return nonEmptyString2(value.inputRequestId) && value.observationId === void 0;
     }
     return false;
   }
@@ -4970,24 +5070,24 @@
     if (!isRecord(value)) return false;
     switch (value.kind) {
       case "observation":
-        return nonEmptyString(value.title) && optionalString(value.body);
+        return nonEmptyString2(value.title) && optionalString(value.body);
       case "input_request":
-        return nonEmptyString(value.title) && optionalString(value.body) && nonEmptyString(value.status) && (value.responses === void 0 || Array.isArray(value.responses) && value.responses.every(isFactResponse));
+        return nonEmptyString2(value.title) && optionalString(value.body) && nonEmptyString2(value.status) && (value.responses === void 0 || Array.isArray(value.responses) && value.responses.every(isFactResponse));
       case "assessment":
-        return nonEmptyString(value.assessment) && optionalString(value.summary);
+        return nonEmptyString2(value.assessment) && optionalString(value.summary);
       case "validation":
-        return nonEmptyString(value.checkName) && optionalString(value.command) && nonEmptyString(value.status) && optionalString(value.summary);
+        return nonEmptyString2(value.checkName) && optionalString(value.command) && nonEmptyString2(value.status) && optionalString(value.summary);
       default:
         return false;
     }
   }
   __name(isFactContent, "isFactContent");
   function isFactResponse(value) {
-    return isRecord(value) && nonEmptyString(value.responseId) && nonEmptyString(value.outcome) && optionalString(value.reason) && (value.contentType === "text/plain" || value.contentType === "text/markdown") && (value.bodyContentState === "present" || value.bodyContentState === "suppressed_present" || value.bodyContentState === "physically_removed") && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+    return isRecord(value) && nonEmptyString2(value.responseId) && nonEmptyString2(value.outcome) && optionalString(value.reason) && (value.contentType === "text/plain" || value.contentType === "text/markdown") && (value.bodyContentState === "present" || value.bodyContentState === "suppressed_present" || value.bodyContentState === "physically_removed") && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
   }
   __name(isFactResponse, "isFactResponse");
   function isAssociation(value) {
-    return isRecord(value) && value.schema === "pointbreak.review-association-comparison" && value.version === 1 && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString(value.comparison.associationId) && nonEmptyString(value.comparison.commitOid) && nonEmptyString(value.comparison.comparisonBase) && nonEmptyString(value.comparison.viewKind) && optionalString(value.comparison.proofRef) && isStringArray(value.diagnostics) && nonEmptyString(value.cacheKey);
+    return isRecord(value) && value.schema === "pointbreak.review-association-comparison" && value.version === 1 && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString2(value.comparison.associationId) && nonEmptyString2(value.comparison.commitOid) && nonEmptyString2(value.comparison.comparisonBase) && nonEmptyString2(value.comparison.viewKind) && optionalString(value.comparison.proofRef) && isStringArray(value.diagnostics) && nonEmptyString2(value.cacheKey);
   }
   __name(isAssociation, "isAssociation");
   function sameRevision(left, right) {
@@ -5047,10 +5147,10 @@
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
   __name(isRecord, "isRecord");
-  function nonEmptyString(value) {
+  function nonEmptyString2(value) {
     return typeof value === "string" && value.length > 0;
   }
-  __name(nonEmptyString, "nonEmptyString");
+  __name(nonEmptyString2, "nonEmptyString");
   function optionalString(value) {
     return value === void 0 || typeof value === "string";
   }
@@ -5209,77 +5309,30 @@
     ).join("\n");
   }
   __name(exactRevisionCopyText, "exactRevisionCopyText");
-  function attentionReasonCopy(reason) {
-    switch (reason.kind) {
-      case "conflicted":
-        return {
-          kind: reason.kind,
-          reason: "Conflicting Change state",
-          ask: "Resolve the conflicting Change state.",
-          actionLabel: "Review conflict",
-          accessibleName: "Conflicting Change state. Resolve the conflicting Change state.",
-          title: "Conflicting Change state",
-          copyText: "conflicted"
-        };
-      case "incomplete":
-        return {
-          kind: reason.kind,
-          reason: "Incomplete Change state",
-          ask: "Complete the missing Change state.",
-          actionLabel: "Review incomplete Change",
-          accessibleName: "Incomplete Change state. Complete the missing Change state.",
-          title: "Incomplete Change state",
-          copyText: "incomplete"
-        };
-      case "no_current_revision":
-        return {
-          kind: reason.kind,
-          reason: "No current Revision",
-          ask: "Establish one exact current Revision before review can continue.",
-          actionLabel: "Review Change",
-          accessibleName: "No current Revision. Establish one exact current Revision before review can continue.",
-          title: "No current Revision",
-          copyText: "no_current_revision"
-        };
-      case "unresolved_operative_requests": {
-        const visibleRequestIds = reason.requestIds.map(shortRef);
-        const requestList = visibleRequestIds.join(", ");
-        const fullRequestList = reason.requestIds.join(", ");
-        return {
-          kind: reason.kind,
-          reason: "Unresolved operative requests",
-          ask: `Respond to operative requests: ${requestList}.`,
-          actionLabel: "Respond to requests",
-          accessibleName: `Unresolved operative requests. Respond to operative requests: ${fullRequestList}.`,
-          title: `Operative requests: ${fullRequestList}`,
-          copyText: reason.requestIds.join("\n")
-        };
-      }
-      case "current_revisions_need_assessment": {
-        const visibleRevisions = reason.revisions.map(shortExactRevision).join(", ");
-        const fullRevisions = reason.revisions.map(exactRevisionAccessibleIdentity).join("; ");
-        return {
-          kind: reason.kind,
-          reason: "Current Revisions need assessment",
-          ask: `Assess current Revisions: ${visibleRevisions}.`,
-          actionLabel: "Assess current Revisions",
-          accessibleName: `Current Revisions need assessment. Assess ${fullRevisions}.`,
-          title: fullRevisions,
-          copyText: exactRevisionCopyText(reason.revisions)
-        };
-      }
-    }
+  function attentionReasonCopy(presentation) {
+    const { cause, ask, reason, evidence, nextAction } = presentation;
+    return {
+      kind: cause.kind,
+      reason,
+      ask,
+      evidence,
+      nextAction,
+      accessibleName: `${reason} ${ask} ${evidence} Next: ${nextAction}`,
+      title: evidence,
+      copyText: [reason, ask, evidence, nextAction].join("\n")
+    };
   }
   __name(attentionReasonCopy, "attentionReasonCopy");
   function attentionPresentation(attention) {
     if (attention === void 0) return void 0;
-    const primary = attentionReasonCopy(attention.primaryReason);
+    const primary = attentionReasonCopy(attention.reasonPresentations[0]);
     return {
       primary,
       reason: primary.reason,
       ask: primary.ask,
-      actionLabel: primary.actionLabel,
-      additionalReasons: attention.reasons.slice(1).map(attentionReasonCopy),
+      evidence: primary.evidence,
+      nextAction: primary.nextAction,
+      additionalReasons: attention.reasonPresentations.slice(1).map(attentionReasonCopy),
       ...attention.diagnostics === void 0 ? {} : { diagnostics: attention.diagnostics }
     };
   }
@@ -6907,6 +6960,43 @@
     });
   }
   __name(graphRoot, "graphRoot");
+  function graphViewport(document2, label2) {
+    const viewport = document2.createElement("div");
+    viewport.className = "relationship-graph-viewport";
+    viewport.dataset.graphViewport = "true";
+    viewport.tabIndex = 0;
+    viewport.setAttribute("role", "region");
+    viewport.setAttribute(
+      "aria-label",
+      `${label2}; use Left and Right Arrow keys, Home, and End to pan`
+    );
+    viewport.addEventListener("keydown", (event) => {
+      if (event.target !== viewport) return;
+      const maximum = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      const step = Math.max(80, Math.round(viewport.clientWidth * 0.8));
+      let next;
+      switch (event.key) {
+        case "ArrowLeft":
+          next = viewport.scrollLeft - step;
+          break;
+        case "ArrowRight":
+          next = viewport.scrollLeft + step;
+          break;
+        case "Home":
+          next = 0;
+          break;
+        case "End":
+          next = maximum;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      viewport.scrollLeft = Math.min(maximum, Math.max(0, next));
+    });
+    return viewport;
+  }
+  __name(graphViewport, "graphViewport");
   function sorted(values, key) {
     return [...values].sort(
       (left, right) => key(left).localeCompare(key(right), "en")
@@ -6964,11 +7054,11 @@
     return { root, nodes, edges };
   }
   __name(textualEquivalent, "textualEquivalent");
-  function actionItem(document2, text, accessibleName, action) {
+  function actionItem(document2, accessibleName, action) {
     const item = document2.createElement("li");
     const button2 = document2.createElement("button");
     button2.type = "button";
-    button2.textContent = text;
+    button2.textContent = accessibleName;
     button2.title = accessibleName;
     button2.setAttribute("aria-label", accessibleName);
     wireAction(button2, action, false);
@@ -6993,6 +7083,11 @@
       "Change Revision relationship graph",
       graph.bounds
     );
+    const viewport = graphViewport(
+      document2,
+      "Change Revision relationship graph"
+    );
+    viewport.append(svg);
     const defs = svgElement(document2, "defs");
     defs.append(
       marker(document2, "change-effective-arrow", "solid"),
@@ -7118,18 +7213,13 @@
       if (activate) wireAction(group, activate, true);
       svg.append(group);
       text.nodes.append(
-        activate ? actionItem(
-          document2,
-          `${node.isCurrent ? "Current " : ""}${shortRef(node.revision.revisionId)}`,
-          `Open ${accessibleName}`,
-          activate
-        ) : textItem(document2, accessibleName)
+        activate ? actionItem(document2, `Open ${accessibleName}`, activate) : textItem(document2, accessibleName)
       );
     }
     for (const diagnostic of graph.diagnostics ?? []) {
       text.edges.append(textItem(document2, `Graph diagnostic: ${diagnostic}`));
     }
-    figure.append(svg, text.root);
+    figure.append(viewport, text.root);
     return figure;
   }
   __name(renderChangeRevisionGraph, "renderChangeRevisionGraph");
@@ -7171,6 +7261,8 @@
       "Exact fact relationship graph",
       graph.bounds
     );
+    const viewport = graphViewport(document2, "Exact fact relationship graph");
+    viewport.append(svg);
     const defs = svgElement(document2, "defs");
     defs.append(
       marker(document2, "fact-observation-arrow", "solid"),
@@ -7321,15 +7413,10 @@
       if (activate) wireAction(group, activate, true);
       svg.append(group);
       text.nodes.append(
-        activate ? actionItem(
-          document2,
-          focus ? `${words3(focus.family)} ${shortRef(focus.factId)}` : `Revision ${shortRef(node.revision.revisionId)}`,
-          accessibleName,
-          activate
-        ) : textItem(document2, accessibleName)
+        activate ? actionItem(document2, accessibleName, activate) : textItem(document2, accessibleName)
       );
     }
-    figure.append(svg, text.root);
+    figure.append(viewport, text.root);
     return figure;
   }
   __name(renderFactRelationshipGraph, "renderFactRelationshipGraph");
@@ -7373,7 +7460,7 @@
     };
   }
   __name(routeForLens, "routeForLens");
-  function syncLensLinks(active3, current) {
+  function syncLensLinks(active3, current, attentionCount) {
     document.querySelectorAll("#lens-switcher a[data-lens]").forEach((link) => {
       const lens = link.dataset.lens;
       if (lens !== "timeline" && lens !== "changes" && lens !== "attention")
@@ -7381,6 +7468,21 @@
       link.href = formatChangeInspectorRoute(routeForLens(lens, current));
       if (lens === active3) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
+      if (lens === "attention") {
+        let count = link.querySelector(`.${CLASS.lensCount}`);
+        if (count === null) {
+          count = document.createElement("span");
+          count.className = CLASS.lensCount;
+          count.setAttribute("aria-hidden", "true");
+          link.append(count);
+        }
+        count.textContent = `${attentionCount} shown`;
+        count.title = "Changes shown on this page";
+        link.setAttribute(
+          "aria-label",
+          `Attention, ${attentionCount} ${attentionCount === 1 ? "Change" : "Changes"} shown on this page`
+        );
+      }
     });
   }
   __name(syncLensLinks, "syncLensLinks");
@@ -7438,6 +7540,46 @@
     if (element) element.textContent = value;
   }
   __name(setText, "setText");
+  var INSPECTOR_TITLE = "Pointbreak Review";
+  function renderChangeInspectorIdentity(identity) {
+    const root = document.querySelector("#store-identity");
+    if (root === null) return;
+    root.classList.remove("hidden");
+    const repository = document.querySelector("#store-chip-repo");
+    const chip = document.querySelector("#store-chip");
+    const rows = document.querySelector("#store-identity-rows");
+    if (identity === null) {
+      if (repository) repository.textContent = "local server";
+      chip?.setAttribute("aria-label", "local review server");
+      rows?.replaceChildren();
+      document.title = INSPECTOR_TITLE;
+      return;
+    }
+    const values = [
+      ["repository", identity.repository],
+      ["store", identity.placement.label]
+    ];
+    if (identity.family) values.push(["family", identity.family.id]);
+    if (identity.worktree) values.push(["worktree", identity.worktree]);
+    if (rows) {
+      const children = [];
+      for (const [label2, value] of values) {
+        const term = document.createElement("dt");
+        term.textContent = label2;
+        const description = document.createElement("dd");
+        description.textContent = value;
+        children.push(term, description);
+      }
+      rows.replaceChildren(...children);
+    }
+    if (repository) repository.textContent = identity.repository;
+    chip?.setAttribute(
+      "aria-label",
+      values.map(([label2, value]) => `${label2} ${value}`).join(", ")
+    );
+    document.title = `${identity.repository} · ${INSPECTOR_TITLE}`;
+  }
+  __name(renderChangeInspectorIdentity, "renderChangeInspectorIdentity");
   function replaceMasterWith(...children) {
     const master = document.querySelector("#master");
     if (!master) return;
@@ -7473,6 +7615,12 @@
         link.className = "lens-tab";
         link.dataset.lens = lens;
         link.textContent = lens === "timeline" ? "Timeline" : lens === "changes" ? "Changes" : "Attention";
+        if (lens === "attention") {
+          const count = document.createElement("span");
+          count.className = CLASS.lensCount;
+          count.setAttribute("aria-hidden", "true");
+          link.append(count);
+        }
         const destination = /* @__PURE__ */ __name(() => {
           const current = parseChangeInspectorRoute(
             location.hash || "#/timeline"
@@ -7959,9 +8107,9 @@
       );
     }
     attribution.append(attributionFacts);
-    const record = document.createElement("section");
-    record.className = "event-detail-record";
-    record.append(detailHeading("Event record", 3));
+    const record2 = document.createElement("section");
+    record2.className = "event-detail-record";
+    record2.append(detailHeading("Event record", 3));
     const facts = document.createElement("dl");
     facts.className = "kv";
     const add = /* @__PURE__ */ __name((name, value, accessibleName = value) => appendDefinition(facts, name, value, accessibleName), "add");
@@ -7987,7 +8135,7 @@
     );
     if (event.unresolvedRevisionIds.length)
       add("unresolved Revisions", event.unresolvedRevisionIds.join("; "));
-    record.append(facts);
+    record2.append(facts);
     const context = document.createElement("section");
     context.className = "actions event-detail-actions";
     const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
@@ -8082,7 +8230,7 @@
       2
     );
     structured.append(structuredLabel, raw);
-    return [heading, identity, summary, attribution, record, context, structured];
+    return [heading, identity, summary, attribution, record2, context, structured];
   }
   __name(renderEventDetail, "renderEventDetail");
   function detailHeading(text, level = 2) {
@@ -8674,19 +8822,19 @@
       ],
       ["Diagnostics", detail.diagnostics]
     ];
-    const record = document.createElement("details");
-    record.className = "detail-record";
+    const record2 = document.createElement("details");
+    record2.className = "detail-record";
     const recordLabel = document.createElement("summary");
     recordLabel.textContent = "Recorded claims and diagnostics";
-    record.append(recordLabel);
+    record2.append(recordLabel);
     for (const [title, entries] of sections) {
       const section = document.createElement("section");
       section.append(detailHeading(title, 3));
       if (entries.length === 0) section.append(message("None."));
       for (const entry of entries) section.append(detailLine(entry));
-      record.append(section);
+      record2.append(section);
     }
-    nodes.push(record);
+    nodes.push(record2);
     return nodes;
   }
   __name(renderChangeDetail, "renderChangeDetail");
@@ -8917,6 +9065,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     reading: null,
     refusal: null
   }) {
+    renderChangeInspectorIdentity(snapshot2.identity ?? null);
     const master = document.querySelector("#master");
     if (!master) return;
     if (snapshot2.route.kind === "diff" && presentation.reading?.kind === "diff") {
@@ -8982,7 +9131,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         timelineRoute,
         route.kind === "event" ? route.eventId : null
       );
-      syncLensLinks("timeline", snapshot2.route);
+      syncLensLinks(
+        "timeline",
+        snapshot2.route,
+        snapshot2.generation.attention.changes.length
+      );
       setText("#stat-events", `${history2.eventCount} events`);
       setText(
         "#stat-units",
@@ -8990,7 +9143,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       );
       setText(
         "#stat-threads",
-        `${snapshot2.generation.attention.changes.length} need attention`
+        `${snapshot2.generation.attention.changes.length} shown on this page`
       );
       setText("#stat-hash", history2.timelineProjectionStamp);
       renderDetail(snapshot2, actions2, presentation);
@@ -9010,9 +9163,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     if (master.dataset.changeListKey !== listKey) {
       const list = document.createElement("section");
       list.className = "units";
-      const heading = document.createElement("h1");
-      heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
-      list.append(heading);
+      const count = page.changes.length;
+      const [heading, metadata] = createLensHeading(
+        lens === "changes" ? "Changes" : "Attention",
+        `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`
+      );
+      list.append(heading, metadata);
       for (const summary of page.changes.slice(0, 150)) {
         const card = changeCardPresentation(
           summary,
@@ -9061,17 +9217,20 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           const ask = document.createElement("p");
           ask.className = "change-card-attention-ask";
           ask.textContent = card.attention.ask;
+          const evidence = document.createElement("p");
+          evidence.className = "change-card-attention-evidence";
+          evidence.textContent = card.attention.evidence;
           const action = document.createElement("p");
           action.className = "change-card-attention-action";
-          action.textContent = `Next: ${card.attention.actionLabel}`;
-          attention.append(reason, ask, action);
+          action.textContent = `Next: ${card.attention.nextAction}`;
+          attention.append(reason, ask, evidence, action);
           if (card.attention.additionalReasons.length > 0) {
             const additional = document.createElement("ul");
             additional.className = "change-card-attention-additional";
             additional.setAttribute("aria-label", "Additional reasons");
             for (const item of card.attention.additionalReasons) {
               const row = document.createElement("li");
-              row.textContent = `${item.reason}: ${item.ask}`;
+              row.textContent = `${item.reason}: ${item.ask} ${item.evidence} Next: ${item.nextAction}`;
               row.title = item.title;
               row.setAttribute("aria-label", item.accessibleName);
               additional.append(row);
@@ -9115,8 +9274,24 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           const current = document.createElement("p");
           current.className = "change-card-current";
           current.append("Current Revision · ");
+          const open = document.createElement("a");
+          open.href = formatChangeInspectorRoute({
+            kind: "revision",
+            changeId: summary.changeId,
+            revision: peer.revision,
+            query: queryForExactNavigation(route)
+          });
+          open.dataset.changeId = summary.changeId;
+          open.dataset.revisionId = peer.revision.revisionId;
+          open.dataset.artifactHash = peer.revision.objectArtifactContentHash;
+          open.title = peer.title;
+          open.setAttribute(
+            "aria-label",
+            `Open ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`
+          );
           const exact = exactRevisionIdentity2(peer.revision);
-          current.append(exact);
+          open.append(exact);
+          current.append(open);
           element.append(current);
         } else {
           const peers = document.createElement("section");
@@ -9180,7 +9355,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       master.replaceChildren(list);
       master.dataset.changeListKey = listKey;
     }
-    syncLensLinks(lens, snapshot2.route);
+    syncLensLinks(
+      lens,
+      snapshot2.route,
+      snapshot2.generation.attention.changes.length
+    );
     setText(
       "#stat-events",
       `${snapshot2.generation.profile.authorityCursor.eventCount ?? "—"} events`
@@ -9191,7 +9370,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     );
     setText(
       "#stat-threads",
-      `${snapshot2.generation.attention.changes.length} need attention`
+      `${snapshot2.generation.attention.changes.length} shown on this page`
     );
     setText("#stat-hash", snapshot2.generation.changes.projectionStamp);
     renderDetail(snapshot2, actions2, presentation);
@@ -9676,11 +9855,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(stageGeneration, "stageGeneration");
   function createChangeInspectorState(initialRoute) {
     let generation = null;
+    let generationCredentialVersion = null;
+    let identity = null;
+    let pendingIdentity = null;
     let route = initialRoute;
     const snapshot2 = /* @__PURE__ */ __name(() => {
       const selected = generation === null ? null : selectedChange(generation, route);
       return {
         generation,
+        identity: identity?.value ?? null,
         route,
         selected,
         diagnostic: selectionDiagnostic(route)
@@ -9688,8 +9871,25 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "snapshot");
     return {
       snapshot: snapshot2,
-      publish(next) {
+      publish(next, credentialVersion2 = 0) {
+        const transition = generation === null ? "initial" : sameProfileGeneration(generation.profile, next.profile) && generation.changes.projectionStamp === next.changes.projectionStamp && generation.history?.timelineProjectionStamp === next.history?.timelineProjectionStamp ? "unchanged" : "changed";
         generation = next;
+        generationCredentialVersion = credentialVersion2;
+        if (identity?.credentialVersion !== credentialVersion2) {
+          identity = pendingIdentity?.credentialVersion === credentialVersion2 ? pendingIdentity : null;
+        }
+        if (pendingIdentity?.credentialVersion === credentialVersion2) {
+          pendingIdentity = null;
+        }
+        return { snapshot: snapshot2(), transition };
+      },
+      publishIdentity(next, credentialVersion2 = 0) {
+        const candidate = { value: next, credentialVersion: credentialVersion2 };
+        if (generation === null || generationCredentialVersion === credentialVersion2) {
+          identity = candidate;
+        } else {
+          pendingIdentity = candidate;
+        }
         return snapshot2();
       },
       setRoute(next) {
@@ -9698,6 +9898,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       },
       clearGeneration() {
         generation = null;
+        generationCredentialVersion = null;
+        if (pendingIdentity !== null) {
+          identity = pendingIdentity;
+          pendingIdentity = null;
+        }
         return snapshot2();
       }
     };
@@ -9942,10 +10147,16 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
 
   // src/change-inspector.ts
   var EXACT_READING_TIMEOUT_MS = 1e4;
+  var IDENTITY_TIMEOUT_MS = 3e3;
   var POLL_CYCLE_TIMEOUT_MS = 15e3;
   var ChangeInspectorTimeout = class extends Error {
     static {
       __name(this, "ChangeInspectorTimeout");
+    }
+  };
+  var ChangeInspectorSessionChanged = class extends Error {
+    static {
+      __name(this, "ChangeInspectorSessionChanged");
     }
   };
   var pollTimer = null;
@@ -9958,7 +10169,14 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var interactionStop = null;
   var timelineSearchFocusIntentStop = null;
   var pollCoordinatorStop = null;
+  var refreshSettleTimer = null;
   var requestEpoch = 0;
+  var compositionEpoch = 0;
+  function clearRefreshSettleTimer() {
+    if (refreshSettleTimer !== null) clearTimeout(refreshSettleTimer);
+    refreshSettleTimer = null;
+  }
+  __name(clearRefreshSettleTimer, "clearRefreshSettleTimer");
   function currentRoute() {
     return parseChangeInspectorRoute(location.hash || "#/timeline");
   }
@@ -10008,11 +10226,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   }
   __name(withinTimeout, "withinTimeout");
   function stopChangeInspector() {
+    compositionEpoch += 1;
     requestEpoch += 1;
     if (pollTimer !== null) clearInterval(pollTimer);
     pollTimer = null;
     pollCoordinatorStop?.();
     pollCoordinatorStop = null;
+    clearRefreshSettleTimer();
     if (routeListener !== null)
       window.removeEventListener("hashchange", routeListener);
     routeListener = null;
@@ -10031,13 +10251,35 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(stopChangeInspector, "stopChangeInspector");
   async function bootstrapChangeInspector(options = {}) {
     stopChangeInspector();
+    const composition = compositionEpoch;
+    const isCurrentComposition = /* @__PURE__ */ __name(() => composition === compositionEpoch, "isCurrentComposition");
     const capability = bootstrapCapability();
     if (capability.token !== null) {
       (options.reload ?? (() => location.reload()))();
       return;
     }
     installDefaultAuthCoordinator();
+    const refreshEnabled = options.poll !== false;
     const state = createChangeInspectorState(currentRoute());
+    const credentialSessionChanged = /* @__PURE__ */ __name((startedAt) => sessionCredentialVersion() !== startedAt, "credentialSessionChanged");
+    const showAcceptedPublication = /* @__PURE__ */ __name((transition, origin) => {
+      if (!refreshEnabled) return;
+      clearRefreshSettleTimer();
+      if (transition === "changed" && origin !== "route") {
+        setRefreshState("updated");
+        refreshSettleTimer = setTimeout(() => {
+          refreshSettleTimer = null;
+          setRefreshState("watching");
+        }, 1200);
+        return;
+      }
+      setRefreshState("watching");
+    }, "showAcceptedPublication");
+    const showPollFailure = /* @__PURE__ */ __name(() => {
+      if (!refreshEnabled) return;
+      clearRefreshSettleTimer();
+      setRefreshState("degraded");
+    }, "showPollFailure");
     const navigate = /* @__PURE__ */ __name((route) => {
       const hash = formatChangeInspectorRoute(route);
       if (location.hash !== hash) location.hash = hash;
@@ -10128,13 +10370,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     let pendingReading = null;
     let releaseQueuedPoll = /* @__PURE__ */ __name(() => {
     }, "releaseQueuedPoll");
+    let revalidateIdentityForCurrentSession = /* @__PURE__ */ __name(() => {
+    }, "revalidateIdentityForCurrentSession");
     const readingKey = /* @__PURE__ */ __name((route, projectionStamp) => `${formatChangeInspectorRoute(route)}\0${projectionStamp}`, "readingKey");
     const clearReading = /* @__PURE__ */ __name(() => {
       reading = null;
       readingRefusal = null;
       visibleReading = "";
     }, "clearReading");
-    const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, retryBudget, pollDraft = null) => {
+    const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, retryBudget, pollDraft = null, origin = "route", credentialVersion2 = sessionCredentialVersion()) => {
       if (route.kind === "lens" || route.kind === "timeline" || route.kind === "event") {
         clearReading();
         return;
@@ -10164,6 +10408,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           "exact Change reading timed out"
         );
         if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
+        if (credentialSessionChanged(credentialVersion2)) {
+          throw new ChangeInspectorSessionChanged();
+        }
         const staged = state.snapshot().generation;
         if (staged === null || formatChangeInspectorRoute(
           currentRoute()
@@ -10175,8 +10422,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         paint(pollDraft);
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
-          await loadGeneration(route, retryBudget, pollDraft);
+        const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
+        if ((error instanceof ChangeInspectorGenerationChanged || sessionChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
+          if (sessionChanged) revalidateIdentityForCurrentSession();
+          await loadGeneration(route, retryBudget, pollDraft, origin);
           return;
         }
         reading = null;
@@ -10187,7 +10436,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         releaseQueuedPoll();
       }
     }, "loadReading");
-    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null) => {
+    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route") => {
+      const credentialVersion2 = sessionCredentialVersion();
       const epoch = ++requestEpoch;
       try {
         const profile = decodeReaderProfile(
@@ -10195,6 +10445,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         if (epoch !== requestEpoch) return;
         if (profile.availability !== "ready") {
+          if (origin !== "route" && state.snapshot().generation !== null) {
+            showPollFailure();
+            return;
+          }
           pendingTimelineSearchFocus = false;
           visibleRequest = "";
           clearReading();
@@ -10239,30 +10493,78 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           postflight,
           history2
         );
-        if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event") {
+        const refreshesExactReading = origin !== "route" && route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event";
+        let acceptedReading = null;
+        let acceptedReadingKey = "";
+        if (refreshesExactReading) {
+          acceptedReadingKey = readingKey(route, changes.projectionStamp);
+          if (visibleReading === acceptedReadingKey && reading !== null) {
+            acceptedReading = reading;
+          } else {
+            const result = await withinTimeout(
+              (async () => {
+                const loaded = await loadChangeInspectorReading(
+                  route,
+                  changes.projectionStamp
+                );
+                const readingPostflight = decodeReaderProfile(
+                  await fetchChangeInspectorJSON("/api/v2/profile")
+                );
+                return { loaded, readingPostflight };
+              })(),
+              EXACT_READING_TIMEOUT_MS,
+              "exact Change reading timed out"
+            );
+            if (epoch !== requestEpoch) return;
+            const browserRoute = currentRoute();
+            if (browserRoute.kind === "invalid" || formatChangeInspectorRoute(browserRoute) !== formatChangeInspectorRoute(route) || !sameProfileGeneration(staged.profile, result.readingPostflight)) {
+              throw new ChangeInspectorGenerationChanged();
+            }
+            acceptedReading = result.loaded;
+          }
+        }
+        if (credentialSessionChanged(credentialVersion2)) {
+          throw new ChangeInspectorSessionChanged();
+        }
+        if (origin === "route" && route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event") {
           const requestedReading = readingKey(route, changes.projectionStamp);
           if (visibleReading !== requestedReading) {
             reading = null;
             readingRefusal = null;
           }
+        } else if (refreshesExactReading) {
+          reading = acceptedReading;
+          readingRefusal = null;
+          visibleReading = acceptedReadingKey;
         }
-        state.publish(staged);
+        const publication = state.publish(staged, credentialVersion2);
+        showAcceptedPublication(publication.transition, origin);
         if (route.kind === "timeline" && history2 !== null) {
           timelineMonitor.observe(route, history2);
         }
         visibleRequest = requestKey(route);
         paint(pollDraft);
-        await loadReading(
-          route,
-          changes.projectionStamp,
-          epoch,
-          retryBudget,
-          pollDraft
-        );
+        if (!refreshesExactReading) {
+          await loadReading(
+            route,
+            changes.projectionStamp,
+            epoch,
+            retryBudget,
+            pollDraft,
+            origin,
+            credentialVersion2
+          );
+        }
       } catch (error) {
         if (epoch !== requestEpoch) return;
-        if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged) && consumeProjectionRetry(retryBudget)) {
-          await loadGeneration(route, retryBudget, pollDraft);
+        const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
+        if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged || sessionChanged) && consumeProjectionRetry(retryBudget)) {
+          if (sessionChanged) revalidateIdentityForCurrentSession();
+          await loadGeneration(route, retryBudget, pollDraft, origin);
+          return;
+        }
+        if (origin !== "route" && state.snapshot().generation !== null) {
+          showPollFailure();
           return;
         }
         visibleRequest = "";
@@ -10321,13 +10623,80 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       void onRoute();
     }, "routeListener");
     window.addEventListener("hashchange", routeListener);
+    const readIdentity = /* @__PURE__ */ __name(async (reportConnection) => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const credentialVersion2 = sessionCredentialVersion();
+        try {
+          const identity = decodeInspectorIdentity(
+            await withinTimeout(
+              fetchChangeInspectorJSON("/api/identity", { reportConnection }),
+              IDENTITY_TIMEOUT_MS,
+              "Inspector identity timed out"
+            )
+          );
+          if (!isCurrentComposition()) return null;
+          if (sessionCredentialVersion() === credentialVersion2) {
+            return { identity, credentialVersion: credentialVersion2 };
+          }
+        } catch {
+          if (!isCurrentComposition() || sessionCredentialVersion() === credentialVersion2) {
+            return null;
+          }
+        }
+      }
+      return null;
+    }, "readIdentity");
+    let verifiedIdentityCredentialVersion = null;
+    let identityHydration = null;
+    const hydrateIdentity = /* @__PURE__ */ __name(() => {
+      if (identityHydration !== null) return identityHydration;
+      const operation = (async () => {
+        const verified = await readIdentity(false);
+        if (verified === null || !isCurrentComposition()) return;
+        verifiedIdentityCredentialVersion = verified.credentialVersion;
+        const next = state.publishIdentity(
+          verified.identity,
+          verified.credentialVersion
+        );
+        renderChangeInspectorIdentity(next.identity ?? null);
+      })();
+      identityHydration = operation.finally(() => {
+        identityHydration = null;
+      });
+      return identityHydration;
+    }, "hydrateIdentity");
+    revalidateIdentityForCurrentSession = /* @__PURE__ */ __name(() => {
+      if (verifiedIdentityCredentialVersion === sessionCredentialVersion()) {
+        return;
+      }
+      void hydrateIdentity();
+    }, "revalidateIdentityForCurrentSession");
     const reloadCurrent = /* @__PURE__ */ __name(async () => {
       const route = currentRoute();
       if (route.kind === "invalid") {
         await onRoute();
         return;
       }
-      await loadGeneration(route, newProjectionRetryBudget());
+      const verified = await readIdentity(true);
+      if (verified === null || !isCurrentComposition()) {
+        showPollFailure();
+        return;
+      }
+      const identity = verified.identity;
+      verifiedIdentityCredentialVersion = verified.credentialVersion;
+      const prior = state.snapshot();
+      const continuesSession = prior.identity !== null && prior.identity !== void 0 && prior.identity.storeIdentity === identity.storeIdentity && prior.identity.contextIdentity === identity.contextIdentity;
+      const mustRetireGeneration = prior.generation !== null && !continuesSession;
+      if (mustRetireGeneration) {
+        visibleRequest = "";
+        pendingTimelineSearchFocus = false;
+        clearReading();
+        state.clearGeneration();
+      }
+      const next = state.publishIdentity(identity, verified.credentialVersion);
+      if (mustRetireGeneration) paint();
+      else renderChangeInspectorIdentity(next.identity ?? null);
+      await loadGeneration(route, newProjectionRetryBudget(), null, "recovery");
     }, "reloadCurrent");
     configureConnectionActions({
       retry: reloadCurrent,
@@ -10500,7 +10869,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         }, "focusTimeline")
       });
     }
-    await onRoute();
+    const initialRouteLoad = onRoute();
+    void hydrateIdentity();
+    await initialRouteLoad;
+    if (!isCurrentComposition()) return;
     if (options.poll !== false) {
       let pollRequested = false;
       let pollRunning = false;
@@ -10521,15 +10893,18 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const operation = loadGeneration(
           route,
           newProjectionRetryBudget(),
-          capturePollFilterDraft()
+          capturePollFilterDraft(),
+          "poll"
         );
+        const pollEpoch = requestEpoch;
         void withinTimeout(
           operation,
           POLL_CYCLE_TIMEOUT_MS,
           "Change generation poll timed out"
         ).catch((error) => {
-          if (error instanceof ChangeInspectorTimeout) {
+          if (error instanceof ChangeInspectorTimeout && isCurrentComposition() && requestEpoch === pollEpoch) {
             requestEpoch += 1;
+            showPollFailure();
           }
         }).finally(() => {
           pollRunning = false;

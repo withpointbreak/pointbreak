@@ -321,6 +321,7 @@ function setNarrowViewport(narrow: boolean): void {
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
+  sessionStorage.clear();
   mountInspectorDom();
   history.replaceState(null, "", "/#/changes");
 });
@@ -1907,6 +1908,7 @@ describe("Change-first composition", () => {
     await bootstrapChangeInspector({ poll: false });
     expect(requests).toEqual([
       "/api/v2/profile",
+      "/api/identity",
       "/api/v2/changes?limit=50&order=change_id_asc",
       "/api/v2/attention?limit=50&order=change_id_asc",
       "/api/v2/profile",
@@ -1933,6 +1935,915 @@ describe("Change-first composition", () => {
     expect(location.hash).toContain("artifactHash=sha256%3Aartifact");
   });
 
+  it("hydrates the served identity once at bootstrap and never polls it", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    const requests: string[] = [];
+    const identity = {
+      schema: "pointbreak.inspect-identity",
+      storeIdentity: "store:sha256:served",
+      contextIdentity: "context:sha256:served",
+      repository: "served-pointbreak",
+      placement: { tier: "family", label: "family store" },
+      family: { id: "served-family" },
+      worktree: "feat-served-pointbreak",
+    };
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    await bootstrapChangeInspector();
+
+    expect(requests.filter((path) => path === "/api/identity")).toHaveLength(1);
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      identity.repository,
+    );
+    expect(
+      document.querySelector("#store-chip")?.getAttribute("aria-label"),
+    ).toBe(
+      "repository served-pointbreak, store family store, family served-family, worktree feat-served-pointbreak",
+    );
+    expect(document.querySelector("#store-identity-rows")?.textContent).toBe(
+      "repositoryserved-pointbreakstorefamily storefamilyserved-familyworktreefeat-served-pointbreak",
+    );
+    expect(document.title).toBe("served-pointbreak · Pointbreak Review");
+
+    pollTick();
+    await vi.waitFor(() =>
+      expect(
+        requests.filter((path) => path === "/api/v2/profile"),
+      ).toHaveLength(4),
+    );
+    expect(requests.filter((path) => path === "/api/identity")).toHaveLength(1);
+  });
+
+  it("does not let a hung identity request gate semantic paint or poll installation", async () => {
+    let identityResolve!: (response: Response) => void;
+    const identityResponse = new Promise<Response>((resolve) => {
+      identityResolve = resolve;
+    });
+    const interval = vi
+      .spyOn(globalThis, "setInterval")
+      .mockImplementation(() => 1 as unknown as ReturnType<typeof setInterval>);
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") return identityResponse;
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    const bootstrap = bootstrapChangeInspector();
+    try {
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector(".unit-card[data-change-id]"),
+        ).not.toBeNull(),
+      );
+      expect(interval).toHaveBeenCalledWith(expect.any(Function), 3000);
+      expect(document.querySelector("#refresh-status")?.textContent).toBe(
+        "watching",
+      );
+    } finally {
+      identityResolve(
+        new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-identity",
+            storeIdentity: "store:sha256:late",
+            contextIdentity: "context:sha256:late",
+            repository: "late-identity",
+            placement: { tier: "clone", label: "clone store" },
+          }),
+        ),
+      );
+      await bootstrap;
+    }
+  });
+
+  it("does not let an older bootstrap identity repaint a newer bootstrap", async () => {
+    let olderIdentityResolve!: (response: Response) => void;
+    const olderIdentityResponse = new Promise<Response>((resolve) => {
+      olderIdentityResolve = resolve;
+    });
+    let identityRequests = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        identityRequests += 1;
+        if (identityRequests === 1) return olderIdentityResponse;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:newer",
+              contextIdentity: "context:sha256:newer",
+              repository: "newer-identity",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const reader = await import("../src/change-inspector");
+
+    const olderBootstrap = reader.bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(".unit-card[data-change-id]"),
+      ).not.toBeNull(),
+    );
+    await reader.bootstrapChangeInspector({ poll: false });
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "newer-identity",
+    );
+
+    olderIdentityResolve(
+      new Response(
+        JSON.stringify({
+          schema: "pointbreak.inspect-identity",
+          storeIdentity: "store:sha256:older",
+          contextIdentity: "context:sha256:older",
+          repository: "older-identity",
+          placement: { tier: "clone", label: "clone store" },
+        }),
+      ),
+    );
+    await olderBootstrap;
+
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "newer-identity",
+    );
+    expect(document.title).toBe("newer-identity · Pointbreak Review");
+  });
+
+  it("retains the last verified identity and generation across a failed poll and retry", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    const identity = {
+      schema: "pointbreak.inspect-identity",
+      storeIdentity: "store:sha256:stable",
+      contextIdentity: "context:sha256:stable",
+      repository: "stable-pointbreak",
+      placement: { tier: "clone", label: "clone store" },
+    };
+    let failPoll = false;
+    let failIdentity = false;
+    let identityRequests = 0;
+    let changesRequests = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        identityRequests += 1;
+        if (failIdentity) {
+          return new Response(JSON.stringify({ error: "unavailable" }), {
+            status: 500,
+          });
+        }
+        return new Response(JSON.stringify(identity));
+      }
+      if (path === "/api/v2/profile") {
+        if (failPoll) return new Response("not a profile", { status: 500 });
+        return new Response(JSON.stringify(profile));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return new Response(JSON.stringify(page("changes")));
+      }
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    await bootstrapChangeInspector();
+    const publishedHash = document.querySelector("#stat-hash")?.textContent;
+    failPoll = true;
+    pollTick();
+    await vi.waitFor(() =>
+      expect(document.querySelector("#refresh-status")?.textContent).toBe(
+        "response error",
+      ),
+    );
+    expect(document.querySelector(".unit-card[data-change-id]")).not.toBeNull();
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      publishedHash,
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      identity.repository,
+    );
+
+    failPoll = false;
+    failIdentity = true;
+    document.querySelector<HTMLButtonElement>("#connection-action")?.click();
+    await vi.waitFor(() => expect(identityRequests).toBe(2));
+    expect(changesRequests).toBe(1);
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      publishedHash,
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      identity.repository,
+    );
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "response error",
+    );
+
+    failIdentity = false;
+    document.querySelector<HTMLButtonElement>("#connection-action")?.click();
+    await vi.waitFor(() => expect(changesRequests).toBe(2));
+    expect(document.querySelector(".unit-card[data-change-id]")).not.toBeNull();
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      identity.repository,
+    );
+  });
+
+  it("reports accepted poll liveness only after a coherent stage and never degrades for a retried mismatch", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let generation = 1;
+    let profileRequests = 0;
+    let releaseChangedPostflight!: () => void;
+    const changedPostflight = new Promise<void>((resolve) => {
+      releaseChangedPostflight = resolve;
+    });
+    let holdChangedPostflight = false;
+    let mismatchPostflight = false;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-identity",
+            storeIdentity: "store:sha256:liveness",
+            contextIdentity: "context:sha256:liveness",
+            repository: "liveness-pointbreak",
+            placement: { tier: "clone", label: "clone store" },
+          }),
+        );
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (holdChangedPostflight && profileRequests === 4) {
+          await changedPostflight;
+        }
+        if (mismatchPostflight && profileRequests === 8) {
+          return new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(2),
+            }),
+          );
+        }
+        return new Response(JSON.stringify(profile));
+      }
+      const stamp = `sha256:generation-${generation}`;
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes", stamp)));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention", stamp)));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+
+    await bootstrapChangeInspector();
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "watching",
+    );
+
+    generation = 2;
+    holdChangedPostflight = true;
+    pollTick();
+    await vi.waitFor(() => expect(profileRequests).toBe(4));
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation-1",
+    );
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "watching",
+    );
+    releaseChangedPostflight();
+    await vi.waitFor(() =>
+      expect(document.querySelector("#stat-hash")?.textContent).toBe(
+        "sha256:generation-2",
+      ),
+    );
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "updated",
+    );
+
+    pollTick();
+    await vi.waitFor(() => expect(profileRequests).toBe(6));
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "watching",
+    );
+
+    generation = 3;
+    mismatchPostflight = true;
+    pollTick();
+    await vi.waitFor(() => expect(profileRequests).toBe(10));
+    expect(document.querySelector("#refresh-status")?.textContent).not.toBe(
+      "response error",
+    );
+  });
+
+  it("does not publish a poll generation after its credential session changes", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let generation = 1;
+    let profileRequests = 0;
+    let releasePollProfile!: (response: Response) => void;
+    const pollProfile = new Promise<Response>((resolve) => {
+      releasePollProfile = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:credential",
+              contextIdentity: "context:sha256:credential",
+              repository: "credential-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 3) return pollProfile;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      }
+      const stamp = `sha256:generation-${generation}`;
+      if (path.startsWith("/api/v2/changes?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const reader = await import("../src/change-inspector");
+    const auth = await import("../src/auth");
+
+    await reader.bootstrapChangeInspector();
+    await vi.waitFor(() =>
+      expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+        "credential-pointbreak",
+      ),
+    );
+    const acceptedHash = document.querySelector("#stat-hash")?.textContent;
+
+    generation = 2;
+    pollTick();
+    await vi.waitFor(() => expect(profileRequests).toBe(3));
+    auth.setSessionToken("rotated-session-token");
+    releasePollProfile(
+      new Response(
+        JSON.stringify({
+          ...profile,
+          authorityCursor: authorityCursor(generation),
+        }),
+      ),
+    );
+
+    await vi.waitFor(() =>
+      expect(document.querySelector("#refresh-status")?.textContent).toBe(
+        "response error",
+      ),
+    );
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      acceptedHash,
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "credential-pointbreak",
+    );
+    auth.resetAuthForTests();
+  });
+
+  it("restarts an initial semantic load and identity read after the credential session changes", async () => {
+    let releaseIdentity!: (response: Response) => void;
+    let releaseInitialProfile!: (response: Response) => void;
+    const initialIdentity = new Promise<Response>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    const initialProfile = new Promise<Response>((resolve) => {
+      releaseInitialProfile = resolve;
+    });
+    let identityRequests = 0;
+    let profileRequests = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        identityRequests += 1;
+        if (identityRequests === 1) return initialIdentity;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:new-session",
+              contextIdentity: "context:sha256:new-session",
+              repository: "new-session-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 1) return initialProfile;
+        const generation = profileRequests <= 2 ? 1 : 2;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      }
+      const generation = profileRequests <= 2 ? 1 : 2;
+      const stamp = `sha256:generation-${generation}`;
+      if (path.startsWith("/api/v2/changes?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const reader = await import("../src/change-inspector");
+    const auth = await import("../src/auth");
+
+    const bootstrap = reader.bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => {
+      expect(identityRequests).toBe(1);
+      expect(profileRequests).toBe(1);
+    });
+    auth.setSessionToken("new-session-token");
+    releaseIdentity(
+      new Response(
+        JSON.stringify({
+          schema: "pointbreak.inspect-identity",
+          storeIdentity: "store:sha256:old-session",
+          contextIdentity: "context:sha256:old-session",
+          repository: "old-session-pointbreak",
+          placement: { tier: "clone", label: "clone store" },
+        }),
+      ),
+    );
+    releaseInitialProfile(
+      new Response(
+        JSON.stringify({
+          ...profile,
+          authorityCursor: authorityCursor(1),
+        }),
+      ),
+    );
+    await bootstrap;
+
+    expect(identityRequests).toBe(2);
+    expect(profileRequests).toBe(4);
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation-2",
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "new-session-pointbreak",
+    );
+    auth.resetAuthForTests();
+  });
+
+  it("revalidates identity when session A identity publishes before session B semantics", async () => {
+    let releaseInitialProfile!: (response: Response) => void;
+    const initialProfile = new Promise<Response>((resolve) => {
+      releaseInitialProfile = resolve;
+    });
+    let identityRequests = 0;
+    let profileRequests = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        identityRequests += 1;
+        const session = identityRequests === 1 ? "a" : "b";
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: `store:sha256:session-${session}`,
+              contextIdentity: `context:sha256:session-${session}`,
+              repository: `session-${session}-pointbreak`,
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 1) return initialProfile;
+        const generation = profileRequests <= 2 ? 1 : 2;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      }
+      const generation = profileRequests <= 2 ? 1 : 2;
+      const stamp = `sha256:generation-${generation}`;
+      if (path.startsWith("/api/v2/changes?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const reader = await import("../src/change-inspector");
+    const auth = await import("../src/auth");
+
+    const bootstrap = reader.bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => {
+      expect(profileRequests).toBe(1);
+      expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+        "session-a-pointbreak",
+      );
+    });
+    auth.setSessionToken("session-b-token");
+    releaseInitialProfile(
+      new Response(
+        JSON.stringify({
+          ...profile,
+          authorityCursor: authorityCursor(1),
+        }),
+      ),
+    );
+    await bootstrap;
+
+    expect(identityRequests).toBe(2);
+    expect(profileRequests).toBe(4);
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation-2",
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "session-b-pointbreak",
+    );
+    auth.resetAuthForTests();
+  });
+
+  it("does not expose session B identity over an accepted session A generation", async () => {
+    let releaseInitialIdentity!: (response: Response) => void;
+    const initialIdentity = new Promise<Response>((resolve) => {
+      releaseInitialIdentity = resolve;
+    });
+    let identityRequests = 0;
+    let profileRequests = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        identityRequests += 1;
+        if (identityRequests === 1) return initialIdentity;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:session-b",
+              contextIdentity: "context:sha256:session-b",
+              repository: "session-b-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        const generation = profileRequests <= 2 ? 1 : 2;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      }
+      const generation = profileRequests <= 2 ? 1 : 2;
+      const stamp = `sha256:generation-${generation}`;
+      if (path.startsWith("/api/v2/changes?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const reader = await import("../src/change-inspector");
+    const auth = await import("../src/auth");
+
+    await reader.bootstrapChangeInspector({ poll: false });
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation-1",
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "local server",
+    );
+
+    auth.setSessionToken("session-b-token");
+    releaseInitialIdentity(
+      new Response(
+        JSON.stringify({
+          schema: "pointbreak.inspect-identity",
+          storeIdentity: "store:sha256:session-a",
+          contextIdentity: "context:sha256:session-a",
+          repository: "session-a-pointbreak",
+          placement: { tier: "clone", label: "clone store" },
+        }),
+      ),
+    );
+    await vi.waitFor(() => expect(identityRequests).toBe(2));
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation-1",
+    );
+    expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+      "local server",
+    );
+
+    history.replaceState(null, "", "/#/changes?q=session-b");
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() => {
+      expect(document.querySelector("#stat-hash")?.textContent).toBe(
+        "sha256:generation-2",
+      );
+      expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
+        "session-b-pointbreak",
+      );
+    });
+    auth.resetAuthForTests();
+  });
+
+  it("does not let an old poll timeout invalidate a newer route load", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let profileRequests = 0;
+    let newerRouteProfileResolve!: (response: Response) => void;
+    let markPollStarted!: () => void;
+    let markNewerRouteStarted!: () => void;
+    const pollStarted = new Promise<void>((resolve) => {
+      markPollStarted = resolve;
+    });
+    const newerRouteStarted = new Promise<void>((resolve) => {
+      markNewerRouteStarted = resolve;
+    });
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/identity")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:timeout",
+              contextIdentity: "context:sha256:timeout",
+              repository: "timeout-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 3) {
+          markPollStarted();
+          return new Promise<Response>(() => {});
+        }
+        if (profileRequests === 4) {
+          markNewerRouteStarted();
+          return new Promise<Response>((resolve) => {
+            newerRouteProfileResolve = resolve;
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        const document = page("changes");
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...document,
+              changes: path.includes("q=newer")
+                ? [
+                    {
+                      ...document.changes[0],
+                      changeId: "change:sha256:newer-route",
+                    },
+                  ]
+                : document.changes,
+            }),
+          ),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    let expireOldPoll: () => void = () => {
+      throw new Error("poll timeout was not installed");
+    };
+    const timeout = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((handler, delay) => {
+        if (delay === 15_000 && typeof handler === "function") {
+          expireOldPoll = handler;
+        }
+        return 1 as unknown as ReturnType<typeof setTimeout>;
+      });
+    pollTick();
+    await pollStarted;
+    history.replaceState(null, "", "/#/changes?q=newer");
+    window.dispatchEvent(new Event("hashchange"));
+    await newerRouteStarted;
+
+    expireOldPoll();
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    expect
+      .soft(document.querySelector("#refresh-status")?.textContent)
+      .toBe("watching");
+    timeout.mockRestore();
+    newerRouteProfileResolve(new Response(JSON.stringify(profile)));
+    await vi.waitFor(() =>
+      expect(requests).toContain(
+        "/api/v2/changes?limit=50&q=newer&order=change_id_asc",
+      ),
+    );
+
+    expect(requests).toContain(
+      "/api/v2/changes?limit=50&q=newer&order=change_id_asc",
+    );
+    expect(document.querySelector("#master")?.textContent).toContain(
+      "change:sha256:newer-route",
+    );
+  });
+
+  it("preserves an accepted exact surface when poll hydration fails", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let generation = 1;
+    let exactRequests = 0;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-identity",
+            storeIdentity: "store:sha256:exact",
+            contextIdentity: "context:sha256:exact",
+            repository: "exact-pointbreak",
+            placement: { tier: "clone", label: "clone store" },
+          }),
+        );
+      const stamp = `sha256:generation-${generation}`;
+      if (path === "/api/v2/profile")
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            authorityCursor: authorityCursor(generation),
+          }),
+        );
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes", stamp)));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention", stamp)));
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        return exactRequests === 1
+          ? new Response(JSON.stringify(revisionDetail(stamp)))
+          : new Response(JSON.stringify({ error: "hydration unavailable" }), {
+              status: 500,
+            });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    const detail = document.querySelector<HTMLElement>("#detail-body");
+    const acceptedReadingKey = detail?.dataset.changeReadingKey;
+    expect(acceptedReadingKey).toContain("sha256:generation-1");
+    expect(detail?.textContent).toContain("Exact Revision");
+
+    generation = 2;
+    pollTick();
+    await vi.waitFor(() => expect(exactRequests).toBe(2));
+
+    expect(detail?.dataset.changeReadingKey).toBe(acceptedReadingKey);
+    expect(detail?.textContent).toContain("Exact Revision");
+    expect(detail?.textContent).not.toContain(
+      "Reader refused this exact surface",
+    );
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "response error",
+    );
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "degraded",
+    );
+  });
+
   it("refuses an invalid route without fetching any semantic document", async () => {
     history.replaceState(null, "", "/#/changes?unknown=value");
     const requests: string[] = [];
@@ -1946,7 +2857,7 @@ describe("Change-first composition", () => {
 
     await bootstrapChangeInspector({ poll: false });
 
-    expect(requests).toEqual([]);
+    expect(requests).toEqual(["/api/identity"]);
     expect(document.querySelector("#route-diagnostic")?.textContent).toContain(
       "Unknown unknown route query.",
     );
@@ -1994,8 +2905,8 @@ describe("Change-first composition", () => {
         "Loading Change generation",
       );
     });
-    expect(requests).toHaveLength(5);
-    expect(requests.slice(4)).toEqual(["/api/v2/profile"]);
+    expect(requests).toHaveLength(6);
+    expect(requests.slice(5)).toEqual(["/api/v2/profile"]);
 
     replacementProfileResolve(new Response(JSON.stringify(profile)));
     await vi.waitFor(() => {
@@ -2678,7 +3589,7 @@ describe("Change-first composition", () => {
     location.hash =
       "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
     window.dispatchEvent(new Event("hashchange"));
-    await vi.waitFor(() => expect(requests).toHaveLength(5));
+    await vi.waitFor(() => expect(requests).toHaveLength(7));
 
     location.hash =
       "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone/resource?artifactHash=sha256%3Aartifact";
@@ -2753,7 +3664,7 @@ describe("Change-first composition", () => {
     const requestCount = requests.length;
     reader.stopChangeInspector();
     await reader.bootstrapChangeInspector({ poll: false });
-    expect(requests).toHaveLength(requestCount + 6);
+    expect(requests).toHaveLength(requestCount + 7);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact Revision",
     );

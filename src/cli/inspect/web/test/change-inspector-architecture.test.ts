@@ -233,7 +233,15 @@ describe("active Change inspector architecture", () => {
         activeComposition ||
         file.endsWith("/src/change-inspector-reading.ts")
       )
-        expect(source).not.toMatch(/\/api\/(?!v2\/)/);
+        expect(source).not.toMatch(/\/api\/(?!v2\/|identity\b)/);
     }
+
+    // Identity is chrome metadata, but it still belongs to the active
+    // Change-first composition so readers never fall back to the quarantined
+    // aggregate store to learn which repository they are inspecting.
+    const identityTransport = [...closure.entries()].filter(([, source]) =>
+      source.includes('"/api/identity"'),
+    );
+    expect(identityTransport).toHaveLength(1);
   });
 });

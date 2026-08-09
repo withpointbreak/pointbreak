@@ -591,6 +591,10 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(help?.textContent).toContain("Space");
     expect(help?.textContent).toContain("page the exact detail");
     expect(help?.textContent).toContain("return one layer");
+    expect(help?.textContent).toContain(
+      "one exact Revision in a stable Change",
+    );
+    expect(help?.textContent).toContain("change attention");
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", {

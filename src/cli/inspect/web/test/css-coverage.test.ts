@@ -108,6 +108,13 @@ test("unit cards read their padding from the density-aware card token", () => {
   expect(css).toMatch(/\.unit-card \{[^}]*padding: var\(--card-pad\);/s);
 });
 
+test("Timeline rows read their padding only from the density-aware row token", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.event \{[^}]*padding: var\(--row-pad\);/s);
+  const compact = css.match(/html\.compact \{([^}]*)\}/s)?.[1] ?? "";
+  expect(compact).not.toMatch(/--(?:row|card)-pad\s*:/);
+});
+
 test("bounded Change grids keep sparse result cards at their content height", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
   expect(css).toMatch(/\.units \{[^}]*align-content: start;/s);

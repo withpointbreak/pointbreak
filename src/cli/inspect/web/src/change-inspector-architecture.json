@@ -49,13 +49,25 @@
       "path": "change-inspector-http.ts",
       "classification": "adapted",
       "activeImport": true,
-      "reason": "Owns the authenticated Change-reader HTTP leaf, bounded abort behavior, and typed request failures. It cannot construct or call legacy aggregate-reader routes."
+      "reason": "Owns authenticated transport for the bounded Change reader and path-private identity document, plus typed request failures. It cannot construct or call legacy aggregate-reader routes."
+    },
+    {
+      "path": "change-inspector-identity.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Strictly decodes the path-private repository, store, family, and worktree identity used by active session chrome. It owns no semantic generation, route, or transport state."
     },
     {
       "path": "change-inspector-interaction.ts",
       "classification": "adapted",
       "activeImport": true,
       "reason": "Owns Change-first keyboard, route focus, palette/help dialogs, split, reading-mode, theme, density, and page-local Timeline cursor behavior. Its local cursors never choose a Revision implicitly."
+    },
+    {
+      "path": "change-inspector-lens.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Builds the shared accessible heading and compact metadata pair for an already selected lens. It owns no route, state, transport, or Change semantics."
     },
     {
       "path": "change-inspector-reading.ts",

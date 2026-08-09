@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ChangePresentation, ChangeSummary } from "../src/change-protocol";
+import type {
+  ChangeAttentionReason,
+  ChangePresentation,
+  ChangeSummary,
+} from "../src/change-protocol";
 import {
   buildChangePageUrl,
   buildEventHistoryUrl,
@@ -87,6 +91,16 @@ function page(
               attention: {
                 primaryReason: { kind: "no_current_revision" },
                 reasons: [{ kind: "no_current_revision" }],
+                reasonPresentations: [
+                  {
+                    cause: { kind: "no_current_revision" },
+                    ask: "Establish one exact current Revision.",
+                    reason: "No current Revision is available for review.",
+                    evidence: "The current Revision set is empty.",
+                    nextAction:
+                      "Review the Change and establish a current Revision.",
+                  },
+                ],
               },
             }
           : {}),
@@ -462,6 +476,34 @@ describe("bounded Change protocol", () => {
           ],
         },
       ],
+      reasonPresentations: [
+        {
+          cause: {
+            kind: "unresolved_operative_requests",
+            requestIds: ["input-request:sha256:one"],
+          },
+          ask: "Respond to the operative request.",
+          reason: "An operative request remains unresolved.",
+          evidence: "Open request: input-request:sha256:one.",
+          nextAction: "Open the Change and respond to the request.",
+        },
+        {
+          cause: {
+            kind: "current_revisions_need_assessment",
+            revisions: [
+              {
+                revisionId: "rev:sha256:one",
+                objectArtifactContentHash: "sha256:artifact-one",
+              },
+            ],
+          },
+          ask: "Assess the current Revision.",
+          reason: "Assessment coverage is incomplete.",
+          evidence:
+            "Unassessed exact Revision rev:sha256:one; artifact sha256:artifact-one.",
+          nextAction: "Open the exact Revision and record an assessment.",
+        },
+      ],
     };
 
     const decoded = decodeChangePage(response, {
@@ -474,6 +516,61 @@ describe("bounded Change protocol", () => {
       kind: "unresolved_operative_requests",
       requestIds: ["input-request:sha256:one"],
     });
+
+    const missingEvidence = page("pointbreak.inspect-attention");
+    const incompleteCopy = missingEvidence.presentations?.["change:sha256:a"]
+      ?.attention as unknown as {
+      reasonPresentations: Array<Record<string, unknown>>;
+    };
+    delete incompleteCopy.reasonPresentations[0]?.evidence;
+    expect(() =>
+      decodeChangePage(missingEvidence, {
+        lens: "attention",
+        bounded: true,
+      }),
+    ).toThrow("invalid attention Change page DTO");
+
+    const unknownCopyMember = page("pointbreak.inspect-attention");
+    const expandedCopy = unknownCopyMember.presentations?.["change:sha256:a"]
+      ?.attention as unknown as {
+      reasonPresentations: Array<Record<string, unknown>>;
+    };
+    if (expandedCopy.reasonPresentations[0])
+      expandedCopy.reasonPresentations[0].browserSummary = "inferred";
+    expect(() =>
+      decodeChangePage(unknownCopyMember, {
+        lens: "attention",
+        bounded: true,
+      }),
+    ).toThrow("invalid attention Change page DTO");
+
+    const emptyNextAction = page("pointbreak.inspect-attention");
+    const emptyCopy = emptyNextAction.presentations?.["change:sha256:a"]
+      ?.attention as unknown as {
+      reasonPresentations: Array<Record<string, unknown>>;
+    };
+    if (emptyCopy.reasonPresentations[0])
+      emptyCopy.reasonPresentations[0].nextAction = " ";
+    expect(() =>
+      decodeChangePage(emptyNextAction, {
+        lens: "attention",
+        bounded: true,
+      }),
+    ).toThrow("invalid attention Change page DTO");
+
+    const mismatchedCopy = page("pointbreak.inspect-attention");
+    const mismatched = mismatchedCopy.presentations?.["change:sha256:a"]
+      ?.attention as unknown as {
+      reasonPresentations: Array<{ cause: ChangeAttentionReason }>;
+    };
+    if (mismatched.reasonPresentations[0])
+      mismatched.reasonPresentations[0].cause = { kind: "incomplete" };
+    expect(() =>
+      decodeChangePage(mismatchedCopy, {
+        lens: "attention",
+        bounded: true,
+      }),
+    ).toThrow("invalid attention Change page DTO");
 
     const missing = page("pointbreak.inspect-attention");
     delete missing.presentations?.["change:sha256:a"]?.attention;
@@ -504,6 +601,15 @@ describe("bounded Change protocol", () => {
     leakedPresentation.attention = {
       primaryReason: { kind: "incomplete" },
       reasons: [{ kind: "incomplete" }],
+      reasonPresentations: [
+        {
+          cause: { kind: "incomplete" },
+          ask: "Complete the Change state.",
+          reason: "The Change state is incomplete.",
+          evidence: "Lifecycle is incomplete.",
+          nextAction: "Review the missing Change records.",
+        },
+      ],
     };
     expect(() =>
       decodeChangePage(leaked, { lens: "changes", bounded: true }),

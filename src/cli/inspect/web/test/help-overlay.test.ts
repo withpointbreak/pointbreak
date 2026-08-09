@@ -99,13 +99,14 @@ describe("initControls wiring", () => {
     expect(isOpen()).toBe(false);
   });
 
-  it("explains the five-stage CLI mapping and the read-only copy boundary", () => {
+  it("explains stable Change capture and the read-only copy boundary", () => {
     // The static workflow section rides the cheat sheet: stages, attention,
     // association, the placeholder convention, and the copy-never-execute rule.
     const text = sheet().textContent ?? "";
-    expect(text).toContain("Work -> Claims -> Evidence -> Questions -> Call");
+    expect(text).toContain("one exact Revision in a stable Change");
+    expect(text).toContain("change attention");
     expect(text).toContain("outstanding judgment");
-    expect(text).toContain("same revision");
+    expect(text).toContain("that exact Revision landed");
     expect(text).toContain("never runs them");
     expect(text).toContain("replace each placeholder before running");
     expect(text).toContain("never a verdict or merge gate");

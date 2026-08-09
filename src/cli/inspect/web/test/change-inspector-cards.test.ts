@@ -121,111 +121,82 @@ describe("Change cards", () => {
 });
 
 describe("Change card Attention", () => {
-  const cases: Array<{
-    reason: ChangeAttentionReason;
-    expected: {
-      reason: string;
-      ask: string;
-      actionLabel: string;
-      copyText: string;
+  it("passes through distinct server-authored ask, reason, evidence, and next action", () => {
+    const cause: ChangeAttentionReason = {
+      kind: "current_revisions_need_assessment",
+      revisions: [first],
     };
-  }> = [
-    {
-      reason: { kind: "conflicted" },
-      expected: {
-        reason: "Conflicting Change state",
-        ask: "Resolve the conflicting Change state.",
-        actionLabel: "Review conflict",
-        copyText: "conflicted",
-      },
-    },
-    {
-      reason: { kind: "incomplete" },
-      expected: {
-        reason: "Incomplete Change state",
-        ask: "Complete the missing Change state.",
-        actionLabel: "Review incomplete Change",
-        copyText: "incomplete",
-      },
-    },
-    {
-      reason: { kind: "no_current_revision" },
-      expected: {
-        reason: "No current Revision",
-        ask: "Establish one exact current Revision before review can continue.",
-        actionLabel: "Review Change",
-        copyText: "no_current_revision",
-      },
-    },
-    {
-      reason: {
-        kind: "unresolved_operative_requests",
-        requestIds: [
-          "request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "request:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        ],
-      },
-      expected: {
-        reason: "Unresolved operative requests",
-        ask: "Respond to operative requests: request:aaaaaaaa, request:bbbbbbbb.",
-        actionLabel: "Respond to requests",
-        copyText:
-          "request:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaa\nrequest:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      },
-    },
-    {
-      reason: { kind: "current_revisions_need_assessment", revisions: [first] },
-      expected: {
-        reason: "Current Revisions need assessment",
-        ask: "Assess current Revisions: revision:aaaaaaaa · sha256:11111111.",
-        actionLabel: "Assess current Revisions",
-        copyText: `${first.revisionId} ${first.objectArtifactContentHash}`,
-      },
-    },
-  ];
+    const attention = {
+      primaryReason: cause,
+      reasons: [cause],
+      reasonPresentations: [
+        {
+          cause,
+          ask: "ASK SENTINEL",
+          reason: "REASON SENTINEL",
+          evidence: "EVIDENCE SENTINEL",
+          nextAction: "NEXT ACTION SENTINEL",
+        },
+      ],
+    } satisfies NonNullable<ChangePresentation["attention"]>;
+    const card = changeCardPresentation(
+      summary([first]),
+      presentation([], attention),
+    );
 
-  it.each(
-    cases,
-  )("uses the server primary $reason.kind without client ranking", ({
-    reason,
-    expected,
-  }) => {
+    expect(card.attention).toMatchObject({
+      ask: "ASK SENTINEL",
+      reason: "REASON SENTINEL",
+      evidence: "EVIDENCE SENTINEL",
+      nextAction: "NEXT ACTION SENTINEL",
+    });
+  });
+
+  it("retains the server order for every additional Attention reason", () => {
+    const reasons: ChangeAttentionReason[] = [
+      { kind: "incomplete" },
+      { kind: "no_current_revision" },
+      { kind: "conflicted" },
+    ];
+    const reasonPresentations = reasons.map((cause, index) => ({
+      cause,
+      ask: `ASK ${index}`,
+      reason: `REASON ${index}`,
+      evidence: `EVIDENCE ${index}`,
+      nextAction: `NEXT ${index}`,
+    }));
     const card = changeCardPresentation(
       summary([first]),
       presentation([], {
-        primaryReason: reason,
-        reasons: [reason, { kind: "conflicted" }],
+        primaryReason: reasons[0],
+        reasons,
+        reasonPresentations,
         diagnostics: ["server diagnostic"],
       }),
     );
 
     expect(card.attention).toMatchObject({
-      reason: expected.reason,
-      ask: expected.ask,
-      actionLabel: expected.actionLabel,
+      reason: "REASON 0",
+      ask: "ASK 0",
+      evidence: "EVIDENCE 0",
+      nextAction: "NEXT 0",
       diagnostics: ["server diagnostic"],
-      primary: expected,
     });
-    expect(card.attention?.additionalReasons).toHaveLength(1);
-    expect(card.attention?.additionalReasons[0]?.kind).toBe("conflicted");
-  });
-
-  it("retains the server order for every additional Attention reason", () => {
-    const card = changeCardPresentation(
-      summary([first]),
-      presentation([], {
-        primaryReason: { kind: "incomplete" },
-        reasons: [
-          { kind: "incomplete" },
-          { kind: "no_current_revision" },
-          { kind: "conflicted" },
-        ],
-      }),
-    );
-
-    expect(card.attention?.additionalReasons.map(({ kind }) => kind)).toEqual([
-      "no_current_revision",
-      "conflicted",
+    expect(card.attention?.additionalReasons).toMatchObject([
+      {
+        kind: "no_current_revision",
+        reason: "REASON 1",
+        ask: "ASK 1",
+        evidence: "EVIDENCE 1",
+        nextAction: "NEXT 1",
+      },
+      {
+        kind: "conflicted",
+        reason: "REASON 2",
+        ask: "ASK 2",
+        evidence: "EVIDENCE 2",
+        nextAction: "NEXT 2",
+      },
     ]);
   });
 });

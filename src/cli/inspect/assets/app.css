@@ -184,6 +184,16 @@ body {
   background: var(--bg-row);
   border-color: var(--border);
 }
+.lens-count {
+  margin-left: 6px;
+  min-width: 1.5em;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  color: var(--accent);
+  font: var(--fs-xs) / var(--line) var(--mono);
+  text-align: center;
+}
 
 /* The attention tab's judgment-queue badge: the needs-input count as the
    number, the advisory count muted beside it. Absent when both are zero. */
@@ -228,12 +238,28 @@ body {
   flex-direction: column;
   min-height: 0;
 }
-.timeline-shell > h1 {
+.lens-heading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.lens-meta {
   flex: 0 0 auto;
   margin: 0;
+  color: var(--fg-dim);
+  font: var(--fs-xs) / var(--line) var(--mono);
+}
+.timeline-shell > .lens-meta {
   padding: 10px 14px 0;
-  font-size: var(--fs-lg);
-  line-height: 1.25;
+}
+.units > .lens-meta {
+  grid-column: 1 / -1;
 }
 .timeline-summary {
   flex: 0 0 auto;
@@ -837,7 +863,7 @@ main {
   grid-template-columns: 84px 12px 1fr;
   gap: 8px;
   align-items: baseline;
-  padding: 7px 14px;
+  padding: var(--row-pad);
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
@@ -1288,10 +1314,6 @@ main {
 
 /* Density is a reader-local presentation preference. It never changes the
    bounded server page or the selected Change/Revision identity. */
-html.compact {
-  --row-pad: 5px 10px;
-  --card-pad: 8px 10px;
-}
 html.compact .units {
   gap: 6px;
   padding: 10px 12px;
@@ -1386,11 +1408,13 @@ html.compact .unit-card {
   color: var(--warning-strong);
 }
 .change-card-attention-ask,
+.change-card-attention-evidence,
 .change-card-attention-action,
 .change-card-attention-additional {
   margin: 3px 0 0;
   font-size: var(--fs-sm);
 }
+.change-card-attention-evidence,
 .change-card-attention-action {
   color: var(--fg-dim);
 }
@@ -1759,12 +1783,19 @@ html.compact .unit-card {
 .change-revision-graph,
 .fact-relationship-graph {
   margin: 8px 0 14px;
+}
+.relationship-graph-viewport {
   overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.relationship-graph-viewport:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .change-revision-graph-svg,
 .fact-relationship-graph-svg {
   display: block;
-  max-width: 100%;
+  max-width: none;
   height: auto;
   color: var(--border);
 }
@@ -2133,6 +2164,11 @@ html.compact .unit-card {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-elev);
+}
+.diff-page-title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 600;
 }
 .diff-page-keys {
   margin-left: auto;

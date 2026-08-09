@@ -141,6 +141,43 @@ function graphRoot(
   });
 }
 
+function graphViewport(document: Document, label: string): HTMLDivElement {
+  const viewport = document.createElement("div");
+  viewport.className = "relationship-graph-viewport";
+  viewport.dataset.graphViewport = "true";
+  viewport.tabIndex = 0;
+  viewport.setAttribute("role", "region");
+  viewport.setAttribute(
+    "aria-label",
+    `${label}; use Left and Right Arrow keys, Home, and End to pan`,
+  );
+  viewport.addEventListener("keydown", (event) => {
+    if (event.target !== viewport) return;
+    const maximum = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    const step = Math.max(80, Math.round(viewport.clientWidth * 0.8));
+    let next: number;
+    switch (event.key) {
+      case "ArrowLeft":
+        next = viewport.scrollLeft - step;
+        break;
+      case "ArrowRight":
+        next = viewport.scrollLeft + step;
+        break;
+      case "Home":
+        next = 0;
+        break;
+      case "End":
+        next = maximum;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    viewport.scrollLeft = Math.min(maximum, Math.max(0, next));
+  });
+  return viewport;
+}
+
 function sorted<T>(values: readonly T[], key: (value: T) => string): T[] {
   return [...values].sort((left, right) =>
     key(left).localeCompare(key(right), "en"),
@@ -219,14 +256,13 @@ function textualEquivalent(
 
 function actionItem(
   document: Document,
-  text: string,
   accessibleName: string,
   action: () => void,
 ): HTMLLIElement {
   const item = document.createElement("li");
   const button = document.createElement("button");
   button.type = "button";
-  button.textContent = text;
+  button.textContent = accessibleName;
   button.title = accessibleName;
   button.setAttribute("aria-label", accessibleName);
   wireAction(button, action, false);
@@ -255,6 +291,11 @@ export function renderChangeRevisionGraph(
     "Change Revision relationship graph",
     graph.bounds,
   );
+  const viewport = graphViewport(
+    document,
+    "Change Revision relationship graph",
+  );
+  viewport.append(svg);
   const defs = svgElement(document, "defs");
   defs.append(
     marker(document, "change-effective-arrow", "solid"),
@@ -394,12 +435,7 @@ export function renderChangeRevisionGraph(
     svg.append(group);
     text.nodes.append(
       activate
-        ? actionItem(
-            document,
-            `${node.isCurrent ? "Current " : ""}${shortRef(node.revision.revisionId)}`,
-            `Open ${accessibleName}`,
-            activate,
-          )
+        ? actionItem(document, `Open ${accessibleName}`, activate)
         : textItem(document, accessibleName),
     );
   }
@@ -407,7 +443,7 @@ export function renderChangeRevisionGraph(
   for (const diagnostic of graph.diagnostics ?? []) {
     text.edges.append(textItem(document, `Graph diagnostic: ${diagnostic}`));
   }
-  figure.append(svg, text.root);
+  figure.append(viewport, text.root);
   return figure;
 }
 
@@ -466,6 +502,8 @@ export function renderFactRelationshipGraph(
     "Exact fact relationship graph",
     graph.bounds,
   );
+  const viewport = graphViewport(document, "Exact fact relationship graph");
+  viewport.append(svg);
   const defs = svgElement(document, "defs");
   defs.append(
     marker(document, "fact-observation-arrow", "solid"),
@@ -645,18 +683,11 @@ export function renderFactRelationshipGraph(
     svg.append(group);
     text.nodes.append(
       activate
-        ? actionItem(
-            document,
-            focus
-              ? `${words(focus.family)} ${shortRef(focus.factId)}`
-              : `Revision ${shortRef(node.revision.revisionId)}`,
-            accessibleName,
-            activate,
-          )
+        ? actionItem(document, accessibleName, activate)
         : textItem(document, accessibleName),
     );
   }
 
-  figure.append(svg, text.root);
+  figure.append(viewport, text.root);
   return figure;
 }

@@ -40,6 +40,9 @@ export const CLASS = {
   actions: "actions",
   timelineShell: "timeline-shell",
   timelineNewPill: "timeline-new-pill",
+  lensHeading: "lens-heading",
+  lensMeta: "lens-meta",
+  lensCount: "lens-count",
 
   // (The app-shell store-identity chip + detail popover is static markup in
   // index.html — `store-identity*` classes live there and in app.css, not here —

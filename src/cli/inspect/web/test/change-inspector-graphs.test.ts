@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   renderChangeRevisionGraph,
@@ -8,6 +10,11 @@ import type {
   FactRelationshipGraphPresentation,
   RevisionRef,
 } from "../src/change-protocol";
+
+const APP_CSS = readFileSync(
+  resolve(process.cwd(), "../assets/app.css"),
+  "utf8",
+);
 
 const first: RevisionRef = {
   revisionId: `rev:sha256:${"1".repeat(64)}`,
@@ -410,7 +417,168 @@ function factGraph(): FactRelationshipGraphPresentation {
   };
 }
 
+function largeFactGraph(nodeCount = 36): FactRelationshipGraphPresentation {
+  const nodeWidth = 150;
+  const columnWidth = 180;
+  const nodes = Array.from({ length: nodeCount }, (_, index) => {
+    const serial = (index + 1).toString(16).padStart(64, "0");
+    const inverseSerial = (nodeCount - index).toString(16).padStart(64, "0");
+    const revision: RevisionRef = {
+      revisionId: `rev:sha256:${serial}`,
+      objectArtifactContentHash: `sha256:${inverseSerial}`,
+    };
+    const factId = `observation:sha256:${serial}`;
+    return {
+      id: factKey(revision, "observation", factId),
+      kind: "fact" as const,
+      revision,
+      factId,
+      family: "observation",
+      x: nodeWidth / 2 + index * columnWidth,
+      y: index % 2 === 0 ? 40 : 110,
+      w: nodeWidth,
+      h: 34,
+      contextAvailability: "available" as const,
+      activationRevision: revision,
+    };
+  });
+  return {
+    nodes,
+    observationSupersedes: [],
+    assessmentReplaces: [],
+    factPorts: [],
+    bounds: {
+      w: nodeWidth + (nodeCount - 1) * columnWidth,
+      h: 150,
+    },
+  };
+}
+
+function renderLargeFactGraph(
+  graph = largeFactGraph(),
+): ReturnType<typeof renderFactRelationshipGraph> {
+  return renderFactRelationshipGraph(graph, {
+    document,
+    onActivateRevision: vi.fn(),
+    onFocusFact: vi.fn(),
+  });
+}
+
 describe("exact fact graph renderer", () => {
+  it.each([
+    ["wide", 1_200],
+    ["narrow", 360],
+  ])("keeps a 36-node canvas wider than its %s viewport", (_layout, viewportWidth) => {
+    const graph = largeFactGraph();
+    const figure = renderLargeFactGraph(graph);
+    const viewport = figure.querySelector<HTMLElement>("[data-graph-viewport]");
+    expect(viewport).not.toBeNull();
+    if (!viewport) return;
+
+    Object.defineProperty(viewport, "clientWidth", {
+      configurable: true,
+      value: viewportWidth,
+    });
+    const canvas = viewport.querySelector<SVGSVGElement>(
+      ".fact-relationship-graph-svg",
+    );
+    const canvasWidth = Number(canvas?.getAttribute("width"));
+    expect(canvasWidth).toBe(graph.bounds.w);
+    expect(canvasWidth).toBeGreaterThan(viewport.clientWidth);
+    expect(APP_CSS).toMatch(
+      /\.relationship-graph-viewport\s*\{[^}]*overflow-x:\s*auto;/s,
+    );
+    expect(APP_CSS).toMatch(
+      /\.change-revision-graph-svg,\s*\.fact-relationship-graph-svg\s*\{[^}]*max-width:\s*none;/s,
+    );
+  });
+
+  it("makes the graph viewport focusable and supports bounded horizontal keys", () => {
+    const graph = largeFactGraph();
+    const viewport = renderLargeFactGraph(graph).querySelector<HTMLElement>(
+      "[data-graph-viewport]",
+    );
+    expect(viewport).not.toBeNull();
+    if (!viewport) return;
+
+    expect(viewport.tabIndex).toBe(0);
+    Object.defineProperties(viewport, {
+      clientWidth: { configurable: true, value: 600 },
+      scrollWidth: { configurable: true, value: graph.bounds.w },
+    });
+
+    const arrowRight = new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    });
+    viewport.dispatchEvent(arrowRight);
+    expect(arrowRight.defaultPrevented).toBe(true);
+    expect(viewport.scrollLeft).toBeGreaterThan(0);
+
+    const end = new KeyboardEvent("keydown", {
+      key: "End",
+      bubbles: true,
+      cancelable: true,
+    });
+    viewport.dispatchEvent(end);
+    expect(end.defaultPrevented).toBe(true);
+    expect(viewport.scrollLeft).toBe(graph.bounds.w - viewport.clientWidth);
+
+    viewport.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(viewport.scrollLeft).toBe(graph.bounds.w - viewport.clientWidth);
+
+    const home = new KeyboardEvent("keydown", {
+      key: "Home",
+      bubbles: true,
+      cancelable: true,
+    });
+    viewport.dispatchEvent(home);
+    expect(home.defaultPrevented).toBe(true);
+    expect(viewport.scrollLeft).toBe(0);
+
+    viewport.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowLeft",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(viewport.scrollLeft).toBe(0);
+  });
+
+  it("keeps every full identity in the 36-node textual equivalent", () => {
+    const graph = largeFactGraph();
+    const equivalent = renderLargeFactGraph(graph).querySelector<HTMLElement>(
+      "[data-graph-textual-equivalent]",
+    );
+    const items = Array.from(
+      equivalent?.querySelectorAll<HTMLLIElement>(
+        "[data-graph-text-nodes] > li",
+      ) ?? [],
+    );
+    expect(items).toHaveLength(graph.nodes.length);
+    for (const node of graph.nodes) {
+      if (node.kind !== "fact") continue;
+      const exactName = items
+        .map(
+          (item) =>
+            item.querySelector("button")?.getAttribute("aria-label") ??
+            item.textContent ??
+            "",
+        )
+        .find((name) => name.includes(node.factId));
+      expect(exactName).toContain(node.revision.revisionId);
+      expect(exactName).toContain(node.revision.objectArtifactContentHash);
+    }
+  });
+
   it("keeps observation, assessment, and fact-port relations distinct", () => {
     const figure = renderFactRelationshipGraph(factGraph(), {
       document,

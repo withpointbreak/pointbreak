@@ -41,8 +41,9 @@ export class ChangeInspectorPageFailure extends ChangeInspectorRequestFailure {
 function failure(
   kind: RequestFailureKind,
   status?: number,
+  reportConnection = true,
 ): ChangeInspectorRequestFailure {
-  markRequestFailure(kind);
+  if (reportConnection) markRequestFailure(kind, { degradeRefresh: false });
   return new ChangeInspectorRequestFailure(kind, status);
 }
 
@@ -72,7 +73,10 @@ function typedPageFailure(
   return null;
 }
 
-async function fetchOnce(path: string): Promise<unknown> {
+async function fetchOnce(
+  path: string,
+  reportConnection: boolean,
+): Promise<unknown> {
   const headers: Record<string, string> = {};
   const token = getSessionToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -86,7 +90,7 @@ async function fetchOnce(path: string): Promise<unknown> {
       headers,
     });
   } catch {
-    throw failure("unreachable");
+    throw failure("unreachable", undefined, reportConnection);
   }
   if (response.status === 401)
     throw new ChangeInspectorRequestFailure("unauthorized", 401);
@@ -94,29 +98,33 @@ async function fetchOnce(path: string): Promise<unknown> {
   try {
     data = JSON.parse(await response.text());
   } catch {
-    throw failure("protocol", response.status);
+    throw failure("protocol", response.status, reportConnection);
   }
   if (!response.ok)
     throw (
       typedPageFailure(data, response.status) ??
-      failure("protocol", response.status)
+      failure("protocol", response.status, reportConnection)
     );
   if (
     typeof data !== "object" ||
     data === null ||
     ("error" in data && Boolean((data as Record<string, unknown>).error))
   ) {
-    throw failure("protocol", response.status);
+    throw failure("protocol", response.status, reportConnection);
   }
-  markRequestSuccess();
+  if (reportConnection) markRequestSuccess();
   return data;
 }
 
 /** Fetch one Change reader document, retrying exactly once after capability recovery. */
-export async function fetchChangeInspectorJSON(path: string): Promise<unknown> {
+export async function fetchChangeInspectorJSON(
+  path: string,
+  options: { reportConnection?: boolean } = {},
+): Promise<unknown> {
+  const reportConnection = options.reportConnection !== false;
   const credentialVersion = sessionCredentialVersion();
   try {
-    return await fetchOnce(path);
+    return await fetchOnce(path, reportConnection);
   } catch (error) {
     if (
       !(error instanceof ChangeInspectorRequestFailure) ||
@@ -128,6 +136,6 @@ export async function fetchChangeInspectorJSON(path: string): Promise<unknown> {
     sessionCredentialVersion() !== credentialVersion ||
     (await recoverUnauthorized())
   )
-    return fetchOnce(path);
-  throw failure("unauthorized", 401);
+    return fetchOnce(path, reportConnection);
+  throw failure("unauthorized", 401, reportConnection);
 }

@@ -182,7 +182,12 @@ describe("Change-aware Timeline renderer", () => {
     const list = document.querySelector<HTMLOListElement>("#timeline");
     expect(list?.querySelectorAll("[data-timeline-spacer]")).toHaveLength(2);
     expect(list?.querySelectorAll("li.event")).toHaveLength(2);
-    expect(master.textContent).toContain("Timeline · 400");
+    const heading = master.querySelector("h1.lens-heading");
+    expect(master.querySelectorAll("h1")).toHaveLength(1);
+    expect(heading?.textContent).toBe("Timeline");
+    expect(master.querySelector(".lens-meta")?.textContent).toBe(
+      "400 events · newest first",
+    );
     expect(master.textContent).toContain("loaded 101-102 of 400 matches");
     expect(master.textContent).toContain(
       "Presentation chronology uses writer timestamps",

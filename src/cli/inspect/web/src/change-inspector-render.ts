@@ -14,6 +14,8 @@ import {
   renderChangeRevisionGraph,
   renderFactRelationshipGraph,
 } from "./change-inspector-graphs";
+import type { InspectorIdentity } from "./change-inspector-identity";
+import { createLensHeading } from "./change-inspector-lens";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
@@ -39,6 +41,7 @@ import type {
   RevisionResource,
 } from "./change-protocol";
 import { filterChipsFor, removeFilterChipToken } from "./chips";
+import { CLASS } from "./classNames";
 import {
   type DiffArtifact,
   renderDiff,
@@ -103,6 +106,7 @@ function routeForLens(
 function syncLensLinks(
   active: "timeline" | "changes" | "attention",
   current: ChangeInspectorRoute,
+  attentionCount: number,
 ): void {
   document
     .querySelectorAll<HTMLAnchorElement>("#lens-switcher a[data-lens]")
@@ -113,6 +117,21 @@ function syncLensLinks(
       link.href = formatChangeInspectorRoute(routeForLens(lens, current));
       if (lens === active) link.setAttribute("aria-current", "page");
       else link.removeAttribute("aria-current");
+      if (lens === "attention") {
+        let count = link.querySelector<HTMLElement>(`.${CLASS.lensCount}`);
+        if (count === null) {
+          count = document.createElement("span");
+          count.className = CLASS.lensCount;
+          count.setAttribute("aria-hidden", "true");
+          link.append(count);
+        }
+        count.textContent = `${attentionCount} shown`;
+        count.title = "Changes shown on this page";
+        link.setAttribute(
+          "aria-label",
+          `Attention, ${attentionCount} ${attentionCount === 1 ? "Change" : "Changes"} shown on this page`,
+        );
+      }
     });
 }
 
@@ -185,6 +204,50 @@ function setText(selector: string, value: string): void {
   if (element) element.textContent = value;
 }
 
+const INSPECTOR_TITLE = "Pointbreak Review";
+
+/** Paint verified session identity without deriving it from reader generations. */
+export function renderChangeInspectorIdentity(
+  identity: InspectorIdentity | null,
+): void {
+  const root = document.querySelector<HTMLElement>("#store-identity");
+  if (root === null) return;
+  root.classList.remove("hidden");
+  const repository = document.querySelector<HTMLElement>("#store-chip-repo");
+  const chip = document.querySelector<HTMLElement>("#store-chip");
+  const rows = document.querySelector<HTMLElement>("#store-identity-rows");
+  if (identity === null) {
+    if (repository) repository.textContent = "local server";
+    chip?.setAttribute("aria-label", "local review server");
+    rows?.replaceChildren();
+    document.title = INSPECTOR_TITLE;
+    return;
+  }
+  const values: Array<[string, string]> = [
+    ["repository", identity.repository],
+    ["store", identity.placement.label],
+  ];
+  if (identity.family) values.push(["family", identity.family.id]);
+  if (identity.worktree) values.push(["worktree", identity.worktree]);
+  if (rows) {
+    const children: HTMLElement[] = [];
+    for (const [label, value] of values) {
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const description = document.createElement("dd");
+      description.textContent = value;
+      children.push(term, description);
+    }
+    rows.replaceChildren(...children);
+  }
+  if (repository) repository.textContent = identity.repository;
+  chip?.setAttribute(
+    "aria-label",
+    values.map(([label, value]) => `${label} ${value}`).join(", "),
+  );
+  document.title = `${identity.repository} · ${INSPECTOR_TITLE}`;
+}
+
 function replaceMasterWith(...children: Node[]): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
@@ -240,6 +303,12 @@ export function prepareChangeInspectorShell(
           : lens === "changes"
             ? "Changes"
             : "Attention";
+      if (lens === "attention") {
+        const count = document.createElement("span");
+        count.className = CLASS.lensCount;
+        count.setAttribute("aria-hidden", "true");
+        link.append(count);
+      }
       const destination = () => {
         const current = parseChangeInspectorRoute(
           location.hash || "#/timeline",
@@ -1939,6 +2008,7 @@ export function renderChangeInspector(
     refusal: null,
   },
 ): void {
+  renderChangeInspectorIdentity(snapshot.identity ?? null);
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
   if (snapshot.route.kind === "diff" && presentation.reading?.kind === "diff") {
@@ -2015,7 +2085,11 @@ export function renderChangeInspector(
       timelineRoute,
       route.kind === "event" ? route.eventId : null,
     );
-    syncLensLinks("timeline", snapshot.route);
+    syncLensLinks(
+      "timeline",
+      snapshot.route,
+      snapshot.generation.attention.changes.length,
+    );
     setText("#stat-events", `${history.eventCount} events`);
     setText(
       "#stat-units",
@@ -2023,7 +2097,7 @@ export function renderChangeInspector(
     );
     setText(
       "#stat-threads",
-      `${snapshot.generation.attention.changes.length} need attention`,
+      `${snapshot.generation.attention.changes.length} shown on this page`,
     );
     setText("#stat-hash", history.timelineProjectionStamp);
     renderDetail(snapshot, actions, presentation);
@@ -2049,9 +2123,12 @@ export function renderChangeInspector(
   if (master.dataset.changeListKey !== listKey) {
     const list = document.createElement("section");
     list.className = "units";
-    const heading = document.createElement("h1");
-    heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
-    list.append(heading);
+    const count = page.changes.length;
+    const [heading, metadata] = createLensHeading(
+      lens === "changes" ? "Changes" : "Attention",
+      `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`,
+    );
+    list.append(heading, metadata);
     // The protocol caps individual responses lower than this guard. Keep the
     // render-side bound as a second line of defence against an over-full server
     // page: a large store must never create an unbounded live DOM.
@@ -2104,17 +2181,20 @@ export function renderChangeInspector(
         const ask = document.createElement("p");
         ask.className = "change-card-attention-ask";
         ask.textContent = card.attention.ask;
+        const evidence = document.createElement("p");
+        evidence.className = "change-card-attention-evidence";
+        evidence.textContent = card.attention.evidence;
         const action = document.createElement("p");
         action.className = "change-card-attention-action";
-        action.textContent = `Next: ${card.attention.actionLabel}`;
-        attention.append(reason, ask, action);
+        action.textContent = `Next: ${card.attention.nextAction}`;
+        attention.append(reason, ask, evidence, action);
         if (card.attention.additionalReasons.length > 0) {
           const additional = document.createElement("ul");
           additional.className = "change-card-attention-additional";
           additional.setAttribute("aria-label", "Additional reasons");
           for (const item of card.attention.additionalReasons) {
             const row = document.createElement("li");
-            row.textContent = `${item.reason}: ${item.ask}`;
+            row.textContent = `${item.reason}: ${item.ask} ${item.evidence} Next: ${item.nextAction}`;
             row.title = item.title;
             row.setAttribute("aria-label", item.accessibleName);
             additional.append(row);
@@ -2160,8 +2240,24 @@ export function renderChangeInspector(
         const current = document.createElement("p");
         current.className = "change-card-current";
         current.append("Current Revision · ");
+        const open = document.createElement("a");
+        open.href = formatChangeInspectorRoute({
+          kind: "revision",
+          changeId: summary.changeId,
+          revision: peer.revision,
+          query: queryForExactNavigation(route),
+        });
+        open.dataset.changeId = summary.changeId;
+        open.dataset.revisionId = peer.revision.revisionId;
+        open.dataset.artifactHash = peer.revision.objectArtifactContentHash;
+        open.title = peer.title;
+        open.setAttribute(
+          "aria-label",
+          `Open ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`,
+        );
         const exact = exactRevisionIdentity(peer.revision);
-        current.append(exact);
+        open.append(exact);
+        current.append(open);
         element.append(current);
       } else {
         const peers = document.createElement("section");
@@ -2227,7 +2323,11 @@ export function renderChangeInspector(
     master.replaceChildren(list);
     master.dataset.changeListKey = listKey;
   }
-  syncLensLinks(lens, snapshot.route);
+  syncLensLinks(
+    lens,
+    snapshot.route,
+    snapshot.generation.attention.changes.length,
+  );
   setText(
     "#stat-events",
     `${snapshot.generation.profile.authorityCursor.eventCount ?? "—"} events`,
@@ -2238,7 +2338,7 @@ export function renderChangeInspector(
   );
   setText(
     "#stat-threads",
-    `${snapshot.generation.attention.changes.length} need attention`,
+    `${snapshot.generation.attention.changes.length} shown on this page`,
   );
   setText("#stat-hash", snapshot.generation.changes.projectionStamp);
   renderDetail(snapshot, actions, presentation);

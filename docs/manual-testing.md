@@ -626,8 +626,8 @@ Launch Review once against the empty store before capturing:
 "$POINTBREAK_BINARY" inspect --repo "$WALK_REPO" --open
 ```
 
-Record screenshot `01-empty-first-open.png`. The empty state must identify the repository, say
-there are no captured revisions, and point at capture with a summary — without demanding schema or
+Record screenshot `01-empty-first-open.png`. The empty state must identify the repository, expose
+the Timeline, Changes, and Attention lenses, and say `No Changes.` in the Changes lens — without demanding schema or
 trust setup first. Copy any offered command and verify the copied text equals the visible text with
 placeholders intact; do not run commands from Review, which stays read-only. A filtered-empty state
 must explain filter recovery rather than suggesting a new capture. Any mismatch is a product
@@ -653,7 +653,7 @@ capture:
   --format json \
   > "$WALK_EVIDENCE/02-capture.json" \
   2> "$WALK_EVIDENCE/02-capture.stderr.txt"
-REVISION_ID=$(jq -r '.revision.id' "$WALK_EVIDENCE/02-capture.json")
+REVISION_ID=$(jq -r '.revision.revisionId' "$WALK_EVIDENCE/02-capture.json")
 CHANGE_ID=$(jq -r '.changeId' "$WALK_EVIDENCE/02-capture.json")
 OBJECT_ARTIFACT_HASH=$(jq -r '.revision.objectArtifactContentHash' \
   "$WALK_EVIDENCE/02-capture.json")
@@ -876,7 +876,7 @@ Every recovery is journaled. Setup-only recoveries stay outside the clocks when 
 | Wrong repository/store | Run `pointbreak store paths --repo <repo> --format text`; restart Review with an exact `--repo` |
 | No tracked change | Confirm `git status --short`; modify an already tracked file; do not substitute a sample |
 | Untracked change omitted | Track the file before modifying it, or deliberately pass `--include-untracked`; journal the choice |
-| More than one revision | Keep `.revision.id` from the capture output and pass it explicitly; do not rely on single-revision defaults |
+| More than one Revision | Keep `.revision.revisionId` from the Change capture output and pass it explicitly; do not rely on single-Revision defaults |
 | Port/browser open failure | Read the startup URL, choose another `--port`, open the printed URL manually; never expose a non-loopback host |
 | Signed but untrusted writer | Continue; explain the advisory state; offer `pointbreak key enroll` only after value is visible |
 | Ambiguous assessment | Use `assessment add --replaces <id>` and verify one current call |

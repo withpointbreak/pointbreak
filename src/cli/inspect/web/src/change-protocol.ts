@@ -522,11 +522,21 @@ export type ChangeAttentionReason =
       revisions: RevisionRef[];
     };
 
+export interface ChangeAttentionReasonPresentation {
+  cause: ChangeAttentionReason;
+  ask: string;
+  reason: string;
+  evidence: string;
+  nextAction: string;
+}
+
 export interface ChangeAttentionPresentation {
   /** Server-ranked cause. It is always byte-for-byte equivalent to reasons[0]. */
   primaryReason: ChangeAttentionReason;
   /** Complete, deterministic, primary-first model causes. */
   reasons: ChangeAttentionReason[];
+  /** Server-owned copy, exactly parallel to reasons. */
+  reasonPresentations: ChangeAttentionReasonPresentation[];
   diagnostics?: string[];
 }
 
@@ -2164,18 +2174,53 @@ function isPresentations(
 function isAttentionPresentation(
   value: unknown,
 ): value is ChangeAttentionPresentation {
+  if (!isRecord(value)) return false;
+  const reasons = value.reasons;
+  const reasonPresentations = value.reasonPresentations;
   if (
-    !isRecord(value) ||
     !isAttentionReason(value.primaryReason) ||
-    !Array.isArray(value.reasons) ||
-    value.reasons.length === 0 ||
-    !value.reasons.every(isAttentionReason) ||
-    !sameAttentionReason(value.primaryReason, value.reasons[0]) ||
+    !Array.isArray(reasons) ||
+    reasons.length === 0 ||
+    !reasons.every(isAttentionReason) ||
+    !sameAttentionReason(value.primaryReason, reasons[0]) ||
+    !Array.isArray(reasonPresentations) ||
+    reasonPresentations.length !== reasons.length ||
+    !reasonPresentations.every(
+      (presentation, index) =>
+        isAttentionReasonPresentation(presentation) &&
+        sameAttentionReason(presentation.cause, reasons[index]),
+    ) ||
     (value.diagnostics !== undefined && !isStringArray(value.diagnostics))
   ) {
     return false;
   }
   return true;
+}
+
+const ATTENTION_REASON_PRESENTATION_KEYS = new Set([
+  "cause",
+  "ask",
+  "reason",
+  "evidence",
+  "nextAction",
+]);
+
+function nonBlankAttentionCopy(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isAttentionReasonPresentation(
+  value: unknown,
+): value is ChangeAttentionReasonPresentation {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ATTENTION_REASON_PRESENTATION_KEYS) &&
+    isAttentionReason(value.cause) &&
+    nonBlankAttentionCopy(value.ask) &&
+    nonBlankAttentionCopy(value.reason) &&
+    nonBlankAttentionCopy(value.evidence) &&
+    nonBlankAttentionCopy(value.nextAction)
+  );
 }
 
 function isAttentionReason(value: unknown): value is ChangeAttentionReason {

@@ -6,6 +6,7 @@
  * selection additionally requires the exact (Revision ID, artifact hash) pair.
  */
 
+import type { InspectorIdentity } from "./change-inspector-identity";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
   type AttentionPage,
@@ -28,9 +29,18 @@ export interface ChangeInspectorGeneration {
 
 export interface ChangeInspectorSnapshot {
   generation: ChangeInspectorGeneration | null;
+  /** Session chrome state; older argument-built snapshots may omit it. */
+  identity?: InspectorIdentity | null;
   route: ChangeInspectorRoute;
   selected: ChangeSummary | null;
   diagnostic: string | null;
+}
+
+export type PublicationTransition = "initial" | "unchanged" | "changed";
+
+export interface ChangeInspectorPublication {
+  snapshot: ChangeInspectorSnapshot;
+  transition: PublicationTransition;
 }
 
 export class ChangeInspectorGenerationChanged extends Error {
@@ -95,6 +105,15 @@ export function stageGeneration(
 
 export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
   let generation: ChangeInspectorGeneration | null = null;
+  let generationCredentialVersion: number | null = null;
+  let identity: {
+    value: InspectorIdentity;
+    credentialVersion: number;
+  } | null = null;
+  let pendingIdentity: {
+    value: InspectorIdentity;
+    credentialVersion: number;
+  } | null = null;
   let route = initialRoute;
 
   const snapshot = (): ChangeInspectorSnapshot => {
@@ -102,6 +121,7 @@ export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
       generation === null ? null : selectedChange(generation, route);
     return {
       generation,
+      identity: identity?.value ?? null,
       route,
       selected,
       diagnostic: selectionDiagnostic(route),
@@ -110,8 +130,46 @@ export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
 
   return {
     snapshot,
-    publish(next: ChangeInspectorGeneration): ChangeInspectorSnapshot {
+    publish(
+      next: ChangeInspectorGeneration,
+      credentialVersion = 0,
+    ): ChangeInspectorPublication {
+      const transition: PublicationTransition =
+        generation === null
+          ? "initial"
+          : sameProfileGeneration(generation.profile, next.profile) &&
+              generation.changes.projectionStamp ===
+                next.changes.projectionStamp &&
+              generation.history?.timelineProjectionStamp ===
+                next.history?.timelineProjectionStamp
+            ? "unchanged"
+            : "changed";
       generation = next;
+      generationCredentialVersion = credentialVersion;
+      if (identity?.credentialVersion !== credentialVersion) {
+        identity =
+          pendingIdentity?.credentialVersion === credentialVersion
+            ? pendingIdentity
+            : null;
+      }
+      if (pendingIdentity?.credentialVersion === credentialVersion) {
+        pendingIdentity = null;
+      }
+      return { snapshot: snapshot(), transition };
+    },
+    publishIdentity(
+      next: InspectorIdentity,
+      credentialVersion = 0,
+    ): ChangeInspectorSnapshot {
+      const candidate = { value: next, credentialVersion };
+      if (
+        generation === null ||
+        generationCredentialVersion === credentialVersion
+      ) {
+        identity = candidate;
+      } else {
+        pendingIdentity = candidate;
+      }
       return snapshot();
     },
     setRoute(next: ChangeInspectorRoute): ChangeInspectorSnapshot {
@@ -120,6 +178,11 @@ export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
     },
     clearGeneration(): ChangeInspectorSnapshot {
       generation = null;
+      generationCredentialVersion = null;
+      if (pendingIdentity !== null) {
+        identity = pendingIdentity;
+        pendingIdentity = null;
+      }
       return snapshot();
     },
   };

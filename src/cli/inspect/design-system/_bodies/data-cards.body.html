@@ -1,98 +1,72 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Unit card</p>
-    <div class="ds-stack" style="max-width:520px">
-      <div class="unit-card">
-        <h3>c2351ed43e9b</h3>
-        <div class="supersession-badges"><span class="badge head">current in thread</span></div>
-        <div class="kv tier-medium">
-          <span>captured</span><b>6/18/2026, 23:21:32</b>
-          <span>base</span><b>405fb0cc42fb (git_commit)</b>
-          <span>target</span><b>pointbreak @ 405fb0c</b>
-          <span>snapshot</span><b>b8ecfc8ffbb7</b>
-        </div>
-        <div class="actions"><button class="ghost diff-btn">view snapshot diff</button></div>
-      </div>
-    </div>
+    <p class="ds-label">Changes lens · meaning before identity</p>
+    <section class="units" aria-label="Changes">
+      <h1 class="lens-heading">Changes</h1>
+      <p class="lens-meta">2 Changes on this page · Change ID order</p>
+
+      <article class="unit-card" data-change-id="change:sha256:8c2d3a91f3e7495b">
+        <button class="change-card-primary" aria-label="Open Change. Preserve exact route and refresh behavior. Change change:sha256:8c2d3a91f3e7495b">
+          <span class="change-card-headline">Preserve exact route and refresh behavior</span>
+          <code class="change-card-id">change:8c2d3a91</code>
+        </button>
+        <dl class="change-card-state">
+          <dt>Topology</dt><dd>initial</dd>
+          <dt>Lifecycle</dt><dd>ready</dd>
+          <dt>Attention</dt><dd>clear</dd>
+          <dt>Availability</dt><dd>available</dd>
+        </dl>
+        <p class="change-card-current">
+          Current Revision ·
+          <a href="#/changes/change%3Asha256%3A8c2d3a91f3e7495b/revisions/rev%3Asha256%3A58fe0c5ff8b8?artifactHash=sha256%3Ab8ecfc8ffbb7" aria-label="Open exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7; for Change change:sha256:8c2d3a91f3e7495b" title="exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7">rev:58fe0c5f · sha256:b8ecfc8f</a>
+        </p>
+      </article>
+
+      <article class="unit-card" data-change-id="change:sha256:cc14db7a2d81702a">
+        <button class="change-card-primary" aria-label="Review current Revisions. Multiple current Revisions need selection. Change change:sha256:cc14db7a2d81702a">
+          <span class="change-card-headline">Multiple current Revisions need selection</span>
+          <code class="change-card-id">change:cc14db7a</code>
+        </button>
+        <dl class="change-card-state">
+          <dt>Topology</dt><dd>parallel current</dd>
+          <dt>Lifecycle</dt><dd>ready</dd>
+          <dt>Attention</dt><dd>current Revisions need assessment</dd>
+          <dt>Availability</dt><dd>available</dd>
+        </dl>
+        <section class="change-card-peers" aria-label="Explicit current Revision choices">
+          <h3>Choose an exact current Revision</h3>
+          <button class="ghost change-card-peer-open">Parser cleanup · rev:aaaa1111 · sha256:11111111</button>
+          <button class="ghost change-card-peer-open">Renderer cleanup · rev:cccc2222 · sha256:22222222</button>
+        </section>
+      </article>
+    </section>
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Revision thread — single head (linear succession)</p>
-    <div class="ds-stack" style="max-width:520px">
-      <div class="unit-card thread-card">
-        <h3>revision thread · current in thread fb12c0a9e4d1</h3>
-        <div class="kv">
-          <span>revisions</span><b>3</b>
-          <span>heads</span><b>1</b>
-          <span>superseded</span><b>2</b>
-        </div>
-        <svg class="revision-dag" width="120" height="164" viewBox="0 0 120 164" preserveAspectRatio="xMinYMin meet" role="group" aria-label="supersession graph">
-          <defs>
-            <marker id="dag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head" d="M0,0 L7,4 L0,8 z" /></marker>
-            <marker id="dag-arrow-traced" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head-traced" d="M0,0 L7,4 L0,8 z" /></marker>
-          </defs>
-          <polyline class="dag-edge" data-from="fb12c0a9e4d1" data-to="7a3e55c8b201" points="60,67 60,37" marker-end="url(#dag-arrow)" />
-          <polyline class="dag-edge" data-from="7a3e55c8b201" data-to="9c1aee30b742" points="60,127 60,97" marker-end="url(#dag-arrow)" />
-          <g class="dag-node head" data-revision-id="fb12c0a9e4d1" tabindex="0" role="link" aria-label="revision fb12c0a9e4d1">
-            <rect x="8" y="7" width="104" height="30" rx="6" />
-            <text x="60" y="22" text-anchor="middle" dominant-baseline="middle">fb12c0a9e4d1</text>
+    <p class="ds-label">Change relationship graph · intrinsic-width keyboard pan and text alternative</p>
+    <figure class="change-revision-graph">
+      <figcaption>Current and contextual exact Revisions</figcaption>
+      <div class="relationship-graph-viewport" data-graph-viewport tabindex="0" role="region" aria-label="Change relationship graph. Use Left, Right, Home, and End to pan.">
+        <svg class="change-revision-graph-svg" width="1120" height="170" viewBox="0 0 1120 170" role="group" aria-label="Change relationship graph">
+          <path class="change-revision-edge is-effective" d="M150 85 H970" />
+          <g class="change-revision-node is-current" tabindex="0" role="link" transform="translate(28 54)" aria-label="exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7; current Change member">
+            <rect width="244" height="62" rx="6" />
+            <text x="16" y="26">rev:58fe0c5f</text><text x="16" y="45">sha256:b8ecfc8f</text>
           </g>
-          <g class="dag-node superseded" data-revision-id="7a3e55c8b201" tabindex="0" role="link" aria-label="revision 7a3e55c8b201">
-            <rect x="8" y="67" width="104" height="30" rx="6" />
-            <text x="60" y="82" text-anchor="middle" dominant-baseline="middle">7a3e55c8b201</text>
-          </g>
-          <g class="dag-node superseded" data-revision-id="9c1aee30b742" tabindex="0" role="link" aria-label="revision 9c1aee30b742">
-            <rect x="8" y="127" width="104" height="30" rx="6" />
-            <text x="60" y="142" text-anchor="middle" dominant-baseline="middle">9c1aee30b742</text>
+          <g class="change-revision-node is-context" role="group" aria-disabled="true" transform="translate(848 54)" aria-label="exact Revision rev:sha256:9c1aee30b742; artifact sha256:7a3e55c8b201; relationship context only">
+            <rect width="244" height="62" rx="6" />
+            <text x="16" y="26">rev:9c1aee30</text><text x="16" y="45">sha256:7a3e55c8</text>
           </g>
         </svg>
       </div>
-    </div>
-  </div>
-
-  <div class="ds-group">
-    <p class="ds-label">Revision thread — competing heads (forked; one edge traced)</p>
-    <div class="ds-stack" style="max-width:520px">
-      <div class="unit-card thread-card competing">
-        <h3>revision thread · 2 competing heads</h3>
-        <div class="thread-competing"><span class="fact-status competing">competing revisions (2)</span> <span class="ref" data-ref-kind="rev">rev:aaaa1111</span> <span class="ref" data-ref-kind="rev">rev:cccc2222</span></div>
-        <div class="kv">
-          <span>revisions</span><b>3</b>
-          <span>heads</span><b>2</b>
-          <span>superseded</span><b>1</b>
-        </div>
-        <svg class="revision-dag" width="228" height="120" viewBox="0 0 228 120" preserveAspectRatio="xMinYMin meet" role="group" aria-label="supersession graph">
-          <defs>
-            <marker id="dag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head" d="M0,0 L7,4 L0,8 z" /></marker>
-            <marker id="dag-arrow-traced" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head-traced" d="M0,0 L7,4 L0,8 z" /></marker>
-          </defs>
-          <polyline class="dag-edge traced" data-from="aaaa1111bbbb" data-to="e5f0a7b3c901" points="114,81 54,39" marker-end="url(#dag-arrow-traced)" />
-          <polyline class="dag-edge" data-from="cccc2222dddd" data-to="e5f0a7b3c901" points="114,81 174,39" marker-end="url(#dag-arrow)" />
-          <g class="dag-node head traced" data-revision-id="aaaa1111bbbb" tabindex="0" role="link" aria-label="revision aaaa1111bbbb">
-            <rect x="2" y="9" width="104" height="30" rx="6" />
-            <text x="54" y="24" text-anchor="middle" dominant-baseline="middle">aaaa1111bbbb</text>
-          </g>
-          <g class="dag-node head" data-revision-id="cccc2222dddd" tabindex="0" role="link" aria-label="revision cccc2222dddd">
-            <rect x="122" y="9" width="104" height="30" rx="6" />
-            <text x="174" y="24" text-anchor="middle" dominant-baseline="middle">cccc2222dddd</text>
-          </g>
-          <g class="dag-node superseded" data-revision-id="e5f0a7b3c901" tabindex="0" role="link" aria-label="revision e5f0a7b3c901">
-            <rect x="62" y="81" width="104" height="30" rx="6" />
-            <text x="114" y="96" text-anchor="middle" dominant-baseline="middle">e5f0a7b3c901</text>
-          </g>
-        </svg>
-      </div>
-    </div>
-  </div>
-
-  <div class="ds-group">
-    <p class="ds-label">Badges</p>
-    <div class="ds-row">
-      <span class="badge">handoff</span>
-      <span class="badge head">current in thread</span>
-      <span class="badge superseded">superseded</span>
-      <span class="badge supersedes">supersedes</span>
-      <span class="badge stale">stale</span>
-    </div>
+      <details data-graph-textual-equivalent>
+        <summary>Relationship graph as text</summary>
+        <ul data-graph-text-nodes>
+          <li><button class="ghost">exact Revision rev:sha256:58fe0c5ff8b8; artifact sha256:b8ecfc8ffbb7; current Change member</button></li>
+          <li>exact Revision rev:sha256:9c1aee30b742; artifact sha256:7a3e55c8b201; relationship context only</li>
+        </ul>
+        <ul data-graph-text-edges><li>rev:58fe0c5f effectively supersedes rev:9c1aee30</li></ul>
+      </details>
+    </figure>
   </div>
 </div>

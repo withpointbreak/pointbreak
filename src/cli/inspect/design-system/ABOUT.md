@@ -1,4 +1,4 @@
-# About Pointbreak Review / shore inspect — context for this design system
+# About Pointbreak Review / pointbreak inspect — context for this design system
 
 Read this before generating or reviewing designs with these tokens. It
 explains what the product is and the vocabulary the UI speaks.
@@ -14,10 +14,11 @@ each assessment — as an append-only log. Every fact is attributed to the
 actor that asserted it (human or agent) and can be signed (Ed25519): a
 reader can tell *merely signed* from *bound to a trusted identity*.
 
-**This design system covers `shore inspect`**, the local web inspector over
-that record: a filterable event timeline with per-actor tracks, revision
-pages, annotated diffs, and signature-trust badges. Dense, terminal-adjacent,
-information-first — the product shows facts with attribution, not chatter.
+**This design system covers `pointbreak inspect`**, the local web inspector over
+that record: a filterable Timeline, stable Changes, explicit exact-Revision
+detail and annotated diffs, and signature-trust readback. Dense,
+terminal-adjacent, information-first — the product shows facts with
+attribution, not chatter.
 
 Pointbreak is the overall product brand. The Review qualifier matters in this
 surface because Pointbreak also covers debugging collaboration tools.
@@ -43,8 +44,9 @@ surface because Pointbreak also covers debugging collaboration tools.
   highlighting (`--tok-*`) aliases the semantic hues.
 - **Non-color redundancy**: non-positive states (failed, stale, open,
   superseded, errored, skipped) always carry a glyph (✕ ! ? ~ ○) via CSS —
-  meaning never rides on hue alone. Head-vs-superseded in the revision DAG
-  reads as solid-vs-dashed stroke, not color.
+  meaning never rides on hue alone. Current-vs-contextual exact Revision nodes
+  and effective-vs-unresolved relationship edges differ by shape and line style,
+  not color alone.
 - **Density**: comfortable by default; `.compact` tightens rhythm tokens
   (`--row-pad`, `--line`) with no component changes.
 - **Type**: a dense register — 11/12/13/14px body steps plus one 19px
@@ -61,9 +63,9 @@ hierarchy remain Review-specific rather than inheriting marketing composition.
 
 ## Vocabulary the UI speaks
 
-Use surface words in any generated copy: **change, review, revision,
+Use surface words in any generated copy: **Change, review, exact Revision,
 observation, question / input request, assessment, accepted / needs changes /
-needs clarification, signed by, track, actor, head, superseded.** Avoid
+needs clarification, signed by, track, actor, current, superseded.** Avoid
 internal substrate vocabulary: "work objects," "supersession DAG,"
 "projections" — these never appear in user-facing UI.
 

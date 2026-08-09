@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { InspectorIdentity } from "../src/change-inspector-identity";
 import {
   createChangeInspectorState,
   stageGeneration,
@@ -25,6 +26,16 @@ const profile: ReaderProfile = {
   commitGraphStamp: "sha256:stamp",
   minimumReaderProfile: "review_change_revision_v1",
   documents: {},
+};
+
+const identity: InspectorIdentity = {
+  schema: "pointbreak.inspect-identity",
+  storeIdentity: "store:sha256:one",
+  contextIdentity: "context:sha256:one",
+  repository: "pointbreak",
+  placement: { tier: "family", label: "family store" },
+  family: { id: "pointbreak" },
+  worktree: "feat-change-aware-inspector",
 };
 
 function page(lens: "changes" | "attention", hash = "sha256:artifact") {
@@ -81,6 +92,42 @@ function history(cursor = authorityCursor(1)): EventHistoryDocument {
 }
 
 describe("Change inspector state", () => {
+  it("classifies only coherent accepted publications and preserves session identity", () => {
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publishIdentity(identity);
+    const first = stageGeneration(
+      profile,
+      page("changes") as ChangesPage,
+      page("attention") as AttentionPage,
+      profile,
+    );
+    expect(state.publish(first).transition).toBe("initial");
+    expect(state.publish(first).transition).toBe("unchanged");
+
+    const changedProfile = {
+      ...profile,
+      authorityCursor: authorityCursor(2),
+      commitGraphStamp: "sha256:changed-commit-graph",
+    };
+    const changed = stageGeneration(
+      changedProfile,
+      page("changes", "sha256:changed") as ChangesPage,
+      page("attention", "sha256:changed") as AttentionPage,
+      changedProfile,
+    );
+    expect(state.publish(changed).transition).toBe("changed");
+
+    state.clearGeneration();
+    expect(state.snapshot()).toMatchObject({
+      generation: null,
+      identity,
+    });
+  });
+
   it("publishes atomically without inferring exact membership from a bounded page", () => {
     const state = createChangeInspectorState({
       kind: "revision",
@@ -109,6 +156,35 @@ describe("Change inspector state", () => {
     expect(state.snapshot().route.kind).toBe("revision");
     expect(state.snapshot().selected).toBeNull();
     expect(state.snapshot().diagnostic).toBeNull();
+  });
+
+  it("exposes identity only beside a generation from the same credential version", () => {
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    const generation = stageGeneration(
+      profile,
+      page("changes") as ChangesPage,
+      page("attention") as AttentionPage,
+      profile,
+    );
+    const nextIdentity = {
+      ...identity,
+      storeIdentity: "store:sha256:two",
+      contextIdentity: "context:sha256:two",
+      repository: "pointbreak-two",
+    };
+
+    state.publishIdentity(identity, 1);
+    state.publish(generation, 1);
+    expect(state.snapshot().identity).toEqual(identity);
+
+    state.publishIdentity(nextIdentity, 2);
+    expect(state.snapshot().identity).toEqual(identity);
+    state.publish(generation, 2);
+    expect(state.snapshot().identity).toEqual(nextIdentity);
   });
 
   it("refuses to stage a mixed stamp or changed profile postflight", () => {

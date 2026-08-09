@@ -32,9 +32,9 @@ const INDEX_BODY = `
         <dl id="store-identity-rows"></dl>
         <div class="store-identity-stats">
           <span id="stat-events" class="stat" title="durable events in the store">— events</span>
-          <span id="stat-units" class="stat" title="captured revisions">— units</span>
-          <span id="stat-threads" class="stat" title="supersession threads">— threads</span>
-          <span id="stat-hash" class="stat mono" title="eventSetHash">—</span>
+          <span id="stat-units" class="stat" title="Changes in the current page">— Changes</span>
+          <span id="stat-threads" class="stat" title="Changes shown on this Attention page">— shown on this page</span>
+          <span id="stat-hash" class="stat mono" title="Change projection stamp">—</span>
         </div>
         <dl class="connection-status-rows">
           <dt>connection</dt><dd id="connection-status">connecting</dd>
@@ -151,7 +151,7 @@ const INDEX_BODY = `
   </div>
   <section id="diff-page" class="diff-page hidden" aria-label="annotated diff">
     <header class="diff-page-head">
-      <span id="diff-page-title" class="mono"></span>
+      <h1 id="diff-page-title" class="diff-page-title mono"></h1>
       <span class="diff-page-keys">
         <kbd>[</kbd>/<kbd>]</kbd> files · <kbd>p</kbd>/<kbd>n</kbd> facts
       </span>
@@ -229,7 +229,7 @@ const INDEX_BODY = `
     </dl>
     <div class="key-help-workflow">
       <h3>Review stages and the CLI</h3>
-      <p>Work -> Claims -> Evidence -> Questions -> Call maps to <code>capture</code>/<code>revision</code>/<code>inspect</code>, then <code>observation</code>, <code>validation</code>, <code>input-request</code>, and <code>assessment</code>. <code>attention</code> lists outstanding judgment; <code>association</code> records where the same revision landed. Validation is evidence, never a verdict or merge gate.</p>
+      <p>Work -> Claims -> Evidence -> Questions -> Call maps to <code>capture</code> of one exact Revision in a stable Change, then <code>observation</code>, <code>validation</code>, <code>input-request</code>, and <code>assessment</code>. <code>change attention</code> lists outstanding judgment; <code>association</code> records where that exact Revision landed—the same revision already under review. Validation is evidence, never a verdict or merge gate.</p>
       <p>Review is local, read-only, and advisory: it shows and copies commands but never runs them. Copied commands keep visible placeholder tokens like <code>&lt;your-track&gt;</code> — replace each placeholder before running.</p>
     </div>
   </div>

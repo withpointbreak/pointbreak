@@ -1,9 +1,11 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Split shell — timeline · resizable divider · detail pane</p>
+    <p class="ds-label">Timeline lens · resizable divider · exact event detail</p>
     <div class="split">
       <button class="master-rail" type="button" aria-label="Show timeline" title="Show timeline">›</button>
       <section class="master" aria-label="master pane">
+        <h1 class="lens-heading">Timeline</h1>
+        <p class="lens-meta">858 events · newest first</p>
         <ol class="timeline" aria-label="event timeline" tabindex="0">
           <li class="event" aria-selected="true">
             <span class="time"><span class="event-date">6/23/2026</span><span>18:20:59.643</span></span>
@@ -13,7 +15,8 @@
               <span class="meta">
                 <span class="type" style="color:var(--evt-observation)">observation</span>
                 <span>agent:claude-code-0080</span>
-                <span class="tier-medium">revision 58fe0c5f</span>
+                <a class="ref tier-medium" href="#/timeline?change=change%3Asha256%3A8c2d3a91">change:8c2d3a91</a>
+                <a class="ref tier-medium" href="#/changes/change%3Asha256%3A8c2d3a91/revisions/rev%3Asha256%3A58fe0c5f?artifactHash=sha256%3Ab8ecfc8f">rev:58fe0c5f</a>
               </span>
             </span>
           </li>
@@ -25,7 +28,7 @@
               <span class="meta">
                 <span class="type" style="color:var(--evt-assessment)">assessment</span>
                 <span>agent:codex-storage</span>
-                <span class="tier-medium">revision 58fe0c5f</span>
+                <a class="ref tier-medium" href="#/timeline?revision=rev%3Asha256%3A58fe0c5f">rev:58fe0c5f</a>
               </span>
             </span>
           </li>
@@ -44,7 +47,7 @@
             <span class="time"><span class="event-date">6/23/2026</span><span>17:57:53.219</span></span>
             <span class="rail" style="background:var(--evt-capture)"></span>
             <span class="body">
-              <span class="title">New pins lock the order/round-trip invariants <span class="badge head">current in thread</span></span>
+              <span class="title">New pins lock the order/round-trip invariants <span class="badge current">current Revision</span></span>
               <span class="meta">
                 <span class="type" style="color:var(--evt-capture)">capture</span>
                 <span>agent:claude-code-0080</span>
@@ -55,7 +58,7 @@
             <span class="time"><span class="event-date">6/22/2026</span><span>17:51:02.004</span></span>
             <span class="rail" style="background:var(--evt-note)"></span>
             <span class="body">
-              <span class="title">Earlier revision <span class="badge stale">superseded by <span class="ref" data-ref-kind="rev">rev:58fe0c5f</span></span></span>
+              <span class="title">Earlier Revision <span class="badge stale">superseded by <span class="ref" data-ref-kind="rev">rev:58fe0c5f</span></span></span>
               <span class="meta">
                 <span class="type" style="color:var(--evt-note)">revision_superseded</span>
                 <span>agent:claude-code-0080</span>
@@ -75,7 +78,8 @@
           <dt>type</dt><dd>observation</dd>
           <dt>occurredAt</dt><dd>6/23/2026, 18:20:59</dd>
           <dt>eventId</dt><dd><span class="ref ref-hash">evt:cb7e7875</span></dd>
-          <dt>revision</dt><dd><a href="#">rev:58fe0c5f</a></dd>
+          <dt>Change</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91">change:8c2d3a91</a></dd>
+          <dt>exact Revision</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91/revisions/rev%3Asha256%3A58fe0c5f?artifactHash=sha256%3Ab8ecfc8f">rev:58fe0c5f · sha256:b8ecfc8f</a></dd>
           <dt>track</dt><dd>agent:claude-code-0080</dd>
           <dt>writer</dt><dd>human:kevin</dd>
         </dl>
@@ -100,6 +104,8 @@
     <div class="split reading">
       <button class="master-rail" type="button" aria-label="Show timeline" title="Show timeline">›</button>
       <section class="master" aria-label="master pane">
+        <h1 class="lens-heading">Timeline</h1>
+        <p class="lens-meta">858 events · newest first</p>
         <ol class="timeline" aria-label="event timeline" tabindex="0">
           <li class="event" aria-selected="true">
             <span class="time"><span class="event-date">6/23/2026</span><span>18:20:59.643</span></span>
@@ -119,7 +125,8 @@
           <dt>type</dt><dd>observation</dd>
           <dt>occurredAt</dt><dd>6/23/2026, 18:20:59</dd>
           <dt>eventId</dt><dd><span class="ref ref-hash">evt:cb7e7875</span></dd>
-          <dt>revision</dt><dd><a href="#">rev:58fe0c5f</a></dd>
+          <dt>Change</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91">change:8c2d3a91</a></dd>
+          <dt>exact Revision</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91/revisions/rev%3Asha256%3A58fe0c5f?artifactHash=sha256%3Ab8ecfc8f">rev:58fe0c5f · sha256:b8ecfc8f</a></dd>
         </dl>
         <span class="verify verify-valid">signature valid</span>
         <pre>{
@@ -136,6 +143,8 @@
     <div class="ds-sheet-frame">
       <div class="split">
         <section class="master" aria-label="master pane">
+          <h1 class="lens-heading">Timeline</h1>
+          <p class="lens-meta">858 events · newest first</p>
           <ol class="timeline" aria-label="event timeline" tabindex="0">
             <li class="event" aria-selected="true">
               <span class="time"><span class="event-date">6/23/2026</span><span>18:20:59</span></span>
@@ -151,7 +160,7 @@
         </section>
         <aside class="detail">
           <header class="detail-head">
-            <button class="ghost detail-back" type="button" aria-label="Back to timeline">‹ timeline</button>
+            <button class="ghost detail-back" type="button" aria-label="Back to Timeline">‹ Timeline</button>
             <button class="ghost" type="button" aria-label="Reading mode" title="Reading mode">⤢</button>
             <button class="ghost" type="button" aria-label="Close detail" title="Close detail (Esc)">✕</button>
           </header>
@@ -159,7 +168,8 @@
           <dl class="kv">
             <dt>type</dt><dd>observation</dd>
             <dt>occurredAt</dt><dd>6/23/2026, 18:20:59</dd>
-            <dt>revision</dt><dd><a href="#">rev:58fe0c5f</a></dd>
+            <dt>Change</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91">change:8c2d3a91</a></dd>
+            <dt>exact Revision</dt><dd><a href="#/changes/change%3Asha256%3A8c2d3a91/revisions/rev%3Asha256%3A58fe0c5f?artifactHash=sha256%3Ab8ecfc8f">rev:58fe0c5f · sha256:b8ecfc8f</a></dd>
             <dt>writer</dt><dd>human:kevin</dd>
           </dl>
           <span class="verify verify-valid">signature valid</span>

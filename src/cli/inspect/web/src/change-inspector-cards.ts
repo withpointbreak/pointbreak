@@ -3,6 +3,7 @@
 import type {
   ChangeAttentionPresentation,
   ChangeAttentionReason,
+  ChangeAttentionReasonPresentation,
   ChangePresentation,
   ChangeSummary,
   RevisionRef,
@@ -24,7 +25,8 @@ export interface ChangeCardAttentionReason {
   kind: ChangeAttentionReason["kind"];
   reason: string;
   ask: string;
-  actionLabel: string;
+  evidence: string;
+  nextAction: string;
   /** Complete source identities for assistive technology and hover text. */
   accessibleName: string;
   title: string;
@@ -37,7 +39,8 @@ export interface ChangeCardAttention {
   primary: ChangeCardAttentionReason;
   reason: ChangeCardAttentionReason["reason"];
   ask: ChangeCardAttentionReason["ask"];
-  actionLabel: ChangeCardAttentionReason["actionLabel"];
+  evidence: ChangeCardAttentionReason["evidence"];
+  nextAction: ChangeCardAttentionReason["nextAction"];
   /** Additional causes retain the server's primary-first order. */
   additionalReasons: ChangeCardAttentionReason[];
   diagnostics?: string[];
@@ -91,87 +94,35 @@ function exactRevisionCopyText(revisions: RevisionRef[]): string {
 }
 
 function attentionReasonCopy(
-  reason: ChangeAttentionReason,
+  presentation: ChangeAttentionReasonPresentation,
 ): ChangeCardAttentionReason {
-  switch (reason.kind) {
-    case "conflicted":
-      return {
-        kind: reason.kind,
-        reason: "Conflicting Change state",
-        ask: "Resolve the conflicting Change state.",
-        actionLabel: "Review conflict",
-        accessibleName:
-          "Conflicting Change state. Resolve the conflicting Change state.",
-        title: "Conflicting Change state",
-        copyText: "conflicted",
-      };
-    case "incomplete":
-      return {
-        kind: reason.kind,
-        reason: "Incomplete Change state",
-        ask: "Complete the missing Change state.",
-        actionLabel: "Review incomplete Change",
-        accessibleName:
-          "Incomplete Change state. Complete the missing Change state.",
-        title: "Incomplete Change state",
-        copyText: "incomplete",
-      };
-    case "no_current_revision":
-      return {
-        kind: reason.kind,
-        reason: "No current Revision",
-        ask: "Establish one exact current Revision before review can continue.",
-        actionLabel: "Review Change",
-        accessibleName:
-          "No current Revision. Establish one exact current Revision before review can continue.",
-        title: "No current Revision",
-        copyText: "no_current_revision",
-      };
-    case "unresolved_operative_requests": {
-      const visibleRequestIds = reason.requestIds.map(shortRef);
-      const requestList = visibleRequestIds.join(", ");
-      const fullRequestList = reason.requestIds.join(", ");
-      return {
-        kind: reason.kind,
-        reason: "Unresolved operative requests",
-        ask: `Respond to operative requests: ${requestList}.`,
-        actionLabel: "Respond to requests",
-        accessibleName: `Unresolved operative requests. Respond to operative requests: ${fullRequestList}.`,
-        title: `Operative requests: ${fullRequestList}`,
-        copyText: reason.requestIds.join("\n"),
-      };
-    }
-    case "current_revisions_need_assessment": {
-      const visibleRevisions = reason.revisions
-        .map(shortExactRevision)
-        .join(", ");
-      const fullRevisions = reason.revisions
-        .map(exactRevisionAccessibleIdentity)
-        .join("; ");
-      return {
-        kind: reason.kind,
-        reason: "Current Revisions need assessment",
-        ask: `Assess current Revisions: ${visibleRevisions}.`,
-        actionLabel: "Assess current Revisions",
-        accessibleName: `Current Revisions need assessment. Assess ${fullRevisions}.`,
-        title: fullRevisions,
-        copyText: exactRevisionCopyText(reason.revisions),
-      };
-    }
-  }
+  const { cause, ask, reason, evidence, nextAction } = presentation;
+  return {
+    kind: cause.kind,
+    reason,
+    ask,
+    evidence,
+    nextAction,
+    accessibleName: `${reason} ${ask} ${evidence} Next: ${nextAction}`,
+    title: evidence,
+    copyText: [reason, ask, evidence, nextAction].join("\n"),
+  };
 }
 
 function attentionPresentation(
   attention: ChangeAttentionPresentation | undefined,
 ): ChangeCardAttention | undefined {
   if (attention === undefined) return undefined;
-  const primary = attentionReasonCopy(attention.primaryReason);
+  const primary = attentionReasonCopy(attention.reasonPresentations[0]);
   return {
     primary,
     reason: primary.reason,
     ask: primary.ask,
-    actionLabel: primary.actionLabel,
-    additionalReasons: attention.reasons.slice(1).map(attentionReasonCopy),
+    evidence: primary.evidence,
+    nextAction: primary.nextAction,
+    additionalReasons: attention.reasonPresentations
+      .slice(1)
+      .map(attentionReasonCopy),
     ...(attention.diagnostics === undefined
       ? {}
       : { diagnostics: attention.diagnostics }),

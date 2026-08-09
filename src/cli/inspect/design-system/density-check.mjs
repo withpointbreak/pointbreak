@@ -22,7 +22,7 @@ const ALLOWED_COMPACT_PROPERTIES = new Set([
 
 const galleries = [
   { body: "data-timeline.body.html", name: "timeline", title: "Timeline" },
-  { body: "data-cards.body.html", name: "cards", title: "Revisions" },
+  { body: "data-cards.body.html", name: "changes", title: "Changes" },
   { body: "data-attention.body.html", name: "attention", title: "Attention" },
 ];
 const themes = ["dark", "light"];
