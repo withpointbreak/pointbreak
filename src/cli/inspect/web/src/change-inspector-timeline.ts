@@ -13,6 +13,7 @@ import type { ChangeInspectorRenderActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
   formatChangeInspectorRoute,
+  timelineEventRoute,
 } from "./change-inspector-router";
 import type {
   EventHistoryDocument,
@@ -218,12 +219,9 @@ function entryRow(
     meta,
     entry.eventId,
     "event",
-    formatChangeInspectorRoute({
-      kind: "event",
-      eventId: entry.eventId,
-      historyQuery: { ...route.historyQuery, after: undefined, at: undefined },
-      query: {},
-    }),
+    formatChangeInspectorRoute(
+      timelineEventRoute(entry.eventId, route.historyQuery),
+    ),
   );
 
   const contexts = document.createElement("p");

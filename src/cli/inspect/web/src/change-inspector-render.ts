@@ -20,10 +20,13 @@ import {
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
+  eventAnnotatedDiffRoute,
   formatChangeInspectorRoute,
   lensForRoute,
   parseChangeInspectorRoute,
   queryForExactNavigation,
+  showChangeInTimelineRoute,
+  showRevisionInTimelineRoute,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
 import { renderChangeInspectorTimeline } from "./change-inspector-timeline";
@@ -725,40 +728,63 @@ function renderEventDetail(
   const context = document.createElement("section");
   context.className = "actions event-detail-actions";
   const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
-  const onlyRevision =
-    event.revisionRefs.length === 1 ? event.revisionRefs[0] : null;
-  if (onlyChange) {
+  const annotatedDiff = eventAnnotatedDiffRoute(event);
+  if (annotatedDiff) {
+    const activation = document.createElement("button");
+    activation.type = "button";
+    activation.className = "ghost detail-action-primary";
+    activation.dataset.exactDiffActivation = "true";
+    activation.textContent = "Open annotated diff";
+    activation.addEventListener("click", () => actions.navigate(annotatedDiff));
+    context.append(activation);
+  }
+  for (const changeId of event.changeIds) {
     const change = document.createElement("button");
     change.type = "button";
     change.className = "ghost";
-    change.textContent = "Open Change";
+    change.dataset.eventChangeChoice = changeId;
+    change.textContent =
+      event.changeIds.length === 1 ? "Open Change" : `Open Change ${changeId}`;
     change.addEventListener("click", () =>
-      actions.navigate({ kind: "change", changeId: onlyChange, query: {} }),
+      actions.navigate({ kind: "change", changeId, query: {} }),
     );
     context.append(change);
   }
-  if (onlyChange && onlyRevision) {
-    const revision = document.createElement("button");
-    revision.type = "button";
-    revision.className = "ghost";
-    revision.textContent = "Open exact Revision";
-    revision.addEventListener("click", () =>
-      actions.navigate({
+  if (onlyChange) {
+    for (const exactRevision of event.revisionRefs) {
+      const revision = document.createElement("button");
+      revision.type = "button";
+      revision.className = "ghost";
+      revision.dataset.eventRevisionChoice = formatChangeInspectorRoute({
         kind: "revision",
         changeId: onlyChange,
-        revision: onlyRevision,
+        revision: exactRevision,
         query: {},
-      }),
-    );
-    context.append(revision);
+      });
+      revision.textContent =
+        event.revisionRefs.length === 1
+          ? "Open exact Revision"
+          : `Open exact Revision ${shortExact(exactRevision)}`;
+      revision.addEventListener("click", () =>
+        actions.navigate({
+          kind: "revision",
+          changeId: onlyChange,
+          revision: exactRevision,
+          query: {},
+        }),
+      );
+      context.append(revision);
+    }
   }
-  if (!onlyChange || (event.revisionRefs.length > 0 && !onlyRevision)) {
-    context.append(
-      detailLine(
-        "This event has multiple contexts; choose an explicit Change and exact Revision from Changes.",
-        "dim",
-      ),
+  if (!annotatedDiff) {
+    const refusal = detailLine(
+      "Opening an annotated diff requires exactly one Change and one exact Revision, with no unresolved Revisions. Choose an explicit context where available.",
+      "dim",
     );
+    refusal.dataset.eventDiffRefusal = "true";
+    refusal.setAttribute("role", "status");
+    refusal.tabIndex = -1;
+    context.append(refusal);
   }
   const copyLink = document.createElement("button");
   copyLink.type = "button";
@@ -823,11 +849,37 @@ function detailIdentity(revision: RevisionRef): HTMLParagraphElement {
   return line;
 }
 
-function detailActions(...buttons: HTMLButtonElement[]): HTMLElement {
+function detailActions(...controls: HTMLElement[]): HTMLElement {
   const actions = document.createElement("div");
   actions.className = "detail-actions";
-  actions.append(...buttons);
+  actions.append(...controls);
   return actions;
+}
+
+function showChangeInTimeline(changeId: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "ghost";
+  link.textContent = "Show in Timeline";
+  link.href = formatChangeInspectorRoute(showChangeInTimelineRoute(changeId));
+  link.setAttribute("aria-label", `Show Change ${changeId} in Timeline`);
+  return link;
+}
+
+function showRevisionInTimeline(
+  changeId: string,
+  revision: RevisionRef,
+): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "ghost";
+  link.textContent = "Show in Timeline";
+  link.href = formatChangeInspectorRoute(
+    showRevisionInTimelineRoute(changeId, revision),
+  );
+  link.setAttribute(
+    "aria-label",
+    `Show exact Revision ${revision.revisionId} with artifact ${revision.objectArtifactContentHash} for Change ${changeId} in Timeline`,
+  );
+  return link;
 }
 
 function shortExact(revision: {
@@ -1058,6 +1110,7 @@ function openAnnotatedDiff(
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ghost detail-action-primary";
+  button.dataset.exactDiffActivation = "true";
   button.textContent = "Open annotated diff";
   button.addEventListener("click", () =>
     actions.navigate({
@@ -1349,6 +1402,7 @@ function renderChangeDetail(
       ["Members", String(detail.summary.memberCount)],
       ["Current peers", String(detail.currentRevisionRefs.length)],
     ]),
+    detailActions(showChangeInTimeline(route.changeId)),
     renderCurrentRevisionChoices(
       route.changeId,
       detail.currentRevisionRefs,
@@ -1549,6 +1603,7 @@ function renderReading(
         detailActions(
           openAnnotatedDiff(route, actions),
           openCapturedResource(route, actions),
+          showRevisionInTimeline(route.changeId, route.revision),
         ),
         ...(factRelationships ? [factRelationships] : []),
         renderFacts(reading, route, actions),

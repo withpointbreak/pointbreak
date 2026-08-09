@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  eventAnnotatedDiffRoute,
   formatChangeInspectorRoute,
   parseChangeInspectorRoute,
   queryForExactNavigation,
+  showChangeInTimelineRoute,
+  showRevisionInTimelineRoute,
+  timelineEventRoute,
 } from "../src/change-inspector-router";
 
 describe("Change inspector routes", () => {
@@ -142,6 +146,99 @@ describe("Change inspector routes", () => {
       kind: "invalid",
       message:
         "Exact route focus requires at most one non-empty fact and file.",
+    });
+  });
+
+  it("constructs an event diff route only from one explicit fully exact context", () => {
+    const context = {
+      changeIds: ["change:sha256:one"],
+      revisionRefs: [
+        {
+          revisionId: "revision:sha256:two",
+          objectArtifactContentHash: "sha256:artifact-two",
+        },
+      ],
+      unresolvedRevisionIds: [],
+    };
+    expect(eventAnnotatedDiffRoute(context)).toEqual({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision: context.revisionRefs[0],
+      query: {},
+    });
+    for (const refused of [
+      { ...context, changeIds: [] },
+      { ...context, revisionRefs: [] },
+      {
+        ...context,
+        unresolvedRevisionIds: ["revision:sha256:unresolved"],
+      },
+      {
+        ...context,
+        changeIds: ["change:sha256:one", "change:sha256:two"],
+      },
+      {
+        ...context,
+        revisionRefs: [
+          ...context.revisionRefs,
+          {
+            revisionId: "revision:sha256:three",
+            objectArtifactContentHash: "sha256:artifact-three",
+          },
+        ],
+      },
+    ]) {
+      expect(eventAnnotatedDiffRoute(refused)).toBeNull();
+    }
+  });
+
+  it("constructs fresh canonical Timeline scopes for a Change and exact Revision", () => {
+    const revision = {
+      revisionId: "revision:sha256:two",
+      objectArtifactContentHash: "sha256:artifact-two",
+    };
+    expect(showChangeInTimelineRoute("change:sha256:one")).toEqual({
+      kind: "timeline",
+      historyQuery: { change: "change:sha256:one" },
+    });
+    expect(showRevisionInTimelineRoute("change:sha256:one", revision)).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        change: "change:sha256:one",
+        revision: "revision:sha256:two",
+        artifactHash: "sha256:artifact-two",
+      },
+    });
+  });
+
+  it("constructs an event route without competing Timeline position", () => {
+    expect(
+      timelineEventRoute("evt:sha256:one", {
+        q: "review",
+        type: "review_note_imported",
+        track: "reviewer",
+        change: "change:sha256:one",
+        revision: "revision:sha256:one",
+        artifactHash: "sha256:artifact-one",
+        limit: 25,
+        order: "asc",
+        after: "opaque-continuation",
+        at: "evt:sha256:locator",
+      }),
+    ).toEqual({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {
+        q: "review",
+        type: "review_note_imported",
+        track: "reviewer",
+        change: "change:sha256:one",
+        revision: "revision:sha256:one",
+        artifactHash: "sha256:artifact-one",
+        limit: 25,
+        order: "asc",
+      },
+      query: {},
     });
   });
 

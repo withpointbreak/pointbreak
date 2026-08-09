@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseChangeInspectorRoute } from "../src/change-inspector-router";
 import type { ChangeInspectorSnapshot } from "../src/change-inspector-state";
 import {
   CHANGE_READER_DOCUMENTS,
   type EventHistoryDocument,
+  type EventHistoryEntry,
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
@@ -75,6 +77,50 @@ function historyPage(projectionStamp = "sha256:generation") {
     diagnostics: [],
     queryNotices: [],
     entries: [],
+  };
+}
+
+function activationHistoryPage(
+  context: Pick<
+    EventHistoryEntry,
+    "changeIds" | "revisionRefs" | "unresolvedRevisionIds"
+  > = {
+    changeIds: ["change:sha256:one"],
+    revisionRefs: [revision],
+    unresolvedRevisionIds: [],
+  },
+): EventHistoryDocument {
+  const entry: EventHistoryEntry = {
+    eventId: "evt:sha256:activation",
+    eventType: "review_note_imported",
+    occurredAt: "2026-08-08T00:00:00Z",
+    payloadHash: "sha256:activation-payload",
+    journalId: "journal:sha256:activation",
+    writer: {
+      actorId: "actor:author",
+      producer: { name: "pointbreak", version: "0.10.0" },
+    },
+    verificationStatus: "valid",
+    assertionMode: "advisory",
+    subject: {
+      kind: "journal",
+      journalId: "journal:sha256:activation",
+    },
+    ...context,
+    summary: { kind: "review_note_imported" },
+  };
+  return {
+    ...(historyPage() as EventHistoryDocument),
+    eventCount: 1,
+    matchCount: 1,
+    completion: {
+      eventTypes: [entry.eventType],
+      trackIds: [],
+      changeIds: [...entry.changeIds],
+      revisionRefs: [...entry.revisionRefs],
+      unresolvedRevisionIds: [...entry.unresolvedRevisionIds],
+    },
+    entries: [entry],
   };
 }
 
@@ -219,6 +265,44 @@ function isExactResourcePath(path: string): boolean {
   );
 }
 
+function serveComposition(historyDocument: EventHistoryDocument): string[] {
+  const requests: string[] = [];
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    requests.push(path);
+    if (path === "/api/v2/profile")
+      return new Response(JSON.stringify(profile));
+    if (path.startsWith("/api/v2/changes?"))
+      return new Response(JSON.stringify(page("changes")));
+    if (path.startsWith("/api/v2/attention?"))
+      return new Response(JSON.stringify(page("attention")));
+    if (path.startsWith("/api/v2/history?"))
+      return new Response(JSON.stringify(historyDocument));
+    if (isChangeDetailPath(path))
+      return new Response(JSON.stringify(changeDetail()));
+    if (isExactRevisionPath(path))
+      return new Response(JSON.stringify(revisionDetail()));
+    throw new Error(`unexpected ${path}`);
+  }) as typeof fetch;
+  return requests;
+}
+
+function setNarrowViewport(narrow: boolean): void {
+  vi.spyOn(window, "matchMedia").mockImplementation(
+    (query: string) =>
+      ({
+        matches: narrow && query === "(max-width: 760px)",
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(() => true),
+      }) as unknown as MediaQueryList,
+  );
+}
+
 beforeEach(() => {
   vi.resetModules();
   localStorage.clear();
@@ -234,6 +318,318 @@ afterEach(async () => {
 });
 
 describe("Change-first composition", () => {
+  it.each([
+    ["wide keyboard", false, "keyboard"],
+    ["narrow keyboard", true, "keyboard"],
+    ["wide pointer", false, "pointer"],
+    ["narrow pointer", true, "pointer"],
+  ])("descends from a selected located Timeline event to its sole exact annotated diff and returns via %s", async (_case, narrow, activationKind) => {
+    setNarrowViewport(narrow);
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline?q=review&limit=20&at=evt%3Asha256%3Aactivation",
+    );
+    serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    if (activationKind === "keyboard") {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+      );
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    } else {
+      document
+        .querySelector<HTMLElement>(
+          "#timeline [data-event-id='evt:sha256:activation']",
+        )
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "event",
+        eventId: "evt:sha256:activation",
+        historyQuery: { q: "review", limit: 20 },
+        query: {},
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Event",
+      ),
+    );
+
+    const activation = document.querySelector<HTMLButtonElement>(
+      "[data-exact-diff-activation]",
+    );
+    expect(activation?.textContent).toBe("Open annotated diff");
+    expect(document.activeElement).toBe(activation);
+    // HTMLElement.click() models the native button activation synthesized by
+    // Enter; the document controller intentionally leaves native controls
+    // alone.
+    activation?.click();
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "diff",
+        changeId: "change:sha256:one",
+        revision,
+        query: {},
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#diff-page")?.classList).not.toContain(
+        "hidden",
+      ),
+    );
+
+    document.querySelector<HTMLButtonElement>("#diff-page-close")?.click();
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "event",
+        eventId: "evt:sha256:activation",
+        historyQuery: { q: "review", limit: 20 },
+        query: {},
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("#timeline")
+          ?.getAttribute("aria-activedescendant"),
+      ).toContain("evt_3Asha256_3Aactivation"),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "timeline",
+        historyQuery: {
+          q: "review",
+          limit: 20,
+          at: "evt:sha256:activation",
+        },
+      }),
+    );
+  });
+
+  it.each([
+    [
+      "zero context",
+      { changeIds: [], revisionRefs: [], unresolvedRevisionIds: [] },
+      0,
+      0,
+    ],
+    [
+      "one unresolved Revision",
+      {
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [],
+        unresolvedRevisionIds: ["revision:sha256:unresolved"],
+      },
+      1,
+      0,
+    ],
+    [
+      "an exact Revision plus an unresolved Revision",
+      {
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [revision],
+        unresolvedRevisionIds: ["revision:sha256:unresolved"],
+      },
+      1,
+      1,
+    ],
+    [
+      "plural Changes",
+      {
+        changeIds: ["change:sha256:one", "change:sha256:two"],
+        revisionRefs: [revision],
+        unresolvedRevisionIds: [],
+      },
+      2,
+      0,
+    ],
+    [
+      "plural exact Revisions",
+      {
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [
+          revision,
+          {
+            revisionId: "revision:sha256:two",
+            objectArtifactContentHash: "sha256:artifact-two",
+          },
+        ],
+        unresolvedRevisionIds: [],
+      },
+      1,
+      2,
+    ],
+  ])("refuses to infer an annotated diff from %s", async (_label, context, expectedChangeChoices, expectedRevisionChoices) => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Asha256%3Aactivation?q=review&limit=20",
+    );
+    const requests = serveComposition(activationHistoryPage(context));
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const eventRoute = parseChangeInspectorRoute(location.hash);
+    const refusal = document.querySelector<HTMLElement>(
+      "[data-event-diff-refusal]",
+    );
+    expect(document.activeElement).toBe(refusal);
+
+    refusal?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual(eventRoute),
+    );
+    expect(refusal?.getAttribute("role")).toBe("status");
+    expect(refusal?.textContent).toContain(
+      "exactly one Change and one exact Revision",
+    );
+    expect(document.activeElement).toBe(refusal);
+    expect(requests.some(isExactRevisionPath)).toBe(false);
+    expect(
+      document.querySelectorAll("[data-event-change-choice]"),
+    ).toHaveLength(expectedChangeChoices);
+    expect(
+      document.querySelectorAll("[data-event-revision-choice]"),
+    ).toHaveLength(expectedRevisionChoices);
+  });
+
+  it.each([
+    ["wide", false],
+    ["narrow", true],
+  ])("opens the same canonical annotated diff from exact Revision detail at %s width", async (_viewport, narrow) => {
+    setNarrowViewport(narrow);
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact&q=review",
+    );
+    serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Exact Revision",
+      ),
+    );
+
+    const activation = document.querySelector<HTMLButtonElement>(
+      "[data-exact-diff-activation]",
+    );
+    expect(activation?.textContent).toBe("Open annotated diff");
+    expect(document.activeElement).toBe(activation);
+    activation?.click();
+
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "diff",
+        changeId: "change:sha256:one",
+        revision,
+        query: { q: "review" },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#diff-page")?.classList).not.toContain(
+        "hidden",
+      ),
+    );
+    document.querySelector<HTMLButtonElement>("#diff-page-close")?.click();
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "revision",
+        changeId: "change:sha256:one",
+        revision,
+        query: { q: "review" },
+      }),
+    );
+  });
+
+  it("renders a native Change Show in Timeline link with only canonical Change scope", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone?q=old&topology=initial&after=opaque&limit=25&order=change_id_asc",
+    );
+    serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Current Revisions",
+      ),
+    );
+
+    const link = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>("#detail-body a"),
+    ).find((candidate) => candidate.textContent === "Show in Timeline");
+    expect(link?.getAttribute("href")).toBe(
+      "#/timeline?change=change%3Asha256%3Aone",
+    );
+    expect(link?.getAttribute("aria-label")).toBe(
+      "Show Change change:sha256:one in Timeline",
+    );
+    expect(parseChangeInspectorRoute(link?.hash ?? "")).toEqual({
+      kind: "timeline",
+      historyQuery: { change: "change:sha256:one" },
+    });
+  });
+
+  it("renders a native exact-Revision Show in Timeline link with only canonical exact scope", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact&q=old&topology=initial&after=opaque&limit=25&order=change_id_asc",
+    );
+    serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Exact Revision",
+      ),
+    );
+
+    const link = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>("#detail-body a"),
+    ).find((candidate) => candidate.textContent === "Show in Timeline");
+    expect(link?.getAttribute("href")).toBe(
+      "#/timeline?change=change%3Asha256%3Aone&revision=revision%3Asha256%3Aone&artifactHash=sha256%3Aartifact",
+    );
+    expect(link?.getAttribute("aria-label")).toBe(
+      "Show exact Revision revision:sha256:one with artifact sha256:artifact for Change change:sha256:one in Timeline",
+    );
+    expect(parseChangeInspectorRoute(link?.hash ?? "")).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        change: "change:sha256:one",
+        revision: "revision:sha256:one",
+        artifactHash: "sha256:artifact",
+      },
+    });
+  });
+
   it("decodes and retries one typed moving-Journal Timeline refusal", async () => {
     history.replaceState(null, "", "/#/timeline?q=review&limit=20");
     let historyRequests = 0;
@@ -448,13 +844,14 @@ describe("Change-first composition", () => {
       ?.click();
     await vi.waitFor(() =>
       expect(
-        document.querySelector<HTMLElement>("#detail-body")?.dataset
-          .changeReadingKey,
-      ).toBeDefined(),
+        document.querySelector("[data-exact-diff-activation]"),
+      ).not.toBeNull(),
     );
     expect(detail?.inert).toBe(false);
     expect(detail?.hasAttribute("aria-hidden")).toBe(false);
-    expect(document.activeElement).toBe(document.querySelector("#detail-back"));
+    expect(document.activeElement).toBe(
+      document.querySelector("[data-exact-diff-activation]"),
+    );
     for (const selector of [
       "#topbar",
       "#toolbar",

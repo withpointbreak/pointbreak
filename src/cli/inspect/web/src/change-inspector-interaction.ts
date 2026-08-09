@@ -7,8 +7,11 @@
 import type { ChangeInspectorRenderActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
+  eventAnnotatedDiffRoute,
   formatChangeInspectorRoute,
+  parseChangeInspectorRoute,
   queryForExactNavigation,
+  timelineEventRoute,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
 import { scheduleChangeInspectorTimelineRemeasure } from "./change-inspector-timeline";
@@ -20,7 +23,10 @@ import {
   type TimelineSelectionIntent,
   type TimelineWindow,
 } from "./change-inspector-timeline-navigation";
-import type { EventHistoryDocument } from "./change-protocol";
+import type {
+  EventHistoryDocument,
+  EventHistoryEntry,
+} from "./change-protocol";
 import {
   applyPrefs,
   applySplit,
@@ -144,6 +150,7 @@ type TimelineParkActions = ChangeInspectorRenderActions & {
 };
 
 type TimelineRoute = Extract<ValidRoute, { kind: "timeline" }>;
+type DiffReturnRoute = Extract<ValidRoute, { kind: "event" | "revision" }>;
 type AdjacentTimelineIntent = Extract<
   TimelineSelectionIntent,
   { kind: "adjacent-page" }
@@ -158,6 +165,12 @@ type DiffIdentity = {
   revisionId: string;
   objectArtifactContentHash: string;
 };
+
+function exactActivationIdentity(route: ValidRoute | null): string | null {
+  if (route?.kind === "event") return `event\0${route.eventId}`;
+  if (route?.kind !== "revision") return null;
+  return `revision\0${route.changeId}\0${route.revision.revisionId}\0${route.revision.objectArtifactContentHash}`;
+}
 
 function diffIdentity(
   route: Extract<ValidRoute, { kind: "diff" }>,
@@ -354,6 +367,7 @@ export function installChangeInspectorInteraction(
   let selectedChangeId: string | null = null;
   let selectedTimelineEventId: string | null = null;
   let currentTimelineEventIds: string[] = [];
+  let currentTimelineEntries = new Map<string, EventHistoryEntry>();
   let pendingTimelineSelection: PendingTimelineSelection | null = null;
   let pendingGlobalTimelineSelection: {
     boundary: "first" | "last";
@@ -370,9 +384,24 @@ export function installChangeInspectorInteraction(
   let detailDomIdentity: ChildNode | null = null;
   let pendingDiffEntryFocus: DiffIdentity | null = null;
   let pendingDiffExitFocus: string | null = null;
+  let pendingExactActivationFocus: string | null = null;
+  let diffReturnRoute: DiffReturnRoute | null = null;
 
   const parkTimelineForReaderActivity = () => {
     (actions as TimelineParkActions).parkTimelineMonitoring?.();
+  };
+
+  const navigateToTimelineEvent = (
+    eventId: string,
+    historyQuery: TimelineRoute["historyQuery"],
+  ) => {
+    const origin = companionTimelineRoute(currentRoute);
+    if (currentRoute?.kind === "timeline") {
+      timelineOriginRoute = currentRoute;
+    } else if (timelineOriginRoute === null && origin !== null) {
+      timelineOriginRoute = origin;
+    }
+    actions.navigate(timelineEventRoute(eventId, historyQuery));
   };
 
   const selectTimelineEvent = (eventId: string) => {
@@ -537,9 +566,9 @@ export function installChangeInspectorInteraction(
     colorSchemeWatcherInstalled = true;
   }
 
-  const historyOrigin = (
+  const historyOriginRecord = (
     route: ValidRoute,
-  ): "timeline" | "changes" | "attention" | null => {
+  ): Record<string, unknown> | null => {
     if (route.kind === "lens" || route.kind === "timeline") return null;
     const state = history.state;
     if (state === null || typeof state !== "object" || Array.isArray(state))
@@ -548,6 +577,14 @@ export function installChangeInspectorInteraction(
     if (origin === null || typeof origin !== "object") return null;
     const record = origin as Record<string, unknown>;
     if (record.route !== formatChangeInspectorRoute(route)) return null;
+    return record;
+  };
+
+  const historyOrigin = (
+    route: ValidRoute,
+  ): "timeline" | "changes" | "attention" | null => {
+    const record = historyOriginRecord(route);
+    if (record === null) return null;
     return record.lens === "timeline" ||
       record.lens === "changes" ||
       record.lens === "attention"
@@ -558,6 +595,7 @@ export function installChangeInspectorInteraction(
   const persistHistoryOrigin = (
     route: ValidRoute,
     lens: "timeline" | "changes" | "attention",
+    returnRoute: DiffReturnRoute | null = null,
   ): void => {
     if (route.kind === "lens" || route.kind === "timeline") return;
     const state = history.state;
@@ -571,11 +609,43 @@ export function installChangeInspectorInteraction(
         [HISTORY_ORIGIN_KEY]: {
           route: formatChangeInspectorRoute(route),
           lens,
+          ...(returnRoute
+            ? { returnRoute: formatChangeInspectorRoute(returnRoute) }
+            : {}),
         },
       },
       "",
       location.href,
     );
+  };
+
+  const persistedDiffReturnRoute = (
+    route: Extract<ValidRoute, { kind: "diff" }>,
+  ): DiffReturnRoute | null => {
+    const encoded = historyOriginRecord(route)?.returnRoute;
+    if (typeof encoded !== "string") return null;
+    const parsed = parseChangeInspectorRoute(encoded);
+    if (parsed.kind === "event") return parsed;
+    if (
+      parsed.kind === "revision" &&
+      parsed.changeId === route.changeId &&
+      parsed.revision.revisionId === route.revision.revisionId &&
+      parsed.revision.objectArtifactContentHash ===
+        route.revision.objectArtifactContentHash
+    ) {
+      return parsed;
+    }
+    return null;
+  };
+
+  const routeReturningFromDiff = (
+    route: Extract<ValidRoute, { kind: "diff" }>,
+  ): DiffReturnRoute => diffReturnRoute ?? revisionRouteFromDiff(route);
+
+  const onDiffClose = () => {
+    if (currentRoute?.kind === "diff") {
+      actions.navigate(routeReturningFromDiff(currentRoute));
+    }
   };
 
   const listRoute = (route: ValidRoute): ValidRoute => {
@@ -908,12 +978,7 @@ export function installChangeInspectorInteraction(
         currentRoute?.kind === "timeline" || currentRoute?.kind === "event"
           ? currentRoute.historyQuery
           : {};
-      actions.navigate({
-        kind: "event",
-        eventId,
-        historyQuery: { ...historyQuery, after: undefined },
-        query: {},
-      });
+      navigateToTimelineEvent(eventId, historyQuery);
     }
   };
   document.addEventListener("click", onClick);
@@ -969,7 +1034,7 @@ export function installChangeInspectorInteraction(
     // Other text-control keystrokes remain native and never trigger page keys.
     if (route?.kind === "diff" && event.key === "Escape") {
       event.preventDefault();
-      actions.navigate(revisionRouteFromDiff(route));
+      actions.navigate(routeReturningFromDiff(route));
       return;
     }
     if (isTextControl(event.target)) return;
@@ -1164,14 +1229,44 @@ export function installChangeInspectorInteraction(
         !isNativeActionControl(event.target)
       ) {
         event.preventDefault();
-        actions.navigate({
-          kind: "event",
-          eventId: selectedTimelineEventId,
-          historyQuery: timelineRoute.historyQuery,
-          query: {},
-        });
+        if (
+          route.kind === "event" &&
+          route.eventId === selectedTimelineEventId
+        ) {
+          const entry = currentTimelineEntries.get(selectedTimelineEventId);
+          const diff = entry ? eventAnnotatedDiffRoute(entry) : null;
+          if (diff === null) {
+            document
+              .querySelector<HTMLElement>("[data-event-diff-refusal]")
+              ?.focus({ preventScroll: true });
+            return;
+          }
+          diffReturnRoute = route;
+          actions.navigate(diff);
+          return;
+        }
+        navigateToTimelineEvent(
+          selectedTimelineEventId,
+          timelineRoute.historyQuery,
+        );
         return;
       }
+    }
+    if (
+      event.key === "Enter" &&
+      route.kind === "revision" &&
+      !isNativeActionControl(event.target)
+    ) {
+      event.preventDefault();
+      diffReturnRoute = route;
+      actions.navigate({
+        kind: "diff",
+        changeId: route.changeId,
+        revision: route.revision,
+        query: route.query,
+        ...(route.focus ? { focus: route.focus } : {}),
+      });
+      return;
     }
     if (event.key === "j" || event.key === "ArrowDown") {
       event.preventDefault();
@@ -1312,6 +1407,7 @@ export function installChangeInspectorInteraction(
     selectedChangeId = null;
     selectedTimelineEventId = null;
     currentTimelineEventIds = [];
+    currentTimelineEntries = new Map();
     pendingTimelineSelection = null;
     pendingGlobalTimelineSelection = null;
     setSelected(null);
@@ -1325,16 +1421,26 @@ export function installChangeInspectorInteraction(
     detailDomIdentity = null;
     pendingDiffEntryFocus = null;
     pendingDiffExitFocus = null;
+    pendingExactActivationFocus = null;
+    diffReturnRoute = null;
+    const diffClose =
+      document.querySelector<HTMLButtonElement>("#diff-page-close");
+    if (diffClose?.onclick === onDiffClose) diffClose.onclick = null;
     setCoveredPageInert(false);
   };
   return {
     sync(snapshot, timelinePage = snapshot.generation?.history ?? null) {
       const nextRoute =
         snapshot.route.kind === "invalid" ? null : snapshot.route;
-      currentTimelineEventIds =
+      const previousTimelineEntries = currentTimelineEntries;
+      const timelineEntries =
         companionTimelineRoute(nextRoute) !== null && timelinePage !== null
-          ? timelinePage.entries.map((entry) => entry.eventId)
+          ? timelinePage.entries
           : [];
+      currentTimelineEventIds = timelineEntries.map((entry) => entry.eventId);
+      currentTimelineEntries = new Map(
+        timelineEntries.map((entry) => [entry.eventId, entry]),
+      );
       if (
         nextRoute?.kind === "event" &&
         (currentRoute?.kind !== "event" ||
@@ -1348,6 +1454,37 @@ export function installChangeInspectorInteraction(
         nextRoute.kind !== "lens" &&
         nextRoute.kind !== "timeline"
       ) {
+        if (nextRoute.kind === "diff") {
+          const persisted = persistedDiffReturnRoute(nextRoute);
+          if (persisted !== null) {
+            diffReturnRoute = persisted;
+          } else if (currentRoute?.kind === "event") {
+            const entry = previousTimelineEntries.get(currentRoute.eventId);
+            const eventDiff = entry ? eventAnnotatedDiffRoute(entry) : null;
+            diffReturnRoute =
+              eventDiff !== null &&
+              sameDiffIdentity(diffIdentity(eventDiff), diffIdentity(nextRoute))
+                ? currentRoute
+                : null;
+          } else if (
+            currentRoute?.kind === "revision" &&
+            currentRoute.changeId === nextRoute.changeId &&
+            currentRoute.revision.revisionId ===
+              nextRoute.revision.revisionId &&
+            currentRoute.revision.objectArtifactContentHash ===
+              nextRoute.revision.objectArtifactContentHash
+          ) {
+            diffReturnRoute = currentRoute;
+          } else if (
+            currentRoute?.kind !== "diff" ||
+            !sameDiffIdentity(
+              diffIdentity(currentRoute),
+              diffIdentity(nextRoute),
+            )
+          ) {
+            diffReturnRoute = null;
+          }
+        }
         const persistedOrigin = historyOrigin(nextRoute);
         const origin =
           persistedOrigin ??
@@ -1363,7 +1500,13 @@ export function installChangeInspectorInteraction(
           timelineOriginRoute = currentRoute;
         }
         exactOriginLens = origin;
-        if (persistedOrigin === null) persistHistoryOrigin(nextRoute, origin);
+        if (persistedOrigin === null) {
+          persistHistoryOrigin(
+            nextRoute,
+            origin,
+            nextRoute.kind === "diff" ? diffReturnRoute : null,
+          );
+        }
       } else {
         exactOriginLens = null;
       }
@@ -1418,10 +1561,32 @@ export function installChangeInspectorInteraction(
         nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
       const currentDiffIdentity =
         currentRoute?.kind === "diff" ? diffIdentity(currentRoute) : null;
+      const nextExactActivationIdentity = exactActivationIdentity(nextRoute);
+      const currentExactActivationIdentity =
+        exactActivationIdentity(currentRoute);
+      if (nextExactActivationIdentity === null) {
+        pendingExactActivationFocus = null;
+      } else if (
+        currentRoute?.kind !== "diff" &&
+        nextExactActivationIdentity !== currentExactActivationIdentity
+      ) {
+        pendingExactActivationFocus = nextExactActivationIdentity;
+      }
+      const exactActivationTarget =
+        pendingExactActivationFocus === nextExactActivationIdentity
+          ? document.querySelector<HTMLElement>(
+              "#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]",
+            )
+          : null;
       if (nextDiffIdentity === null) {
         pendingDiffEntryFocus = null;
       } else if (!sameDiffIdentity(currentDiffIdentity, nextDiffIdentity)) {
         pendingDiffEntryFocus = nextDiffIdentity;
+      }
+      const diffClose =
+        document.querySelector<HTMLButtonElement>("#diff-page-close");
+      if (nextRoute?.kind === "diff" && diffClose) {
+        diffClose.onclick = onDiffClose;
       }
       const entersVisibleDiff =
         nextRoute?.kind === "diff" &&
@@ -1459,7 +1624,10 @@ export function installChangeInspectorInteraction(
         if (detailOpen) detail.removeAttribute("aria-hidden");
         else detail.setAttribute("aria-hidden", "true");
       }
-      if (entersVisibleDiff) {
+      if (exactActivationTarget !== null) {
+        pendingExactActivationFocus = null;
+        exactActivationTarget.focus({ preventScroll: true });
+      } else if (entersVisibleDiff) {
         pendingDiffEntryFocus = null;
         // The full-frame diff replaces the split reader. Put focus on its
         // visible Back control rather than leaving it on the now-hidden exact

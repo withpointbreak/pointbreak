@@ -491,6 +491,35 @@
     "order"
   ];
   var TIMELINE_QUERY_KEY_SET = new Set(TIMELINE_QUERY_KEYS);
+  function eventAnnotatedDiffRoute(context) {
+    const changeId = context.changeIds[0];
+    const revision2 = context.revisionRefs[0];
+    if (context.changeIds.length !== 1 || context.revisionRefs.length !== 1 || context.unresolvedRevisionIds.length !== 0 || changeId === void 0 || revision2 === void 0) {
+      return null;
+    }
+    return { kind: "diff", changeId, revision: revision2, query: {} };
+  }
+  __name(eventAnnotatedDiffRoute, "eventAnnotatedDiffRoute");
+  function timelineEventRoute(eventId, historyQuery) {
+    const { after: _after, at: _at, ...context } = historyQuery;
+    return { kind: "event", eventId, historyQuery: context, query: {} };
+  }
+  __name(timelineEventRoute, "timelineEventRoute");
+  function showChangeInTimelineRoute(changeId) {
+    return { kind: "timeline", historyQuery: { change: changeId } };
+  }
+  __name(showChangeInTimelineRoute, "showChangeInTimelineRoute");
+  function showRevisionInTimelineRoute(changeId, revision2) {
+    return {
+      kind: "timeline",
+      historyQuery: {
+        change: changeId,
+        revision: revision2.revisionId,
+        artifactHash: revision2.objectArtifactContentHash
+      }
+    };
+  }
+  __name(showRevisionInTimelineRoute, "showRevisionInTimelineRoute");
   function decodeSegment(value) {
     try {
       const decoded2 = decodeURIComponent(value);
@@ -1869,12 +1898,9 @@
       meta,
       entry.eventId,
       "event",
-      formatChangeInspectorRoute({
-        kind: "event",
-        eventId: entry.eventId,
-        historyQuery: { ...route.historyQuery, after: void 0, at: void 0 },
-        query: {}
-      })
+      formatChangeInspectorRoute(
+        timelineEventRoute(entry.eventId, route.historyQuery)
+      )
     );
     const contexts = document.createElement("p");
     contexts.className = "event-context mono";
@@ -2287,6 +2313,12 @@
     };
   }
   __name(revisionRouteFromDiff, "revisionRouteFromDiff");
+  function exactActivationIdentity(route) {
+    if (route?.kind === "event") return `event\0${route.eventId}`;
+    if (route?.kind !== "revision") return null;
+    return `revision\0${route.changeId}\0${route.revision.revisionId}\0${route.revision.objectArtifactContentHash}`;
+  }
+  __name(exactActivationIdentity, "exactActivationIdentity");
   function diffIdentity(route) {
     return {
       changeId: route.changeId,
@@ -2436,6 +2468,7 @@
     let selectedChangeId = null;
     let selectedTimelineEventId = null;
     let currentTimelineEventIds = [];
+    let currentTimelineEntries = /* @__PURE__ */ new Map();
     let pendingTimelineSelection = null;
     let pendingGlobalTimelineSelection = null;
     let modalReturnFocus = null;
@@ -2447,9 +2480,20 @@
     let detailDomIdentity = null;
     let pendingDiffEntryFocus = null;
     let pendingDiffExitFocus = null;
+    let pendingExactActivationFocus = null;
+    let diffReturnRoute = null;
     const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
       actions2.parkTimelineMonitoring?.();
     }, "parkTimelineForReaderActivity");
+    const navigateToTimelineEvent = /* @__PURE__ */ __name((eventId, historyQuery) => {
+      const origin = companionTimelineRoute(currentRoute2);
+      if (currentRoute2?.kind === "timeline") {
+        timelineOriginRoute = currentRoute2;
+      } else if (timelineOriginRoute === null && origin !== null) {
+        timelineOriginRoute = origin;
+      }
+      actions2.navigate(timelineEventRoute(eventId, historyQuery));
+    }, "navigateToTimelineEvent");
     const selectTimelineEvent = /* @__PURE__ */ __name((eventId) => {
       selectedTimelineEventId = eventId;
       actions2.revealTimelineEvent?.(eventId);
@@ -2554,7 +2598,7 @@
       watchColorScheme();
       colorSchemeWatcherInstalled = true;
     }
-    const historyOrigin = /* @__PURE__ */ __name((route) => {
+    const historyOriginRecord = /* @__PURE__ */ __name((route) => {
       if (route.kind === "lens" || route.kind === "timeline") return null;
       const state = history.state;
       if (state === null || typeof state !== "object" || Array.isArray(state))
@@ -2563,9 +2607,14 @@
       if (origin === null || typeof origin !== "object") return null;
       const record = origin;
       if (record.route !== formatChangeInspectorRoute(route)) return null;
+      return record;
+    }, "historyOriginRecord");
+    const historyOrigin = /* @__PURE__ */ __name((route) => {
+      const record = historyOriginRecord(route);
+      if (record === null) return null;
       return record.lens === "timeline" || record.lens === "changes" || record.lens === "attention" ? record.lens : null;
     }, "historyOrigin");
-    const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens) => {
+    const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens, returnRoute = null) => {
       if (route.kind === "lens" || route.kind === "timeline") return;
       const state = history.state;
       const retained = state !== null && typeof state === "object" && !Array.isArray(state) ? state : {};
@@ -2574,13 +2623,30 @@
           ...retained,
           [HISTORY_ORIGIN_KEY]: {
             route: formatChangeInspectorRoute(route),
-            lens
+            lens,
+            ...returnRoute ? { returnRoute: formatChangeInspectorRoute(returnRoute) } : {}
           }
         },
         "",
         location.href
       );
     }, "persistHistoryOrigin");
+    const persistedDiffReturnRoute = /* @__PURE__ */ __name((route) => {
+      const encoded2 = historyOriginRecord(route)?.returnRoute;
+      if (typeof encoded2 !== "string") return null;
+      const parsed = parseChangeInspectorRoute(encoded2);
+      if (parsed.kind === "event") return parsed;
+      if (parsed.kind === "revision" && parsed.changeId === route.changeId && parsed.revision.revisionId === route.revision.revisionId && parsed.revision.objectArtifactContentHash === route.revision.objectArtifactContentHash) {
+        return parsed;
+      }
+      return null;
+    }, "persistedDiffReturnRoute");
+    const routeReturningFromDiff = /* @__PURE__ */ __name((route) => diffReturnRoute ?? revisionRouteFromDiff(route), "routeReturningFromDiff");
+    const onDiffClose = /* @__PURE__ */ __name(() => {
+      if (currentRoute2?.kind === "diff") {
+        actions2.navigate(routeReturningFromDiff(currentRoute2));
+      }
+    }, "onDiffClose");
     const listRoute = /* @__PURE__ */ __name((route) => {
       if (route.kind === "timeline" || route.kind === "lens") return route;
       const lens = historyOrigin(route) ?? exactOriginLens ?? "timeline";
@@ -2826,12 +2892,7 @@
         const eventId = timelineEvent.dataset.eventId;
         selectTimelineEvent(eventId);
         const historyQuery = currentRoute2?.kind === "timeline" || currentRoute2?.kind === "event" ? currentRoute2.historyQuery : {};
-        actions2.navigate({
-          kind: "event",
-          eventId,
-          historyQuery: { ...historyQuery, after: void 0 },
-          query: {}
-        });
+        navigateToTimelineEvent(eventId, historyQuery);
       }
     }, "onClick");
     document.addEventListener("click", onClick);
@@ -2877,7 +2938,7 @@
       const route = currentRoute2;
       if (route?.kind === "diff" && event.key === "Escape") {
         event.preventDefault();
-        actions2.navigate(revisionRouteFromDiff(route));
+        actions2.navigate(routeReturningFromDiff(route));
         return;
       }
       if (isTextControl(event.target)) return;
@@ -3031,14 +3092,35 @@
         }
         if (event.key === "Enter" && selectedTimelineEventId !== null && !isNativeActionControl(event.target)) {
           event.preventDefault();
-          actions2.navigate({
-            kind: "event",
-            eventId: selectedTimelineEventId,
-            historyQuery: timelineRoute.historyQuery,
-            query: {}
-          });
+          if (route.kind === "event" && route.eventId === selectedTimelineEventId) {
+            const entry = currentTimelineEntries.get(selectedTimelineEventId);
+            const diff = entry ? eventAnnotatedDiffRoute(entry) : null;
+            if (diff === null) {
+              document.querySelector("[data-event-diff-refusal]")?.focus({ preventScroll: true });
+              return;
+            }
+            diffReturnRoute = route;
+            actions2.navigate(diff);
+            return;
+          }
+          navigateToTimelineEvent(
+            selectedTimelineEventId,
+            timelineRoute.historyQuery
+          );
           return;
         }
+      }
+      if (event.key === "Enter" && route.kind === "revision" && !isNativeActionControl(event.target)) {
+        event.preventDefault();
+        diffReturnRoute = route;
+        actions2.navigate({
+          kind: "diff",
+          changeId: route.changeId,
+          revision: route.revision,
+          query: route.query,
+          ...route.focus ? { focus: route.focus } : {}
+        });
+        return;
       }
       if (event.key === "j" || event.key === "ArrowDown") {
         event.preventDefault();
@@ -3156,6 +3238,7 @@
       selectedChangeId = null;
       selectedTimelineEventId = null;
       currentTimelineEventIds = [];
+      currentTimelineEntries = /* @__PURE__ */ new Map();
       pendingTimelineSelection = null;
       pendingGlobalTimelineSelection = null;
       setSelected(null);
@@ -3169,23 +3252,55 @@
       detailDomIdentity = null;
       pendingDiffEntryFocus = null;
       pendingDiffExitFocus = null;
+      pendingExactActivationFocus = null;
+      diffReturnRoute = null;
+      const diffClose = document.querySelector("#diff-page-close");
+      if (diffClose?.onclick === onDiffClose) diffClose.onclick = null;
       setCoveredPageInert(false);
     }, "stop");
     return {
       sync(snapshot2, timelinePage = snapshot2.generation?.history ?? null) {
         const nextRoute = snapshot2.route.kind === "invalid" ? null : snapshot2.route;
-        currentTimelineEventIds = companionTimelineRoute(nextRoute) !== null && timelinePage !== null ? timelinePage.entries.map((entry) => entry.eventId) : [];
+        const previousTimelineEntries = currentTimelineEntries;
+        const timelineEntries = companionTimelineRoute(nextRoute) !== null && timelinePage !== null ? timelinePage.entries : [];
+        currentTimelineEventIds = timelineEntries.map((entry) => entry.eventId);
+        currentTimelineEntries = new Map(
+          timelineEntries.map((entry) => [entry.eventId, entry])
+        );
         if (nextRoute?.kind === "event" && (currentRoute2?.kind !== "event" || formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute))) {
           selectedTimelineEventId = nextRoute.eventId;
         }
         if (nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline") {
+          if (nextRoute.kind === "diff") {
+            const persisted = persistedDiffReturnRoute(nextRoute);
+            if (persisted !== null) {
+              diffReturnRoute = persisted;
+            } else if (currentRoute2?.kind === "event") {
+              const entry = previousTimelineEntries.get(currentRoute2.eventId);
+              const eventDiff = entry ? eventAnnotatedDiffRoute(entry) : null;
+              diffReturnRoute = eventDiff !== null && sameDiffIdentity(diffIdentity(eventDiff), diffIdentity(nextRoute)) ? currentRoute2 : null;
+            } else if (currentRoute2?.kind === "revision" && currentRoute2.changeId === nextRoute.changeId && currentRoute2.revision.revisionId === nextRoute.revision.revisionId && currentRoute2.revision.objectArtifactContentHash === nextRoute.revision.objectArtifactContentHash) {
+              diffReturnRoute = currentRoute2;
+            } else if (currentRoute2?.kind !== "diff" || !sameDiffIdentity(
+              diffIdentity(currentRoute2),
+              diffIdentity(nextRoute)
+            )) {
+              diffReturnRoute = null;
+            }
+          }
           const persistedOrigin = historyOrigin(nextRoute);
           const origin = persistedOrigin ?? (currentRoute2?.kind === "lens" ? currentRoute2.lens : currentRoute2?.kind === "timeline" ? "timeline" : exactOriginLens ?? "timeline");
           if (currentRoute2?.kind === "timeline") {
             timelineOriginRoute = currentRoute2;
           }
           exactOriginLens = origin;
-          if (persistedOrigin === null) persistHistoryOrigin(nextRoute, origin);
+          if (persistedOrigin === null) {
+            persistHistoryOrigin(
+              nextRoute,
+              origin,
+              nextRoute.kind === "diff" ? diffReturnRoute : null
+            );
+          }
         } else {
           exactOriginLens = null;
         }
@@ -3214,10 +3329,24 @@
         const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
         const nextDiffIdentity = nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
         const currentDiffIdentity = currentRoute2?.kind === "diff" ? diffIdentity(currentRoute2) : null;
+        const nextExactActivationIdentity = exactActivationIdentity(nextRoute);
+        const currentExactActivationIdentity = exactActivationIdentity(currentRoute2);
+        if (nextExactActivationIdentity === null) {
+          pendingExactActivationFocus = null;
+        } else if (currentRoute2?.kind !== "diff" && nextExactActivationIdentity !== currentExactActivationIdentity) {
+          pendingExactActivationFocus = nextExactActivationIdentity;
+        }
+        const exactActivationTarget = pendingExactActivationFocus === nextExactActivationIdentity ? document.querySelector(
+          "#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]"
+        ) : null;
         if (nextDiffIdentity === null) {
           pendingDiffEntryFocus = null;
         } else if (!sameDiffIdentity(currentDiffIdentity, nextDiffIdentity)) {
           pendingDiffEntryFocus = nextDiffIdentity;
+        }
+        const diffClose = document.querySelector("#diff-page-close");
+        if (nextRoute?.kind === "diff" && diffClose) {
+          diffClose.onclick = onDiffClose;
         }
         const entersVisibleDiff = nextRoute?.kind === "diff" && sameDiffIdentity(pendingDiffEntryFocus, nextDiffIdentity) && document.querySelector("#diff-page:not(.hidden)") !== null;
         const leavesDiffForExactSurface = currentRoute2?.kind === "diff" && nextRoute !== null && nextRoute.kind !== "diff" && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline";
@@ -3235,7 +3364,10 @@
           if (detailOpen) detail.removeAttribute("aria-hidden");
           else detail.setAttribute("aria-hidden", "true");
         }
-        if (entersVisibleDiff) {
+        if (exactActivationTarget !== null) {
+          pendingExactActivationFocus = null;
+          exactActivationTarget.focus({ preventScroll: true });
+        } else if (entersVisibleDiff) {
           pendingDiffEntryFocus = null;
           focusFallback(nextRoute);
         } else if (leavesDiffForExactSurface) {
@@ -7108,41 +7240,61 @@
     const context = document.createElement("section");
     context.className = "actions event-detail-actions";
     const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
-    const onlyRevision = event.revisionRefs.length === 1 ? event.revisionRefs[0] : null;
-    if (onlyChange) {
+    const annotatedDiff = eventAnnotatedDiffRoute(event);
+    if (annotatedDiff) {
+      const activation = document.createElement("button");
+      activation.type = "button";
+      activation.className = "ghost detail-action-primary";
+      activation.dataset.exactDiffActivation = "true";
+      activation.textContent = "Open annotated diff";
+      activation.addEventListener("click", () => actions2.navigate(annotatedDiff));
+      context.append(activation);
+    }
+    for (const changeId of event.changeIds) {
       const change = document.createElement("button");
       change.type = "button";
       change.className = "ghost";
-      change.textContent = "Open Change";
+      change.dataset.eventChangeChoice = changeId;
+      change.textContent = event.changeIds.length === 1 ? "Open Change" : `Open Change ${changeId}`;
       change.addEventListener(
         "click",
-        () => actions2.navigate({ kind: "change", changeId: onlyChange, query: {} })
+        () => actions2.navigate({ kind: "change", changeId, query: {} })
       );
       context.append(change);
     }
-    if (onlyChange && onlyRevision) {
-      const revision2 = document.createElement("button");
-      revision2.type = "button";
-      revision2.className = "ghost";
-      revision2.textContent = "Open exact Revision";
-      revision2.addEventListener(
-        "click",
-        () => actions2.navigate({
+    if (onlyChange) {
+      for (const exactRevision of event.revisionRefs) {
+        const revision2 = document.createElement("button");
+        revision2.type = "button";
+        revision2.className = "ghost";
+        revision2.dataset.eventRevisionChoice = formatChangeInspectorRoute({
           kind: "revision",
           changeId: onlyChange,
-          revision: onlyRevision,
+          revision: exactRevision,
           query: {}
-        })
-      );
-      context.append(revision2);
+        });
+        revision2.textContent = event.revisionRefs.length === 1 ? "Open exact Revision" : `Open exact Revision ${shortExact2(exactRevision)}`;
+        revision2.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: "revision",
+            changeId: onlyChange,
+            revision: exactRevision,
+            query: {}
+          })
+        );
+        context.append(revision2);
+      }
     }
-    if (!onlyChange || event.revisionRefs.length > 0 && !onlyRevision) {
-      context.append(
-        detailLine(
-          "This event has multiple contexts; choose an explicit Change and exact Revision from Changes.",
-          "dim"
-        )
+    if (!annotatedDiff) {
+      const refusal = detailLine(
+        "Opening an annotated diff requires exactly one Change and one exact Revision, with no unresolved Revisions. Choose an explicit context where available.",
+        "dim"
       );
+      refusal.dataset.eventDiffRefusal = "true";
+      refusal.setAttribute("role", "status");
+      refusal.tabIndex = -1;
+      context.append(refusal);
     }
     const copyLink = document.createElement("button");
     copyLink.type = "button";
@@ -7204,13 +7356,36 @@
     return line;
   }
   __name(detailIdentity, "detailIdentity");
-  function detailActions(...buttons) {
+  function detailActions(...controls) {
     const actions2 = document.createElement("div");
     actions2.className = "detail-actions";
-    actions2.append(...buttons);
+    actions2.append(...controls);
     return actions2;
   }
   __name(detailActions, "detailActions");
+  function showChangeInTimeline(changeId) {
+    const link = document.createElement("a");
+    link.className = "ghost";
+    link.textContent = "Show in Timeline";
+    link.href = formatChangeInspectorRoute(showChangeInTimelineRoute(changeId));
+    link.setAttribute("aria-label", `Show Change ${changeId} in Timeline`);
+    return link;
+  }
+  __name(showChangeInTimeline, "showChangeInTimeline");
+  function showRevisionInTimeline(changeId, revision2) {
+    const link = document.createElement("a");
+    link.className = "ghost";
+    link.textContent = "Show in Timeline";
+    link.href = formatChangeInspectorRoute(
+      showRevisionInTimelineRoute(changeId, revision2)
+    );
+    link.setAttribute(
+      "aria-label",
+      `Show exact Revision ${revision2.revisionId} with artifact ${revision2.objectArtifactContentHash} for Change ${changeId} in Timeline`
+    );
+    return link;
+  }
+  __name(showRevisionInTimeline, "showRevisionInTimeline");
   function shortExact2(revision2) {
     return `${shortRef(revision2.revisionId)} · ${shortRef(
       revision2.objectArtifactContentHash
@@ -7382,6 +7557,7 @@
     const button2 = document.createElement("button");
     button2.type = "button";
     button2.className = "ghost detail-action-primary";
+    button2.dataset.exactDiffActivation = "true";
     button2.textContent = "Open annotated diff";
     button2.addEventListener(
       "click",
@@ -7640,6 +7816,7 @@
         ["Members", String(detail.summary.memberCount)],
         ["Current peers", String(detail.currentRevisionRefs.length)]
       ]),
+      detailActions(showChangeInTimeline(route.changeId)),
       renderCurrentRevisionChoices(
         route.changeId,
         detail.currentRevisionRefs,
@@ -7818,7 +7995,8 @@
         nodes.push(
           detailActions(
             openAnnotatedDiff(route, actions2),
-            openCapturedResource(route, actions2)
+            openCapturedResource(route, actions2),
+            showRevisionInTimeline(route.changeId, route.revision)
           ),
           ...factRelationships ? [factRelationships] : [],
           renderFacts(reading, route, actions2),

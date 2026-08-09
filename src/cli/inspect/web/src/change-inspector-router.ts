@@ -8,6 +8,7 @@
 import type {
   ChangeLens,
   ChangePageQuery,
+  EventHistoryEntry,
   EventHistoryQuery,
   RevisionRef,
 } from "./change-protocol";
@@ -108,6 +109,63 @@ export interface ExactRouteFocus {
   filePath?: string;
   /** The local, presentation-only file navigator query for an annotated diff. */
   fileQuery?: string;
+}
+
+type EventDiffContext = Pick<
+  EventHistoryEntry,
+  "changeIds" | "revisionRefs" | "unresolvedRevisionIds"
+>;
+
+/**
+ * Resolve one event to the annotated diff only when its accepted Timeline
+ * document carries one unambiguous Change and one fully exact Revision.
+ */
+export function eventAnnotatedDiffRoute(
+  context: EventDiffContext,
+): Extract<ChangeInspectorRoute, { kind: "diff" }> | null {
+  const changeId = context.changeIds[0];
+  const revision = context.revisionRefs[0];
+  if (
+    context.changeIds.length !== 1 ||
+    context.revisionRefs.length !== 1 ||
+    context.unresolvedRevisionIds.length !== 0 ||
+    changeId === undefined ||
+    revision === undefined
+  ) {
+    return null;
+  }
+  return { kind: "diff", changeId, revision, query: {} };
+}
+
+/** Open one event while keeping page position in private return provenance. */
+export function timelineEventRoute(
+  eventId: string,
+  historyQuery: EventHistoryQuery,
+): Extract<ChangeInspectorRoute, { kind: "event" }> {
+  const { after: _after, at: _at, ...context } = historyQuery;
+  return { kind: "event", eventId, historyQuery: context, query: {} };
+}
+
+/** Build a fresh Timeline set scope without carrying card or page state. */
+export function showChangeInTimelineRoute(
+  changeId: string,
+): Extract<ChangeInspectorRoute, { kind: "timeline" }> {
+  return { kind: "timeline", historyQuery: { change: changeId } };
+}
+
+/** Build a fresh exact contextual Timeline set scope. */
+export function showRevisionInTimelineRoute(
+  changeId: string,
+  revision: RevisionRef,
+): Extract<ChangeInspectorRoute, { kind: "timeline" }> {
+  return {
+    kind: "timeline",
+    historyQuery: {
+      change: changeId,
+      revision: revision.revisionId,
+      artifactHash: revision.objectArtifactContentHash,
+    },
+  };
 }
 
 function decodeSegment(value: string): string | null {

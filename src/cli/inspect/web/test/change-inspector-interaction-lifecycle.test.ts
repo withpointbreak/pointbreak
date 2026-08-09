@@ -502,6 +502,195 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(document.activeElement).toBe(hydratedFact);
   });
 
+  it("does not attach an unrelated Timeline event as exact-diff return provenance", () => {
+    const { controller, navigate } = install();
+    const event = eventSnapshot();
+    const context = timelineDocument(["evt:sha256:deep-link"]);
+    const entry = context.entries[0];
+    if (event.route.kind !== "event" || !entry) {
+      throw new Error("event provenance fixture is incomplete");
+    }
+    entry.changeIds = ["change:sha256:event-context"];
+    entry.revisionRefs = [
+      {
+        revisionId: "revision:sha256:event-context",
+        objectArtifactContentHash: "sha256:artifact-event-context",
+      },
+    ];
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(event.route)}`,
+    );
+    controller.sync(event, context);
+
+    const unrelatedDiff: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId: "change:sha256:unrelated",
+      revision: {
+        revisionId: "revision:sha256:unrelated",
+        objectArtifactContentHash: "sha256:artifact-unrelated",
+      },
+      query: { q: "direct" },
+    };
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(unrelatedDiff)}`,
+    );
+    controller.sync({
+      generation: null,
+      route: unrelatedDiff,
+      selected: null,
+      diagnostic: null,
+    });
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "revision",
+      changeId: unrelatedDiff.changeId,
+      revision: unrelatedDiff.revision,
+      query: unrelatedDiff.query,
+    });
+  });
+
+  it("retains same-diff return provenance but clears it across exact diff identities", () => {
+    const { controller, navigate } = install();
+    const firstRevision: Extract<ChangeInspectorRoute, { kind: "revision" }> = {
+      kind: "revision",
+      changeId: "change:sha256:first",
+      revision: {
+        revisionId: "revision:sha256:first",
+        objectArtifactContentHash: "sha256:artifact-first",
+      },
+      query: { q: "origin" },
+    };
+    const firstDiff: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      ...firstRevision,
+      kind: "diff",
+    };
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(firstRevision)}`,
+    );
+    controller.sync({
+      generation: null,
+      route: firstRevision,
+      selected: null,
+      diagnostic: null,
+    });
+    history.replaceState(null, "", `/${formatChangeInspectorRoute(firstDiff)}`);
+    controller.sync({
+      generation: null,
+      route: firstDiff,
+      selected: null,
+      diagnostic: null,
+    });
+
+    const refinedFirstDiff: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      ...firstDiff,
+      focus: { filePath: "src/first.rs", factId: "obs:first" },
+    };
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(refinedFirstDiff)}`,
+    );
+    controller.sync({
+      generation: null,
+      route: refinedFirstDiff,
+      selected: null,
+      diagnostic: null,
+    });
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith(firstRevision);
+
+    const secondDiff: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId: "change:sha256:second",
+      revision: {
+        revisionId: "revision:sha256:second",
+        objectArtifactContentHash: "sha256:artifact-second",
+      },
+      query: { q: "second" },
+      focus: { filePath: "src/second.rs", factId: "obs:second" },
+    };
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(secondDiff)}`,
+    );
+    controller.sync({
+      generation: null,
+      route: secondDiff,
+      selected: null,
+      diagnostic: null,
+    });
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "revision",
+      changeId: secondDiff.changeId,
+      revision: secondDiff.revision,
+      query: secondDiff.query,
+      focus: { filePath: "src/second.rs", factId: "obs:second" },
+    });
+  });
+
+  it("restores exact event return provenance from the matching diff history entry", () => {
+    const first = install();
+    const event = eventSnapshot();
+    const context = timelineDocument(["evt:sha256:deep-link"]);
+    const entry = context.entries[0];
+    if (event.route.kind !== "event" || !entry) {
+      throw new Error("event reload fixture is incomplete");
+    }
+    const revision = {
+      revisionId: "revision:sha256:event-context",
+      objectArtifactContentHash: "sha256:artifact-event-context",
+    };
+    entry.changeIds = ["change:sha256:event-context"];
+    entry.revisionRefs = [revision];
+    const diff: Extract<ChangeInspectorRoute, { kind: "diff" }> = {
+      kind: "diff",
+      changeId: entry.changeIds[0] ?? "",
+      revision,
+      query: {},
+    };
+    history.replaceState(
+      null,
+      "",
+      `/${formatChangeInspectorRoute(event.route)}`,
+    );
+    first.controller.sync(event, context);
+    history.replaceState(null, "", `/${formatChangeInspectorRoute(diff)}`);
+    first.controller.sync({
+      generation: null,
+      route: diff,
+      selected: null,
+      diagnostic: null,
+    });
+    first.controller.stop();
+
+    const reloaded = install();
+    reloaded.controller.sync({
+      generation: null,
+      route: diff,
+      selected: null,
+      diagnostic: null,
+    });
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(reloaded.navigate).toHaveBeenLastCalledWith(event.route);
+  });
+
   it("keeps one Timeline tab stop and moves its event cursor with j/k/g/G", () => {
     const { controller, navigate } = install();
     const list = mountTimelineRows(["evt:one", "evt:two", "evt:three"]);
@@ -542,7 +731,6 @@ describe("Change Inspector interaction lifecycle", () => {
       historyQuery: {
         q: "assessment",
         type: "assessment_recorded",
-        after: "opaque-continuation",
       },
       query: {},
     });
@@ -720,11 +908,29 @@ describe("Change Inspector interaction lifecycle", () => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
     );
-    expect(navigate).toHaveBeenCalledWith({
+    const opened = {
       kind: "event",
       eventId: "evt:sha256:next",
-      historyQuery: snapshot.route.historyQuery,
+      historyQuery: { q: "assessment", track: "reviewer" },
       query: {},
+    } as const;
+    expect(navigate).toHaveBeenCalledWith(opened);
+
+    controller.sync(
+      {
+        generation: null,
+        route: opened,
+        selected: null,
+        diagnostic: null,
+      },
+      timelineDocument(["evt:sha256:deep-link", opened.eventId]),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "timeline",
+      historyQuery: snapshot.route.historyQuery,
     });
   });
 
