@@ -290,12 +290,16 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         "a narrow Change graph may fit its viewport, but Home and End must still stay within its scroll bounds"
     );
     assert!(
-        annotated_diff_round_trip.contains("const canonicalReadingKey = await")
-            && annotated_diff_round_trip.contains("const waitForCanonicalRevisionSurface = () =>")
+        annotated_diff_round_trip.contains("const canonicalReadingIdentity =")
+            && annotated_diff_round_trip.contains("await canonicalReadingIdentityLocator")
+            && annotated_diff_round_trip
+                .contains("const waitForCanonicalRevisionSurface = async (phase) =>")
             && annotated_diff_round_trip.contains("diff.classList.contains(\"hidden\")")
             && annotated_diff_round_trip.contains("!split.classList.contains(\"hidden\")")
+            && annotated_diff_round_trip.contains("identity.dataset.revisionId")
+            && annotated_diff_round_trip.contains("identity.dataset.artifactHash")
             && annotated_diff_round_trip
-                .matches("await waitForCanonicalRevisionSurface();")
+                .matches("await waitForCanonicalRevisionSurface(")
                 .count()
                 >= 2,
         "annotated-diff Close and Forward must prove the canonical exact Revision surface is visible and bound"
@@ -442,6 +446,149 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     assert!(
         explicit_cleanup < disarmed_trap && disarmed_trap < manifest_publish,
         "browser shutdown and child reaping must precede completion-last manifest publication"
+    );
+}
+
+#[test]
+fn change_inspector_browser_gate_rejects_frozen_exact_identity_false_negatives() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let browser_program =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
+            .expect("read Change Inspector browser program");
+
+    let exact_timeline_details = browser_program
+        .split_once("const inspectExactTimelineEvent = async (")
+        .and_then(|(_, tail)| tail.split_once("// The original proposal remains correlated"))
+        .map(|(details, _)| details)
+        .expect("browser gate retains exact Timeline detail checks");
+    assert!(
+        browser_program.contains("const readTimelineEventIdentity = async (label) =>")
+            && browser_program.contains("timelineDetailIdentityCount === 1")
+            && browser_program
+                .contains("eventId: await detailIdentity.getAttribute(\"data-event-id\"),")
+            && browser_program.contains("title: await detailIdentity.getAttribute(\"title\"),")
+            && browser_program.contains("name: await detailIdentity.getAttribute(\"aria-label\"),")
+            && browser_program.contains("const compareTimelineEventIdentity =")
+            && browser_program.contains("title: eventId,")
+            && browser_program.contains("name: `event ${eventId}`,")
+            && exact_timeline_details
+                .contains("const detailIdentity = await waitForExactTimelineEvent(eventId);")
+            && exact_timeline_details.contains("await readExactDetailIdentitySources()")
+            && !exact_timeline_details.contains("detail.includes(identity)"),
+        "exact Timeline detail checks must prove the full opaque event identity through data-event-id, title, and aria-label rather than rendered text"
+    );
+
+    let exact_event_lifecycle = browser_program
+        .split_once("// Open one exact event from the Timeline.")
+        .and_then(|(_, tail)| {
+            tail.split_once("await open(\n\t\t\t\t\"timeline?limit=100&order=desc\",")
+        })
+        .map(|(lifecycle, _)| lifecycle)
+        .expect("browser gate retains click, history, and reload event checks");
+    assert!(
+        exact_event_lifecycle
+            .matches("waitForExactTimelineEvent(selectedEventId)")
+            .count()
+            >= 3
+            && exact_event_lifecycle.contains("const expectedExactEventRoute =")
+            && exact_event_lifecycle.contains("exactEventRouteFromTimelineRoute(")
+            && exact_event_lifecycle
+                .contains("const exactEventRouteMatches = await currentRouteMatches(")
+            && exact_event_lifecycle
+                .matches("await currentRouteMatches(expectedExactEventRoute)")
+                .count()
+                >= 2
+            && !exact_event_lifecycle.contains("const exactEventRoute = await hash();")
+            && exact_event_lifecycle.contains("Timeline event Forward route")
+            && exact_event_lifecycle.contains("Timeline event reload route")
+            && !exact_event_lifecycle
+                .contains("innerText()).includes(\n\t\t\t\t\tselectedEventId,")
+            && !exact_event_lifecycle.contains("textContent?.includes(selectedEventId)"),
+        "exact event checks after click and reload must retain the semantic route and data-event-id identity, not infer either from visible detail text"
+    );
+
+    let exact_event_wait = browser_program
+        .split_once("const waitForExactTimelineEvent = async (eventId) =>")
+        .and_then(|(_, tail)| tail.split_once("const readExactDetailIdentitySources = () =>"))
+        .map(|(wait, _)| wait)
+        .expect("browser gate retains exact Timeline event readiness");
+    assert!(
+        !exact_event_wait.contains("detailIdentity.title === expectedEventId")
+            && !exact_event_wait.contains("detailIdentity.getAttribute(\"aria-label\")")
+            && browser_program.contains("compareTimelineEventIdentity("),
+        "event readiness must settle on route and data identity before recording title and accessible-name mismatches as structured comparisons"
+    );
+
+    assert!(
+        browser_program.contains("titleTokens: identityTokens(title)")
+            && browser_program.contains("nameTokens: identityTokens(name)")
+            && browser_program.contains("source.titleTokens.includes(identity)")
+            && browser_program.contains("source.nameTokens.includes(identity)")
+            && !browser_program.contains("source.title.includes(identity)")
+            && !browser_program.contains("source.name.includes(identity)"),
+        "correlated opaque identities must compare complete structured tokens instead of accepting substrings"
+    );
+
+    let historical_proposal = browser_program
+        .split_once("const historical = config.fixture.historicalMembership;")
+        .and_then(|(_, tail)| {
+            tail.split_once("await open(\n\t\t\t\t\"timeline?limit=100&order=asc&track=")
+        })
+        .map(|(proposal, _)| proposal)
+        .expect("browser gate retains the withdrawn historical proposal check");
+    assert!(
+        historical_proposal.contains("historicalEventIdentity = await waitForExactTimelineEvent(")
+            && historical_proposal.contains("historicalProposalEventId,")
+            && historical_proposal.contains("await readExactDetailIdentitySources()")
+            && historical_proposal.contains("containsExactDetailIdentity(")
+            && !historical_proposal.contains("textContent?.includes(eventId)"),
+        "historical proposal readiness must compare its exact data-event-id instead of matching opaque identity text"
+    );
+
+    let annotated_diff_round_trip = browser_program
+        .split_once("// An annotated diff is a first-class full-frame exact route")
+        .and_then(|(_, tail)| tail.split_once("await open(exact, layouts[1]"))
+        .map(|(round_trip, _)| round_trip)
+        .expect("browser gate retains the annotated-diff round-trip section");
+    assert!(
+        annotated_diff_round_trip
+            .matches("await waitForCurrentRoute(focusedDiffRoute);")
+            .count()
+            >= 2
+            && annotated_diff_round_trip.contains("canonicalReadingIdentityCount === 1")
+            && annotated_diff_round_trip
+                .contains("await waitForCanonicalRevisionSurface(\"Close\");")
+            && annotated_diff_round_trip
+                .contains("await waitForCanonicalRevisionSurface(\"Forward\");")
+            && !annotated_diff_round_trip.contains("location.hash === expectedRoute")
+            && !annotated_diff_round_trip
+                .contains("detail.dataset.changeReadingKey === expectedReadingKey"),
+        "annotated diff reload, Close, and Forward must use semantic route matching with separately labeled exits, not raw fragment order or a prior detail generation key"
+    );
+    assert!(
+        annotated_diff_round_trip.contains("const expectedAnnotatedDiffRoute =")
+            && annotated_diff_round_trip.contains("canonicalRevisionPath}/diff")
+            && annotated_diff_round_trip
+                .contains("const annotatedDiffEntryRouteMatches = await currentRouteMatches(")
+            && annotated_diff_round_trip.contains("expectedAnnotatedDiffRoute,")
+            && annotated_diff_round_trip.contains("annotated diff entry route"),
+        "annotated diff entry must prove the complete semantic route derived from the accepted exact Revision instead of preserving an observed route as its oracle"
+    );
+
+    let narrow_exact_detail = browser_program
+        .split_once("await diagnostics.section(\"Exact detail and reading\"")
+        .and_then(|(_, tail)| {
+            tail.split_once("await diagnostics.section(\"Exact resource availability\"")
+        })
+        .map(|(detail, _)| detail)
+        .expect("browser gate retains the narrow exact-detail section");
+    assert!(
+        narrow_exact_detail.contains("[data-exact-diff-activation]")
+            && narrow_exact_detail.contains("narrowExactActivationCount === 1")
+            && narrow_exact_detail.contains("await currentRouteMatches(`#/${exact}`)")
+            && !narrow_exact_detail.contains("document.activeElement?.id === \"detail-back\"")
+            && !narrow_exact_detail.contains("narrowExactRoute === `#/${exact}`"),
+        "narrow exact detail must focus the served exact-diff activation and compare the exact route semantically"
     );
 }
 

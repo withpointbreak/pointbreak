@@ -290,8 +290,44 @@
 					expectedRoute,
 			route,
 		);
-	const waitForExactTimelineEvent = (eventId) =>
-		page.waitForFunction((expectedEventId) => {
+	const expectedTimelineEventIdentity = (eventId) => ({
+		eventId,
+		title: eventId,
+		name: `event ${eventId}`,
+	});
+	const readTimelineEventIdentity = async (label) => {
+		const detailIdentity = page.locator("#detail-body [data-event-id]");
+		const timelineDetailIdentityCount = await detailIdentity.count();
+		requireCondition(
+			timelineDetailIdentityCount === 1,
+			label,
+			"exact Timeline detail did not expose one event identity",
+			1,
+			timelineDetailIdentityCount,
+		);
+		return {
+			eventId: await detailIdentity.getAttribute("data-event-id"),
+			title: await detailIdentity.getAttribute("title"),
+			name: await detailIdentity.getAttribute("aria-label"),
+		};
+	};
+	const compareTimelineEventIdentity = (eventId, label, actual) => {
+		const expected = expectedTimelineEventIdentity(eventId);
+		compare(
+			JSON.stringify(actual) === JSON.stringify(expected),
+			label,
+			`event detail did not retain exact identity ${eventId}`,
+			expected,
+			actual,
+		);
+		return expected;
+	};
+	const exactEventRouteFromTimelineRoute = (timelineRoute, eventId) => {
+		const [timelinePath, timelineSearch = ""] = timelineRoute.split("?", 2);
+		return `${timelinePath}/events/${encodeURIComponent(eventId)}${timelineSearch ? `?${timelineSearch}` : ""}`;
+	};
+	const waitForExactTimelineEvent = async (eventId) => {
+		await page.waitForFunction((expectedEventId) => {
 			const selected = document.querySelector(
 				'#timeline [aria-selected="true"]',
 			);
@@ -310,6 +346,34 @@
 					?.getAttribute("aria-activedescendant") === selected.id
 			);
 		}, eventId);
+		return readTimelineEventIdentity("Timeline exact event identity");
+	};
+	const readExactDetailIdentitySources = () =>
+		page
+			.locator("#detail-body dd[title][aria-label]")
+			.evaluateAll((nodes) => {
+				const identityTokens = (value) =>
+					value
+						.split(/\s*(?:;|·)\s*/u)
+						.map((token) => token.trim())
+						.filter(Boolean);
+				return nodes.map((node) => {
+					const title = node.getAttribute("title") ?? "";
+					const name = node.getAttribute("aria-label") ?? "";
+					return {
+						title,
+						name,
+						titleTokens: identityTokens(title),
+						nameTokens: identityTokens(name),
+					};
+				});
+			});
+	const containsExactDetailIdentity = (sources, identity) =>
+		sources.some(
+			(source) =>
+				source.titleTokens.includes(identity) &&
+				source.nameTokens.includes(identity),
+		);
 	const waitForLens = (lens) =>
 		page.waitForFunction((expectedLens) => {
 			if (expectedLens === "timeline")
@@ -1091,7 +1155,7 @@
 			const inspectExactTimelineEvent = async (
 				eventId,
 				label,
-				expectedText,
+				{ identities = [], prose = [] },
 			) => {
 				await open(
 					`timeline/events/${encodeURIComponent(eventId)}?limit=100&order=asc`,
@@ -1126,15 +1190,21 @@
 					rowId,
 					activeDescendant,
 				);
-				await page.waitForFunction(
-					(id) =>
-						document.querySelector("#detail-body [data-event-id]")?.dataset
-							.eventId === id,
-					eventId,
-				);
+				const detailIdentity = await waitForExactTimelineEvent(eventId);
+				compareTimelineEventIdentity(eventId, label, detailIdentity);
 				const detail = await page.locator("#detail-body").innerText();
-				for (const text of expectedText) {
+				for (const text of prose) {
 					expect(detail.includes(text), label, `event detail omitted ${text}`);
+				}
+				const identitySources = await readExactDetailIdentitySources();
+				for (const identity of identities) {
+					compare(
+						containsExactDetailIdentity(identitySources, identity),
+						label,
+						`event detail omitted exact identity ${identity}`,
+						{ titleToken: identity, accessibleNameToken: identity },
+						identitySources,
+					);
 				}
 				return detail;
 			};
@@ -1142,24 +1212,29 @@
 			await inspectExactTimelineEvent(
 				config.fixture.correction.eventId,
 				"Timeline correction event",
-				[
-					config.fixture.correction.originObservationId,
-					"Browser correction replacement",
-				],
+				{
+					identities: [config.fixture.correction.originObservationId],
+					prose: ["Browser correction replacement"],
+				},
 			);
 			await inspectExactTimelineEvent(
 				config.fixture.factPort.eventId,
 				"Timeline fact-port event",
-				[config.fixture.factPort.portId, "context only observation"],
+				{
+					identities: [config.fixture.factPort.portId],
+					prose: ["context only observation"],
+				},
 			);
 			await inspectExactTimelineEvent(
 				config.fixture.historicalMembership.withdrawEventId,
 				"Timeline membership-withdrawal event",
-				[
-					config.fixture.historicalMembership.claimId,
-					config.fixture.historicalMembership.historicalChangeId,
-					config.fixture.historicalMembership.revisionId,
-				],
+				{
+					identities: [
+						config.fixture.historicalMembership.claimId,
+						config.fixture.historicalMembership.historicalChangeId,
+						config.fixture.historicalMembership.revisionId,
+					],
+				},
 			);
 
 			// The original proposal remains correlated with both its direct Change and
@@ -1190,27 +1265,52 @@
 				"nonempty event ID",
 				historicalProposalEventId,
 			);
-			await historicalProposal.click();
-			await page.waitForFunction(
-				(eventId) =>
-					location.hash.includes(`/events/${encodeURIComponent(eventId)}`) &&
-					!document.querySelector("#detail")?.inert &&
-					document
-						.querySelector("#detail-body")
-						?.textContent?.includes(eventId),
+			const historicalTimelineRoute = await hash();
+			const expectedHistoricalEventRoute = exactEventRouteFromTimelineRoute(
+				historicalTimelineRoute,
 				historicalProposalEventId,
 			);
-			const historicalProposalDetail = await page
-				.locator("#detail-body")
-				.innerText();
+			await historicalProposal.click();
+			const historicalEventIdentity = await waitForExactTimelineEvent(
+				historicalProposalEventId,
+			);
+			compareTimelineEventIdentity(
+				historicalProposalEventId,
+				"Timeline withdrawn historical membership",
+				historicalEventIdentity,
+			);
+			const historicalEventRoute = await hash();
+			const historicalEventRouteMatches = await currentRouteMatches(
+				expectedHistoricalEventRoute,
+			);
+			compare(
+				historicalEventRouteMatches,
+				"Timeline withdrawn historical membership route",
+				"historical proposal did not retain its bounded Timeline context",
+				{ semanticRoute: expectedHistoricalEventRoute },
+				{
+					semanticRouteMatches: historicalEventRouteMatches,
+					route: historicalEventRoute,
+				},
+			);
+			const historicalProposalIdentitySources =
+				await readExactDetailIdentitySources();
 			for (const expectedChange of [
 				historical.directChangeId,
 				historical.historicalChangeId,
 			]) {
-				expect(
-					historicalProposalDetail.includes(expectedChange),
+				compare(
+					containsExactDetailIdentity(
+						historicalProposalIdentitySources,
+						expectedChange,
+					),
 					"Timeline withdrawn historical membership",
-					`proposal detail omitted correlated Change ${expectedChange}`,
+					`proposal detail omitted exact correlated Change ${expectedChange}`,
+					{
+						titleToken: expectedChange,
+						accessibleNameToken: expectedChange,
+					},
+					historicalProposalIdentitySources,
 				);
 			}
 
@@ -1547,16 +1647,32 @@
 				"nonempty event ID",
 				selectedEventId,
 			);
-			await page.locator("#timeline [data-event-id]").first().click();
-			await waitForExactTimelineEvent(selectedEventId);
-			expect(
-				(await page.locator("#detail-body").innerText()).includes(
-					selectedEventId,
-				),
-				"Timeline exact event",
-				"event detail did not retain its exact event identity",
+			const expectedExactEventRoute = exactEventRouteFromTimelineRoute(
+				timelineHashBeforeEvent,
+				selectedEventId,
 			);
-			const exactEventRoute = await hash();
+			await page.locator("#timeline [data-event-id]").first().click();
+			const selectedEventIdentity =
+				await waitForExactTimelineEvent(selectedEventId);
+			compareTimelineEventIdentity(
+				selectedEventId,
+				"Timeline exact event",
+				selectedEventIdentity,
+			);
+			const settledExactEventRoute = await hash();
+			const exactEventRouteMatches = await currentRouteMatches(
+				expectedExactEventRoute,
+			);
+			compare(
+				exactEventRouteMatches,
+				"Timeline exact event route",
+				"opening an exact event did not retain its bounded Timeline context",
+				{ semanticRoute: expectedExactEventRoute },
+				{
+					semanticRouteMatches: exactEventRouteMatches,
+					route: settledExactEventRoute,
+				},
+			);
 			const exactEventList = page.locator("#timeline");
 			const exactDetailClose = page.locator("#detail-close");
 			await exactDetailClose.focus();
@@ -1572,13 +1688,13 @@
 			compare(
 				exactDetailArrowState.activeEvent === exactEventBeforeDetailArrow &&
 					exactDetailArrowState.activeElement === "detail-close" &&
-					exactDetailArrowState.route === exactEventRoute,
+					exactDetailArrowState.route === settledExactEventRoute,
 				"Timeline exact event native arrow",
 				"ArrowDown on exact detail chrome operated the background Timeline",
 				{
 					activeEvent: exactEventBeforeDetailArrow,
 					activeElement: "detail-close",
-					route: exactEventRoute,
+					route: settledExactEventRoute,
 				},
 				exactDetailArrowState,
 			);
@@ -1597,10 +1713,10 @@
 				"j did not move the exact-event Timeline cursor locally",
 			);
 			compare(
-				exactEventRouteAfterJ === exactEventRoute,
+				exactEventRouteAfterJ === settledExactEventRoute,
 				"Timeline exact event keyboard",
 				"j changed the stable exact-event detail route",
-				exactEventRoute,
+				settledExactEventRoute,
 				exactEventRouteAfterJ,
 			);
 			await page.waitForTimeout(3500);
@@ -1610,10 +1726,10 @@
 			};
 			compare(
 				exactEventRepaintState.activeEvent === exactEventMoved &&
-					exactEventRepaintState.route === exactEventRoute,
+					exactEventRepaintState.route === settledExactEventRoute,
 				"Timeline exact event repaint",
 				"an unchanged exact-event poll reset the page-local Timeline cursor",
-				{ activeEvent: exactEventMoved, route: exactEventRoute },
+				{ activeEvent: exactEventMoved, route: settledExactEventRoute },
 				exactEventRepaintState,
 			);
 			await page.keyboard.press("k");
@@ -1623,10 +1739,10 @@
 			};
 			compare(
 				exactEventAfterKState.activeEvent === exactEventActive &&
-					exactEventAfterKState.route === exactEventRoute,
+					exactEventAfterKState.route === settledExactEventRoute,
 				"Timeline exact event keyboard",
 				"k did not restore the exact-event Timeline cursor without changing detail",
-				{ activeEvent: exactEventActive, route: exactEventRoute },
+				{ activeEvent: exactEventActive, route: settledExactEventRoute },
 				exactEventAfterKState,
 			);
 			await page.keyboard.press("g");
@@ -1637,10 +1753,10 @@
 			};
 			compare(
 				exactEventBoundaryState.activeEvent === exactEventActive &&
-					exactEventBoundaryState.route === exactEventRoute,
+					exactEventBoundaryState.route === settledExactEventRoute,
 				"Timeline exact event global boundaries",
 				"g/G replaced or reinterpreted the stable exact-event detail route",
-				{ activeEvent: exactEventActive, route: exactEventRoute },
+				{ activeEvent: exactEventActive, route: settledExactEventRoute },
 				exactEventBoundaryState,
 			);
 			await page.locator("#detail-read").click();
@@ -1663,15 +1779,46 @@
 			await page.goBack();
 			await waitForTimelineRoute(timelineHashBeforeEvent);
 			await page.goForward();
-			await waitForExactTimelineEvent(selectedEventId);
+			const forwardedEventIdentity =
+				await waitForExactTimelineEvent(selectedEventId);
+			compareTimelineEventIdentity(
+				selectedEventId,
+				"Timeline event Forward identity",
+				forwardedEventIdentity,
+			);
+			const forwardedEventRoute = await hash();
+			const forwardedEventRouteMatches =
+				await currentRouteMatches(expectedExactEventRoute);
+			compare(
+				forwardedEventRouteMatches,
+				"Timeline event Forward route",
+				"Forward did not restore the complete semantic exact-event route",
+				{ semanticRoute: expectedExactEventRoute },
+				{
+					semanticRouteMatches: forwardedEventRouteMatches,
+					route: forwardedEventRoute,
+				},
+			);
 			await page.reload({ waitUntil: "domcontentloaded" });
-			await waitForExactTimelineEvent(selectedEventId);
-			expect(
-				(await page.locator("#detail-body").innerText()).includes(
-					selectedEventId,
-				),
+			const reloadedEventIdentity =
+				await waitForExactTimelineEvent(selectedEventId);
+			compareTimelineEventIdentity(
+				selectedEventId,
 				"Timeline event reload",
-				"reload lost the exact event detail",
+				reloadedEventIdentity,
+			);
+			const reloadedEventRoute = await hash();
+			const reloadedEventRouteMatches =
+				await currentRouteMatches(expectedExactEventRoute);
+			compare(
+				reloadedEventRouteMatches,
+				"Timeline event reload route",
+				"reload did not retain the complete semantic exact-event route",
+				{ semanticRoute: expectedExactEventRoute },
+				{
+					semanticRouteMatches: reloadedEventRouteMatches,
+					route: reloadedEventRoute,
+				},
 			);
 			await page.goBack();
 			await waitForTimelineRoute(timelineHashBeforeEvent);
@@ -1701,8 +1848,31 @@
 				"nonempty event ID",
 				narrowEventId,
 			);
+			const expectedNarrowEventRoute = exactEventRouteFromTimelineRoute(
+				narrowTimelineHash,
+				narrowEventId,
+			);
 			await narrowEventRows.first().click();
-			await waitForExactTimelineEvent(narrowEventId);
+			const narrowEventIdentity = await waitForExactTimelineEvent(narrowEventId);
+			compareTimelineEventIdentity(
+				narrowEventId,
+				"narrow Timeline event identity",
+				narrowEventIdentity,
+			);
+			const narrowEventRoute = await hash();
+			const narrowEventRouteMatches = await currentRouteMatches(
+				expectedNarrowEventRoute,
+			);
+			compare(
+				narrowEventRouteMatches,
+				"narrow Timeline event route",
+				"narrow exact event did not retain its bounded Timeline context",
+				{ semanticRoute: expectedNarrowEventRoute },
+				{
+					semanticRouteMatches: narrowEventRouteMatches,
+					route: narrowEventRoute,
+				},
+			);
 			expect(
 				await page
 					.locator("#detail")
@@ -3836,46 +4006,130 @@
 				annotatedDiffOpenerCount,
 			);
 			const canonicalRevisionRoute = await hash();
-			const canonicalReadingKey = await page
-				.locator("#detail-body")
-				.getAttribute("data-change-reading-key");
-			requireCondition(
-				Boolean(canonicalReadingKey),
-				"annotated diff return binding",
-				"the accepted exact Revision had no reading identity",
-				"nonempty exact reading key",
-				canonicalReadingKey,
+			const [canonicalRevisionPath, canonicalRevisionSearch = ""] =
+				canonicalRevisionRoute.split("?", 2);
+			const expectedAnnotatedDiffRoute = `${canonicalRevisionPath}/diff${canonicalRevisionSearch ? `?${canonicalRevisionSearch}` : ""}`;
+			const canonicalReadingIdentityLocator = page.locator(
+				"#detail-body .detail-identity [data-revision-id]",
 			);
-			const waitForCanonicalRevisionSurface = () =>
-				page.waitForFunction(
-					({ expectedRoute, expectedReadingKey }) => {
+			const canonicalReadingIdentityCount =
+				await canonicalReadingIdentityLocator.count();
+			requireCondition(
+				canonicalReadingIdentityCount === 1,
+				"annotated diff return binding",
+				"the accepted exact Revision did not expose one reading identity",
+				1,
+				canonicalReadingIdentityCount,
+			);
+			const canonicalReadingIdentity =
+				await canonicalReadingIdentityLocator
+				.evaluate((identity) => ({
+					revisionId: identity.dataset.revisionId ?? null,
+					artifactHash: identity.dataset.artifactHash ?? null,
+				}));
+			requireCondition(
+				canonicalReadingIdentity.revisionId ===
+					config.fixture.rich.revisionId &&
+					canonicalReadingIdentity.artifactHash ===
+						config.fixture.rich.artifactHash,
+				"annotated diff return binding",
+				"the accepted exact Revision had the wrong reading identity",
+				{
+					revisionId: config.fixture.rich.revisionId,
+					artifactHash: config.fixture.rich.artifactHash,
+				},
+				canonicalReadingIdentity,
+			);
+			const waitForCanonicalRevisionSurface = async (phase) => {
+				let transitionError = null;
+				try {
+					await waitForCurrentRoute(canonicalRevisionRoute);
+					await page.waitForFunction(
+						(expectedIdentity) => {
 						const diff = document.querySelector("#diff-page");
 						const split = document.querySelector(".split");
 						const detail = document.querySelector("#detail-body");
+						const identity = detail?.querySelector(
+							".detail-identity [data-revision-id][data-artifact-hash]",
+						);
 						if (
 							!(diff instanceof HTMLElement) ||
 							!(split instanceof HTMLElement) ||
-							!(detail instanceof HTMLElement)
+							!(detail instanceof HTMLElement) ||
+							!(identity instanceof HTMLElement)
 						)
 							return false;
 						return (
-							location.hash === expectedRoute &&
 							diff.classList.contains("hidden") &&
 							!split.classList.contains("hidden") &&
-							detail.dataset.changeReadingKey === expectedReadingKey
+							Boolean(detail.dataset.changeReadingKey) &&
+							identity.dataset.revisionId === expectedIdentity.revisionId &&
+							identity.dataset.artifactHash === expectedIdentity.artifactHash
 						);
 					},
+						canonicalReadingIdentity,
+					);
+				} catch (error) {
+					transitionError = error instanceof Error ? error.message : String(error);
+				}
+				const actual = await page.evaluate(() => {
+					const diff = document.querySelector("#diff-page");
+					const split = document.querySelector(".split");
+					const detail = document.querySelector("#detail-body");
+					const identity = detail?.querySelector(
+						".detail-identity [data-revision-id][data-artifact-hash]",
+					);
+					return {
+						route: location.hash,
+						diffHidden: diff?.classList.contains("hidden") ?? null,
+						splitVisible: split
+							? !split.classList.contains("hidden")
+							: null,
+						hasReadingKey: Boolean(detail?.dataset.changeReadingKey),
+						revisionId: identity?.dataset.revisionId ?? null,
+						artifactHash: identity?.dataset.artifactHash ?? null,
+					};
+				});
+				const routeMatches = await currentRouteMatches(canonicalRevisionRoute);
+				requireCondition(
+					transitionError === null &&
+						routeMatches &&
+						actual.diffHidden === true &&
+						actual.splitVisible === true &&
+						actual.hasReadingKey &&
+						actual.revisionId === canonicalReadingIdentity.revisionId &&
+						actual.artifactHash === canonicalReadingIdentity.artifactHash,
+					`annotated diff ${phase} return`,
+					`${phase} did not restore the canonical exact Revision surface${transitionError ? `: ${transitionError}` : ""}`,
 					{
-						expectedRoute: canonicalRevisionRoute,
-						expectedReadingKey: canonicalReadingKey,
+						semanticRoute: canonicalRevisionRoute,
+						diffHidden: true,
+						splitVisible: true,
+						hasReadingKey: true,
+						...canonicalReadingIdentity,
 					},
+					{ semanticRouteMatches: routeMatches, ...actual },
 				);
+			};
 			await annotatedDiffOpener.click();
 			await page.waitForFunction(
 				() =>
-					location.hash.includes("/diff?") &&
 					!document.querySelector("#diff-page")?.classList.contains("hidden") &&
 					document.querySelector(".split")?.classList.contains("hidden"),
+			);
+			const annotatedDiffEntryRoute = await hash();
+			const annotatedDiffEntryRouteMatches = await currentRouteMatches(
+				expectedAnnotatedDiffRoute,
+			);
+			compare(
+				annotatedDiffEntryRouteMatches,
+				"annotated diff entry route",
+				"annotated diff entry did not retain the complete exact Revision context",
+				{ semanticRoute: expectedAnnotatedDiffRoute },
+				{
+					semanticRouteMatches: annotatedDiffEntryRouteMatches,
+					route: annotatedDiffEntryRoute,
+				},
 			);
 			const diffCloseFocusedOnEntry = await page
 				.locator("#diff-page-close")
@@ -4029,12 +4283,11 @@
 			const focusedDiffRoute = await hash();
 			await screenshot("wide-annotated-diff-full-frame");
 			await page.reload({ waitUntil: "domcontentloaded" });
+			await waitForCurrentRoute(focusedDiffRoute);
 			await page.waitForFunction(
-				(expectedRoute) =>
-					location.hash === expectedRoute &&
+				() =>
 					!document.querySelector("#diff-page")?.classList.contains("hidden") &&
 					document.querySelectorAll("#diff-page-body .dfile").length > 0,
-				focusedDiffRoute,
 			);
 			const diffCloseFocusedOnReload = await page
 				.locator("#diff-page-close")
@@ -4047,7 +4300,7 @@
 				diffCloseFocusedOnReload,
 			);
 			await page.locator("#diff-page-close").click();
-			await waitForCanonicalRevisionSurface();
+			await waitForCanonicalRevisionSurface("Close");
 			const detailCloseFocusedOnDiffReturn = await page
 				.locator("#detail-close")
 				.evaluate((node) => document.activeElement === node);
@@ -4059,14 +4312,13 @@
 				detailCloseFocusedOnDiffReturn,
 			);
 			await page.goBack();
+			await waitForCurrentRoute(focusedDiffRoute);
 			await page.waitForFunction(
-				(expectedRoute) =>
-					location.hash === expectedRoute &&
+				() =>
 					!document.querySelector("#diff-page")?.classList.contains("hidden"),
-				focusedDiffRoute,
 			);
 			await page.goForward();
-			await waitForCanonicalRevisionSurface();
+			await waitForCanonicalRevisionSurface("Forward");
 		},
 		teardown: teardownSection,
 	});
@@ -4088,10 +4340,30 @@
 				"narrow exact revision",
 				"open detail remained inert or hidden",
 			);
-			expect(
-				await page.evaluate(() => document.activeElement?.id === "detail-back"),
+			const narrowExactActivation = page.locator(
+				"#detail-body [data-exact-diff-activation]",
+			);
+			const narrowExactActivationCount = await narrowExactActivation.count();
+			requireCondition(
+				narrowExactActivationCount === 1,
 				"narrow detail focus",
-				"opening the narrow detail did not move focus into the sheet",
+				"narrow exact detail did not expose one primary annotated diff action",
+				1,
+				narrowExactActivationCount,
+			);
+			compare(
+				await narrowExactActivation.evaluate(
+					(node) => document.activeElement === node,
+				),
+				"narrow detail focus",
+				"opening the narrow exact detail did not focus its primary annotated diff action",
+				"#detail-body [data-exact-diff-activation]",
+				await page.evaluate(() => {
+					const active = document.activeElement;
+					return active instanceof HTMLElement
+						? active.id || active.dataset.exactDiffActivation || active.tagName
+						: null;
+				}),
 			);
 			const narrowExactIdentity = page.locator(
 				"#detail-body .detail-identity code",
@@ -4127,12 +4399,13 @@
 				narrowExactPresentation,
 			);
 			const narrowExactRoute = await hash();
+			const narrowExactRouteMatches = await currentRouteMatches(`#/${exact}`);
 			compare(
-				narrowExactRoute === `#/${exact}`,
+				narrowExactRouteMatches,
 				"narrow exact revision",
 				"exact Change, Revision, or artifact identity was lost from the route",
-				`#/${exact}`,
-				narrowExactRoute,
+				{ semanticRoute: `#/${exact}` },
+				{ semanticRouteMatches: narrowExactRouteMatches, route: narrowExactRoute },
 			);
 			const exactText = await page.locator("body").innerText();
 			for (const expected of [
