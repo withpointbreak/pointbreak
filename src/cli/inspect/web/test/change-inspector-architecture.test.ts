@@ -105,6 +105,11 @@ describe("active Change inspector architecture", () => {
           activeImport: true,
         }),
         expect.objectContaining({
+          path: "change-inspector-search.ts",
+          classification: "adapted",
+          activeImport: true,
+        }),
+        expect.objectContaining({
           path: "change-inspector-timeline-boundary.ts",
           classification: "adapted",
           activeImport: true,

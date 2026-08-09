@@ -104,9 +104,14 @@ const INDEX_BODY = `
     <input
       id="filter-text"
       type="search"
+      role="combobox"
+      aria-label="Search Inspector"
+      aria-autocomplete="list"
+      aria-controls="filter-suggestions"
+      aria-expanded="false"
       placeholder="search — text or field:value"
     />
-    <ul id="filter-suggestions" class="filter-suggestions hidden" aria-label="search suggestions"></ul>
+    <ul id="filter-suggestions" class="filter-suggestions hidden" role="listbox" aria-label="Search suggestions"></ul>
     <div id="filter-controls" class="disclosure filter-controls">
       <button id="filters-toggle" type="button" class="ghost disclosure-toggle" aria-haspopup="dialog" aria-expanded="false" aria-controls="filters-panel">Filters</button>
       <div id="filters-panel" class="control-panel filters-panel hidden" role="dialog" aria-label="Filters">

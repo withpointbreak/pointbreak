@@ -33,6 +33,10 @@ import {
   parseChangeInspectorRoute,
 } from "./change-inspector-router";
 import {
+  type ChangeInspectorSearchController,
+  installChangeInspectorSearch,
+} from "./change-inspector-search";
+import {
   ChangeInspectorGenerationChanged,
   createChangeInspectorState,
   stageGeneration,
@@ -83,11 +87,12 @@ class ChangeInspectorTimeout extends Error {}
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let routeListener: (() => void) | null = null;
 let filterInput: HTMLInputElement | null = null;
-let filterInputListener: (() => void) | null = null;
+let searchController: ChangeInspectorSearchController | null = null;
 let connectionControlsInitialized = false;
 let filterDisclosure: DisclosureController | null = null;
 let viewDisclosure: DisclosureController | null = null;
 let interactionStop: (() => void) | null = null;
+let timelineSearchFocusIntentStop: (() => void) | null = null;
 let pollCoordinatorStop: (() => void) | null = null;
 let requestEpoch = 0;
 
@@ -160,17 +165,17 @@ export function stopChangeInspector(): void {
   if (routeListener !== null)
     window.removeEventListener("hashchange", routeListener);
   routeListener = null;
-  if (filterInput !== null && filterInputListener !== null) {
-    filterInput.removeEventListener("change", filterInputListener);
-  }
+  searchController?.stop();
+  searchController = null;
   filterInput = null;
-  filterInputListener = null;
   filterDisclosure?.dispose();
   filterDisclosure = null;
   viewDisclosure?.dispose();
   viewDisclosure = null;
   interactionStop?.();
   interactionStop = null;
+  timelineSearchFocusIntentStop?.();
+  timelineSearchFocusIntentStop = null;
 }
 
 /** Start the only active Inspector reader composition. */
@@ -207,6 +212,28 @@ export async function bootstrapChangeInspector(
   let readingRefusal: string | null = null;
   let visibleReading = "";
   const timelineMonitor = createTimelineMonitor();
+  let pendingTimelineSearchFocus = false;
+  const cancelPendingTimelineSearchFocus = () => {
+    pendingTimelineSearchFocus = false;
+  };
+  document.addEventListener("focusin", cancelPendingTimelineSearchFocus, true);
+  document.addEventListener(
+    "pointerdown",
+    cancelPendingTimelineSearchFocus,
+    true,
+  );
+  timelineSearchFocusIntentStop = () => {
+    document.removeEventListener(
+      "focusin",
+      cancelPendingTimelineSearchFocus,
+      true,
+    );
+    document.removeEventListener(
+      "pointerdown",
+      cancelPendingTimelineSearchFocus,
+      true,
+    );
+  };
   // Reader activity is a presentation-only reason to hold a live head page.
   // The monitor's `park` operation is idempotent and never changes the route
   // or server authority; repainting merely keeps the held window visible.
@@ -261,6 +288,21 @@ export async function bootstrapChangeInspector(
           : snapshot.generation.history
         : null;
     interaction?.sync(snapshot, interactiveTimeline);
+    searchController?.sync();
+    if (pendingTimelineSearchFocus) {
+      if (
+        snapshot.route.kind !== "timeline" &&
+        snapshot.route.kind !== "event"
+      ) {
+        pendingTimelineSearchFocus = false;
+      } else {
+        const timeline = document.querySelector<HTMLElement>("#timeline");
+        if (timeline !== null) {
+          pendingTimelineSearchFocus = false;
+          timeline.focus({ preventScroll: true });
+        }
+      }
+    }
   };
   let interaction: ReturnType<typeof installChangeInspectorInteraction> | null =
     null;
@@ -381,6 +423,7 @@ export async function bootstrapChangeInspector(
       );
       if (epoch !== requestEpoch) return;
       if (profile.availability !== "ready") {
+        pendingTimelineSearchFocus = false;
         visibleRequest = "";
         clearReading();
         state.clearGeneration();
@@ -476,6 +519,7 @@ export async function bootstrapChangeInspector(
         return;
       }
       visibleRequest = "";
+      pendingTimelineSearchFocus = false;
       clearReading();
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
@@ -684,34 +728,85 @@ export async function bootstrapChangeInspector(
   });
   interactionStop = interaction.stop;
   filterInput = document.querySelector<HTMLInputElement>("#filter-text");
-  filterInputListener = () => {
-    const route = currentRoute();
-    const base =
-      route.kind === "invalid"
-        ? { kind: "timeline" as const, historyQuery: {} }
-        : route;
-    if (base.kind === "timeline" || base.kind === "event") {
-      navigate({
-        kind: "timeline",
-        historyQuery: {
-          ...base.historyQuery,
-          after: undefined,
-          at: undefined,
-          q: filterInput?.value || undefined,
-        },
-      });
-    } else {
-      navigate({
-        ...base,
-        query: {
-          ...base.query,
-          after: undefined,
-          q: filterInput?.value || undefined,
-        },
-      } as Exclude<ChangeInspectorRoute, { kind: "invalid" }>);
-    }
-  };
-  filterInput?.addEventListener("change", filterInputListener);
+  const suggestionList = document.querySelector<HTMLElement>(
+    "#filter-suggestions",
+  );
+  if (filterInput !== null && suggestionList !== null) {
+    searchController = installChangeInspectorSearch({
+      input: filterInput,
+      list: suggestionList,
+      readContext: () => {
+        const snapshot = state.snapshot();
+        const route = snapshot.route;
+        const browserRoute = currentRoute();
+        const routeKey =
+          browserRoute.kind === "invalid"
+            ? `invalid:${location.hash}`
+            : formatChangeInspectorRoute(browserRoute);
+        if (route.kind === "invalid") {
+          return {
+            surface: "change-timeline",
+            completion: null,
+            committedQuery: "",
+            queryNotices: [],
+            routeDiagnostic: snapshot.diagnostic,
+            routeKey,
+          };
+        }
+        const timelineRoute =
+          route.kind === "timeline" || route.kind === "event";
+        const history = timelineRoute ? snapshot.generation?.history : null;
+        return {
+          surface: timelineRoute ? "change-timeline" : "plain",
+          completion: history?.completion ?? null,
+          committedQuery: timelineRoute
+            ? (route.historyQuery.q ?? "")
+            : (route.query.q ?? ""),
+          queryNotices: history?.queryNotices ?? [],
+          routeDiagnostic: snapshot.diagnostic,
+          routeKey,
+        };
+      },
+      applyQuery: (query) => {
+        const route = currentRoute();
+        const base =
+          route.kind === "invalid"
+            ? { kind: "timeline" as const, historyQuery: {} }
+            : route;
+        if (base.kind === "timeline" || base.kind === "event") {
+          replace({
+            kind: "timeline",
+            historyQuery: {
+              ...base.historyQuery,
+              after: undefined,
+              at: undefined,
+              q: query,
+            },
+          });
+          return;
+        }
+        replace({
+          ...base,
+          query: {
+            ...base.query,
+            after: undefined,
+            q: query,
+          },
+        } as Exclude<ChangeInspectorRoute, { kind: "invalid" }>);
+      },
+      focusTimeline: () => {
+        const timeline = document.querySelector<HTMLElement>("#timeline");
+        if (timeline !== null) {
+          pendingTimelineSearchFocus = false;
+          timeline.focus({ preventScroll: true });
+          return;
+        }
+        const route = currentRoute();
+        pendingTimelineSearchFocus =
+          route.kind === "timeline" || route.kind === "event";
+      },
+    });
+  }
   await onRoute();
   if (options.poll !== false) {
     let pollRequested = false;

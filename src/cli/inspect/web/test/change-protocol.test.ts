@@ -220,6 +220,10 @@ describe("bounded Change protocol", () => {
     expect(() =>
       buildEventHistoryUrl({ at: "evt:one", after: "opaque" }),
     ).toThrow("mutually exclusive");
+    expect(buildEventHistoryUrl({ q: "é".repeat(128) })).toContain("q=");
+    expect(() => buildEventHistoryUrl({ q: "é".repeat(129) })).toThrow(
+      "at most 256 bytes",
+    );
 
     const mismatchedCount = structuredClone(validEventHistoryValue());
     mismatchedCount.eventCount = 2;

@@ -9,7 +9,7 @@ import {
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
-import type { ChangeInspectorRenderActions } from "./change-inspector-render";
+import type { ChangeInspectorNavigationActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
   formatChangeInspectorRoute,
@@ -379,7 +379,7 @@ function disposeActiveTimeline(): void {
 export function renderChangeInspectorTimeline(
   master: HTMLElement,
   timeline: EventHistoryDocument,
-  actions: ChangeInspectorRenderActions,
+  actions: ChangeInspectorNavigationActions,
   route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
   selectedEventId: string | null = null,
 ): void {

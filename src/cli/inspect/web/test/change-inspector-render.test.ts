@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { ChangeInspectorReading } from "../src/change-inspector-reading";
 import {
+  type ChangeInspectorRenderActions,
   prepareChangeInspectorShell,
-  renderChangeInspector,
   renderChangeInspectorRefusal,
+  renderChangeInspector as renderChangeInspectorSource,
 } from "../src/change-inspector-render";
 import {
   createChangeInspectorState,
@@ -19,6 +20,21 @@ import type {
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
+
+type TestRenderActions = Omit<ChangeInspectorRenderActions, "replace"> &
+  Partial<Pick<ChangeInspectorRenderActions, "replace">>;
+
+function renderChangeInspector(
+  snapshot: Parameters<typeof renderChangeInspectorSource>[0],
+  actions: TestRenderActions,
+  presentation?: Parameters<typeof renderChangeInspectorSource>[2],
+): void {
+  renderChangeInspectorSource(
+    snapshot,
+    { replace: actions.navigate, ...actions },
+    presentation,
+  );
+}
 
 const profile: ReaderProfile = {
   schema: "pointbreak.inspect-reader-profile",
@@ -380,6 +396,12 @@ function interdiffReading(): Extract<
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
+  it("requires replacement semantics for renderer-owned query edits", () => {
+    expectTypeOf<ChangeInspectorRenderActions["replace"]>().toEqualTypeOf<
+      ChangeInspectorRenderActions["navigate"]
+    >();
+  });
+
   it("renders native lens links with the active lens as the only current page", () => {
     const cases = [
       {
@@ -524,6 +546,63 @@ describe("Change inspector render", () => {
         at: undefined,
       },
     });
+  });
+
+  it("renders one removable chip per Timeline q clause without disturbing outer exact filters", () => {
+    const navigate = vi.fn();
+    const replace = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {
+        q: "free revision:0123 rev:4567 change:fed change:fed",
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        at: "evt:sha256:anchor",
+        limit: 20,
+        order: "asc",
+      },
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(state.snapshot(), { navigate, replace });
+
+    const chips = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#filter-chips button"),
+    );
+    expect(chips).toHaveLength(6);
+    expect(chips.map((chip) => chip.textContent)).toEqual(
+      expect.arrayContaining([
+        "revision: 0123 ×",
+        "revision: 4567 ×",
+        "change: fed ×",
+        "change: fed ×",
+      ]),
+    );
+    expect(chips.map((chip) => chip.textContent).join(" ")).not.toContain(
+      "free ×",
+    );
+
+    const duplicateChanges = chips.filter(
+      (chip) => chip.textContent === "change: fed ×",
+    );
+    duplicateChanges[1]?.click();
+    expect(replace).toHaveBeenCalledWith({
+      kind: "timeline",
+      historyQuery: {
+        q: "free revision:0123 rev:4567 change:fed",
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        at: undefined,
+        after: undefined,
+        limit: 20,
+        order: "asc",
+      },
+    });
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("keeps duplicate Revision IDs distinct by their exact artifact hash", () => {
@@ -998,7 +1077,7 @@ describe("Change inspector render", () => {
   it("renders a full-frame annotated diff from the contextual exact Revision document", () => {
     const navigate = vi.fn();
     const replace = vi.fn();
-    prepareChangeInspectorShell({ navigate, replace });
+    prepareChangeInspectorShell({ navigate });
     const state = createChangeInspectorState({
       kind: "diff",
       changeId: "change:sha256:one",

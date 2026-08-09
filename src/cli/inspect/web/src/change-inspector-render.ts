@@ -38,6 +38,7 @@ import type {
   RevisionRef,
   RevisionResource,
 } from "./change-protocol";
+import { filterChipsFor, removeFilterChipToken } from "./chips";
 import {
   type DiffArtifact,
   renderDiff,
@@ -51,10 +52,8 @@ import {
   shortRef,
 } from "./refs";
 
-export interface ChangeInspectorRenderActions {
+export interface ChangeInspectorNavigationActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
-  /** Replace local presentation-only route refinements such as diff file search. */
-  replace?(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
   navigateTimelineBoundary?(
     boundary: "first" | "last",
     route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
@@ -62,6 +61,12 @@ export interface ChangeInspectorRenderActions {
   revealTimelineEvent?(eventId: string): boolean;
   toggleTimelineMonitoring?(): void;
   parkTimelineMonitoring?(): void;
+}
+
+export interface ChangeInspectorRenderActions
+  extends ChangeInspectorNavigationActions {
+  /** Replace local presentation-only route refinements and query edits. */
+  replace(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
 }
 
 export interface ChangeInspectorDetailPresentation {
@@ -204,7 +209,7 @@ function replaceDetailWith(...children: Node[]): void {
 
 /** Prepare retained model-neutral chrome for Timeline and the Change lenses. */
 export function prepareChangeInspectorShell(
-  actions: ChangeInspectorRenderActions,
+  actions: ChangeInspectorNavigationActions,
 ): void {
   // Display preferences are reader-local presentation state. They do not alter
   // the server-owned Change generation, so keep them available in this reader.
@@ -531,14 +536,45 @@ function syncFilterChrome(
     const input = document.querySelector<HTMLInputElement>("#filter-text");
     if (input) input.value = route.historyQuery.q ?? "";
     const chips = document.querySelector<HTMLElement>("#filter-chips");
+    const queryChips = filterChipsFor(
+      route.historyQuery.q ?? "",
+      "change-timeline",
+    );
     const values = [
-      ["search", route.historyQuery.q],
       ["type", route.historyQuery.type],
       ["track", route.historyQuery.track],
       ["change", route.historyQuery.change],
       ["revision", route.historyQuery.revision],
     ].filter((value): value is [string, string] => Boolean(value[1]));
     chips?.replaceChildren(
+      ...queryChips.map((queryChip) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "badge";
+        const field = `${queryChip.negate ? "-" : ""}${queryChip.field}`;
+        chip.textContent = `${field}: ${compactIdentityText(queryChip.value)} ×`;
+        chip.title = `${field}:${queryChip.value}`;
+        chip.setAttribute(
+          "aria-label",
+          `Remove ${field} query clause: ${queryChip.value}`,
+        );
+        chip.addEventListener("click", () => {
+          const q = removeFilterChipToken(
+            route.historyQuery.q ?? "",
+            queryChip.tokenIndex,
+          );
+          actions.replace({
+            kind: "timeline",
+            historyQuery: {
+              ...route.historyQuery,
+              after: undefined,
+              at: undefined,
+              q: q || undefined,
+            },
+          });
+        });
+        return chip;
+      }),
       ...values.map(([name, value]) => {
         const chip = document.createElement("button");
         chip.type = "button";
@@ -579,12 +615,11 @@ function syncFilterChrome(
     );
     document
       .querySelector<HTMLElement>("#filter-chips-empty")
-      ?.classList.toggle("hidden", values.length > 0);
+      ?.classList.toggle("hidden", queryChips.length + values.length > 0);
     const toggle = document.querySelector<HTMLElement>("#filters-toggle");
+    const filterCount = queryChips.length + values.length;
     if (toggle)
-      toggle.textContent = values.length
-        ? `Filters · ${values.length}`
-        : "Filters";
+      toggle.textContent = filterCount ? `Filters · ${filterCount}` : "Filters";
     document
       .querySelectorAll<HTMLElement>(".timeline-filter")
       .forEach((element) => {

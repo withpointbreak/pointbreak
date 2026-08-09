@@ -3703,6 +3703,25 @@
     };
   }
   __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
+  var MAX_INSPECTOR_QUERY_BYTES = 256;
+  function normalizeBoundedQueryText(value, label2) {
+    const normalized = trimUnicodeWhitespace(value).toLowerCase();
+    if (!normalized || new TextEncoder().encode(normalized).length > MAX_INSPECTOR_QUERY_BYTES) {
+      throw new Error(
+        `${label2} query must be non-empty and at most ${MAX_INSPECTOR_QUERY_BYTES} bytes`
+      );
+    }
+    return normalized;
+  }
+  __name(normalizeBoundedQueryText, "normalizeBoundedQueryText");
+  function normalizeChangePageQueryText(value) {
+    return normalizeBoundedQueryText(value, "Change page");
+  }
+  __name(normalizeChangePageQueryText, "normalizeChangePageQueryText");
+  function normalizeEventHistoryQueryText(value) {
+    return normalizeBoundedQueryText(value, "Timeline");
+  }
+  __name(normalizeEventHistoryQueryText, "normalizeEventHistoryQueryText");
   function buildChangePageUrl(lens, query = {}) {
     const limit = query.limit ?? CHANGE_PAGE_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
@@ -3718,13 +3737,7 @@
       params.set("after", query.after);
     }
     if (query.q !== void 0) {
-      const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
-      if (!normalized || new TextEncoder().encode(normalized).length > 256) {
-        throw new Error(
-          "Change page query must be non-empty and at most 256 bytes"
-        );
-      }
-      params.set("q", normalized);
+      params.set("q", normalizeChangePageQueryText(query.q));
     }
     appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
     appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
@@ -3757,10 +3770,12 @@
     }
     const canonicalTypes = eventTypes?.sort().join(",");
     const params = new URLSearchParams({ limit: String(limit) });
+    if (query.q !== void 0) {
+      params.set("q", normalizeEventHistoryQueryText(query.q));
+    }
     const textFields = [
       "after",
       "at",
-      "q",
       "track",
       "change",
       "revision",
@@ -3770,10 +3785,7 @@
       const value = query[field2];
       if (value === void 0) continue;
       if (!value) throw new Error(`Timeline ${field2} must be non-empty`);
-      params.set(
-        field2,
-        field2 === "q" ? trimUnicodeWhitespace(value).toLowerCase() : value
-      );
+      params.set(field2, value);
     }
     if (canonicalTypes) params.set("type", canonicalTypes);
     if (query.order !== void 0 && query.order !== "asc" && query.order !== "desc") {
@@ -5106,6 +5118,63 @@
     needs_changes: "needs-changes",
     needs_clarification: "needs-clarification"
   };
+  var EVENT_QUERY_FIELDS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after"
+  ];
+  var CHANGE_TIMELINE_QUERY_FIELDS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "change",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after"
+  ];
+  var REVISION_QUERY_FIELDS = [
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "assessment",
+    "is",
+    "tag",
+    "attention",
+    "before",
+    "after"
+  ];
+  var KNOWN_QUERY_KEYS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "attention",
+    "before",
+    "after",
+    "status",
+    "object",
+    "rev",
+    "change"
+  ];
   var REVISION_ATTENTION_VALUES = [
     "open-request",
     "unassessed",
@@ -5128,6 +5197,106 @@
     return out;
   }
   __name(tokenizeQuery, "tokenizeQuery");
+  var EVENT_VALUE_SETS = {
+    is: ["open", "answered"]
+  };
+  var REVISION_VALUE_SETS = {
+    is: [
+      "open",
+      "answered",
+      "unassessed",
+      "stale",
+      "follow-up",
+      "contested",
+      "superseded"
+    ],
+    attention: REVISION_ATTENTION_VALUES
+  };
+  function parseSearchQueryFor(q, surface) {
+    const fields2 = surface === "revision" ? REVISION_QUERY_FIELDS : surface === "change-timeline" ? CHANGE_TIMELINE_QUERY_FIELDS : EVENT_QUERY_FIELDS;
+    const valueSets = surface === "revision" ? REVISION_VALUE_SETS : EVENT_VALUE_SETS;
+    const clauses = [];
+    const diagnostics = [];
+    for (let tok of tokenizeQuery(q || "")) {
+      let negate = false;
+      if (tok.length > 1 && tok[0] === "-") {
+        negate = true;
+        tok = tok.slice(1);
+      }
+      const colon = tok.indexOf(":");
+      const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+      if (!key) {
+        pushText(clauses, tok, negate);
+        continue;
+      }
+      const value = tok.slice(colon + 1).replace(/^"|"$/g, "").toLowerCase();
+      const [field2, deprecatedFrom] = resolveAlias(key, surface);
+      if (fields2.includes(field2)) {
+        if (isIdentityField(field2) && (value === "" || /\s/.test(value))) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key,
+            message: value === "" ? `\`${key}:\` requires an identity fragment` : `\`${key}:\` identity fragments cannot contain whitespace`
+          });
+          continue;
+        }
+        const allowed = valueSets[field2];
+        if (allowed && !allowed.includes(value)) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key: field2,
+            message: `\`${field2}:${value}\` — expected one of: ${allowed.join(", ")}`
+          });
+          continue;
+        }
+        if (deprecatedFrom)
+          diagnostics.push({
+            code: "deprecated-qualifier",
+            key: deprecatedFrom,
+            message: `\`${deprecatedFrom}:\` is deprecated; use \`${field2}:\``
+          });
+        clauses.push({
+          kind: "field",
+          field: field2,
+          value: canonicalizeFieldValue(field2, value),
+          negate
+        });
+      } else if (KNOWN_QUERY_KEYS.includes(key)) {
+        diagnostics.push({
+          code: "unsupported-qualifier",
+          key,
+          message: `\`${key}:\` is not a filter on the ${surface === "revision" ? "revisions" : "timeline"} view`
+        });
+      } else {
+        pushText(clauses, tok, negate);
+      }
+    }
+    return { clauses, diagnostics };
+  }
+  __name(parseSearchQueryFor, "parseSearchQueryFor");
+  function canonicalizeFieldValue(field2, value) {
+    if (field2 === "actor" && value && !value.startsWith("actor:") && !value.startsWith("did:key:"))
+      return `actor:${value}`;
+    return value;
+  }
+  __name(canonicalizeFieldValue, "canonicalizeFieldValue");
+  function pushText(clauses, tok, negate) {
+    const term = tok.replace(/^"|"$/g, "").toLowerCase();
+    if (term) clauses.push({ kind: "text", value: term, negate });
+  }
+  __name(pushText, "pushText");
+  function resolveAlias(key, surface) {
+    if (key === "object") return ["snapshot", null];
+    if (key === "rev") return ["revision", null];
+    if (key === "status")
+      return [surface === "revision" ? "assessment" : "check", "status"];
+    return [key, null];
+  }
+  __name(resolveAlias, "resolveAlias");
+  function isIdentityField(field2) {
+    return field2 === "revision" || field2 === "change";
+  }
+  __name(isIdentityField, "isIdentityField");
 
   // src/projection.ts
   function verificationChip(status) {
@@ -6700,6 +6869,30 @@
   }
   __name(renderFactRelationshipGraph, "renderFactRelationshipGraph");
 
+  // src/chips.ts
+  function filterChipsFor(filterText, surface) {
+    const chips = [];
+    tokenizeQuery(filterText).forEach((raw, tokenIndex) => {
+      const clause = parseSearchQueryFor(raw, surface).clauses[0];
+      if (clause && clause.kind === "field") {
+        chips.push({
+          tokenIndex,
+          field: clause.field,
+          value: clause.value,
+          negate: clause.negate
+        });
+      }
+    });
+    return chips;
+  }
+  __name(filterChipsFor, "filterChipsFor");
+  function removeFilterChipToken(filterText, tokenIndex) {
+    const tokens = tokenizeQuery(filterText);
+    tokens.splice(tokenIndex, 1);
+    return tokens.join(" ");
+  }
+  __name(removeFilterChipToken, "removeFilterChipToken");
+
   // src/change-inspector-render.ts
   function routeForLens(lens, current) {
     if (lens === "timeline") {
@@ -7070,14 +7263,45 @@
       const input2 = document.querySelector("#filter-text");
       if (input2) input2.value = route.historyQuery.q ?? "";
       const chips2 = document.querySelector("#filter-chips");
+      const queryChips = filterChipsFor(
+        route.historyQuery.q ?? "",
+        "change-timeline"
+      );
       const values2 = [
-        ["search", route.historyQuery.q],
         ["type", route.historyQuery.type],
         ["track", route.historyQuery.track],
         ["change", route.historyQuery.change],
         ["revision", route.historyQuery.revision]
       ].filter((value) => Boolean(value[1]));
       chips2?.replaceChildren(
+        ...queryChips.map((queryChip) => {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "badge";
+          const field2 = `${queryChip.negate ? "-" : ""}${queryChip.field}`;
+          chip.textContent = `${field2}: ${compactIdentityText(queryChip.value)} ×`;
+          chip.title = `${field2}:${queryChip.value}`;
+          chip.setAttribute(
+            "aria-label",
+            `Remove ${field2} query clause: ${queryChip.value}`
+          );
+          chip.addEventListener("click", () => {
+            const q = removeFilterChipToken(
+              route.historyQuery.q ?? "",
+              queryChip.tokenIndex
+            );
+            actions2.replace({
+              kind: "timeline",
+              historyQuery: {
+                ...route.historyQuery,
+                after: void 0,
+                at: void 0,
+                q: q || void 0
+              }
+            });
+          });
+          return chip;
+        }),
         ...values2.map(([name, value]) => {
           const chip = document.createElement("button");
           chip.type = "button";
@@ -7107,10 +7331,11 @@
           return chip;
         })
       );
-      document.querySelector("#filter-chips-empty")?.classList.toggle("hidden", values2.length > 0);
+      document.querySelector("#filter-chips-empty")?.classList.toggle("hidden", queryChips.length + values2.length > 0);
       const toggle2 = document.querySelector("#filters-toggle");
+      const filterCount = queryChips.length + values2.length;
       if (toggle2)
-        toggle2.textContent = values2.length ? `Filters · ${values2.length}` : "Filters";
+        toggle2.textContent = filterCount ? `Filters · ${filterCount}` : "Filters";
       document.querySelectorAll(".timeline-filter").forEach((element) => {
         element.classList.remove("hidden");
       });
@@ -8511,6 +8736,417 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   }
   __name(renderChangeInspectorRefusal, "renderChangeInspectorRefusal");
 
+  // src/change-inspector-search.ts
+  var SEARCH_DEBOUNCE_MS = 150;
+  function fieldsFor(surface) {
+    if (surface === "plain") return [];
+    if (surface === "revision") return REVISION_QUERY_FIELDS;
+    if (surface === "change-timeline") return CHANGE_TIMELINE_QUERY_FIELDS;
+    return EVENT_QUERY_FIELDS;
+  }
+  __name(fieldsFor, "fieldsFor");
+  function activeToken(filterText) {
+    if (/\s$/.test(filterText)) return "";
+    return filterText.match(/\S+$/)?.[0] ?? "";
+  }
+  __name(activeToken, "activeToken");
+  function canonicalSuggestionField(field2) {
+    return field2 === "rev" ? "revision" : field2;
+  }
+  __name(canonicalSuggestionField, "canonicalSuggestionField");
+  function unique(values) {
+    return [...new Set(values)];
+  }
+  __name(unique, "unique");
+  function completionValues(field2, completion) {
+    switch (field2) {
+      case "type":
+        return completion?.eventTypes ?? [];
+      case "track":
+        return completion?.trackIds ?? [];
+      case "change":
+        return completion?.changeIds ?? [];
+      case "revision":
+        return unique([
+          ...completion?.revisionRefs.map(
+            (reference) => String(reference.revisionId)
+          ) ?? [],
+          ...completion?.unresolvedRevisionIds ?? []
+        ]);
+      default:
+        return [];
+    }
+  }
+  __name(completionValues, "completionValues");
+  function suggestionForValue(typedField, canonicalField, value, negate) {
+    const prefix = negate ? "-" : "";
+    const insertText = `${prefix}${typedField}:${value}`;
+    if (canonicalField !== "change" && canonicalField !== "revision") {
+      return { insertText, label: insertText };
+    }
+    const visible = `${prefix}${typedField}:${shortRef(value)}`;
+    const kind = canonicalField === "change" ? "Change ID" : "Revision ID";
+    return {
+      insertText,
+      label: visible,
+      title: `${typedField}:${value}`,
+      accessibleName: `Use ${typedField} filter for ${kind} ${value}`
+    };
+  }
+  __name(suggestionForValue, "suggestionForValue");
+  function suggestionsFor(filterText, context) {
+    let token = activeToken(filterText);
+    if (!token) return [];
+    const negate = token.startsWith("-") && token.length > 1;
+    if (negate) token = token.slice(1);
+    const colon = token.indexOf(":");
+    if (colon < 0) {
+      const prefix = token.toLowerCase();
+      return fieldsFor(context.surface).filter((field2) => field2.startsWith(prefix)).map((field2) => {
+        const insertText = `${negate ? "-" : ""}${field2}:`;
+        return { insertText, label: insertText };
+      });
+    }
+    const typedField = token.slice(0, colon).toLowerCase();
+    const canonicalField = canonicalSuggestionField(typedField);
+    if (!fieldsFor(context.surface).includes(canonicalField)) return [];
+    const valuePrefix = token.slice(colon + 1).replace(/^"/, "").toLowerCase();
+    return completionValues(canonicalField, context.completion).filter((value) => value.toLowerCase().includes(valuePrefix)).map(
+      (value) => suggestionForValue(typedField, canonicalField, value, negate)
+    );
+  }
+  __name(suggestionsFor, "suggestionsFor");
+  function acceptSuggestion(filterText, insertText) {
+    const token = activeToken(filterText);
+    const trailing = insertText.endsWith(":") ? "" : " ";
+    if (!token) return `${filterText}${insertText}${trailing}`;
+    return `${filterText.slice(0, filterText.length - token.length)}${insertText}${trailing}`;
+  }
+  __name(acceptSuggestion, "acceptSuggestion");
+  function incompleteFieldKey(filterText, surface) {
+    let token = activeToken(filterText);
+    if (token.startsWith("-") && token.length > 1) token = token.slice(1);
+    const match = token.match(/^([a-z]+):"?$/i);
+    if (!match) return null;
+    const typedField = match[1]?.toLowerCase() ?? "";
+    const canonicalField = canonicalSuggestionField(typedField);
+    return fieldsFor(surface).includes(canonicalField) ? typedField : null;
+  }
+  __name(incompleteFieldKey, "incompleteFieldKey");
+  function incompleteIdentityKey(filterText, surface) {
+    const typedField = incompleteFieldKey(filterText, surface);
+    if (typedField === null) return null;
+    const canonicalField = canonicalSuggestionField(typedField);
+    return canonicalField === "change" || canonicalField === "revision" ? typedField : null;
+  }
+  __name(incompleteIdentityKey, "incompleteIdentityKey");
+  function localDiagnostics(filterText, context) {
+    const parsed = context.surface === "plain" ? { diagnostics: [] } : parseSearchQueryFor(filterText, context.surface);
+    const incompleteKey = incompleteIdentityKey(filterText, context.surface);
+    const diagnostics = parsed.diagnostics.filter(
+      (diagnostic) => !(diagnostic.code === "unsupported-value" && incompleteKey !== null && diagnostic.key === incompleteKey)
+    );
+    const messages = diagnostics.map((diagnostic) => diagnostic.message);
+    let fatal = diagnostics.some(
+      (diagnostic) => diagnostic.code !== "deprecated-qualifier"
+    );
+    if (normalizedQuery(filterText)) {
+      try {
+        if (context.surface === "change-timeline") {
+          normalizeEventHistoryQueryText(filterText);
+        } else {
+          normalizeChangePageQueryText(filterText);
+        }
+      } catch (error) {
+        messages.push(error instanceof Error ? error.message : String(error));
+        fatal = true;
+      }
+    }
+    return { messages, fatal };
+  }
+  __name(localDiagnostics, "localDiagnostics");
+  function normalizedQuery(value) {
+    return value.trim();
+  }
+  __name(normalizedQuery, "normalizedQuery");
+  function installChangeInspectorSearch(options) {
+    const { input, list } = options;
+    let activeIndex = -1;
+    let paintedSuggestions = [];
+    let debounceTimer = null;
+    let draftValue = null;
+    let draftBaseRouteKey = null;
+    let retainedTimelineCompletion = null;
+    let suggestionsRequested = false;
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-controls", list.id);
+    input.setAttribute("aria-expanded", "false");
+    if (!input.hasAttribute("aria-label")) {
+      input.setAttribute("aria-label", "Search Inspector");
+    }
+    list.setAttribute("role", "listbox");
+    if (!list.hasAttribute("aria-label")) {
+      list.setAttribute("aria-label", "Search suggestions");
+    }
+    const cancelDebounce = /* @__PURE__ */ __name(() => {
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }, "cancelDebounce");
+    const readContext = /* @__PURE__ */ __name(() => {
+      const context = options.readContext();
+      if (context.surface !== "change-timeline") {
+        retainedTimelineCompletion = null;
+        return context;
+      }
+      if (context.completion !== null) {
+        retainedTimelineCompletion = context.completion;
+        return context;
+      }
+      return {
+        ...context,
+        completion: retainedTimelineCompletion
+      };
+    }, "readContext");
+    const clearSuggestions = /* @__PURE__ */ __name(() => {
+      activeIndex = -1;
+      paintedSuggestions = [];
+      list.replaceChildren();
+      list.classList.add("hidden");
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    }, "clearSuggestions");
+    const dismiss = /* @__PURE__ */ __name(() => {
+      suggestionsRequested = false;
+      clearSuggestions();
+    }, "dismiss");
+    const updateActive = /* @__PURE__ */ __name(() => {
+      const options2 = list.querySelectorAll("[role='option']");
+      options2.forEach((option, index) => {
+        const active4 = index === activeIndex;
+        option.classList.toggle("suggestion-active", active4);
+        option.setAttribute("aria-selected", String(active4));
+      });
+      const active3 = options2[activeIndex];
+      if (active3) input.setAttribute("aria-activedescendant", active3.id);
+      else input.removeAttribute("aria-activedescendant");
+    }, "updateActive");
+    const paintSuggestions = /* @__PURE__ */ __name((context, preserveActive = false) => {
+      const activeInsertText = preserveActive ? paintedSuggestions[activeIndex]?.insertText : void 0;
+      const suggestions = suggestionsFor(input.value, context);
+      if (suggestions.length === 0) {
+        clearSuggestions();
+        return;
+      }
+      activeIndex = activeInsertText === void 0 ? -1 : suggestions.findIndex(
+        (suggestion) => suggestion.insertText === activeInsertText
+      );
+      paintedSuggestions = suggestions;
+      list.replaceChildren(
+        ...suggestions.map((suggestion, index) => {
+          const option = document.createElement("li");
+          option.id = `filter-suggestion-${index}`;
+          option.className = "suggestion";
+          option.dataset.index = String(index);
+          option.setAttribute("role", "option");
+          option.setAttribute("aria-selected", "false");
+          option.textContent = suggestion.label;
+          if (suggestion.title) option.title = suggestion.title;
+          if (suggestion.accessibleName) {
+            option.setAttribute("aria-label", suggestion.accessibleName);
+          }
+          return option;
+        })
+      );
+      list.classList.remove("hidden");
+      input.setAttribute("aria-expanded", "true");
+      updateActive();
+    }, "paintSuggestions");
+    const paintDiagnostics = /* @__PURE__ */ __name((context, localMessages, fatal) => {
+      if (context.routeDiagnostic !== null) return;
+      const routeDiagnostic = document.querySelector("#route-diagnostic");
+      if (!routeDiagnostic) return;
+      const draftMatchesCommitted = normalizedQuery(input.value) === normalizedQuery(context.committedQuery);
+      const messages = [
+        ...localMessages,
+        ...draftMatchesCommitted ? context.queryNotices : []
+      ].filter((message2, index, all) => all.indexOf(message2) === index);
+      routeDiagnostic.textContent = messages.join(" · ");
+      routeDiagnostic.classList.toggle("hidden", messages.length === 0);
+      if (messages.length > 0) {
+        input.setAttribute("aria-describedby", "route-diagnostic");
+      } else {
+        input.removeAttribute("aria-describedby");
+      }
+      if (fatal) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+    }, "paintDiagnostics");
+    const applyNow = /* @__PURE__ */ __name((value) => {
+      cancelDebounce();
+      const context = readContext();
+      const local = localDiagnostics(value, context);
+      paintDiagnostics(context, local.messages, local.fatal);
+      if (local.fatal || incompleteFieldKey(value, context.surface) !== null) {
+        return;
+      }
+      options.applyQuery(normalizedQuery(value) || void 0);
+    }, "applyNow");
+    const scheduleApply = /* @__PURE__ */ __name((context, value) => {
+      cancelDebounce();
+      const scheduledRouteKey = context.routeKey;
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        if (readContext().routeKey !== scheduledRouteKey) return;
+        applyNow(value);
+      }, SEARCH_DEBOUNCE_MS);
+    }, "scheduleApply");
+    const accept = /* @__PURE__ */ __name((suggestion) => {
+      const next = acceptSuggestion(input.value, suggestion.insertText);
+      draftValue = next;
+      draftBaseRouteKey = readContext().routeKey;
+      input.value = next;
+      if (suggestion.insertText.endsWith(":")) {
+        suggestionsRequested = true;
+        const context = readContext();
+        const local = localDiagnostics(next, context);
+        paintSuggestions(context);
+        paintDiagnostics(context, local.messages, local.fatal);
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(next.length, next.length);
+        return;
+      }
+      dismiss();
+      applyNow(next);
+      input.value = next;
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(next.length, next.length);
+    }, "accept");
+    const onInput = /* @__PURE__ */ __name(() => {
+      cancelDebounce();
+      const context = readContext();
+      draftValue = input.value;
+      draftBaseRouteKey = context.routeKey;
+      suggestionsRequested = true;
+      const local = localDiagnostics(input.value, context);
+      paintSuggestions(context);
+      paintDiagnostics(context, local.messages, local.fatal);
+      if (local.fatal || incompleteFieldKey(input.value, context.surface) !== null) {
+        return;
+      }
+      scheduleApply(context, input.value);
+    }, "onInput");
+    const onChange = /* @__PURE__ */ __name(() => {
+      const context = readContext();
+      draftValue = input.value;
+      draftBaseRouteKey = context.routeKey;
+      const local = localDiagnostics(input.value, context);
+      paintDiagnostics(context, local.messages, local.fatal);
+      if (local.fatal || incompleteFieldKey(input.value, context.surface) !== null || normalizedQuery(input.value) === normalizedQuery(context.committedQuery) || debounceTimer !== null) {
+        return;
+      }
+      scheduleApply(context, input.value);
+    }, "onChange");
+    const onKeyDown = /* @__PURE__ */ __name((event) => {
+      const open = !list.classList.contains("hidden");
+      if (open && event.key === "ArrowDown") {
+        event.preventDefault();
+        activeIndex = Math.min(paintedSuggestions.length - 1, activeIndex + 1);
+        updateActive();
+        return;
+      }
+      if (open && event.key === "ArrowUp") {
+        event.preventDefault();
+        activeIndex = Math.max(0, activeIndex - 1);
+        updateActive();
+        return;
+      }
+      if (open && (event.key === "Enter" || event.key === "Tab") && activeIndex >= 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        const suggestion = paintedSuggestions[activeIndex];
+        if (suggestion) accept(suggestion);
+        return;
+      }
+      if (open && event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        dismiss();
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyNow(input.value);
+        dismiss();
+        options.focusTimeline();
+      }
+    }, "onKeyDown");
+    const onBlur = /* @__PURE__ */ __name((event) => {
+      if (event.relatedTarget instanceof Node && list.contains(event.relatedTarget)) {
+        return;
+      }
+      dismiss();
+    }, "onBlur");
+    const onListMouseDown = /* @__PURE__ */ __name((event) => {
+      event.preventDefault();
+    }, "onListMouseDown");
+    const onListClick = /* @__PURE__ */ __name((event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const option = target.closest("[data-index]");
+      const index = Number(option?.dataset.index);
+      if (!Number.isInteger(index)) return;
+      const suggestion = paintedSuggestions[index];
+      if (suggestion) accept(suggestion);
+    }, "onListClick");
+    const onDocumentClick = /* @__PURE__ */ __name((event) => {
+      if (list.classList.contains("hidden")) return;
+      if (event.target instanceof Node && (input.contains(event.target) || list.contains(event.target))) {
+        return;
+      }
+      dismiss();
+    }, "onDocumentClick");
+    input.addEventListener("input", onInput);
+    input.addEventListener("change", onChange);
+    input.addEventListener("keydown", onKeyDown);
+    input.addEventListener("blur", onBlur);
+    list.addEventListener("mousedown", onListMouseDown);
+    list.addEventListener("click", onListClick);
+    document.addEventListener("click", onDocumentClick, true);
+    return {
+      sync() {
+        const context = readContext();
+        if (draftValue !== null) {
+          const draftStillBelongs = normalizedQuery(draftValue) === normalizedQuery(context.committedQuery) || draftBaseRouteKey === context.routeKey;
+          if (draftStillBelongs) input.value = draftValue;
+          else {
+            cancelDebounce();
+            draftValue = null;
+            draftBaseRouteKey = null;
+            dismiss();
+          }
+        }
+        const local = localDiagnostics(input.value, context);
+        paintDiagnostics(context, local.messages, local.fatal);
+        if (draftValue !== null && suggestionsRequested) {
+          paintSuggestions(context, true);
+        }
+      },
+      stop() {
+        cancelDebounce();
+        dismiss();
+        input.removeEventListener("input", onInput);
+        input.removeEventListener("change", onChange);
+        input.removeEventListener("keydown", onKeyDown);
+        input.removeEventListener("blur", onBlur);
+        list.removeEventListener("mousedown", onListMouseDown);
+        list.removeEventListener("click", onListClick);
+        document.removeEventListener("click", onDocumentClick, true);
+      }
+    };
+  }
+  __name(installChangeInspectorSearch, "installChangeInspectorSearch");
+
   // src/change-inspector-state.ts
   var ChangeInspectorGenerationChanged = class extends Error {
     static {
@@ -8827,11 +9463,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var pollTimer = null;
   var routeListener = null;
   var filterInput = null;
-  var filterInputListener = null;
+  var searchController = null;
   var connectionControlsInitialized = false;
   var filterDisclosure = null;
   var viewDisclosure = null;
   var interactionStop = null;
+  var timelineSearchFocusIntentStop = null;
   var pollCoordinatorStop = null;
   var requestEpoch = 0;
   function currentRoute() {
@@ -8891,17 +9528,17 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     if (routeListener !== null)
       window.removeEventListener("hashchange", routeListener);
     routeListener = null;
-    if (filterInput !== null && filterInputListener !== null) {
-      filterInput.removeEventListener("change", filterInputListener);
-    }
+    searchController?.stop();
+    searchController = null;
     filterInput = null;
-    filterInputListener = null;
     filterDisclosure?.dispose();
     filterDisclosure = null;
     viewDisclosure?.dispose();
     viewDisclosure = null;
     interactionStop?.();
     interactionStop = null;
+    timelineSearchFocusIntentStop?.();
+    timelineSearchFocusIntentStop = null;
   }
   __name(stopChangeInspector, "stopChangeInspector");
   async function bootstrapChangeInspector(options = {}) {
@@ -8928,6 +9565,28 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     let readingRefusal = null;
     let visibleReading = "";
     const timelineMonitor = createTimelineMonitor();
+    let pendingTimelineSearchFocus = false;
+    const cancelPendingTimelineSearchFocus = /* @__PURE__ */ __name(() => {
+      pendingTimelineSearchFocus = false;
+    }, "cancelPendingTimelineSearchFocus");
+    document.addEventListener("focusin", cancelPendingTimelineSearchFocus, true);
+    document.addEventListener(
+      "pointerdown",
+      cancelPendingTimelineSearchFocus,
+      true
+    );
+    timelineSearchFocusIntentStop = /* @__PURE__ */ __name(() => {
+      document.removeEventListener(
+        "focusin",
+        cancelPendingTimelineSearchFocus,
+        true
+      );
+      document.removeEventListener(
+        "pointerdown",
+        cancelPendingTimelineSearchFocus,
+        true
+      );
+    }, "timelineSearchFocusIntentStop");
     const parkTimelineMonitoring = /* @__PURE__ */ __name(() => {
       if (timelineMonitor.park() !== null) paint();
     }, "parkTimelineMonitoring");
@@ -8960,6 +9619,18 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
       const interactiveTimeline = (snapshot2.route.kind === "timeline" || snapshot2.route.kind === "event") && snapshot2.generation !== null ? snapshot2.route.kind === "timeline" ? monitor?.display ?? snapshot2.generation.history : snapshot2.generation.history : null;
       interaction?.sync(snapshot2, interactiveTimeline);
+      searchController?.sync();
+      if (pendingTimelineSearchFocus) {
+        if (snapshot2.route.kind !== "timeline" && snapshot2.route.kind !== "event") {
+          pendingTimelineSearchFocus = false;
+        } else {
+          const timeline = document.querySelector("#timeline");
+          if (timeline !== null) {
+            pendingTimelineSearchFocus = false;
+            timeline.focus({ preventScroll: true });
+          }
+        }
+      }
     }, "paint");
     let interaction = null;
     const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? buildEventHistoryUrl(
@@ -9036,6 +9707,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         if (epoch !== requestEpoch) return;
         if (profile.availability !== "ready") {
+          pendingTimelineSearchFocus = false;
           visibleRequest = "";
           clearReading();
           state.clearGeneration();
@@ -9106,6 +9778,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           return;
         }
         visibleRequest = "";
+        pendingTimelineSearchFocus = false;
         clearReading();
         state.clearGeneration();
         renderChangeInspectorRefusal(error);
@@ -9269,31 +9942,75 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     });
     interactionStop = interaction.stop;
     filterInput = document.querySelector("#filter-text");
-    filterInputListener = /* @__PURE__ */ __name(() => {
-      const route = currentRoute();
-      const base = route.kind === "invalid" ? { kind: "timeline", historyQuery: {} } : route;
-      if (base.kind === "timeline" || base.kind === "event") {
-        navigate({
-          kind: "timeline",
-          historyQuery: {
-            ...base.historyQuery,
-            after: void 0,
-            at: void 0,
-            q: filterInput?.value || void 0
+    const suggestionList = document.querySelector(
+      "#filter-suggestions"
+    );
+    if (filterInput !== null && suggestionList !== null) {
+      searchController = installChangeInspectorSearch({
+        input: filterInput,
+        list: suggestionList,
+        readContext: /* @__PURE__ */ __name(() => {
+          const snapshot2 = state.snapshot();
+          const route = snapshot2.route;
+          const browserRoute = currentRoute();
+          const routeKey = browserRoute.kind === "invalid" ? `invalid:${location.hash}` : formatChangeInspectorRoute(browserRoute);
+          if (route.kind === "invalid") {
+            return {
+              surface: "change-timeline",
+              completion: null,
+              committedQuery: "",
+              queryNotices: [],
+              routeDiagnostic: snapshot2.diagnostic,
+              routeKey
+            };
           }
-        });
-      } else {
-        navigate({
-          ...base,
-          query: {
-            ...base.query,
-            after: void 0,
-            q: filterInput?.value || void 0
+          const timelineRoute = route.kind === "timeline" || route.kind === "event";
+          const history2 = timelineRoute ? snapshot2.generation?.history : null;
+          return {
+            surface: timelineRoute ? "change-timeline" : "plain",
+            completion: history2?.completion ?? null,
+            committedQuery: timelineRoute ? route.historyQuery.q ?? "" : route.query.q ?? "",
+            queryNotices: history2?.queryNotices ?? [],
+            routeDiagnostic: snapshot2.diagnostic,
+            routeKey
+          };
+        }, "readContext"),
+        applyQuery: /* @__PURE__ */ __name((query) => {
+          const route = currentRoute();
+          const base = route.kind === "invalid" ? { kind: "timeline", historyQuery: {} } : route;
+          if (base.kind === "timeline" || base.kind === "event") {
+            replace({
+              kind: "timeline",
+              historyQuery: {
+                ...base.historyQuery,
+                after: void 0,
+                at: void 0,
+                q: query
+              }
+            });
+            return;
           }
-        });
-      }
-    }, "filterInputListener");
-    filterInput?.addEventListener("change", filterInputListener);
+          replace({
+            ...base,
+            query: {
+              ...base.query,
+              after: void 0,
+              q: query
+            }
+          });
+        }, "applyQuery"),
+        focusTimeline: /* @__PURE__ */ __name(() => {
+          const timeline = document.querySelector("#timeline");
+          if (timeline !== null) {
+            pendingTimelineSearchFocus = false;
+            timeline.focus({ preventScroll: true });
+            return;
+          }
+          const route = currentRoute();
+          pendingTimelineSearchFocus = route.kind === "timeline" || route.kind === "event";
+        }, "focusTimeline")
+      });
+    }
     await onRoute();
     if (options.poll !== false) {
       let pollRequested = false;

@@ -1222,6 +1222,31 @@ export interface ChangePageQuery {
   order?: "change_id_asc";
 }
 
+const MAX_INSPECTOR_QUERY_BYTES = 256;
+
+function normalizeBoundedQueryText(value: string, label: string): string {
+  const normalized = trimUnicodeWhitespace(value).toLowerCase();
+  if (
+    !normalized ||
+    new TextEncoder().encode(normalized).length > MAX_INSPECTOR_QUERY_BYTES
+  ) {
+    throw new Error(
+      `${label} query must be non-empty and at most ${MAX_INSPECTOR_QUERY_BYTES} bytes`,
+    );
+  }
+  return normalized;
+}
+
+/** Normalize and bound the plain Change-page search before route transport. */
+export function normalizeChangePageQueryText(value: string): string {
+  return normalizeBoundedQueryText(value, "Change page");
+}
+
+/** Normalize and bound the structured Timeline search before route transport. */
+export function normalizeEventHistoryQueryText(value: string): string {
+  return normalizeBoundedQueryText(value, "Timeline");
+}
+
 export function buildChangePageUrl(
   lens: ChangeLens,
   query: ChangePageQuery = {},
@@ -1240,13 +1265,7 @@ export function buildChangePageUrl(
     params.set("after", query.after);
   }
   if (query.q !== undefined) {
-    const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
-    if (!normalized || new TextEncoder().encode(normalized).length > 256) {
-      throw new Error(
-        "Change page query must be non-empty and at most 256 bytes",
-      );
-    }
-    params.set("q", normalized);
+    params.set("q", normalizeChangePageQueryText(query.q));
   }
   appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
   appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
@@ -1283,10 +1302,12 @@ export function buildEventHistoryUrl(query: EventHistoryQuery = {}): string {
   }
   const canonicalTypes = eventTypes?.sort().join(",");
   const params = new URLSearchParams({ limit: String(limit) });
+  if (query.q !== undefined) {
+    params.set("q", normalizeEventHistoryQueryText(query.q));
+  }
   const textFields = [
     "after",
     "at",
-    "q",
     "track",
     "change",
     "revision",
@@ -1296,10 +1317,7 @@ export function buildEventHistoryUrl(query: EventHistoryQuery = {}): string {
     const value = query[field];
     if (value === undefined) continue;
     if (!value) throw new Error(`Timeline ${field} must be non-empty`);
-    params.set(
-      field,
-      field === "q" ? trimUnicodeWhitespace(value).toLowerCase() : value,
-    );
+    params.set(field, value);
   }
   if (canonicalTypes) params.set("type", canonicalTypes);
   if (

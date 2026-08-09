@@ -4,7 +4,7 @@
  * exact request).  In particular, moving with j/k never chooses a Revision.
  */
 
-import type { ChangeInspectorRenderActions } from "./change-inspector-render";
+import type { ChangeInspectorNavigationActions } from "./change-inspector-render";
 import {
   type ChangeInspectorRoute,
   eventAnnotatedDiffRoute,
@@ -145,7 +145,7 @@ type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
  * contract currently exposes only the historical toggle, so retain this
  * optional seam until the composition root wires `TimelineMonitor.park()`.
  */
-type TimelineParkActions = ChangeInspectorRenderActions & {
+type TimelineParkActions = ChangeInspectorNavigationActions & {
   parkTimelineMonitoring?: () => void;
 };
 
@@ -356,7 +356,7 @@ function trapModalFocus(modal: HTMLElement, event: KeyboardEvent): void {
 
 /** Install once per active composition and return a sync hook for every paint. */
 export function installChangeInspectorInteraction(
-  actions: ChangeInspectorRenderActions,
+  actions: ChangeInspectorNavigationActions,
 ): {
   sync(
     snapshot: ChangeInspectorSnapshot,

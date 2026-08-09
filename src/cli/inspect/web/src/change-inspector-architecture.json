@@ -1,7 +1,7 @@
 {
   "version": 1,
   "purpose": "The active Change-first Inspector may only import modules that preserve Change/Revision semantics or are explicitly adapted to its bounded reader contract. This inventory keeps retained presentation work visible while preventing the old aggregate-reader composition from returning through an incidental import.",
-  "keyboardAndFocusOwnership": "change-inspector.ts owns Change-first route intent and bounded read epochs. change-inspector-interaction.ts owns the local Change and Timeline cursors, Change-first shortcuts, its palette/help dialogs, reader-local display controls, and route-transition focus entry/restoration after each DOM paint. change-inspector-timeline-navigation.ts owns pure page-local Timeline cursor intent, while change-inspector-timeline-boundary.ts owns opaque signed-continuation traversal to global boundaries. auth.ts separately owns reconnect-dialog settlement, its focus trap, and focus restoration so authentication cannot be hidden while its request remains pending. change-inspector-render.ts owns focusable Change/Revision reading controls plus exact fact/file anchor focus inside the projected detail. change-inspector-graphs.ts owns keyboard activation of server-laid relationship nodes and emits only explicit exact-identity callbacks. change-inspector-diff.ts owns full-frame file/fact navigation and deep-link focus inside one contextual exact Revision; change-inspector-interaction.ts owns the visible focus handoff into and out of that route. Legacy keyboard, palette, detail, diff-controller, render, and main modules remain outside that composition until each is explicitly adapted with Change-first tests.",
+  "keyboardAndFocusOwnership": "change-inspector.ts owns Change-first route intent and bounded read epochs. change-inspector-search.ts owns the search combobox draft, completion list, bounded replace cadence, and Enter handoff to the Timeline. change-inspector-interaction.ts owns the local Change and Timeline cursors, Change-first shortcuts, its palette/help dialogs, reader-local display controls, and route-transition focus entry/restoration after each DOM paint. change-inspector-timeline-navigation.ts owns pure page-local Timeline cursor intent, while change-inspector-timeline-boundary.ts owns opaque signed-continuation traversal to global boundaries. auth.ts separately owns reconnect-dialog settlement, its focus trap, and focus restoration so authentication cannot be hidden while its request remains pending. change-inspector-render.ts owns focusable Change/Revision reading controls plus exact fact/file anchor focus inside the projected detail. change-inspector-graphs.ts owns keyboard activation of server-laid relationship nodes and emits only explicit exact-identity callbacks. change-inspector-diff.ts owns full-frame file/fact navigation and deep-link focus inside one contextual exact Revision; change-inspector-interaction.ts owns the visible focus handoff into and out of that route. Legacy keyboard, palette, detail, diff-controller, render, and main modules remain outside that composition until each is explicitly adapted with Change-first tests.",
   "modules": [
     {
       "path": "auth.ts",
@@ -14,6 +14,12 @@
       "classification": "model-neutral-retained",
       "activeImport": true,
       "reason": "Contains argument-driven fact-card HTML emitters used only beneath exact Revision resources. It owns no selection, transport, aggregate store, or Change membership semantics."
+    },
+    {
+      "path": "chips.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Derives removable structured-query chips from the shared parser and raw token indexes. It is argument-driven and cannot read routes, state, transport, or Change membership."
     },
     {
       "path": "change-inspector-cards.ts",
@@ -56,6 +62,12 @@
       "classification": "adapted",
       "activeImport": true,
       "reason": "Loads only typed Change detail, exact Revision detail/resource, association, and interdiff documents through versioned Change-reader routes and keeps each exact identity distinct."
+    },
+    {
+      "path": "change-inspector-search.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the active search draft, bounded replace cadence, accessible completion list, and parser diagnostics. It consumes only accepted Event History completion values and callback-owned route intent, without fetching or constructing exact semantic routes."
     },
     {
       "path": "change-inspector-render.ts",

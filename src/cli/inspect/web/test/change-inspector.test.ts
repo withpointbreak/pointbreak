@@ -80,6 +80,21 @@ function historyPage(projectionStamp = "sha256:generation") {
   };
 }
 
+function searchableHistoryPage(
+  projectionStamp = "sha256:generation",
+): EventHistoryDocument {
+  return {
+    ...(historyPage(projectionStamp) as EventHistoryDocument),
+    completion: {
+      eventTypes: ["review_note_imported", "validation_check_recorded"],
+      trackIds: ["track:author"],
+      changeIds: ["change:sha256:one", "change:sha256:two"],
+      revisionRefs: [revision],
+      unresolvedRevisionIds: ["revision:sha256:unresolved"],
+    },
+  };
+}
+
 function activationHistoryPage(
   context: Pick<
     EventHistoryEntry,
@@ -662,6 +677,516 @@ describe("Change-first composition", () => {
     expect(document.querySelector("#error")?.textContent).not.toContain(
       "private server detail",
     );
+  });
+
+  it("debounces valid Timeline input into one replace read while preserving outer filters", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline?limit=20&at=evt%3Asha256%3Aanchor&type=review_note_imported&track=track%3Aauthor&change=change%3Asha256%3Aone&revision=revision%3Asha256%3Aone&artifactHash=sha256%3Aartifact&order=asc",
+    );
+    const requests = serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing Timeline search input");
+    const replaceState = vi.spyOn(history, "replaceState");
+    const historyRequestCount = () =>
+      requests.filter((request) => request.startsWith("/api/v2/history?"))
+        .length;
+    const initialHistoryRequests = historyRequestCount();
+    vi.useFakeTimers();
+
+    for (const draft of ["revision:0", "revision:0123", "revision:01234567"]) {
+      search.value = draft;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    search.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(replaceState).not.toHaveBeenCalled();
+    expect(historyRequestCount()).toBe(initialHistoryRequests);
+    await vi.advanceTimersByTimeAsync(149);
+    expect(replaceState).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(replaceState).toHaveBeenCalledOnce();
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        limit: 20,
+        q: "revision:01234567",
+        type: "review_note_imported",
+        track: "track:author",
+        change: "change:sha256:one",
+        revision: revision.revisionId,
+        artifactHash: revision.objectArtifactContentHash,
+        order: "asc",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(historyRequestCount()).toBe(initialHistoryRequests + 1);
+  });
+
+  it("keeps incomplete Timeline identity clauses local while completing only server-provided values", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    const requests = serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Timeline search UI");
+    const initialHash = location.hash;
+    const historyRequestCount = () =>
+      requests.filter((request) => request.startsWith("/api/v2/history?"))
+        .length;
+    const initialHistoryRequests = historyRequestCount();
+    vi.useFakeTimers();
+
+    for (const [draft, expected] of [
+      [
+        "revision:",
+        ["revision:revision:sha256:one", "revision:revision:sha256:unresolved"],
+      ],
+      ["rev:", ["rev:revision:sha256:one", "rev:revision:sha256:unresolved"]],
+      ["change:", ["change:change:sha256:one", "change:change:sha256:two"]],
+    ] as const) {
+      search.value = draft;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(location.hash).toBe(initialHash);
+      expect(historyRequestCount()).toBe(initialHistoryRequests);
+      expect(
+        Array.from(
+          suggestions.querySelectorAll<HTMLElement>("[role='option']"),
+        ).map((option) => option.textContent),
+      ).toEqual(expected);
+    }
+
+    for (const draft of ["actor:", "tag:", "check:", "assessment:", "is:"]) {
+      search.value = draft;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(suggestions.querySelectorAll("[role='option']")).toHaveLength(0);
+      expect(search.getAttribute("aria-expanded")).toBe("false");
+      await vi.advanceTimersByTimeAsync(150);
+      expect(location.hash).toBe(initialHash);
+      expect(historyRequestCount()).toBe(initialHistoryRequests);
+    }
+  });
+
+  it("offers partial field, event-type, and track completions with full accessible identities", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    const fullRevisionId = `revision:sha256:${"a".repeat(64)}`;
+    const fullChangeId = `change:sha256:${"b".repeat(64)}`;
+    const searchable = searchableHistoryPage();
+    serveComposition({
+      ...searchable,
+      completion: {
+        ...searchable.completion,
+        changeIds: [fullChangeId],
+        revisionRefs: [
+          {
+            revisionId: fullRevisionId,
+            objectArtifactContentHash: `sha256:${"c".repeat(64)}`,
+          },
+          {
+            revisionId: fullRevisionId,
+            objectArtifactContentHash: `sha256:${"d".repeat(64)}`,
+          },
+        ],
+      },
+    });
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Timeline search UI");
+    const optionTexts = () =>
+      Array.from(
+        suggestions.querySelectorAll<HTMLElement>("[role='option']"),
+      ).map((option) => option.textContent);
+
+    for (const [draft, expected] of [
+      ["cha", ["change:"]],
+      ["act", ["actor:"]],
+      ["type:valid", ["type:validation_check_recorded"]],
+      ["track:auth", ["track:track:author"]],
+    ] as const) {
+      search.value = draft;
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(optionTexts()).toEqual(expected);
+    }
+
+    search.value = "revision:aaaa";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const exactRevision =
+      suggestions.querySelector<HTMLElement>("[role='option']");
+    expect(suggestions.querySelectorAll("[role='option']")).toHaveLength(1);
+    expect(exactRevision?.textContent).toBe("revision:revision:aaaaaaaa");
+    expect(exactRevision?.title).toContain(fullRevisionId);
+    expect(exactRevision?.getAttribute("aria-label")).toContain(fullRevisionId);
+
+    search.value = "change:bbbb";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const change = suggestions.querySelector<HTMLElement>("[role='option']");
+    expect(change?.textContent).toBe("change:change:bbbbbbbb");
+    expect(change?.title).toContain(fullChangeId);
+    expect(change?.getAttribute("aria-label")).toContain(fullChangeId);
+  });
+
+  it("keeps invalid Timeline input local and announces its parser diagnostic", async () => {
+    history.replaceState(null, "", "/#/timeline?q=before&limit=20");
+    const requests = serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const diagnostic = document.querySelector<HTMLElement>("#route-diagnostic");
+    if (!search || !diagnostic) throw new Error("missing Timeline search UI");
+    const initialHash = location.hash;
+    const initialRequestCount = requests.length;
+
+    search.value = 'revision:"two words"';
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(location.hash).toBe(initialHash);
+    expect(requests).toHaveLength(initialRequestCount);
+    expect(search.getAttribute("aria-invalid")).toBe("true");
+    expect(search.getAttribute("aria-describedby")).toBe("route-diagnostic");
+    expect(diagnostic.classList).not.toContain("hidden");
+    expect(diagnostic.textContent).toContain(
+      "identity fragments cannot contain whitespace",
+    );
+
+    search.value = "revision:";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(search.getAttribute("aria-invalid")).toBeNull();
+    expect(diagnostic.classList).toContain("hidden");
+  });
+
+  it("keeps an over-limit multibyte Timeline query local", async () => {
+    history.replaceState(null, "", "/#/timeline?q=before&limit=20");
+    const requests = serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const diagnostic = document.querySelector<HTMLElement>("#route-diagnostic");
+    if (!search || !diagnostic) throw new Error("missing Timeline search UI");
+    const initialHash = location.hash;
+    const initialRequestCount = requests.length;
+    vi.useFakeTimers();
+
+    search.value = "é".repeat(129);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(location.hash).toBe(initialHash);
+    expect(requests).toHaveLength(initialRequestCount);
+    expect(search.getAttribute("aria-invalid")).toBe("true");
+    expect(diagnostic.textContent).toContain("at most 256 bytes");
+  });
+
+  it("announces query notices from the accepted Timeline document", async () => {
+    history.replaceState(null, "", "/#/timeline?q=review&limit=20");
+    const searchable = searchableHistoryPage();
+    serveComposition({
+      ...searchable,
+      queryNotices: ["The Timeline query was normalized by the reader."],
+    });
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const diagnostic = document.querySelector<HTMLElement>("#route-diagnostic");
+    expect(search?.getAttribute("aria-describedby")).toBe("route-diagnostic");
+    expect(diagnostic?.classList).not.toContain("hidden");
+    expect(diagnostic?.textContent).toContain(
+      "The Timeline query was normalized by the reader.",
+    );
+  });
+
+  it("moves Enter from a settled Timeline search to the one Timeline tab stop", async () => {
+    history.replaceState(null, "", "/#/timeline?q=free&limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const timeline = document.querySelector<HTMLElement>("#timeline");
+    if (!search || !timeline) throw new Error("missing Timeline search UI");
+    search.focus();
+
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+
+    expect(document.activeElement).toBe(timeline);
+  });
+
+  it("hands Enter to the Timeline after an in-flight query replacement mounts", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    let releaseProfile!: () => void;
+    const profileGate = new Promise<void>((resolve) => {
+      releaseProfile = resolve;
+    });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile") {
+        await profileGate;
+        return new Response(JSON.stringify(profile));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        return new Response(JSON.stringify(page("changes")));
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return new Response(JSON.stringify(page("attention")));
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        return new Response(JSON.stringify(searchableHistoryPage()));
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing Timeline search input");
+    search.focus();
+    search.value = "after";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: { limit: 20, q: "after" },
+    });
+    expect(document.querySelector("#master")?.textContent).toContain(
+      "Loading Change generation",
+    );
+    releaseProfile();
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(
+        document.querySelector<HTMLElement>("#timeline"),
+      ),
+    );
+  });
+
+  it("does not steal focus changed deliberately while the Timeline replacement is in flight", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    let releaseProfile!: () => void;
+    const profileGate = new Promise<void>((resolve) => {
+      releaseProfile = resolve;
+    });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile") {
+        await profileGate;
+        return new Response(JSON.stringify(profile));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        return new Response(JSON.stringify(page("changes")));
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return new Response(JSON.stringify(page("attention")));
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        return new Response(JSON.stringify(searchableHistoryPage()));
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const viewToggle =
+      document.querySelector<HTMLButtonElement>("#view-toggle");
+    if (!search || !viewToggle) throw new Error("missing Inspector controls");
+    search.focus();
+    search.value = "after";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+
+    viewToggle.focus();
+    expect(document.activeElement).toBe(viewToggle);
+    releaseProfile();
+    await vi.waitFor(() =>
+      expect(document.querySelector<HTMLElement>("#timeline")).not.toBeNull(),
+    );
+
+    expect(document.activeElement).toBe(viewToggle);
+  });
+
+  it("keeps Change-page search plain instead of advertising Timeline grammar", async () => {
+    history.replaceState(null, "", "/#/changes");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Change search UI");
+    vi.useFakeTimers();
+
+    search.value = "revision:";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(suggestions.querySelectorAll("[role='option']")).toHaveLength(0);
+    expect(search.getAttribute("aria-invalid")).toBeNull();
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "lens",
+      lens: "changes",
+      query: { q: "revision:" },
+    });
+  });
+
+  it("cancels a Timeline draft when the live URL changes before hashchange", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    const requests = serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing Timeline search input");
+    vi.useFakeTimers();
+    search.value = "review";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    history.replaceState(null, "", "/#/changes");
+    await vi.advanceTimersByTimeAsync(150);
+
+    expect(location.hash).toBe("#/changes");
+    expect(requests.some((request) => request.includes("q=review"))).toBe(
+      false,
+    );
+  });
+
+  it("accepts Timeline completions without constructing exact routes and keeps combobox focus", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Timeline search UI");
+    search.focus();
+    const initialRoute = parseChangeInspectorRoute(location.hash);
+    search.value = "cha";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(search.value).toBe("change:");
+    expect(parseChangeInspectorRoute(location.hash)).toEqual(initialRoute);
+    expect(
+      Array.from(
+        suggestions.querySelectorAll<HTMLElement>("[role='option']"),
+      ).map((option) => option.textContent),
+    ).toEqual(["change:change:sha256:one", "change:change:sha256:two"]);
+
+    search.value = "rev:one";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(search.getAttribute("role")).toBe("combobox");
+    expect(search.getAttribute("aria-controls")).toBe("filter-suggestions");
+    expect(suggestions.getAttribute("role")).toBe("listbox");
+    expect(search.getAttribute("aria-expanded")).toBe("true");
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(search.getAttribute("aria-activedescendant")).not.toBeNull();
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+
+    expect(search.value).toBe("rev:revision:sha256:one ");
+    expect(document.activeElement).toBe(search);
+    expect(search.getAttribute("aria-expanded")).toBe("false");
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: { limit: 20, q: "rev:revision:sha256:one" },
+    });
+
+    search.value = "change:two";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+    );
+    expect(search.value).toBe("change:change:sha256:two ");
+    expect(document.activeElement).toBe(search);
+
+    search.value = "revision:";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(search.getAttribute("aria-expanded")).toBe("true");
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    expect(search.value).toBe("revision:");
+    expect(document.activeElement).toBe(search);
+    expect(search.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("accepts a Timeline completion by pointer without losing search focus", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    serveComposition(searchableHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (!search) throw new Error("missing Timeline search input");
+    search.focus();
+    search.value = "change:two";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const option = document.querySelector<HTMLElement>(
+      "#filter-suggestions [role='option']",
+    );
+    option?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    option?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(search.value).toBe("change:change:sha256:two ");
+    expect(document.activeElement).toBe(search);
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: { limit: 20, q: "change:change:sha256:two" },
+    });
   });
 
   it("returns an exact event search to its filtered Timeline instead of a card lens", async () => {
@@ -1750,6 +2275,136 @@ describe("Change-first composition", () => {
     expect(search.selectionStart).toBe(4);
     expect(search.selectionEnd).toBe(11);
     expect(search.selectionDirection).toBe("forward");
+  });
+
+  it("preserves an incomplete Timeline draft and its completions across poll paints", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let generation = 1;
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      const stamp = `sha256:generation-${generation}`;
+      if (path === "/api/v2/profile") {
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            authorityCursor: authorityCursor(generation),
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        const document = page("changes", stamp);
+        return new Response(
+          JSON.stringify({
+            ...document,
+            changes:
+              generation === 1
+                ? document.changes
+                : [
+                    ...document.changes,
+                    {
+                      ...document.changes[0],
+                      changeId: "change:sha256:two",
+                    },
+                  ],
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        const document = page("attention", stamp);
+        return new Response(
+          JSON.stringify({
+            ...document,
+            changes:
+              generation === 1
+                ? document.changes
+                : [
+                    ...document.changes,
+                    {
+                      ...document.changes[0],
+                      changeId: "change:sha256:two",
+                    },
+                  ],
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        return new Response(
+          JSON.stringify({
+            ...searchableHistoryPage(stamp),
+            authorityCursor: authorityCursor(generation),
+            eventCount: generation,
+            timelineProjectionStamp: `sha256:timeline-${generation}`,
+          }),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    const suggestions = document.querySelector<HTMLElement>(
+      "#filter-suggestions",
+    );
+    if (!search || !suggestions) throw new Error("missing Timeline search UI");
+    search.focus();
+    search.value = "revision:";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const suggestionTexts = () =>
+      Array.from(
+        suggestions.querySelectorAll<HTMLElement>("[role='option']"),
+      ).map((option) => option.textContent);
+    const expected = [
+      "revision:revision:sha256:one",
+      "revision:revision:sha256:unresolved",
+    ];
+    expect(suggestionTexts()).toEqual(expected);
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    const activeSuggestion = search.getAttribute("aria-activedescendant");
+    expect(activeSuggestion).not.toBeNull();
+
+    generation = 2;
+    pollTick();
+    await vi.waitFor(() =>
+      expect(
+        requests.filter((request) => request === "/api/v2/profile"),
+      ).toHaveLength(4),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#stat-units")?.textContent).toBe(
+        "2 Changes",
+      ),
+    );
+
+    expect(location.hash).toBe("#/timeline?limit=20");
+    expect(search.value).toBe("revision:");
+    expect(document.activeElement).toBe(search);
+    expect(suggestionTexts()).toEqual(expected);
+    expect(search.getAttribute("aria-activedescendant")).toBe(activeSuggestion);
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(search.value).toBe("revision:revision:sha256:one ");
+    expect(parseChangeInspectorRoute(location.hash)).toEqual({
+      kind: "timeline",
+      historyQuery: {
+        limit: 20,
+        q: "revision:revision:sha256:one",
+      },
+    });
   });
 
   it("preserves a search draft started after a background poll begins", async () => {
