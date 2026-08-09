@@ -419,8 +419,9 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     );
     assert!(
         manifest_publisher.contains("browserResult.failures.length > 0")
-            && manifest_publisher.contains("await rename(candidatePath, manifestPath)"),
-        "manifest publication must reject recorded failures before its atomic rename"
+            && manifest_publisher.contains("await link(publisherPath, manifestPath)")
+            && !manifest_publisher.contains("await rename("),
+        "manifest publication must reject recorded failures before atomic no-replace publication"
     );
 
     let manifest_publish = script
@@ -590,6 +591,61 @@ fn change_inspector_browser_gate_rejects_frozen_exact_identity_false_negatives()
             && !narrow_exact_detail.contains("narrowExactRoute === `#/${exact}`"),
         "narrow exact detail must focus the served exact-diff activation and compare the exact route semantically"
     );
+}
+
+#[test]
+fn change_inspector_browser_gate_binds_retained_bytes_and_instruments_initial_navigation() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/change-inspector-browser-verify.sh"))
+        .expect("read Change Inspector browser gate");
+    let browser_program =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
+            .expect("read Change Inspector browser program");
+    let manifest_publisher =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-manifest.mjs"))
+            .expect("read Change Inspector browser manifest publisher");
+
+    assert!(
+        script.contains("evidenceInventory")
+            && script.contains("browser-artifacts")
+            && script.contains("logs/browser-result.json")
+            && script.contains("logs/browser-gate.log")
+            && script.contains("logs/browser-program.mjs"),
+        "the completion candidate must retain a named inventory for every PNG and browser result, log, and rendered program"
+    );
+    assert!(
+        script.contains("sort") && script.contains("shasum -a 256"),
+        "the completion candidate must publish SHA-256 evidence entries in a deterministic order"
+    );
+    assert!(
+        manifest_publisher.contains("evidenceRoot")
+            && manifest_publisher.contains("evidenceInventory")
+            && manifest_publisher.contains("sha256")
+            && manifest_publisher.contains("await link(")
+            && !manifest_publisher.contains("await rename("),
+        "manifest publication must verify retained bytes and atomically refuse replacement"
+    );
+
+    assert!(
+        !script.contains("run_pw open \"$browser_url\""),
+        "the shell must not navigate before browser diagnostics are installed"
+    );
+    let first_navigation = browser_program
+        .find("await page.goto(")
+        .expect("browser program performs its initial navigation");
+    for observer in [
+        "page.on(\"console\"",
+        "page.on(\"pageerror\"",
+        "page.on(\"requestfailed\"",
+    ] {
+        let observer_offset = browser_program
+            .find(observer)
+            .unwrap_or_else(|| panic!("browser program is missing {observer} observer"));
+        assert!(
+            observer_offset < first_navigation,
+            "{observer} must be installed before the program's first page navigation"
+        );
+    }
 }
 
 #[test]

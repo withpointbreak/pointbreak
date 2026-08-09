@@ -20,7 +20,7 @@ remain under that root.
 EOF
 }
 
-for command in git jq node rg shasum find wc tr mv curl cp chmod; do
+for command in git jq node rg shasum find sort wc tr mv curl cp chmod; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
@@ -737,11 +737,10 @@ for (const [marker, value] of replacements) {
 fs.writeFileSync(process.argv[4], rendered);
 ' "$browser_program_template" "$browser_diagnostics" "$browser_config" "$browser_program"
 
-# Startup intentionally has no semantic fragment: the Change-aware Inspector
-# must select the Timeline monitor by default while the one-time capability is
-# consumed into origin-scoped session storage.
-browser_url="$(jq -r '.baseUrl + "/#/?token=" + (.token | @uri)' <<<"$server")"
-run_pw open "$browser_url" >"$log_dir/browser-open.log" 2>&1
+# Create the session without visiting the Inspector. The injected program installs
+# console, page-error, and request-failure observers before it performs the
+# capability-bearing bootstrap navigation.
+run_pw open about:blank >"$log_dir/browser-open.log" 2>&1
 
 # The browser program first parks the initial Timeline and writes the retained
 # screenshot below.  Only then append one public fixture event.  This avoids a
@@ -874,6 +873,29 @@ trap - EXIT
 manifest_tmp="$root/.manifest.json.tmp"
 [ "$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')" = "$harness_record_sha256" ] \
   || die "browser harness digest record changed during qualification"
+for required_evidence_path in \
+  logs/browser-result.json \
+  logs/browser-gate.log \
+  logs/browser-program.mjs; do
+  [ -f "$root/$required_evidence_path" ] \
+    || die "required browser evidence is missing: $required_evidence_path"
+done
+evidence_inventory="$({
+  for evidence_path in "$artifact_dir"/*.png; do
+    [ -f "$evidence_path" ] || continue
+    printf 'browser-artifacts/%s\n' "${evidence_path##*/}"
+  done
+  for evidence_path in "$log_dir"/browser-*; do
+    [ -f "$evidence_path" ] || continue
+    case "$evidence_path" in
+      *.json | *.log | *.mjs) printf 'logs/%s\n' "${evidence_path##*/}" ;;
+    esac
+  done
+} | LC_ALL=C sort | while IFS= read -r evidence_path; do
+  evidence_sha256="$(shasum -a 256 "$root/$evidence_path" | awk '{print $1}')"
+  jq -cn --arg path "$evidence_path" --arg sha256 "$evidence_sha256" \
+    '{path: $path, sha256: $sha256}'
+done | jq -s '.')"
 jq -n \
   --arg sourceCommit "$source_commit" \
   --arg binary "$requested_binary" \
@@ -888,12 +910,13 @@ jq -n \
   --arg harnessSha256 "$harness_record_sha256" \
   --argjson assertionCount "$assertion_count" \
   --argjson screenshotCount "$screenshot_count" \
+  --argjson evidenceInventory "$evidence_inventory" \
   '{gate: "change-inspector-browser-verify", status: "passed", sourceCommit: $sourceCommit,
     binary: $binary, executedBinary: $executedBinary, binarySha256: $binarySha256,
     harness: $harness[0], harnessSha256: $harnessSha256, root: $root, fixture: $fixture,
     fixtureData: $fixtureData, timelineAppend: $timelineAppend,
     toolVersions: $toolVersions, assertionCount: $assertionCount,
-    screenshotCount: $screenshotCount}' \
+    screenshotCount: $screenshotCount, evidenceInventory: $evidenceInventory}' \
   >"$manifest_tmp"
 [ "$(shasum -a 256 "$browser_manifest_publisher" | awk '{print $1}')" = "$publisher_sha256" ] \
   || die "manifest publisher snapshot changed before completion publication"

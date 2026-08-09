@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -567,15 +568,161 @@ test("an aggregate failure cannot publish a passing completion manifest", async 
 		...candidate,
 		assertionCount: passingResult.assertionCount,
 		screenshotCount: passingResult.screenshotCount,
+		evidenceInventory: [],
 	};
+	await mkdir(join(root, "browser-artifacts"), { recursive: true });
+	await mkdir(join(root, "logs"), { recursive: true });
+	const retainedFiles = new Map([
+		["browser-artifacts/wide-timeline.png", "wide PNG bytes"],
+		["logs/browser-gate.log", "browser gate log bytes"],
+		["logs/browser-program.mjs", "browser program bytes"],
+		["logs/browser-result.json", '{"status":"passed"}\n'],
+	]);
+	for (const [path, bytes] of retainedFiles) {
+		await writeFile(join(root, path), bytes);
+	}
+	passingCandidate.evidenceInventory = [...retainedFiles.entries()]
+		.map(([path, bytes]) => ({
+			path,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		}))
+		.sort((left, right) => left.path.localeCompare(right.path));
 	await writeFile(candidatePath, `${JSON.stringify(passingCandidate)}\n`);
 	await publishPassingManifest({
 		candidatePath,
 		manifestPath,
 		browserResult: passingResult,
+		evidenceRoot: root,
 	});
 	assert.deepEqual(
 		JSON.parse(await readFile(manifestPath, "utf8")),
 		passingCandidate,
 	);
+});
+
+test("completion manifests bind a sorted SHA-256 inventory of retained browser evidence", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-evidence-"));
+	const evidenceRoot = join(root, "evidence");
+	const artifactDir = join(evidenceRoot, "browser-artifacts");
+	const logDir = join(evidenceRoot, "logs");
+	await mkdir(artifactDir, { recursive: true });
+	await mkdir(logDir, { recursive: true });
+
+	const retainedFiles = new Map([
+		["browser-artifacts/narrow-timeline.png", "narrow PNG bytes"],
+		["browser-artifacts/wide-timeline.png", "wide PNG bytes"],
+		["logs/browser-gate.log", "browser gate log bytes"],
+		["logs/browser-program.mjs", "browser program bytes"],
+		["logs/browser-result.json", '{"status":"passed"}\n'],
+	]);
+	for (const [path, bytes] of retainedFiles) {
+		await writeFile(join(evidenceRoot, path), bytes);
+	}
+	const evidenceInventory = [...retainedFiles.entries()]
+		.map(([path, bytes]) => ({
+			path,
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+		}))
+		.sort((left, right) => left.path.localeCompare(right.path));
+	const browserResult = {
+		schema: "pointbreak.change-inspector-browser-report",
+		version: 1,
+		status: "passed",
+		assertionCount: 2,
+		screenshotCount: 2,
+		sectionCount: 1,
+		globalInvalid: false,
+		sections: [{ name: "Timeline", status: "passed", failureCount: 0 }],
+		failures: [],
+	};
+	const candidate = {
+		gate: "change-inspector-browser-verify",
+		status: "passed",
+		assertionCount: browserResult.assertionCount,
+		screenshotCount: browserResult.screenshotCount,
+		evidenceInventory,
+	};
+
+	const missingPath = join(root, ".missing-manifest.json.tmp");
+	await writeFile(
+		missingPath,
+		`${JSON.stringify({ ...candidate, evidenceInventory: evidenceInventory.slice(1) })}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: missingPath,
+			manifestPath: join(root, "missing-manifest.json"),
+			browserResult,
+			evidenceRoot,
+		}),
+		/retained browser evidence|evidence inventory/i,
+	);
+
+	const unsortedPath = join(root, ".unsorted-manifest.json.tmp");
+	await writeFile(
+		unsortedPath,
+		`${JSON.stringify({
+			...candidate,
+			evidenceInventory: [...evidenceInventory].reverse(),
+		})}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: unsortedPath,
+			manifestPath: join(root, "unsorted-manifest.json"),
+			browserResult,
+			evidenceRoot,
+		}),
+		/sorted.*evidence inventory|evidence inventory.*sorted/i,
+	);
+
+	const tamperedPath = join(root, ".tampered-manifest.json.tmp");
+	await writeFile(tamperedPath, `${JSON.stringify(candidate)}\n`);
+	await writeFile(
+		join(logDir, "browser-gate.log"),
+		"tampered browser gate log",
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: tamperedPath,
+			manifestPath: join(root, "tampered-manifest.json"),
+			browserResult,
+			evidenceRoot,
+		}),
+		/SHA-256|digest|evidence inventory/i,
+	);
+
+	await writeFile(
+		join(logDir, "browser-gate.log"),
+		retainedFiles.get("logs/browser-gate.log"),
+	);
+	const validCandidatePath = join(root, ".valid-manifest.json.tmp");
+	const validManifestPath = join(root, "valid-manifest.json");
+	const validCandidateBytes = `${JSON.stringify(candidate)}\n`;
+	await writeFile(validCandidatePath, validCandidateBytes);
+	await publishPassingManifest({
+		candidatePath: validCandidatePath,
+		manifestPath: validManifestPath,
+		browserResult,
+		evidenceRoot,
+	});
+	assert.deepEqual(
+		JSON.parse(await readFile(validManifestPath, "utf8")),
+		candidate,
+	);
+	assert.equal(await readFile(validManifestPath, "utf8"), validCandidateBytes);
+
+	const duplicateCandidatePath = join(root, ".duplicate-manifest.json.tmp");
+	await writeFile(duplicateCandidatePath, `${JSON.stringify(candidate)}\n`);
+	const publishedBytes = await readFile(validManifestPath);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: duplicateCandidatePath,
+			manifestPath: validManifestPath,
+			browserResult,
+			evidenceRoot,
+		}),
+		/already exists/i,
+	);
+	assert.deepEqual(await readFile(validManifestPath), publishedBytes);
 });

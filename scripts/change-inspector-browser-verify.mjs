@@ -9,10 +9,21 @@
 	let lastScreenshot = null;
 	const consoleErrors = [];
 	const pageErrors = [];
+	const requestFailures = [];
+	const bootstrapUrl = (server) =>
+		`${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
 	page.on("console", (message) => {
 		if (message.type() === "error") consoleErrors.push(message.text());
 	});
 	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("requestfailed", (request) => {
+		requestFailures.push({
+			method: request.method(),
+			resourceType: request.resourceType(),
+			url: request.url(),
+			error: request.failure()?.errorText ?? "unknown request failure",
+		});
+	});
 
 	const layouts = [
 		{ name: "wide", width: 1440, height: 1000 },
@@ -39,6 +50,9 @@
 			);
 		},
 	});
+	await page.goto(bootstrapUrl(config.server), {
+		waitUntil: "domcontentloaded",
+	});
 	const fail = (label, detail) => {
 		throw new Error(`${label}: ${detail}`);
 	};
@@ -57,7 +71,7 @@
 				document.activeElement.blur();
 		});
 	};
-	// The launcher has already moved the one-time fragment capability into
+	// The instrumented bootstrap has moved the one-time fragment capability into
 	// origin-scoped sessionStorage. Route changes are same-document navigation
 	// and therefore use only the strict, shareable Change route grammar.
 	const url = (route) => `${config.server.baseUrl}/#/${route}`;
@@ -470,8 +484,6 @@
 		);
 	};
 
-	const bootstrapUrl = (server) =>
-		`${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
 	const isHistoryRequest = (requestUrl, server) => {
 		const endpoint = `${server.baseUrl}/api/v2/history`;
 		return requestUrl === endpoint || requestUrl.startsWith(`${endpoint}?`);
@@ -4942,6 +4954,20 @@
 			expected: [],
 			actual: pageErrors,
 		});
+		expect(
+			requestFailures.length === 0,
+			"browser requests",
+			requestFailures
+				.map(
+					(failure) =>
+						`${failure.method} ${failure.url}: ${failure.error}`,
+				)
+				.join("\n"),
+			{
+				expected: [],
+				actual: requestFailures,
+			},
+		);
 	});
 
 	const completion = diagnostics.result({ screenshotCount: screenshots });
