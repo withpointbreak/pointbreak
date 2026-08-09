@@ -1410,7 +1410,7 @@ html.compact .unit-card {
 }
 .change-card-attention-reason {
   display: block;
-  color: var(--warning-strong);
+  color: var(--warning);
 }
 .change-card-attention-ask,
 .change-card-attention-evidence,
@@ -1468,10 +1468,18 @@ html.compact .unit-card {
   font-family: var(--sans);
 }
 .change-card-peer-open {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-row);
   color: var(--fg);
   font-size: var(--fs-sm);
   font-weight: 500;
   text-align: left;
+  overflow-wrap: anywhere;
+}
+.change-card-peer-open:hover {
+  border-color: var(--accent);
+  background: var(--sel-bg);
 }
 .compact .tier-medium {
   display: none;

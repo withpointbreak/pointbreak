@@ -1219,13 +1219,28 @@ describe("Change inspector render", () => {
     const state = createChangeInspectorState({
       kind: "lens",
       lens: "changes",
-      query: {},
+      query: { q: "parallel" },
     });
     state.publish(stageGeneration(profile, pluralChanges, attention, profile));
     renderChangeInspector(state.snapshot(), { navigate });
 
     expect(document.querySelector(".change-card-current a")).toBeNull();
-    expect(document.querySelectorAll(".change-card-peer-open")).toHaveLength(2);
+    const peerActions = [
+      ...document.querySelectorAll<HTMLButtonElement>(".change-card-peer-open"),
+    ];
+    expect(peerActions).toHaveLength(2);
+    for (const action of peerActions)
+      expect(action.textContent).toMatch(/^Open current Revision · /);
+    const secondPeer = peerActions.find(
+      (action) => action.dataset.revisionId === secondRevision.revisionId,
+    );
+    secondPeer?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision: secondRevision,
+      query: { q: "parallel" },
+    });
   });
 
   it("keeps an off-page exact deep link visible without claiming list absence is refusal", () => {

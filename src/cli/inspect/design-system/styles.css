@@ -571,14 +571,27 @@ body {
   color: var(--warning);
   font-family: var(--sans);
 }
-.change-card-peer-open { color: var(--fg); font-size: var(--fs-sm); text-align: left; }
+.change-card-peer-open {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--bg-row);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.change-card-peer-open:hover {
+  border-color: var(--accent);
+  background: var(--sel-bg);
+}
 .change-card-attention {
   margin: 10px 0 0;
   padding: 8px 10px;
   border-left: 3px solid var(--warning);
   background: color-mix(in srgb, var(--warning) 7%, transparent);
 }
-.change-card-attention-reason { display: block; color: var(--warning-strong); }
+.change-card-attention-reason { display: block; color: var(--warning); }
 .change-card-attention-ask,
 .change-card-attention-evidence,
 .change-card-attention-action { margin: 3px 0 0; font-size: var(--fs-sm); }

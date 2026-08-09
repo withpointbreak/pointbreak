@@ -147,6 +147,29 @@ test("narrow Attention cards keep their headline, reason, and exact Revision art
   expect(css).toMatch(/\.change-card-current \{[^}]*overflow-wrap: anywhere;/s);
 });
 
+test("parallel exact Revision choices retain a visible at-rest action affordance", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  const peerActionRule =
+    css.match(/\.change-card-peer-open \{([^}]*)\}/s)?.[1] ?? "";
+  // These choices are rendered as `.ghost` buttons, whose base treatment is
+  // intentionally borderless. Each peer choice therefore needs its own
+  // persistent boundary and fill rather than relying on hover or focus to read
+  // as an action. Naming the tokens also prevents a transparent border/fill
+  // from satisfying the contract accidentally.
+  expect(peerActionRule).toMatch(/border:\s*1px solid var\(--border\);/);
+  expect(peerActionRule).toMatch(/background:\s*var\(--bg-row\);/);
+});
+
+test("Attention reasons use the AA-tuned warning color on their cream surface", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  // --warning-strong also serves fixed dark diagnostics, so the component must
+  // choose the established light-safe warning foreground instead of retuning
+  // that shared token.
+  expect(css).toMatch(
+    /\.change-card-attention-reason \{[^}]*color: var\(--warning\);/s,
+  );
+});
+
 test("the compact preset overrides the card token", () => {
   const tokens = readFileSync(TOKENS_CSS_PATH, "utf8");
   expect(tokens).toMatch(/\.compact \{[^}]*--card-pad:/s);
