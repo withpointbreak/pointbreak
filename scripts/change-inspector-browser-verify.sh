@@ -769,9 +769,22 @@ browser_gate_status=0
 run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1 \
   || browser_gate_status=$?
 browser_result="$log_dir/browser-result.json"
-browser_result_line="$(rg -o 'POINTBREAK_BROWSER_RESULT=\{.*\}' "$log_dir/browser-gate.log" | tail -1 || true)"
+browser_result_line="$(awk '
+  {
+    line = $0
+    sub(/\r$/, "", line)
+    if (after_result) {
+      result = line
+      after_result = 0
+    }
+    if (line == "### Result") after_result = 1
+  }
+  END {
+    if (result != "") print result
+  }
+' "$log_dir/browser-gate.log")"
 if [ -n "$browser_result_line" ]; then
-  printf '%s\n' "${browser_result_line#POINTBREAK_BROWSER_RESULT=}" >"$browser_result"
+  printf '%s\n' "$browser_result_line" >"$browser_result"
   jq -e '
     .schema == "pointbreak.change-inspector-browser-report" and .version == 1 and
     (.status == "passed" or .status == "failed") and
@@ -793,7 +806,13 @@ jq -e '
   (.failures | length == 0) and
   (.sections | all(.status == "passed" and .failureCount == 0))
 ' "$browser_result" >/dev/null \
-  || die "browser diagnostic report did not pass"
+  || {
+    jq -r '
+      .failures[]? |
+      "[\(.section)] \(.label): \(.detail)\n  expected=\(.expected | tojson) actual=\(.actual | tojson)\n  route=\(.route) screenshot=\(.screenshot)"
+    ' "$browser_result" >&2
+    die "browser diagnostic report did not pass"
+  }
 if wait "$timeline_append_pid"; then
   forget_background_process "$timeline_append_pid"
 else

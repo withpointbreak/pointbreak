@@ -289,6 +289,46 @@ test("refuses successful completion whenever any assertion failed", async () => 
 	assert.equal(completionPublished, false);
 });
 
+test("returns a serializable failed result while completion remains green-only", async () => {
+	const diagnostics = createBrowserDiagnostics({ context });
+
+	await diagnostics.section("Timeline", async () => {
+		diagnostics.expect(
+			false,
+			"chronological order",
+			"newest event was not first",
+			{
+				expected: "newest first",
+				actual: "oldest first",
+			},
+		);
+	});
+	await diagnostics.section("Changes", async () => {
+		diagnostics.expect(true, "change cards", "change cards were absent");
+	});
+
+	const result = diagnostics.result({ screenshotCount: 4 });
+	assert.deepEqual(result, {
+		schema: "pointbreak.change-inspector-browser-report",
+		version: 1,
+		status: "failed",
+		assertionCount: 2,
+		screenshotCount: 4,
+		sectionCount: 2,
+		globalInvalid: false,
+		sections: [
+			{ name: "Timeline", status: "failed", failureCount: 1 },
+			{ name: "Changes", status: "passed", failureCount: 0 },
+		],
+		failures: diagnostics.report().failures,
+	});
+	assert.deepEqual(JSON.parse(JSON.stringify(result)), result);
+	assert.throws(
+		() => diagnostics.complete({ screenshotCount: 4 }),
+		BrowserDiagnosticFailure,
+	);
+});
+
 test("returns a compact passing completion only after every section succeeds", async () => {
 	const diagnostics = createBrowserDiagnostics({ context });
 
@@ -313,6 +353,50 @@ test("returns a compact passing completion only after every section succeeds", a
 		],
 		failures: [],
 	});
+});
+
+test("rendered browser program logs and returns failed diagnostics normally", async () => {
+	let source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	for (const [marker, replacement] of [
+		[
+			"__POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__",
+			BrowserDiagnosticFailure.toString(),
+		],
+		["__POINTBREAK_BROWSER_DIAGNOSTICS__", createBrowserDiagnostics.toString()],
+		["__POINTBREAK_CHANGE_BROWSER_CONFIG__", "{}"],
+	]) {
+		assert.ok(source.includes(marker), `missing browser marker ${marker}`);
+		source = source.replace(marker, replacement);
+	}
+
+	assert.equal(
+		typeof new Function(`return (${source}\n)`)(),
+		"function",
+		"rendered browser program remains executable by the runner",
+	);
+	assert.match(
+		source,
+		/const completion = diagnostics\.result\(\{ screenshotCount: screenshots \}\);/,
+		"the browser program obtains failed and passing reports from diagnostics",
+	);
+	assert.match(
+		source,
+		/console\.log\(`POINTBREAK_BROWSER_RESULT=\$\{JSON\.stringify\(completion\)\}`\);\s*return completion;/,
+		"the logged browser report is returned to the runner",
+	);
+	const completionTransport = source.slice(
+		source.lastIndexOf(
+			"const completion = diagnostics.result({ screenshotCount: screenshots });",
+		),
+	);
+	assert.doesNotMatch(
+		completionTransport,
+		/throw new BrowserDiagnosticFailure\(/,
+		"a failed browser report returns normally after logging",
+	);
 });
 
 test("an aggregate failure cannot publish a passing completion manifest", async () => {

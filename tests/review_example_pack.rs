@@ -177,20 +177,81 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         !browser_program.contains("new URLSearchParams((await hash())"),
         "route query parsing must stay in page context because the Playwright run-code sandbox does not expose URLSearchParams"
     );
+    assert!(
+        !browser_program.contains("#detail-body > p.mono")
+            && browser_program.contains("#detail-body [data-event-id]")
+            && browser_program.contains(".dataset.eventId === expectedEventId"),
+        "exact Timeline event readiness must compare the detail's full data-event-id, not compact identity prose"
+    );
+    assert!(
+        !browser_program.contains("const filteredQuery = new URLSearchParams(")
+            && !browser_program.contains("const clearedQuery = new URLSearchParams(")
+            && browser_program.contains("const routeParameters = (names) =>")
+            && browser_program
+                .matches("await routeParameters([\"limit\", \"order\"])")
+                .count()
+                >= 2,
+        "the outer Playwright runner must read filtered and cleared route parameters through one page-context helper"
+    );
+    assert!(
+        !browser_program.contains("initialTimelineText.includes(\"Newest first\")")
+            && !browser_program.contains("ascendingText.includes(\"Oldest first\")")
+            && browser_program.contains("const defaultChronologyDeclared = initialTimelineText")
+            && browser_program.contains("const ascendingChronologyDeclared = ascendingText")
+            && browser_program.matches(".toLowerCase()").count() >= 2,
+        "Timeline chronology checks must normalize rendered case before comparing their labels"
+    );
+    assert!(
+        browser_program
+            .contains("const semanticRouteMatchesInPage = ({ expectedHash, source }) =>")
+            && browser_program.contains("page.url().startsWith(`${config.server.baseUrl}/`)")
+            && browser_program.contains("(await currentRouteMatches(targetHash))")
+            && browser_program.contains("await waitForCurrentRoute(targetHash);")
+            && browser_program.contains("const companionTimelineHash =")
+            && browser_program
+                .contains("await waitForCurrentRoute(companionTimelineHash, \"timeline\");")
+            && browser_program.contains("dataset.timelineRoute")
+            && browser_program.contains("reload || readingKey !== priorKeys.reading"),
+        "browser readiness must compare semantic routes while preserving exact-reading replacement for different identities"
+    );
     let annotated_diff_round_trip = browser_program
         .split_once("// An annotated diff is a first-class full-frame exact route")
         .and_then(|(_, tail)| tail.split_once("await open(exact, layouts[1]"))
         .map(|(round_trip, _)| round_trip)
         .expect("browser gate retains the annotated-diff round-trip section");
     assert!(
-        annotated_diff_round_trip
-            .contains("const focusedRevisionRoute = await page.evaluate((diffRoute) => {")
-            && annotated_diff_round_trip.contains("params.delete(\"fq\");")
+        annotated_diff_round_trip.contains("const canonicalRevisionRoute = await hash();")
+            && !annotated_diff_round_trip
+                .contains("const focusedRevisionRoute = await page.evaluate((diffRoute) => {")
+            && !annotated_diff_round_trip.contains("params.delete(\"fq\");")
             && annotated_diff_round_trip
-                .matches("focusedRevisionRoute")
+                .matches("canonicalRevisionRoute")
                 .count()
-                >= 3,
-        "annotated-diff close and Forward waits must expect the canonical focus-preserving Revision route"
+                >= 2,
+        "annotated-diff Close and Forward waits must restore the captured canonical Revision entry route"
+    );
+    let timeline_search = browser_program
+        .split_once("const timelineSearch = \"Browser correction replacement\";")
+        .and_then(|(_, tail)| tail.split_once("// Drive all typed filters"))
+        .map(|(search, _)| search)
+        .expect("browser gate retains the Timeline plain-search section");
+    assert!(
+        !timeline_search.contains("Remove search filter:")
+            && timeline_search.contains("getByRole(\"button\", { name: \"Clear all\" })")
+            && timeline_search.contains("const correctionEventIds =")
+            && timeline_search.contains("const expectedCorrectionEventIds = [")
+            && timeline_search.contains("config.fixture.correction.eventId"),
+        "plain Timeline q must clear through Clear all instead of an invented removable chip"
+    );
+    assert!(
+        !browser_program.contains("throw new BrowserDiagnosticFailure(report);")
+            && browser_program.contains(
+                "const completion = diagnostics.result({ screenshotCount: screenshots });"
+            )
+            && browser_program.contains("return completion;")
+            && script.contains("line == \"### Result\"")
+            && script.contains("browser_gate_status=$?"),
+        "browser assertion failures must return a structured Playwright result while a nonzero runner remains infrastructure-fatal"
     );
     let first_response = materializer
         .find("actor:agent:pointbreak-matrix-response-one")
@@ -210,6 +271,34 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
             && script.contains(".fact_port.port_id")
             && !script.contains("fact-port-target-cursor"),
         "the browser gate must consume the pre-ambiguity fact port instead of bypassing selection"
+    );
+    assert!(
+        !browser_program.contains("controlCount === 1")
+            && browser_program.contains("controlCount === 2")
+            && browser_program.contains("controls.nth(1)")
+            && browser_program.contains("instanceof HTMLAnchorElement")
+            && browser_program.contains("href: control.getAttribute(\"href\")")
+            && browser_program.contains("accessibleName: control.getAttribute(\"aria-label\")")
+            && browser_program.contains("topologyFixture.initial.current.revision")
+            && browser_program.contains("topologyFixture.initial.current.artifact"),
+        "an ordinary Change card must retain its primary action plus a native exact Revision link"
+    );
+    assert!(
+        browser_program.contains("const changeGraphMaxScroll = Math.max(")
+            && browser_program.contains("changeGraphEnd === changeGraphMaxScroll")
+            && browser_program.contains("changeGraphHome === 0"),
+        "a narrow Change graph may fit its viewport, but Home and End must still stay within its scroll bounds"
+    );
+    assert!(
+        annotated_diff_round_trip.contains("const canonicalReadingKey = await")
+            && annotated_diff_round_trip.contains("const waitForCanonicalRevisionSurface = () =>")
+            && annotated_diff_round_trip.contains("diff.classList.contains(\"hidden\")")
+            && annotated_diff_round_trip.contains("!split.classList.contains(\"hidden\")")
+            && annotated_diff_round_trip
+                .matches("await waitForCanonicalRevisionSurface();")
+                .count()
+                >= 2,
+        "annotated-diff Close and Forward must prove the canonical exact Revision surface is visible and bound"
     );
 
     let explicit_cleanup = script
@@ -254,7 +343,8 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     assert!(
         browser_diagnostics.contains("status: stopped ? \"stopped\"")
             && browser_diagnostics.contains("failures.map((failure)")
-            && browser_diagnostics.contains("throw new BrowserDiagnosticFailure(result)")
+            && browser_diagnostics.contains("throw new BrowserDiagnosticFailure(")
+            && browser_diagnostics.contains("const result = ({ screenshotCount }) =>")
             && browser_diagnostics.contains("browserDiagnosticRecorded")
             && browser_diagnostics.contains("requireCondition")
             && browser_diagnostics.contains("condition: label")

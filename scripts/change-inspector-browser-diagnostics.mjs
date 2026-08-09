@@ -222,23 +222,28 @@ export function createBrowserDiagnostics({
 		};
 	};
 
-	const complete = ({ screenshotCount }) => {
-		const result = report();
-		if (result.failures.length > 0) {
-			throw new BrowserDiagnosticFailure(result);
-		}
+	const result = ({ screenshotCount }) => {
+		const diagnosticReport = report();
 		return {
 			schema: "pointbreak.change-inspector-browser-report",
 			version: 1,
-			status: "passed",
+			status: diagnosticReport.failures.length === 0 ? "passed" : "failed",
 			assertionCount,
 			screenshotCount,
 			sectionCount: sections.length,
 			globalInvalid,
 			sections: sections.map((entry) => ({ ...entry })),
-			failures: [],
+			failures: diagnosticReport.failures,
 		};
 	};
 
-	return { abort, complete, expect, report, requireCondition, section };
+	const complete = ({ screenshotCount }) => {
+		const completion = result({ screenshotCount });
+		if (completion.status === "failed") {
+			throw new BrowserDiagnosticFailure(report());
+		}
+		return completion;
+	};
+
+	return { abort, complete, expect, report, requireCondition, result, section };
 }

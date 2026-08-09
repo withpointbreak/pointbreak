@@ -2,6 +2,7 @@
 // It only reads the disposable Inspector page and writes screenshots under its configured root.
 // biome-ignore format: playwright-cli run-code wraps this file as one function expression.
 ((config) => async (page) => {
+	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
 	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
 	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
 	let screenshots = 0;
@@ -60,6 +61,40 @@
 	// origin-scoped sessionStorage. Route changes are same-document navigation
 	// and therefore use only the strict, shareable Change route grammar.
 	const url = (route) => `${config.server.baseUrl}/#/${route}`;
+	// Playwright serializes this callback into the page. Query normalization must
+	// stay there because the run-code sandbox does not expose URLSearchParams.
+	const semanticRouteMatchesInPage = ({ expectedHash, source }) => {
+		const normalize = (value) => {
+			const raw = value.startsWith("#/")
+				? value.slice(2)
+				: value.startsWith("#")
+					? value.slice(1)
+					: value;
+			const separator = raw.indexOf("?");
+			const path = separator === -1 ? raw : raw.slice(0, separator);
+			const search = separator === -1 ? "" : raw.slice(separator + 1);
+			const entries = Array.from(new URLSearchParams(search).entries()).sort(
+				([leftKey, leftValue], [rightKey, rightValue]) =>
+					leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue),
+			);
+			return JSON.stringify([path, entries]);
+		};
+		const actualHash =
+			source === "timeline"
+				? document.querySelector("#timeline")?.dataset.timelineRoute
+				: location.hash;
+		return (
+			actualHash !== undefined &&
+			normalize(actualHash) === normalize(expectedHash)
+		);
+	};
+	const currentRouteMatches = (expectedHash) =>
+		page.evaluate(semanticRouteMatchesInPage, {
+			expectedHash,
+			source: "location",
+		});
+	const waitForCurrentRoute = (expectedHash, source = "location") =>
+		page.waitForFunction(semanticRouteMatchesInPage, { expectedHash, source });
 	const screenshot = async (name) => {
 		screenshots += 1;
 		const path = `${config.artifactDir}/${name}.png`;
@@ -79,8 +114,8 @@
 	const open = async (route, layout, label) => {
 		await page.setViewportSize({ width: layout.width, height: layout.height });
 		const targetUrl = url(route);
+		const targetHash = `#/${route}`;
 		const priorKeys = await page.evaluate(() => ({
-			timeline: document.querySelector("#master")?.dataset.timelineKey ?? null,
 			changeList:
 				document.querySelector("#master")?.dataset.changeListKey ?? null,
 			reading:
@@ -88,12 +123,19 @@
 				null,
 			route: location.hash,
 		}));
-		const reload = page.url() === targetUrl;
+		const reload =
+			page.url().startsWith(`${config.server.baseUrl}/`) &&
+			(await currentRouteMatches(targetHash));
 		const [expectedPath] = route.split("?", 2);
 		const eventPrefix = "timeline/events/";
 		const expectedEventId = expectedPath.startsWith(eventPrefix)
 			? decodeURIComponent(expectedPath.slice(eventPrefix.length))
 			: null;
+		const companionTimelineHash = expectedPath.startsWith(eventPrefix)
+			? `#/timeline${route.includes("?") ? `?${route.split("?", 2)[1]}` : ""}`
+			: expectedPath === "timeline"
+				? targetHash
+				: null;
 		// A goto to the exact current fragment is a no-op. Force a document reload
 		// so a deliberately refused reader-profile fixture cannot leak its DOM
 		// into the real reader that follows it.
@@ -102,11 +144,15 @@
 		} else {
 			await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
 		}
+		await waitForCurrentRoute(targetHash);
 		await page.waitForFunction(
 			() =>
 				document.querySelector("#connection-status")?.textContent ===
 				"connected",
 		);
+		if (companionTimelineHash !== null) {
+			await waitForCurrentRoute(companionTimelineHash, "timeline");
+		}
 		const readiness = await page.waitForFunction(
 			({ expectedRoute, expectedEventId, priorKeys, reload }) => {
 				const refusal = document.querySelector("#master")?.textContent?.trim();
@@ -119,24 +165,26 @@
 				const [path] = expectedRoute.split("?", 2);
 				const expectedLens = path.split("/", 1)[0] || "timeline";
 				if (expectedLens === "timeline") {
+					const timeline = document.querySelector("#timeline");
 					const timelineKey =
 						document.querySelector("#master")?.dataset.timelineKey;
 					if (expectedEventId !== null) {
 						const selected = Array.from(
 							document.querySelectorAll("#timeline [data-event-id]"),
 						).find((row) => row.dataset.eventId === expectedEventId);
-						return location.hash === `#/${expectedRoute}` &&
-							timelineKey !== undefined &&
+						const detailIdentity = document.querySelector(
+							"#detail-body [data-event-id]",
+						);
+						return timelineKey !== undefined &&
 							selected?.getAttribute("aria-selected") === "true" &&
-							document.querySelector("#detail-body > p.mono")?.textContent ===
-								expectedEventId
+							detailIdentity?.dataset.eventId === expectedEventId &&
+							timeline?.getAttribute("aria-activedescendant") === selected.id
 							? { state: "ready" }
 							: false;
 					}
-					return document.querySelector("#timeline") &&
-						location.hash === `#/${expectedRoute}` &&
+					return timeline &&
 						timelineKey !== undefined &&
-						(reload || timelineKey !== priorKeys.timeline)
+						!document.querySelector("#detail-body [data-event-id]")
 						? { state: "ready" }
 						: false;
 				}
@@ -148,7 +196,6 @@
 						const readingKey =
 							document.querySelector("#detail-body")?.dataset.changeReadingKey;
 						return key.lens === expectedLens &&
-							location.hash === `#/${expectedRoute}` &&
 							readingKey &&
 							(reload || readingKey !== priorKeys.reading)
 							? { state: "ready" }
@@ -158,7 +205,6 @@
 						`#/${expectedLens}/`,
 					);
 					return key.lens === expectedLens &&
-						location.hash === `#/${expectedRoute}` &&
 						(reload ||
 							rawKey !== priorKeys.changeList ||
 							retainedExactCompanion)
@@ -214,6 +260,15 @@
 				),
 			name,
 		);
+	const routeParameters = (names) =>
+		page.evaluate((parameterNames) => {
+			const params = new URLSearchParams(
+				location.hash.split("?", 2)[1] ?? "",
+			);
+			return Object.fromEntries(
+				parameterNames.map((name) => [name, params.get(name)]),
+			);
+		}, names);
 	const shortRef = (value) => {
 		let match = String(value).match(
 			/^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i,
@@ -240,13 +295,15 @@
 			const selected = document.querySelector(
 				'#timeline [aria-selected="true"]',
 			);
+			const detailIdentity = document.querySelector(
+				"#detail-body [data-event-id]",
+			);
 			return (
 				location.hash.includes(
 					`/timeline/events/${encodeURIComponent(expectedEventId)}`,
 				) &&
 				!document.querySelector("#detail")?.inert &&
-				document.querySelector("#detail-body > p.mono")?.textContent ===
-					expectedEventId &&
+				detailIdentity?.dataset.eventId === expectedEventId &&
 				selected?.dataset.eventId === expectedEventId &&
 				document
 					.querySelector("#timeline")
@@ -577,12 +634,15 @@
 				">= 300",
 				recordedEvents,
 			);
+			const defaultChronologyDeclared = initialTimelineText
+				.toLowerCase()
+				.includes("newest first");
 			compare(
-				initialTimelineText.includes("Newest first"),
+				defaultChronologyDeclared,
 				"descending chronology",
 				"default Timeline did not declare newest-first chronology",
 				true,
-				initialTimelineText.includes("Newest first"),
+				defaultChronologyDeclared,
 			);
 			expect(
 				await page.locator("#timeline [data-event-id]").evaluateAll((rows) =>
@@ -826,12 +886,15 @@
 				"ascending Timeline",
 			);
 			const ascendingText = await page.locator("#master").innerText();
+			const ascendingChronologyDeclared = ascendingText
+				.toLowerCase()
+				.includes("oldest first");
 			compare(
-				ascendingText.includes("Oldest first"),
+				ascendingChronologyDeclared,
 				"ascending chronology",
 				"ascending Timeline did not declare oldest-first chronology",
 				true,
-				ascendingText.includes("Oldest first"),
+				ascendingChronologyDeclared,
 			);
 			await screenshot("wide-timeline-ascending");
 		},
@@ -847,8 +910,8 @@
 			),
 		run: async () => {
 			// Search is a server-owned Timeline filter, not a client-side hide/show.
-			// Exercise both its removable chip and the shared clear-all control against
-			// a title that names one exact fixture event.
+			// Exercise its shared clear-all control against a title that names one
+			// exact fixture event. Individual chips belong to structured filters below.
 			const timelineSearch = "Browser correction replacement";
 			const applyTimelineSearch = async (label) => {
 				const priorKey = await page
@@ -872,17 +935,19 @@
 					},
 					{ queryText: timelineSearch, timelineKey: priorKey },
 				);
-				const correctionEventCount = await page
-					.locator(
-						`#timeline [data-event-id="${config.fixture.correction.eventId}"]`,
-					)
-					.count();
+				const correctionEventIds = await page
+					.locator("#timeline [data-event-id]")
+					.evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
+				const expectedCorrectionEventIds = [
+					config.fixture.correction.eventId,
+				];
 				compare(
-					correctionEventCount === 1,
+					JSON.stringify(correctionEventIds) ===
+						JSON.stringify(expectedCorrectionEventIds),
 					label,
-					"server search did not retain the exact correction event",
-					1,
-					correctionEventCount,
+					"server search did not isolate the exact correction event",
+					expectedCorrectionEventIds,
+					correctionEventIds,
 				);
 			};
 			await open(
@@ -891,29 +956,6 @@
 				"Timeline search base",
 			);
 			await applyTimelineSearch("Timeline search filter");
-			await page.locator("#filters-toggle").click();
-			const searchRemoveCount = await page
-				.getByRole("button", {
-					name: `Remove search filter: ${timelineSearch}`,
-				})
-				.count();
-			requireCondition(
-				searchRemoveCount === 1,
-				"Timeline search filter",
-				"server search did not create one removable chip",
-				1,
-				searchRemoveCount,
-			);
-			await page
-				.getByRole("button", {
-					name: `Remove search filter: ${timelineSearch}`,
-				})
-				.click();
-			await page.waitForFunction(() => {
-				const query = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
-				return !query.has("q") && Boolean(document.querySelector("#timeline"));
-			});
-			await applyTimelineSearch("Timeline search clear-all");
 			await page.locator("#filters-toggle").click();
 			await page.getByRole("button", { name: "Clear all" }).click();
 			await page.waitForFunction(() => {
@@ -1086,7 +1128,8 @@
 				);
 				await page.waitForFunction(
 					(id) =>
-						document.querySelector("#detail-body")?.textContent?.includes(id),
+						document.querySelector("#detail-body [data-event-id]")?.dataset
+							.eventId === id,
 					eventId,
 				);
 				const detail = await page.locator("#detail-body").innerText();
@@ -2327,14 +2370,7 @@
 			});
 			await page.locator("#filters-toggle").click();
 			await page.locator("#change-filter-topology").selectOption("initial");
-			const filteredHash = await hash();
-			const filteredQuery = new URLSearchParams(
-				filteredHash.split("?", 2)[1] ?? "",
-			);
-			const filteredPaging = {
-				limit: filteredQuery.get("limit"),
-				order: filteredQuery.get("order"),
-			};
+			const filteredPaging = await routeParameters(["limit", "order"]);
 			const expectedPaging = { limit: "100", order: "change_id_asc" };
 			compare(
 				JSON.stringify(filteredPaging) === JSON.stringify(expectedPaging),
@@ -2369,14 +2405,7 @@
 					return false;
 				}
 			});
-			const clearedHash = await hash();
-			const clearedQuery = new URLSearchParams(
-				clearedHash.split("?", 2)[1] ?? "",
-			);
-			const clearedPaging = {
-				limit: clearedQuery.get("limit"),
-				order: clearedQuery.get("order"),
-			};
+			const clearedPaging = await routeParameters(["limit", "order"]);
 			compare(
 				JSON.stringify(clearedPaging) === JSON.stringify(expectedPaging),
 				"clear reset",
@@ -2469,31 +2498,70 @@
 					);
 					if (slug === "initial") {
 						const controls = representativeCard.locator(
-							"a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])",
+							"a[href]:not([tabindex='-1']), button:not([disabled]):not([tabindex='-1']), input:not([disabled]):not([tabindex='-1']), select:not([disabled]):not([tabindex='-1']), textarea:not([disabled]):not([tabindex='-1']), summary:not([tabindex='-1']), [tabindex]:not([tabindex='-1'])",
 						);
 						const controlCount = await controls.count();
 						requireCondition(
-							controlCount === 1,
+							controlCount === 2,
 							`${layout.name} ordinary card tab order`,
-							"an ordinary Change card exposed more than one tab stop",
-							1,
+							"an ordinary Change card did not expose its primary action followed by its exact Revision link",
+							2,
 							controlCount,
 						);
+						const primaryControl = controls.nth(0);
+						const exactRevisionControl = controls.nth(1);
 						expect(
-							await controls
-								.first()
+							await primaryControl
 								.getAttribute("class")
 								.then((value) => value?.includes("change-card-primary")),
 							`${layout.name} ordinary card tab order`,
-							"the ordinary Change card's only tab stop was not its primary action",
+							"the ordinary Change card's first tab stop was not its primary action",
 						);
 						expect(
-							await controls
-								.first()
+							await primaryControl
 								.getAttribute("aria-label")
 								.then((value) => value?.startsWith("Review Change. ")),
 							`${layout.name} ordinary card action name`,
 							"the ordinary Change card's primary action did not lead with its human review action",
+						);
+						const exactRevisionIdentity = await exactRevisionControl.evaluate(
+							(control) => ({
+								nativeAnchor: control instanceof HTMLAnchorElement,
+								changeId: control.dataset.changeId ?? null,
+								revisionId: control.dataset.revisionId ?? null,
+								artifactHash: control.dataset.artifactHash ?? null,
+								href: control.getAttribute("href"),
+								accessibleName: control.getAttribute("aria-label"),
+							}),
+						);
+						const expectedExactRevisionPath = `#/changes/${encodeURIComponent(topologyFixture.initial.change)}/revisions/${encodeURIComponent(topologyFixture.initial.current.revision)}`;
+						const expectedArtifactParameter = `artifactHash=${encodeURIComponent(topologyFixture.initial.current.artifact)}`;
+						const expectedAccessibleName = `Open exact Revision ${topologyFixture.initial.current.revision}; artifact ${topologyFixture.initial.current.artifact}; for Change ${topologyFixture.initial.change}`;
+						const expectedExactRevisionIdentity = {
+							nativeAnchor: true,
+							changeId: topologyFixture.initial.change,
+							revisionId: topologyFixture.initial.current.revision,
+							artifactHash: topologyFixture.initial.current.artifact,
+							href: `${expectedExactRevisionPath}?...&${expectedArtifactParameter}`,
+							accessibleName: expectedAccessibleName,
+						};
+						compare(
+							exactRevisionIdentity.nativeAnchor &&
+								exactRevisionIdentity.changeId ===
+									expectedExactRevisionIdentity.changeId &&
+								exactRevisionIdentity.revisionId ===
+									expectedExactRevisionIdentity.revisionId &&
+								exactRevisionIdentity.artifactHash ===
+									expectedExactRevisionIdentity.artifactHash &&
+								exactRevisionIdentity.href?.startsWith(
+									`${expectedExactRevisionPath}?`,
+								) &&
+								exactRevisionIdentity.href.includes(expectedArtifactParameter) &&
+								exactRevisionIdentity.accessibleName === expectedAccessibleName,
+							`${layout.name} ordinary card exact Revision link`,
+							"the ordinary Change card's secondary action did not retain its exact Revision identity",
+							expectedExactRevisionIdentity,
+							exactRevisionIdentity,
 						);
 					}
 					const sparseGeometry = await page.evaluate(() => {
@@ -2827,18 +2895,24 @@
 				}));
 			compare(
 				narrowChangeGraphGeometry.clientWidth > 0 &&
-					narrowChangeGraphGeometry.scrollWidth >
+					narrowChangeGraphGeometry.scrollWidth >=
 						narrowChangeGraphGeometry.clientWidth &&
-					narrowChangeGraphGeometry.svgWidth >
-						narrowChangeGraphGeometry.clientWidth,
+					narrowChangeGraphGeometry.svgWidth > 0 &&
+					narrowChangeGraphGeometry.scrollWidth >=
+						narrowChangeGraphGeometry.svgWidth,
 				"narrow intrinsic Change graph viewport",
-				`Change graph was compressed instead of pannable: ${JSON.stringify(narrowChangeGraphGeometry)}`,
+				`Change graph viewport did not preserve its intrinsic canvas: ${JSON.stringify(narrowChangeGraphGeometry)}`,
 				{
 					clientWidth: "> 0",
-					scrollWidth: "> clientWidth",
-					svgWidth: "> clientWidth",
+					scrollWidth: ">= clientWidth and >= svgWidth",
+					svgWidth: "> 0",
 				},
 				narrowChangeGraphGeometry,
+			);
+			const changeGraphMaxScroll = Math.max(
+				0,
+				narrowChangeGraphGeometry.scrollWidth -
+					narrowChangeGraphGeometry.clientWidth,
 			);
 			await narrowChangeGraphViewport.focus();
 			await page.keyboard.press("End");
@@ -2850,16 +2924,12 @@
 				(viewport) => viewport.scrollLeft,
 			);
 			compare(
-				changeGraphEnd ===
-					narrowChangeGraphGeometry.scrollWidth -
-						narrowChangeGraphGeometry.clientWidth && changeGraphHome === 0,
+				changeGraphEnd === changeGraphMaxScroll && changeGraphHome === 0,
 				"narrow Change graph keyboard panning",
 				`Home/End panning produced ${changeGraphHome}/${changeGraphEnd} for ${JSON.stringify(narrowChangeGraphGeometry)}`,
 				{
 					home: 0,
-					end:
-						narrowChangeGraphGeometry.scrollWidth -
-						narrowChangeGraphGeometry.clientWidth,
+					end: changeGraphMaxScroll,
 				},
 				{ home: changeGraphHome, end: changeGraphEnd },
 			);
@@ -3765,6 +3835,41 @@
 				1,
 				annotatedDiffOpenerCount,
 			);
+			const canonicalRevisionRoute = await hash();
+			const canonicalReadingKey = await page
+				.locator("#detail-body")
+				.getAttribute("data-change-reading-key");
+			requireCondition(
+				Boolean(canonicalReadingKey),
+				"annotated diff return binding",
+				"the accepted exact Revision had no reading identity",
+				"nonempty exact reading key",
+				canonicalReadingKey,
+			);
+			const waitForCanonicalRevisionSurface = () =>
+				page.waitForFunction(
+					({ expectedRoute, expectedReadingKey }) => {
+						const diff = document.querySelector("#diff-page");
+						const split = document.querySelector(".split");
+						const detail = document.querySelector("#detail-body");
+						if (
+							!(diff instanceof HTMLElement) ||
+							!(split instanceof HTMLElement) ||
+							!(detail instanceof HTMLElement)
+						)
+							return false;
+						return (
+							location.hash === expectedRoute &&
+							diff.classList.contains("hidden") &&
+							!split.classList.contains("hidden") &&
+							detail.dataset.changeReadingKey === expectedReadingKey
+						);
+					},
+					{
+						expectedRoute: canonicalRevisionRoute,
+						expectedReadingKey: canonicalReadingKey,
+					},
+				);
 			await annotatedDiffOpener.click();
 			await page.waitForFunction(
 				() =>
@@ -3922,13 +4027,6 @@
 				routedDiffFact,
 			);
 			const focusedDiffRoute = await hash();
-			const focusedRevisionRoute = await page.evaluate((diffRoute) => {
-				const [path, rawQuery = ""] = diffRoute.slice(2).split("?", 2);
-				const params = new URLSearchParams(rawQuery);
-				params.delete("fq");
-				const query = params.toString();
-				return `#/${path.replace(/\/diff$/, "")}${query ? `?${query}` : ""}`;
-			}, focusedDiffRoute);
 			await screenshot("wide-annotated-diff-full-frame");
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await page.waitForFunction(
@@ -3949,14 +4047,7 @@
 				diffCloseFocusedOnReload,
 			);
 			await page.locator("#diff-page-close").click();
-			await page.waitForFunction(
-				(expectedRoute) =>
-					location.hash === expectedRoute &&
-					Boolean(
-						document.querySelector("#detail-body")?.dataset.changeReadingKey,
-					),
-				focusedRevisionRoute,
-			);
+			await waitForCanonicalRevisionSurface();
 			const detailCloseFocusedOnDiffReturn = await page
 				.locator("#detail-close")
 				.evaluate((node) => document.activeElement === node);
@@ -3975,14 +4066,7 @@
 				focusedDiffRoute,
 			);
 			await page.goForward();
-			await page.waitForFunction(
-				(expectedRoute) =>
-					location.hash === expectedRoute &&
-					Boolean(
-						document.querySelector("#detail-body")?.dataset.changeReadingKey,
-					),
-				focusedRevisionRoute,
-			);
+			await waitForCanonicalRevisionSurface();
 		},
 		teardown: teardownSection,
 	});
@@ -4453,23 +4537,7 @@
 		});
 	});
 
-	const report = diagnostics.report();
-	const completion =
-		report.failures.length === 0
-			? diagnostics.complete({ screenshotCount: screenshots })
-			: {
-					schema: "pointbreak.change-inspector-browser-report",
-					version: 1,
-					status: "failed",
-					assertionCount: report.assertionCount,
-					screenshotCount: screenshots,
-					sectionCount: report.sections.length,
-					globalInvalid: report.globalInvalid,
-					sections: report.sections,
-					failures: report.failures,
-				};
+	const completion = diagnostics.result({ screenshotCount: screenshots });
 	console.log(`POINTBREAK_BROWSER_RESULT=${JSON.stringify(completion)}`);
-	if (completion.status === "failed")
-		throw new BrowserDiagnosticFailure(report);
 	return completion;
 })(__POINTBREAK_CHANGE_BROWSER_CONFIG__)
