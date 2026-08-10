@@ -562,11 +562,79 @@ pub enum StoreCapabilityStatus {
     },
 }
 
+/// One compact, bodyless member of the frozen Journal authority sets.
+///
+/// `key_digest` is the lowercase, unprefixed SHA-256 carrier address used by
+/// the Journal backend. The two content witnesses retain the canonical
+/// `sha256:` prefix used by `AuthorityCursorV2`. An absent event payload hash
+/// identifies a non-event authority record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JournalRecordIdentityV1 {
+    pub(crate) key_digest: String,
+    pub(crate) record_sha256: String,
+    pub(crate) event_payload_sha256: Option<String>,
+}
+
+impl JournalRecordIdentityV1 {
+    pub(crate) fn for_event(
+        logical_key: &str,
+        record_sha256: impl Into<String>,
+        event_id: &str,
+        event_payload_sha256: impl Into<String>,
+    ) -> Result<Self> {
+        let key_digest = sha256_bytes_hex(logical_key.as_bytes());
+        let expected_event_id = format!("evt:sha256:{key_digest}");
+        if event_id != expected_event_id {
+            return capability_error(
+                "authority event identity does not match its logical carrier key",
+            );
+        }
+        let identity = Self {
+            key_digest,
+            record_sha256: record_sha256.into(),
+            event_payload_sha256: Some(event_payload_sha256.into()),
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !is_lower_hex_sha256(&self.key_digest) {
+            return capability_error("authority record key digest is not canonical SHA-256");
+        }
+        if !is_prefixed_sha256(&self.record_sha256) {
+            return capability_error("authority record witness is not canonical SHA-256");
+        }
+        if self
+            .event_payload_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_prefixed_sha256(hash))
+        {
+            return capability_error("authority event payload witness is not canonical SHA-256");
+        }
+        Ok(())
+    }
+}
+
+/// Result of the bounded activation/completion carrier validation used by a
+/// receipt-backed current-generation open. It contains identities and byte
+/// witnesses only, never carrier bodies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoundedChangeCapabilityPairV1 {
+    pub(crate) activation_id: String,
+    pub(crate) manifest_hash: String,
+    pub(crate) completion_id: String,
+    pub(crate) minimum_reader_profile: String,
+    pub(crate) activation_record_sha256: String,
+    pub(crate) completion_record_sha256: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct JournalInspection {
     pub(crate) status: StoreCapabilityStatus,
     pub(crate) cursor: AuthorityCursorV2,
     pub(crate) minimum_reader_profile: Option<String>,
+    pub(crate) authority_record_identities: Vec<JournalRecordIdentityV1>,
     #[cfg(any(test, feature = "bench"))]
     pub(crate) record_entries: Vec<JournalEntry>,
     pub(crate) event_entries: Vec<JournalEntry>,
@@ -681,6 +749,66 @@ struct JournalRecordSetEntry {
     record_hash: String,
 }
 
+/// Point-read and fully validate the two immutable capability records bound by
+/// a published Change reader receipt. This function never enumerates the
+/// Journal and never retains carrier bytes in its result.
+pub(crate) fn validate_bounded_change_capability_pair(
+    journal: &dyn Journal,
+    activation_logical_key: &str,
+    completion_logical_key: &str,
+) -> Result<BoundedChangeCapabilityPairV1> {
+    let activation_bytes = journal
+        .read_event_bytes(activation_logical_key)?
+        .ok_or_else(|| {
+            ShoreError::Message(format!(
+                "published capability activation carrier is absent: {activation_logical_key}"
+            ))
+        })?;
+    let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&activation_bytes)?;
+    activation.validate()?;
+    if activation.logical_key() != activation_logical_key {
+        return capability_error(
+            "published capability activation does not match its bounded logical key",
+        );
+    }
+
+    let completion_bytes = journal
+        .read_event_bytes(completion_logical_key)?
+        .ok_or_else(|| {
+            ShoreError::Message(format!(
+                "published bulk-adoption completion carrier is absent: {completion_logical_key}"
+            ))
+        })?;
+    let completion: BulkAdoptionCompletionV1 = serde_json::from_slice(&completion_bytes)?;
+    completion.validate()?;
+    if completion.logical_key() != completion_logical_key {
+        return capability_error(
+            "published bulk-adoption completion does not match its bounded logical key",
+        );
+    }
+    if completion.activation_id != activation.activation_id
+        || completion.bulk_adoption_manifest_hash != activation.bulk_adoption_manifest_hash
+    {
+        return capability_error(
+            "bounded capability activation/completion identity or manifest linkage mismatch",
+        );
+    }
+    let expected_coverage =
+        reserved_record_set_hash(&activation.bulk_adoption_manifest.reserved_records)?;
+    if completion.covered_record_set_hash != expected_coverage {
+        return capability_error("bounded bulk-adoption completion coverage mismatch");
+    }
+
+    Ok(BoundedChangeCapabilityPairV1 {
+        activation_id: activation.activation_id,
+        manifest_hash: activation.bulk_adoption_manifest_hash,
+        completion_id: completion.completion_id,
+        minimum_reader_profile: activation.minimum_reader_profile,
+        activation_record_sha256: format!("sha256:{}", sha256_bytes_hex(&activation_bytes)),
+        completion_record_sha256: format!("sha256:{}", sha256_bytes_hex(&completion_bytes)),
+    })
+}
+
 pub(crate) fn inspect_journal_records(journal: &dyn Journal) -> Result<JournalInspection> {
     route_journal_entries(journal.list_record_entries()?)
 }
@@ -708,12 +836,14 @@ fn route_unactivated_journal_entries(entries: Vec<JournalEntry>) -> Result<Journ
     let mut event_entries = Vec::new();
     let mut event_probes = Vec::new();
     let mut record_set = Vec::with_capacity(entries.len());
+    let mut authority_record_identities = Vec::with_capacity(entries.len());
 
     for entry in entries {
         record_set.push(JournalRecordSetEntry {
             key_digest: entry.key_digest.clone(),
             record_hash: format!("sha256:{}", sha256_bytes_hex(&entry.bytes)),
         });
+        let mut authority_identity = journal_record_identity(&entry, None)?;
 
         if let Some(code) = serde_json::from_slice::<serde_json::Value>(&entry.bytes)
             .ok()
@@ -739,12 +869,14 @@ fn route_unactivated_journal_entries(entries: Vec<JournalEntry>) -> Result<Journ
             Ok(_) => {
                 let probe: EventProbe = serde_json::from_slice(&entry.bytes)?;
                 validate_event_probe(&probe, &entry.key_digest)?;
+                authority_identity.event_payload_sha256 = Some(probe.payload_hash.clone());
                 event_probes.push(probe);
                 event_entries.push(entry);
             }
             Err(ShoreError::UnsupportedEventType(_) | ShoreError::UnsupportedEventEnvelope(_)) => {}
             Err(error) => return Err(error),
         }
+        authority_record_identities.push(authority_identity);
     }
 
     record_set.sort_by(|left, right| left.key_digest.cmp(&right.key_digest));
@@ -769,6 +901,7 @@ fn route_unactivated_journal_entries(entries: Vec<JournalEntry>) -> Result<Journ
         status: StoreCapabilityStatus::MigrationRequired,
         cursor,
         minimum_reader_profile: None,
+        authority_record_identities,
         #[cfg(any(test, feature = "bench"))]
         record_entries,
         event_entries,
@@ -905,20 +1038,18 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
     let mut event_probes = Vec::new();
     let mut activations = Vec::new();
     let mut completions = Vec::new();
-    let mut record_set = Vec::new();
+    let mut authority_record_identities = Vec::new();
 
     for entry in entries {
         let probe: SchemaProbe = serde_json::from_slice(&entry.bytes).map_err(|error| {
             ShoreError::Message(format!("Journal record has no valid typed schema: {error}"))
         })?;
-        record_set.push(JournalRecordSetEntry {
-            key_digest: entry.key_digest.clone(),
-            record_hash: format!("sha256:{}", sha256_bytes_hex(&entry.bytes)),
-        });
         match probe.schema.as_str() {
             "shore.event" => {
                 let event: EventProbe = serde_json::from_slice(&entry.bytes)?;
                 validate_event_probe(&event, &entry.key_digest)?;
+                authority_record_identities
+                    .push(journal_record_identity(&entry, Some(&event.payload_hash))?);
                 event_probes.push(event);
                 event_entries.push(entry);
             }
@@ -926,29 +1057,24 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
                 let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&entry.bytes)?;
                 activation.validate()?;
                 validate_logical_key_digest(&activation.logical_key(), &entry.key_digest)?;
+                authority_record_identities.push(journal_record_identity(&entry, None)?);
                 activations.push(activation);
             }
             COMPLETION_SCHEMA_V1 => {
                 let completion: BulkAdoptionCompletionV1 = serde_json::from_slice(&entry.bytes)?;
                 completion.validate()?;
                 validate_logical_key_digest(&completion.logical_key(), &entry.key_digest)?;
+                authority_record_identities.push(journal_record_identity(&entry, None)?);
                 completions.push(completion);
             }
             other => return capability_error(format!("unknown Journal record schema {other:?}")),
         }
     }
 
-    record_set.sort_by(|left, right| left.key_digest.cmp(&right.key_digest));
     event_probes.sort_by(|left, right| {
         (left.event_id.as_str(), left.payload_hash.as_str())
             .cmp(&(right.event_id.as_str(), right.payload_hash.as_str()))
     });
-    let event_set_hash = event_set_hash(&event_probes)?;
-    let journal_record_set_hash =
-        sha256_json_prefixed(&serde_json::to_value(JournalRecordSetMaterial {
-            schema: JOURNAL_RECORD_SET_SCHEMA_V1,
-            records: record_set,
-        })?)?;
 
     if activations.is_empty() {
         if !completions.is_empty()
@@ -958,24 +1084,21 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
         {
             return capability_error("Change-cohort records exist without a capability activation");
         }
-        let cursor = authority_cursor(
-            event_entries.len(),
-            event_entries.len(),
-            journal_record_set_hash,
-            event_set_hash,
-            &[],
+        let cursor = authority_cursor_from_record_identities(
+            &authority_record_identities,
+            capability_set_hash(&[])?,
         )?;
         return Ok(JournalInspection {
             status: StoreCapabilityStatus::MigrationRequired,
             cursor,
             minimum_reader_profile: None,
+            authority_record_identities,
             #[cfg(any(test, feature = "bench"))]
             record_entries,
             event_entries,
         });
     }
 
-    let activation_count = activations.len();
     let active = validate_activation_chain(&activations)?;
     if completions.len() > 1 {
         return capability_error("multiple bulk-adoption completion records are unsupported");
@@ -994,17 +1117,15 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
             manifest_hash: active.bulk_adoption_manifest_hash.clone(),
         }
     };
-    let cursor = authority_cursor(
-        event_entries.len() + activation_count + completions.len(),
-        event_entries.len(),
-        journal_record_set_hash,
-        event_set_hash,
-        &active.required_capabilities,
+    let cursor = authority_cursor_from_record_identities(
+        &authority_record_identities,
+        capability_set_hash(&active.required_capabilities)?,
     )?;
     Ok(JournalInspection {
         status,
         cursor,
         minimum_reader_profile: Some(active.minimum_reader_profile.clone()),
+        authority_record_identities,
         #[cfg(any(test, feature = "bench"))]
         record_entries,
         event_entries,
@@ -1169,6 +1290,91 @@ fn is_reserved_event_code(code: &str) -> bool {
         .any(|family| family.event_type_code == code)
 }
 
+fn journal_record_identity(
+    entry: &JournalEntry,
+    event_payload_sha256: Option<&str>,
+) -> Result<JournalRecordIdentityV1> {
+    let identity = JournalRecordIdentityV1 {
+        key_digest: entry.key_digest.clone(),
+        record_sha256: format!("sha256:{}", sha256_bytes_hex(&entry.bytes)),
+        event_payload_sha256: event_payload_sha256.map(str::to_owned),
+    };
+    identity.validate()?;
+    Ok(identity)
+}
+
+/// Reproduce the frozen authority cursor from bodyless record identities.
+///
+/// The capability-set hash is publication-bound independently; record and
+/// event set ordering and JSON material remain byte-for-byte identical to the
+/// complete Journal router.
+pub(crate) fn authority_cursor_from_record_identities(
+    identities: &[JournalRecordIdentityV1],
+    capability_set_hash: impl Into<String>,
+) -> Result<AuthorityCursorV2> {
+    let capability_set_hash = capability_set_hash.into();
+    if !is_prefixed_sha256(&capability_set_hash) {
+        return capability_error("authority capability-set hash is not canonical SHA-256");
+    }
+
+    let mut identities = identities.to_vec();
+    for identity in &identities {
+        identity.validate()?;
+    }
+    identities.sort_by(|left, right| left.key_digest.cmp(&right.key_digest));
+    if identities
+        .windows(2)
+        .any(|pair| pair[0].key_digest == pair[1].key_digest)
+    {
+        return capability_error("authority record identity set contains a duplicate carrier key");
+    }
+
+    let records = identities
+        .iter()
+        .map(|identity| JournalRecordSetEntry {
+            key_digest: identity.key_digest.clone(),
+            record_hash: identity.record_sha256.clone(),
+        })
+        .collect::<Vec<_>>();
+    let journal_record_set_hash =
+        sha256_json_prefixed(&serde_json::to_value(JournalRecordSetMaterial {
+            schema: JOURNAL_RECORD_SET_SCHEMA_V1,
+            records,
+        })?)?;
+
+    let mut event_pairs = identities
+        .iter()
+        .filter_map(|identity| {
+            identity.event_payload_sha256.as_deref().map(|payload| {
+                (
+                    format!("evt:sha256:{}", identity.key_digest),
+                    payload.to_owned(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    event_pairs.sort();
+    let event_set_hash = sha256_json_prefixed(&serde_json::to_value(EventSetMaterial {
+        schema: EVENT_SET_SCHEMA_V1,
+        events: event_pairs
+            .iter()
+            .map(|(event_id, payload_hash)| EventSetEntry {
+                event_id,
+                payload_hash,
+            })
+            .collect(),
+    })?)?;
+
+    Ok(AuthorityCursorV2 {
+        schema: AUTHORITY_CURSOR_SCHEMA_V2.to_owned(),
+        journal_record_count: u64::try_from(identities.len()).unwrap_or(u64::MAX),
+        event_count: u64::try_from(event_pairs.len()).unwrap_or(u64::MAX),
+        journal_record_set_hash,
+        event_set_hash,
+        capability_set_hash,
+    })
+}
+
 fn authority_cursor(
     record_count: usize,
     event_count: usize,
@@ -1288,6 +1494,13 @@ fn is_prefixed_sha256(value: &str) -> bool {
     };
     hex.len() == 64
         && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
@@ -1839,6 +2052,7 @@ fn qualification_event<P: crate::session::event::EventPayload>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::session::store::backend::StoreBackend;
 
     #[test]
@@ -1941,6 +2155,67 @@ mod tests {
         );
         assert!(inspection.cursor.journal_record_count > inspection.cursor.event_count);
         assert!(!inspection.event_entries.is_empty());
+        assert_eq!(
+            authority_cursor_from_record_identities(
+                &inspection.authority_record_identities,
+                inspection.cursor.capability_set_hash.clone(),
+            )
+            .unwrap(),
+            inspection.cursor
+        );
+        assert_eq!(
+            inspection.authority_record_identities.len() as u64,
+            inspection.cursor.journal_record_count
+        );
+        assert_eq!(
+            inspection
+                .authority_record_identities
+                .iter()
+                .filter(|identity| identity.event_payload_sha256.is_some())
+                .count() as u64,
+            inspection.cursor.event_count
+        );
+    }
+
+    #[test]
+    fn bounded_capability_pair_uses_exactly_two_point_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let inspection = inspect_journal_records(backend.journal().as_ref()).unwrap();
+        let StoreCapabilityStatus::Ready {
+            activation_id,
+            manifest_hash,
+            completion_id,
+        } = &inspection.status
+        else {
+            panic!("completed fixture must expose ready capability authority");
+        };
+        let completion_logical_key = format!("bulk_adoption_completion:{completion_id}");
+        let scope = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
+        let pair = {
+            let _guard = scope.enter();
+            validate_bounded_change_capability_pair(
+                backend.journal().as_ref(),
+                ROOT_ACTIVATION_LOGICAL_KEY_V1,
+                &completion_logical_key,
+            )
+            .unwrap()
+        };
+
+        assert_eq!(&pair.activation_id, activation_id);
+        assert_eq!(&pair.manifest_hash, manifest_hash);
+        assert_eq!(&pair.completion_id, completion_id);
+        assert_eq!(
+            pair.minimum_reader_profile,
+            REVIEW_CHANGE_REVISION_COHORT_V1
+        );
+        assert!(is_prefixed_sha256(&pair.activation_record_sha256));
+        assert!(is_prefixed_sha256(&pair.completion_record_sha256));
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(counters.carrier_opens, 2);
     }
 
     #[test]

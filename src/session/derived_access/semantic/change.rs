@@ -37,6 +37,7 @@ pub(crate) const READER_PROJECTION_CHECKPOINT_SCHEMA_V1: &str =
 pub(crate) const CHANGE_GENERATION_STAMP_SCHEMA_V1: &str =
     "pointbreak.derived-change-generation-stamp.v1";
 const CHANGE_SEMANTIC_RESOURCE: &str = "change-semantic.json";
+pub(crate) const CHANGE_READER_PROFILE_RESOURCE_V3: &str = "change-reader-profile.json";
 const CURSOR_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const CURSOR_SCHEMA_VERSION_V1: u32 = 4;
 const LOCATOR_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-locator.v1";
@@ -553,6 +554,185 @@ pub(crate) fn reader_projection_checkpoint_sha256_v1(
 
 pub(crate) fn reader_document_registry_sha256_v1() -> ChangeReaderContractResult<String> {
     contract_sha256(&crate::documents::change_revision_document_registry())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_change_reader_profile_receipt_v3(
+    generation_id: &str,
+    store_id: &str,
+    inspection: &JournalInspection,
+    activation_record_sha256: String,
+    completion_record_sha256: String,
+    platform_stamp: JournalChangeStamp,
+    truth_cursor: TruthCursor,
+    events: &[ShoreEvent],
+    semantic_snapshot: &SemanticSnapshot,
+) -> Result<ChangeReaderProfileReceiptV3> {
+    let StoreCapabilityStatus::Ready {
+        activation_id,
+        manifest_hash,
+        completion_id,
+    } = &inspection.status
+    else {
+        return Err(ShoreError::Message(
+            "Change reader publication requires completed capability authority".to_owned(),
+        ));
+    };
+    if inspection.minimum_reader_profile.as_deref() != Some(REVIEW_CHANGE_REVISION_COHORT_V1) {
+        return Err(ShoreError::Message(
+            "completed Change authority has the wrong minimum reader profile".to_owned(),
+        ));
+    }
+    if inspection.cursor.event_count != truth_cursor.sequence {
+        return Err(ShoreError::Message(format!(
+            "Change authority event count {} differs from truth cursor {}",
+            inspection.cursor.event_count, truth_cursor.sequence
+        )));
+    }
+
+    let locator_checkpoint = publication_locator_checkpoint(truth_cursor)
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let semantic_checkpoint = publication_applied_checkpoint(
+        SEMANTIC_PROFILE_ID_V1,
+        SEMANTIC_SCHEMA_VERSION_V1,
+        truth_cursor,
+    )
+    .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let product_checkpoint = publication_applied_checkpoint(
+        PRODUCT_HISTORY_PROFILE_ID_V1,
+        PRODUCT_HISTORY_SCHEMA_VERSION_V1,
+        truth_cursor,
+    )
+    .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let projection = crate::session::project_changes(events)?;
+    let document_projection = crate::session::project_change_documents(events)?;
+    let mut receipt = ChangeReaderProfileReceiptV3 {
+        schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V3.to_owned(),
+        version: 3,
+        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
+        publication_generation_id: generation_id.to_owned(),
+        publication_store_id: store_id.to_owned(),
+        publication_profile: DerivedAccessProfile::SqliteWalBodylessV1,
+        publication_activation_id: activation_id.clone(),
+        publication_manifest_hash: manifest_hash.clone(),
+        publication_completion_id: completion_id.clone(),
+        publication_activation_carrier: CapabilityCarrierBindingV1::new(
+            "store_capability_activation:review_change_revision_v1:root",
+            activation_record_sha256,
+        ),
+        publication_completion_carrier: CapabilityCarrierBindingV1::new(
+            format!("bulk_adoption_completion:{completion_id}"),
+            completion_record_sha256,
+        ),
+        publication_authority_cursor: inspection.cursor.clone(),
+        publication_platform_stamp: platform_stamp,
+        publication_truth_cursor: truth_cursor,
+        publication_cursor_identity: ReaderSchemaIdentityV1 {
+            profile_id: CURSOR_PROFILE_ID_V1.to_owned(),
+            schema_version: CURSOR_SCHEMA_VERSION_V1,
+        },
+        publication_locator_checkpoint: locator_checkpoint,
+        publication_semantic_checkpoint: semantic_checkpoint,
+        publication_product_checkpoint: product_checkpoint,
+        projector_versions: reader_projector_versions_v1(),
+        document_versions: reader_document_versions_v1(),
+        fact_availability: fact_availability(events),
+        resource_availability: resource_availability(events)?,
+        projection_sha256: sha256_json_prefixed(&serde_json::to_value(projection)?)?,
+        document_projection_sha256: sha256_json_prefixed(&serde_json::to_value(
+            document_projection,
+        )?)?,
+        semantic_receipt: semantic_snapshot.semantic_receipt.clone(),
+        reader_document_registry_sha256: reader_document_registry_sha256_v1()
+            .map_err(|error| ShoreError::Message(error.to_string()))?,
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = change_reader_profile_receipt_sha256_v3(&receipt)
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    receipt
+        .validate()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    Ok(receipt)
+}
+
+pub(crate) fn initial_reader_projection_checkpoint_v1(
+    receipt: &ChangeReaderProfileReceiptV3,
+) -> ChangeReaderContractResult<ReaderProjectionCheckpointV1> {
+    receipt.validate()?;
+    let mut checkpoint = ReaderProjectionCheckpointV1 {
+        schema: READER_PROJECTION_CHECKPOINT_SCHEMA_V1.to_owned(),
+        version: 1,
+        store_id: receipt.publication_store_id.clone(),
+        reader_receipt_sha256: receipt.receipt_sha256.clone(),
+        authority_cursor: receipt.publication_authority_cursor.clone(),
+        truth_cursor: receipt.publication_truth_cursor,
+        cursor_identity: receipt.publication_cursor_identity.clone(),
+        locator_checkpoint: receipt.publication_locator_checkpoint.clone(),
+        semantic_checkpoint: receipt.publication_semantic_checkpoint.clone(),
+        product_checkpoint: receipt.publication_product_checkpoint.clone(),
+        projector_versions: receipt.projector_versions.clone(),
+        checkpoint_sha256: String::new(),
+    };
+    checkpoint.checkpoint_sha256 = reader_projection_checkpoint_sha256_v1(&checkpoint)?;
+    checkpoint.validate_for_receipt(receipt)?;
+    Ok(checkpoint)
+}
+
+pub(crate) fn advance_reader_projection_checkpoint_v1(
+    checkpoint: &ReaderProjectionCheckpointV1,
+    authority_cursor: AuthorityCursorV2,
+    truth_cursor: TruthCursor,
+) -> ChangeReaderContractResult<ReaderProjectionCheckpointV1> {
+    checkpoint.validate_self()?;
+    let mut advanced = checkpoint.clone();
+    advanced.authority_cursor = authority_cursor;
+    advanced.truth_cursor = truth_cursor;
+    advanced.locator_checkpoint.applied_cursor = truth_cursor;
+    advanced.locator_checkpoint.observed_cursor = truth_cursor;
+    advanced.locator_checkpoint.receipt_sha256 =
+        locator_projection_checkpoint_sha256_v1(&advanced.locator_checkpoint)?;
+    advanced.semantic_checkpoint.applied_cursor = truth_cursor;
+    advanced.semantic_checkpoint.receipt_sha256 =
+        applied_projection_checkpoint_sha256_v1(&advanced.semantic_checkpoint)?;
+    advanced.product_checkpoint.applied_cursor = truth_cursor;
+    advanced.product_checkpoint.receipt_sha256 =
+        applied_projection_checkpoint_sha256_v1(&advanced.product_checkpoint)?;
+    advanced.checkpoint_sha256 = reader_projection_checkpoint_sha256_v1(&advanced)?;
+    advanced.validate_self()?;
+    Ok(advanced)
+}
+
+fn publication_applied_checkpoint(
+    profile_id: &str,
+    schema_version: u32,
+    cursor: TruthCursor,
+) -> ChangeReaderContractResult<AppliedProjectionCheckpointV1> {
+    let mut checkpoint = AppliedProjectionCheckpointV1 {
+        identity: ReaderSchemaIdentityV1 {
+            profile_id: profile_id.to_owned(),
+            schema_version,
+        },
+        applied_cursor: cursor,
+        receipt_sha256: String::new(),
+    };
+    checkpoint.receipt_sha256 = applied_projection_checkpoint_sha256_v1(&checkpoint)?;
+    Ok(checkpoint)
+}
+
+fn publication_locator_checkpoint(
+    cursor: TruthCursor,
+) -> ChangeReaderContractResult<LocatorProjectionCheckpointV1> {
+    let mut checkpoint = LocatorProjectionCheckpointV1 {
+        identity: ReaderSchemaIdentityV1 {
+            profile_id: LOCATOR_PROFILE_ID_V1.to_owned(),
+            schema_version: LOCATOR_SCHEMA_VERSION_V1,
+        },
+        applied_cursor: cursor,
+        observed_cursor: cursor,
+        receipt_sha256: String::new(),
+    };
+    checkpoint.receipt_sha256 = locator_projection_checkpoint_sha256_v1(&checkpoint)?;
+    Ok(checkpoint)
 }
 
 pub(crate) fn probe_change_reader_profile_receipt(

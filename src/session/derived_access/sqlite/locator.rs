@@ -8,6 +8,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Params, StatementStatus, TransactionBehavior, params,
 };
 
+use super::{immutable_read_only_open_is_safe, sqlite_immutable_read_only_uri};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::record_chronological_sort_items;
 use crate::canonical_hash::sha256_bytes_hex;
@@ -33,6 +34,14 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) struct SqliteLocator {
     store_root: PathBuf,
     database_path: PathBuf,
+    access: LocatorAccess,
+    published_immutable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocatorAccess {
+    ReadWrite,
+    PublishedReadOnly,
 }
 
 #[derive(Debug)]
@@ -107,12 +116,32 @@ impl SqliteLocator {
         store_root: &Path,
         sidecar_root: &Path,
     ) -> Result<Self, SqliteLocatorError> {
+        Self::open_at_with_access(store_root, sidecar_root, LocatorAccess::ReadWrite)
+    }
+
+    pub(crate) fn open_at_read_only(
+        store_root: &Path,
+        sidecar_root: &Path,
+    ) -> Result<Self, SqliteLocatorError> {
+        Self::open_at_with_access(store_root, sidecar_root, LocatorAccess::PublishedReadOnly)
+    }
+
+    fn open_at_with_access(
+        store_root: &Path,
+        sidecar_root: &Path,
+        access: LocatorAccess,
+    ) -> Result<Self, SqliteLocatorError> {
         let store_root = store_root
             .canonicalize()
             .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+        let database_path = sidecar_root.join(DATABASE_FILE);
+        let published_immutable = access == LocatorAccess::PublishedReadOnly
+            && immutable_read_only_open_is_safe(&database_path);
         let locator = Self {
             store_root: store_root.clone(),
-            database_path: sidecar_root.join(DATABASE_FILE),
+            database_path,
+            access,
+            published_immutable,
         };
         if !locator.database_path.exists() {
             return Err(SqliteLocatorError::MissingSidecar(
@@ -121,7 +150,9 @@ impl SqliteLocator {
         }
         let connection = locator.connection()?;
         let cursor = validate_cursor_metadata(&connection)?;
-        initialize_locator_schema(&connection, &cursor)?;
+        if access == LocatorAccess::ReadWrite {
+            initialize_locator_schema(&connection, &cursor)?;
+        }
         validate_locator_checkpoint(&connection, &cursor)?;
         Ok(locator)
     }
@@ -555,38 +586,54 @@ impl SqliteLocator {
     }
 
     fn connection(&self) -> Result<Connection, SqliteLocatorError> {
-        let connection = Connection::open_with_flags(
-            &self.database_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
+        let connection = match self.access {
+            LocatorAccess::ReadWrite => Connection::open_with_flags(
+                &self.database_path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ),
+            LocatorAccess::PublishedReadOnly if self.published_immutable => {
+                Connection::open_with_flags(
+                    sqlite_immutable_read_only_uri(&self.database_path),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                        | OpenFlags::SQLITE_OPEN_URI,
+                )
+            }
+            LocatorAccess::PublishedReadOnly => Connection::open_with_flags(
+                &self.database_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ),
+        }
         .map_err(|error| sqlite_error("open locator sidecar", error))?;
         connection
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(|error| sqlite_error("set locator busy timeout", error))?;
-        let mode = connection
-            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
-            .map_err(|error| sqlite_error("enable locator WAL", error))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(SqliteLocatorError::Metadata(format!(
-                "SQLite refused WAL mode and returned {mode}"
-            )));
+        if self.access == LocatorAccess::ReadWrite {
+            let mode = connection
+                .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+                .map_err(|error| sqlite_error("enable locator WAL", error))?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                return Err(SqliteLocatorError::Metadata(format!(
+                    "SQLite refused WAL mode and returned {mode}"
+                )));
+            }
+            connection
+                // Locator and semantic rows are an atomic, rebuildable projection.
+                // WAL NORMAL may roll back the latest transaction after power loss;
+                // the separately durable cursor head then forces bounded catch-up.
+                .pragma_update(None, "synchronous", "NORMAL")
+                .map_err(|error| sqlite_error("set locator synchronous", error))?;
+            #[cfg(target_os = "macos")]
+            connection
+                .pragma_update(None, "fullfsync", true)
+                .map_err(|error| sqlite_error("enable locator fullfsync", error))?;
         }
-        connection
-            // Locator and semantic rows are an atomic, rebuildable projection.
-            // WAL NORMAL may roll back the latest transaction after power loss;
-            // the separately durable cursor head then forces bounded catch-up.
-            .pragma_update(None, "synchronous", "NORMAL")
-            .map_err(|error| sqlite_error("set locator synchronous", error))?;
         connection
             .pragma_update(None, "foreign_keys", true)
             .map_err(|error| sqlite_error("enable locator foreign keys", error))?;
         connection
             .pragma_update(None, "cell_size_check", true)
             .map_err(|error| sqlite_error("enable locator cell-size checks", error))?;
-        #[cfg(target_os = "macos")]
-        connection
-            .pragma_update(None, "fullfsync", true)
-            .map_err(|error| sqlite_error("enable locator fullfsync", error))?;
         Ok(connection)
     }
 

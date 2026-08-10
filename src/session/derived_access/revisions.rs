@@ -9,9 +9,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rusqlite::types::Value;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+use super::history::DerivedHistoryMode;
 use super::history::{
-    CurrentRead, DerivedHistoryAccess, DerivedHistoryMode, DerivedHistoryStatus,
-    catching_up_status, hydrate_events, projection_stamp, state_diagnostics, support_event_ids,
+    CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, hydrate_events,
+    projection_stamp, state_diagnostics, support_event_ids,
 };
 use super::locator::LocatorRead;
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -265,12 +267,7 @@ impl DerivedHistoryAccess {
         snapshot_summaries: Arc<SnapshotSummaryCache>,
         request: &RevisionPageRequest,
     ) -> Result<DerivedRevisionPageRoute, String> {
-        let DerivedHistoryMode::Active {
-            store_identity,
-            backend,
-            ..
-        } = &self.mode
-        else {
+        let Some((store_identity, backend)) = self.active_context() else {
             return Ok(DerivedRevisionPageRoute::Off);
         };
         let current = match self.current()? {
@@ -417,12 +414,7 @@ impl DerivedHistoryAccess {
         revision_id: &RevisionId,
         options: RevisionShowOptions,
     ) -> Result<DerivedRevisionDetailRoute, String> {
-        let DerivedHistoryMode::Active {
-            store_identity,
-            backend,
-            ..
-        } = &self.mode
-        else {
+        let Some((store_identity, backend)) = self.active_context() else {
             return Ok(DerivedRevisionDetailRoute::Off);
         };
         let current = match self.current()? {
@@ -1665,9 +1657,7 @@ mod tests {
         };
         let token = first.next.expect("first page continuation");
 
-        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
-            panic!("test access is active");
-        };
+        let lifecycle = access.lifecycle().expect("test access is active");
         let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).expect("active writer");
         let read_store = resolve_read_store(repo.path()).expect("resolve target store");
         let target_store = EventStore::open(read_store.store_dir());
@@ -1713,9 +1703,7 @@ mod tests {
     #[test]
     fn revision_pages_start_with_the_newest_normalized_instant() {
         let (repo, access, _) = active_captured_repo();
-        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
-            panic!("test access is active");
-        };
+        let lifecycle = access.lifecycle().expect("test access is active");
         let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).expect("active writer");
         let read_store = resolve_read_store(repo.path()).expect("resolve target store");
         let target_store = EventStore::open(read_store.store_dir());

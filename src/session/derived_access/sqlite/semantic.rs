@@ -7,10 +7,13 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
-use crate::canonical_hash::sha256_bytes_hex;
+use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
+use crate::session::derived_access::semantic::change::{
+    ReaderProjectionCheckpointV1, advance_reader_projection_checkpoint_v1,
+};
 use crate::session::derived_access::semantic::state::{
     MaterializedSemanticDuplicate, MaterializedSemanticState, SemanticStateSnapshot,
 };
@@ -19,6 +22,9 @@ use crate::session::derived_access::semantic::{
     InputResponseFact, MaterializedAttentionSnapshot, RefAssociationFact, RefWithdrawalFact,
     RevisionFact, SemanticFact, SemanticFactKind, SemanticModelError, SemanticSnapshot,
     ValidationFact, decode_enum, decode_string_list, encode_enum, encode_string_list,
+};
+use crate::session::derived_access::sqlite::cursor::{
+    insert_authority_event_identity, recompute_authority_cursor_from_identities,
 };
 use crate::session::event::{
     EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
@@ -157,6 +163,21 @@ pub(crate) enum SqliteSemanticError {
 
 impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
+        Self::open_inner(locator, true)
+    }
+
+    /// Open an already-published semantic projection without creating or
+    /// repairing schema state. Published generations are immutable as a
+    /// lifecycle unit even though governed catch-up may append projection rows
+    /// through the separate writer path.
+    pub(crate) fn open_published(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
+        Self::open_inner(locator, false)
+    }
+
+    fn open_inner(
+        locator: SqliteLocator,
+        initialize_schema: bool,
+    ) -> Result<Self, SqliteSemanticError> {
         let connection = locator.validated_connection()?;
         let locator_checkpoint = read_locator_checkpoint(&connection)?;
         let semantic_schema_exists = connection
@@ -220,6 +241,21 @@ impl SqliteSemantic {
                      {PRODUCT_HISTORY_SCHEMA_VERSION}"
                 )));
             }
+        }
+        if !initialize_schema {
+            if !semantic_schema_exists {
+                return Err(SqliteSemanticError::UpgradeRequired(
+                    "published semantic schema is absent".to_owned(),
+                ));
+            }
+            if !product_history_exists {
+                return Err(SqliteSemanticError::ProductHistoryUpgradeRequired(
+                    "published product history schema is absent".to_owned(),
+                ));
+            }
+            validate_meta(&connection, locator_checkpoint.applied)?;
+            validate_product_history_meta(&connection, locator_checkpoint.applied)?;
+            return Ok(Self { locator });
         }
         connection
             .execute_batch(
@@ -477,7 +513,12 @@ impl SqliteSemantic {
                      PRIMARY KEY (sequence, superseded_revision_id)
                  ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS product_revision_edge_target
-                     ON product_revision_edge(superseded_revision_id, sequence);",
+                     ON product_revision_edge(superseded_revision_id, sequence);
+                 CREATE TABLE IF NOT EXISTS reader_projection_checkpoint (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     checkpoint_json TEXT NOT NULL
+                         CHECK (length(checkpoint_json) > 0)
+                 ) STRICT;",
             )
             .map_err(|error| sqlite_error("create semantic schema", error))?;
         let inserted = connection
@@ -528,6 +569,24 @@ impl SqliteSemantic {
         validate_meta(&connection, locator_checkpoint.applied)?;
         validate_product_history_meta(&connection, locator_checkpoint.applied)?;
         Ok(Self { locator })
+    }
+
+    /// Seed the publication-anchored live checkpoint while a generation is
+    /// still staging. Published opens never call this method.
+    pub(crate) fn seed_reader_projection_checkpoint(
+        &self,
+        checkpoint: &ReaderProjectionCheckpointV1,
+    ) -> Result<(), SqliteSemanticError> {
+        let checkpoint_json = canonical_checkpoint_json(checkpoint)?;
+        let connection = self.locator.validated_connection()?;
+        connection
+            .execute(
+                "INSERT INTO reader_projection_checkpoint (singleton, checkpoint_json)
+                 VALUES (1, ?1)",
+                [checkpoint_json],
+            )
+            .map_err(|error| sqlite_error("seed reader projection checkpoint", error))?;
+        Ok(())
     }
 
     pub(crate) fn apply_delta(
@@ -604,6 +663,50 @@ impl SqliteSemantic {
             .apply_delta_with(delta, locator_rows, |transaction| {
                 insert_facts(transaction, semantic_facts)?;
                 insert_product_history_facts(transaction, product_history_facts)?;
+                if let Some(checkpoint) = read_reader_projection_checkpoint(transaction)
+                    .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?
+                {
+                    for (receipt, fact) in delta.receipts.iter().zip(semantic_facts) {
+                        insert_authority_event_identity(
+                            transaction,
+                            &receipt.logical_reread_key,
+                            &receipt.validation_witness,
+                            &fact.event_id,
+                            &fact.payload_hash,
+                        )
+                        .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+                    }
+                    let authority_cursor = recompute_authority_cursor_from_identities(
+                        transaction,
+                        &checkpoint.authority_cursor.capability_set_hash,
+                    )
+                    .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+                    let advanced = advance_reader_projection_checkpoint_v1(
+                        &checkpoint,
+                        authority_cursor,
+                        applied,
+                    )
+                    .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+                    let previous_json = canonical_checkpoint_json(&checkpoint)
+                        .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+                    let advanced_json = canonical_checkpoint_json(&advanced)
+                        .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+                    let updated = transaction
+                        .execute(
+                            "UPDATE reader_projection_checkpoint
+                             SET checkpoint_json = ?1
+                             WHERE singleton = 1 AND checkpoint_json = ?2",
+                            params![advanced_json, previous_json],
+                        )
+                        .map_err(|error| {
+                            locator_sqlite_error("advance reader projection checkpoint", error)
+                        })?;
+                    if updated != 1 {
+                        return Err(SqliteLocatorError::Delta(
+                            "reader projection checkpoint changed concurrently".to_owned(),
+                        ));
+                    }
+                }
                 if inject_failure {
                     return Err(SqliteLocatorError::Delta(
                         "injected semantic transaction failure".to_owned(),
@@ -2553,6 +2656,52 @@ fn query_names(
     }
     names.sort();
     Ok(names)
+}
+
+fn read_reader_projection_checkpoint(
+    connection: &rusqlite::Connection,
+) -> Result<Option<ReaderProjectionCheckpointV1>, SqliteSemanticError> {
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'reader_projection_checkpoint'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| sqlite_error("inspect reader projection checkpoint schema", error))?;
+    if !exists {
+        return Ok(None);
+    }
+    let checkpoint_json = connection
+        .query_row(
+            "SELECT checkpoint_json
+             FROM reader_projection_checkpoint
+             WHERE singleton = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read reader projection checkpoint", error))?;
+    checkpoint_json
+        .map(|checkpoint_json| {
+            serde_json::from_str(&checkpoint_json)
+                .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))
+        })
+        .transpose()
+}
+
+fn canonical_checkpoint_json(
+    checkpoint: &ReaderProjectionCheckpointV1,
+) -> Result<String, SqliteSemanticError> {
+    let value = serde_json::to_value(checkpoint)
+        .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+    String::from_utf8(
+        canonical_json_bytes(&value)
+            .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?,
+    )
+    .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))
 }
 
 fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> SqliteSemanticError {

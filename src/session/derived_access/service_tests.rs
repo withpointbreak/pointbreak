@@ -1,4 +1,7 @@
+use super::changes::DerivedChangeAccess;
+use super::history::{DerivedHistoryAccess, DerivedHistoryMode};
 use super::product_contract::DerivedAccessProfile;
+use super::runtime::DerivedAccessRuntime;
 use super::service::{DerivedAccessHandle, DerivedAccessIoProbe};
 use super::sqlite::{CursorLedgerIdentity, SqliteCursorLedger};
 
@@ -245,7 +248,7 @@ fn change_reader_reuses_the_single_derived_access_engine() {
         (
             "rebuild worker",
             &[
-                "background_rebuild_in_flight",
+                "background_work_state",
                 "start_background_rebuild",
                 ".spawn(",
             ][..],
@@ -305,6 +308,138 @@ fn change_reader_reuses_the_single_derived_access_engine() {
     let adapter = std::fs::read_to_string(root.join("src/bench_support/derived_access/adapter.rs"))
         .expect("read qualification adapter");
     assert!(adapter.contains("DerivedAccessService as QualificationDerivedAccessAdapter"));
+}
+
+#[test]
+fn history_and_change_facades_hold_arcs_to_the_same_runtime_type() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let derived_root = root.join("src/session/derived_access");
+    let history = std::fs::read_to_string(derived_root.join("history.rs"))
+        .expect("read derived History facade");
+    let changes = std::fs::read_to_string(derived_root.join("changes.rs"))
+        .expect("read derived Change facade");
+
+    for (name, facade) in [("History", history), ("Change", changes)] {
+        assert!(
+            production_source(&facade).contains("runtime: Arc<DerivedAccessRuntime>"),
+            "derived {name} facade must hold the shared runtime Arc"
+        );
+    }
+}
+
+#[test]
+fn dropping_one_reader_preserves_the_runtime_held_by_the_other() {
+    let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Off);
+    let history = DerivedHistoryAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+
+    assert_eq!(std::sync::Arc::strong_count(&runtime), 3);
+    drop(history);
+    assert_eq!(std::sync::Arc::strong_count(&runtime), 2);
+    drop(changes);
+    assert_eq!(std::sync::Arc::strong_count(&runtime), 1);
+}
+
+#[test]
+fn active_worker_lives_until_the_last_shared_facade_drops() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let lifecycle = super::lifecycle::DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        temp.path(),
+        "store:test",
+    )
+    .unwrap();
+    lifecycle.paths().ensure_scaffold().unwrap();
+    let _rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+    let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Active {
+        lifecycle,
+        current: std::sync::Mutex::new(None),
+        store_identity: "store:test".to_owned(),
+        backend: crate::session::store::backend::StoreBackend::Local(temp.path().to_path_buf()),
+    });
+    let history = DerivedHistoryAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let weak = std::sync::Arc::downgrade(&runtime);
+
+    runtime.start_background_rebuild().unwrap();
+    assert!(runtime.maintenance_in_flight());
+    drop(runtime);
+    drop(changes);
+
+    assert!(history.is_active());
+    assert!(weak.upgrade().unwrap().maintenance_in_flight());
+
+    let started = std::time::Instant::now();
+    drop(history);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "the last facade must cancel and join its blocked worker promptly"
+    );
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn runtime_owns_the_current_generation_slot_and_rebuild_worker() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let derived_root = root.join("src/session/derived_access");
+    let runtime_path = derived_root.join("runtime.rs");
+    let runtime =
+        std::fs::read_to_string(&runtime_path).expect("shared derived runtime module must exist");
+    let runtime = production_source(&runtime);
+
+    for primitive in [
+        "struct DerivedAccessRuntime",
+        "DerivedAccessLifecycle",
+        "Mutex<Option<Arc<CurrentGeneration",
+        "background_work_state",
+        "background_rebuild_cancel",
+        "background_rebuild_handle",
+        "start_background_rebuild",
+    ] {
+        assert!(
+            runtime.contains(primitive),
+            "shared runtime must own {primitive}"
+        );
+    }
+
+    for facade_name in ["history.rs", "changes.rs"] {
+        let facade = std::fs::read_to_string(derived_root.join(facade_name))
+            .unwrap_or_else(|error| panic!("read {facade_name}: {error}"));
+        let facade = production_source(&facade);
+        for forbidden in [
+            "Mutex<Option<Arc<CurrentGeneration",
+            "background_work_state",
+            "background_rebuild_cancel",
+            "background_rebuild_handle",
+        ] {
+            assert!(
+                !facade.contains(forbidden),
+                "{facade_name} must delegate {forbidden} to the shared runtime"
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_runtime_drop_owns_rebuild_worker_shutdown() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let derived_root = root.join("src/session/derived_access");
+    let runtime = std::fs::read_to_string(derived_root.join("runtime.rs"))
+        .expect("shared derived runtime module must exist");
+    assert!(
+        production_source(&runtime).contains("impl Drop for DerivedAccessRuntime"),
+        "the last shared runtime owner must cancel and join its rebuild worker"
+    );
+
+    for facade_name in ["history.rs", "changes.rs"] {
+        let facade = std::fs::read_to_string(derived_root.join(facade_name))
+            .unwrap_or_else(|error| panic!("read {facade_name}: {error}"));
+        assert!(
+            !production_source(&facade).contains("impl Drop for DerivedHistoryAccess")
+                && !production_source(&facade).contains("impl Drop for DerivedChangeAccess"),
+            "dropping one facade must not shut down a runtime still shared by another facade"
+        );
+    }
 }
 
 #[test]

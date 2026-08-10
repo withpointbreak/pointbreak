@@ -236,17 +236,64 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
             return Err("derived-access phase receipt hash drifted".to_owned());
         }
         let expected = self.operation.expected_phases();
-        if self.phases.len() != expected.len() {
+        let maintenance_index = self.phases.iter().position(|sample| {
+            sample.phase
+                == LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+        });
+        if self
+            .phases
+            .iter()
+            .filter(|sample| {
+                sample.phase
+                    == LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+            })
+            .count()
+            > 1
+            || maintenance_index.is_some()
+                && self.operation != QualificationDerivedAccessPhaseOperationV1::GovernedWrite
+        {
+            return Err("derived-access authority maintenance phase drifted".to_owned());
+        }
+        let baseline = self
+            .phases
+            .iter()
+            .filter(|sample| {
+                sample.phase
+                    != LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+            })
+            .collect::<Vec<_>>();
+        if baseline.len() != expected.len() {
             return Err("derived-access phase receipt is incomplete".to_owned());
         }
-        for (index, (sample, expected_phase)) in self.phases.iter().zip(expected.iter()).enumerate()
+        if baseline
+            .iter()
+            .zip(expected.iter())
+            .any(|(sample, expected_phase)| sample.phase != *expected_phase)
         {
-            if sample.phase != *expected_phase || usize::from(sample.ordinal) != index {
+            return Err("derived-access phase receipt order drifted".to_owned());
+        }
+        if let Some(index) = maintenance_index
+            && (index == 0
+                || index + 1 >= self.phases.len()
+                || self.phases[index - 1].phase
+                    != LongitudinalDerivedAccessPhaseV1::GovernedWriteCatchUp
+                || self.phases[index + 1].phase
+                    != LongitudinalDerivedAccessPhaseV1::GovernedWriteResponse
+                || self.phases[index].counters.authority_identity_rows_scanned == 0)
+        {
+            return Err("derived-access authority maintenance phase drifted".to_owned());
+        }
+        for (index, sample) in self.phases.iter().enumerate() {
+            if usize::from(sample.ordinal) != index {
                 return Err("derived-access phase receipt order drifted".to_owned());
             }
-            let expected_parent = (sample.phase
-                == LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries)
-                .then_some(5_u16);
+            let expected_parent = match sample.phase {
+                LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries => Some(5_u16),
+                LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance => {
+                    Some(self.phases[index - 1].ordinal)
+                }
+                _ => None,
+            };
             if sample.parent_ordinal != expected_parent {
                 return Err("derived-access phase nesting drifted".to_owned());
             }
@@ -296,6 +343,7 @@ fn phase_counters_overflowed(counters: &LongitudinalCountersV1) -> bool {
         counters.directory_entries_walked,
         counters.carrier_opens,
         counters.carrier_bytes_read,
+        counters.authority_identity_rows_scanned,
         counters.event_decodes,
         counters.event_validations,
         counters.event_folds,

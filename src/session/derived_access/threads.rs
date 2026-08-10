@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use super::history::{
-    CurrentRead, DerivedHistoryAccess, DerivedHistoryMode, DerivedHistoryStatus,
-    catching_up_status, projection_stamp, state_diagnostics,
+    CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, projection_stamp,
+    state_diagnostics,
 };
 use super::locator::LocatorRead;
 use crate::model::RevisionId;
@@ -28,7 +28,7 @@ pub struct DerivedThreads {
 
 impl DerivedHistoryAccess {
     pub fn threads(&self) -> Result<DerivedThreadsRoute, String> {
-        let DerivedHistoryMode::Active { store_identity, .. } = &self.mode else {
+        let Some((store_identity, _)) = self.active_context() else {
             return Ok(DerivedThreadsRoute::Off);
         };
         let current = match self.current()? {

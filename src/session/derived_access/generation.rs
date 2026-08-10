@@ -1,9 +1,13 @@
 //! Immutable generation paths and atomic current-generation publication.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +25,10 @@ const PUBLICATION_SCHEMA: &str = "pointbreak.derived-access-publication.v1";
 const PROGRESS_SCHEMA: &str = "pointbreak.derived-access-generation-progress.v2";
 const PROGRESS_INTERVAL: usize = 256;
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static HELD_REBUILD_LEASES: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct GenerationLayout {
@@ -122,6 +130,8 @@ pub(crate) struct GenerationReadLease {
 #[derive(Debug)]
 pub(crate) struct RebuildLease {
     file: File,
+    path: PathBuf,
+    _not_send: PhantomData<Rc<()>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -201,11 +211,27 @@ impl GenerationLayout {
             .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
         let path = self.storage_layout.rebuild_lock();
         let file = open_lock_file(&path)?;
+        let identity = rebuild_lease_identity(&path);
         match file.try_lock() {
-            Ok(()) => Ok(RebuildLease { file }),
+            Ok(()) => Ok(register_rebuild_lease(file, identity)),
             Err(std::fs::TryLockError::WouldBlock) => Err(GenerationError::RebuildBusy),
             Err(std::fs::TryLockError::Error(error)) => Err(io_error(&path, error)),
         }
+    }
+
+    pub(crate) fn acquire_rebuild_lease(&self) -> Result<RebuildLease, GenerationError> {
+        std::fs::create_dir_all(self.storage_layout.store_root())
+            .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
+        let path = self.storage_layout.rebuild_lock();
+        let file = open_lock_file(&path)?;
+        let identity = rebuild_lease_identity(&path);
+        file.lock().map_err(|error| io_error(&path, error))?;
+        Ok(register_rebuild_lease(file, identity))
+    }
+
+    pub(crate) fn rebuild_lease_held_by_current_thread(&self) -> bool {
+        let path = rebuild_lease_identity(&self.storage_layout.rebuild_lock());
+        HELD_REBUILD_LEASES.with(|held| held.borrow().contains(&path))
     }
 
     pub(crate) fn acquire_read_lease(
@@ -728,8 +754,24 @@ impl Drop for GenerationReadLease {
     }
 }
 
+fn register_rebuild_lease(file: File, path: PathBuf) -> RebuildLease {
+    let inserted = HELD_REBUILD_LEASES.with(|held| held.borrow_mut().insert(path.clone()));
+    debug_assert!(
+        inserted,
+        "one thread cannot own the same rebuild lease twice"
+    );
+    RebuildLease {
+        file,
+        path,
+        _not_send: PhantomData,
+    }
+}
+
 impl Drop for RebuildLease {
     fn drop(&mut self) {
+        HELD_REBUILD_LEASES.with(|held| {
+            held.borrow_mut().remove(&self.path);
+        });
         let _ = self.file.unlock();
     }
 }
@@ -879,6 +921,15 @@ fn open_lock_file(path: &Path) -> Result<File, GenerationError> {
         .map_err(|error| io_error(path, error))
 }
 
+fn rebuild_lease_identity(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
+}
+
 fn io_error(path: &Path, error: std::io::Error) -> GenerationError {
     GenerationError::Io {
         path: path.to_path_buf(),
@@ -898,6 +949,25 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_lease_identity_is_shared_across_store_symlink_aliases() {
+        let temp = TempDir::new().unwrap();
+        let store = temp.path().join("store");
+        let alias = temp.path().join("store-alias");
+        std::fs::create_dir(&store).unwrap();
+        std::os::unix::fs::symlink(&store, &alias).unwrap();
+        let direct = GenerationLayout::new(&store).unwrap();
+        let aliased = GenerationLayout::new(&alias).unwrap();
+        let _lease = direct.try_rebuild_lease().unwrap();
+
+        assert!(aliased.rebuild_lease_held_by_current_thread());
+        assert!(matches!(
+            aliased.try_rebuild_lease(),
+            Err(GenerationError::RebuildBusy)
+        ));
+    }
 
     #[test]
     fn staging_progress_treats_concurrent_cleanup_as_absence() {

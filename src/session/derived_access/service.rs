@@ -21,6 +21,7 @@ use crate::session::derived_access::cursor::{
 use crate::session::derived_access::locator::{
     ChronologicalWindowRequest, HydratedWindow, LocatorModelError, LocatorRead, LocatorRow,
 };
+use crate::session::derived_access::semantic::change::ReaderProjectionCheckpointV1;
 use crate::session::derived_access::semantic::state::{
     DerivedAccessFreshness, FreshnessModelError,
 };
@@ -29,9 +30,17 @@ use crate::session::derived_access::semantic::{
 };
 use crate::session::event::{ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
 use crate::session::store::backend::JournalChangeStamp;
+use crate::session::store::capabilities::JournalRecordIdentityV1;
 
 const DEFAULT_DELTA_LIMIT: usize = 512;
 type DerivedRows = (Vec<LocatorRow>, Vec<SemanticFact>, Vec<ProductHistoryFact>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceOpenMode {
+    Default,
+    WritableGeneration,
+    PublishedReadOnly,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BootstrapProjectionControl {
@@ -51,6 +60,13 @@ pub(crate) struct DerivedAccessService {
     cursor: SqliteCursorLedger,
     locator: SqliteLocator,
     semantic: SqliteSemantic,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublicationValidationSnapshot {
+    pub(crate) authority: TruthAuthoritySnapshot,
+    pub(crate) locator_applied: TruthCursor,
+    pub(crate) reader_projection_checkpoint: Option<ReaderProjectionCheckpointV1>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,7 +182,7 @@ impl DerivedAccessService {
         store_root: &Path,
         identity: CursorLedgerIdentity,
     ) -> Result<Self, DerivedAccessServiceError> {
-        Self::open_inner(store_root, None, identity, None)
+        Self::open_inner(store_root, None, identity, None, ServiceOpenMode::Default)
     }
 
     pub(crate) fn open_at(
@@ -174,7 +190,27 @@ impl DerivedAccessService {
         sidecar_root: &Path,
         identity: CursorLedgerIdentity,
     ) -> Result<Self, DerivedAccessServiceError> {
-        Self::open_inner(store_root, Some(sidecar_root), identity, None)
+        Self::open_inner(
+            store_root,
+            Some(sidecar_root),
+            identity,
+            None,
+            ServiceOpenMode::PublishedReadOnly,
+        )
+    }
+
+    pub(crate) fn open_writable_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, DerivedAccessServiceError> {
+        Self::open_inner(
+            store_root,
+            Some(sidecar_root),
+            identity,
+            None,
+            ServiceOpenMode::WritableGeneration,
+        )
     }
 
     fn open_observed(
@@ -182,7 +218,13 @@ impl DerivedAccessService {
         identity: CursorLedgerIdentity,
         probe: &DerivedAccessIoProbe,
     ) -> Result<Self, DerivedAccessServiceError> {
-        Self::open_inner(store_root, None, identity, Some(probe))
+        Self::open_inner(
+            store_root,
+            None,
+            identity,
+            Some(probe),
+            ServiceOpenMode::Default,
+        )
     }
 
     fn open_inner(
@@ -190,6 +232,7 @@ impl DerivedAccessService {
         sidecar_root: Option<&Path>,
         identity: CursorLedgerIdentity,
         probe: Option<&DerivedAccessIoProbe>,
+        mode: ServiceOpenMode,
     ) -> Result<Self, DerivedAccessServiceError> {
         let store_root = store_root
             .canonicalize()
@@ -197,23 +240,41 @@ impl DerivedAccessService {
         if let Some(probe) = probe {
             probe.record_root_resolution();
         }
-        let cursor = match sidecar_root {
-            Some(sidecar_root) => {
+        let cursor = match (sidecar_root, mode) {
+            (Some(sidecar_root), ServiceOpenMode::PublishedReadOnly) => {
+                SqliteCursorLedger::open_published_read_only_at(
+                    &store_root,
+                    sidecar_root,
+                    identity,
+                )?
+            }
+            (Some(sidecar_root), ServiceOpenMode::WritableGeneration) => {
                 SqliteCursorLedger::open_immutable_at(&store_root, sidecar_root, identity)?
             }
-            None => SqliteCursorLedger::open(&store_root, identity)?,
+            (None, ServiceOpenMode::Default) => SqliteCursorLedger::open(&store_root, identity)?,
+            _ => unreachable!("service open mode and sidecar root disagree"),
         };
         if let Some(probe) = probe {
             probe.record_sqlite_physical_open();
         }
-        let locator = match sidecar_root {
-            Some(sidecar_root) => SqliteLocator::open_at(&store_root, sidecar_root)?,
-            None => SqliteLocator::open(&store_root)?,
+        let locator = match (sidecar_root, mode) {
+            (Some(sidecar_root), ServiceOpenMode::PublishedReadOnly) => {
+                SqliteLocator::open_at_read_only(&store_root, sidecar_root)?
+            }
+            (Some(sidecar_root), ServiceOpenMode::WritableGeneration) => {
+                SqliteLocator::open_at(&store_root, sidecar_root)?
+            }
+            (None, ServiceOpenMode::Default) => SqliteLocator::open(&store_root)?,
+            _ => unreachable!("service open mode and sidecar root disagree"),
         };
         if let Some(probe) = probe {
             probe.record_sqlite_physical_open();
         }
-        let semantic = SqliteSemantic::open(locator.clone())?;
+        let semantic = if mode == ServiceOpenMode::PublishedReadOnly {
+            SqliteSemantic::open_published(locator.clone())?
+        } else {
+            SqliteSemantic::open(locator.clone())?
+        };
         if let Some(probe) = probe {
             probe.record_sqlite_physical_open();
         }
@@ -221,6 +282,53 @@ impl DerivedAccessService {
             cursor,
             locator,
             semantic,
+        })
+    }
+
+    pub(crate) fn seed_change_reader_publication(
+        &self,
+        authority_record_identities: &[JournalRecordIdentityV1],
+        checkpoint: &ReaderProjectionCheckpointV1,
+    ) -> Result<(), DerivedAccessServiceError> {
+        self.cursor
+            .seed_authority_record_identities(authority_record_identities)?;
+        self.semantic
+            .seed_reader_projection_checkpoint(checkpoint)?;
+        Ok(())
+    }
+
+    pub(crate) fn publication_validation_snapshot(
+        &self,
+    ) -> Result<PublicationValidationSnapshot, DerivedAccessServiceError> {
+        let raw = self.cursor.publication_validation_snapshot()?;
+        Self::decode_publication_validation_snapshot(raw)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_validation_snapshot_with_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<PublicationValidationSnapshot, DerivedAccessServiceError> {
+        let raw = self
+            .cursor
+            .publication_validation_snapshot_with_hook(hook)?;
+        Self::decode_publication_validation_snapshot(raw)
+    }
+
+    fn decode_publication_validation_snapshot(
+        raw: super::sqlite::PublishedValidationSnapshotRaw,
+    ) -> Result<PublicationValidationSnapshot, DerivedAccessServiceError> {
+        let reader_projection_checkpoint = raw
+            .reader_projection_checkpoint_json
+            .map(|checkpoint_json| {
+                serde_json::from_str(&checkpoint_json)
+                    .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))
+            })
+            .transpose()?;
+        Ok(PublicationValidationSnapshot {
+            authority: raw.authority,
+            locator_applied: raw.locator_applied,
+            reader_projection_checkpoint,
         })
     }
 
@@ -671,5 +779,192 @@ impl DerivedAccessService {
             )?);
         }
         Ok((locator_rows, semantic_facts, product_history_facts))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::canonical_hash::sha256_bytes_hex;
+    use crate::model::JournalId;
+    use crate::session::derived_access::generation::GenerationLayout;
+    use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
+    use crate::session::derived_access::writer::DerivedWriteCoordinator;
+    use crate::session::event::{
+        EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
+    };
+    use crate::session::store::backend::StoreBackend;
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
+    use crate::session::{EventStore, EventWriteOutcome};
+
+    #[cfg(unix)]
+    #[test]
+    fn published_change_projection_opens_read_only_without_persistent_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = valid_change_projection();
+        let layout = GenerationLayout::new(temp.path()).unwrap();
+        let publication = layout.current_publication().unwrap().unwrap();
+        let generation = layout.generation(&publication.generation_id);
+        let database = generation.join("cursor.sqlite3");
+
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        drop(connection);
+        for companion in [
+            generation.join("cursor.sqlite3-wal"),
+            generation.join("cursor.sqlite3-shm"),
+        ] {
+            if companion.exists() {
+                fs::remove_file(companion).unwrap();
+            }
+        }
+
+        let before = generation_contents(&generation);
+        let original_directory_mode = fs::metadata(&generation).unwrap().permissions().mode();
+        let original_database_mode = fs::metadata(&database).unwrap().permissions().mode();
+        fs::set_permissions(&database, fs::Permissions::from_mode(0o444)).unwrap();
+        fs::set_permissions(&generation, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let opened = DerivedAccessService::open_at(
+            temp.path(),
+            &generation,
+            CursorLedgerIdentity::new("store:test"),
+        );
+
+        fs::set_permissions(
+            &generation,
+            fs::Permissions::from_mode(original_directory_mode),
+        )
+        .unwrap();
+        fs::set_permissions(
+            &database,
+            fs::Permissions::from_mode(original_database_mode),
+        )
+        .unwrap();
+
+        let service = opened.expect("ordinary published Change projection open is read-only");
+        assert_eq!(
+            service.cursor.read_integrity_policy_for_test().unwrap(),
+            (true, true),
+            "published cursor reads retain foreign-key and cell-size checks"
+        );
+        service
+            .truth_authority_snapshot()
+            .expect("read-only snapshot exposes the current authority head");
+        service
+            .locator_checkpoint()
+            .expect("read-only snapshot exposes the live projection checkpoint");
+        drop(service);
+
+        assert_eq!(generation_contents(&generation), before);
+        assert!(!generation.join("cursor.sqlite3-wal").exists());
+        assert!(!generation.join("cursor.sqlite3-shm").exists());
+    }
+
+    #[test]
+    fn publication_validation_snapshot_does_not_mix_a_concurrent_commit() {
+        let temp = valid_change_projection();
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        let layout = GenerationLayout::new(temp.path()).unwrap();
+        let publication = layout.current_publication().unwrap().unwrap();
+        let generation = layout.generation(&publication.generation_id);
+        let service = DerivedAccessService::open_at(
+            temp.path(),
+            &generation,
+            CursorLedgerIdentity::new("store:test"),
+        )
+        .unwrap();
+        let before = service.publication_validation_snapshot().unwrap();
+
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            "store:test",
+        )
+        .unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).unwrap();
+        let governed = EventStore::from_backend(&backend).with_coordinator(coordinator);
+        let journal_id = JournalId::new("journal:publication-snapshot-concurrent");
+        let event = ShoreEvent::new(
+            EventType::ReviewInitialized,
+            ReviewInitializedPayload::idempotency_key(&journal_id),
+            EventTarget::for_journal(journal_id),
+            Writer::shore_local("test"),
+            ReviewInitializedPayload {},
+            "2026-08-10T00:00:00Z",
+        )
+        .unwrap();
+
+        let pinned = service
+            .publication_validation_snapshot_with_hook(|| {
+                assert_eq!(
+                    governed.record_event_once(&event).unwrap(),
+                    EventWriteOutcome::Created
+                );
+            })
+            .unwrap();
+        assert_eq!(pinned, before);
+
+        let after = service.publication_validation_snapshot().unwrap();
+        assert_eq!(
+            after.authority.head.cursor.sequence,
+            before.authority.head.cursor.sequence + 1
+        );
+        assert_eq!(after.locator_applied, after.authority.head.cursor);
+        assert_eq!(
+            after
+                .reader_projection_checkpoint
+                .as_ref()
+                .unwrap()
+                .truth_cursor,
+            after.authority.head.cursor
+        );
+        assert_ne!(after, before);
+    }
+
+    fn valid_change_projection() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            "store:test",
+        )
+        .unwrap()
+        .rebuild(|_| LifecycleControl::Continue)
+        .unwrap();
+        temp
+    }
+
+    fn generation_contents(root: &Path) -> BTreeMap<PathBuf, String> {
+        let mut contents = BTreeMap::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    contents.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        sha256_bytes_hex(&fs::read(&path).unwrap()),
+                    );
+                }
+            }
+        }
+        contents
     }
 }

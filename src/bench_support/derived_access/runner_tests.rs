@@ -162,6 +162,57 @@ fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() 
 }
 
 #[test]
+fn governed_write_phase_receipt_accepts_counted_nested_authority_maintenance() {
+    use crate::bench_support::longitudinal::{
+        LongitudinalCountersV1, LongitudinalDerivedAccessPhaseSampleV1,
+        LongitudinalDerivedAccessPhaseV1,
+    };
+
+    let mut receipt = phase_receipt(
+        QualificationDerivedAccessTierV1::L7,
+        QualificationDerivedAccessPhaseOperationV1::GovernedWrite,
+        digest(47),
+    );
+    receipt.phases[3].ordinal = 4;
+    let counters = LongitudinalCountersV1 {
+        authority_identity_rows_scanned: 17,
+        ..LongitudinalCountersV1::default()
+    };
+    let phase = LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance;
+    receipt.phases.insert(
+        3,
+        LongitudinalDerivedAccessPhaseSampleV1 {
+            phase,
+            ownership: phase.ownership(),
+            ordinal: 3,
+            parent_ordinal: Some(2),
+            wall_nanos: 1,
+            process_cpu_nanos: Some(1),
+            resident_bytes_before: Some(100),
+            resident_bytes_after: Some(101),
+            resident_bytes_observed_max: Some(101),
+            counters,
+        },
+    );
+    receipt
+        .refresh_sha256()
+        .expect("rehash maintenance receipt");
+    receipt.validate().expect("counted maintenance is valid");
+
+    let serialized = serde_json::to_value(&receipt).expect("maintenance receipt JSON");
+    assert_eq!(
+        serialized["phases"][3]["counters"]["authorityIdentityRowsScanned"],
+        17
+    );
+
+    receipt.phases[3].counters.authority_identity_rows_scanned = 0;
+    receipt
+        .refresh_sha256()
+        .expect("rehash uncounted maintenance receipt");
+    assert!(receipt.validate().is_err());
+}
+
+#[test]
 fn phase_receipt_json_rejects_negative_and_overflowed_measurements() {
     let receipt = phase_receipt(
         QualificationDerivedAccessTierV1::D0_128,

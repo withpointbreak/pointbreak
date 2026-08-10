@@ -1,8 +1,7 @@
 //! Product attention reads over the active derived generation.
 
 use super::history::{
-    CurrentRead, DerivedHistoryAccess, DerivedHistoryMode, DerivedHistoryStatus,
-    catching_up_status, projection_stamp,
+    CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, projection_stamp,
 };
 use super::locator::LocatorRead;
 use crate::model::RevisionId;
@@ -30,7 +29,7 @@ impl DerivedHistoryAccess {
         &self,
         revision: Option<&RevisionId>,
     ) -> Result<DerivedAttentionRoute, String> {
-        let DerivedHistoryMode::Active { store_identity, .. } = &self.mode else {
+        let Some((store_identity, _)) = self.active_context() else {
             return Ok(DerivedAttentionRoute::Off);
         };
         let current = match self.current()? {

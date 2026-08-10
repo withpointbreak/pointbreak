@@ -12,8 +12,12 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use super::writer_lock::{StoreWriterLock, WriterLockError};
+use super::{immutable_read_only_open_is_safe, sqlite_immutable_read_only_uri};
 #[cfg(any(test, feature = "longitudinal-counting"))]
-use crate::bench_support::longitudinal::RetainedDecodedEventsGuardV1;
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, RetainedDecodedEventsGuardV1,
+    enter_derived_access_phase_v1, record_authority_identity_rows_scanned,
+};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::ShoreError;
 use crate::session::derived_access::cursor::{
@@ -25,6 +29,9 @@ use crate::session::derived_access::{QualificationJournalCursor, QualificationLo
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::{
     JournalChangeStamp, JournalChangeVerdict, JournalCreatedTransitionVerdict,
+};
+use crate::session::store::capabilities::{
+    AuthorityCursorV2, JournalRecordIdentityV1, authority_cursor_from_record_identities,
 };
 use crate::session::{EventStore, EventWriteOutcome};
 
@@ -87,6 +94,17 @@ pub(crate) struct CursorLedgerInventory {
     pub(crate) database_bytes: u64,
     pub(crate) wal_bytes: u64,
     pub(crate) shared_memory_bytes: u64,
+}
+
+/// The publication state whose fields must be observed from one SQLite read
+/// transaction. The semantic layer owns decoding and validating the checkpoint
+/// document; the cursor ledger only keeps its bytes pinned to the same WAL
+/// snapshot as the authority head and locator checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublishedValidationSnapshotRaw {
+    pub(crate) authority: TruthAuthoritySnapshot,
+    pub(crate) locator_applied: TruthCursor,
+    pub(crate) reader_projection_checkpoint_json: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,6 +196,8 @@ pub(crate) struct SqliteCursorLedger {
     sidecar_root: PathBuf,
     database_path: PathBuf,
     identity: CursorLedgerIdentity,
+    published_read_only: bool,
+    published_immutable: bool,
 }
 
 #[derive(Debug)]
@@ -324,6 +344,34 @@ impl SqliteCursorLedger {
         sidecar_root: &Path,
         identity: CursorLedgerIdentity,
         epoch: u64,
+        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+        hook: impl FnMut(BootstrapCrashPoint),
+    ) -> Result<BootstrapPopulation, CursorLedgerError> {
+        validate_identity(&identity)?;
+        if epoch == 0 {
+            return Err(CursorLedgerError::SchemaMismatch(
+                "cursor epoch must be greater than zero".to_owned(),
+            ));
+        }
+        let store_root = canonical_store_root(store_root)?;
+        let writer_lock = StoreWriterLock::acquire(&store_root)?;
+        Self::bootstrap_population_from_truth_at_locked_with_hook(
+            &store_root,
+            sidecar_root,
+            identity,
+            epoch,
+            &writer_lock,
+            progress,
+            hook,
+        )
+    }
+
+    pub(crate) fn bootstrap_population_from_truth_at_locked_with_hook(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
+        _writer_lock: &StoreWriterLock,
         mut progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
         mut hook: impl FnMut(BootstrapCrashPoint),
     ) -> Result<BootstrapPopulation, CursorLedgerError> {
@@ -334,7 +382,6 @@ impl SqliteCursorLedger {
             ));
         }
         let store_root = canonical_store_root(store_root)?;
-        let _writer_lock = StoreWriterLock::acquire(&store_root)?;
         let ledger = Self::for_paths(store_root, sidecar_root.to_path_buf(), identity);
         if ledger.prepare_sidecar_for_bootstrap()? {
             hook(BootstrapCrashPoint::AfterQuarantineBeforeNewEpoch);
@@ -521,6 +568,30 @@ impl SqliteCursorLedger {
         Ok(ledger)
     }
 
+    /// Open an already-published cursor ledger through a strictly read-only
+    /// SQLite handle. Validation is bounded to the metadata singleton and the
+    /// current head receipt; it performs no schema initialization, recovery,
+    /// WAL configuration, writer locking, or quarantine mutation.
+    pub(crate) fn open_published_read_only_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
+        validate_identity(&identity)?;
+        let store_root = canonical_store_root(store_root)?;
+        let mut ledger = Self::for_paths(store_root, sidecar_root.to_path_buf(), identity);
+        ledger.published_read_only = true;
+        if !ledger.database_path.exists() {
+            return Err(CursorLedgerError::IncompleteBootstrap);
+        }
+        ledger.published_immutable = immutable_read_only_open_is_safe(&ledger.database_path);
+        let connection =
+            open_published_read_only_connection(&ledger.database_path, ledger.published_immutable)?;
+        let metadata = validate_metadata_header(&connection, &ledger.identity)?;
+        validate_bounded_head(&connection, &metadata)?;
+        Ok(ledger)
+    }
+
     pub(crate) fn head(&self) -> Result<TruthHead, CursorLedgerError> {
         let (_connection, metadata) = self.hot_read_connection()?;
         Ok(TruthHead {
@@ -540,6 +611,93 @@ impl SqliteCursorLedger {
                 cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
             },
             change_stamp: metadata.authority_stamp,
+        })
+    }
+
+    /// Read all mutable publication-validation state from one SQLite snapshot.
+    /// The optional checkpoint preserves pre-Change/L0 generations whose
+    /// schema predates `reader_projection_checkpoint`.
+    pub(crate) fn publication_validation_snapshot(
+        &self,
+    ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
+        self.publication_validation_snapshot_with_hook_inner(|| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_validation_snapshot_with_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
+        self.publication_validation_snapshot_with_hook_inner(hook)
+    }
+
+    fn publication_validation_snapshot_with_hook_inner(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<PublishedValidationSnapshotRaw, CursorLedgerError> {
+        let (connection, metadata) = self.hot_read_connection_with_hook(hook)?;
+        let (locator_epoch, locator_applied, locator_observed) = connection
+            .query_row(
+                "SELECT epoch, applied_sequence, observed_sequence
+                 FROM locator_checkpoint WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_err(|error| sqlite_error("read publication locator checkpoint", error))?;
+        let locator_epoch = i64_to_u64(locator_epoch, "locator checkpoint epoch")?;
+        let locator_applied = i64_to_u64(locator_applied, "locator checkpoint applied")?;
+        let locator_observed = i64_to_u64(locator_observed, "locator checkpoint observed")?;
+        if locator_epoch != metadata.epoch
+            || locator_applied > locator_observed
+            || locator_observed > metadata.head_sequence
+        {
+            return Err(CursorLedgerError::SchemaMismatch(format!(
+                "locator applied/observed {locator_applied}/{locator_observed} at epoch \
+                 {locator_epoch} is invalid for cursor head {}:{}",
+                metadata.epoch, metadata.head_sequence
+            )));
+        }
+
+        let checkpoint_table_exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'reader_projection_checkpoint'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| sqlite_error("inspect publication reader checkpoint schema", error))?;
+        let reader_projection_checkpoint_json = if checkpoint_table_exists {
+            connection
+                .query_row(
+                    "SELECT checkpoint_json
+                     FROM reader_projection_checkpoint WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("read publication reader checkpoint", error))?
+        } else {
+            None
+        };
+
+        Ok(PublishedValidationSnapshotRaw {
+            authority: TruthAuthoritySnapshot {
+                head: TruthHead {
+                    store_id: metadata.store_id,
+                    cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
+                },
+                change_stamp: metadata.authority_stamp,
+            },
+            locator_applied: TruthCursor::new(locator_epoch, locator_applied),
+            reader_projection_checkpoint_json,
         })
     }
 
@@ -592,6 +750,15 @@ impl SqliteCursorLedger {
             .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
             .map_err(|error| sqlite_error("read synchronous", error))?;
         Ok((journal_mode, synchronous))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_integrity_policy_for_test(&self) -> Result<(bool, bool), CursorLedgerError> {
+        let connection = self.validated_connection()?;
+        Ok((
+            pragma_i64(&connection, "foreign_keys")? != 0,
+            pragma_i64(&connection, "cell_size_check")? != 0,
+        ))
     }
 
     #[cfg(test)]
@@ -901,6 +1068,24 @@ impl SqliteCursorLedger {
         Ok(())
     }
 
+    /// Seed the complete bodyless authority set while a generation is still
+    /// writable. The caller supplies identities produced by one fully
+    /// validated capability routing pass; no carrier is reopened here.
+    pub(crate) fn seed_authority_record_identities(
+        &self,
+        identities: &[JournalRecordIdentityV1],
+    ) -> Result<(), CursorLedgerError> {
+        let mut connection = self.validated_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin authority identity seed", error))?;
+        seed_authority_record_identities(&transaction, identities)?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit authority identity seed", error))?;
+        Ok(())
+    }
+
     pub(crate) fn checkpoint(&self) -> Result<CursorLedgerCheckpoint, CursorLedgerError> {
         let connection = self.validated_connection()?;
         let (busy, log_frames, checkpointed_frames) = connection
@@ -962,6 +1147,8 @@ impl SqliteCursorLedger {
             sidecar_root,
             database_path,
             identity,
+            published_read_only: false,
+            published_immutable: false,
         }
     }
 
@@ -970,8 +1157,17 @@ impl SqliteCursorLedger {
     }
 
     fn validated_connection(&self) -> Result<Connection, CursorLedgerError> {
-        let connection = open_connection(&self.database_path, false)?;
-        validate_completed_metadata(&connection, &self.identity)?;
+        let connection = if self.published_read_only {
+            open_published_read_only_connection(&self.database_path, self.published_immutable)?
+        } else {
+            open_connection(&self.database_path, false)?
+        };
+        if self.published_read_only {
+            let metadata = validate_metadata_header(&connection, &self.identity)?;
+            validate_bounded_head(&connection, &metadata)?;
+        } else {
+            validate_completed_metadata(&connection, &self.identity)?;
+        }
         Ok(connection)
     }
 
@@ -983,7 +1179,11 @@ impl SqliteCursorLedger {
         &self,
         hook: impl FnOnce(),
     ) -> Result<(Connection, Metadata), CursorLedgerError> {
-        let connection = open_connection(&self.database_path, false)?;
+        let connection = if self.published_read_only {
+            open_published_read_only_connection(&self.database_path, self.published_immutable)?
+        } else {
+            open_connection(&self.database_path, false)?
+        };
         // Keep metadata, bounded-head validation, and any subsequent delta query
         // on one WAL snapshot. Without an explicit read transaction, a writer
         // can commit between the metadata and receipt SELECTs and make an atomic
@@ -1120,6 +1320,39 @@ fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedger
     Ok(connection)
 }
 
+fn open_published_read_only_connection(
+    path: &Path,
+    immutable: bool,
+) -> Result<Connection, CursorLedgerError> {
+    if !path.exists() {
+        return Err(CursorLedgerError::IncompleteBootstrap);
+    }
+    let connection = if immutable {
+        Connection::open_with_flags(
+            sqlite_immutable_read_only_uri(path),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_URI,
+        )
+    } else {
+        Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+    }
+    .map_err(|error| sqlite_error("open published cursor ledger read-only", error))?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| sqlite_error("set published read-only busy timeout", error))?;
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| sqlite_error("enable published read-only foreign keys", error))?;
+    connection
+        .pragma_update(None, "cell_size_check", true)
+        .map_err(|error| sqlite_error("enable published read-only cell-size checks", error))?;
+    Ok(connection)
+}
+
 fn configure_connection(connection: &Connection, create: bool) -> Result<(), CursorLedgerError> {
     connection
         .busy_timeout(BUSY_TIMEOUT)
@@ -1157,6 +1390,121 @@ fn configure_connection(connection: &Connection, create: bool) -> Result<(), Cur
         .pragma_update(None, "fullfsync", true)
         .map_err(|error| sqlite_error("enable fullfsync", error))?;
     Ok(())
+}
+
+/// Insert the complete normalized authority set using the caller's connection
+/// or transaction. The table is append-only inside one generation; duplicate
+/// carrier keys therefore fail closed rather than being replaced.
+pub(crate) fn seed_authority_record_identities(
+    connection: &Connection,
+    identities: &[JournalRecordIdentityV1],
+) -> Result<(), CursorLedgerError> {
+    for identity in identities {
+        insert_authority_record_identity(connection, identity)?;
+    }
+    Ok(())
+}
+
+/// Insert one governed event identity into the same transaction that advances
+/// locator, semantic, product, and live reader checkpoints.
+pub(crate) fn insert_authority_event_identity(
+    transaction: &Transaction<'_>,
+    logical_key: &str,
+    validation_witness: &str,
+    event_id: &str,
+    event_payload_sha256: &str,
+) -> Result<(), CursorLedgerError> {
+    let identity = JournalRecordIdentityV1::for_event(
+        logical_key,
+        format!("sha256:{validation_witness}"),
+        event_id,
+        event_payload_sha256,
+    )
+    .map_err(|error| CursorLedgerError::SchemaMismatch(error.to_string()))?;
+    insert_authority_record_identity(transaction, &identity)
+}
+
+/// Read the normalized bodyless authority identities in carrier-key order.
+/// SQLite performs no carrier access; the returned strings restore the exact
+/// frozen hashing representation.
+pub(crate) fn read_authority_record_identities(
+    connection: &Connection,
+) -> Result<Vec<JournalRecordIdentityV1>, CursorLedgerError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT lower(hex(key_digest)),
+                    'sha256:' || lower(hex(record_hash)),
+                    CASE WHEN event_payload_hash IS NULL THEN NULL
+                         ELSE 'sha256:' || lower(hex(event_payload_hash)) END
+             FROM authority_record_identity
+             ORDER BY key_digest",
+        )
+        .map_err(|error| sqlite_error("prepare authority identity scan", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(JournalRecordIdentityV1 {
+                key_digest: row.get(0)?,
+                record_sha256: row.get(1)?,
+                event_payload_sha256: row.get(2)?,
+            })
+        })
+        .map_err(|error| sqlite_error("query authority identities", error))?;
+    let mut identities = Vec::new();
+    for row in rows {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_authority_identity_rows_scanned(1);
+        identities.push(row.map_err(|error| sqlite_error("read authority identity", error))?);
+    }
+    Ok(identities)
+}
+
+/// Recompute the exact frozen `AuthorityCursorV2` from SQLite identities only.
+/// The caller supplies the independently publication-bound capability-set
+/// hash; this function performs no Journal read.
+pub(crate) fn recompute_authority_cursor_from_identities(
+    connection: &Connection,
+    capability_set_hash: &str,
+) -> Result<AuthorityCursorV2, CursorLedgerError> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _maintenance_phase =
+        enter_derived_access_phase_v1(Phase::GovernedWriteAuthorityCursorMaintenance);
+    let identities = read_authority_record_identities(connection)?;
+    authority_cursor_from_record_identities(&identities, capability_set_hash.to_owned())
+        .map_err(|error| CursorLedgerError::SchemaMismatch(error.to_string()))
+}
+
+fn insert_authority_record_identity(
+    connection: &Connection,
+    identity: &JournalRecordIdentityV1,
+) -> Result<(), CursorLedgerError> {
+    let key_digest = decode_digest(&identity.key_digest, "authority record key digest")?;
+    let record_hash =
+        decode_prefixed_digest(&identity.record_sha256, "authority record content witness")?;
+    let event_payload_hash = identity
+        .event_payload_sha256
+        .as_deref()
+        .map(|value| decode_prefixed_digest(value, "authority event payload witness"))
+        .transpose()?;
+    connection
+        .execute(
+            "INSERT INTO authority_record_identity
+             (key_digest, record_hash, event_payload_hash)
+             VALUES (?1, ?2, ?3)",
+            params![
+                key_digest.as_slice(),
+                record_hash.as_slice(),
+                event_payload_hash.as_ref().map(<[u8; 32]>::as_slice),
+            ],
+        )
+        .map_err(|error| sqlite_error("insert authority record identity", error))?;
+    Ok(())
+}
+
+fn decode_prefixed_digest(value: &str, label: &'static str) -> Result<[u8; 32], CursorLedgerError> {
+    let value = value.strip_prefix("sha256:").ok_or_else(|| {
+        CursorLedgerError::SchemaMismatch(format!("{label} has no sha256 prefix"))
+    })?;
+    decode_digest(value, label)
 }
 
 fn initialize_schema(
@@ -1205,6 +1553,12 @@ fn initialize_schema(
                      REFERENCES cursor_attempt(attempt_hash),
                  attempt_token TEXT CHECK (length(attempt_token) > 0)
              ) STRICT;
+             CREATE TABLE authority_record_identity (
+                 key_digest BLOB PRIMARY KEY CHECK (length(key_digest) = 32),
+                 record_hash BLOB NOT NULL CHECK (length(record_hash) = 32),
+                 event_payload_hash BLOB
+                     CHECK (event_payload_hash IS NULL OR length(event_payload_hash) = 32)
+             ) STRICT, WITHOUT ROWID;
              CREATE VIEW cursor_receipt_text AS
              SELECT sequence, epoch,
                     lower(hex(logical_reread_key_hash)) AS logical_reread_key_hash,

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::runtime::DerivedAccessRuntime;
 use crate::documents::{
     ChangeAttentionPresentationDocumentV2, ChangeListPresentationDocumentV1,
     ChangeQueryUnavailableDocumentV1, ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1,
@@ -23,13 +24,6 @@ const DEFAULT_PAGE_LIMIT: usize = 50;
 const MAXIMUM_PAGE_LIMIT: usize = 100;
 const MAXIMUM_SUMMARY_QUERY_BYTES: usize = 256;
 
-/// Reserved shared runtime shell. The existing lifecycle, current-generation
-/// slot, and hydration machinery move behind this one owner when that runtime
-/// is extracted; this contract does not create another engine.
-pub(crate) struct DerivedAccessRuntime {
-    _reserved: std::convert::Infallible,
-}
-
 /// Thin product facade consumed by the Inspector binary.
 #[doc(hidden)]
 #[derive(Clone)]
@@ -38,6 +32,10 @@ pub struct DerivedChangeAccess {
 }
 
 impl DerivedChangeAccess {
+    pub(crate) fn from_runtime(runtime: Arc<DerivedAccessRuntime>) -> Self {
+        Self { runtime }
+    }
+
     pub fn resolve_for_inspector(_repo: impl AsRef<Path>) -> Result<Self> {
         Err(Self::runtime_not_connected())
     }

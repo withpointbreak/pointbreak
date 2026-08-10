@@ -16,6 +16,7 @@ pub(crate) mod locator;
 pub(crate) mod oracle;
 pub(crate) mod product_contract;
 pub(crate) mod revisions;
+pub(crate) mod runtime;
 pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;

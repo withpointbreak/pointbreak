@@ -322,10 +322,7 @@ impl DerivedWriteCoordinator {
             .diagnostics
             .lock()
             .expect("derived write diagnostic lock poisoned");
-        if diagnostics.len() == MAX_DIAGNOSTICS {
-            diagnostics.pop_front();
-        }
-        diagnostics.push_back(diagnostic);
+        push_bounded_diagnostic(&mut diagnostics, diagnostic);
     }
 
     fn publish_degraded(
@@ -393,6 +390,13 @@ fn enqueue_process_diagnostic(diagnostic: DerivedWriteDiagnostic) {
         .get_or_init(|| Mutex::new(VecDeque::new()))
         .lock()
         .expect("derived process diagnostic lock poisoned");
+    push_bounded_diagnostic(&mut diagnostics, diagnostic);
+}
+
+fn push_bounded_diagnostic(
+    diagnostics: &mut VecDeque<DerivedWriteDiagnostic>,
+    diagnostic: DerivedWriteDiagnostic,
+) {
     if diagnostics.len() == MAX_DIAGNOSTICS {
         diagnostics.pop_front();
     }
@@ -469,28 +473,48 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::Mutex;
 
+    use rusqlite::{Connection, OpenFlags};
     use tempfile::TempDir;
 
     use super::{AppendCrashPoint, DerivedWriteCoordinator, catch_up_after_publication};
-    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+    use crate::bench_support::longitudinal::{
+        LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseOwnershipV1,
+        LongitudinalDerivedAccessPhaseV1,
+    };
+    use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::SignerId;
     use crate::model::JournalId;
+    use crate::session::derived_access::history::{
+        CurrentRead, DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryMode,
+        DerivedHistoryStatus,
+    };
     use crate::session::derived_access::lifecycle::{
         DerivedAccessLifecycle, LifecycleControl, LifecycleError,
     };
     use crate::session::derived_access::product_contract::{
         DerivedAccessAvailability, DerivedAccessProfile,
     };
+    use crate::session::derived_access::semantic::change::{
+        ReaderProjectionCheckpointV1, reader_projection_checkpoint_sha256_v1,
+    };
     use crate::session::derived_access::sqlite::{CursorLedgerIdentity, SqliteCursorLedger};
     use crate::session::event::{
         EventSignature, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
+    use crate::session::store::backend::StoreBackend;
     use crate::session::store::bundle::import_store_bundle_into_with_verification;
+    use crate::session::store::capabilities::{
+        AUTHORITY_CURSOR_SCHEMA_V2, CapabilityFixtureState, inspect_journal_records,
+        write_capability_fixture_for_test,
+    };
     use crate::session::store::resolution::{
         event_store_for_explicit_target, opaque_path_identity,
     };
-    use crate::session::{EventStore, EventVerificationPolicy, EventWriteOutcome, TrustSet};
+    use crate::session::{
+        AuthorityCursorV2, EventStore, EventVerificationPolicy, EventWriteOutcome, TrustSet,
+    };
 
     #[test]
     fn governed_write_advances_once_and_out_of_band_append_requires_rebuild() {
@@ -720,6 +744,306 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(append.snapshot().counters.directory_entries_walked, 0);
+    }
+
+    #[test]
+    fn rebuilt_change_generation_seeds_only_bodyless_authority_record_identities() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let connection = current_projection_connection(&lifecycle);
+        let columns = connection
+            .prepare("PRAGMA table_info(authority_record_identity)")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(
+            columns,
+            vec![
+                ("key_digest".to_owned(), "BLOB".to_owned()),
+                ("record_hash".to_owned(), "BLOB".to_owned()),
+                ("event_payload_hash".to_owned(), "BLOB".to_owned()),
+            ],
+            "the published generation must persist the normalized bodyless authority identity set"
+        );
+
+        let (record_count, event_count, malformed_digest_count): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN event_payload_hash IS NOT NULL THEN 1 ELSE 0 END),
+                        SUM(CASE
+                                WHEN length(key_digest) != 32
+                                  OR length(record_hash) != 32
+                                  OR (event_payload_hash IS NOT NULL
+                                      AND length(event_payload_hash) != 32)
+                                THEN 1 ELSE 0
+                            END)
+                 FROM authority_record_identity",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let strict = inspect_journal_records(
+            StoreBackend::Local(root.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .unwrap();
+        assert_eq!(
+            u64::try_from(record_count).unwrap(),
+            strict.cursor.journal_record_count
+        );
+        assert_eq!(
+            u64::try_from(event_count).unwrap(),
+            strict.cursor.event_count
+        );
+        assert_eq!(malformed_digest_count, 0);
+    }
+
+    #[test]
+    fn governed_change_prefixes_reproduce_the_exact_frozen_authority_cursor() {
+        let (_root, backend, lifecycle) = ready_change_lifecycle();
+        assert_bodyless_authority_matches_strict(&backend, &lifecycle);
+
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let governed = EventStore::from_backend(&backend).with_coordinator(coordinator);
+        for index in 40..43 {
+            assert_eq!(
+                governed.record_event_once(&event(index)).unwrap(),
+                EventWriteOutcome::Created
+            );
+            assert_bodyless_authority_matches_strict(&backend, &lifecycle);
+        }
+    }
+
+    #[test]
+    fn governed_change_catch_up_counts_bodyless_authority_maintenance_separately() {
+        let (_root, backend, lifecycle) = ready_change_lifecycle();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let governed = EventStore::from_backend(&backend).with_coordinator(coordinator);
+        let scope = counting_scope('c');
+        {
+            let _guard = scope.enter();
+            assert_eq!(
+                governed.record_event_once(&event(49)).unwrap(),
+                EventWriteOutcome::Created
+            );
+        }
+
+        let snapshot = scope.snapshot();
+        let phase = snapshot
+            .derived_access_phases
+            .iter()
+            .find(|sample| {
+                sample.phase
+                    == LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+            })
+            .expect("Change catch-up records authority cursor maintenance");
+        let parent = snapshot
+            .derived_access_phases
+            .iter()
+            .find(|sample| Some(sample.ordinal) == phase.parent_ordinal)
+            .expect("authority maintenance retains its catch-up parent");
+
+        assert_eq!(
+            phase.ownership,
+            LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess
+        );
+        assert_eq!(
+            parent.phase,
+            LongitudinalDerivedAccessPhaseV1::GovernedWriteCatchUp
+        );
+        assert_eq!(
+            phase.counters.authority_identity_rows_scanned,
+            authority_identity_count(&lifecycle)
+        );
+        assert_eq!(phase.counters.directory_entries_walked, 0);
+        assert_eq!(phase.counters.carrier_opens, 0);
+        assert_eq!(phase.counters.carrier_bytes_read, 0);
+        assert_eq!(phase.counters.event_decodes, 0);
+        assert_eq!(phase.counters.event_validations, 0);
+        assert_eq!(phase.counters.event_folds, 0);
+    }
+
+    #[test]
+    fn current_change_read_does_not_run_authority_cursor_maintenance() {
+        let (root, backend, lifecycle) = ready_change_lifecycle();
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: opaque_path_identity("store", root.path()).unwrap(),
+            backend,
+        });
+        let scope = counting_scope('e');
+        {
+            let _guard = scope.enter();
+            assert!(matches!(access.current().unwrap(), CurrentRead::Ready(_)));
+        }
+
+        let snapshot = scope.snapshot();
+        assert_eq!(snapshot.counters.authority_identity_rows_scanned, 0);
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.event_decodes, 0);
+        assert_eq!(snapshot.counters.event_validations, 0);
+        assert!(snapshot.derived_access_phases.iter().all(|sample| {
+            sample.phase
+                != LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+        }));
+    }
+
+    #[test]
+    fn governed_change_catch_up_atomically_advances_the_live_checkpoint() {
+        let (_root, backend, lifecycle) = ready_change_lifecycle();
+        let before = read_live_checkpoint(&lifecycle);
+        let before_hash = before.checkpoint_sha256.clone();
+        let before_anchor = before.reader_receipt_sha256.clone();
+
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let governed = EventStore::from_backend(&backend).with_coordinator(coordinator);
+        assert_eq!(
+            governed.record_event_once(&event(50)).unwrap(),
+            EventWriteOutcome::Created
+        );
+
+        let after = read_live_checkpoint(&lifecycle);
+        assert_eq!(after.reader_receipt_sha256, before_anchor);
+        assert_ne!(after.checkpoint_sha256, before_hash);
+        assert_eq!(
+            after.checkpoint_sha256,
+            reader_projection_checkpoint_sha256_v1(&after).unwrap()
+        );
+        assert_eq!(
+            after.truth_cursor.sequence,
+            before.truth_cursor.sequence + 1
+        );
+        assert_eq!(
+            after.authority_cursor.event_count,
+            after.truth_cursor.sequence
+        );
+        assert_eq!(after.locator_checkpoint.applied_cursor, after.truth_cursor);
+        assert_eq!(after.locator_checkpoint.observed_cursor, after.truth_cursor);
+        assert_eq!(after.semantic_checkpoint.applied_cursor, after.truth_cursor);
+        assert_eq!(after.product_checkpoint.applied_cursor, after.truth_cursor);
+        assert_eq!(
+            after.authority_cursor,
+            inspect_journal_records(backend.journal().as_ref())
+                .unwrap()
+                .cursor
+        );
+    }
+
+    #[test]
+    fn interrupted_change_catch_up_rolls_back_identity_and_checkpoint_then_resumes() {
+        let (_root, backend, lifecycle) = ready_change_lifecycle();
+        let before_checkpoint = read_live_checkpoint_bytes(&lifecycle);
+        let before_identity_count = authority_identity_count(&lifecycle);
+        let truth = EventStore::from_backend(&backend);
+        let interrupted_event = event(51);
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+
+        assert_eq!(
+            coordinator
+                .record_event_once_with_hook(
+                    &interrupted_event,
+                    |_| {},
+                    || truth.record_event_once(&interrupted_event),
+                    |_| Err("forced catch-up deferral before semantic application".to_owned()),
+                )
+                .unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::CatchingUp
+        );
+
+        assert!(
+            lifecycle
+                .maintain_current_generation_with_interruption(512)
+                .is_err()
+        );
+        assert_eq!(read_live_checkpoint_bytes(&lifecycle), before_checkpoint);
+        assert_eq!(authority_identity_count(&lifecycle), before_identity_count);
+
+        assert!(lifecycle.maintain_current_generation().unwrap());
+        let recovered = lifecycle
+            .open_current()
+            .unwrap()
+            .unwrap()
+            .service()
+            .locator_checkpoint()
+            .unwrap();
+        let checkpoint = read_live_checkpoint(&lifecycle);
+        assert_eq!(checkpoint.truth_cursor, recovered);
+        assert_eq!(
+            authority_identity_count(&lifecycle),
+            before_identity_count + 1
+        );
+        assert_eq!(
+            checkpoint.authority_cursor,
+            inspect_journal_records(backend.journal().as_ref())
+                .unwrap()
+                .cursor
+        );
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+    }
+
+    #[test]
+    fn cold_reader_defers_interrupted_catch_up_to_the_shared_maintenance_worker() {
+        let (root, backend, lifecycle) = ready_change_lifecycle();
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("ready fixture has a current generation");
+        let truth = EventStore::from_backend(&backend);
+        let interrupted_event = event(52);
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        assert_eq!(
+            coordinator
+                .record_event_once_with_hook(
+                    &interrupted_event,
+                    |_| {},
+                    || truth.record_event_once(&interrupted_event),
+                    |_| Err("forced catch-up deferral before reader recovery".to_owned()),
+                )
+                .unwrap(),
+            EventWriteOutcome::Created
+        );
+
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle: lifecycle.clone(),
+            current: Mutex::new(None),
+            store_identity: opaque_path_identity("store", root.path()).unwrap(),
+            backend,
+        });
+        assert!(matches!(
+            access.current().unwrap(),
+            CurrentRead::Unavailable(DerivedHistoryStatus {
+                availability: DerivedHistoryAvailability::CatchingUp,
+                ..
+            })
+        ));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while lifecycle.status().unwrap().availability != DerivedAccessAvailability::Current {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "maintenance worker did not resume the interrupted projection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(matches!(access.current().unwrap(), CurrentRead::Ready(_)));
+        assert_eq!(
+            lifecycle.published_generation_id().unwrap().as_deref(),
+            Some(generation_id.as_str()),
+            "catch-up must preserve the current generation"
+        );
     }
 
     #[test]
@@ -1028,6 +1352,131 @@ mod tests {
             opaque_path_identity("store", root.path()).unwrap(),
         )
         .unwrap()
+    }
+
+    fn ready_change_lifecycle() -> (TempDir, StoreBackend, DerivedAccessLifecycle) {
+        let root = TempDir::new().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        (root, backend, lifecycle)
+    }
+
+    fn current_projection_connection(lifecycle: &DerivedAccessLifecycle) -> Connection {
+        let publication = lifecycle.paths().current_publication().unwrap().unwrap();
+        let database = lifecycle
+            .paths()
+            .generation(&publication.generation_id)
+            .join("cursor.sqlite3");
+        Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap()
+    }
+
+    fn authority_identity_count(lifecycle: &DerivedAccessLifecycle) -> u64 {
+        let count = current_projection_connection(lifecycle)
+            .query_row(
+                "SELECT COUNT(*) FROM authority_record_identity",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        u64::try_from(count).unwrap()
+    }
+
+    fn read_live_checkpoint_bytes(lifecycle: &DerivedAccessLifecycle) -> Vec<u8> {
+        current_projection_connection(lifecycle)
+            .query_row(
+                "SELECT checkpoint_json
+                 FROM reader_projection_checkpoint
+                 WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0).map(String::into_bytes),
+            )
+            .unwrap()
+    }
+
+    fn read_live_checkpoint(lifecycle: &DerivedAccessLifecycle) -> ReaderProjectionCheckpointV1 {
+        serde_json::from_slice(&read_live_checkpoint_bytes(lifecycle)).unwrap()
+    }
+
+    fn assert_bodyless_authority_matches_strict(
+        backend: &StoreBackend,
+        lifecycle: &DerivedAccessLifecycle,
+    ) {
+        let strict = inspect_journal_records(backend.journal().as_ref()).unwrap();
+        let derived = bodyless_authority_cursor(
+            &current_projection_connection(lifecycle),
+            strict.cursor.capability_set_hash.clone(),
+        );
+        assert_eq!(derived, strict.cursor);
+    }
+
+    fn bodyless_authority_cursor(
+        connection: &Connection,
+        capability_set_hash: String,
+    ) -> AuthorityCursorV2 {
+        let mut statement = connection
+            .prepare(
+                "SELECT lower(hex(key_digest)),
+                        lower(hex(record_hash)),
+                        CASE WHEN event_payload_hash IS NULL THEN NULL
+                             ELSE lower(hex(event_payload_hash)) END
+                 FROM authority_record_identity
+                 ORDER BY key_digest, event_payload_hash",
+            )
+            .unwrap();
+        let identities = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let records = identities
+            .iter()
+            .map(|(key_digest, record_hash, _)| {
+                serde_json::json!({
+                    "keyDigest": key_digest,
+                    "recordHash": format!("sha256:{record_hash}"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let events = identities
+            .iter()
+            .filter_map(|(key_digest, _, payload_hash)| {
+                payload_hash.as_ref().map(|payload_hash| {
+                    serde_json::json!({
+                        "eventId": format!("evt:sha256:{key_digest}"),
+                        "payloadHash": format!("sha256:{payload_hash}"),
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        AuthorityCursorV2 {
+            schema: AUTHORITY_CURSOR_SCHEMA_V2.to_owned(),
+            journal_record_count: identities.len() as u64,
+            event_count: events.len() as u64,
+            journal_record_set_hash: sha256_json_prefixed(&serde_json::json!({
+                "schema": "pointbreak.journal-record-set.v1",
+                "records": records,
+            }))
+            .unwrap(),
+            event_set_hash: sha256_json_prefixed(&serde_json::json!({
+                "schema": "shore.event-set.v1",
+                "events": events,
+            }))
+            .unwrap(),
+            capability_set_hash,
+        }
     }
 
     fn event(index: usize) -> ShoreEvent {

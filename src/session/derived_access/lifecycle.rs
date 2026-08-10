@@ -4,31 +4,48 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::cursor::TruthAuthoritySnapshot;
+use super::cursor::{TruthAuthoritySnapshot, TruthCursor};
 use super::generation::{
     GenerationDescriptor, GenerationError, GenerationLayout, GenerationProgress,
     GenerationProgressPhase, GenerationPublication, GenerationReadLease,
 };
 use super::locator::LocatorRead;
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
-use super::service::{BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError};
+use super::semantic::change::{
+    CHANGE_READER_PROFILE_RESOURCE_V3, ChangeReaderContractError,
+    ChangeReaderProfileReceiptProbeV1, ChangeReaderProfileReceiptV3,
+    build_change_reader_profile_receipt_v3, initial_reader_projection_checkpoint_v1,
+    probe_change_reader_profile_receipt,
+};
+use super::service::{
+    BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError,
+    PublicationValidationSnapshot,
+};
 use super::sqlite::{
-    BootstrapControl, CursorLedgerError, CursorLedgerIdentity, SqliteCursorLedger,
-    SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
+    BootstrapControl, BootstrapProgress, CursorLedgerError, CursorLedgerIdentity,
+    SqliteCursorLedger, SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
 };
 use super::verification::strict_bodyless_materialized_snapshot_at;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
 };
+use crate::canonical_hash::canonical_json_bytes;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
+use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::backend::{
-    JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict,
+    JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, StoreBackend,
+};
+use crate::session::store::capabilities::{
+    StoreCapabilityStatus, inspect_change_reader_journal_records,
+    validate_bounded_change_capability_pair,
 };
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 const BOOTSTRAP_PROJECTION_BATCH: usize = 512;
+const CHANGE_ACTIVATION_LOGICAL_KEY: &str =
+    "store_capability_activation:review_change_revision_v1:root";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleControl {
@@ -41,6 +58,7 @@ pub(crate) enum PublicationBoundary {
     StagingPrepared,
     CandidatePopulated,
     CandidateValidated,
+    ReaderReceiptWritten,
     GenerationPromoted,
     CurrentPublished,
     PriorPublicationRetired,
@@ -84,7 +102,24 @@ pub(crate) struct LifecycleReceipt {
 pub(crate) struct CurrentGeneration {
     generation_id: String,
     service: DerivedAccessService,
+    descriptor: GenerationDescriptor,
+    reader_receipt: Option<ChangeReaderProfileReceiptV3>,
+    authority_head: TruthCursor,
+    locator_applied: TruthCursor,
+    authority_maintenance_pending: bool,
     _lease: GenerationReadLease,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CurrentGenerationValidation {
+    pub(crate) authority: TruthAuthoritySnapshot,
+    pub(crate) locator_applied: TruthCursor,
+    pub(crate) authority_maintenance_pending: bool,
+}
+
+struct CurrentAuthorityValidation {
+    snapshot: TruthAuthoritySnapshot,
+    continuation_pending: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,6 +138,8 @@ pub(crate) enum LifecycleError {
     Cancelled,
     #[error("another derived-access rebuild is already running")]
     RebuildBusy,
+    #[error("automatic derived rebuild stopped after Change capability activation")]
+    AutomaticRebuildSuppressed,
     #[error("derived-access lifecycle requires rebuild: {0}")]
     RebuildRequired(String),
     #[error("derived-access lifecycle quarantined invalid state: {0}")]
@@ -123,6 +160,27 @@ pub(crate) enum LifecycleError {
     WriterLock(#[from] WriterLockError),
     #[error("authoritative truth read failed: {0}")]
     Truth(String),
+}
+
+#[derive(Clone, Copy)]
+enum RebuildExecution {
+    Synchronous,
+    Background { suppress_after_activation: bool },
+}
+
+impl RebuildExecution {
+    fn is_background(self) -> bool {
+        matches!(self, Self::Background { .. })
+    }
+
+    fn suppress_after_activation(self) -> bool {
+        matches!(
+            self,
+            Self::Background {
+                suppress_after_activation: true
+            }
+        )
+    }
 }
 
 impl DerivedAccessLifecycle {
@@ -156,6 +214,33 @@ impl DerivedAccessLifecycle {
             .current_publication()
             .map(|publication| publication.map(|publication| publication.generation_id))
             .map_err(|error| self.generation_open_error(error))
+    }
+
+    /// Metadata-only activation probe used to constrain automatic recovery.
+    /// It never opens a carrier or enumerates the Journal.
+    pub(crate) fn change_capability_activated(&self) -> Result<bool, LifecycleError> {
+        StoreBackend::Local(self.store_root.clone())
+            .journal()
+            .record_exists(CHANGE_ACTIVATION_LOGICAL_KEY)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))
+    }
+
+    fn try_background_authority(
+        &self,
+        execution: RebuildExecution,
+    ) -> Result<Option<StoreAuthorityLock>, LifecycleError> {
+        if !execution.is_background() {
+            return Ok(None);
+        }
+        let Some(authority) = StoreAuthorityLock::try_acquire(&self.store_root)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))?
+        else {
+            return Err(LifecycleError::RebuildBusy);
+        };
+        if execution.suppress_after_activation() && self.change_capability_activated()? {
+            return Err(LifecycleError::AutomaticRebuildSuppressed);
+        }
+        Ok(Some(authority))
     }
 
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
@@ -267,14 +352,17 @@ impl DerivedAccessLifecycle {
                 ));
             }
         };
-        let authority = match self.validate_current_authority(&service) {
-            Ok(authority) => authority,
-            Err(LifecycleError::RebuildRequired(detail)) => {
+        let publication_snapshot = match service.publication_validation_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) if service_error_requires_rebuild(&error) => {
                 return Ok(status(
                     DerivedAccessAvailability::RebuildRequired,
                     Some(publication.generation_id),
-                    Some(detail),
+                    Some(error.to_string()),
                 ));
+            }
+            Err(error) if service_error_requires_quarantine(&error) => {
+                return self.invalid_status(error.to_string(), allow_quarantine);
             }
             Err(error) => {
                 return Ok(status(
@@ -284,10 +372,51 @@ impl DerivedAccessLifecycle {
                 ));
             }
         };
-        if let Err(error) = validate_published(&service, &descriptor, &authority) {
+        if let Err(error) = self.validate_change_reader_publication(
+            &generation_root,
+            &descriptor,
+            &publication_snapshot,
+        ) {
+            return match error {
+                LifecycleError::RebuildRequired(detail) => Ok(status(
+                    DerivedAccessAvailability::RebuildRequired,
+                    Some(publication.generation_id),
+                    Some(detail),
+                )),
+                LifecycleError::Validation(detail) => self.invalid_status(detail, allow_quarantine),
+                error => Ok(status(
+                    DerivedAccessAvailability::Unavailable,
+                    Some(publication.generation_id),
+                    Some(error.to_string()),
+                )),
+            };
+        }
+        let authority =
+            match self.observe_current_authority_snapshot(publication_snapshot.authority.clone()) {
+                Ok(authority) => authority.snapshot,
+                Err(LifecycleError::RebuildRequired(detail)) => {
+                    return Ok(status(
+                        DerivedAccessAvailability::RebuildRequired,
+                        Some(publication.generation_id),
+                        Some(detail),
+                    ));
+                }
+                Err(error) => {
+                    return Ok(status(
+                        DerivedAccessAvailability::Unavailable,
+                        Some(publication.generation_id),
+                        Some(error.to_string()),
+                    ));
+                }
+            };
+        if let Err(error) = validate_published(
+            &descriptor,
+            &authority,
+            publication_snapshot.locator_applied,
+        ) {
             return self.invalid_status(error.to_string(), allow_quarantine);
         }
-        if service.locator_checkpoint()? != authority.head.cursor {
+        if publication_snapshot.locator_applied != authority.head.cursor {
             return Ok(status(
                 DerivedAccessAvailability::CatchingUp,
                 Some(publication.generation_id),
@@ -308,12 +437,44 @@ impl DerivedAccessLifecycle {
         self.rebuild_with_hook(progress, |_| {})
     }
 
+    pub(crate) fn try_automatic_legacy_rebuild(
+        &self,
+        progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+    ) -> Result<LifecycleReceipt, LifecycleError> {
+        self.rebuild_with_execution(
+            BOOTSTRAP_PROJECTION_BATCH,
+            progress,
+            |_| {},
+            RebuildExecution::Background {
+                suppress_after_activation: true,
+            },
+        )
+    }
+
+    pub(crate) fn try_explicit_background_rebuild(
+        &self,
+        progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+    ) -> Result<LifecycleReceipt, LifecycleError> {
+        self.rebuild_with_execution(
+            BOOTSTRAP_PROJECTION_BATCH,
+            progress,
+            |_| {},
+            RebuildExecution::Background {
+                suppress_after_activation: false,
+            },
+        )
+    }
+
     pub(crate) fn rebuild_required_while_writer_idle(&self) -> Result<bool, LifecycleError> {
         // A governed append publishes loose truth before finalizing its cursor
         // receipt. `RebuildRequired` during that bounded gap is expected. The
         // writer lock makes this second observation authoritative: if the gap
         // has closed, the background worker must not start a full rebuild.
-        let _writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let _writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+            Ok(writer_lock) => writer_lock,
+            Err(WriterLockError::Busy) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
         Ok(self.status()?.availability == DerivedAccessAvailability::RebuildRequired)
     }
 
@@ -322,19 +483,64 @@ impl DerivedAccessLifecycle {
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
         hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
-        self.rebuild_with_hook_and_batch_limit(BOOTSTRAP_PROJECTION_BATCH, progress, hook)
+        self.rebuild_with_execution(
+            BOOTSTRAP_PROJECTION_BATCH,
+            progress,
+            hook,
+            RebuildExecution::Synchronous,
+        )
     }
 
     fn rebuild_with_hook_and_batch_limit(
         &self,
         bootstrap_batch_limit: usize,
+        progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+        hook: impl FnMut(PublicationBoundary),
+    ) -> Result<LifecycleReceipt, LifecycleError> {
+        self.rebuild_with_execution(
+            bootstrap_batch_limit,
+            progress,
+            hook,
+            RebuildExecution::Synchronous,
+        )
+    }
+
+    fn rebuild_with_execution(
+        &self,
+        bootstrap_batch_limit: usize,
         mut progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
         mut hook: impl FnMut(PublicationBoundary),
+        execution: RebuildExecution,
     ) -> Result<LifecycleReceipt, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off {
             return Err(LifecycleError::Disabled);
         }
-        let _rebuild_lease = match self.paths.try_rebuild_lease() {
+        // Every rebuild acquires authority before the rebuild lease and holds
+        // it through publication. Ordinary synchronous callers remain
+        // fail-fast under contention; migration's required post-activation
+        // build nests the authority guard it already owns and may wait for a
+        // background lease that will yield on its next authority try.
+        let synchronous_authority_lock = if matches!(execution, RebuildExecution::Synchronous) {
+            match StoreAuthorityLock::try_acquire(&self.store_root)
+                .map_err(|error| LifecycleError::Truth(error.to_string()))?
+            {
+                Some(authority) => Some(authority),
+                None => return Err(LifecycleError::RebuildBusy),
+            }
+        } else {
+            None
+        };
+        let mut background_authority_lock = self.try_background_authority(execution)?;
+        let lease = if synchronous_authority_lock
+            .as_ref()
+            .is_some_and(StoreAuthorityLock::is_reentrant)
+            && !self.paths.rebuild_lease_held_by_current_thread()
+        {
+            self.paths.acquire_rebuild_lease()
+        } else {
+            self.paths.try_rebuild_lease()
+        };
+        let rebuild_lease = match lease {
             Ok(lease) => lease,
             Err(GenerationError::RebuildBusy) => return Err(LifecycleError::RebuildBusy),
             Err(error) => return Err(error.into()),
@@ -351,39 +557,58 @@ impl DerivedAccessLifecycle {
             let population_phase = enter_derived_access_phase_v1(Phase::BootstrapPopulation);
             let cursor_phase_started = Instant::now();
             let mut progress_error = None;
-            let bootstrap = SqliteCursorLedger::bootstrap_population_from_truth_at_with_hook(
-                &self.store_root,
-                &staging,
-                CursorLedgerIdentity::new(self.store_id.clone()),
-                sequence,
-                |update| {
-                    let update = lifecycle_progress(
-                        GenerationProgressPhase::CursorPopulation,
-                        update.completed,
-                        update.total,
-                        update.bytes_processed,
-                        rebuild_started,
-                        cursor_phase_started,
-                    );
-                    let control = match record_and_report_progress(
-                        &self.paths,
-                        &generation_id,
-                        update,
-                        &mut progress,
-                    ) {
-                        Ok(control) => control,
-                        Err(error) => {
-                            progress_error = Some(error);
-                            return BootstrapControl::Cancel;
-                        }
-                    };
-                    match control {
-                        LifecycleControl::Continue => BootstrapControl::Continue,
-                        LifecycleControl::Cancel => BootstrapControl::Cancel,
+            let mut report_bootstrap = |update: BootstrapProgress| {
+                let update = lifecycle_progress(
+                    GenerationProgressPhase::CursorPopulation,
+                    update.completed,
+                    update.total,
+                    update.bytes_processed,
+                    rebuild_started,
+                    cursor_phase_started,
+                );
+                let control = match record_and_report_progress(
+                    &self.paths,
+                    &generation_id,
+                    update,
+                    &mut progress,
+                ) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        progress_error = Some(error);
+                        return BootstrapControl::Cancel;
                     }
-                },
-                |_| {},
-            );
+                };
+                match control {
+                    LifecycleControl::Continue => BootstrapControl::Continue,
+                    LifecycleControl::Cancel => BootstrapControl::Cancel,
+                }
+            };
+            let bootstrap = if execution.is_background() {
+                let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+                    Ok(writer_lock) => writer_lock,
+                    Err(WriterLockError::Busy) => return Err(LifecycleError::RebuildBusy),
+                    Err(error) => return Err(error.into()),
+                };
+                SqliteCursorLedger::bootstrap_population_from_truth_at_locked_with_hook(
+                    &self.store_root,
+                    &staging,
+                    CursorLedgerIdentity::new(self.store_id.clone()),
+                    sequence,
+                    &writer_lock,
+                    &mut report_bootstrap,
+                    |_| {},
+                )
+            } else {
+                SqliteCursorLedger::bootstrap_population_from_truth_at_with_hook(
+                    &self.store_root,
+                    &staging,
+                    CursorLedgerIdentity::new(self.store_id.clone()),
+                    sequence,
+                    &mut report_bootstrap,
+                    |_| {},
+                )
+            };
+            drop(background_authority_lock.take());
             if let Some(error) = progress_error {
                 return Err(error);
             }
@@ -392,7 +617,7 @@ impl DerivedAccessLifecycle {
             }
             let bootstrap = bootstrap?;
 
-            let service = DerivedAccessService::open_at(
+            let service = DerivedAccessService::open_writable_at(
                 &self.store_root,
                 &staging,
                 CursorLedgerIdentity::new(self.store_id.clone()),
@@ -465,6 +690,12 @@ impl DerivedAccessLifecycle {
             #[cfg(any(test, feature = "longitudinal-counting"))]
             drop(population_phase);
 
+            // Background rebuilds never wait for authoritative mutation while
+            // owning the rebuild lease. This second guard linearizes strict
+            // replay and publication against capability activation; the long
+            // semantic projection above intentionally runs without it.
+            background_authority_lock = self.try_background_authority(execution)?;
+
             #[cfg(any(test, feature = "longitudinal-counting"))]
             let oracle_phase = enter_derived_access_phase_v1(Phase::BootstrapOracle);
             let strict_phase_started = Instant::now();
@@ -482,6 +713,16 @@ impl DerivedAccessLifecycle {
                 return Err(LifecycleError::Cancelled);
             }
             let strict_events = self.truth_events()?;
+            let authority_backend = StoreBackend::Local(self.store_root.clone());
+            let authority_journal = authority_backend.journal();
+            let change_inspection = authority_journal
+                .record_exists(CHANGE_ACTIVATION_LOGICAL_KEY)
+                .map_err(|error| LifecycleError::Truth(error.to_string()))?
+                .then(|| {
+                    inspect_change_reader_journal_records(authority_journal.as_ref())
+                        .map_err(|error| LifecycleError::Truth(error.to_string()))
+                })
+                .transpose()?;
             #[cfg(any(test, feature = "longitudinal-counting"))]
             let strict_event_ownership =
                 crate::bench_support::longitudinal::RetainedDecodedEventsGuardV1::new(
@@ -498,7 +739,7 @@ impl DerivedAccessLifecycle {
                     authority.change_stamp.clone(),
                     "",
                 ),
-                strict_events,
+                strict_events.clone(),
             )?;
             let strict_complete = lifecycle_progress(
                 GenerationProgressPhase::StrictVerification,
@@ -519,19 +760,26 @@ impl DerivedAccessLifecycle {
             }
             #[cfg(any(test, feature = "longitudinal-counting"))]
             drop(strict_event_ownership);
-            let semantic_receipt = semantic_snapshot.semantic_receipt;
             #[cfg(any(test, feature = "longitudinal-counting"))]
             drop(oracle_phase);
             hook(PublicationBoundary::CandidateValidated);
-            Ok((service, head, semantic_receipt, bootstrap_stamp))
+            Ok((
+                service,
+                head,
+                semantic_snapshot,
+                strict_events,
+                change_inspection,
+                bootstrap_stamp,
+            ))
         })();
-        let (service, head, semantic_receipt, bootstrap_stamp) = match candidate_result {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                self.paths.discard_staging(&generation_id)?;
-                return Err(error);
-            }
-        };
+        let (service, head, semantic_snapshot, strict_events, change_inspection, bootstrap_stamp) =
+            match candidate_result {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.paths.discard_staging(&generation_id)?;
+                    return Err(error);
+                }
+            };
 
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let finalization_phase = enter_derived_access_phase_v1(Phase::BootstrapFinalization);
@@ -561,7 +809,27 @@ impl DerivedAccessLifecycle {
             }
         }
 
-        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let writer_lock = if execution.is_background() {
+            match StoreWriterLock::try_acquire(&self.store_root) {
+                Ok(writer_lock) => writer_lock,
+                Err(WriterLockError::Busy) => {
+                    self.paths.discard_staging(&generation_id)?;
+                    return Err(LifecycleError::RebuildBusy);
+                }
+                Err(error) => {
+                    self.paths.discard_staging(&generation_id)?;
+                    return Err(error.into());
+                }
+            }
+        } else {
+            match StoreWriterLock::acquire(&self.store_root) {
+                Ok(writer_lock) => writer_lock,
+                Err(error) => {
+                    self.paths.discard_staging(&generation_id)?;
+                    return Err(error.into());
+                }
+            }
+        };
         let authority_check = QualificationLocalJournal::new(&self.store_root)
             .changes_since(&bootstrap_stamp)
             .map_err(|error| LifecycleError::Truth(error.to_string()))?;
@@ -575,6 +843,80 @@ impl DerivedAccessLifecycle {
             self.paths.discard_staging(&generation_id)?;
             return Err(error.into());
         }
+        let semantic_receipt_result = (|| -> Result<String, LifecycleError> {
+            let Some(change_inspection) = change_inspection.as_ref() else {
+                return Ok(semantic_snapshot.semantic_receipt.clone());
+            };
+            match &change_inspection.status {
+                StoreCapabilityStatus::Ready {
+                    activation_id,
+                    manifest_hash,
+                    completion_id,
+                } => {
+                    let completion_logical_key =
+                        format!("bulk_adoption_completion:{completion_id}");
+                    let backend = StoreBackend::Local(self.store_root.clone());
+                    let pair = validate_bounded_change_capability_pair(
+                        backend.journal().as_ref(),
+                        CHANGE_ACTIVATION_LOGICAL_KEY,
+                        &completion_logical_key,
+                    )
+                    .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+                    if pair.activation_id != *activation_id
+                        || pair.manifest_hash != *manifest_hash
+                        || pair.completion_id != *completion_id
+                    {
+                        return Err(LifecycleError::TruthChanged);
+                    }
+                    let receipt = build_change_reader_profile_receipt_v3(
+                        &generation_id,
+                        &self.store_id,
+                        change_inspection,
+                        pair.activation_record_sha256,
+                        pair.completion_record_sha256,
+                        authority_check.after.clone(),
+                        head,
+                        &strict_events,
+                        &semantic_snapshot,
+                    )
+                    .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+                    let checkpoint = initial_reader_projection_checkpoint_v1(&receipt)
+                        .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+                    service.seed_change_reader_publication(
+                        &change_inspection.authority_record_identities,
+                        &checkpoint,
+                    )?;
+                    let receipt_bytes = canonical_json_bytes(
+                        &serde_json::to_value(&receipt)
+                            .map_err(|error| LifecycleError::Validation(error.to_string()))?,
+                    )
+                    .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+                    self.paths.write_resource(
+                        &staging,
+                        CHANGE_READER_PROFILE_RESOURCE_V3,
+                        &receipt_bytes,
+                    )?;
+                    hook(PublicationBoundary::ReaderReceiptWritten);
+                    Ok(receipt.receipt_sha256)
+                }
+                StoreCapabilityStatus::MigrationRequired => {
+                    Ok(semantic_snapshot.semantic_receipt.clone())
+                }
+                StoreCapabilityStatus::MigrationInProgress { .. } => {
+                    Err(LifecycleError::RebuildRequired(
+                        "partial Change capability authority cannot publish a generation"
+                            .to_owned(),
+                    ))
+                }
+            }
+        })();
+        let semantic_receipt = match semantic_receipt_result {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(error);
+            }
+        };
         let descriptor = GenerationDescriptor::new(
             &generation_id,
             &self.store_id,
@@ -641,6 +983,10 @@ impl DerivedAccessLifecycle {
             };
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(finalization_phase);
+        drop(writer_lock);
+        drop(rebuild_lease);
+        drop(background_authority_lock);
+        drop(synchronous_authority_lock);
 
         Ok(LifecycleReceipt {
             availability: DerivedAccessAvailability::Current,
@@ -690,12 +1036,41 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
-        let authority = self.validate_current_authority(&service)?;
-        validate_published(&service, &descriptor, &authority)
-            .map_err(|error| self.quarantine_error(error.to_string()))?;
+        let publication_snapshot = service.publication_validation_snapshot().map_err(|error| {
+            if service_error_requires_rebuild(&error) {
+                LifecycleError::RebuildRequired(error.to_string())
+            } else if service_error_requires_quarantine(&error) {
+                self.quarantine_error(error.to_string())
+            } else {
+                LifecycleError::Service(error)
+            }
+        })?;
+        let reader_receipt = self
+            .validate_change_reader_publication(
+                &generation_root,
+                &descriptor,
+                &publication_snapshot,
+            )
+            .map_err(|error| match error {
+                LifecycleError::Validation(detail) => LifecycleError::Quarantined(detail),
+                error => error,
+            })?;
+        let authority =
+            self.observe_current_authority_snapshot(publication_snapshot.authority.clone())?;
+        validate_published(
+            &descriptor,
+            &authority.snapshot,
+            publication_snapshot.locator_applied,
+        )
+        .map_err(|error| self.quarantine_error(error.to_string()))?;
         Ok(Some(CurrentGeneration {
             generation_id: publication.generation_id,
             service,
+            descriptor,
+            reader_receipt,
+            authority_head: authority.snapshot.head.cursor,
+            locator_applied: publication_snapshot.locator_applied,
+            authority_maintenance_pending: authority.continuation_pending,
             _lease: lease,
         }))
     }
@@ -770,7 +1145,7 @@ impl DerivedAccessLifecycle {
             .map_err(|error| LifecycleError::Validation(error.to_string()))?;
         let generation_root = self.paths.generation(&publication.generation_id);
         validate_wal_shape(&generation_root)?;
-        let service = DerivedAccessService::open_at(
+        let service = DerivedAccessService::open_writable_at(
             &self.store_root,
             &generation_root,
             CursorLedgerIdentity::new(self.store_id.clone()),
@@ -782,13 +1157,73 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
-        let authority = self.validate_current_authority(&service)?;
-        validate_published(&service, &descriptor, &authority)?;
+        let publication_snapshot = service.publication_validation_snapshot()?;
+        let reader_receipt = self.validate_change_reader_publication(
+            &generation_root,
+            &descriptor,
+            &publication_snapshot,
+        )?;
+        let authority = self.persist_current_authority_snapshot_locked(
+            &service,
+            publication_snapshot.authority.clone(),
+            _writer_lock,
+        )?;
+        validate_published(
+            &descriptor,
+            &authority,
+            publication_snapshot.locator_applied,
+        )?;
         Ok(Some(CurrentGeneration {
             generation_id: publication.generation_id,
             service,
+            descriptor,
+            reader_receipt,
+            authority_head: authority.head.cursor,
+            locator_applied: publication_snapshot.locator_applied,
+            authority_maintenance_pending: false,
             _lease: lease,
         }))
+    }
+
+    /// Run mutable maintenance against the current generation without ever
+    /// replacing it. A busy canonical writer is reported as pending so the
+    /// process-local worker can retry without blocking a response.
+    pub(crate) fn maintain_current_generation(&self) -> Result<bool, LifecycleError> {
+        self.maintain_current_generation_with(|service| {
+            service
+                .catch_up_to_head(BOOTSTRAP_PROJECTION_BATCH)
+                .map(|_| ())
+                .map_err(LifecycleError::Service)
+        })
+    }
+
+    fn maintain_current_generation_with(
+        &self,
+        catch_up: impl FnOnce(&DerivedAccessService) -> Result<(), LifecycleError>,
+    ) -> Result<bool, LifecycleError> {
+        let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+            Ok(writer_lock) => writer_lock,
+            Err(WriterLockError::Busy) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(current) = self.open_current_for_write_locked(&writer_lock)? else {
+            return Ok(true);
+        };
+        catch_up(current.service())?;
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn maintain_current_generation_with_interruption(
+        &self,
+        batch_limit: usize,
+    ) -> Result<bool, LifecycleError> {
+        self.maintain_current_generation_with(|service| {
+            service
+                .catch_up_with_interruption(batch_limit)
+                .map(|_| ())
+                .map_err(LifecycleError::Service)
+        })
     }
 
     /// Admit a product writer against a stable current generation. The bounded
@@ -860,6 +1295,76 @@ impl DerivedAccessLifecycle {
         Ok(())
     }
 
+    fn validate_change_reader_publication(
+        &self,
+        generation_root: &Path,
+        descriptor: &GenerationDescriptor,
+        snapshot: &PublicationValidationSnapshot,
+    ) -> Result<Option<ChangeReaderProfileReceiptV3>, LifecycleError> {
+        let receipt_path = generation_root.join(CHANGE_READER_PROFILE_RESOURCE_V3);
+        let receipt_bytes = match std::fs::read(&receipt_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let backend = StoreBackend::Local(self.store_root.clone());
+                let journal = backend.journal();
+                let activation_exists = journal
+                    .record_exists(CHANGE_ACTIVATION_LOGICAL_KEY)
+                    .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+                if activation_exists {
+                    return Err(LifecycleError::RebuildRequired(
+                        "published Change generation has no V3 reader receipt".to_owned(),
+                    ));
+                }
+                if snapshot.reader_projection_checkpoint.is_some() {
+                    return Err(LifecycleError::RebuildRequired(
+                        "legacy publication has an unanchored reader checkpoint".to_owned(),
+                    ));
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(LifecycleError::Validation(format!(
+                    "could not read Change reader receipt {}: {error}",
+                    receipt_path.display()
+                )));
+            }
+        };
+        let receipt = match probe_change_reader_profile_receipt(&receipt_bytes)
+            .map_err(change_reader_contract_lifecycle_error)?
+        {
+            ChangeReaderProfileReceiptProbeV1::Current(receipt) => receipt,
+            ChangeReaderProfileReceiptProbeV1::RebuildRequired { schema, version } => {
+                return Err(LifecycleError::RebuildRequired(format!(
+                    "published Change reader receipt requires upgrade: {schema:?} v{version:?}"
+                )));
+            }
+        };
+        receipt
+            .validate_for_descriptor(descriptor)
+            .map_err(change_reader_contract_lifecycle_error)?;
+        validate_live_reader_checkpoint(snapshot, Some(&receipt))?;
+
+        let backend = StoreBackend::Local(self.store_root.clone());
+        let pair = validate_bounded_change_capability_pair(
+            backend.journal().as_ref(),
+            &receipt.publication_activation_carrier.logical_key,
+            &receipt.publication_completion_carrier.logical_key,
+        )
+        .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+        if pair.activation_id != receipt.publication_activation_id
+            || pair.manifest_hash != receipt.publication_manifest_hash
+            || pair.completion_id != receipt.publication_completion_id
+            || pair.minimum_reader_profile != receipt.minimum_reader_profile
+            || pair.activation_record_sha256 != receipt.publication_activation_carrier.record_sha256
+            || pair.completion_record_sha256 != receipt.publication_completion_carrier.record_sha256
+        {
+            return Err(LifecycleError::Validation(
+                "bounded Change capability authority differs from the published receipt".to_owned(),
+            ));
+        }
+        Ok(Some(*receipt))
+    }
+
     fn truth_events(&self) -> Result<Vec<crate::session::event::ShoreEvent>, LifecycleError> {
         EventStore::open(&self.store_root)
             .list_events_untracked()
@@ -880,16 +1385,35 @@ impl DerivedAccessLifecycle {
             }))
     }
 
-    /// Continue the authority cursor bound atomically to the service's current
-    /// head. `Stable` is the only serving verdict; changed, truncated, reset,
-    /// capped, or otherwise indeterminate observations all require an explicit
-    /// rebuild/audit before this generation can be current again.
-    pub(crate) fn validate_current_authority(
+    /// Revalidate one cached generation without mixing SQLite transactions.
+    /// The immutable descriptor and V3 receipt were checked when the generation
+    /// entered the cache; only their mutable checkpoint is re-read here.
+    pub(crate) fn validate_cached_current(
         &self,
-        service: &DerivedAccessService,
-    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        current: &CurrentGeneration,
+    ) -> Result<CurrentGenerationValidation, LifecycleError> {
+        let publication_snapshot = current.service.publication_validation_snapshot()?;
+        validate_live_reader_checkpoint(&publication_snapshot, current.reader_receipt.as_ref())?;
+        let authority =
+            self.observe_current_authority_snapshot(publication_snapshot.authority.clone())?;
+        validate_published(
+            &current.descriptor,
+            &authority.snapshot,
+            publication_snapshot.locator_applied,
+        )?;
+        Ok(CurrentGenerationValidation {
+            authority: authority.snapshot,
+            locator_applied: publication_snapshot.locator_applied,
+            authority_maintenance_pending: authority.continuation_pending,
+        })
+    }
+
+    fn observe_current_authority_snapshot(
+        &self,
+        snapshot: TruthAuthoritySnapshot,
+    ) -> Result<CurrentAuthorityValidation, LifecycleError> {
         let journal = QualificationLocalJournal::new(&self.store_root);
-        self.validate_current_authority_with(service, |before| {
+        self.observe_current_authority_snapshot_with(snapshot, |before| {
             journal
                 .changes_since(before)
                 .map_err(|error| LifecycleError::Truth(error.to_string()))
@@ -899,45 +1423,79 @@ impl DerivedAccessLifecycle {
     fn validate_current_authority_with(
         &self,
         service: &DerivedAccessService,
-        mut changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+        changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
     ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        Ok(self
+            .observe_current_authority_with(service, changes_since)?
+            .snapshot)
+    }
+
+    fn observe_current_authority_with(
+        &self,
+        service: &DerivedAccessService,
+        changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+    ) -> Result<CurrentAuthorityValidation, LifecycleError> {
         let snapshot = service.truth_authority_snapshot()?;
+        self.observe_current_authority_snapshot_with(snapshot, changes_since)
+    }
+
+    fn observe_current_authority_snapshot_with(
+        &self,
+        snapshot: TruthAuthoritySnapshot,
+        mut changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+    ) -> Result<CurrentAuthorityValidation, LifecycleError> {
         let check = changes_since(&snapshot.change_stamp)?;
         require_stable_authority(&check)?;
-        if check.after == snapshot.change_stamp {
-            return Ok(snapshot);
-        }
+        let continuation_pending = check.after != snapshot.change_stamp;
+        Ok(CurrentAuthorityValidation {
+            snapshot: TruthAuthoritySnapshot {
+                head: snapshot.head,
+                change_stamp: check.after,
+            },
+            continuation_pending,
+        })
+    }
 
-        // NTFS continuation advances a volume-wide USN cursor even when every
-        // observed record is irrelevant to the event directory. Persist that
-        // successor before a later bounded read, or unrelated volume churn can
-        // eventually consume the byte/record budget. A current stable read must
-        // not wait behind publication, however: it may use the already-proven
-        // successor for this response and let the next idle read persist it.
-        let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
-            Ok(writer_lock) => writer_lock,
-            Err(WriterLockError::Busy) => {
-                return Ok(TruthAuthoritySnapshot {
-                    head: snapshot.head,
-                    change_stamp: check.after,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let locked_snapshot = service.truth_authority_snapshot()?;
-        let locked_check = changes_since(&locked_snapshot.change_stamp)?;
-        require_stable_authority(&locked_check)?;
-        if locked_check.after != locked_snapshot.change_stamp {
+    fn persist_current_authority_snapshot_locked(
+        &self,
+        service: &DerivedAccessService,
+        snapshot: TruthAuthoritySnapshot,
+        writer_lock: &StoreWriterLock,
+    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        self.persist_current_authority_snapshot_with(service, snapshot, writer_lock, |before| {
+            journal
+                .changes_since(before)
+                .map_err(|error| LifecycleError::Truth(error.to_string()))
+        })
+    }
+
+    fn persist_current_authority_with(
+        &self,
+        service: &DerivedAccessService,
+        writer_lock: &StoreWriterLock,
+        changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        let snapshot = service.truth_authority_snapshot()?;
+        self.persist_current_authority_snapshot_with(service, snapshot, writer_lock, changes_since)
+    }
+
+    fn persist_current_authority_snapshot_with(
+        &self,
+        service: &DerivedAccessService,
+        snapshot: TruthAuthoritySnapshot,
+        writer_lock: &StoreWriterLock,
+        changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        let observed = self.observe_current_authority_snapshot_with(snapshot, changes_since)?;
+        if observed.continuation_pending {
             service.bind_truth_authority_stamp_locked(
-                locked_snapshot.head.cursor,
-                &locked_check.after,
-                &writer_lock,
+                observed.snapshot.head.cursor,
+                &observed.snapshot.change_stamp,
+                writer_lock,
             )?;
         }
-        Ok(TruthAuthoritySnapshot {
-            head: locked_snapshot.head,
-            change_stamp: locked_check.after,
-        })
+        Ok(observed.snapshot)
     }
 
     fn quarantine_status(&self, reason: String) -> Result<LifecycleStatus, LifecycleError> {
@@ -1060,6 +1618,18 @@ impl CurrentGeneration {
     pub(crate) fn service(&self) -> &DerivedAccessService {
         &self.service
     }
+
+    pub(crate) const fn authority_head(&self) -> TruthCursor {
+        self.authority_head
+    }
+
+    pub(crate) const fn locator_applied(&self) -> TruthCursor {
+        self.locator_applied
+    }
+
+    pub(crate) const fn authority_maintenance_pending(&self) -> bool {
+        self.authority_maintenance_pending
+    }
 }
 
 fn lifecycle_progress(
@@ -1138,6 +1708,40 @@ pub(crate) fn lifecycle_transition_allowed(
     current.allows(successor)
 }
 
+fn change_reader_contract_lifecycle_error(error: ChangeReaderContractError) -> LifecycleError {
+    if error.is_rebuild_required() {
+        LifecycleError::RebuildRequired(error.to_string())
+    } else {
+        LifecycleError::Validation(error.to_string())
+    }
+}
+
+fn validate_live_reader_checkpoint(
+    snapshot: &PublicationValidationSnapshot,
+    receipt: Option<&ChangeReaderProfileReceiptV3>,
+) -> Result<(), LifecycleError> {
+    match (receipt, snapshot.reader_projection_checkpoint.as_ref()) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(LifecycleError::RebuildRequired(
+            "legacy publication has an unanchored reader checkpoint".to_owned(),
+        )),
+        (Some(_), None) => Err(LifecycleError::RebuildRequired(
+            "published Change generation has no live reader checkpoint".to_owned(),
+        )),
+        (Some(receipt), Some(checkpoint)) => {
+            checkpoint
+                .validate_for_receipt(receipt)
+                .map_err(change_reader_contract_lifecycle_error)?;
+            if checkpoint.truth_cursor != snapshot.locator_applied {
+                return Err(LifecycleError::Validation(
+                    "live Change reader checkpoint differs from the locator checkpoint".to_owned(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
 fn validate_candidate(
     service: &DerivedAccessService,
     descriptor: &GenerationDescriptor,
@@ -1195,15 +1799,14 @@ fn validate_candidate(
 }
 
 fn validate_published(
-    service: &DerivedAccessService,
     descriptor: &GenerationDescriptor,
     authority: &TruthAuthoritySnapshot,
+    checkpoint: TruthCursor,
 ) -> Result<(), LifecycleError> {
     let head = authority.head.cursor;
-    let checkpoint = service.locator_checkpoint()?;
     // The descriptor freezes the publication-time authority anchor. The cursor
     // ledger may later carry that anchor forward after a bounded stable check
-    // (or advance it with a governed append). `validate_current_authority` has
+    // (or advance it with a governed append). Authority validation has
     // already proved the live cursor before this structural coverage check, so
     // requiring byte equality with the immutable anchor would reject valid NTFS
     // continuations that observed only unrelated volume churn.
@@ -1419,10 +2022,20 @@ mod tests {
     use crate::session::derived_access::product_contract::{
         DerivedAccessAvailability, DerivedAccessProfile,
     };
+    use crate::session::derived_access::semantic::change::{
+        ChangeReaderProfileReceiptProbeV1, ReaderProjectionCheckpointV1,
+        probe_change_reader_profile_receipt,
+    };
     use crate::session::event::{
         EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
+    use crate::session::store::backend::StoreBackend;
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
     use crate::session::{EventStore, EventWriteOutcome};
+
+    const CHANGE_READER_PROFILE_RESOURCE: &str = "change-reader-profile.json";
 
     #[test]
     fn lifecycle_implements_the_frozen_transition_table() {
@@ -1724,10 +2337,18 @@ mod tests {
             .record_event_once(&lifecycle_event(2))
             .unwrap();
         assert!(lifecycle.rebuild_required_while_writer_idle().unwrap());
+
+        let _writer_lock = StoreWriterLock::acquire(temp.path()).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!lifecycle.rebuild_required_while_writer_idle().unwrap());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "writer-idle confirmation must never wait behind an active writer"
+        );
     }
 
     #[test]
-    fn stable_authority_successors_are_persisted_before_the_next_bounded_interval() {
+    fn stable_authority_successors_are_deferred_to_writable_maintenance() {
         let temp = populated_store(1);
         let lifecycle = active_lifecycle(temp.path());
         lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
@@ -1749,15 +2370,29 @@ mod tests {
             })
             .unwrap();
         assert_eq!(continued.change_stamp, successor_one);
-        validate_published(current.service(), &descriptor, &continued).unwrap();
+        validate_published(&descriptor, &continued, current.locator_applied()).unwrap();
         assert_eq!(
             current
                 .service()
                 .truth_authority_snapshot()
                 .unwrap()
                 .change_stamp,
-            successor_one
+            initial.change_stamp,
+            "the read-only response must not persist its proved successor"
         );
+
+        let writer_lock = StoreWriterLock::acquire(temp.path()).unwrap();
+        let writable = lifecycle
+            .open_current_for_write_locked(&writer_lock)
+            .unwrap()
+            .unwrap();
+        let persisted = lifecycle
+            .persist_current_authority_with(writable.service(), &writer_lock, |before| {
+                assert_eq!(before, &initial.change_stamp);
+                Ok(stable_change_check(successor_one.clone()))
+            })
+            .unwrap();
+        assert_eq!(persisted.change_stamp, successor_one);
 
         let successor_two = JournalChangeStamp::Observed {
             identity_sha256: "1".repeat(64),
@@ -1785,6 +2420,21 @@ mod tests {
         assert_eq!(continued.change_stamp, successor_two);
         assert_eq!(
             current
+                .service()
+                .truth_authority_snapshot()
+                .unwrap()
+                .change_stamp,
+            successor_one,
+            "a second response still leaves persistence to maintenance"
+        );
+        lifecycle
+            .persist_current_authority_with(writable.service(), &writer_lock, |before| {
+                assert_eq!(before, &successor_one);
+                Ok(stable_change_check(successor_two.clone()))
+            })
+            .unwrap();
+        assert_eq!(
+            writable
                 .service()
                 .truth_authority_snapshot()
                 .unwrap()
@@ -1838,8 +2488,9 @@ mod tests {
         std::fs::write(temp.path().join("unrelated-to-events.bin"), b"volume churn").unwrap();
 
         let continued = lifecycle
-            .validate_current_authority(current.service())
-            .expect("unrelated NTFS churn remains stable");
+            .validate_cached_current(&current)
+            .expect("unrelated NTFS churn remains stable")
+            .authority;
 
         assert_ne!(continued.change_stamp, before.change_stamp);
         assert_eq!(
@@ -2093,35 +2744,227 @@ mod tests {
     }
 
     #[test]
-    fn every_publication_boundary_is_process_interruption_safe() {
-        let cases = [
+    fn change_publication_binds_immutable_v3_and_its_live_checkpoint() {
+        let temp = valid_change_store();
+        let lifecycle = active_lifecycle(temp.path());
+        let built = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation_id = built.generation_id.as_deref().unwrap();
+        let publication = lifecycle.paths().current_publication().unwrap().unwrap();
+        let descriptor = lifecycle.paths().descriptor(&publication).unwrap();
+        let generation = lifecycle.paths().generation(generation_id);
+        let receipt_path = generation.join(CHANGE_READER_PROFILE_RESOURCE);
+        let receipt_bytes = fs::read(&receipt_path)
+            .expect("published Change generation persists its immutable V3 reader receipt");
+        let receipt = match probe_change_reader_profile_receipt(&receipt_bytes).unwrap() {
+            ChangeReaderProfileReceiptProbeV1::Current(receipt) => receipt,
+            ChangeReaderProfileReceiptProbeV1::RebuildRequired { schema, version } => {
+                panic!("published Change generation used legacy receipt {schema:?} v{version:?}")
+            }
+        };
+
+        receipt.validate_for_descriptor(&descriptor).unwrap();
+        assert_eq!(descriptor.semantic_receipt, receipt.receipt_sha256);
+
+        let database = generation.join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let checkpoint_json = connection
+            .query_row(
+                "SELECT checkpoint_json
+                 FROM reader_projection_checkpoint
+                 WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("published Change generation persists one live reader checkpoint");
+        let checkpoint: ReaderProjectionCheckpointV1 =
+            serde_json::from_str(&checkpoint_json).unwrap();
+        checkpoint.validate_for_receipt(&receipt).unwrap();
+        assert_eq!(checkpoint.reader_receipt_sha256, receipt.receipt_sha256);
+        drop(connection);
+
+        lifecycle.open_current().unwrap().unwrap();
+        assert_eq!(fs::read(receipt_path).unwrap(), receipt_bytes);
+    }
+
+    #[test]
+    fn change_receipt_failures_are_classified_without_strict_fallback() {
+        for (case, expected) in [
+            ("absent", DerivedAccessAvailability::RebuildRequired),
+            ("v2", DerivedAccessAvailability::RebuildRequired),
+            ("malformed", DerivedAccessAvailability::Quarantined),
+            ("self_hash", DerivedAccessAvailability::Quarantined),
+            ("profile", DerivedAccessAvailability::Quarantined),
             (
-                PublicationBoundary::StagingPrepared,
-                DerivedAccessAvailability::Absent,
-            ),
-            (
-                PublicationBoundary::CandidatePopulated,
-                DerivedAccessAvailability::Bootstrapping,
-            ),
-            (
-                PublicationBoundary::CandidateValidated,
-                DerivedAccessAvailability::Bootstrapping,
-            ),
-            (
-                PublicationBoundary::GenerationPromoted,
+                "checkpoint_anchor",
                 DerivedAccessAvailability::RebuildRequired,
             ),
             (
-                PublicationBoundary::CurrentPublished,
-                DerivedAccessAvailability::Current,
+                "checkpoint_schema",
+                DerivedAccessAvailability::RebuildRequired,
+            ),
+        ] {
+            let temp = valid_change_store();
+            let lifecycle = active_lifecycle(temp.path());
+            let built = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+            let generation = lifecycle
+                .paths()
+                .generation(built.generation_id.as_deref().unwrap());
+            let receipt_path = generation.join(CHANGE_READER_PROFILE_RESOURCE);
+
+            match case {
+                "absent" => {
+                    if receipt_path.exists() {
+                        fs::remove_file(&receipt_path).unwrap();
+                    }
+                }
+                "v2" => fs::write(
+                    &receipt_path,
+                    br#"{"schema":"pointbreak.change-reader-profile-receipt.v2","version":2}"#,
+                )
+                .unwrap(),
+                "malformed" => fs::write(&receipt_path, b"{").unwrap(),
+                "self_hash" | "profile" => {
+                    let mut value: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+                    if case == "self_hash" {
+                        value["receiptSha256"] =
+                            serde_json::Value::String(format!("sha256:{}", "0".repeat(64)));
+                    } else {
+                        value["publicationProfile"] = serde_json::Value::String("off".to_owned());
+                    }
+                    fs::write(&receipt_path, canonical_json_bytes(&value).unwrap()).unwrap();
+                }
+                "checkpoint_anchor" | "checkpoint_schema" => {
+                    let database = generation.join("cursor.sqlite3");
+                    let connection = rusqlite::Connection::open(&database).unwrap();
+                    let checkpoint_json: String = connection
+                        .query_row(
+                            "SELECT checkpoint_json
+                             FROM reader_projection_checkpoint
+                             WHERE singleton = 1",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    let mut checkpoint: serde_json::Value =
+                        serde_json::from_str(&checkpoint_json).unwrap();
+                    if case == "checkpoint_anchor" {
+                        checkpoint["readerReceiptSha256"] =
+                            serde_json::Value::String(format!("sha256:{}", "0".repeat(64)));
+                    } else {
+                        checkpoint["schema"] = serde_json::Value::String(
+                            "pointbreak.reader-projection-checkpoint.v2".to_owned(),
+                        );
+                        checkpoint["version"] = serde_json::Value::from(2);
+                    }
+                    connection
+                        .execute(
+                            "UPDATE reader_projection_checkpoint
+                             SET checkpoint_json = ?1
+                             WHERE singleton = 1",
+                            [
+                                String::from_utf8(canonical_json_bytes(&checkpoint).unwrap())
+                                    .unwrap(),
+                            ],
+                        )
+                        .unwrap();
+                    connection
+                        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let scope = LongitudinalCountingScopeV1::new("d".repeat(64)).unwrap();
+            let guard = scope.enter();
+            let observed = lifecycle.status_read_only().unwrap();
+            drop(guard);
+
+            assert_eq!(observed.availability, expected, "receipt case {case}");
+            let counters = scope.snapshot().counters;
+            assert_eq!(counters.event_folds, 0, "receipt case {case}");
+            assert_eq!(counters.projection_rebuilds, 0, "receipt case {case}");
+            assert_eq!(counters.state_rebuilds, 0, "receipt case {case}");
+            assert!(generation.exists(), "receipt case {case}");
+        }
+    }
+
+    #[test]
+    fn fresh_process_valid_l2_restart_is_bounded_and_receipt_backed() {
+        let temp = valid_change_store();
+        active_lifecycle(temp.path())
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+
+        let result = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "session::derived_access::lifecycle::tests::valid_l2_restart_child",
+            ])
+            .env("POINTBREAK_VALID_L2_RESTART_ROOT", temp.path())
+            .status()
+            .unwrap();
+
+        assert!(result.success(), "fresh valid-L2 restart must stay bounded");
+    }
+
+    #[test]
+    #[ignore = "spawned by fresh_process_valid_l2_restart_is_bounded_and_receipt_backed"]
+    fn valid_l2_restart_child() {
+        let root = std::env::var_os("POINTBREAK_VALID_L2_RESTART_ROOT").unwrap();
+        let scope = LongitudinalCountingScopeV1::new("e".repeat(64)).unwrap();
+        let guard = scope.enter();
+
+        active_lifecycle(Path::new(&root))
+            .open_current()
+            .expect("valid L2 publication opens")
+            .expect("valid L2 publication remains current");
+
+        drop(guard);
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(
+            counters.carrier_opens, 2,
+            "restart point-reads only activation and completion carriers"
+        );
+        assert_eq!(counters.event_folds, 0);
+        assert_eq!(counters.projection_rebuilds, 0);
+        assert_eq!(counters.state_rebuilds, 0);
+    }
+
+    #[test]
+    fn every_publication_boundary_is_process_interruption_safe() {
+        let cases = [
+            ("StagingPrepared", DerivedAccessAvailability::Absent),
+            (
+                "CandidatePopulated",
+                DerivedAccessAvailability::Bootstrapping,
             ),
             (
-                PublicationBoundary::PriorPublicationRetired,
+                "CandidateValidated",
+                DerivedAccessAvailability::Bootstrapping,
+            ),
+            (
+                "ReaderReceiptWritten",
+                DerivedAccessAvailability::Bootstrapping,
+            ),
+            (
+                "GenerationPromoted",
+                DerivedAccessAvailability::RebuildRequired,
+            ),
+            ("CurrentPublished", DerivedAccessAvailability::Current),
+            (
+                "PriorPublicationRetired",
                 DerivedAccessAvailability::Current,
             ),
         ];
         for (boundary, expected) in cases {
-            let temp = populated_store(7);
+            let temp = if boundary == "ReaderReceiptWritten" {
+                valid_change_store()
+            } else {
+                populated_store(7)
+            };
             let lifecycle = active_lifecycle(temp.path());
             let result = Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -2130,17 +2973,14 @@ mod tests {
                     "session::derived_access::lifecycle::tests::lifecycle_publication_crash_child",
                 ])
                 .env("POINTBREAK_LIFECYCLE_CRASH_ROOT", temp.path())
-                .env(
-                    "POINTBREAK_LIFECYCLE_CRASH_BOUNDARY",
-                    format!("{boundary:?}"),
-                )
+                .env("POINTBREAK_LIFECYCLE_CRASH_BOUNDARY", boundary)
                 .status()
                 .unwrap();
-            assert_eq!(result.code(), Some(91), "boundary {boundary:?}");
+            assert_eq!(result.code(), Some(91), "boundary {boundary}");
             assert_eq!(
                 lifecycle.status().unwrap().availability,
                 expected,
-                "boundary {boundary:?}"
+                "boundary {boundary}"
             );
 
             lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
@@ -2198,6 +3038,129 @@ mod tests {
         assert_eq!((status.completed, status.total), (Some(0), Some(7)));
         release_tx.send(()).unwrap();
         thread.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn automatic_rebuild_stops_when_activation_wins_between_population_and_strict_replay() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        let mut activated = false;
+
+        let result = lifecycle.try_automatic_legacy_rebuild(|progress| {
+            if !activated
+                && progress.phase == GenerationProgressPhase::ProjectionPopulation
+                && progress.completed == 0
+            {
+                let _authority = StoreAuthorityLock::acquire(temp.path()).unwrap();
+                write_capability_fixture_for_test(
+                    backend.journal().as_ref(),
+                    CapabilityFixtureState::L2,
+                )
+                .unwrap();
+                activated = true;
+            }
+            LifecycleControl::Continue
+        });
+
+        assert!(activated);
+        assert!(matches!(
+            result,
+            Err(LifecycleError::AutomaticRebuildSuppressed)
+        ));
+        assert_eq!(lifecycle.published_generation_id().unwrap(), None);
+        assert!(lifecycle.paths().staging_progress().unwrap().is_none());
+    }
+
+    #[test]
+    fn authority_held_rebuild_waits_for_a_background_lease_to_yield() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let worker = lifecycle.clone();
+        let (projection_tx, projection_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let background = std::thread::spawn(move || {
+            let mut paused = false;
+            worker.try_automatic_legacy_rebuild(|progress| {
+                if !paused
+                    && progress.phase == GenerationProgressPhase::ProjectionPopulation
+                    && progress.completed == 0
+                {
+                    paused = true;
+                    projection_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                }
+                LifecycleControl::Continue
+            })
+        });
+        projection_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let authority = StoreAuthorityLock::acquire(temp.path()).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            continue_tx.send(()).unwrap();
+        });
+
+        let receipt = lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("the authority-owning rebuild waits for the background lease");
+
+        assert!(matches!(
+            background.join().unwrap(),
+            Err(LifecycleError::RebuildBusy)
+        ));
+        assert_eq!(
+            lifecycle.published_generation_id().unwrap(),
+            receipt.generation_id
+        );
+        releaser.join().unwrap();
+        drop(authority);
+    }
+
+    #[test]
+    fn synchronous_l0_rebuild_publishes_before_a_waiting_activation() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let root = temp.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let mut contender = None;
+
+        lifecycle
+            .rebuild_with_hook(
+                |_| LifecycleControl::Continue,
+                |boundary| match boundary {
+                    PublicationBoundary::CandidateValidated => {
+                        let acquired_tx = acquired_tx.clone();
+                        let root = root.clone();
+                        contender = Some(std::thread::spawn(move || {
+                            let _authority = StoreAuthorityLock::acquire(&root).unwrap();
+                            acquired_tx.send(()).unwrap();
+                            let backend = StoreBackend::Local(root);
+                            write_capability_fixture_for_test(
+                                backend.journal().as_ref(),
+                                CapabilityFixtureState::L2,
+                            )
+                            .unwrap();
+                        }));
+                        assert!(
+                            acquired_rx
+                                .recv_timeout(Duration::from_millis(100))
+                                .is_err(),
+                            "activation must wait while the L0 rebuild owns authority"
+                        );
+                    }
+                    PublicationBoundary::CurrentPublished => assert!(
+                        acquired_rx
+                            .recv_timeout(Duration::from_millis(100))
+                            .is_err(),
+                        "activation must remain excluded until current publication"
+                    ),
+                    _ => {}
+                },
+            )
+            .unwrap();
+
+        acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        contender.unwrap().join().unwrap();
     }
 
     #[test]
@@ -2266,6 +3229,32 @@ mod tests {
 
         release_tx.send(()).unwrap();
         thread.join().unwrap().unwrap();
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+    }
+
+    #[test]
+    fn same_thread_rebuild_reentry_is_rejected_without_waiting() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let mut reentered = false;
+
+        lifecycle
+            .rebuild(|_| {
+                if !reentered {
+                    reentered = true;
+                    assert!(matches!(
+                        lifecycle.rebuild(|_| LifecycleControl::Continue),
+                        Err(LifecycleError::RebuildBusy)
+                    ));
+                }
+                LifecycleControl::Continue
+            })
+            .unwrap();
+
+        assert!(reentered);
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::Current
@@ -2696,6 +3685,14 @@ mod tests {
                 EventWriteOutcome::Created
             );
         }
+        temp
+    }
+
+    fn valid_change_store() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
         temp
     }
 

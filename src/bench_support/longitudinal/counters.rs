@@ -58,6 +58,7 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     GovernedWriteAdmission,
     GovernedWriteTruth,
     GovernedWriteCatchUp,
+    GovernedWriteAuthorityCursorMaintenance,
     GovernedWriteResponse,
 }
 
@@ -80,6 +81,7 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::GovernedWriteCatchUp => Ownership::MixedDerivedAndTruth,
             Self::BootstrapFinalization
             | Self::GovernedWriteAdmission
+            | Self::GovernedWriteAuthorityCursorMaintenance
             | Self::GovernedWriteResponse => Ownership::DerivedAccess,
         }
     }
@@ -406,6 +408,7 @@ fn counter_delta(
         directory_entries_walked: delta!(directory_entries_walked),
         carrier_opens: delta!(carrier_opens),
         carrier_bytes_read: delta!(carrier_bytes_read),
+        authority_identity_rows_scanned: delta!(authority_identity_rows_scanned),
         event_decodes: delta!(event_decodes),
         event_validations: delta!(event_validations),
         event_folds: delta!(event_folds),
@@ -464,6 +467,16 @@ pub fn record_carrier_bytes(bytes: usize) {
             &mut state.counters.carrier_bytes_read,
             bytes as u64,
             "carrier_bytes_read",
+        );
+    });
+}
+
+pub fn record_authority_identity_rows_scanned(count: usize) {
+    with_active(|state| {
+        add(
+            &mut state.counters.authority_identity_rows_scanned,
+            count as u64,
+            "authority_identity_rows_scanned",
         );
     });
 }
@@ -632,6 +645,7 @@ mod tests {
         );
         record_directory_entries_walked(9);
         record_carrier_read(11);
+        record_authority_identity_rows_scanned(12);
         record_event_decode();
         record_event_validation();
         record_event_folds(13);
@@ -737,6 +751,7 @@ mod tests {
         record_directory_entries_walked(2);
         record_carrier_read(3);
         record_carrier_read(5);
+        record_authority_identity_rows_scanned(6);
         record_event_decode();
         record_event_validation();
         record_event_folds(7);
@@ -765,6 +780,7 @@ mod tests {
                 directory_entries_walked: 2,
                 carrier_opens: 2,
                 carrier_bytes_read: 8,
+                authority_identity_rows_scanned: 6,
                 event_decodes: 1,
                 event_validations: 1,
                 event_folds: 7,

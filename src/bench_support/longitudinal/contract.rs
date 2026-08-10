@@ -3079,6 +3079,8 @@ pub struct LongitudinalCountersV1 {
     pub directory_entries_walked: u64,
     pub carrier_opens: u64,
     pub carrier_bytes_read: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub authority_identity_rows_scanned: u64,
     pub event_decodes: u64,
     pub event_validations: u64,
     pub event_folds: u64,
@@ -3090,6 +3092,10 @@ pub struct LongitudinalCountersV1 {
     pub projection_rebuilds: u64,
     pub state_rebuilds: u64,
     pub response_bytes: u64,
+}
+
+fn u64_is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
