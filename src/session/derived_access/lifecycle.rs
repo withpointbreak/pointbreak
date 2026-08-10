@@ -105,7 +105,7 @@ pub(crate) struct LifecycleReceipt {
 
 #[derive(Debug)]
 pub(crate) struct CurrentGeneration {
-    generation_id: String,
+    publication_identity: GenerationPublication,
     service: DerivedAccessService,
     descriptor: GenerationDescriptor,
     reader_receipt: Option<ChangeReaderProfileReceiptV3>,
@@ -219,6 +219,17 @@ impl DerivedAccessLifecycle {
             .current_publication()
             .map(|publication| publication.map(|publication| publication.generation_id))
             .map_err(|error| self.generation_open_error(error))
+    }
+
+    /// Observe the completion-last current-publication record without opening
+    /// or validating the referenced generation. Unlike lifecycle generation
+    /// opening, an invalid record is reported without quarantine or mutation.
+    pub(crate) fn published_generation_identity_read_only(
+        &self,
+    ) -> Result<Option<GenerationPublication>, LifecycleError> {
+        self.paths
+            .current_publication()
+            .map_err(LifecycleError::Generation)
     }
 
     /// Metadata-only activation probe used to constrain automatic recovery.
@@ -1095,7 +1106,7 @@ impl DerivedAccessLifecycle {
         )
         .map_err(|error| self.quarantine_error(error.to_string()))?;
         Ok(Some(CurrentGeneration {
-            generation_id: publication.generation_id,
+            publication_identity: publication,
             service,
             descriptor,
             reader_receipt,
@@ -1205,7 +1216,7 @@ impl DerivedAccessLifecycle {
             publication_snapshot.locator_applied,
         )?;
         Ok(Some(CurrentGeneration {
-            generation_id: publication.generation_id,
+            publication_identity: publication,
             service,
             descriptor,
             reader_receipt,
@@ -1643,7 +1654,11 @@ impl DerivedAccessLifecycle {
 
 impl CurrentGeneration {
     pub(crate) fn generation_id(&self) -> &str {
-        &self.generation_id
+        &self.publication_identity.generation_id
+    }
+
+    pub(crate) fn publication_identity(&self) -> &GenerationPublication {
+        &self.publication_identity
     }
 
     pub(crate) fn service(&self) -> &DerivedAccessService {

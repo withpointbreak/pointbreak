@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use super::generation::GenerationPublication;
 use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout};
 use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
@@ -166,6 +167,32 @@ impl DerivedAccessRuntime {
             return None;
         };
         Some(lifecycle)
+    }
+
+    /// Observe only the live completion-last publication record. Namespace
+    /// selection is refreshed exactly like `current`, but no generation is
+    /// selected, opened, validated, installed, or maintained.
+    pub(super) fn current_publication_identity(
+        &self,
+    ) -> Result<Option<GenerationPublication>, String> {
+        let DerivedAccessMode::Active {
+            lifecycle: configured_lifecycle,
+            ..
+        } = &self.mode
+        else {
+            return Ok(None);
+        };
+        let refreshed_lifecycle;
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => {
+                refreshed_lifecycle = maintenance.lifecycle()?;
+                &refreshed_lifecycle
+            }
+            None => configured_lifecycle,
+        };
+        lifecycle
+            .published_generation_identity_read_only()
+            .map_err(|error| error.to_string())
     }
 
     /// Clone the process-local reader already selected by another product

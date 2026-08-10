@@ -835,6 +835,13 @@ fn bind_strict_change_stamp_with_hook(
     let Some(current) = runtime.cached_current() else {
         return Ok(StrictChangeStampBindingV1::Unavailable);
     };
+    let initial_publication = match runtime.current_publication_identity() {
+        Ok(Some(publication)) => publication,
+        Ok(None) | Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
+    };
+    if current.publication_identity() != &initial_publication {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    }
     let checkpoint = match current.pin_change_reader_checkpoint() {
         Ok(checkpoint) => checkpoint,
         Err(LifecycleError::TruthChanged) => return Ok(StrictChangeStampBindingV1::Moving),
@@ -857,9 +864,7 @@ fn bind_strict_change_stamp_with_hook(
     let Some(final_current) = runtime.cached_current() else {
         return Ok(StrictChangeStampBindingV1::Moving);
     };
-    if !Arc::ptr_eq(&current, &final_current)
-        || current.generation_id() != final_current.generation_id()
-    {
+    if !Arc::ptr_eq(&current, &final_current) {
         return Ok(StrictChangeStampBindingV1::Moving);
     }
     let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
@@ -869,6 +874,16 @@ fn bind_strict_change_stamp_with_hook(
     };
     if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256
         || &final_checkpoint.authority_cursor != authority_cursor
+    {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    }
+    let final_publication = match runtime.current_publication_identity() {
+        Ok(Some(publication)) => publication,
+        Ok(None) => return Ok(StrictChangeStampBindingV1::Moving),
+        Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
+    };
+    if final_publication != initial_publication
+        || final_current.publication_identity() != &final_publication
     {
         return Ok(StrictChangeStampBindingV1::Moving);
     }
@@ -1538,9 +1553,12 @@ mod tests {
         ChangeDeclarationStateV1, ReaderProfileAvailabilityV1, change_presentation_projection,
     };
     use crate::model::{ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, RevisionId};
+    use crate::session::derived_access::layout::{
+        DerivedStorageLayout, DerivedStorageNamespace, DerivedStorageTransition,
+    };
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
-    use crate::session::derived_access::runtime::DerivedAccessMode;
+    use crate::session::derived_access::runtime::{DerivedAccessMaintenance, DerivedAccessMode};
     use crate::session::derived_access::semantic::change::CHANGE_READER_PROFILE_RESOURCE_V3;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
@@ -1811,6 +1829,14 @@ mod tests {
                 .paths()
                 .generation(&generation_id)
                 .join(CHANGE_READER_PROFILE_RESOURCE_V3)
+        }
+
+        fn publication_path(&self) -> PathBuf {
+            fs::read_dir(self.lifecycle.paths().root().join("publications"))
+                .expect("read disposable publication directory")
+                .map(|entry| entry.expect("read disposable publication entry").path())
+                .find(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+                .expect("fixture has a current publication record")
         }
 
         fn proposal_sequence(&self, event: &ShoreEvent) -> i64 {
@@ -2997,6 +3023,9 @@ mod tests {
     fn strict_stamp_binder_leaves_an_empty_runtime_cache_unavailable() {
         let fixture = ActiveChangeFixture::new(&[]);
         let access = fixture.fresh_access();
+        let publication_path = fixture.publication_path();
+        fs::write(&publication_path, b"{")
+            .expect("invalidate publication metadata behind an empty cache");
         let scope = LongitudinalCountingScopeV1::new("8".repeat(64)).unwrap();
         let guard = scope.enter();
         let binding = access
@@ -3011,6 +3040,11 @@ mod tests {
 
         assert_eq!(binding, StrictChangeStampBindingV1::Unavailable);
         assert!(access.runtime.cached_current().is_none());
+        assert_eq!(
+            fs::read(&publication_path)
+                .expect("empty-cache binding must not move publication state"),
+            b"{"
+        );
         let counters = scope.snapshot().counters;
         assert_eq!(counters.directory_entries_walked, 0);
         assert_eq!(counters.event_folds, 0);
@@ -3062,6 +3096,154 @@ mod tests {
     }
 
     #[test]
+    fn strict_stamp_binder_rejects_a_cached_generation_after_publication_advances() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("publication stamp state"),
+            Some("publication stamp state"),
+        ]]);
+        let DerivedChangeOutcomeV1::Ready(old_page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the original cached Change generation")
+        else {
+            panic!("original fixture Changes must be ready");
+        };
+        let old_generation_id = fixture
+            .runtime
+            .cached_current()
+            .expect("original generation is cached")
+            .generation_id()
+            .to_owned();
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind_with_hook(&authority, &strict_projection, &strict_documents, || {
+                    fixture
+                        .lifecycle
+                        .rebuild(|_| LifecycleControl::Continue)
+                        .expect("publish a replacement generation during stamp binding");
+                })
+                .expect("classify publication movement during binding"),
+            StrictChangeStampBindingV1::Moving,
+            "one response must not mix N with a live pointer that advances to N+1"
+        );
+        let replacement_generation_id = fixture
+            .lifecycle
+            .published_generation_id()
+            .expect("read replacement publication")
+            .expect("replacement generation is current");
+        assert_ne!(replacement_generation_id, old_generation_id);
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("classify the retained cached generation"),
+            StrictChangeStampBindingV1::Moving,
+            "a retained reader for N must not bind after the live pointer publishes N+1"
+        );
+
+        let replacement_access = fixture.fresh_access();
+        let DerivedChangeOutcomeV1::Ready(replacement_page) = replacement_access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("read through a fresh replacement-generation cache")
+        else {
+            panic!("replacement fixture Changes must be ready");
+        };
+        assert_ne!(
+            replacement_page.document.document.projection_stamp,
+            old_page.document.document.projection_stamp
+        );
+        assert_eq!(
+            replacement_access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("bind the replacement generation"),
+            StrictChangeStampBindingV1::Bound(replacement_page.document.document.projection_stamp)
+        );
+    }
+
+    #[test]
+    fn strict_stamp_binder_observes_the_refreshed_publication_namespace() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("transitioned publication state"),
+            Some("transitioned publication state"),
+        ]]);
+        let stable = DerivedStorageLayout::for_namespace(
+            fixture._temp.path(),
+            DerivedStorageNamespace::Stable,
+        );
+        let legacy = DerivedStorageLayout::for_namespace(
+            fixture._temp.path(),
+            DerivedStorageNamespace::Legacy,
+        );
+        fs::rename(stable.root(), legacy.root()).expect("move fixture into the legacy namespace");
+        let store_identity = opaque_path_identity("store", fixture._temp.path())
+            .expect("derive transitioned fixture identity");
+        let configured_lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            fixture._temp.path(),
+            store_identity.clone(),
+        )
+        .expect("configure runtime while the legacy namespace is selected");
+        let runtime = DerivedAccessRuntime::new(
+            DerivedAccessMode::Active {
+                lifecycle: configured_lifecycle,
+                current: Mutex::new(None),
+                store_identity: store_identity.clone(),
+                backend: StoreBackend::Local(fixture._temp.path().to_path_buf()),
+            },
+            Some(DerivedAccessMaintenance {
+                profile: DerivedAccessProfile::SqliteWalBodylessV1,
+                store_root: fixture._temp.path().to_path_buf(),
+                store_identity,
+            }),
+        );
+        let transition = DerivedStorageLayout::transition_legacy(fixture._temp.path())
+            .expect("transition the publication into the stable namespace");
+        assert_eq!(transition.disposition, DerivedStorageTransition::Moved);
+        let access = DerivedChangeAccess::from_runtime(runtime);
+        let DerivedChangeOutcomeV1::Ready(page) = access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("open the refreshed stable publication")
+        else {
+            panic!("refreshed stable publication must be ready");
+        };
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+
+        assert_eq!(
+            access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("bind through the refreshed publication namespace"),
+            StrictChangeStampBindingV1::Bound(page.document.document.projection_stamp)
+        );
+    }
+
+    #[test]
     fn strict_stamp_binder_treats_invalid_cached_metadata_as_unavailable() {
         let fixture =
             ActiveChangeFixture::new(&[&[Some("cached stamp state"), Some("cached stamp state")]]);
@@ -3102,6 +3284,49 @@ mod tests {
     }
 
     #[test]
+    fn strict_stamp_binder_treats_invalid_publication_metadata_as_unavailable() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("publication metadata state"),
+            Some("publication metadata state"),
+        ]]);
+        fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the cached Change generation");
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+        let publication_path = fixture.publication_path();
+        fs::write(&publication_path, b"{").expect("invalidate disposable publication metadata");
+
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("classify invalid publication metadata"),
+            StrictChangeStampBindingV1::Unavailable
+        );
+        assert!(
+            fixture.runtime.cached_current().is_some(),
+            "metadata observation must not mutate the cached reader slot"
+        );
+        assert_eq!(
+            fs::read(&publication_path)
+                .expect("publication observation must not move invalid metadata"),
+            b"{"
+        );
+    }
+
+    #[test]
     fn strict_stamp_binder_source_has_no_query_hydration_or_activation_path() {
         let source = include_str!("changes.rs");
         let start = source
@@ -3112,18 +3337,87 @@ mod tests {
             .map(|offset| start + offset)
             .expect("binder implementation terminator");
         let implementation = &source[start..end];
+        assert!(
+            implementation
+                .find("runtime.cached_current()")
+                .expect("cached reader observation")
+                < implementation
+                    .find("runtime.current_publication_identity()")
+                    .expect("initial publication observation"),
+            "an empty cached-reader slot must return before publication metadata I/O"
+        );
         for forbidden in [
             ".current(",
+            "open_current",
             "semantic_materialized",
             "read_page",
             "LocatorRead",
             "hydrate",
+            "query",
             "rebuild",
             "maintenance",
         ] {
             assert!(
                 !implementation.contains(forbidden),
                 "strict stamp binding must not contain {forbidden:?}"
+            );
+        }
+
+        let runtime_source = include_str!("runtime.rs");
+        let runtime_start = runtime_source
+            .find("pub(super) fn current_publication_identity")
+            .expect("runtime publication observation marker");
+        let runtime_end = runtime_source[runtime_start..]
+            .find("\n    /// Clone the process-local reader")
+            .map(|offset| runtime_start + offset)
+            .expect("runtime publication observation terminator");
+        let runtime_observation = &runtime_source[runtime_start..runtime_end];
+        for forbidden in [
+            ".current(",
+            "open_current",
+            "rebuild",
+            "maintenance(",
+            "maintain_current_generation",
+            "start_background",
+            "semantic",
+            "hydrate",
+            "query",
+            "lock(current)",
+        ] {
+            assert!(
+                !runtime_observation.contains(forbidden),
+                "publication observation must not contain {forbidden:?}"
+            );
+        }
+
+        let lifecycle_source = include_str!("lifecycle.rs");
+        let lifecycle_start = lifecycle_source
+            .find("pub(crate) fn published_generation_identity_read_only")
+            .expect("lifecycle publication observation marker");
+        let lifecycle_end = lifecycle_source[lifecycle_start..]
+            .find("\n    /// Metadata-only activation probe")
+            .map(|offset| lifecycle_start + offset)
+            .expect("lifecycle publication observation terminator");
+        let lifecycle_observation = &lifecycle_source[lifecycle_start..lifecycle_end];
+        for forbidden in [
+            "open_current",
+            "rebuild",
+            "maintain",
+            "semantic",
+            "hydrate",
+            "query",
+            "EventStore",
+            "StoreBackend",
+            "generation_open_error",
+            "quarantine",
+            "try_acquire",
+            "rename",
+            "remove",
+            "write",
+        ] {
+            assert!(
+                !lifecycle_observation.contains(forbidden),
+                "publication metadata read must not contain {forbidden:?}"
             );
         }
     }
