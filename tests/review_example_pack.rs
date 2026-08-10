@@ -313,9 +313,9 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let installed_trap = script
         .find("\ntrap cleanup EXIT\n")
         .expect("browser gate installs its cleanup trap");
-    let fixture_concurrency = script
-        .find("\nequal_timestamp_pids=()\n")
-        .expect("browser gate starts its concurrent fixture writers");
+    let deterministic_equal_timestamp = script
+        .find("\nequal_timestamp_pair=\"$(jq -s -ce '\n")
+        .expect("browser gate binds one deterministic capture event pair");
     let disarmed_trap = script
         .rfind("\ntrap - EXIT\n")
         .expect("browser gate disarms its cleanup trap");
@@ -432,11 +432,23 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         )
         .expect("browser gate publishes its completion marker");
     assert!(
-        installed_trap < fixture_concurrency,
-        "failure cleanup must own fixture writers before concurrency begins"
+        installed_trap < deterministic_equal_timestamp,
+        "failure cleanup must be installed before deterministic fixture selection"
+    );
+    assert!(
+        script.contains(".changeEvents | map(select(.outcome == \"created\"))")
+            && script.contains("eventType == \"change_declared\"")
+            && script.contains("eventType == \"change_membership_asserted\"")
+            && script.contains("changeId: $capture.changeId")
+            && !script.contains("equal_timestamp_pids")
+            && !script.contains("browser-equal-time")
+            && browser_program
+                .contains("change=${encodeURIComponent(config.fixture.equalTimestamp.changeId)}",)
+            && browser_program.contains("new Set(equalTimestampOccurredAt).size === 1")
+            && !browser_program.contains("track=agent%3Abrowser-equal-time"),
+        "Timeline tie evidence must come from one supported multi-event Change capture, not clock luck"
     );
     for registration in [
-        "register_background_process \"$equal_timestamp_pid\"",
         "reader_state_started_pid=$!\n  register_background_process \"$reader_state_started_pid\"",
         "server_pid=$!\nregister_background_process \"$server_pid\"",
         "timeline_append_pid=$!\nregister_background_process \"$timeline_append_pid\"",
@@ -536,7 +548,9 @@ fn change_inspector_browser_gate_rejects_frozen_exact_identity_false_negatives()
     let historical_proposal = browser_program
         .split_once("const historical = config.fixture.historicalMembership;")
         .and_then(|(_, tail)| {
-            tail.split_once("await open(\n\t\t\t\t\"timeline?limit=100&order=asc&track=")
+            tail.split_once(
+                "await open(\n\t\t\t\t`timeline?limit=100&order=asc&change=${encodeURIComponent(config.fixture.equalTimestamp.changeId)}`",
+            )
         })
         .map(|(proposal, _)| proposal)
         .expect("browser gate retains the withdrawn historical proposal check");

@@ -76,7 +76,7 @@ log_dir="$root/logs"
 mkdir -p "$fixture_root" "$pointbreak_home" "$artifact_dir" "$log_dir"
 
 # Own every asynchronous child from the moment it is spawned. The EXIT trap is
-# installed before fixture concurrency begins, while browser cleanup remains
+# installed before asynchronous work begins, while browser cleanup remains
 # disabled until its session command has been resolved.
 background_pids=()
 pwcli=()
@@ -241,6 +241,26 @@ for ordinal in $(seq 1 351); do
       --summary "Browser scale Change $ordinal" --format json \
       >>"$log_dir/scale-captures.jsonl" 2>>"$log_dir/scale-captures.log"
 done
+
+# An initial Change capture mints its declaration and membership assertion from
+# one operation timestamp. Bind the first supported receipt's exact event pair
+# so the browser can prove the Timeline's event-id tie break without depending
+# on scheduler or wall-clock coincidence between separate writer processes.
+equal_timestamp_pair="$(jq -s -ce '
+  .[0] as $capture
+  | ($capture | .changeEvents | map(select(.outcome == "created"))) as $events
+  | [$events[] | select(
+      .eventType == "change_declared" or
+      .eventType == "change_membership_asserted"
+    )] as $pair
+  | if (($pair | length) == 2 and
+        ($pair | map(.eventType) | unique | length) == 2 and
+        ($capture.changeId | startswith("change:sha256:")))
+    then {changeId: $capture.changeId, tieBreak: "event_id_asc",
+      eventIds: ($pair | map(.eventId) | sort)}
+    else error("first scale capture did not emit one created declaration/membership pair") end
+' "$log_dir/scale-captures.jsonl")" \
+  || die "supported Change capture did not provide a deterministic equal-occurredAt pair"
 
 # One explicit exact Revision is the removed-resource case. The removal claim
 # models intentional unavailability without erasing bytes, preserving a
@@ -438,48 +458,9 @@ POINTBREAK_HOME="$pointbreak_home" \
     >"$log_dir/historical-membership-withdraw.json" \
     2>"$log_dir/historical-membership-withdraw.log"
 
-# Exercise the real multi-writer timestamp path instead of inventing a raw
-# record. A bounded burst makes a same-millisecond pair observable while every
-# event remains a valid supported observation write. The exact pair is derived
-# and asserted below after the projection is rebuilt.
-equal_timestamp_pids=()
-for ordinal in $(seq 1 16); do
-  POINTBREAK_HOME="$pointbreak_home" \
-    POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-    "$pointbreak_binary" observation add --repo "$fixture_repo" \
-      --exact-revision "$primary_revision" --track "agent:browser-equal-time" \
-      --title "Browser equal-time writer $ordinal" \
-      --idempotency-key "browser-equal-time-$ordinal-v1" --format json \
-      >"$log_dir/equal-time-$ordinal.json" 2>"$log_dir/equal-time-$ordinal.log" &
-  equal_timestamp_pid="$!"
-  equal_timestamp_pids+=("$equal_timestamp_pid")
-  register_background_process "$equal_timestamp_pid"
-done
-for equal_timestamp_pid in "${equal_timestamp_pids[@]}"; do
-  if wait "$equal_timestamp_pid"; then
-    forget_background_process "$equal_timestamp_pid"
-  else
-    forget_background_process "$equal_timestamp_pid"
-    die "a supported concurrent equal-timestamp fixture write failed"
-  fi
-done
-
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" store derived build \
   --repo "$fixture_repo" --format json \
   >"$log_dir/derived-build.json" 2>"$log_dir/derived-build.log"
-POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" history \
-  --repo "$fixture_repo" --track "agent:browser-equal-time" --format json \
-  >"$log_dir/equal-time-history.json"
-equal_timestamp_pair="$(jq -ce '
-  [.entries[] | {eventId, occurredAt}]
-  | group_by(.occurredAt)
-  | map(select(length >= 2))
-  | first
-  | select(. != null)
-  | {occurredAt: .[0].occurredAt, tieBreak: "event_id_asc",
-      eventIds: ([.[0].eventId, .[1].eventId] | sort)}
-' "$log_dir/equal-time-history.json")" \
-  || die "supported concurrent writers did not produce an equal-occurredAt pair"
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change list --repo "$fixture_repo" --format json \
   >"$log_dir/changes.json"
 change_count="$(jq -er '.changes | length' "$log_dir/changes.json")"

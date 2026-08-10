@@ -1327,10 +1327,11 @@
 			}
 
 			await open(
-				"timeline?limit=100&order=asc&track=agent%3Abrowser-equal-time",
+				`timeline?limit=100&order=asc&change=${encodeURIComponent(config.fixture.equalTimestamp.changeId)}`,
 				layouts[0],
 				"Timeline equal occurredAt pair",
 			);
+			const equalTimestampOccurredAt = [];
 			for (const eventId of config.fixture.equalTimestamp.eventIds) {
 				const row = page.locator(`#timeline [data-event-id="${eventId}"]`);
 				const rowCount = await row.count();
@@ -1342,14 +1343,25 @@
 					rowCount,
 				);
 				const occurredAt = await row.locator("time").getAttribute("datetime");
-				compare(
-					occurredAt === config.fixture.equalTimestamp.occurredAt,
+				requireCondition(
+					typeof occurredAt === "string" && occurredAt.length > 0,
 					"Timeline equal occurredAt pair",
-					`event ${eventId} did not retain ${config.fixture.equalTimestamp.occurredAt}`,
-					config.fixture.equalTimestamp.occurredAt,
+					`event ${eventId} did not expose an authored timestamp`,
+					"one non-empty occurredAt",
 					occurredAt,
 				);
+				equalTimestampOccurredAt.push(occurredAt);
 			}
+			compare(
+				new Set(equalTimestampOccurredAt).size === 1,
+				"Timeline equal occurredAt pair",
+				`capture pair did not retain one operation timestamp: ${JSON.stringify(equalTimestampOccurredAt)}`,
+				{ sharedTimestampCount: 1 },
+				{
+					sharedTimestampCount: new Set(equalTimestampOccurredAt).size,
+					occurredAt: equalTimestampOccurredAt,
+				},
+			);
 			const equalTimestampOrder = await page
 				.locator("#timeline [data-event-id]")
 				.evaluateAll(
