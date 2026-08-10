@@ -10,10 +10,50 @@
 	const consoleErrors = [];
 	const pageErrors = [];
 	const requestFailures = [];
+	const serviceUnavailableResponses = [];
+	let insideAppendWindow = false;
 	const bootstrapUrl = (server) =>
 		`${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
+	function isDeliberateChangeProjectionTransition(record, primaryBaseUrl) {
+		if (!record.insideAppendWindow || record.status !== 503) return false;
+		let responseUrl;
+		let primaryUrl;
+		try {
+			responseUrl = new URL(record.url);
+			primaryUrl = new URL(primaryBaseUrl);
+		} catch {
+			return false;
+		}
+		if (
+			responseUrl.origin !== primaryUrl.origin ||
+			(responseUrl.pathname !== "/api/v2/changes" &&
+				responseUrl.pathname !== "/api/v2/attention")
+		)
+			return false;
+		const body = record.body;
+		return (
+			typeof body === "object" &&
+			body !== null &&
+			record.schema === "pointbreak.inspect-change-projection-error" &&
+			body.schema === record.schema &&
+			body.version === 1 &&
+			body.code === "projection_unstable" &&
+			body.retryable === true
+		);
+	}
+	const responseInspections = new Set();
+	const settleResponseInspections = async () => {
+		while (responseInspections.size > 0) {
+			await Promise.all(Array.from(responseInspections));
+		}
+	};
 	page.on("console", (message) => {
-		if (message.type() === "error") consoleErrors.push(message.text());
+		if (message.type() !== "error") return;
+		consoleErrors.push({
+			text: message.text(),
+			url: message.location().url || null,
+			insideAppendWindow,
+		});
 	});
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	page.on("requestfailed", (request) => {
@@ -23,6 +63,36 @@
 			url: request.url(),
 			error: request.failure()?.errorText ?? "unknown request failure",
 		});
+	});
+	page.on("response", (response) => {
+		if (response.status() !== 503) return;
+		const responseWindow = insideAppendWindow;
+		const inspection = (async () => {
+			let bodyText;
+			try {
+				bodyText = await response.text();
+			} catch (error) {
+				bodyText = `response body unavailable: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			let body = bodyText;
+			try {
+				body = JSON.parse(bodyText);
+			} catch {
+				// Preserve the original response text when the server did not return JSON.
+			}
+			serviceUnavailableResponses.push({
+				url: response.url(),
+				status: response.status(),
+				body,
+				schema:
+					typeof body === "object" && body !== null
+						? (body.schema ?? null)
+						: null,
+				insideAppendWindow: responseWindow,
+			});
+		})();
+		responseInspections.add(inspection);
+		void inspection.finally(() => responseInspections.delete(inspection));
 	});
 
 	const layouts = [
@@ -109,6 +179,38 @@
 		});
 	const waitForCurrentRoute = (expectedHash, source = "location") =>
 		page.waitForFunction(semanticRouteMatchesInPage, { expectedHash, source });
+	const waitForRoutedDiffFocus = (kind, identity) =>
+		page.waitForFunction(
+			({ kind, identity }) => {
+				if (!document.querySelector("#diff-page:not(.hidden)")) return false;
+				const candidates = Array.from(
+					document.querySelectorAll(
+						kind === "file"
+							? "#diff-page-body .dfile"
+							: "#diff-page-body [data-anno]",
+					),
+				);
+				const matches = candidates.filter((candidate) =>
+					kind === "file"
+						? candidate.dataset.filePath === identity ||
+							candidate.dataset.oldFilePath === identity ||
+							candidate.dataset.newFilePath === identity
+						: candidate.dataset.anno === identity,
+				);
+				const target =
+					kind === "fact"
+						? (matches.find((candidate) => candidate.classList.contains("anno")) ??
+							matches[0])
+						: matches[0];
+				return (
+					target !== undefined &&
+					target.getClientRects().length > 0 &&
+					target.dataset.exactFocus === "true" &&
+					document.activeElement === target
+				);
+			},
+			{ kind, identity },
+		);
 	const screenshot = async (name) => {
 		screenshots += 1;
 		const path = `${config.artifactDir}/${name}.png`;
@@ -2049,6 +2151,7 @@
 					});
 				}
 			});
+			insideAppendWindow = true;
 			await screenshot("timeline-parked-before-append");
 			// Wait for the normal poll/catch-up affordance. The shell worker's receipt
 			// remains a completion-last evidence record and is checked after this
@@ -2108,6 +2211,7 @@
 				refreshLifecycle,
 			);
 			await screenshot("timeline-followed-after-append");
+			insideAppendWindow = false;
 
 			// The continuation captured above names the pre-append projection. Exercise
 			// its real authenticated refusal, then prove the reader can recover by
@@ -2147,7 +2251,10 @@
 				recoveredHeadHash.includes("after="),
 			);
 		},
-		teardown: teardownSection,
+		teardown: async () => {
+			insideAppendWindow = false;
+			await teardownSection();
+		},
 	});
 
 	await diagnostics.section("Changes and Attention paging", {
@@ -4344,6 +4451,7 @@
 					) === filePath,
 				diffFilePaths[0],
 			);
+			await waitForRoutedDiffFocus("file", diffFilePaths[0]);
 			const focusedDiffFile = await page
 				.locator("#diff-page-body .dfile")
 				.first()
@@ -4373,6 +4481,7 @@
 					) === factId,
 				firstDiffFact,
 			);
+			await waitForRoutedDiffFocus("fact", firstDiffFact);
 			const focusedDiffFact = await page
 				.locator(`#diff-page-body [data-anno]`)
 				.evaluateAll(
@@ -4960,14 +5069,61 @@
 		},
 	});
 
+	await settleResponseInspections();
+	const deliberateTransitionResponses = serviceUnavailableResponses.filter(
+		(response) =>
+			isDeliberateChangeProjectionTransition(response, config.server.baseUrl),
+	);
+	const transitionResponsesByUrl = new Map();
+	for (const response of deliberateTransitionResponses) {
+		transitionResponsesByUrl.set(
+			response.url,
+			(transitionResponsesByUrl.get(response.url) ?? 0) + 1,
+		);
+	}
+	const genericServiceUnavailable =
+		"Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+	const unexpectedConsoleErrors = consoleErrors.filter((error) => {
+		if (
+			error.text !== genericServiceUnavailable ||
+			!error.insideAppendWindow ||
+			error.url === null
+		)
+			return true;
+		const remaining = transitionResponsesByUrl.get(error.url) ?? 0;
+		if (remaining === 0) return true;
+		transitionResponsesByUrl.set(error.url, remaining - 1);
+		return false;
+	});
+	const unexpectedServiceUnavailableResponses =
+		serviceUnavailableResponses.filter(
+			(response) =>
+				!isDeliberateChangeProjectionTransition(
+					response,
+					config.server.baseUrl,
+				),
+		);
+
 	await diagnostics.section("Browser runtime", async () => {
 		expect(
-			consoleErrors.length === 0,
+			unexpectedConsoleErrors.length === 0 &&
+				unexpectedServiceUnavailableResponses.length === 0,
 			"browser console",
-			consoleErrors.join("\n"),
+			[
+				...unexpectedConsoleErrors.map(
+					(error) => `${error.text}${error.url ? ` @ ${error.url}` : ""}`,
+				),
+				...unexpectedServiceUnavailableResponses.map(
+					(response) =>
+						`${response.status} ${response.url}: ${JSON.stringify(response.body)}`,
+				),
+			].join("\n"),
 			{
 				expected: [],
-				actual: consoleErrors,
+				actual: {
+					console: unexpectedConsoleErrors,
+					responses: unexpectedServiceUnavailableResponses,
+				},
 			},
 		);
 		expect(pageErrors.length === 0, "browser page", pageErrors.join("\n"), {

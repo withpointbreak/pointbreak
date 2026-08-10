@@ -91,7 +91,7 @@ impl DerivedChangeAccess {
         let generation_id = current.generation_id().to_owned();
         let checkpoint = match current.pin_change_reader_checkpoint() {
             Ok(checkpoint) => checkpoint,
-            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+            Err(error) => return Ok(self.profile_receipt_failure_outcome(error)),
         };
         let document = match current.reader_profile_document(&checkpoint) {
             Ok(document) => document,
@@ -299,7 +299,7 @@ impl DerivedChangeAccess {
         let generation_id = current.generation_id().to_owned();
         let checkpoint = match current.pin_change_reader_checkpoint() {
             Ok(checkpoint) => checkpoint,
-            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+            Err(error) => return Ok(self.page_receipt_failure_outcome(error)),
         };
         if let Err(error) = current.reader_profile_document(&checkpoint) {
             return Ok(self.page_receipt_failure_outcome(error));
@@ -2148,6 +2148,55 @@ mod tests {
         let counters = scope.snapshot().counters;
         assert_eq!(counters.authoritative_fallbacks, 0);
         assert_eq!(counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn l0_control_path_survives_a_preactivation_generation_without_a_live_checkpoint() {
+        let temp = TempDir::new().expect("create disposable pre-activation root");
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        let store_identity =
+            opaque_path_identity("store", temp.path()).expect("derive disposable store identity");
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            store_identity.clone(),
+        )
+        .expect("create pre-activation lifecycle");
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish pre-activation derived generation");
+
+        let runtime = DerivedAccessRuntime::from_mode(DerivedAccessMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity,
+            backend,
+        });
+        let access = DerivedChangeAccess::from_runtime(runtime);
+
+        let profile = access.profile().expect("classify L0 profile");
+        let changes = access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("classify L0 Changes");
+        let attention = access
+            .attention(&DerivedChangePageRequestV1::Bare)
+            .expect("classify L0 Attention");
+
+        let DerivedChangeOutcomeV1::Ready(profile) = profile else {
+            panic!("L0 Profile must remain a control document");
+        };
+        assert_eq!(
+            profile.availability,
+            ReaderProfileAvailabilityV1::MigrationRequired
+        );
+        for outcome in [changes.map_ready(|_| ()), attention.map_ready(|_| ())] {
+            assert!(matches!(
+                outcome,
+                DerivedChangeOutcomeV1::AuthorityUnavailable(
+                    ChangeQueryUnavailableDocumentV1::MigrationRequired { .. }
+                )
+            ));
+        }
     }
 
     #[test]

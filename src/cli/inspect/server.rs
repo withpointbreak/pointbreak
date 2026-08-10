@@ -2416,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn l0_v2_routes_keep_profile_available_and_refuse_collections_without_fallback() {
+    fn l0_v2_routes_survive_the_automatic_preactivation_generation() {
         let repo = tempfile::tempdir().expect("routing test repository");
         assert!(
             std::process::Command::new("git")
@@ -2426,9 +2426,21 @@ mod tests {
                 .expect("initialize routing test repository")
                 .success()
         );
-        let state = Arc::new(
-            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
-        );
+        let state = Arc::new(InspectState::new(repo.path().to_path_buf()).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let status = route(&state, true, "GET", "/api/derived-access/status", None);
+            assert_eq!(status.status, "200 OK");
+            let status: serde_json::Value = serde_json::from_slice(&status.body).unwrap();
+            if status["availability"] == "current" && status["rebuildInFlight"] == false {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the L0 background worker did not publish its preactivation generation: {status}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let profile = route(&state, true, "GET", "/api/v2/profile", None);
         assert_eq!(profile.status, "200 OK");

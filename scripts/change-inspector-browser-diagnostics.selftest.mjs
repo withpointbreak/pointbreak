@@ -529,6 +529,149 @@ test("Change-graph evidence checks painted labels against server-sized node fram
 	);
 });
 
+test("annotated-diff focus assertions wait for routed hydration and active focus", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const helperStart = source.indexOf("const waitForRoutedDiffFocus =");
+	const sectionStart = source.indexOf(
+		'await diagnostics.section("Annotated diff"',
+	);
+	const sectionEnd = source.indexOf(
+		'await diagnostics.section("Exact detail and reading"',
+		sectionStart,
+	);
+	assert.notEqual(helperStart, -1, "missing routed diff focus wait helper");
+	assert.notEqual(sectionStart, -1, "missing annotated diff section");
+	assert.notEqual(
+		sectionEnd,
+		-1,
+		"annotated diff section must precede exact reading",
+	);
+	const helper = source.slice(
+		helperStart,
+		source.indexOf("\n\tconst ", helperStart + 1),
+	);
+	assert.match(
+		helper,
+		/#diff-page:not\(\.hidden\)[\s\S]*getClientRects\(\)\.length > 0[\s\S]*dataset\.exactFocus === "true"[\s\S]*document\.activeElement === target/,
+		"focus readiness must require a visible diff, the exact-focus marker, and active DOM focus",
+	);
+	const section = source.slice(sectionStart, sectionEnd);
+	const fileRouteWait = section.indexOf(
+		'new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get(\n\t\t\t\t\t\t"file"',
+	);
+	const fileFocusWait = section.indexOf(
+		'await waitForRoutedDiffFocus("file", diffFilePaths[0]);',
+	);
+	const fileAssertion = section.indexOf("const focusedDiffFile = await page");
+	assert.ok(
+		fileRouteWait >= 0 &&
+			fileFocusWait > fileRouteWait &&
+			fileAssertion > fileFocusWait,
+		"file focus must wait for hydrated routed focus after the route assertion",
+	);
+	const factRouteWait = section.indexOf(
+		'new URLSearchParams(location.hash.split("?", 2)[1] ?? "").get(\n\t\t\t\t\t\t"fact"',
+		fileAssertion,
+	);
+	const factFocusWait = section.indexOf(
+		'await waitForRoutedDiffFocus("fact", firstDiffFact);',
+	);
+	const factAssertion = section.indexOf("const focusedDiffFact = await page");
+	assert.ok(
+		factRouteWait >= 0 &&
+			factFocusWait > factRouteWait &&
+			factAssertion > factFocusWait,
+		"fact focus must wait for hydrated routed focus after the route assertion",
+	);
+});
+
+test("console 503 exemption accepts only typed primary Change transitions inside append", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf(
+		"function isDeliberateChangeProjectionTransition(",
+	);
+	const end = source.indexOf("\n\tconst responseInspections", start);
+	assert.notEqual(start, -1, "missing Change projection transition classifier");
+	assert.ok(end > start, "missing classifier boundary");
+	const classify = new Function(
+		`${source.slice(start, end)}\nreturn isDeliberateChangeProjectionTransition;`,
+	)();
+	const baseUrl = "http://127.0.0.1:4173";
+	const typed = {
+		url: `${baseUrl}/api/v2/changes?limit=100`,
+		status: 503,
+		body: {
+			schema: "pointbreak.inspect-change-projection-error",
+			version: 1,
+			code: "projection_unstable",
+			retryable: true,
+		},
+		schema: "pointbreak.inspect-change-projection-error",
+		insideAppendWindow: true,
+	};
+	assert.equal(classify(typed, baseUrl), true);
+	assert.equal(
+		classify(
+			{ ...typed, url: `${baseUrl}/api/v2/attention?limit=100` },
+			baseUrl,
+		),
+		true,
+	);
+	for (const rejected of [
+		{ ...typed, insideAppendWindow: false },
+		{ ...typed, status: 409 },
+		{ ...typed, url: `${baseUrl}/api/v2/profile` },
+		{ ...typed, url: "http://127.0.0.1:4999/api/v2/changes" },
+		{ ...typed, schema: "pointbreak.inspect-reader-profile" },
+		{
+			...typed,
+			body: { ...typed.body, schema: "pointbreak.inspect-reader-profile" },
+		},
+		{ ...typed, body: { ...typed.body, code: "moving_journal" } },
+		{ ...typed, body: { ...typed.body, version: 2 } },
+		{ ...typed, body: { ...typed.body, retryable: false } },
+	]) {
+		assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+	}
+	const responseCapture = source.slice(
+		source.indexOf('page.on("response"'),
+		source.indexOf("\n\n\tconst layouts", source.indexOf('page.on("response"')),
+	);
+	for (const retained of [
+		/response\.url\(\)/,
+		/response\.status\(\)/,
+		/response\.text\(\)/,
+		/schema:/,
+		/body,/,
+	]) {
+		assert.match(
+			responseCapture,
+			retained,
+			"503 response evidence must retain URL, status, body, and schema",
+		);
+	}
+	const runtimeAccounting = source.slice(
+		source.indexOf("await settleResponseInspections();"),
+		source.indexOf('await diagnostics.section("Browser runtime"'),
+	);
+	assert.match(
+		runtimeAccounting,
+		/error\.text !== genericServiceUnavailable[\s\S]*!error\.insideAppendWindow[\s\S]*error\.url === null[\s\S]*transitionResponsesByUrl\.get\(error\.url\)/,
+		"generic console errors must consume only same-URL typed transitions observed in the append window",
+	);
+	assert.match(
+		runtimeAccounting,
+		/unexpectedServiceUnavailableResponses[\s\S]*!isDeliberateChangeProjectionTransition/,
+		"every non-classified 503 response must remain a browser-runtime failure",
+	);
+});
+
 test("an aggregate failure cannot publish a passing completion manifest", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-diagnostics-"));
 	const candidatePath = join(root, ".manifest.json.tmp");
