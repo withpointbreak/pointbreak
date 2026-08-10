@@ -20,6 +20,7 @@ pub(crate) mod runtime;
 pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;
+mod support;
 pub(crate) mod threads;
 pub(crate) mod verification;
 pub(crate) mod writer;

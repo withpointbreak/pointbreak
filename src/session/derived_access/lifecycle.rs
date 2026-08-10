@@ -13,9 +13,9 @@ use super::locator::LocatorRead;
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use super::semantic::change::{
     CHANGE_READER_PROFILE_RESOURCE_V3, ChangeReaderContractError,
-    ChangeReaderProfileReceiptProbeV1, ChangeReaderProfileReceiptV3,
-    build_change_reader_profile_receipt_v3, initial_reader_projection_checkpoint_v1,
-    probe_change_reader_profile_receipt,
+    ChangeReaderProfileReceiptProbeV1, ChangeReaderProfileReceiptV3, ReaderProjectionCheckpointV1,
+    build_change_reader_profile_receipt_v3, derived_change_generation_stamp_v1,
+    initial_reader_projection_checkpoint_v1, probe_change_reader_profile_receipt,
 };
 use super::service::{
     BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError,
@@ -1655,6 +1655,54 @@ impl CurrentGeneration {
 
     pub(crate) const fn authority_maintenance_pending(&self) -> bool {
         self.authority_maintenance_pending
+    }
+
+    /// Pin the exact live Change checkpoint used by one product response.
+    ///
+    /// The cursor, locator, and checkpoint rows come from the service's one
+    /// publication-validation snapshot. The generation lease keeps immutable
+    /// publication resources alive; callers still revalidate at response
+    /// completion so a same-generation append cannot make a K result look like
+    /// K+1.
+    pub(crate) fn pin_change_reader_checkpoint(
+        &self,
+    ) -> Result<ReaderProjectionCheckpointV1, LifecycleError> {
+        let snapshot = self.service.publication_validation_snapshot()?;
+        validate_live_reader_checkpoint(&snapshot, self.reader_receipt.as_ref())?;
+        let checkpoint = snapshot.reader_projection_checkpoint.ok_or_else(|| {
+            LifecycleError::RebuildRequired(
+                "published Change generation has no live reader checkpoint".to_owned(),
+            )
+        })?;
+        if snapshot.authority.head.store_id != checkpoint.store_id {
+            return Err(LifecycleError::Validation(
+                "live Change reader checkpoint has the wrong store identity".to_owned(),
+            ));
+        }
+        if snapshot.authority.head.cursor != checkpoint.truth_cursor {
+            return Err(LifecycleError::TruthChanged);
+        }
+        Ok(checkpoint)
+    }
+
+    pub(crate) fn change_generation_stamp(
+        &self,
+        checkpoint: &ReaderProjectionCheckpointV1,
+        semantic_projection: &crate::session::ChangeProjection,
+        document_projection: &crate::session::ChangeDocumentProjectionV1,
+    ) -> Result<String, LifecycleError> {
+        let receipt = self.reader_receipt.as_ref().ok_or_else(|| {
+            LifecycleError::RebuildRequired(
+                "current generation has no Change reader-profile receipt".to_owned(),
+            )
+        })?;
+        derived_change_generation_stamp_v1(
+            receipt,
+            checkpoint,
+            semantic_projection,
+            document_projection,
+        )
+        .map_err(change_reader_contract_lifecycle_error)
     }
 }
 

@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use super::history::DerivedHistoryMode;
 use super::history::{
     CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, hydrate_events,
-    projection_stamp, state_diagnostics, support_event_ids,
+    projection_stamp, state_diagnostics,
 };
 use super::locator::LocatorRead;
+use super::support::support_event_ids;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,

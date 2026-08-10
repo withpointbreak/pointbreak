@@ -272,6 +272,7 @@ fn change_reader_reuses_the_single_derived_access_engine() {
     }
     for hydrator in [
         "fn hydrate_events(",
+        "fn semantic_ids_at(",
         "fn lookup_event_ids_hydrated(",
         "fn hydrate_locator_row(",
     ] {
@@ -281,10 +282,20 @@ fn change_reader_reuses_the_single_derived_access_engine() {
             "{hydrator} must have one authoritative implementation"
         );
     }
+    assert_eq!(
+        owners_with_all(
+            &sources,
+            &["fn support_event_ids(", "pointbreak_product_support_lookup",],
+        )
+        .len(),
+        1,
+        "TEMP support-set expansion must have one production owner"
+    );
 
     let facade = std::fs::read_to_string(derived_root.join("changes.rs"))
         .expect("read derived Change facade");
-    assert!(facade.contains("runtime: Arc<DerivedAccessRuntime>"));
+    let production_facade = production_source(&facade);
+    assert!(production_facade.contains("runtime: Arc<DerivedAccessRuntime>"));
     for forbidden in [
         "GenerationLayout",
         "DerivedAccessLifecycle",
@@ -293,15 +304,35 @@ fn change_reader_reuses_the_single_derived_access_engine() {
         "SqliteLocator",
         "SqliteSemantic",
         "QualificationLocalJournal",
+        "QualificationDerivedAccessAdapter",
         "EventStore",
         "rusqlite",
         "std::fs",
+        "std::path::PathBuf",
+        "read_dir(",
+        "File::open(",
+        "OpenOptions",
+        "read_events_for_display",
+        "list_events(",
+        "read_events(",
         "read_change_semantics_for_qualification",
+        "strict_bodyless_materialized_snapshot_at",
+        "DerivedHistoryRoute",
         "ExhaustiveSearchFallback",
+        "AuthoritativeFallback",
+        "FullHistoryFallback",
+        "legacy_",
+        "pointbreak_product_support_lookup",
     ] {
         assert!(
-            !facade.contains(forbidden),
+            !production_facade.contains(forbidden),
             "Change facade must reuse the shared engine instead of naming {forbidden}"
+        );
+    }
+    for literal in rust_string_literals(production_facade) {
+        assert!(
+            !looks_like_sql(literal),
+            "Change facade must keep derived SQL below the product facade: {literal:?}"
         );
     }
 

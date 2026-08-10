@@ -1,6 +1,7 @@
 //! Dormant product service for the SQLite-WAL bodyless derived-access profile.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,10 +9,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
     AppendCrashPoint, BootstrapPopulationEntry, CursorLedgerError, CursorLedgerIdentity,
-    CursorLedgerInventory, LocatorInventory, MaterializedChangeProjection, ProductHistoryFact,
-    ProposalCarrierLocator, SemanticInventory, SqliteCursorLedger, SqliteLocator,
-    SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
+    CursorLedgerInventory, HydratedLocatorRow, LocatorInventory, MaterializedChangeProjection,
+    ProductHistoryFact, ProposalCarrierLocator, SemanticInventory, SqliteCursorLedger,
+    SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
 };
+use super::support::support_event_ids;
 use crate::error::Result as ShoreResult;
 use crate::model::{RevisionId, RevisionRefV1};
 use crate::session::EventWriteOutcome;
@@ -510,21 +512,48 @@ impl DerivedAccessService {
         event_ids: &[String],
         observed: TruthCursor,
     ) -> Result<LocatorRead<Vec<Option<ShoreEvent>>>, DerivedAccessServiceError> {
-        Ok(
-            match self
-                .locator
-                .lookup_event_ids_hydrated(event_ids, observed)?
-            {
-                LocatorRead::Ready(rows) => LocatorRead::Ready(
-                    rows.into_iter()
-                        .map(|row| row.map(|row| row.event))
-                        .collect(),
-                ),
-                LocatorRead::CatchUpRequired { applied, observed } => {
-                    LocatorRead::CatchUpRequired { applied, observed }
-                }
-            },
-        )
+        Ok(match self.semantic_ids_hydrated_at(event_ids, observed)? {
+            LocatorRead::Ready(rows) => LocatorRead::Ready(
+                rows.into_iter()
+                    .map(|row| row.map(|row| row.event))
+                    .collect(),
+            ),
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                LocatorRead::CatchUpRequired { applied, observed }
+            }
+        })
+    }
+
+    /// Return the locator row alongside each validated authoritative carrier
+    /// so a selected compact relation can be compared field-for-field without
+    /// introducing another hydrator.
+    pub(crate) fn semantic_ids_hydrated_at(
+        &self,
+        event_ids: &[String],
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<Option<HydratedLocatorRow>>>, DerivedAccessServiceError> {
+        Ok(self
+            .locator
+            .lookup_event_ids_hydrated(event_ids, observed)?)
+    }
+
+    /// Expand selected product carriers through the shared support closure at
+    /// one already-observed truth cursor.
+    pub(crate) fn support_event_ids_at(
+        &self,
+        selected: &[ShoreEvent],
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<String>>, DerivedAccessServiceError> {
+        match self.semantic.product_history_connection(observed)? {
+            LocatorRead::Ready((connection, _)) => {
+                support_event_ids(&connection, selected, observed)
+                    .map(LocatorRead::Ready)
+                    .map_err(DerivedAccessServiceError::Truth)
+            }
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                Ok(LocatorRead::CatchUpRequired { applied, observed })
+            }
+        }
     }
 
     pub(super) fn product_history_connection(
@@ -620,6 +649,13 @@ impl DerivedAccessService {
         &self,
     ) -> Result<LocatorRead<MaterializedChangeProjection>, DerivedAccessServiceError> {
         let observed = self.cursor.head()?.cursor;
+        self.semantic_materialized_change_projection_at(observed)
+    }
+
+    pub(crate) fn semantic_materialized_change_projection_at(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedChangeProjection>, DerivedAccessServiceError> {
         Ok(self.semantic.materialized_change_projection(observed)?)
     }
 
@@ -629,6 +665,19 @@ impl DerivedAccessService {
         observed: TruthCursor,
     ) -> Result<LocatorRead<Vec<ProposalCarrierLocator>>, DerivedAccessServiceError> {
         Ok(self.semantic.proposal_carrier_locators(exact, observed)?)
+    }
+
+    pub(crate) fn proposal_carrier_locators_for_exact_revisions(
+        &self,
+        selected: &BTreeSet<RevisionRefV1>,
+        observed: TruthCursor,
+    ) -> Result<
+        LocatorRead<BTreeMap<RevisionRefV1, Vec<ProposalCarrierLocator>>>,
+        DerivedAccessServiceError,
+    > {
+        Ok(self
+            .semantic
+            .proposal_carrier_locators_for_exact_revisions(selected, observed)?)
     }
 
     pub(crate) fn semantic_materialized_attention_snapshot(

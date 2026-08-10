@@ -3081,6 +3081,10 @@ pub struct LongitudinalCountersV1 {
     pub carrier_bytes_read: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub authority_identity_rows_scanned: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub authoritative_fallbacks: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub full_history_fallbacks: u64,
     pub event_decodes: u64,
     pub event_validations: u64,
     pub event_folds: u64,
@@ -5934,6 +5938,20 @@ mod contract_tests {
                 "stateRebuilds",
             ]
         );
+        assert_eq!(
+            serde_json::from_value::<LongitudinalCountersV1>(value.clone())
+                .expect("legacy zero-valued counter JSON"),
+            LongitudinalCountersV1::default()
+        );
+
+        let nonzero = LongitudinalCountersV1 {
+            authoritative_fallbacks: 1,
+            full_history_fallbacks: 2,
+            ..LongitudinalCountersV1::default()
+        };
+        let nonzero = serde_json::to_value(nonzero).expect("nonzero fallback counter JSON");
+        assert_eq!(nonzero["authoritativeFallbacks"], 1);
+        assert_eq!(nonzero["fullHistoryFallbacks"], 2);
 
         let mut receipt = LongitudinalCounterReceiptV1 {
             schema: LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1.to_owned(),

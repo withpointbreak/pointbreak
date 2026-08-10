@@ -878,6 +878,30 @@ pub(crate) fn derived_change_generation_stamp_preimage_v1(
     )
 }
 
+/// Mint the shared strict/derived Change generation stamp from one validated
+/// live reader checkpoint and its bodyless compact projections.
+///
+/// Ordinary Change pages have no runtime trust set: every selected proposal
+/// carrier is reopened and validated directly against the locator. Keeping
+/// this assembly beside the frozen stamp contract prevents product facades
+/// from independently reconstructing its canonical hashes.
+pub(crate) fn derived_change_generation_stamp_v1(
+    receipt: &ChangeReaderProfileReceiptV3,
+    checkpoint: &ReaderProjectionCheckpointV1,
+    semantic_projection: &ChangeProjection,
+    document_projection: &ChangeDocumentProjectionV1,
+) -> ChangeReaderContractResult<String> {
+    let preimage = derived_change_generation_stamp_preimage_v1(
+        receipt,
+        checkpoint,
+        contract_sha256(semantic_projection)?,
+        contract_sha256(document_projection)?,
+        document_projection.projection_stamp.clone(),
+        RuntimeTrustIdentityV1::NotApplicable,
+    )?;
+    change_generation_stamp_sha256_v1(&preimage)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble_change_generation_stamp_preimage_v1(
     receipt: &ChangeReaderProfileReceiptV3,
@@ -2407,6 +2431,27 @@ mod tests {
         let derived = change_generation_stamp_sha256_v1(&derived_preimage).unwrap();
         assert_eq!(strict_preimage, derived_preimage);
         assert_eq!(strict, derived);
+
+        let ordinary_strict = strict_change_generation_stamp_preimage_v1(
+            &receipt,
+            &checkpoint,
+            &inspection.cursor,
+            &generation.projection,
+            &generation.document_projection,
+            RuntimeTrustIdentityV1::NotApplicable,
+        )
+        .unwrap();
+        assert_eq!(
+            derived_change_generation_stamp_v1(
+                &receipt,
+                &checkpoint,
+                &generation.projection,
+                &generation.document_projection,
+            )
+            .unwrap(),
+            change_generation_stamp_sha256_v1(&ordinary_strict).unwrap(),
+            "the ordinary derived page must mint the exact strict checkpoint stamp"
+        );
 
         let mut changed_strict_document = generation.document_projection.clone();
         changed_strict_document

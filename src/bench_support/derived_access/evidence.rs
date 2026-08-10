@@ -344,6 +344,8 @@ fn phase_counters_overflowed(counters: &LongitudinalCountersV1) -> bool {
         counters.carrier_opens,
         counters.carrier_bytes_read,
         counters.authority_identity_rows_scanned,
+        counters.authoritative_fallbacks,
+        counters.full_history_fallbacks,
         counters.event_decodes,
         counters.event_validations,
         counters.event_folds,

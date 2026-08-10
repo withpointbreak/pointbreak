@@ -45,6 +45,12 @@ pub struct LongitudinalCountingGuardV1 {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LongitudinalDerivedAccessPhaseV1 {
+    ChangePageSnapshotAcquisition,
+    ChangePageBodylessSelection,
+    ChangePageProposalLocatorExpansion,
+    ChangePageCarrierHydrationValidation,
+    ChangePageSupportExpansion,
+    ChangePagePresentationProjection,
     RevisionPageSqlSelection,
     RevisionPageEventIdExpansion,
     RevisionPageCarrierHydrationValidation,
@@ -66,16 +72,20 @@ impl LongitudinalDerivedAccessPhaseV1 {
     pub const fn ownership(self) -> LongitudinalDerivedAccessPhaseOwnershipV1 {
         use LongitudinalDerivedAccessPhaseOwnershipV1 as Ownership;
         match self {
-            Self::RevisionPageSqlSelection | Self::RevisionPageEventIdExpansion => {
-                Ownership::DerivedAccess
-            }
-            Self::RevisionPageCarrierHydrationValidation | Self::GovernedWriteTruth => {
-                Ownership::AuthoritativeTruth
-            }
-            Self::RevisionPageListProjection
+            Self::ChangePageBodylessSelection
+            | Self::ChangePageProposalLocatorExpansion
+            | Self::RevisionPageSqlSelection
+            | Self::RevisionPageEventIdExpansion => Ownership::DerivedAccess,
+            Self::ChangePageCarrierHydrationValidation
+            | Self::RevisionPageCarrierHydrationValidation
+            | Self::GovernedWriteTruth => Ownership::AuthoritativeTruth,
+            Self::ChangePagePresentationProjection
+            | Self::RevisionPageListProjection
             | Self::RevisionPageOverviewConstruction
             | Self::RevisionPageSnapshotSummaries => Ownership::ProductProjection,
-            Self::RevisionPageSupersederSupportExpansion
+            Self::ChangePageSnapshotAcquisition
+            | Self::ChangePageSupportExpansion
+            | Self::RevisionPageSupersederSupportExpansion
             | Self::BootstrapPopulation
             | Self::BootstrapOracle
             | Self::GovernedWriteCatchUp => Ownership::MixedDerivedAndTruth,
@@ -409,6 +419,8 @@ fn counter_delta(
         carrier_opens: delta!(carrier_opens),
         carrier_bytes_read: delta!(carrier_bytes_read),
         authority_identity_rows_scanned: delta!(authority_identity_rows_scanned),
+        authoritative_fallbacks: delta!(authoritative_fallbacks),
+        full_history_fallbacks: delta!(full_history_fallbacks),
         event_decodes: delta!(event_decodes),
         event_validations: delta!(event_validations),
         event_folds: delta!(event_folds),
@@ -477,6 +489,26 @@ pub fn record_authority_identity_rows_scanned(count: usize) {
             &mut state.counters.authority_identity_rows_scanned,
             count as u64,
             "authority_identity_rows_scanned",
+        );
+    });
+}
+
+pub fn record_authoritative_fallback() {
+    with_active(|state| {
+        add(
+            &mut state.counters.authoritative_fallbacks,
+            1,
+            "authoritative_fallbacks",
+        );
+    });
+}
+
+pub fn record_full_history_fallback() {
+    with_active(|state| {
+        add(
+            &mut state.counters.full_history_fallbacks,
+            1,
+            "full_history_fallbacks",
         );
     });
 }
@@ -646,6 +678,8 @@ mod tests {
         record_directory_entries_walked(9);
         record_carrier_read(11);
         record_authority_identity_rows_scanned(12);
+        record_authoritative_fallback();
+        record_full_history_fallback();
         record_event_decode();
         record_event_validation();
         record_event_folds(13);
@@ -677,12 +711,14 @@ mod tests {
                 LongitudinalDerivedAccessPhaseV1::RevisionPageSqlSelection,
             );
             record_carrier_read(13);
+            record_authoritative_fallback();
             record_event_decode();
         }
         {
             let _phase = enter_derived_access_phase_v1(
                 LongitudinalDerivedAccessPhaseV1::RevisionPageEventIdExpansion,
             );
+            record_full_history_fallback();
             record_event_folds(17);
         }
 
@@ -700,7 +736,9 @@ mod tests {
         );
         assert_eq!(phases[0].counters.carrier_opens, 1);
         assert_eq!(phases[0].counters.carrier_bytes_read, 13);
+        assert_eq!(phases[0].counters.authoritative_fallbacks, 1);
         assert_eq!(phases[0].counters.event_decodes, 1);
+        assert_eq!(phases[1].counters.full_history_fallbacks, 1);
         assert_eq!(phases[1].counters.event_folds, 17);
         assert!(phases.iter().all(|phase| phase.wall_nanos < u64::MAX));
         assert!(phases.iter().all(|phase| {
@@ -752,6 +790,8 @@ mod tests {
         record_carrier_read(3);
         record_carrier_read(5);
         record_authority_identity_rows_scanned(6);
+        record_authoritative_fallback();
+        record_full_history_fallback();
         record_event_decode();
         record_event_validation();
         record_event_folds(7);
@@ -781,6 +821,8 @@ mod tests {
                 carrier_opens: 2,
                 carrier_bytes_read: 8,
                 authority_identity_rows_scanned: 6,
+                authoritative_fallbacks: 1,
+                full_history_fallbacks: 1,
                 event_decodes: 1,
                 event_validations: 1,
                 event_folds: 7,

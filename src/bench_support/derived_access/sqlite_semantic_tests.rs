@@ -3,6 +3,7 @@ use crate::bench_support::derived_access::adapter::QualificationDerivedAccessAda
 use crate::bench_support::derived_access::sqlite_cursor::{
     CursorLedgerIdentity, SqliteCursorLedger,
 };
+use crate::bench_support::derived_access::sqlite_locator::ProposalCarrierLocator;
 use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
 use crate::crypto::SignerId;
 use crate::model::{
@@ -826,6 +827,200 @@ fn proposal_carrier_locators_preserve_every_duplicate_at_one_exact_revision() {
 }
 
 #[test]
+fn proposal_carrier_locators_for_exact_revisions_group_every_selected_exact_binding_at_one_cursor()
+{
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_id("proposal-carrier-batch");
+    let exact_a = RevisionRefV1::new(revision.clone(), format!("sha256:{}", "a".repeat(64)))
+        .expect("first exact Revision");
+    let exact_b = RevisionRefV1::new(revision, format!("sha256:{}", "b".repeat(64)))
+        .expect("second exact Revision");
+    let unselected_binding = RevisionRefV1::new(
+        exact_a.revision_id.clone(),
+        format!("sha256:{}", "c".repeat(64)),
+    )
+    .expect("unselected exact Revision");
+    let carriers = [
+        proposal_carrier_event(
+            &exact_a,
+            Some("equal summary"),
+            "work_object_proposed:proposal-carrier:batch:a:first",
+            "2026-08-04T00:04:01Z",
+        ),
+        proposal_carrier_event(
+            &exact_a,
+            Some("equal summary"),
+            "work_object_proposed:proposal-carrier:batch:a:duplicate",
+            "2026-08-04T00:04:02Z",
+        ),
+        proposal_carrier_event(
+            &exact_b,
+            Some("other exact binding"),
+            "work_object_proposed:proposal-carrier:batch:b",
+            "2026-08-04T00:04:03Z",
+        ),
+        proposal_carrier_event(
+            &unselected_binding,
+            Some("must remain unselected"),
+            "work_object_proposed:proposal-carrier:batch:unselected",
+            "2026-08-04T00:04:04Z",
+        ),
+    ];
+    for (attempt, carrier) in carriers.iter().enumerate() {
+        append(&adapter, carrier, attempt);
+    }
+
+    let selected = std::collections::BTreeSet::from([exact_a.clone(), exact_b.clone()]);
+    // Smallest intended service seam: one selected exact-Revision set and one
+    // explicit truth cursor produce typed, per-exact-ref locator groups. Empty
+    // groups remain present so the hydrator can fail a selected absent carrier.
+    let prefix: std::collections::BTreeMap<RevisionRefV1, Vec<ProposalCarrierLocator>> = ready(
+        adapter
+            .proposal_carrier_locators_for_exact_revisions(&selected, TruthCursor::new(1, 2))
+            .expect("batched proposal carrier prefix"),
+    );
+    assert_eq!(
+        prefix.keys().collect::<Vec<_>>(),
+        vec![&exact_a, &exact_b],
+        "the result must retain every selected exact binding in stable order"
+    );
+    assert_eq!(
+        prefix[&exact_a]
+            .iter()
+            .map(|row| row.event_id.as_str())
+            .collect::<Vec<_>>(),
+        carriers[..2]
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<Vec<_>>(),
+        "every duplicate at the selected exact Revision must survive"
+    );
+    assert!(
+        prefix[&exact_b].is_empty(),
+        "a selected exact Revision beyond the as-of remains an explicit empty group"
+    );
+
+    let complete: std::collections::BTreeMap<RevisionRefV1, Vec<ProposalCarrierLocator>> = ready(
+        adapter
+            .proposal_carrier_locators_for_exact_revisions(&selected, TruthCursor::new(1, 4))
+            .expect("batched proposal carrier locators"),
+    );
+    assert_eq!(complete[&exact_a].len(), 2);
+    assert_eq!(complete[&exact_b].len(), 1);
+    assert_eq!(complete[&exact_b][0].revision, exact_b);
+    assert!(
+        complete
+            .values()
+            .flatten()
+            .all(|row| row.revision != unselected_binding),
+        "RevisionId equality must not admit an unselected artifact binding"
+    );
+}
+
+#[test]
+fn proposal_carrier_locators_for_exact_revisions_are_portable_past_bind_variable_limits() {
+    const PORTABLE_SQLITE_VARIABLE_LIMIT: usize = 999;
+
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let selected = (0..=PORTABLE_SQLITE_VARIABLE_LIMIT)
+        .map(|index| {
+            RevisionRefV1::new(
+                revision_id(&format!("proposal-batch-limit-{index:04}")),
+                format!("sha256:{index:064x}"),
+            )
+            .expect("selected exact Revision")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let first = selected.first().expect("first selected exact").clone();
+    let last = selected.last().expect("last selected exact").clone();
+    let carriers = [
+        proposal_carrier_event(
+            &first,
+            None,
+            "work_object_proposed:proposal-carrier:batch-limit:first",
+            "2026-08-04T00:05:01Z",
+        ),
+        proposal_carrier_event(
+            &last,
+            None,
+            "work_object_proposed:proposal-carrier:batch-limit:last",
+            "2026-08-04T00:05:02Z",
+        ),
+    ];
+    for (attempt, carrier) in carriers.iter().enumerate() {
+        append(&adapter, carrier, attempt);
+    }
+
+    let grouped: std::collections::BTreeMap<RevisionRefV1, Vec<ProposalCarrierLocator>> = ready(
+        adapter
+            .proposal_carrier_locators_for_exact_revisions(&selected, TruthCursor::new(1, 2))
+            .expect("portable batched proposal carrier locators"),
+    );
+    assert_eq!(grouped.len(), PORTABLE_SQLITE_VARIABLE_LIMIT + 1);
+    assert_eq!(grouped[&first][0].event_id, carriers[0].event_id);
+    assert_eq!(grouped[&last][0].event_id, carriers[1].event_id);
+    assert_eq!(
+        grouped.values().map(Vec::len).sum::<usize>(),
+        carriers.len(),
+        "only selected persisted carriers are returned despite the complete selected set"
+    );
+}
+
+#[test]
+fn proposal_carrier_locators_for_exact_revisions_fail_closed_on_cross_epoch_receipt() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let exact_a = RevisionRefV1::new(
+        revision_id("proposal-batch-epoch-a"),
+        format!("sha256:{}", "d".repeat(64)),
+    )
+    .expect("first exact Revision");
+    let exact_b = RevisionRefV1::new(
+        revision_id("proposal-batch-epoch-b"),
+        format!("sha256:{}", "e".repeat(64)),
+    )
+    .expect("second exact Revision");
+    append(
+        &adapter,
+        &proposal_carrier_event(
+            &exact_a,
+            None,
+            "work_object_proposed:proposal-carrier:batch-epoch:a",
+            "2026-08-04T00:06:01Z",
+        ),
+        0,
+    );
+    append(
+        &adapter,
+        &proposal_carrier_event(
+            &exact_b,
+            None,
+            "work_object_proposed:proposal-carrier:batch-epoch:b",
+            "2026-08-04T00:06:02Z",
+        ),
+        1,
+    );
+    let selected = std::collections::BTreeSet::from([exact_a, exact_b]);
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open corrupt sidecar");
+    connection
+        .execute("UPDATE cursor_receipt SET epoch = 2 WHERE sequence = 2", [])
+        .expect("corrupt one selected receipt epoch");
+    drop(connection);
+
+    let error = adapter
+        .proposal_carrier_locators_for_exact_revisions(&selected, TruthCursor::new(1, 2))
+        .expect_err("one foreign receipt epoch must fail the complete batch closed");
+    assert!(
+        error.to_string().contains("receipt epoch 2"),
+        "unexpected failure: {error}"
+    );
+}
+
+#[test]
 fn proposal_carrier_locator_rejects_a_mismatched_receipt_epoch() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
@@ -983,6 +1178,53 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
         "exact proposal lookup must use its covering index: {plan_details:?}"
     );
     drop(plan);
+
+    query_connection
+        .execute_batch(
+            "CREATE TEMP TABLE pointbreak_proposal_exact_lookup (
+                 revision_id TEXT NOT NULL,
+                 object_artifact_content_hash TEXT NOT NULL,
+                 PRIMARY KEY (revision_id, object_artifact_content_hash)
+             ) STRICT, WITHOUT ROWID;",
+        )
+        .expect("create selected exact-Revision TEMP relation");
+    query_connection
+        .execute(
+            "INSERT INTO temp.pointbreak_proposal_exact_lookup (
+                 revision_id, object_artifact_content_hash
+             ) VALUES (?1, ?2)",
+            rusqlite::params![
+                exact.revision_id.as_str(),
+                exact.object_artifact_content_hash
+            ],
+        )
+        .expect("populate selected exact-Revision TEMP relation");
+    let mut batch_plan = query_connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT proposal.sequence
+             FROM temp.pointbreak_proposal_exact_lookup AS selected
+             JOIN semantic_revision_proposal_carrier AS proposal
+                  INDEXED BY semantic_revision_proposal_exact
+               ON proposal.revision_id = selected.revision_id
+              AND proposal.object_artifact_content_hash =
+                  selected.object_artifact_content_hash
+             WHERE proposal.sequence <= ?1
+             ORDER BY proposal.sequence",
+        )
+        .expect("prepare batched proposal index evidence");
+    let batch_plan_details = batch_plan
+        .query_map([1_i64], |row| row.get::<_, String>(3))
+        .expect("query batched proposal index evidence")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read batched proposal index evidence");
+    assert!(
+        batch_plan_details
+            .iter()
+            .any(|detail| detail.contains("semantic_revision_proposal_exact")),
+        "TEMP exact-set join must retain covering-index lookup: {batch_plan_details:?}"
+    );
+    drop(batch_plan);
     drop(query_connection);
 
     drop(adapter);

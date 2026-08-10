@@ -629,6 +629,33 @@ impl ChangeDocumentFacadeV1 {
         })
     }
 
+    /// Compose one already-selected Inspector Changes page after proposal
+    /// carriers for only its current exact Revisions have been hydrated.
+    /// Generation identity is supplied by the checkpoint-bound caller because
+    /// a partial carrier set cannot derive the complete generation stamp.
+    pub(crate) fn selected_list_document_for_inspector_with_presentations(
+        &self,
+        selected_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        generation_stamp: &str,
+    ) -> Result<ChangeListPresentationDocumentV1> {
+        let (changes, presentations) = self.selected_page_content_with_presentations(
+            selected_change_ids,
+            hydrated_proposal_events,
+            generation_stamp,
+        )?;
+        Ok(ChangeListPresentationDocumentV1 {
+            document: ChangeListDocumentV1 {
+                schema: INSPECT_CHANGES_PAGE_SCHEMA.to_owned(),
+                version: 1,
+                changes,
+                diagnostics: self.provenance.diagnostics.clone(),
+                projection_stamp: generation_stamp.to_owned(),
+            },
+            presentations,
+        })
+    }
+
     fn list_document_with_schema(&self, schema: &str) -> ChangeListDocumentV1 {
         ChangeListDocumentV1 {
             schema: schema.to_owned(),
@@ -691,6 +718,123 @@ impl ChangeDocumentFacadeV1 {
             document: self.attention_document(inspect),
             presentations,
         })
+    }
+
+    /// Compose one already-selected Inspector Attention page using the same
+    /// selected proposal policy as Changes. Accepted Changes remain excluded
+    /// at both selection and document boundaries.
+    pub(crate) fn selected_attention_document_for_inspector_with_presentations(
+        &self,
+        selected_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        generation_stamp: &str,
+    ) -> Result<ChangeAttentionPresentationDocumentV2> {
+        if selected_change_ids.iter().any(|change_id| {
+            self.semantic
+                .changes
+                .get(change_id)
+                .is_some_and(|view| view.lifecycle == ChangeLifecycleV1::Accepted)
+        }) {
+            return Err(ShoreError::Message(
+                "selected Attention page contains an accepted Change".to_owned(),
+            ));
+        }
+        let (changes, presentations) = self.selected_page_content_with_presentations(
+            selected_change_ids,
+            hydrated_proposal_events,
+            generation_stamp,
+        )?;
+        Ok(ChangeAttentionPresentationDocumentV2 {
+            document: ChangeAttentionDocumentV2 {
+                schema: INSPECT_ATTENTION_SCHEMA_V2.to_owned(),
+                version: 2,
+                changes,
+                projection_stamp: generation_stamp.to_owned(),
+            },
+            presentations,
+        })
+    }
+
+    fn selected_page_content_with_presentations(
+        &self,
+        selected_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        generation_stamp: &str,
+    ) -> Result<(
+        Vec<ChangeSummaryV1>,
+        BTreeMap<ChangeId, ChangePresentationV1>,
+    )> {
+        if generation_stamp.is_empty() {
+            return Err(ShoreError::Message(
+                "selected Change page has no checkpoint-derived generation stamp".to_owned(),
+            ));
+        }
+        if selected_change_ids
+            .windows(2)
+            .any(|pair| pair[0].as_str() >= pair[1].as_str())
+        {
+            return Err(ShoreError::Message(
+                "selected Change page identities are not strict change_id_asc".to_owned(),
+            ));
+        }
+
+        let selected = selected_change_ids
+            .iter()
+            .map(|change_id| {
+                self.semantic
+                    .changes
+                    .get(change_id)
+                    .map(|view| (change_id, view))
+                    .ok_or_else(|| {
+                        ShoreError::Message(format!(
+                            "selected Change {} is unavailable",
+                            change_id.as_str()
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let selected_current_revisions = selected
+            .iter()
+            .flat_map(|(_, view)| self.current_refs(view))
+            .collect::<BTreeSet<_>>();
+        let proposal_summaries = fold_proposal_summaries(hydrated_proposal_events)?;
+
+        if let Some(unselected) = proposal_summaries
+            .keys()
+            .find(|revision| !selected_current_revisions.contains(*revision))
+        {
+            return Err(ShoreError::Message(format!(
+                "hydrated proposal carrier targets unselected exact Revision {}",
+                unselected.revision_id.as_str()
+            )));
+        }
+        if let Some(missing) = selected_current_revisions
+            .iter()
+            .find(|revision| !proposal_summaries.contains_key(*revision))
+        {
+            return Err(ShoreError::Message(format!(
+                "selected current exact Revision {} has no hydrated proposal carrier",
+                missing.revision_id.as_str()
+            )));
+        }
+
+        let mut changes = Vec::with_capacity(selected.len());
+        let mut presentations = BTreeMap::new();
+        for (change_id, view) in selected {
+            let current_revisions = self.current_refs(view);
+            let presentation =
+                presentation_for_current_revisions(current_revisions, &proposal_summaries)?;
+            let mut summary = self.summary(view);
+            summary.projection_stamp = generation_stamp.to_owned();
+            changes.push(summary);
+            presentations.insert(
+                change_id.clone(),
+                ChangePresentationV1 {
+                    current_revisions: presentation,
+                },
+            );
+        }
+        Ok((changes, presentations))
     }
 
     pub fn detail_document(&self, change_id: &ChangeId) -> Result<ChangeDetailDocumentV1> {
@@ -1191,6 +1335,36 @@ pub(crate) fn change_presentation_projection(
     events: &[ShoreEvent],
     event_set_hash: &str,
 ) -> Result<ChangePresentationProjectionV1> {
+    let proposal_summaries = fold_proposal_summaries(events)?;
+
+    let mut presentations = BTreeMap::new();
+    for (change_id, view) in &semantic.changes {
+        let current_revisions = view
+            .current_revisions
+            .iter()
+            .filter_map(|revision_id| exact_ref_from_projection(provenance, revision_id))
+            .collect();
+        presentations.insert(
+            change_id.clone(),
+            ChangePresentationV1 {
+                current_revisions: presentation_for_current_revisions(
+                    current_revisions,
+                    &proposal_summaries,
+                )?,
+            },
+        );
+    }
+    Ok(ChangePresentationProjectionV1 {
+        presentations,
+        fact_port_carriers: normalize_fact_port_carriers(events)?,
+        source_projection_stamp: provenance.projection_stamp.clone(),
+        source_event_set_hash: event_set_hash.to_owned(),
+    })
+}
+
+fn fold_proposal_summaries(
+    events: &[ShoreEvent],
+) -> Result<BTreeMap<RevisionRefV1, BTreeSet<Option<String>>>> {
     let mut proposal_summaries = BTreeMap::<RevisionRefV1, BTreeSet<Option<String>>>::new();
     for event in events {
         if event.event_type != EventType::WorkObjectProposed {
@@ -1214,51 +1388,41 @@ pub(crate) fn change_presentation_projection(
                 .insert(summary);
         }
     }
+    Ok(proposal_summaries)
+}
 
-    let mut presentations = BTreeMap::new();
-    for (change_id, view) in &semantic.changes {
-        let current_revisions = view
-            .current_revisions
-            .iter()
-            .filter_map(|revision_id| exact_ref_from_projection(provenance, revision_id))
-            .map(|revision| {
-                let summaries = proposal_summaries
-                    .get(&revision)
-                    .into_iter()
-                    .flat_map(|summaries| summaries.iter().cloned())
-                    .collect::<BTreeSet<_>>();
-                if summaries.len() > 1 {
-                    return Err(ShoreError::Message(format!(
-                        "conflicting proposal summaries for exact Revision {}",
-                        revision.revision_id.as_str()
-                    )));
-                }
-                let revision_proposal_summary = (summaries.len() == 1)
-                    .then(|| summaries.iter().next().cloned().flatten())
-                    .flatten();
-                Ok(CurrentRevisionPresentationV1 {
-                    summary_source: if revision_proposal_summary.is_some() {
-                        RevisionSummarySourceV1::RevisionProposalSummary
-                    } else {
-                        RevisionSummarySourceV1::Absent
-                    },
-                    revision,
-                    revision_proposal_summary,
-                })
+fn presentation_for_current_revisions(
+    current_revisions: Vec<RevisionRefV1>,
+    proposal_summaries: &BTreeMap<RevisionRefV1, BTreeSet<Option<String>>>,
+) -> Result<Vec<CurrentRevisionPresentationV1>> {
+    current_revisions
+        .into_iter()
+        .map(|revision| {
+            let summaries = proposal_summaries
+                .get(&revision)
+                .into_iter()
+                .flat_map(|summaries| summaries.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            if summaries.len() > 1 {
+                return Err(ShoreError::Message(format!(
+                    "conflicting proposal summaries for exact Revision {}",
+                    revision.revision_id.as_str()
+                )));
+            }
+            let revision_proposal_summary = (summaries.len() == 1)
+                .then(|| summaries.iter().next().cloned().flatten())
+                .flatten();
+            Ok(CurrentRevisionPresentationV1 {
+                summary_source: if revision_proposal_summary.is_some() {
+                    RevisionSummarySourceV1::RevisionProposalSummary
+                } else {
+                    RevisionSummarySourceV1::Absent
+                },
+                revision,
+                revision_proposal_summary,
             })
-            .collect::<Result<Vec<_>>>()?;
-
-        presentations.insert(
-            change_id.clone(),
-            ChangePresentationV1 { current_revisions },
-        );
-    }
-    Ok(ChangePresentationProjectionV1 {
-        presentations,
-        fact_port_carriers: normalize_fact_port_carriers(events)?,
-        source_projection_stamp: provenance.projection_stamp.clone(),
-        source_event_set_hash: event_set_hash.to_owned(),
-    })
+        })
+        .collect()
 }
 
 /// Normalize every human-readable fact family from one exact Revision read.
@@ -2559,6 +2723,129 @@ mod tests {
             document.detail.fact_presentations[0].revision_currency,
             ChangeRevisionCurrencyV1::Current
         );
+    }
+
+    #[test]
+    fn selected_page_composition_hydrates_only_selected_changes_and_binds_generation() {
+        let (change_id, revision, facade) = facade();
+        let unselected_change_id = ChangeId::new("change:sha256:unselected");
+        let unselected_revision = reference("unselected", 'b');
+        let facade = with_additional_change(
+            &facade,
+            unselected_change_id.clone(),
+            vec![unselected_revision],
+        );
+        let hydrated = [
+            proposal_event(&revision, Some("selected summary"), "proposal:selected-one"),
+            proposal_event(&revision, Some("selected summary"), "proposal:selected-two"),
+        ];
+
+        let list = facade
+            .selected_list_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        assert_eq!(list.document.changes.len(), 1);
+        assert_eq!(list.document.changes[0].change_id, change_id);
+        assert_eq!(
+            list.document.changes[0].projection_stamp,
+            "sha256:checkpoint-page"
+        );
+        assert_eq!(list.document.projection_stamp, "sha256:checkpoint-page");
+        assert_eq!(
+            list.presentations.keys().collect::<Vec<_>>(),
+            vec![&list.document.changes[0].change_id]
+        );
+        assert!(!list.presentations.contains_key(&unselected_change_id));
+
+        let attention = facade
+            .selected_attention_document_for_inspector_with_presentations(
+                std::slice::from_ref(&list.document.changes[0].change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        assert_eq!(attention.document.changes, list.document.changes);
+        assert_eq!(attention.presentations, list.presentations);
+        assert_eq!(
+            attention.document.projection_stamp,
+            "sha256:checkpoint-page"
+        );
+    }
+
+    #[test]
+    fn selected_page_composition_requires_coverage_and_rejects_conflicting_duplicates() {
+        let (change_id, revision, facade) = facade();
+        let missing = facade
+            .selected_list_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &[],
+                "sha256:checkpoint-page",
+            )
+            .expect_err("selected current exact Revision must have a proposal carrier");
+        assert!(
+            missing
+                .to_string()
+                .contains("has no hydrated proposal carrier")
+        );
+
+        let conflicting = facade
+            .selected_list_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &[
+                    proposal_event(&revision, Some("present"), "proposal:present"),
+                    proposal_event(&revision, None, "proposal:absent"),
+                ],
+                "sha256:checkpoint-page",
+            )
+            .expect_err("Some(summary) and None duplicates must conflict");
+        assert!(
+            conflicting
+                .to_string()
+                .contains("conflicting proposal summaries for exact Revision")
+        );
+    }
+
+    #[test]
+    fn selected_bare_composition_preserves_the_complete_document_shape() {
+        let (change_id, revision, facade) = facade();
+        let events = [proposal_event(
+            &revision,
+            Some("Readable exact state"),
+            "proposal:bare",
+        )];
+        let projection = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &events,
+            "sha256:bare-event-set",
+        )
+        .unwrap();
+        let strict = facade.clone().with_presentations(projection).unwrap();
+        let expected_list = strict
+            .list_document_for_inspector_with_presentations()
+            .unwrap();
+        let expected_attention = strict.attention_document_with_presentations(true).unwrap();
+
+        let actual_list = facade
+            .selected_list_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &events,
+                &expected_list.document.projection_stamp,
+            )
+            .unwrap();
+        let actual_attention = facade
+            .selected_attention_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &events,
+                &expected_attention.document.projection_stamp,
+            )
+            .unwrap();
+
+        assert_eq!(actual_list, expected_list);
+        assert_eq!(actual_attention, expected_attention);
     }
 
     #[test]

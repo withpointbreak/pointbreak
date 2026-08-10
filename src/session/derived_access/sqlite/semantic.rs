@@ -1,7 +1,7 @@
 //! Bodyless SQLite semantic facts shared by the dormant product profile and qualification.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -983,6 +983,33 @@ impl SqliteSemantic {
         exact: &RevisionRefV1,
         observed: TruthCursor,
     ) -> Result<LocatorRead<Vec<ProposalCarrierLocator>>, SqliteSemanticError> {
+        let selected = BTreeSet::from([exact.clone()]);
+        match self.proposal_carrier_locators_for_exact_revisions(&selected, observed)? {
+            LocatorRead::Ready(mut grouped) => Ok(LocatorRead::Ready(
+                grouped.remove(exact).unwrap_or_default(),
+            )),
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                Ok(LocatorRead::CatchUpRequired { applied, observed })
+            }
+        }
+    }
+
+    /// Select every proposal carrier for a complete selected exact-Revision
+    /// set without opening authoritative bytes.
+    ///
+    /// A connection-local two-column TEMP relation keeps the query portable
+    /// beyond SQLite's bind-variable limits. The returned map retains one
+    /// entry for every selected exact Revision, including explicit empty
+    /// groups, and every duplicate carrier remains independently ordered by
+    /// its truth sequence for subsequent authoritative hydration.
+    pub(crate) fn proposal_carrier_locators_for_exact_revisions(
+        &self,
+        selected: &BTreeSet<RevisionRefV1>,
+        observed: TruthCursor,
+    ) -> Result<
+        LocatorRead<BTreeMap<RevisionRefV1, Vec<ProposalCarrierLocator>>>,
+        SqliteSemanticError,
+    > {
         let connection = self.locator.validated_connection()?;
         let checkpoint = read_locator_checkpoint(&connection)?;
         validate_meta(&connection, checkpoint.applied)?;
@@ -994,57 +1021,107 @@ impl SqliteSemantic {
                 observed,
             });
         }
-        let mut statement = connection
-            .prepare(
-                "SELECT receipt.epoch, proposal.sequence,
-                        receipt.logical_reread_key_hash, locator.replay_key,
-                        locator.event_id, locator.event_type, locator.payload_hash,
-                        receipt.validation_witness, proposal.revision_id,
-                        proposal.object_artifact_content_hash
-                 FROM semantic_revision_proposal_carrier AS proposal
-                 JOIN locator_event_text AS locator ON locator.sequence = proposal.sequence
-                 JOIN cursor_receipt_text AS receipt ON receipt.sequence = proposal.sequence
-                 WHERE proposal.revision_id = ?1
-                   AND proposal.object_artifact_content_hash = ?2
-                   AND locator.epoch = ?3
-                   AND proposal.sequence <= ?4
-                 ORDER BY proposal.sequence",
-            )
-            .map_err(|error| sqlite_error("prepare proposal carrier locators", error))?;
-        let rows = statement
-            .query_map(
-                params![
-                    exact.revision_id.as_str(),
-                    exact.object_artifact_content_hash,
-                    to_i64(observed.epoch, "proposal carrier epoch")?,
-                    to_i64(observed.sequence, "proposal carrier sequence")?,
-                ],
-                proposal_carrier_locator_from_sql,
-            )
-            .map_err(|error| sqlite_error("query proposal carrier locators", error))?;
-        let mut locators = Vec::new();
-        for row in rows {
-            let locator =
-                row.map_err(|error| sqlite_error("read proposal carrier locator", error))?;
-            if locator.cursor.epoch != observed.epoch {
-                return Err(SqliteSemanticError::Metadata(format!(
-                    "proposal carrier {} receipt epoch {} does not match locator epoch {}",
-                    locator.event_id.as_str(),
-                    locator.cursor.epoch,
-                    observed.epoch
-                )));
-            }
-            if locator.event_type != EventType::WorkObjectProposed.as_str()
-                || locator.revision != *exact
-            {
-                return Err(SqliteSemanticError::Metadata(format!(
-                    "proposal carrier {} does not match its indexed exact Revision",
-                    locator.event_id.as_str()
-                )));
-            }
-            locators.push(locator);
+        let mut grouped = selected
+            .iter()
+            .cloned()
+            .map(|exact| (exact, Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+        if selected.is_empty() {
+            return Ok(LocatorRead::Ready(grouped));
         }
-        Ok(LocatorRead::Ready(locators))
+
+        let transaction = connection
+            .unchecked_transaction()
+            .map_err(|error| sqlite_error("begin proposal carrier locator batch", error))?;
+        transaction
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS pointbreak_proposal_exact_lookup (
+                     revision_id TEXT NOT NULL,
+                     object_artifact_content_hash TEXT NOT NULL,
+                     PRIMARY KEY (revision_id, object_artifact_content_hash)
+                 ) STRICT, WITHOUT ROWID;
+                 DELETE FROM temp.pointbreak_proposal_exact_lookup;",
+            )
+            .map_err(|error| sqlite_error("prepare proposal exact lookup", error))?;
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO temp.pointbreak_proposal_exact_lookup (
+                         revision_id, object_artifact_content_hash
+                     ) VALUES (?1, ?2)",
+                )
+                .map_err(|error| sqlite_error("prepare proposal exact lookup member", error))?;
+            for exact in selected {
+                insert
+                    .execute(params![
+                        exact.revision_id.as_str(),
+                        exact.object_artifact_content_hash
+                    ])
+                    .map_err(|error| sqlite_error("insert proposal exact lookup member", error))?;
+            }
+        }
+        {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT receipt.epoch, proposal.sequence,
+                            receipt.logical_reread_key_hash, locator.replay_key,
+                            locator.event_id, locator.event_type, locator.payload_hash,
+                            receipt.validation_witness, proposal.revision_id,
+                            proposal.object_artifact_content_hash
+                     FROM temp.pointbreak_proposal_exact_lookup AS selected
+                     JOIN semantic_revision_proposal_carrier AS proposal
+                          INDEXED BY semantic_revision_proposal_exact
+                       ON proposal.revision_id = selected.revision_id
+                      AND proposal.object_artifact_content_hash =
+                          selected.object_artifact_content_hash
+                     JOIN locator_event_text AS locator
+                       ON locator.sequence = proposal.sequence
+                     JOIN cursor_receipt_text AS receipt
+                       ON receipt.sequence = proposal.sequence
+                     WHERE locator.epoch = ?1
+                       AND proposal.sequence <= ?2
+                     ORDER BY proposal.sequence",
+                )
+                .map_err(|error| sqlite_error("prepare proposal carrier locator batch", error))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        to_i64(observed.epoch, "proposal carrier epoch")?,
+                        to_i64(observed.sequence, "proposal carrier sequence")?,
+                    ],
+                    proposal_carrier_locator_from_sql,
+                )
+                .map_err(|error| sqlite_error("query proposal carrier locator batch", error))?;
+            for row in rows {
+                let locator = row
+                    .map_err(|error| sqlite_error("read proposal carrier locator batch", error))?;
+                if locator.cursor.epoch != observed.epoch {
+                    return Err(SqliteSemanticError::Metadata(format!(
+                        "proposal carrier {} receipt epoch {} does not match locator epoch {}",
+                        locator.event_id.as_str(),
+                        locator.cursor.epoch,
+                        observed.epoch
+                    )));
+                }
+                if locator.event_type != EventType::WorkObjectProposed.as_str() {
+                    return Err(SqliteSemanticError::Metadata(format!(
+                        "proposal carrier {} does not match its indexed exact Revision",
+                        locator.event_id.as_str()
+                    )));
+                }
+                let exact_group = grouped.get_mut(&locator.revision).ok_or_else(|| {
+                    SqliteSemanticError::Metadata(format!(
+                        "proposal carrier {} does not match its selected exact Revision",
+                        locator.event_id.as_str()
+                    ))
+                })?;
+                exact_group.push(locator);
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit proposal carrier locator batch", error))?;
+        Ok(LocatorRead::Ready(grouped))
     }
 
     pub(crate) fn facts_for_revision_hydrated(

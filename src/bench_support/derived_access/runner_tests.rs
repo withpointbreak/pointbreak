@@ -106,6 +106,43 @@ fn phase_receipt(
 }
 
 #[test]
+fn change_page_phase_contract_names_bounded_work_and_zero_fallbacks() {
+    use crate::bench_support::longitudinal::{
+        LongitudinalCountersV1, LongitudinalDerivedAccessPhaseOwnershipV1 as Ownership,
+        LongitudinalDerivedAccessPhaseV1 as Phase,
+    };
+
+    let phases = [
+        Phase::ChangePageSnapshotAcquisition,
+        Phase::ChangePageBodylessSelection,
+        Phase::ChangePageProposalLocatorExpansion,
+        Phase::ChangePageCarrierHydrationValidation,
+        Phase::ChangePageSupportExpansion,
+        Phase::ChangePagePresentationProjection,
+    ];
+    assert_eq!(
+        phases
+            .iter()
+            .map(|phase| phase.ownership())
+            .collect::<Vec<_>>(),
+        vec![
+            Ownership::MixedDerivedAndTruth,
+            Ownership::DerivedAccess,
+            Ownership::DerivedAccess,
+            Ownership::AuthoritativeTruth,
+            Ownership::MixedDerivedAndTruth,
+            Ownership::ProductProjection,
+        ]
+    );
+    let counters = LongitudinalCountersV1::default();
+    assert_eq!(counters.authoritative_fallbacks, 0);
+    assert_eq!(counters.full_history_fallbacks, 0);
+    let json = serde_json::to_value(counters).expect("default counters JSON");
+    assert!(json.get("authoritativeFallbacks").is_none());
+    assert!(json.get("fullHistoryFallbacks").is_none());
+}
+
+#[test]
 fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() {
     let source = digest(40);
     let operation = QualificationDerivedAccessPhaseOperationV1::RevisionPage;
