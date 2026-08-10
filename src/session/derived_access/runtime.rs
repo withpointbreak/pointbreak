@@ -6,11 +6,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout};
 use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
 };
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use crate::session::store::backend::StoreBackend;
+use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_REBUILD_REQUIRED_CONFIRMATION: Duration = Duration::from_millis(250);
@@ -107,6 +109,36 @@ impl DerivedAccessRuntime {
             background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             background_rebuild_handle: Mutex::new(None),
         })
+    }
+
+    /// Construct the one shared runtime from an already-resolved store seam.
+    /// Callers choose whether authority classification is appropriate before
+    /// supplying the store; runtime ownership stays identical either way.
+    pub(super) fn from_read_store(read_store: ReadStore) -> Result<Arc<Self>, String> {
+        let profile = read_store.derived_access_profile();
+        if profile == DerivedAccessProfile::Off {
+            return Ok(Self::from_mode(DerivedAccessMode::Off));
+        }
+        let store_identity = opaque_path_identity("store", read_store.store_dir())
+            .map_err(|error| error.to_string())?;
+        let maintenance = DerivedAccessMaintenance {
+            profile,
+            store_root: read_store.store_dir().to_path_buf(),
+            store_identity: store_identity.clone(),
+        };
+        let mode = match DerivedStorageLayout::discover(read_store.store_dir()) {
+            DerivedStorageDiscovery::Conflict { .. } => DerivedAccessMode::Off,
+            DerivedStorageDiscovery::Selected(_) => {
+                let lifecycle = maintenance.lifecycle()?;
+                DerivedAccessMode::Active {
+                    lifecycle,
+                    current: Mutex::new(None),
+                    store_identity,
+                    backend: read_store.backend().clone(),
+                }
+            }
+        };
+        Ok(Self::new(mode, Some(maintenance)))
     }
 
     pub(super) fn is_active(&self) -> bool {

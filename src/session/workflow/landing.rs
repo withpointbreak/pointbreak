@@ -28,7 +28,7 @@ use crate::session::evidence::{
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
-    AssociateCommitOptions, BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome,
+    AssociateCommitOptions, BestEffortSkipSink, EventSigningOptions, EventWriteOutcome,
     ReviewCursorV1, RevisionShowOptions, SessionState, associate_commit, current_timestamp,
     show_revision_for_change_reader, sign_event_if_requested, validated_track_id,
     writer_from_options,
@@ -269,9 +269,9 @@ pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
         current_timestamp(),
     )?;
     sign_event_if_requested(&mut event, &options.signing)?;
-    let attestation_outcome =
-        EventStore::from_backend(write_store.backend()).record_change_event_once(&event)?;
-    let events = EventStore::from_backend(write_store.backend()).list_change_events()?;
+    let event_store = write_store.event_store()?;
+    let attestation_outcome = event_store.record_change_event_once(&event)?;
+    let events = event_store.list_change_events()?;
     let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &write_store.store_dir().join("state.json"),

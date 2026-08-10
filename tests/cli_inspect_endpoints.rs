@@ -150,6 +150,15 @@ fn change_pages_preserve_bare_shape_and_reject_append_stale_continuations() {
     capture(repo.path());
 
     let inspector = Inspector::spawn_current(repo.path());
+    let before_status = inspector.get_json("/api/derived-access/status");
+    let before_generation = before_status["generationId"]
+        .as_str()
+        .expect("ready derived status names its current generation")
+        .to_owned();
+    let before_profile = inspector.get_json("/api/v2/profile");
+    let before_event_count = before_profile["authorityCursor"]["eventCount"]
+        .as_u64()
+        .expect("ready Profile carries its live event count");
     let bare = inspector.get_json("/api/v2/changes");
     assert_eq!(bare["schema"], "pointbreak.inspect-changes-page");
     assert_eq!(bare["version"], 1);
@@ -163,11 +172,28 @@ fn change_pages_preserve_bare_shape_and_reject_append_stale_continuations() {
         .expect("two Changes yield a continuation");
 
     capture(repo.path());
+    inspector.wait_for_current_derived_projection();
+    let after_status = inspector.get_json("/api/derived-access/status");
+    assert_eq!(
+        after_status["generationId"], before_generation,
+        "a governed append advances the live checkpoint in the same generation"
+    );
+    let after_profile = inspector.get_json("/api/v2/profile");
+    assert!(
+        after_profile["authorityCursor"]["eventCount"]
+            .as_u64()
+            .expect("successor Profile carries its live event count")
+            > before_event_count,
+        "the receipt-backed Profile must expose the successor checkpoint"
+    );
     let (status, body) = inspector.get_error(&format!(
         "/api/v2/changes?limit=1&order=change_id_asc&after={}",
         urlencode(next)
     ));
-    assert!(status.contains("409 Conflict"), "status: {status}");
+    assert!(
+        status.contains("409 Conflict"),
+        "status: {status}; body: {body}"
+    );
     assert_eq!(body["schema"], "pointbreak.inspect-change-page-error");
     assert_eq!(body["code"], "stale_projection");
 }

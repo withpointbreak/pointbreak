@@ -1,5 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use pointbreak::model::ChangeId;
+use pointbreak::session::{
+    ChangeLifecycleV1, ChangeTopologyV1, DerivedChangeAttentionFilterV1,
+    DerivedChangeAvailabilityFilterV1, DerivedChangePageBoundaryV1,
+    DerivedChangePageContinuationV1, DerivedChangePageRequestV1, DerivedChangePageSelectionV1,
+    DerivedChangePageWindowV1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -28,11 +35,93 @@ pub(super) enum Request {
     Bounded(Box<Query>),
 }
 
+impl Request {
+    /// Convert the authenticated CLI request into the storage-neutral session
+    /// contract before the derived reader is opened.
+    pub(super) fn derived_request(&self) -> Result<DerivedChangePageRequestV1, PageError> {
+        match self {
+            Self::Bare => Ok(DerivedChangePageRequestV1::Bare),
+            Self::Bounded(query) => query.derived_request(),
+        }
+    }
+
+    /// Attach signed opaque capabilities to a page already selected by the
+    /// session reader. This adapter never filters, sorts, or repaginates rows.
+    pub(super) fn apply_derived_window(
+        &self,
+        mut document: Value,
+        window: Option<&DerivedChangePageWindowV1>,
+        signer: &PageTokenSigner,
+    ) -> Result<Value, PageError> {
+        match self {
+            Self::Bare => {
+                if window.is_some() {
+                    return Err(invalid("bare Change page unexpectedly has a window"));
+                }
+                Ok(document)
+            }
+            Self::Bounded(query) => {
+                // Re-run the pure binding validation at the response adapter so
+                // this function is safe even when called outside the normal API
+                // helper. Normal routing performs it before reader access.
+                query.derived_request()?;
+                let window = window.ok_or_else(|| invalid("bounded Change page has no window"))?;
+                let stamp = document["projectionStamp"]
+                    .as_str()
+                    .ok_or_else(|| invalid("missing projection stamp"))?;
+                if stamp != window.projection_stamp {
+                    return Err(invalid("Change page window has the wrong projection stamp"));
+                }
+                let identity = query.identity();
+                let issue = |boundary: &DerivedChangePageBoundaryV1| {
+                    encode_token(
+                        &Token {
+                            schema: TOKEN_SCHEMA.to_owned(),
+                            lens: query.lens,
+                            projection_stamp: window.projection_stamp.clone(),
+                            query: identity.clone(),
+                            limit: query.limit,
+                            order: ORDER.to_owned(),
+                            last_change_id: boundary
+                                .last_change_id()
+                                .map(|change_id| change_id.as_str().to_owned()),
+                        },
+                        signer,
+                    )
+                };
+                document["previous"] = window
+                    .previous
+                    .as_ref()
+                    .map(issue)
+                    .transpose()?
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
+                document["next"] = window
+                    .next
+                    .as_ref()
+                    .map(issue)
+                    .transpose()?
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
+                document["last"] = window
+                    .last
+                    .as_ref()
+                    .map(issue)
+                    .transpose()?
+                    .map(Value::String)
+                    .unwrap_or(Value::Null);
+                Ok(document)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Query {
     lens: Lens,
     limit: usize,
     after: Option<Token>,
+    raw_q: Option<String>,
     q: Option<String>,
     topology: Option<String>,
     lifecycle: Option<String>,
@@ -118,7 +207,8 @@ pub(super) fn parse_signed(
     if q.as_ref().is_some_and(|v| v.len() > 256) {
         return Err(invalid("query is too long"));
     }
-    let q = q.map(|v| v.to_lowercase());
+    let raw_q = q;
+    let q = raw_q.as_ref().map(|value| value.to_lowercase());
     let topology = domain(
         nonempty("topology")?,
         &[
@@ -148,6 +238,7 @@ pub(super) fn parse_signed(
         lens,
         limit,
         after,
+        raw_q,
         q,
         topology,
         lifecycle,
@@ -262,6 +353,74 @@ pub(super) fn apply_signed(
 }
 
 impl Query {
+    fn derived_request(&self) -> Result<DerivedChangePageRequestV1, PageError> {
+        let after = self
+            .after
+            .as_ref()
+            .map(|token| {
+                if token.lens != self.lens
+                    || token.query != self.identity()
+                    || token.limit != self.limit
+                    || token.order != ORDER
+                {
+                    return Err(invalid("continuation does not match request"));
+                }
+                let boundary = token
+                    .last_change_id
+                    .as_ref()
+                    .map_or_else(DerivedChangePageBoundaryV1::page_one, |change_id| {
+                        DerivedChangePageBoundaryV1::after(ChangeId::new(change_id))
+                    });
+                DerivedChangePageContinuationV1::new(token.projection_stamp.clone(), boundary)
+                    .map_err(|error| PageError::Invalid(error.to_string()))
+            })
+            .transpose()?;
+        let topology = self.topology.as_deref().map(|topology| match topology {
+            "initial" => ChangeTopologyV1::Initial,
+            "replacement" => ChangeTopologyV1::Replacement,
+            "replacement_divergent" => ChangeTopologyV1::ReplacementDivergent,
+            "consolidation" => ChangeTopologyV1::Consolidation,
+            "parallel_current" => ChangeTopologyV1::ParallelCurrent,
+            "mixed" => ChangeTopologyV1::Mixed,
+            "incomplete" => ChangeTopologyV1::Incomplete,
+            "cycle_conflicted" => ChangeTopologyV1::CycleConflicted,
+            _ => unreachable!("query parser admits only frozen Change topologies"),
+        });
+        let lifecycle = self.lifecycle.as_deref().map(|lifecycle| match lifecycle {
+            "incomplete" => ChangeLifecycleV1::Incomplete,
+            "conflicted" => ChangeLifecycleV1::Conflicted,
+            "in_progress" => ChangeLifecycleV1::InProgress,
+            "accepted" => ChangeLifecycleV1::Accepted,
+            _ => unreachable!("query parser admits only frozen Change lifecycles"),
+        });
+        let attention = self.attention.as_deref().map(|attention| match attention {
+            "clear" => DerivedChangeAttentionFilterV1::Clear,
+            "in_progress" => DerivedChangeAttentionFilterV1::InProgress,
+            "incomplete" => DerivedChangeAttentionFilterV1::Incomplete,
+            "conflicted" => DerivedChangeAttentionFilterV1::Conflicted,
+            _ => unreachable!("query parser admits only frozen Attention filters"),
+        });
+        let availability = self
+            .availability
+            .as_deref()
+            .map(|availability| match availability {
+                "available" => DerivedChangeAvailabilityFilterV1::Available,
+                "incomplete" => DerivedChangeAvailabilityFilterV1::Incomplete,
+                _ => unreachable!("query parser admits only frozen availability filters"),
+            });
+        DerivedChangePageSelectionV1::new(
+            self.limit,
+            after,
+            self.raw_q.clone(),
+            topology,
+            lifecycle,
+            attention,
+            availability,
+        )
+        .map(DerivedChangePageRequestV1::Bounded)
+        .map_err(|error| PageError::Invalid(error.to_string()))
+    }
+
     fn identity(&self) -> String {
         format!(
             "limit={}&q={:?}&topology={:?}&lifecycle={:?}&attention={:?}&availability={:?}&order={ORDER}&lens={}",
@@ -396,6 +555,12 @@ fn invalid(message: &str) -> PageError {
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use pointbreak::model::{ChangeId, RevisionId};
+    use pointbreak::session::{
+        ChangeLifecycleV1, ChangeTopologyV1, DerivedChangeAttentionFilterV1,
+        DerivedChangeAvailabilityFilterV1, DerivedChangePageBoundaryV1, DerivedChangePageRequestV1,
+        DerivedChangePageWindowV1,
+    };
 
     use super::*;
     fn signer() -> PageTokenSigner {
@@ -413,6 +578,103 @@ mod tests {
    {"changeId":"change:02","topology":"parallel_current","lifecycle":"in_progress","attentionSummary":"in_progress","availabilitySummary":"available","currentRevisionRefs":[{"revisionId":"rev:two"}]},
    {"changeId":"change:03","topology":"incomplete","lifecycle":"incomplete","attentionSummary":"incomplete","availabilitySummary":"incomplete","currentRevisionRefs":[{"revisionId":"rev:three"}]}
  ],"presentations":{"change:01":{"currentRevisions":[]},"change:02":{"currentRevisions":[{"revisionProposalSummary":"Need Unicode STRASSE"}]},"change:03":{"currentRevisions":[]}}})
+    }
+
+    #[test]
+    fn derived_request_mapping_authenticates_every_binding_before_reader_access() {
+        let parsed = parse(
+            Lens::Attention,
+            Some(
+                "limit=7&q=%C2%A0%C3%84PFEL%E3%80%80&topology=parallel_current&lifecycle=in_progress&attention=conflicted&availability=incomplete&order=change_id_asc",
+            ),
+        )
+        .expect("frozen Change query parses");
+        let derived = parsed
+            .derived_request()
+            .expect("authenticated query maps to the neutral reader request");
+        let DerivedChangePageRequestV1::Bounded(selection) = derived else {
+            panic!("query must remain bounded")
+        };
+        assert_eq!(selection.limit(), 7);
+        assert_eq!(selection.summary_query(), Some("äpfel"));
+        assert_eq!(
+            selection.topology(),
+            Some(ChangeTopologyV1::ParallelCurrent)
+        );
+        assert_eq!(selection.lifecycle(), Some(ChangeLifecycleV1::InProgress));
+        assert_eq!(
+            selection.attention_filter(),
+            Some(DerivedChangeAttentionFilterV1::Conflicted)
+        );
+        assert_eq!(
+            selection.availability_filter(),
+            Some(DerivedChangeAvailabilityFilterV1::Incomplete)
+        );
+
+        let mismatched = encode_token(
+            &Token {
+                schema: TOKEN_SCHEMA.to_owned(),
+                lens: Lens::Changes,
+                projection_stamp: "stamp-1".to_owned(),
+                query: "different-query".to_owned(),
+                limit: 7,
+                order: ORDER.to_owned(),
+                last_change_id: Some("change:01".to_owned()),
+            },
+            &signer(),
+        )
+        .unwrap();
+        let parsed = parse(
+            Lens::Attention,
+            Some(&format!("limit=7&order=change_id_asc&after={mismatched}")),
+        )
+        .expect("token bytes authenticate before binding validation");
+        assert!(matches!(
+            parsed.derived_request(),
+            Err(PageError::Invalid(message)) if message == "continuation does not match request"
+        ));
+    }
+
+    #[test]
+    fn derived_window_signing_does_not_refilter_the_reader_page() {
+        let parsed = parse(Lens::Changes, Some("limit=1&q=needle&order=change_id_asc")).unwrap();
+        let document = serde_json::json!({
+            "schema": "pointbreak.inspect-changes-page",
+            "version": 1,
+            "projectionStamp": "stamp-2",
+            "changes": [{"changeId": "change:02", "currentRevisionRefs": [{
+                "revisionId": RevisionId::new("revision:02"),
+                "objectArtifactContentHash": "sha256:02"
+            }]}],
+            "presentations": {"change:02": {"currentRevisions": []}}
+        });
+        let window = DerivedChangePageWindowV1 {
+            projection_stamp: "stamp-2".to_owned(),
+            previous: Some(DerivedChangePageBoundaryV1::page_one()),
+            next: Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
+                "change:02",
+            ))),
+            last: Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
+                "change:09",
+            ))),
+        };
+        let rendered = parsed
+            .apply_derived_window(document.clone(), Some(&window), &signer())
+            .expect("reader-selected page receives signed opaque boundaries");
+        assert_eq!(rendered["changes"], document["changes"]);
+        assert_eq!(rendered["presentations"], document["presentations"]);
+        for member in ["previous", "next", "last"] {
+            let encoded = rendered[member].as_str().expect("signed capability");
+            let token = decode_token(encoded, &signer()).expect("decode issued capability");
+            assert_eq!(token.projection_stamp, "stamp-2");
+            assert_eq!(
+                token.query,
+                match &parsed {
+                    Request::Bounded(query) => query.identity(),
+                    Request::Bare => unreachable!(),
+                }
+            );
+        }
     }
     #[test]
     fn strict_grammar_rejects_unknown_duplicate_empty_and_order() {
@@ -533,6 +795,20 @@ mod tests {
             };
             assert_eq!(query.q.as_deref(), Some(expected));
         }
+
+        let boundary = format!("q={}", "%C4%B0".repeat(128));
+        let Request::Bounded(query) = parse(Lens::Changes, Some(&boundary)).unwrap() else {
+            panic!()
+        };
+        assert_eq!(query.raw_q.as_ref().unwrap().len(), 256);
+        assert!(query.q.as_ref().unwrap().len() > 256);
+        let DerivedChangePageRequestV1::Bounded(selection) = query
+            .derived_request()
+            .expect("the neutral reader checks the raw query before lowercase expansion")
+        else {
+            panic!()
+        };
+        assert_eq!(selection.summary_query(), query.q.as_deref());
     }
     #[test]
     fn equivalent_defaults_share_identity() {

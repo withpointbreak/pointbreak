@@ -692,6 +692,9 @@ mod tests {
                 "association",
                 include_str!("../workflow/association/mod.rs"),
             ),
+            ("change", include_str!("../workflow/change.rs")),
+            ("fact port", include_str!("../workflow/fact_port.rs")),
+            ("landing", include_str!("../workflow/landing.rs")),
             (
                 "artifact removal",
                 include_str!("../workflow/artifact_removal/mod.rs"),

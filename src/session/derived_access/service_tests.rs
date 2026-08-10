@@ -361,14 +361,92 @@ fn history_and_change_facades_hold_arcs_to_the_same_runtime_type() {
 #[test]
 fn dropping_one_reader_preserves_the_runtime_held_by_the_other() {
     let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Off);
-    let history = DerivedHistoryAccess::from_runtime(std::sync::Arc::clone(&runtime));
     let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let history = changes.recovery_access();
 
     assert_eq!(std::sync::Arc::strong_count(&runtime), 3);
     drop(history);
     assert_eq!(std::sync::Arc::strong_count(&runtime), 2);
     drop(changes);
     assert_eq!(std::sync::Arc::strong_count(&runtime), 1);
+}
+
+#[test]
+fn explicit_off_stays_off_through_the_change_recovery_adapter() {
+    let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Off);
+    let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let recovery = changes.recovery_access();
+
+    assert!(!recovery.is_active());
+    assert_eq!(
+        recovery.lifecycle_status().availability,
+        super::history::DerivedHistoryAvailability::Absent
+    );
+    assert_eq!(std::sync::Arc::strong_count(&runtime), 3);
+}
+
+#[test]
+fn recovery_adapter_shares_the_exact_current_generation_arc() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let backend = crate::session::store::backend::StoreBackend::Local(temp.path().to_path_buf());
+    crate::session::store::capabilities::write_capability_fixture_for_test(
+        backend.journal().as_ref(),
+        crate::session::store::capabilities::CapabilityFixtureState::EmptyL2,
+    )
+    .unwrap();
+    let lifecycle = super::lifecycle::DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        temp.path(),
+        "store:test",
+    )
+    .unwrap();
+    lifecycle
+        .rebuild(|_| super::lifecycle::LifecycleControl::Continue)
+        .unwrap();
+    let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Active {
+        lifecycle,
+        current: std::sync::Mutex::new(None),
+        store_identity: "store:test".to_owned(),
+        backend,
+    });
+    let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let recovery = changes.recovery_access();
+
+    let super::runtime::RuntimeCurrentRead::Ready(runtime_current) = runtime.current().unwrap()
+    else {
+        panic!("shared runtime must open the current generation");
+    };
+    let super::history::CurrentRead::Ready(recovery_current) = recovery.current().unwrap() else {
+        panic!("recovery adapter must see the same current generation");
+    };
+    assert!(std::sync::Arc::ptr_eq(&runtime_current, &recovery_current));
+}
+
+#[test]
+fn recovery_controls_operate_on_the_change_facades_background_worker() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let lifecycle = super::lifecycle::DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        temp.path(),
+        "store:test",
+    )
+    .unwrap();
+    lifecycle.paths().ensure_scaffold().unwrap();
+    let _rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+    let runtime = DerivedAccessRuntime::from_mode(DerivedHistoryMode::Active {
+        lifecycle,
+        current: std::sync::Mutex::new(None),
+        store_identity: "store:test".to_owned(),
+        backend: crate::session::store::backend::StoreBackend::Local(temp.path().to_path_buf()),
+    });
+    let changes = DerivedChangeAccess::from_runtime(std::sync::Arc::clone(&runtime));
+    let recovery = changes.recovery_access();
+
+    recovery.start_background_rebuild().unwrap();
+    assert!(runtime.maintenance_in_flight());
+    recovery.cancel_background_rebuild().unwrap();
+    assert!(!runtime.maintenance_in_flight());
+    assert!(runtime.rebuild_worker_joined());
 }
 
 #[test]

@@ -10,8 +10,10 @@ use serde::Serialize;
 
 use super::lifecycle::LifecycleError;
 use super::locator::LocatorRead;
-use super::product_contract::DerivedAccessAvailability;
-use super::runtime::{DerivedAccessRuntime, RuntimeCurrentRead, RuntimeCurrentStatus};
+use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
+use super::runtime::{
+    DerivedAccessMode, DerivedAccessRuntime, RuntimeCurrentRead, RuntimeCurrentStatus,
+};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
@@ -29,6 +31,11 @@ use crate::documents::{
 use crate::error::{Result, ShoreError};
 use crate::model::{ChangeId, RevisionRefV1};
 use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
+use crate::session::store::capabilities::{
+    StoreCapabilityInspection, StoreCapabilityStatus, change_reader_activation_exists,
+    inspect_change_reader_journal_records,
+};
+use crate::session::store::resolution::resolve_change_read_backend;
 use crate::session::{ChangeLifecycleV1, ChangeTopologyV1};
 
 const AUTHORITY_ERROR_SCHEMA: &str = "pointbreak.inspect-change-authority-error";
@@ -50,13 +57,174 @@ impl DerivedChangeAccess {
         Self { runtime }
     }
 
-    pub fn resolve_for_inspector(_repo: impl AsRef<Path>) -> Result<Self> {
-        Err(Self::runtime_not_connected())
+    pub fn resolve_for_inspector(repo: impl AsRef<Path>) -> Result<Self> {
+        let profile = DerivedAccessProfile::from_environment()
+            .map_err(|error| ShoreError::Message(error.to_string()))?;
+        if profile == DerivedAccessProfile::Off {
+            return Ok(Self::from_runtime(DerivedAccessRuntime::from_mode(
+                DerivedAccessMode::Off,
+            )));
+        }
+        let read_store = resolve_change_read_backend(repo)
+            .map_err(|error| ShoreError::Message(error.to_string()))?;
+        let runtime =
+            DerivedAccessRuntime::from_read_store(read_store).map_err(ShoreError::Message)?;
+        Ok(Self::from_runtime(runtime))
     }
 
     pub fn profile(&self) -> Result<DerivedChangeOutcomeV1<ReaderProfileDocumentV1>> {
-        let _runtime = &self.runtime;
-        Err(Self::runtime_not_connected())
+        let current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(status)) => {
+                return Ok(self.profile_control_outcome(status));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error,
+                ));
+            }
+        };
+        let generation_id = current.generation_id().to_owned();
+        let checkpoint = match current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        let document = match current.reader_profile_document(&checkpoint) {
+            Ok(document) => document,
+            Err(error) => return Ok(self.profile_receipt_failure_outcome(error)),
+        };
+
+        let final_current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Change profile moved before response completion",
+                ));
+            }
+        };
+        if final_current.generation_id() != generation_id {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change profile generation changed before response completion",
+            ));
+        }
+        let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(LifecycleError::TruthChanged) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Change profile checkpoint moved before response completion",
+                ));
+            }
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change profile checkpoint changed before response completion",
+            ));
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(document))
+    }
+
+    fn profile_control_outcome(
+        &self,
+        status: RuntimeCurrentStatus,
+    ) -> DerivedChangeOutcomeV1<ReaderProfileDocumentV1> {
+        match self.control_path_capability() {
+            Ok(inspection)
+                if matches!(
+                    inspection.status,
+                    StoreCapabilityStatus::MigrationRequired
+                        | StoreCapabilityStatus::MigrationInProgress { .. }
+                ) =>
+            {
+                DerivedChangeOutcomeV1::Ready(ReaderProfileDocumentV1::from(&inspection))
+            }
+            Ok(_) => runtime_unavailable_outcome(status),
+            Err(error) => DerivedChangeOutcomeV1::authority_invalid(error),
+        }
+    }
+
+    fn profile_receipt_failure_outcome(
+        &self,
+        error: LifecycleError,
+    ) -> DerivedChangeOutcomeV1<ReaderProfileDocumentV1> {
+        match self.change_cohort_is_activated() {
+            Ok(true) => lifecycle_failure_outcome(error),
+            Ok(false) => match self.control_path_capability() {
+                Ok(inspection)
+                    if matches!(inspection.status, StoreCapabilityStatus::MigrationRequired) =>
+                {
+                    DerivedChangeOutcomeV1::Ready(ReaderProfileDocumentV1::from(&inspection))
+                }
+                Ok(_) => lifecycle_failure_outcome(error),
+                Err(detail) => DerivedChangeOutcomeV1::authority_invalid(detail),
+            },
+            Err(detail) => DerivedChangeOutcomeV1::authority_invalid(detail),
+        }
+    }
+
+    fn page_control_outcome<T>(&self, status: RuntimeCurrentStatus) -> DerivedChangeOutcomeV1<T> {
+        self.capability_unavailable_or(status)
+    }
+
+    fn page_receipt_failure_outcome<T>(&self, error: LifecycleError) -> DerivedChangeOutcomeV1<T> {
+        match self.change_cohort_is_activated() {
+            Ok(true) => lifecycle_failure_outcome(error),
+            Ok(false) => match self.control_path_capability() {
+                Ok(inspection) => capability_unavailable_outcome(&inspection)
+                    .unwrap_or_else(|| lifecycle_failure_outcome(error)),
+                Err(detail) => DerivedChangeOutcomeV1::authority_invalid(detail),
+            },
+            Err(detail) => DerivedChangeOutcomeV1::authority_invalid(detail),
+        }
+    }
+
+    fn capability_unavailable_or<T>(
+        &self,
+        fallback: RuntimeCurrentStatus,
+    ) -> DerivedChangeOutcomeV1<T> {
+        match self.control_path_capability() {
+            Ok(inspection) => capability_unavailable_outcome(&inspection)
+                .unwrap_or_else(|| runtime_unavailable_outcome(fallback)),
+            Err(detail) => DerivedChangeOutcomeV1::authority_invalid(detail),
+        }
+    }
+
+    fn control_path_capability(&self) -> std::result::Result<StoreCapabilityInspection, String> {
+        let Some((_, backend)) = self.runtime.active_context() else {
+            return Err("derived Change authority has no resolved store backend".to_owned());
+        };
+        let inspection = inspect_change_reader_journal_records(backend.journal().as_ref())
+            .map_err(|error| error.to_string())?;
+        Ok(StoreCapabilityInspection {
+            status: inspection.status,
+            cursor: inspection.cursor,
+            minimum_reader_profile: inspection.minimum_reader_profile,
+        })
+    }
+
+    fn change_cohort_is_activated(&self) -> std::result::Result<bool, String> {
+        let Some((_, backend)) = self.runtime.active_context() else {
+            return Err("derived Change authority has no resolved store backend".to_owned());
+        };
+        change_reader_activation_exists(backend.journal().as_ref())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Recovery controls and the supported legacy facade wrap the same runtime
+    /// instead of resolving an independent generation slot or worker.
+    #[doc(hidden)]
+    pub fn recovery_access(&self) -> super::history::DerivedHistoryAccess {
+        super::history::DerivedHistoryAccess::from_runtime(Arc::clone(&self.runtime))
+    }
+
+    #[doc(hidden)]
+    pub fn is_active(&self) -> bool {
+        self.runtime.is_active()
     }
 
     pub fn changes(
@@ -107,7 +275,7 @@ impl DerivedChangeAccess {
         let current = match self.runtime.current() {
             Ok(RuntimeCurrentRead::Ready(current)) => current,
             Ok(RuntimeCurrentRead::Unavailable(status)) => {
-                return Ok(runtime_unavailable_outcome(status));
+                return Ok(self.page_control_outcome(status));
             }
             Err(error) => {
                 return Ok(DerivedChangeOutcomeV1::projection_unavailable(
@@ -121,6 +289,9 @@ impl DerivedChangeAccess {
             Ok(checkpoint) => checkpoint,
             Err(error) => return Ok(lifecycle_failure_outcome(error)),
         };
+        if let Err(error) = current.reader_profile_document(&checkpoint) {
+            return Ok(self.page_receipt_failure_outcome(error));
+        }
         let as_of = checkpoint.truth_cursor;
         let materialized = match current
             .service()
@@ -590,10 +761,6 @@ impl DerivedChangeAccess {
         record_change_rows_emitted(emitted_row_count);
         Ok(DerivedChangeOutcomeV1::Ready(prepared))
     }
-
-    fn runtime_not_connected() -> ShoreError {
-        ShoreError::Message("derived Change access runtime is not connected".to_owned())
-    }
 }
 
 /// Independent authority, compatibility, and projection outcomes.
@@ -981,6 +1148,13 @@ enum ChangeReadBoundary {
     ResponseConstructed,
 }
 
+fn capability_unavailable_outcome<T>(
+    inspection: &StoreCapabilityInspection,
+) -> Option<DerivedChangeOutcomeV1<T>> {
+    ChangeQueryUnavailableDocumentV1::for_inspection(inspection)
+        .map(DerivedChangeOutcomeV1::AuthorityUnavailable)
+}
+
 fn runtime_unavailable_outcome<T>(status: RuntimeCurrentStatus) -> DerivedChangeOutcomeV1<T> {
     let detail = status
         .detail
@@ -1238,6 +1412,7 @@ fn availability_filter_name(filter: DerivedChangeAvailabilityFilterV1) -> &'stat
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -1247,11 +1422,14 @@ mod tests {
     use super::*;
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::crypto::{EventSigner, TestEd25519Signer};
-    use crate::documents::{ChangeDeclarationStateV1, change_presentation_projection};
+    use crate::documents::{
+        ChangeDeclarationStateV1, ReaderProfileAvailabilityV1, change_presentation_projection,
+    };
     use crate::model::{ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, RevisionId};
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::derived_access::runtime::DerivedAccessMode;
+    use crate::session::derived_access::semantic::change::CHANGE_READER_PROFILE_RESOURCE_V3;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventSignatureRecordedPayload, EventTarget,
@@ -1261,11 +1439,12 @@ mod tests {
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::store::backend::StoreBackend;
     use crate::session::store::capabilities::{
-        CapabilityFixtureState, write_capability_fixture_for_test,
+        CapabilityFixtureState, inspect_journal_records, write_capability_fixture_for_test,
     };
-    use crate::session::store::resolution::opaque_path_identity;
+    use crate::session::store::resolution::{opaque_path_identity, resolve_store};
     use crate::session::{
         AUTHORITY_CURSOR_SCHEMA_V2, AuthorityCursorV2, EventStore, EventWriteOutcome,
+        StoreCapabilityInspection,
     };
 
     const PAGE_TEST_STAMP: &str = "sha256:bodyless-page-test";
@@ -1510,6 +1689,18 @@ mod tests {
                 .join("cursor.sqlite3")
         }
 
+        fn receipt_path(&self) -> PathBuf {
+            let generation_id = self
+                .lifecycle
+                .published_generation_id()
+                .expect("read fixture publication")
+                .expect("fixture generation is published");
+            self.lifecycle
+                .paths()
+                .generation(&generation_id)
+                .join(CHANGE_READER_PROFILE_RESOURCE_V3)
+        }
+
         fn proposal_sequence(&self, event: &ShoreEvent) -> i64 {
             rusqlite::Connection::open(self.database_path())
                 .expect("open fixture sidecar")
@@ -1585,6 +1776,15 @@ mod tests {
             "expected {expected:?} in {:?}",
             document.message()
         );
+    }
+
+    fn assert_m1_unavailable<T>(outcome: DerivedChangeOutcomeV1<T>) {
+        assert!(matches!(
+            outcome,
+            DerivedChangeOutcomeV1::AuthorityUnavailable(
+                ChangeQueryUnavailableDocumentV1::MigrationInProgress { .. }
+            )
+        ));
     }
 
     fn bodyless_summary(
@@ -1751,6 +1951,65 @@ mod tests {
             DerivedChangeOutcomeV1::ProjectionUnavailable(_)
             | DerivedChangeOutcomeV1::Retryable(_) => 503,
         }
+    }
+
+    #[test]
+    fn m1_control_path_invalidates_a_preactivation_current_without_semantic_fallback() {
+        let temp = TempDir::new().expect("create disposable pre-activation root");
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        let store_identity =
+            opaque_path_identity("store", temp.path()).expect("derive disposable store identity");
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            store_identity.clone(),
+        )
+        .expect("create pre-activation lifecycle");
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish pre-activation derived generation");
+        assert!(
+            lifecycle
+                .open_current()
+                .expect("open pre-activation current")
+                .is_some(),
+            "the fixture must begin with a published pre-activation generation"
+        );
+
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::M1)
+            .expect("write M1 capability fixture");
+        let runtime = DerivedAccessRuntime::from_mode(DerivedAccessMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity,
+            backend,
+        });
+        let access = DerivedChangeAccess::from_runtime(runtime);
+
+        let scope = LongitudinalCountingScopeV1::new("f".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let profile = access.profile().expect("classify M1 profile");
+        let changes = access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("classify M1 Changes");
+        let attention = access
+            .attention(&DerivedChangePageRequestV1::Bare)
+            .expect("classify M1 Attention");
+        drop(guard);
+
+        let DerivedChangeOutcomeV1::Ready(profile) = profile else {
+            panic!("M1 Profile must remain a control document");
+        };
+        assert_eq!(
+            profile.availability,
+            ReaderProfileAvailabilityV1::MigrationInProgress
+        );
+        assert_m1_unavailable(changes);
+        assert_m1_unavailable(attention);
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.authoritative_fallbacks, 0);
+        assert_eq!(counters.full_history_fallbacks, 0);
     }
 
     #[test]
@@ -3116,11 +3375,136 @@ mod tests {
     }
 
     #[test]
-    fn reserved_change_facade_cannot_synthesize_a_product_outcome() {
-        let error = DerivedChangeAccess::resolve_for_inspector("unused-repository")
-            .err()
-            .expect("runtime extraction owns facade construction");
-        assert!(error.to_string().contains("runtime is not connected"));
+    fn inspector_resolution_connects_one_runtime_without_complete_change_classification() {
+        let repo = TempDir::new().expect("create disposable Inspector repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize disposable Inspector repository")
+                .success()
+        );
+        let resolved = resolve_store(repo.path()).expect("resolve disposable Inspector store");
+        write_capability_fixture_for_test(
+            resolved.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .expect("activate disposable Inspector store");
+        let store_identity = opaque_path_identity("store", resolved.store_dir())
+            .expect("derive disposable Inspector store identity");
+        DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            resolved.store_dir(),
+            store_identity,
+        )
+        .expect("create disposable Inspector lifecycle")
+        .rebuild(|_| LifecycleControl::Continue)
+        .expect("publish disposable Inspector generation");
+
+        let scope = LongitudinalCountingScopeV1::new("6".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let access = DerivedChangeAccess::resolve_for_inspector(repo.path())
+            .expect("resolve the Change-aware Inspector runtime");
+        let recovery = access.recovery_access();
+        assert!(recovery.is_active());
+        drop(guard);
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(counters.event_folds, 0);
+        assert_eq!(counters.projection_rebuilds, 0);
+        assert_eq!(counters.state_rebuilds, 0);
+        assert_eq!(counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn receipt_backed_profile_matches_strict_oracle_at_the_live_checkpoint() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("profile state"), Some("profile state")]]);
+        let inspection = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("classify the strict profile oracle outside the measured read");
+        let expected = ReaderProfileDocumentV1::from(&StoreCapabilityInspection {
+            status: inspection.status,
+            cursor: inspection.cursor,
+            minimum_reader_profile: inspection.minimum_reader_profile,
+        });
+        assert!(expected.authority_cursor.event_count > 0);
+
+        let scope = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = fixture
+            .access
+            .profile()
+            .expect("read the receipt-backed Inspector profile");
+        drop(guard);
+
+        let DerivedChangeOutcomeV1::Ready(actual) = outcome else {
+            panic!("a valid L2 V3 profile must be ready: {outcome:?}");
+        };
+        assert_eq!(actual, expected);
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("the fixture generation must remain current");
+        };
+        assert_eq!(
+            actual.authority_cursor,
+            current
+                .pin_change_reader_checkpoint()
+                .expect("pin the exact live reader checkpoint")
+                .authority_cursor
+        );
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(counters.event_folds, 0);
+        assert_eq!(counters.projection_rebuilds, 0);
+        assert_eq!(counters.state_rebuilds, 0);
+        assert_eq!(counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn missing_and_incompatible_v3_profiles_are_typed_without_strict_fallback() {
+        for case in ["missing", "incompatible"] {
+            let fixture = ActiveChangeFixture::new(&[]);
+            let receipt_path = fixture.receipt_path();
+            match case {
+                "missing" => fs::remove_file(&receipt_path).expect("remove disposable V3 receipt"),
+                "incompatible" => fs::write(
+                    &receipt_path,
+                    br#"{"schema":"pointbreak.derived-change-reader-profile-receipt.v2","version":2}"#,
+                )
+                .expect("replace disposable V3 receipt"),
+                _ => unreachable!(),
+            }
+            let access = fixture.fresh_access();
+            let scope = LongitudinalCountingScopeV1::new(match case {
+                "missing" => "8".repeat(64),
+                "incompatible" => "9".repeat(64),
+                _ => unreachable!(),
+            })
+            .unwrap();
+            let guard = scope.enter();
+            let outcome = access.profile().expect("classify the damaged V3 profile");
+            drop(guard);
+
+            let DerivedChangeOutcomeV1::ProjectionUnavailable(document) = outcome else {
+                panic!("{case} V3 state must be a typed projection failure: {outcome:?}");
+            };
+            assert_eq!(
+                document.code(),
+                DerivedProjectionFailureCodeV1::ProjectionRebuildRequired,
+                "V3 case {case}"
+            );
+            assert!(!document.is_retryable(), "V3 case {case}");
+            let counters = scope.snapshot().counters;
+            assert_eq!(counters.event_folds, 0, "V3 case {case}");
+            assert_eq!(counters.projection_rebuilds, 0, "V3 case {case}");
+            assert_eq!(counters.state_rebuilds, 0, "V3 case {case}");
+            assert_eq!(counters.full_history_fallbacks, 0, "V3 case {case}");
+        }
     }
 
     #[test]

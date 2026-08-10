@@ -31,6 +31,9 @@ use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
 };
 use crate::canonical_hash::canonical_json_bytes;
+use crate::documents::{
+    INSPECT_READER_PROFILE_SCHEMA, ReaderProfileAvailabilityV1, ReaderProfileDocumentV1,
+};
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::store::authority_lock::StoreAuthorityLock;
@@ -1683,6 +1686,38 @@ impl CurrentGeneration {
             return Err(LifecycleError::TruthChanged);
         }
         Ok(checkpoint)
+    }
+
+    /// Reconstruct the frozen public profile from the validated immutable V3
+    /// anchor and its exact live checkpoint. Commit-graph freshness remains a
+    /// CLI concern because it is outside derived-store authority.
+    pub(crate) fn reader_profile_document(
+        &self,
+        checkpoint: &ReaderProjectionCheckpointV1,
+    ) -> Result<ReaderProfileDocumentV1, LifecycleError> {
+        let receipt = self.reader_receipt.as_ref().ok_or_else(|| {
+            LifecycleError::RebuildRequired(
+                "current generation has no Change reader-profile receipt".to_owned(),
+            )
+        })?;
+        checkpoint
+            .validate_for_receipt(receipt)
+            .map_err(change_reader_contract_lifecycle_error)?;
+        Ok(ReaderProfileDocumentV1 {
+            schema: INSPECT_READER_PROFILE_SCHEMA.to_owned(),
+            version: 1,
+            availability: ReaderProfileAvailabilityV1::Ready,
+            authority_cursor: checkpoint.authority_cursor.clone(),
+            minimum_reader_profile: Some(receipt.minimum_reader_profile.clone()),
+            activation_id: Some(receipt.publication_activation_id.clone()),
+            manifest_hash: Some(receipt.publication_manifest_hash.clone()),
+            completion_id: Some(receipt.publication_completion_id.clone()),
+            commit_graph_stamp: None,
+            documents: crate::documents::change_revision_document_registry()
+                .iter()
+                .map(|(schema, version)| ((*schema).to_owned(), *version))
+                .collect(),
+        })
     }
 
     pub(crate) fn change_generation_stamp(

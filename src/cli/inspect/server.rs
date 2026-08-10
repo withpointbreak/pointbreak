@@ -101,6 +101,7 @@ impl From<std::io::Error> for RequestParseError {
 /// highlight cache; cloned cheaply behind an `Arc` to every connection thread.
 pub(super) struct InspectState {
     pub repo: PathBuf,
+    pub derived_changes: pointbreak::session::DerivedChangeAccess,
     pub derived_history: pointbreak::session::DerivedHistoryAccess,
     pub highlight_cache: RwLock<HighlightCache>,
     /// The single-slot exhaustive-search cache (#255). Default-off requests
@@ -111,16 +112,13 @@ pub(super) struct InspectState {
     /// `/api/revisions` pages: an artifact loaded on more than one page is
     /// decoded once per server process.
     pub snapshot_summaries: Arc<SnapshotSummaryCache>,
-    /// One complete Change reader snapshot keyed by the append-only Journal
-    /// marker. The mutex is also the rebuild permit: concurrent requests wait
-    /// for one fold rather than multiplying decoded histories.
+    /// One complete strict Change reader snapshot keyed by the append-only
+    /// Journal marker. Only Timeline and exact/detail/resource/interdiff routes
+    /// may enter it; Profile, Changes, and Attention use `derived_changes`.
     pub change_reader_cache: ChangeReaderCache,
     /// Ephemeral continuation-token authority, deliberately independent of the
     /// browser bearer secret and never persisted beyond this Inspector process.
     pub page_token_signer: super::page_token::PageTokenSigner,
-    /// The eager cache warm is delayed until the first authenticated API request,
-    /// so serving the recovery shell never opens the store.
-    initial_warm_started: AtomicBool,
     /// One service-wide permit for user-elected authoritative fallback. The
     /// fallback is intentionally expensive and request-local; concurrent
     /// callers receive a typed busy response instead of multiplying complete
@@ -137,13 +135,16 @@ impl InspectState {
         repo: PathBuf,
         start_background_rebuild: bool,
     ) -> Result<Self, String> {
-        let derived_history =
-            pointbreak::session::DerivedHistoryAccess::resolve_for_inspector(&repo)?;
+        let derived_changes =
+            pointbreak::session::DerivedChangeAccess::resolve_for_inspector(&repo)
+                .map_err(|error| error.to_string())?;
+        let derived_history = derived_changes.recovery_access();
         if start_background_rebuild && let Err(error) = derived_history.start_background_rebuild() {
             tracing::warn!(error = %error, "derived_access_background_rebuild_start_failed");
         }
         Ok(Self {
             repo,
+            derived_changes,
             derived_history,
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
             history_cache: super::cache::HistoryProjectionCache::new(),
@@ -151,7 +152,6 @@ impl InspectState {
             change_reader_cache: ChangeReaderCache::new(),
             page_token_signer: super::page_token::PageTokenSigner::generate()
                 .map_err(|error| error.to_string())?,
-            initial_warm_started: AtomicBool::new(false),
             authoritative_fallback: AuthoritativeFallbackGate::new(),
         })
     }
@@ -761,10 +761,6 @@ fn handle_connection(
     if !request.longitudinal_counting.is_empty() && !is_api_path(path) {
         return write_response(stream, &Response::unauthorized());
     }
-    if is_api_path(path) {
-        warm_caches_after_auth(state);
-    }
-
     #[cfg(feature = "longitudinal-counting")]
     if let Some(counting_request) = longitudinal_counting_request(&request)? {
         let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
@@ -819,23 +815,6 @@ fn longitudinal_counting_request(
             "multiple longitudinal counting headers",
         )),
     }
-}
-
-fn warm_caches_after_auth(state: &Arc<InspectState>) {
-    if state.initial_warm_started.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let state = Arc::clone(state);
-    thread::spawn(move || {
-        if let Err(error) = state.change_reader_cache.load_state(state.repo.as_path()) {
-            tracing::debug!(error = %error, "inspect_change_reader_cache_warm_failed");
-        }
-        if !state.derived_history.is_active()
-            && let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache)
-        {
-            tracing::debug!(error = %error, "inspect_history_cache_warm_failed");
-        }
-    });
 }
 
 fn parse_request_head(reader: &mut impl BufRead) -> Result<Option<RequestHead>, RequestParseError> {
@@ -976,10 +955,10 @@ fn route(
 
     let repo = state.repo.as_path();
     if path == "/api/v2/profile" {
-        return api_response(api::change_v2_profile_json(
-            repo,
-            &state.change_reader_cache,
-        ));
+        if !state.derived_changes.is_active() {
+            return authoritative_change_v2_profile_response(state);
+        }
+        return change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes));
     }
     if path == "/api/v2/history" {
         return change_v2_response(api::event_history_v2_json(
@@ -990,17 +969,21 @@ fn route(
         ));
     }
     if path == "/api/v2/changes" {
+        if !state.derived_changes.is_active() {
+            return authoritative_changes_v2_response(state, query);
+        }
         return change_v2_response(api::changes_v2_json(
-            repo,
-            &state.change_reader_cache,
+            &state.derived_changes,
             query,
             &state.page_token_signer,
         ));
     }
     if path == "/api/v2/attention" {
+        if !state.derived_changes.is_active() {
+            return authoritative_change_attention_v2_response(state, query);
+        }
         return change_v2_response(api::change_attention_v2_json(
-            repo,
-            &state.change_reader_cache,
+            &state.derived_changes,
             query,
             &state.page_token_signer,
         ));
@@ -1310,6 +1293,11 @@ fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
             "application/json; charset=utf-8",
             body.into_bytes(),
         ),
+        Ok(api::ChangeV2Json::UpgradeRequired(body)) => Response::new(
+            "426 Upgrade Required",
+            "application/json; charset=utf-8",
+            body.into_bytes(),
+        ),
         Ok(api::ChangeV2Json::Invalid(body)) => Response::new(
             "400 Bad Request",
             "application/json; charset=utf-8",
@@ -1335,6 +1323,34 @@ fn requested_authoritative_access(query: Option<&str>) -> Result<bool, String> {
         Some("authoritative") => Ok(true),
         Some(_) => Err("invalid access mode".to_owned()),
     }
+}
+
+fn authoritative_change_v2_profile_response(state: &InspectState) -> Response {
+    api_response(api::authoritative_change_v2_profile_json(
+        state.repo.as_path(),
+        &state.change_reader_cache,
+    ))
+}
+
+fn authoritative_changes_v2_response(state: &InspectState, query: Option<&str>) -> Response {
+    change_v2_response(api::authoritative_changes_v2_json(
+        state.repo.as_path(),
+        &state.change_reader_cache,
+        query,
+        &state.page_token_signer,
+    ))
+}
+
+fn authoritative_change_attention_v2_response(
+    state: &InspectState,
+    query: Option<&str>,
+) -> Response {
+    change_v2_response(api::authoritative_change_attention_v2_json(
+        state.repo.as_path(),
+        &state.change_reader_cache,
+        query,
+        &state.page_token_signer,
+    ))
 }
 
 fn explicit_authoritative_response(
@@ -1732,6 +1748,243 @@ mod tests {
 
     use super::*;
 
+    const SERVER_SOURCE: &str = include_str!("server.rs");
+    const API_SOURCE: &str = include_str!("api.rs");
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start = source
+            .find(start)
+            .unwrap_or_else(|| panic!("missing source start marker: {start}"));
+        let tail = &source[start..];
+        let end = tail
+            .find(end)
+            .unwrap_or_else(|| panic!("missing source end marker after {start}: {end}"));
+        &tail[..end]
+    }
+
+    fn assert_source_order(source: &str, earlier: &str, later: &str) {
+        let earlier = source
+            .find(earlier)
+            .unwrap_or_else(|| panic!("missing earlier source marker: {earlier}"));
+        let later = source
+            .find(later)
+            .unwrap_or_else(|| panic!("missing later source marker: {later}"));
+        assert!(
+            earlier < later,
+            "expected `{earlier}` before `{later}` in production source"
+        );
+    }
+
+    #[test]
+    fn inspector_state_resolves_one_runtime_for_change_reads_and_recovery_controls() {
+        let state = source_between(
+            SERVER_SOURCE,
+            "pub(super) struct InspectState {",
+            "impl InspectState {",
+        );
+        assert!(
+            state.contains("derived_changes: pointbreak::session::DerivedChangeAccess"),
+            "Inspector state must own the derived Change product facade"
+        );
+        assert!(
+            state.contains("derived_history: pointbreak::session::DerivedHistoryAccess"),
+            "the supported recovery facade remains explicit"
+        );
+
+        let constructor = source_between(
+            SERVER_SOURCE,
+            "fn new_with_background_rebuild(",
+            "struct CachedChangeReaderState",
+        );
+        assert!(
+            constructor.contains("DerivedChangeAccess::resolve_for_inspector"),
+            "the product facade must be the only Inspector derived-runtime resolver"
+        );
+        assert!(
+            !constructor.contains("DerivedHistoryAccess::resolve_for_inspector"),
+            "recovery must wrap the product facade's runtime, not resolve a parallel runtime"
+        );
+        assert!(
+            constructor.contains("let derived_history = derived_changes."),
+            "the recovery facade must be obtained from the resolved product facade"
+        );
+        assert!(constructor.contains("derived_changes,"));
+        assert!(constructor.contains("derived_history,"));
+
+        let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
+        let controls = source_between(
+            SERVER_SOURCE,
+            "fn derived_access_control_response(",
+            "fn static_response(",
+        );
+        assert!(
+            route.contains("api::derived_access_status_json(\n            &state.derived_history"),
+            "status must use the recovery facade derived from the product runtime"
+        );
+        assert!(controls.contains("state.derived_history.restart_background_rebuild()"));
+        assert!(controls.contains("state.derived_history.cancel_background_rebuild()"));
+    }
+
+    #[test]
+    fn routes_split_derived_collections_from_strict_timeline_and_exact_reads() {
+        let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
+        let profile = source_between(
+            route,
+            "if path == \"/api/v2/profile\"",
+            "if path == \"/api/v2/history\"",
+        );
+        let timeline = source_between(
+            route,
+            "if path == \"/api/v2/history\"",
+            "if path == \"/api/v2/changes\"",
+        );
+        let changes = source_between(
+            route,
+            "if path == \"/api/v2/changes\"",
+            "if path == \"/api/v2/attention\"",
+        );
+        let attention = source_between(
+            route,
+            "if path == \"/api/v2/attention\"",
+            "if path.starts_with(\"/api/v2/changes/\")",
+        );
+        for (name, derived_route) in [
+            ("Profile", profile),
+            ("Changes", changes),
+            ("Attention", attention),
+        ] {
+            assert!(
+                derived_route.contains("state.derived_changes"),
+                "{name} must dispatch through DerivedChangeAccess"
+            );
+            assert!(
+                !derived_route.contains("state.change_reader_cache"),
+                "{name} must not enter the strict Change reader cache"
+            );
+        }
+        assert!(timeline.contains("state.change_reader_cache"));
+        assert!(!timeline.contains("state.derived_changes"));
+
+        let exact = source_between(
+            SERVER_SOURCE,
+            "fn route_change_v2(",
+            "fn exact_selector_values(",
+        );
+        assert!(exact.contains("let cache = &state.change_reader_cache"));
+        assert!(!exact.contains("state.derived_changes"));
+
+        let profile_api = source_between(
+            API_SOURCE,
+            "pub(super) fn change_v2_profile_json(",
+            "pub(super) fn changes_v2_json(",
+        );
+        let changes_api = source_between(
+            API_SOURCE,
+            "pub(super) fn changes_v2_json(",
+            "pub(super) fn event_history_v2_json(",
+        );
+        let timeline_api = source_between(
+            API_SOURCE,
+            "pub(super) fn event_history_v2_json(",
+            "pub(super) fn event_history_v2_from_loaded(",
+        );
+        let attention_api = source_between(
+            API_SOURCE,
+            "pub(super) fn change_attention_v2_json(",
+            "pub(super) fn exact_selection_error_json(",
+        );
+        for (name, derived_api) in [
+            ("Profile", profile_api),
+            ("Changes", changes_api),
+            ("Attention", attention_api),
+        ] {
+            assert!(
+                derived_api.contains("DerivedChangeAccess"),
+                "{name} API must accept the product facade"
+            );
+            assert!(
+                !derived_api.contains("ChangeReaderCache"),
+                "{name} API must not accept the strict reader cache"
+            );
+        }
+        assert!(timeline_api.contains("ChangeReaderCache"));
+        assert!(!timeline_api.contains("DerivedChangeAccess"));
+    }
+
+    #[test]
+    fn change_query_validation_precedes_derived_generation_access() {
+        let changes = source_between(
+            API_SOURCE,
+            "pub(super) fn changes_v2_json(",
+            "pub(super) fn event_history_v2_json(",
+        );
+        let attention = source_between(
+            API_SOURCE,
+            "pub(super) fn change_attention_v2_json(",
+            "pub(super) fn exact_selection_error_json(",
+        );
+        for (name, helper, facade_call) in [
+            ("Changes", changes, ".changes("),
+            ("Attention", attention, ".attention("),
+        ] {
+            assert!(helper.contains("super::change_page::parse_signed"));
+            assert!(
+                helper.contains("DerivedChangeAccess"),
+                "{name} must receive the already-resolved product facade"
+            );
+            assert_source_order(helper, "super::change_page::parse_signed", facade_call);
+            for forbidden in [
+                "ChangeReaderCache",
+                "change_reader_state_for_repo",
+                "change_reader_head_marker_for_repo",
+                "with_change_v2",
+                "DerivedHistoryRoute",
+                "ExhaustiveSearchFallback",
+                "resolve_for_inspector",
+            ] {
+                assert!(
+                    !helper.contains(forbidden),
+                    "{name} enters forbidden `{forbidden}` after the product-route split"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authenticated_requests_have_no_eager_cache_warm() {
+        let connection = source_between(
+            SERVER_SOURCE,
+            "fn handle_connection(",
+            "fn longitudinal_receipt_header(",
+        );
+        assert!(
+            !connection.contains("change_reader_cache"),
+            "connection admission must not populate exact or Timeline state"
+        );
+        assert!(
+            !connection.contains("load_state"),
+            "Profile-first must not hide a complete strict fold"
+        );
+    }
+
+    #[test]
+    fn static_and_unauthenticated_requests_reach_no_cache_warm() {
+        let connection = source_between(
+            SERVER_SOURCE,
+            "fn handle_connection(",
+            "fn longitudinal_receipt_header(",
+        );
+        assert_source_order(connection, "!has_exact_host", "let response = route(");
+        assert_source_order(connection, "!has_exact_bearer", "let response = route(");
+        assert!(
+            !connection.contains("warm_caches_after_auth"),
+            "static and unauthenticated requests must have no cache-warm seam"
+        );
+
+        let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
+        assert_source_order(route, "static_response(path)", "if !is_api_path(path)");
+    }
+
     fn route_for(method: &str, path: &str) -> Response {
         // The active default resolves the repository before serving even a
         // store-independent route. Use one real empty repository so these
@@ -1850,6 +2103,12 @@ mod tests {
 
     #[test]
     fn typed_page_outcomes_map_to_distinct_http_statuses() {
+        let unavailable = change_v2_response(Ok(api::ChangeV2Json::Unavailable(
+            "{\"code\":\"migration_required\"}".to_owned(),
+        )));
+        let upgrade_required = change_v2_response(Ok(api::ChangeV2Json::UpgradeRequired(
+            "{\"code\":\"reader_upgrade_required\"}".to_owned(),
+        )));
         let invalid = change_v2_response(Ok(api::ChangeV2Json::Invalid(
             "{\"code\":\"invalid_query\"}".to_owned(),
         )));
@@ -1859,6 +2118,8 @@ mod tests {
         let moving = change_v2_response(Ok(api::ChangeV2Json::Retryable(
             "{\"code\":\"moving_journal\"}".to_owned(),
         )));
+        assert_eq!(unavailable.status, "409 Conflict");
+        assert_eq!(upgrade_required.status, "426 Upgrade Required");
         assert_eq!(invalid.status, "400 Bad Request");
         assert_eq!(stale.status, "409 Conflict");
         assert_eq!(moving.status, "503 Service Unavailable");
@@ -2130,13 +2391,44 @@ mod tests {
     }
 
     #[test]
-    fn v2_profile_is_the_only_semantic_bootstrap_on_an_l0_root() {
-        let response = route_for("GET", "/api/v2/profile");
-        assert_eq!(response.status, "200 OK");
-        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(value["schema"], "pointbreak.inspect-reader-profile");
-        assert_eq!(value["availability"], "migration_required");
-        assert!(value["commitGraphStamp"].is_string());
+    fn l0_v2_routes_keep_profile_available_and_refuse_collections_without_fallback() {
+        let repo = tempfile::tempdir().expect("routing test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize routing test repository")
+                .success()
+        );
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
+        );
+
+        let profile = route(&state, true, "GET", "/api/v2/profile", None);
+        assert_eq!(profile.status, "200 OK");
+        let profile: serde_json::Value = serde_json::from_slice(&profile.body).unwrap();
+        assert_eq!(profile["schema"], "pointbreak.inspect-reader-profile");
+        assert_eq!(profile["availability"], "migration_required");
+        assert!(profile["commitGraphStamp"].is_string());
+
+        for path in ["/api/v2/changes", "/api/v2/attention"] {
+            let response = route(&state, true, "GET", path, None);
+            assert_eq!(response.status, "409 Conflict", "{path}");
+            assert!(
+                !response
+                    .headers
+                    .iter()
+                    .any(|(name, _)| *name == "X-Pointbreak-Access-Source"),
+                "{path} must not activate an authoritative fallback"
+            );
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(
+                body["schema"], "pointbreak.store-migration-required",
+                "{path}"
+            );
+            assert_eq!(body["state"], "migration_required", "{path}");
+        }
     }
 
     #[test]

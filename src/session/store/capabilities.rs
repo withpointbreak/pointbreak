@@ -37,6 +37,15 @@ const COMPLETION_TBS_PAYLOAD_TYPE_V1: &str =
 const ROOT_ACTIVATION_LOGICAL_KEY_V1: &str =
     "store_capability_activation:review_change_revision_v1:root";
 
+/// Check only whether the frozen Change-cohort activation carrier exists.
+///
+/// This is a control-path discriminator, not capability validation. A caller
+/// that needs the activated authority must still inspect and validate the
+/// complete capability records through the authoritative router.
+pub(crate) fn change_reader_activation_exists(journal: &dyn Journal) -> Result<bool> {
+    journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)
+}
+
 pub(crate) const REVIEW_CHANGE_REVISION_REQUIRED_CAPABILITIES_V1: &[&str] = &[
     "auxiliary_document_blob_v1",
     "auxiliary_document_manifest_v1",

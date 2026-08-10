@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use rusqlite::OptionalExtension;
 use rusqlite::types::Value;
@@ -30,8 +32,7 @@ use crate::session::derived_access::semantic::state::SemanticStateSnapshot;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{
-    activated_store_capability_for_repo, opaque_path_identity,
-    resolve_read_store_with_derived_access_profile,
+    activated_store_capability_for_repo, resolve_read_store_with_derived_access_profile,
 };
 use crate::session::workflow::{
     BaseProjectionConfig, DistinctValues, HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery,
@@ -303,30 +304,9 @@ impl DerivedHistoryAccess {
         }
         let read_store = resolve_read_store_with_derived_access_profile(repo, profile)
             .map_err(|error| error.to_string())?;
-        let profile = read_store.derived_access_profile();
-        let store_identity = opaque_path_identity("store", read_store.store_dir())
-            .map_err(|error| error.to_string())?;
-        let maintenance = DerivedHistoryMaintenance {
-            profile,
-            store_root: read_store.store_dir().to_path_buf(),
-            store_identity: store_identity.clone(),
-        };
-        let mode = match DerivedStorageLayout::discover(read_store.store_dir()) {
-            DerivedStorageDiscovery::Conflict { .. } => DerivedHistoryMode::Off,
-            DerivedStorageDiscovery::Selected(_) => {
-                let lifecycle = maintenance.lifecycle()?;
-                DerivedHistoryMode::Active {
-                    lifecycle,
-                    current: Mutex::new(None),
-                    store_identity,
-                    backend: read_store.backend().clone(),
-                }
-            }
-        };
-        Ok(Self::from_runtime(DerivedAccessRuntime::new(
-            mode,
-            Some(maintenance),
-        )))
+        Ok(Self::from_runtime(DerivedAccessRuntime::from_read_store(
+            read_store,
+        )?))
     }
 
     /// Resolve the legacy derived-history service for a mixed-cohort Inspector.

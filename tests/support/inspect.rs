@@ -91,7 +91,7 @@ impl Inspector {
     pub fn spawn_current(repo: &Path) -> Self {
         let inspector =
             Self::spawn_with_env_mode(repo, InspectSurface::Web, InspectOutput::Text, &[], false);
-        inspector.wait_for_default_derived_generation();
+        inspector.ensure_default_derived_generation();
         inspector
     }
 
@@ -345,10 +345,31 @@ impl Inspector {
     /// update their own sidecar; the compatibility mirror copies only authority
     /// bytes, so its running Inspector must exercise the explicit retry action.
     pub fn rebuild_legacy_derived_projection(&self) {
+        self.request_default_derived_rebuild();
+        self.wait_for_default_derived_generation();
+    }
+
+    /// Wait for the shared generation to expose a governed append before
+    /// asserting a successor-checkpoint response.
+    pub fn wait_for_current_derived_projection(&self) {
+        self.wait_for_default_derived_generation();
+    }
+
+    fn ensure_default_derived_generation(&self) {
+        if let Ok((_, body)) = self.try_get("/api/v2/profile")
+            && let Ok(profile) = serde_json::from_str::<Value>(&body)
+            && profile["availability"] == "ready"
+        {
+            return;
+        }
+        self.request_default_derived_rebuild();
+        self.wait_for_default_derived_generation();
+    }
+
+    fn request_default_derived_rebuild(&self) {
         let (status, body) =
             self.request_with_retry("POST", "/api/derived-access/retry", &self.default_headers());
         assert!(status.contains("200 OK"), "{status}: {body}");
-        self.wait_for_default_derived_generation();
     }
 
     fn wait_for_default_derived_generation(&self) {

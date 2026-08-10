@@ -17,10 +17,9 @@ use crate::session::event::{
 };
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, InputRequestStatus,
-    ReviewCursorV1, RevisionShowOptions, SessionState, current_timestamp,
-    show_revision_for_change_reader, sign_event_if_requested, validated_track_id,
-    writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, InputRequestStatus, ReviewCursorV1,
+    RevisionShowOptions, SessionState, current_timestamp, show_revision_for_change_reader,
+    sign_event_if_requested, validated_track_id, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
 
@@ -184,7 +183,7 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
         current_timestamp(),
     )?;
     sign_event_if_requested(&mut event, &options.signing)?;
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
     let outcome = event_store.record_change_event_once(&event)?;
     let state = SessionState::from_events(&event_store.list_change_events()?)?;
     storage.write_json_atomic(

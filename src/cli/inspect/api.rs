@@ -27,18 +27,20 @@ use pointbreak::session::event::{FactPortRelationV1, FactRefV1, GitProvenance, R
 use pointbreak::session::{
     AUTHORITATIVE_REVISION_PAGE_PROFILE, AssessmentRecordStatus, AssessmentView, AttentionItem,
     AttentionListOptions, BaseHistoryProjection, BaseProjectionConfig, ChangeLifecycleV1,
-    CurrentAssessmentStatus, DerivedAttention, DerivedAttentionRoute, DerivedHistoryAccess,
-    DerivedHistoryLifecycleStatus, DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute,
-    DerivedHistoryStatus, DerivedRevisionDetail, DerivedRevisionDetailRoute, DerivedRevisionPage,
-    DerivedRevisionPageRoute, DerivedThreads, DerivedThreadsRoute, DistinctValues,
-    EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
-    LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
-    REVISION_PAGE_SCHEMA, ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry,
-    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionPageCursor,
-    RevisionPageRequest, RevisionPageRequestError, RevisionShowOptions, RevisionShowResult,
-    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
-    TrustSet, ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
-    classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
+    CurrentAssessmentStatus, DerivedAttention, DerivedAttentionRoute, DerivedChangeAccess,
+    DerivedChangeOutcomeV1, DerivedHistoryAccess, DerivedHistoryLifecycleStatus,
+    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
+    DerivedProjectionFailureCodeV1, DerivedRevisionDetail, DerivedRevisionDetailRoute,
+    DerivedRevisionPage, DerivedRevisionPageRoute, DerivedThreads, DerivedThreadsRoute,
+    DistinctValues, EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery,
+    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
+    ProjectionDiagnostic, QueryDiagnostic, REVISION_PAGE_SCHEMA, ReviewHistoryEntry,
+    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
+    RevisionOverviewsOptions, RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError,
+    RevisionShowOptions, RevisionShowResult, SessionState, SnapshotSummaryCache, StoreIdentity,
+    StoreIdentityOptions, SupersessionView, TrustSet, ValidationContinuitySummary,
+    ValidationContinuityView, apply_history_query, classify_validation_continuity,
+    commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, parse_event_instant,
@@ -56,24 +58,59 @@ use super::server::HighlightCache;
 pub(super) enum ChangeV2Json {
     Ok(String),
     Unavailable(String),
+    UpgradeRequired(String),
     Invalid(String),
     Stale(String),
     Retryable(String),
 }
 
+fn derived_change_outcome_json<T>(
+    outcome: DerivedChangeOutcomeV1<T>,
+    ready: impl FnOnce(T) -> Result<ChangeV2Json, String>,
+) -> Result<ChangeV2Json, String> {
+    match outcome {
+        DerivedChangeOutcomeV1::Ready(value) => ready(value),
+        DerivedChangeOutcomeV1::AuthorityUnavailable(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::AuthorityConflicted(document)
+        | DerivedChangeOutcomeV1::AuthorityInvalid(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::ReaderUpgradeRequired(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::UpgradeRequired)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::ProjectionUnavailable(document)
+            if document.code() == DerivedProjectionFailureCodeV1::ProjectionStale =>
+        {
+            Ok(ChangeV2Json::Stale(page_error_json(
+                super::change_page::PageError::Stale,
+            )))
+        }
+        DerivedChangeOutcomeV1::ProjectionUnavailable(document)
+        | DerivedChangeOutcomeV1::Retryable(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Retryable)
+            .map_err(|error| error.to_string()),
+    }
+}
+
 pub(super) fn change_v2_profile_json(
     repo: &Path,
-    cache: &super::server::ChangeReaderCache,
-) -> Result<String, String> {
-    let generation = cache.load_state(repo).map_err(|error| error.to_string())?;
-    let mut profile = ReaderProfileDocumentV1::from(&generation.state.capability);
-    profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
-    serde_json::to_string(&profile).map_err(|error| error.to_string())
+    access: &DerivedChangeAccess,
+) -> Result<ChangeV2Json, String> {
+    derived_change_outcome_json(
+        access.profile().map_err(|error| error.to_string())?,
+        |mut profile| {
+            profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
+            serde_json::to_string(&profile)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 pub(super) fn changes_v2_json(
-    repo: &Path,
-    cache: &super::server::ChangeReaderCache,
+    access: &DerivedChangeAccess,
     query: Option<&str>,
     signer: &super::change_page::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
@@ -82,12 +119,19 @@ pub(super) fn changes_v2_json(
             Ok(request) => request,
             Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
         };
-    with_change_v2_outcome(repo, cache, |facade, _| {
-        let document = facade
-            .list_document_for_inspector_with_presentations()
-            .map_err(|error| error.to_string())?;
-        paged_change_json(document, request, signer)
-    })
+    let derived_request = match request.derived_request() {
+        Ok(request) => request,
+        Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+    };
+    derived_change_outcome_json(
+        access
+            .changes(&derived_request)
+            .map_err(|error| error.to_string())?,
+        |page| {
+            let value = serde_json::to_value(page.document).map_err(|error| error.to_string())?;
+            derived_page_json(value, &request, page.window.as_ref(), signer)
+        },
+    )
 }
 
 pub(super) fn event_history_v2_json(
@@ -177,6 +221,137 @@ fn event_history_error_json(code: &str, message: &str, retryable: bool) -> Strin
 }
 
 pub(super) fn change_attention_v2_json(
+    access: &DerivedChangeAccess,
+    query: Option<&str>,
+    signer: &super::change_page::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    let request = match super::change_page::parse_signed(
+        super::change_page::Lens::Attention,
+        query,
+        signer,
+    ) {
+        Ok(request) => request,
+        Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+    };
+    let derived_request = match request.derived_request() {
+        Ok(request) => request,
+        Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+    };
+    derived_change_outcome_json(
+        access
+            .attention(&derived_request)
+            .map_err(|error| error.to_string())?,
+        |page| {
+            let mut value =
+                serde_json::to_value(page.document).map_err(|error| error.to_string())?;
+            merge_derived_attention_presentations(&mut value, page.attention_presentations)?;
+            derived_page_json(value, &request, page.window.as_ref(), signer)
+        },
+    )
+}
+
+fn merge_derived_attention_presentations(
+    value: &mut serde_json::Value,
+    attention_presentations: BTreeMap<
+        ChangeId,
+        pointbreak::session::DerivedAttentionPresentationV1,
+    >,
+) -> Result<(), String> {
+    if attention_presentations.is_empty() {
+        return Ok(());
+    }
+    let presentations = value
+        .get_mut("presentations")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| "Inspector Attention document has no presentation map".to_owned())?;
+    for (change_id, attention) in attention_presentations {
+        let presentation = presentations
+            .get_mut(change_id.as_str())
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                format!(
+                    "Inspector Attention presentation missing for Change {}",
+                    change_id.as_str()
+                )
+            })?;
+        presentation.insert(
+            "attention".to_owned(),
+            serde_json::to_value(attention).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(())
+}
+
+fn derived_page_json(
+    document: serde_json::Value,
+    request: &super::change_page::Request,
+    window: Option<&pointbreak::session::DerivedChangePageWindowV1>,
+    signer: &super::change_page::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    match request.apply_derived_window(document, window, signer) {
+        Ok(value) => serde_json::to_string(&value)
+            .map(ChangeV2Json::Ok)
+            .map_err(|error| error.to_string()),
+        Err(super::change_page::PageError::Invalid(message)) => Ok(ChangeV2Json::Invalid(
+            page_error_json(super::change_page::PageError::Invalid(message)),
+        )),
+        Err(super::change_page::PageError::Stale) => Ok(ChangeV2Json::Stale(page_error_json(
+            super::change_page::PageError::Stale,
+        ))),
+    }
+}
+
+fn page_error_json(error: super::change_page::PageError) -> String {
+    let (code, message) = match error {
+        super::change_page::PageError::Invalid(message) => ("invalid_query", message),
+        super::change_page::PageError::Stale => (
+            "stale_projection",
+            "continuation belongs to a stale projection".to_owned(),
+        ),
+    };
+    serde_json::json!({"schema":"pointbreak.inspect-change-page-error","version":1,"code":code,"message":message}).to_string()
+}
+
+pub(super) fn exact_selection_error_json(message: &str) -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-change-selection-error",
+        "version": 1,
+        "code": "invalid_exact_selection",
+        "message": message,
+    })
+    .to_string()
+}
+
+pub(super) fn authoritative_change_v2_profile_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+) -> Result<String, String> {
+    let generation = cache.load_state(repo).map_err(|error| error.to_string())?;
+    let mut profile = ReaderProfileDocumentV1::from(&generation.state.capability);
+    profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
+    serde_json::to_string(&profile).map_err(|error| error.to_string())
+}
+
+pub(super) fn authoritative_changes_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    query: Option<&str>,
+    signer: &super::change_page::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    let request =
+        match super::change_page::parse_signed(super::change_page::Lens::Changes, query, signer) {
+            Ok(request) => request,
+            Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+        };
+    with_change_v2_outcome(repo, cache, |facade, _| {
+        let document = facade
+            .list_document_for_inspector_with_presentations()
+            .map_err(|error| error.to_string())?;
+        authoritative_paged_change_json(document, request, signer)
+    })
+}
+
+pub(super) fn authoritative_change_attention_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
     query: Option<&str>,
@@ -195,12 +370,12 @@ pub(super) fn change_attention_v2_json(
             .attention_document_with_presentations(true)
             .map_err(|error| error.to_string())?;
         let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
-        enrich_change_attention_presentations(&mut value, facade)?;
-        paged_change_json(value, request, signer)
+        enrich_authoritative_change_attention_presentations(&mut value, facade)?;
+        authoritative_paged_change_json(value, request, signer)
     })
 }
 
-fn enrich_change_attention_presentations(
+fn enrich_authoritative_change_attention_presentations(
     value: &mut serde_json::Value,
     facade: &ChangeDocumentFacadeV1,
 ) -> Result<(), String> {
@@ -252,7 +427,7 @@ fn enrich_change_attention_presentations(
     Ok(())
 }
 
-fn paged_change_json(
+fn authoritative_paged_change_json(
     document: impl Serialize,
     request: super::change_page::Request,
     signer: &super::change_page::PageTokenSigner,
@@ -276,27 +451,6 @@ fn paged_change_json(
             }
         }
     }
-}
-
-fn page_error_json(error: super::change_page::PageError) -> String {
-    let (code, message) = match error {
-        super::change_page::PageError::Invalid(message) => ("invalid_query", message),
-        super::change_page::PageError::Stale => (
-            "stale_projection",
-            "continuation belongs to a stale projection".to_owned(),
-        ),
-    };
-    serde_json::json!({"schema":"pointbreak.inspect-change-page-error","version":1,"code":code,"message":message}).to_string()
-}
-
-pub(super) fn exact_selection_error_json(message: &str) -> String {
-    serde_json::json!({
-        "schema": "pointbreak.inspect-change-selection-error",
-        "version": 1,
-        "code": "invalid_exact_selection",
-        "message": message,
-    })
-    .to_string()
 }
 
 pub(super) fn change_detail_v2_json(
@@ -2205,10 +2359,11 @@ fn default_history_page_limit(query: &HistoryQuery, page: &HistoryPage) -> Optio
     .then_some(page.limit?)
 }
 
-/// Warm the history base projection cache without serializing a history page.
+/// Exercise the history base cache without serializing a page.
 ///
-/// This is intentionally best-effort for server startup: endpoint requests use the
-/// same cache path and will surface any real error to the client.
+/// Product startup no longer warms this strict path; cache-specific tests retain
+/// the helper to prove the normal endpoint cache behavior directly.
+#[cfg(test)]
 pub(super) fn warm_history_cache(
     repo: &Path,
     cache: &super::cache::HistoryProjectionCache,
@@ -3518,7 +3673,7 @@ mod tests {
             "projectionStamp": "stamp"
         });
         let expected = serde_json::to_string(&document).unwrap();
-        let ChangeV2Json::Ok(actual) = paged_change_json(
+        let ChangeV2Json::Ok(actual) = authoritative_paged_change_json(
             &document,
             super::super::change_page::Request::Bare,
             &super::super::change_page::PageTokenSigner::from_seed([3_u8; 32]),

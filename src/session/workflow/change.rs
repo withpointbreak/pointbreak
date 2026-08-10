@@ -24,7 +24,7 @@ use crate::session::event::{
     build_revision_relation_asserted, build_revision_relation_withdrawn,
 };
 use crate::session::store::capabilities::preflight_change_writer;
-use crate::session::store::resolution::resolve_change_read_store;
+use crate::session::store::resolution::resolve_change_write_store;
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
@@ -432,15 +432,15 @@ impl_change_signing_options!(
 
 pub fn create_change(options: ChangeCreateOptions) -> Result<ChangeOperationReceiptV1> {
     validate_operation_id(&options.operation_id)?;
-    let (store, _inspection) = resolve_change_read_store(&options.repo)?;
-    preflight_change_writer(store.backend().journal().as_ref())?;
+    let write_store = resolve_change_write_store(&options.repo)?;
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
 
     let request_hash = sha256_json_prefixed(&serde_json::json!({
         "operation": "create_change_v1",
         "operationId": options.operation_id,
         "identityDescriptor": options.identity_descriptor,
     }))?;
-    let plan_path = operation_plan_path(store.store_dir(), &options.operation_id);
+    let plan_path = operation_plan_path(write_store.store_dir(), &options.operation_id);
     let plan = if plan_path.exists() {
         let bytes = fs::read(&plan_path)
             .map_err(|error| io_error("read Change operation plan", &plan_path, error))?;
@@ -483,8 +483,8 @@ pub fn create_change(options: ChangeCreateOptions) -> Result<ChangeOperationRece
     // The plan is durable before the first append. Recheck the capability at
     // the append boundary so an L0/M1 transition cannot be crossed by a stale
     // workflow object.
-    preflight_change_writer(store.backend().journal().as_ref())?;
-    let event_store = crate::session::EventStore::from_backend(store.backend());
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
+    let event_store = write_store.event_store()?;
     let mut receipts = Vec::with_capacity(plan.events.len());
     for event in &plan.events {
         let outcome = event_store.record_change_event_once(event)?;
@@ -690,8 +690,8 @@ pub fn link_changes(options: ChangeLinkOptions) -> Result<ChangeOperationReceipt
 pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCaptureReceiptV1> {
     validate_operation_id(&options.operation_id)?;
     let repo = options.capture.repo().to_path_buf();
-    let (store, _) = resolve_change_read_store(&repo)?;
-    preflight_change_writer(store.backend().journal().as_ref())?;
+    let write_store = resolve_change_write_store(&repo)?;
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
     let transition_material = match &options.transition {
         ChangeCaptureTransitionV1::Initial {
             identity_descriptor,
@@ -718,19 +718,19 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
             "transition": transition_material,
         }),
     )?;
-    let plan_path = operation_plan_path(store.store_dir(), &options.operation_id);
+    let plan_path = operation_plan_path(write_store.store_dir(), &options.operation_id);
     if plan_path.exists() {
         let plan = read_matching_plan(&plan_path, &options.operation_id, &request_hash)?;
         let revision = plan
             .capture_revision
             .clone()
             .ok_or_else(|| invalid_input("capture operation plan has no exact Revision"))?;
-        let operation = execute_operation_plan(&repo, &store, plan)?;
+        let operation = execute_operation_plan(&repo, &write_store, plan)?;
         return capture_receipt(&repo, revision, None, 0, 1, operation);
     }
 
     let ready = ready_for_mutation(&repo)?;
-    let checkpoint_path = capture_checkpoint_path(store.store_dir(), &options.operation_id);
+    let checkpoint_path = capture_checkpoint_path(write_store.store_dir(), &options.operation_id);
     let existing_checkpoint = if checkpoint_path.exists() {
         Some(read_matching_checkpoint(
             &checkpoint_path,
@@ -862,14 +862,14 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
     #[cfg(test)]
     let operation = execute_operation_plan_with_limit(
         &repo,
-        &store,
+        &write_store,
         plan,
         options
             .interruption_after_append
             .map(|append_count| append_count.saturating_sub(1)),
     )?;
     #[cfg(not(test))]
-    let operation = execute_operation_plan(&repo, &store, plan)?;
+    let operation = execute_operation_plan(&repo, &write_store, plan)?;
     capture_receipt(
         &repo,
         revision,
@@ -1169,9 +1169,9 @@ fn execute_single_event_operation<P: EventPayload>(
     actor_id: Option<&ActorId>,
     signing: &EventSigningOptions,
 ) -> Result<ChangeOperationReceiptV1> {
-    let (store, _) = resolve_change_read_store(repo)?;
-    preflight_change_writer(store.backend().journal().as_ref())?;
-    let plan_path = operation_plan_path(store.store_dir(), operation_id);
+    let write_store = resolve_change_write_store(repo)?;
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
+    let plan_path = operation_plan_path(write_store.store_dir(), operation_id);
     let plan = if plan_path.exists() {
         let bytes = fs::read(&plan_path)
             .map_err(|error| io_error("read Change operation plan", &plan_path, error))?;
@@ -1206,26 +1206,26 @@ fn execute_single_event_operation<P: EventPayload>(
         persist_operation_plan(&plan_path, &plan)?;
         plan
     };
-    execute_operation_plan(repo, &store, plan)
+    execute_operation_plan(repo, &write_store, plan)
 }
 
 fn execute_operation_plan(
     repo: &Path,
-    store: &crate::session::store::resolution::ReadStore,
+    write_store: &crate::session::store::resolution::WriteStore,
     plan: ChangeOperationPlanV1,
 ) -> Result<ChangeOperationReceiptV1> {
-    execute_operation_plan_with_limit(repo, store, plan, None)
+    execute_operation_plan_with_limit(repo, write_store, plan, None)
 }
 
 fn execute_operation_plan_with_limit(
     repo: &Path,
-    store: &crate::session::store::resolution::ReadStore,
+    write_store: &crate::session::store::resolution::WriteStore,
     plan: ChangeOperationPlanV1,
     interruption_after_event: Option<usize>,
 ) -> Result<ChangeOperationReceiptV1> {
     validate_graph_preconditions(repo, &plan)?;
-    preflight_change_writer(store.backend().journal().as_ref())?;
-    let event_store = crate::session::EventStore::from_backend(store.backend());
+    preflight_change_writer(write_store.backend().journal().as_ref())?;
+    let event_store = write_store.event_store()?;
     let mut events = Vec::with_capacity(plan.events.len());
     for event in &plan.events {
         let outcome = event_store.record_change_event_once(event)?;
