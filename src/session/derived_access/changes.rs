@@ -15,15 +15,19 @@ use super::runtime::{DerivedAccessRuntime, RuntimeCurrentRead, RuntimeCurrentSta
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+    record_change_candidate_current_revisions, record_change_candidates, record_change_matches,
+    record_change_proposal_carriers_opened, record_change_proposal_carriers_validated,
+    record_change_rows_emitted, record_change_support_carriers_opened,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::documents::{
-    ChangeAttentionPresentationDocumentV2, ChangeDocumentFacadeV1,
+    ChangeAttentionPresentationDocumentV2, ChangeAttentionPresentationV1,
+    ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1, ChangeDocumentFacadeV1,
     ChangeListPresentationDocumentV1, ChangeQueryUnavailableDocumentV1, ChangeSummaryV1,
-    ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1,
+    ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1, attention_presentation_for_change,
 };
 use crate::error::{Result, ShoreError};
-use crate::model::{ChangeId, InputRequestId, RevisionRefV1};
+use crate::model::{ChangeId, RevisionRefV1};
 use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
 use crate::session::{ChangeLifecycleV1, ChangeTopologyV1};
 
@@ -89,13 +93,6 @@ impl DerivedChangeAccess {
         request: &DerivedChangePageRequestV1,
         hook: impl FnMut(ChangeReadBoundary),
     ) -> Result<DerivedChangeOutcomeV1<PreparedChangePage>> {
-        if matches!(request, DerivedChangePageRequestV1::Bounded(selection) if selection.summary_query().is_some())
-        {
-            return Err(ShoreError::Message(
-                "derived Change summary search is unavailable through the ordinary bodyless path"
-                    .to_owned(),
-            ));
-        }
         self.read_page_with_hook(lens, request, hook)
     }
 
@@ -188,9 +185,9 @@ impl DerivedChangeAccess {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let selection_phase = enter_derived_access_phase_v1(Phase::ChangePageBodylessSelection);
         let summaries = facade.list_document_for_inspector().changes;
-        let selection =
-            match select_bodyless_change_page(lens, &summaries, &generation_stamp, request) {
-                Ok(selection) => selection,
+        let candidate_ids =
+            match select_bodyless_change_candidates(lens, &summaries, &generation_stamp, request) {
+                Ok(candidates) => candidates,
                 Err(error) => {
                     return Ok(DerivedChangeOutcomeV1::projection_unavailable(
                         DerivedProjectionFailureCodeV1::ProjectionInvalid,
@@ -198,16 +195,53 @@ impl DerivedChangeAccess {
                     ));
                 }
             };
-        let selected_ids = selection
-            .change_ids
+        let candidate_id_set = candidate_ids.iter().cloned().collect::<BTreeSet<_>>();
+        let candidate_revisions = summaries
             .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let selected_revisions = summaries
-            .iter()
-            .filter(|summary| selected_ids.contains(&summary.change_id))
+            .filter(|summary| candidate_id_set.contains(&summary.change_id))
             .flat_map(|summary| summary.current_revision_refs.iter().cloned())
             .collect::<BTreeSet<_>>();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            record_change_candidates(candidate_ids.len());
+            record_change_candidate_current_revisions(candidate_revisions.len());
+        }
+        let summary_query = match request {
+            DerivedChangePageRequestV1::Bare => None,
+            DerivedChangePageRequestV1::Bounded(selection) => selection.summary_query(),
+        };
+        let (hydration_plan, revisions_to_hydrate) = match summary_query {
+            None => {
+                let selection = match paginate_bodyless_change_candidates(
+                    &candidate_ids,
+                    &generation_stamp,
+                    request,
+                ) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                let selected_ids = selection
+                    .change_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let revisions = summaries
+                    .iter()
+                    .filter(|summary| selected_ids.contains(&summary.change_id))
+                    .flat_map(|summary| summary.current_revision_refs.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                (ChangeProposalHydrationPlan::Ordinary(selection), revisions)
+            }
+            Some(normalized_query) => (
+                ChangeProposalHydrationPlan::ExhaustiveSearch { normalized_query },
+                candidate_revisions,
+            ),
+        };
         hook(ChangeReadBoundary::BodylessSelectionComplete);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(selection_phase);
@@ -217,7 +251,7 @@ impl DerivedChangeAccess {
             enter_derived_access_phase_v1(Phase::ChangePageProposalLocatorExpansion);
         let proposal_locators = match current
             .service()
-            .proposal_carrier_locators_for_exact_revisions(&selected_revisions, as_of)
+            .proposal_carrier_locators_for_exact_revisions(&revisions_to_hydrate, as_of)
         {
             Ok(LocatorRead::Ready(locators)) => locators,
             Ok(LocatorRead::CatchUpRequired { .. }) => {
@@ -280,6 +314,14 @@ impl DerivedChangeAccess {
                 ));
             }
         };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_change_proposal_carriers_opened(proposal_event_ids.len());
+        if hydrated.len() != located.len() {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                "authoritative proposal hydration returned the wrong carrier count",
+            ));
+        }
         let mut proposal_events = Vec::with_capacity(hydrated.len());
         for ((expected_revision, locator), hydrated) in located.into_iter().zip(hydrated) {
             let Some(hydrated) = hydrated else {
@@ -328,11 +370,81 @@ impl DerivedChangeAccess {
                     ),
                 ));
             }
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            record_change_proposal_carriers_validated(1);
             proposal_events.push(hydrated.event);
         }
         hook(ChangeReadBoundary::ProposalHydrationComplete);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(hydration_phase);
+
+        let selection = match hydration_plan {
+            ChangeProposalHydrationPlan::Ordinary(selection) => selection,
+            ChangeProposalHydrationPlan::ExhaustiveSearch { normalized_query } => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                let search_phase =
+                    enter_derived_access_phase_v1(Phase::ChangePageExhaustiveProposalSearch);
+                let matching_ids = match facade.search_change_ids_with_proposal_presentations(
+                    &candidate_ids,
+                    &proposal_events,
+                    normalized_query,
+                ) {
+                    Ok(matching_ids) => matching_ids,
+                    Err(error) => {
+                        return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                record_change_matches(matching_ids.len());
+                let selection = match paginate_bodyless_change_candidates(
+                    &matching_ids,
+                    &generation_stamp,
+                    request,
+                ) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                            error.to_string(),
+                        ));
+                    }
+                };
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                drop(search_phase);
+                selection
+            }
+        };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let emitted_row_count = selection.change_ids.len();
+        let selected_ids = selection
+            .change_ids
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let selected_revisions = summaries
+            .iter()
+            .filter(|summary| selected_ids.contains(&summary.change_id))
+            .flat_map(|summary| summary.current_revision_refs.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut selected_proposal_events = Vec::new();
+        for event in proposal_events {
+            let revision = match exact_revision_from_proposal(&event) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                        DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                        error.to_string(),
+                    ));
+                }
+            };
+            if selected_revisions.contains(&revision) {
+                selected_proposal_events.push(event);
+            }
+        }
+        let proposal_events = selected_proposal_events;
 
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let support_phase = enter_derived_access_phase_v1(Phase::ChangePageSupportExpansion);
@@ -354,19 +466,24 @@ impl DerivedChangeAccess {
                 ));
             }
         };
-        let support_events = match current.service().semantic_ids_at(&support_ids, as_of) {
+        match current.service().semantic_ids_at(&support_ids, as_of) {
             Ok(LocatorRead::Ready(events)) => {
-                let mut support = Vec::with_capacity(events.len());
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                record_change_support_carriers_opened(support_ids.len());
+                if events.len() != support_ids.len() {
+                    return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                        DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                        "authoritative support hydration returned the wrong carrier count",
+                    ));
+                }
                 for (event_id, event) in support_ids.iter().zip(events) {
-                    let Some(event) = event else {
+                    let Some(_event) = event else {
                         return Ok(DerivedChangeOutcomeV1::projection_unavailable(
                             DerivedProjectionFailureCodeV1::ProjectionInvalid,
                             format!("selected authoritative support carrier {event_id} is absent"),
                         ));
                     };
-                    support.push(event);
                 }
-                support
             }
             Ok(LocatorRead::CatchUpRequired { .. }) => {
                 return Ok(DerivedChangeOutcomeV1::retryable(
@@ -380,10 +497,7 @@ impl DerivedChangeAccess {
                     error.to_string(),
                 ));
             }
-        };
-        proposal_events.extend(support_events);
-        proposal_events.sort_by(|left, right| left.event_id.cmp(&right.event_id));
-        proposal_events.dedup_by(|left, right| left.event_id == right.event_id);
+        }
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(support_phase);
 
@@ -403,19 +517,28 @@ impl DerivedChangeAccess {
                         window: selection.window.clone(),
                     })
                 }),
-            ChangePageLens::Attention => facade
-                .selected_attention_document_for_inspector_with_presentations(
-                    &selection.change_ids,
-                    &proposal_events,
-                    &generation_stamp,
-                )
-                .map(|document| {
-                    PreparedChangePage::Attention(DerivedAttentionPageV1 {
-                        document,
-                        attention_presentations: BTreeMap::new(),
-                        window: selection.window.clone(),
+            ChangePageLens::Attention => (|| {
+                let document = facade
+                    .selected_attention_document_for_inspector_with_presentations(
+                        &selection.change_ids,
+                        &proposal_events,
+                        &generation_stamp,
+                    )?;
+                let attention_presentations = selection
+                    .change_ids
+                    .iter()
+                    .map(|change_id| {
+                        let detail = facade.detail_document(change_id)?;
+                        attention_presentation_for_change(&detail.detail)
+                            .map(|presentation| (change_id.clone(), presentation))
                     })
-                }),
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                Ok(PreparedChangePage::Attention(DerivedAttentionPageV1 {
+                    document,
+                    attention_presentations,
+                    window: selection.window.clone(),
+                }))
+            })(),
         };
         let prepared = match prepared {
             Ok(prepared) => prepared,
@@ -461,6 +584,10 @@ impl DerivedChangeAccess {
                 "derived Change checkpoint changed before response completion",
             ));
         }
+        // Emission is a request outcome, not work performed inside an earlier
+        // phase. Failed or unstable responses therefore never claim rows.
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_change_rows_emitted(emitted_row_count);
         Ok(DerivedChangeOutcomeV1::Ready(prepared))
     }
 
@@ -826,46 +953,23 @@ pub struct DerivedAttentionPageV1 {
 }
 
 #[doc(hidden)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DerivedAttentionPresentationV1 {
-    pub primary_reason: DerivedAttentionReasonV1,
-    pub reasons: Vec<DerivedAttentionReasonV1>,
-    pub reason_presentations: Vec<DerivedAttentionReasonPresentationV1>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<String>,
-}
+pub type DerivedAttentionPresentationV1 = ChangeAttentionPresentationV1;
 
 #[doc(hidden)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    tag = "kind"
-)]
-pub enum DerivedAttentionReasonV1 {
-    Conflicted,
-    Incomplete,
-    NoCurrentRevision,
-    UnresolvedOperativeRequests { request_ids: Vec<InputRequestId> },
-    CurrentRevisionsNeedAssessment { revisions: Vec<RevisionRefV1> },
-}
+pub type DerivedAttentionReasonV1 = ChangeAttentionReasonV1;
 
 #[doc(hidden)]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DerivedAttentionReasonPresentationV1 {
-    pub cause: DerivedAttentionReasonV1,
-    pub ask: String,
-    pub reason: String,
-    pub evidence: String,
-    pub next_action: String,
-}
+pub type DerivedAttentionReasonPresentationV1 = ChangeAttentionReasonPresentationV1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PreparedChangePage {
     Changes(DerivedChangePageV1),
     Attention(DerivedAttentionPageV1),
+}
+
+enum ChangeProposalHydrationPlan<'a> {
+    Ordinary(BodylessChangePageSelection),
+    ExhaustiveSearch { normalized_query: &'a str },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -987,6 +1091,25 @@ pub(crate) fn select_bodyless_change_page(
     projection_stamp: &str,
     request: &DerivedChangePageRequestV1,
 ) -> Result<BodylessChangePageSelection> {
+    let candidates = select_bodyless_change_candidates(lens, summaries, projection_stamp, request)?;
+    if matches!(request, DerivedChangePageRequestV1::Bounded(selection) if selection.summary_query().is_some())
+    {
+        return Err(ShoreError::Message(
+            "derived Change summary query requires exhaustive proposal selection".to_owned(),
+        ));
+    }
+    paginate_bodyless_change_candidates(&candidates, projection_stamp, request)
+}
+
+/// Apply the lens and every prose-independent filter without windowing. The
+/// exhaustive summary path validates all proposal carriers for this complete
+/// candidate set before matching or pagination.
+pub(crate) fn select_bodyless_change_candidates(
+    lens: ChangePageLens,
+    summaries: &[ChangeSummaryV1],
+    projection_stamp: &str,
+    request: &DerivedChangePageRequestV1,
+) -> Result<Vec<ChangeId>> {
     let mut candidates = summaries.iter().collect::<Vec<_>>();
     candidates.sort_by(|left, right| left.change_id.as_str().cmp(right.change_id.as_str()));
     if candidates
@@ -1002,69 +1125,78 @@ pub(crate) fn select_bodyless_change_page(
         candidates.retain(|summary| summary.lifecycle != ChangeLifecycleV1::Accepted);
     }
 
+    if let DerivedChangePageRequestV1::Bounded(selection) = request {
+        if selection.after().is_some_and(|continuation| {
+            continuation.expected_projection_stamp() != projection_stamp
+        }) {
+            return Err(ShoreError::Message(
+                "derived Change continuation belongs to a different projection".to_owned(),
+            ));
+        }
+        candidates.retain(|summary| {
+            selection
+                .topology()
+                .is_none_or(|topology| summary.topology == topology)
+                && selection
+                    .lifecycle()
+                    .is_none_or(|lifecycle| summary.lifecycle == lifecycle)
+                && selection.attention_filter().is_none_or(|attention| {
+                    summary.attention_summary == attention_filter_name(attention)
+                })
+                && selection.availability_filter().is_none_or(|availability| {
+                    summary.availability_summary == availability_filter_name(availability)
+                })
+        });
+    }
+
+    Ok(candidates
+        .into_iter()
+        .map(|summary| summary.change_id.clone())
+        .collect())
+}
+
+fn paginate_bodyless_change_candidates(
+    candidates: &[ChangeId],
+    projection_stamp: &str,
+    request: &DerivedChangePageRequestV1,
+) -> Result<BodylessChangePageSelection> {
+    if candidates
+        .windows(2)
+        .any(|pair| pair[0].as_str() >= pair[1].as_str())
+    {
+        return Err(ShoreError::Message(
+            "bodyless Change candidates are not strictly ordered".to_owned(),
+        ));
+    }
+
     let DerivedChangePageRequestV1::Bounded(selection) = request else {
         return Ok(BodylessChangePageSelection {
-            change_ids: candidates
-                .into_iter()
-                .map(|summary| summary.change_id.clone())
-                .collect(),
+            change_ids: candidates.to_vec(),
             window: None,
         });
     };
-
-    if selection.summary_query().is_some() {
-        return Err(ShoreError::Message(
-            "derived Change summary query requires exhaustive proposal selection".to_owned(),
-        ));
-    }
-    if selection
-        .after()
-        .is_some_and(|continuation| continuation.expected_projection_stamp() != projection_stamp)
-    {
-        return Err(ShoreError::Message(
-            "derived Change continuation belongs to a different projection".to_owned(),
-        ));
-    }
-
-    candidates.retain(|summary| {
-        selection
-            .topology()
-            .is_none_or(|topology| summary.topology == topology)
-            && selection
-                .lifecycle()
-                .is_none_or(|lifecycle| summary.lifecycle == lifecycle)
-            && selection.attention_filter().is_none_or(|attention| {
-                summary.attention_summary == attention_filter_name(attention)
-            })
-            && selection.availability_filter().is_none_or(|availability| {
-                summary.availability_summary == availability_filter_name(availability)
-            })
-    });
 
     let start = selection
         .after()
         .and_then(|continuation| continuation.boundary().last_change_id())
         .map_or(0, |boundary| {
-            candidates.partition_point(|summary| summary.change_id.as_str() <= boundary.as_str())
+            candidates.partition_point(|change_id| change_id.as_str() <= boundary.as_str())
         });
     let end = start
         .saturating_add(selection.limit())
         .min(candidates.len());
-    let change_ids = candidates[start..end]
-        .iter()
-        .map(|summary| summary.change_id.clone())
-        .collect::<Vec<_>>();
+    let change_ids = candidates[start..end].to_vec();
 
     let previous = (start > 0).then(|| {
         let previous_start = start.saturating_sub(selection.limit());
         if previous_start == 0 {
             DerivedChangePageBoundaryV1::page_one()
         } else {
-            DerivedChangePageBoundaryV1::after(candidates[previous_start - 1].change_id.clone())
+            DerivedChangePageBoundaryV1::after(candidates[previous_start - 1].clone())
         }
     });
     let next = (end < candidates.len())
-        .then(|| DerivedChangePageBoundaryV1::after(candidates[end - 1].change_id.clone()));
+        .then(|| DerivedChangePageBoundaryV1::after(candidates[end - 1].clone()));
     let last_page_start = candidates
         .len()
         .checked_sub(1)
@@ -1073,7 +1205,7 @@ pub(crate) fn select_bodyless_change_page(
         if last_page_start == 0 {
             DerivedChangePageBoundaryV1::page_one()
         } else {
-            DerivedChangePageBoundaryV1::after(candidates[last_page_start - 1].change_id.clone())
+            DerivedChangePageBoundaryV1::after(candidates[last_page_start - 1].clone())
         }
     });
 
@@ -1515,6 +1647,45 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn bounded_search_request(
+        query: &str,
+        limit: usize,
+        lifecycle: Option<ChangeLifecycleV1>,
+    ) -> DerivedChangePageRequestV1 {
+        DerivedChangePageRequestV1::Bounded(
+            DerivedChangePageSelectionV1::new(
+                limit,
+                None,
+                Some(query.to_owned()),
+                None,
+                lifecycle,
+                None,
+                None,
+            )
+            .expect("build bounded Change search"),
+        )
+    }
+
+    fn fixture_proposal_summary(change: &FixtureChange) -> String {
+        let payload: WorkObjectProposedPayload = serde_json::from_value(
+            change
+                .proposal_events
+                .first()
+                .expect("fixture Change has a proposal")
+                .payload
+                .clone(),
+        )
+        .expect("decode fixture proposal");
+        let WorkObjectProposal::Revision {
+            summary: Some(summary),
+            ..
+        } = payload.work_object
+        else {
+            panic!("fixture proposal must carry a Revision summary")
+        };
+        summary
     }
 
     fn selected_ids(selection: &BodylessChangePageSelection) -> Vec<String> {
@@ -2394,6 +2565,17 @@ mod tests {
             &attention.document.document.projection_stamp,
         );
         assert_eq!(attention.document, expected_attention);
+        let expected_attention_presentation = attention_presentation_for_change(
+            &strict
+                .detail_document(selected_change)
+                .expect("strict selected Attention detail")
+                .detail,
+        )
+        .expect("strict selected Attention explanation");
+        assert_eq!(
+            attention.attention_presentations,
+            BTreeMap::from([(selected_change.clone(), expected_attention_presentation)])
+        );
     }
 
     #[test]
@@ -2429,7 +2611,8 @@ mod tests {
             bounded.document.document.changes[0].change_id,
             selected.change_id
         );
-        let bounded_counters = bounded_scope.snapshot().counters;
+        let bounded_snapshot = bounded_scope.snapshot();
+        let bounded_counters = &bounded_snapshot.counters;
         assert_eq!(
             bounded_counters.carrier_opens, 4,
             "two equal selected proposals plus removal and detached signature"
@@ -2441,6 +2624,28 @@ mod tests {
         assert_eq!(bounded_counters.state_rebuilds, 0);
         assert_eq!(bounded_counters.authoritative_fallbacks, 0);
         assert_eq!(bounded_counters.full_history_fallbacks, 0);
+        assert_eq!(bounded_counters.change_candidates, 3);
+        assert_eq!(bounded_counters.change_candidate_current_revisions, 3);
+        assert_eq!(bounded_counters.change_proposal_carriers_opened, 2);
+        assert_eq!(bounded_counters.change_proposal_carriers_validated, 2);
+        assert_eq!(bounded_counters.change_support_carriers_opened, 2);
+        assert_eq!(bounded_counters.change_matches, 0);
+        assert_eq!(bounded_counters.change_rows_emitted, 1);
+        assert_eq!(
+            bounded_snapshot
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            vec![
+                Phase::ChangePageSnapshotAcquisition,
+                Phase::ChangePageBodylessSelection,
+                Phase::ChangePageProposalLocatorExpansion,
+                Phase::ChangePageCarrierHydrationValidation,
+                Phase::ChangePageSupportExpansion,
+                Phase::ChangePagePresentationProjection,
+            ]
+        );
 
         let bare_scope = LongitudinalCountingScopeV1::new("2".repeat(64)).unwrap();
         let bare_guard = bare_scope.enter();
@@ -2461,6 +2666,13 @@ mod tests {
         assert_eq!(bare_counters.state_rebuilds, 0);
         assert_eq!(bare_counters.authoritative_fallbacks, 0);
         assert_eq!(bare_counters.full_history_fallbacks, 0);
+        assert_eq!(bare_counters.change_candidates, 3);
+        assert_eq!(bare_counters.change_candidate_current_revisions, 3);
+        assert_eq!(bare_counters.change_proposal_carriers_opened, 6);
+        assert_eq!(bare_counters.change_proposal_carriers_validated, 6);
+        assert_eq!(bare_counters.change_support_carriers_opened, 2);
+        assert_eq!(bare_counters.change_matches, 0);
+        assert_eq!(bare_counters.change_rows_emitted, 3);
 
         let cold_scope = LongitudinalCountingScopeV1::new("3".repeat(64)).unwrap();
         let cold_guard = cold_scope.enter();
@@ -2481,6 +2693,13 @@ mod tests {
         assert_eq!(cold_counters.state_rebuilds, 0);
         assert_eq!(cold_counters.authoritative_fallbacks, 0);
         assert_eq!(cold_counters.full_history_fallbacks, 0);
+        assert_eq!(cold_counters.change_candidates, 3);
+        assert_eq!(cold_counters.change_candidate_current_revisions, 3);
+        assert_eq!(cold_counters.change_proposal_carriers_opened, 2);
+        assert_eq!(cold_counters.change_proposal_carriers_validated, 2);
+        assert_eq!(cold_counters.change_support_carriers_opened, 2);
+        assert_eq!(cold_counters.change_matches, 0);
+        assert_eq!(cold_counters.change_rows_emitted, 1);
     }
 
     #[test]
@@ -2621,12 +2840,17 @@ mod tests {
             ChangeReadBoundary::BodylessSelectionComplete,
             ChangeReadBoundary::ProposalLocatorsSelected,
             ChangeReadBoundary::ProposalHydrationComplete,
+            ChangeReadBoundary::ResponseConstructed,
         ]
         .into_iter()
         .enumerate()
         {
             let fixture =
                 ActiveChangeFixture::new(&[&[Some("checkpoint state"), Some("checkpoint state")]]);
+            let scope =
+                LongitudinalCountingScopeV1::new(format!("{value:064x}", value = index + 10))
+                    .expect("count checkpoint movement");
+            let guard = scope.enter();
             let mut appended = false;
             let outcome = fixture
                 .access
@@ -2641,6 +2865,7 @@ mod tests {
                     },
                 )
                 .expect("read across same-generation checkpoint movement");
+            drop(guard);
             assert!(appended, "requested read boundary must be observed");
             let DerivedChangeOutcomeV1::Retryable(document) = outcome else {
                 panic!("checkpoint movement must not return an old or mixed Ready page");
@@ -2650,6 +2875,7 @@ mod tests {
                 DerivedProjectionFailureCodeV1::ProjectionUnstable
             );
             assert!(document.is_retryable());
+            assert_eq!(scope.snapshot().counters.change_rows_emitted, 0);
         }
     }
 
@@ -2696,6 +2922,197 @@ mod tests {
             DerivedProjectionFailureCodeV1::ProjectionUnstable
         );
         assert!(document.is_retryable());
+    }
+
+    #[test]
+    fn derived_change_summary_search_is_exhaustive_before_pagination_and_measured() {
+        let fixture = ActiveChangeFixture::new(&[
+            &[
+                Some("first searchable state"),
+                Some("first searchable state"),
+            ],
+            &[
+                Some("second searchable state"),
+                Some("second searchable state"),
+            ],
+            &[
+                Some("ÄPFEL searchable state"),
+                Some("ÄPFEL searchable state"),
+            ],
+        ]);
+        let target = fixture
+            .changes
+            .iter()
+            .max_by(|left, right| left.change_id.cmp(&right.change_id))
+            .expect("fixture has a last Change")
+            .clone();
+        let target_summary = fixture_proposal_summary(&target);
+        let unselected = fixture
+            .changes
+            .iter()
+            .find(|change| change.change_id != target.change_id)
+            .expect("fixture has an unselected Change");
+        fixture.append_removal_support(&unselected.revision);
+        fixture.append_removal_support(&target.revision);
+        fixture
+            .runtime
+            .current()
+            .expect("warm the current generation before counting");
+
+        let scope = LongitudinalCountingScopeV1::new("4".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = fixture
+            .access
+            .changes(&bounded_search_request(&target_summary, 1, None))
+            .expect("search derived Changes");
+        drop(guard);
+
+        let DerivedChangeOutcomeV1::Ready(page) = outcome else {
+            panic!("exhaustive derived Change search must be ready: {outcome:?}");
+        };
+        assert_eq!(page.document.document.changes.len(), 1);
+        assert_eq!(
+            page.document.document.changes[0].change_id,
+            target.change_id
+        );
+        assert_eq!(page.document.presentations.len(), 1);
+        assert!(page.window.is_some());
+
+        let snapshot = scope.snapshot();
+        let counters = &snapshot.counters;
+        assert_eq!(counters.change_candidates, 3);
+        assert_eq!(counters.change_candidate_current_revisions, 3);
+        assert_eq!(counters.change_proposal_carriers_opened, 6);
+        assert_eq!(counters.change_proposal_carriers_validated, 6);
+        assert_eq!(counters.change_support_carriers_opened, 2);
+        assert_eq!(counters.change_matches, 1);
+        assert_eq!(counters.change_rows_emitted, 1);
+        assert_eq!(counters.carrier_opens, 8);
+        assert_eq!(counters.full_history_fallbacks, 0);
+        let phases = &snapshot.derived_access_phases;
+        assert_eq!(
+            phases.iter().map(|sample| sample.phase).collect::<Vec<_>>(),
+            vec![
+                Phase::ChangePageSnapshotAcquisition,
+                Phase::ChangePageBodylessSelection,
+                Phase::ChangePageProposalLocatorExpansion,
+                Phase::ChangePageCarrierHydrationValidation,
+                Phase::ChangePageExhaustiveProposalSearch,
+                Phase::ChangePageSupportExpansion,
+                Phase::ChangePagePresentationProjection,
+            ]
+        );
+        assert_eq!(phases[1].counters.change_candidates, 3);
+        assert_eq!(phases[1].counters.change_candidate_current_revisions, 3);
+        assert_eq!(phases[3].counters.change_proposal_carriers_opened, 6);
+        assert_eq!(phases[3].counters.change_proposal_carriers_validated, 6);
+        assert_eq!(phases[4].counters.change_matches, 1);
+        assert_eq!(phases[5].counters.change_support_carriers_opened, 2);
+        assert!(
+            phases
+                .iter()
+                .all(|phase| phase.counters.change_rows_emitted == 0),
+            "successful row emission is recorded only after final response validation"
+        );
+
+        for query in [
+            target.change_id.as_str().to_owned(),
+            target.revision.revision_id.as_str().to_owned(),
+            format!("\u{a0}{}\u{3000}", target_summary.to_uppercase()),
+        ] {
+            let DerivedChangeOutcomeV1::Ready(page) = fixture
+                .access
+                .changes(&bounded_search_request(&query, 1, None))
+                .expect("search by frozen Change field")
+            else {
+                panic!("identity and Unicode summary search must be ready");
+            };
+            assert_eq!(
+                page.document.document.changes[0].change_id,
+                target.change_id
+            );
+        }
+
+        let unicode_target = &fixture.changes[2];
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&bounded_search_request("\u{a0}\u{c4}PFEL\u{3000}", 1, None))
+            .expect("search by normalized Unicode proposal summary")
+        else {
+            panic!("normalized Unicode proposal search must be ready");
+        };
+        assert_eq!(
+            page.document.document.changes[0].change_id,
+            unicode_target.change_id
+        );
+
+        let DerivedChangeOutcomeV1::Ready(attention) = fixture
+            .access
+            .attention(&bounded_search_request(&target_summary, 1, None))
+            .expect("search derived Attention")
+        else {
+            panic!("derived Attention search must be ready");
+        };
+        assert_eq!(attention.document.document.changes.len(), 1);
+        assert_eq!(
+            attention.document.document.changes[0].change_id,
+            target.change_id
+        );
+        assert_eq!(
+            attention
+                .attention_presentations
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![target.change_id]
+        );
+    }
+
+    #[test]
+    fn derived_change_summary_search_filters_before_hydration_and_conflicts_fail_globally() {
+        let filtered = ActiveChangeFixture::new(&[
+            &[Some("first"), Some("first")],
+            &[Some("second"), Some("second")],
+        ]);
+        filtered
+            .runtime
+            .current()
+            .expect("warm filtered fixture before counting");
+        let scope = LongitudinalCountingScopeV1::new("5".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = filtered
+            .access
+            .changes(&bounded_search_request(
+                "does not matter",
+                1,
+                Some(ChangeLifecycleV1::Accepted),
+            ))
+            .expect("search empty bodyless candidate set");
+        drop(guard);
+        let DerivedChangeOutcomeV1::Ready(page) = outcome else {
+            panic!("an empty filtered search must be ready");
+        };
+        assert!(page.document.document.changes.is_empty());
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.change_candidates, 0);
+        assert_eq!(counters.change_candidate_current_revisions, 0);
+        assert_eq!(counters.change_proposal_carriers_opened, 0);
+        assert_eq!(counters.change_proposal_carriers_validated, 0);
+        assert_eq!(counters.change_matches, 0);
+        assert_eq!(counters.change_rows_emitted, 0);
+        assert_eq!(counters.carrier_opens, 0);
+
+        let conflicting = ActiveChangeFixture::new(&[
+            &[Some("nonmatching state"), None],
+            &[Some("target state"), Some("target state")],
+        ]);
+        assert_projection_invalid(
+            conflicting
+                .access
+                .changes(&bounded_search_request("target state", 1, None))
+                .expect("search across a conflicting candidate"),
+            "conflicting proposal summaries for exact Revision",
+        );
     }
 
     #[test]

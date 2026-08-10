@@ -70,6 +70,11 @@ pub use change::{
     REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA,
     RevisionQualificationV1, RevisionSummarySourceV1, UnavailableChangeMemberRevisionV1,
 };
+#[doc(hidden)]
+pub use change::{
+    ChangeAttentionPresentationV1, ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1,
+    attention_presentation_for_change,
+};
 pub use event_history::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
     EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,

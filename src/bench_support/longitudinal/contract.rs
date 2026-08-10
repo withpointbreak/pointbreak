@@ -3082,6 +3082,20 @@ pub struct LongitudinalCountersV1 {
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub authority_identity_rows_scanned: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_candidates: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_candidate_current_revisions: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_proposal_carriers_opened: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_proposal_carriers_validated: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_support_carriers_opened: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_matches: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_rows_emitted: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub authoritative_fallbacks: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub full_history_fallbacks: u64,
@@ -5947,11 +5961,25 @@ mod contract_tests {
         let nonzero = LongitudinalCountersV1 {
             authoritative_fallbacks: 1,
             full_history_fallbacks: 2,
+            change_candidates: 3,
+            change_candidate_current_revisions: 4,
+            change_proposal_carriers_opened: 5,
+            change_proposal_carriers_validated: 6,
+            change_support_carriers_opened: 7,
+            change_matches: 8,
+            change_rows_emitted: 9,
             ..LongitudinalCountersV1::default()
         };
         let nonzero = serde_json::to_value(nonzero).expect("nonzero fallback counter JSON");
         assert_eq!(nonzero["authoritativeFallbacks"], 1);
         assert_eq!(nonzero["fullHistoryFallbacks"], 2);
+        assert_eq!(nonzero["changeCandidates"], 3);
+        assert_eq!(nonzero["changeCandidateCurrentRevisions"], 4);
+        assert_eq!(nonzero["changeProposalCarriersOpened"], 5);
+        assert_eq!(nonzero["changeProposalCarriersValidated"], 6);
+        assert_eq!(nonzero["changeSupportCarriersOpened"], 7);
+        assert_eq!(nonzero["changeMatches"], 8);
+        assert_eq!(nonzero["changeRowsEmitted"], 9);
 
         let mut receipt = LongitudinalCounterReceiptV1 {
             schema: LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1.to_owned(),

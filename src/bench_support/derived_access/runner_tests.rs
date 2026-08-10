@@ -134,6 +134,15 @@ fn change_page_phase_contract_names_bounded_work_and_zero_fallbacks() {
             Ownership::ProductProjection,
         ]
     );
+    assert_eq!(
+        Phase::ChangePageExhaustiveProposalSearch.ownership(),
+        Ownership::ProductProjection
+    );
+    assert_eq!(
+        serde_json::to_string(&Phase::ChangePageExhaustiveProposalSearch)
+            .expect("serialize exhaustive Change search phase"),
+        "\"change_page_exhaustive_proposal_search\""
+    );
     let counters = LongitudinalCountersV1::default();
     assert_eq!(counters.authoritative_fallbacks, 0);
     assert_eq!(counters.full_history_fallbacks, 0);
@@ -251,6 +260,8 @@ fn governed_write_phase_receipt_accepts_counted_nested_authority_maintenance() {
 
 #[test]
 fn phase_receipt_json_rejects_negative_and_overflowed_measurements() {
+    use crate::bench_support::longitudinal::LongitudinalCountersV1;
+
     let receipt = phase_receipt(
         QualificationDerivedAccessTierV1::D0_128,
         QualificationDerivedAccessPhaseOperationV1::Bootstrap,
@@ -260,12 +271,30 @@ fn phase_receipt_json_rejects_negative_and_overflowed_measurements() {
     negative["phases"][0]["wallNanos"] = serde_json::json!(-1);
     assert!(serde_json::from_value::<QualificationDerivedAccessPhaseReceiptV1>(negative).is_err());
 
-    let mut overflowed = receipt;
+    let mut overflowed = receipt.clone();
     overflowed.phases[0].wall_nanos = u64::MAX;
     overflowed
         .refresh_sha256()
         .expect("rehash overflowed receipt");
     assert!(overflowed.validate().is_err());
+
+    let setters: [fn(&mut LongitudinalCountersV1); 7] = [
+        |counters| counters.change_candidates = u64::MAX,
+        |counters| counters.change_candidate_current_revisions = u64::MAX,
+        |counters| counters.change_proposal_carriers_opened = u64::MAX,
+        |counters| counters.change_proposal_carriers_validated = u64::MAX,
+        |counters| counters.change_support_carriers_opened = u64::MAX,
+        |counters| counters.change_matches = u64::MAX,
+        |counters| counters.change_rows_emitted = u64::MAX,
+    ];
+    for set_overflow in setters {
+        let mut overflowed = receipt.clone();
+        set_overflow(&mut overflowed.phases[0].counters);
+        overflowed
+            .refresh_sha256()
+            .expect("rehash overflowed Change counter receipt");
+        assert!(overflowed.validate().is_err());
+    }
 }
 
 #[test]

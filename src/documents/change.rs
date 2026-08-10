@@ -289,6 +289,160 @@ pub struct ChangeDetailV1 {
     pub projection_stamp: String,
 }
 
+/// Inspector-only explanation for why one non-accepted Change appears in the
+/// Attention lens. The reason order is product contract: clients render the
+/// first cause as primary and must not re-rank the remaining causes.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeAttentionPresentationV1 {
+    pub primary_reason: ChangeAttentionReasonV1,
+    pub reasons: Vec<ChangeAttentionReasonV1>,
+    pub reason_presentations: Vec<ChangeAttentionReasonPresentationV1>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+/// Closed, user-neutral causes for a Change appearing in the Attention lens.
+/// Exact current peers remain a collection; no presentation adapter selects
+/// one Revision on the reader's behalf.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum ChangeAttentionReasonV1 {
+    Conflicted,
+    Incomplete,
+    NoCurrentRevision,
+    UnresolvedOperativeRequests { request_ids: Vec<InputRequestId> },
+    CurrentRevisionsNeedAssessment { revisions: Vec<RevisionRefV1> },
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeAttentionReasonPresentationV1 {
+    pub cause: ChangeAttentionReasonV1,
+    pub ask: String,
+    pub reason: String,
+    pub evidence: String,
+    pub next_action: String,
+}
+
+/// Explain a selected non-accepted Change from one exact validated detail.
+///
+/// This is deliberately page-local: callers supply only a Change selected by
+/// the Attention lens, and this function has no store, event, or body access.
+#[doc(hidden)]
+pub fn attention_presentation_for_change(
+    detail: &ChangeDetailV1,
+) -> Result<ChangeAttentionPresentationV1> {
+    if detail.summary.lifecycle == ChangeLifecycleV1::Accepted {
+        return Err(ShoreError::Message(
+            "accepted Change cannot have an Attention presentation".to_owned(),
+        ));
+    }
+
+    let mut reasons = Vec::new();
+    match detail.summary.lifecycle {
+        ChangeLifecycleV1::Conflicted => reasons.push(ChangeAttentionReasonV1::Conflicted),
+        ChangeLifecycleV1::Incomplete => reasons.push(ChangeAttentionReasonV1::Incomplete),
+        ChangeLifecycleV1::InProgress | ChangeLifecycleV1::Accepted => {}
+    }
+    if detail.current_revision_refs.is_empty() {
+        reasons.push(ChangeAttentionReasonV1::NoCurrentRevision);
+    }
+    if !detail.operative_obligations.is_empty() {
+        reasons.push(ChangeAttentionReasonV1::UnresolvedOperativeRequests {
+            request_ids: detail.operative_obligations.clone(),
+        });
+    }
+    let revisions = detail
+        .per_current_revision_qualification
+        .iter()
+        .filter(|qualification| !qualification.qualified)
+        .map(|qualification| qualification.revision.clone())
+        .collect::<Vec<_>>();
+    if !revisions.is_empty() {
+        reasons.push(ChangeAttentionReasonV1::CurrentRevisionsNeedAssessment { revisions });
+    }
+    let primary_reason = reasons.first().cloned().ok_or_else(|| {
+        ShoreError::Message("non-accepted Change has no model-derived Attention reason".to_owned())
+    })?;
+    let reason_presentations = reasons.iter().map(attention_reason_presentation).collect();
+    Ok(ChangeAttentionPresentationV1 {
+        primary_reason,
+        reasons,
+        reason_presentations,
+        diagnostics: detail.diagnostics.clone(),
+    })
+}
+
+fn attention_reason_presentation(
+    cause: &ChangeAttentionReasonV1,
+) -> ChangeAttentionReasonPresentationV1 {
+    let (ask, reason, evidence, next_action) = match cause {
+        ChangeAttentionReasonV1::Conflicted => (
+            "Resolve the conflicting Change state.".to_owned(),
+            "The Change has conflicting current state.".to_owned(),
+            "Lifecycle is conflicted.".to_owned(),
+            "Review the conflicting Change records.".to_owned(),
+        ),
+        ChangeAttentionReasonV1::Incomplete => (
+            "Complete the missing Change state.".to_owned(),
+            "The Change state is incomplete.".to_owned(),
+            "Lifecycle is incomplete.".to_owned(),
+            "Review the missing Change records.".to_owned(),
+        ),
+        ChangeAttentionReasonV1::NoCurrentRevision => (
+            "Establish one exact current Revision.".to_owned(),
+            "No current Revision is available for review.".to_owned(),
+            "The current Revision set is empty.".to_owned(),
+            "Review the Change and establish a current Revision.".to_owned(),
+        ),
+        ChangeAttentionReasonV1::UnresolvedOperativeRequests { request_ids } => (
+            "Respond to every operative request.".to_owned(),
+            "Operative requests remain unresolved.".to_owned(),
+            format!(
+                "Open requests: {}.",
+                request_ids
+                    .iter()
+                    .map(InputRequestId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "Open the Change and respond to each request.".to_owned(),
+        ),
+        ChangeAttentionReasonV1::CurrentRevisionsNeedAssessment { revisions } => (
+            "Assess every current Revision.".to_owned(),
+            "Current Revision assessment coverage is incomplete.".to_owned(),
+            format!(
+                "Unassessed exact Revisions: {}.",
+                revisions
+                    .iter()
+                    .map(|revision| format!(
+                        "{}; artifact {}",
+                        revision.revision_id.as_str(),
+                        revision.object_artifact_content_hash
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            "Open an exact Revision and record its assessment.".to_owned(),
+        ),
+    };
+    ChangeAttentionReasonPresentationV1 {
+        cause: cause.clone(),
+        ask,
+        reason,
+        evidence,
+        next_action,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeClaimWithdrawalV1 {
@@ -755,6 +909,59 @@ impl ChangeDocumentFacadeV1 {
         })
     }
 
+    /// Search a complete bodyless candidate Change set after every candidate
+    /// current Revision proposal carrier has been authoritatively hydrated.
+    ///
+    /// The caller owns bodyless filtering and query normalization. This method
+    /// validates complete candidate coverage and duplicate proposal summaries
+    /// before matching any identity or prose, so a later page cannot hide a
+    /// conflicting or absent current proposal carrier.
+    pub(crate) fn search_change_ids_with_proposal_presentations(
+        &self,
+        candidate_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        normalized_query: &str,
+    ) -> Result<Vec<ChangeId>> {
+        if normalized_query.is_empty() {
+            return Err(ShoreError::Message(
+                "Change summary query must be normalized and nonempty".to_owned(),
+            ));
+        }
+        let presentations = self.proposal_presentations_for_change_ids(
+            candidate_change_ids,
+            hydrated_proposal_events,
+        )?;
+        let mut matches = Vec::new();
+        for change_id in candidate_change_ids {
+            let current_revisions = presentations.get(change_id).ok_or_else(|| {
+                ShoreError::Message(format!(
+                    "candidate Change {} has no hydrated proposal presentation",
+                    change_id.as_str()
+                ))
+            })?;
+            if change_id.as_str().to_lowercase().contains(normalized_query)
+                || current_revisions.iter().any(|current| {
+                    current
+                        .revision
+                        .revision_id
+                        .as_str()
+                        .to_lowercase()
+                        .contains(normalized_query)
+                        || current
+                            .revision_proposal_summary
+                            .as_ref()
+                            .is_some_and(|summary| {
+                                summary.to_lowercase().contains(normalized_query)
+                            })
+                })
+            {
+                matches.push(change_id.clone());
+            }
+        }
+        matches.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(matches)
+    }
+
     fn selected_page_content_with_presentations(
         &self,
         selected_change_ids: &[ChangeId],
@@ -793,37 +1000,21 @@ impl ChangeDocumentFacadeV1 {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        let selected_current_revisions = selected
-            .iter()
-            .flat_map(|(_, view)| self.current_refs(view))
-            .collect::<BTreeSet<_>>();
-        let proposal_summaries = fold_proposal_summaries(hydrated_proposal_events)?;
-
-        if let Some(unselected) = proposal_summaries
-            .keys()
-            .find(|revision| !selected_current_revisions.contains(*revision))
-        {
-            return Err(ShoreError::Message(format!(
-                "hydrated proposal carrier targets unselected exact Revision {}",
-                unselected.revision_id.as_str()
-            )));
-        }
-        if let Some(missing) = selected_current_revisions
-            .iter()
-            .find(|revision| !proposal_summaries.contains_key(*revision))
-        {
-            return Err(ShoreError::Message(format!(
-                "selected current exact Revision {} has no hydrated proposal carrier",
-                missing.revision_id.as_str()
-            )));
-        }
+        let proposal_presentations = self
+            .proposal_presentations_for_change_ids(selected_change_ids, hydrated_proposal_events)?;
 
         let mut changes = Vec::with_capacity(selected.len());
         let mut presentations = BTreeMap::new();
         for (change_id, view) in selected {
-            let current_revisions = self.current_refs(view);
-            let presentation =
-                presentation_for_current_revisions(current_revisions, &proposal_summaries)?;
+            let presentation = proposal_presentations
+                .get(change_id)
+                .cloned()
+                .ok_or_else(|| {
+                    ShoreError::Message(format!(
+                        "selected Change {} has no hydrated proposal presentation",
+                        change_id.as_str()
+                    ))
+                })?;
             let mut summary = self.summary(view);
             summary.projection_stamp = generation_stamp.to_owned();
             changes.push(summary);
@@ -835,6 +1026,66 @@ impl ChangeDocumentFacadeV1 {
             );
         }
         Ok((changes, presentations))
+    }
+
+    fn proposal_presentations_for_change_ids(
+        &self,
+        candidate_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+    ) -> Result<BTreeMap<ChangeId, Vec<CurrentRevisionPresentationV1>>> {
+        let unique_change_ids = candidate_change_ids.iter().collect::<BTreeSet<_>>();
+        if unique_change_ids.len() != candidate_change_ids.len() {
+            return Err(ShoreError::Message(
+                "candidate Change selection contains a duplicate Change identity".to_owned(),
+            ));
+        }
+        let candidates = candidate_change_ids
+            .iter()
+            .map(|change_id| {
+                self.semantic
+                    .changes
+                    .get(change_id)
+                    .map(|view| (change_id, view))
+                    .ok_or_else(|| {
+                        ShoreError::Message(format!(
+                            "selected Change {} is unavailable",
+                            change_id.as_str()
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let candidate_current_revisions = candidates
+            .iter()
+            .flat_map(|(_, view)| self.current_refs(view))
+            .collect::<BTreeSet<_>>();
+        let proposal_summaries = fold_hydrated_proposal_summaries(hydrated_proposal_events)?;
+
+        if let Some(unselected) = proposal_summaries
+            .keys()
+            .find(|revision| !candidate_current_revisions.contains(*revision))
+        {
+            return Err(ShoreError::Message(format!(
+                "hydrated proposal carrier targets unselected exact Revision {}",
+                unselected.revision_id.as_str()
+            )));
+        }
+        if let Some(missing) = candidate_current_revisions
+            .iter()
+            .find(|revision| !proposal_summaries.contains_key(*revision))
+        {
+            return Err(ShoreError::Message(format!(
+                "selected current exact Revision {} has no hydrated proposal carrier",
+                missing.revision_id.as_str()
+            )));
+        }
+
+        candidates
+            .into_iter()
+            .map(|(change_id, view)| {
+                presentation_for_current_revisions(self.current_refs(view), &proposal_summaries)
+                    .map(|presentations| (change_id.clone(), presentations))
+            })
+            .collect()
     }
 
     pub fn detail_document(&self, change_id: &ChangeId) -> Result<ChangeDetailDocumentV1> {
@@ -1391,6 +1642,43 @@ fn fold_proposal_summaries(
     Ok(proposal_summaries)
 }
 
+/// Fold only callers' explicitly selected and validated proposal carriers.
+/// Unlike the whole-generation presentation fold, this rejects every other
+/// carrier family rather than silently ignoring an unrelated event.
+fn fold_hydrated_proposal_summaries(
+    events: &[ShoreEvent],
+) -> Result<BTreeMap<RevisionRefV1, BTreeSet<Option<String>>>> {
+    let mut proposal_summaries = BTreeMap::<RevisionRefV1, BTreeSet<Option<String>>>::new();
+    for event in events {
+        if event.event_type != EventType::WorkObjectProposed {
+            return Err(ShoreError::Message(format!(
+                "hydrated proposal carrier {} has family {}",
+                event.event_id.as_str(),
+                event.event_type.as_str()
+            )));
+        }
+        let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
+        let WorkObjectProposal::Revision {
+            revision,
+            summary,
+            object_artifact_content_hash,
+            ..
+        } = payload.work_object
+        else {
+            return Err(ShoreError::Message(format!(
+                "hydrated proposal carrier {} is not a Revision proposal",
+                event.event_id.as_str()
+            )));
+        };
+        let reference = RevisionRefV1::new(revision.id, object_artifact_content_hash)?;
+        proposal_summaries
+            .entry(reference)
+            .or_default()
+            .insert(summary);
+    }
+    Ok(proposal_summaries)
+}
+
 fn presentation_for_current_revisions(
     current_revisions: Vec<RevisionRefV1>,
     proposal_summaries: &BTreeMap<RevisionRefV1, BTreeSet<Option<String>>>,
@@ -1912,6 +2200,36 @@ mod tests {
             crate::session::change_document_projection_stamp(&semantic, &provenance).unwrap();
         let facade = ChangeDocumentFacadeV1::new(semantic, provenance).unwrap();
         (change_id, revision, facade)
+    }
+
+    fn attention_detail(
+        lifecycle: ChangeLifecycleV1,
+        current_revisions: Vec<RevisionRefV1>,
+        qualified: Vec<bool>,
+        operative_obligations: Vec<InputRequestId>,
+        diagnostics: Vec<&str>,
+    ) -> ChangeDetailV1 {
+        assert_eq!(current_revisions.len(), qualified.len());
+        let (change_id, _, facade) = facade();
+        let mut detail = facade.detail_document(&change_id).unwrap().detail;
+        detail.summary.lifecycle = lifecycle;
+        detail.summary.current_revision_refs = current_revisions.clone();
+        detail.current_revision_refs = current_revisions.to_vec();
+        detail.per_current_revision_qualification = current_revisions
+            .into_iter()
+            .zip(qualified)
+            .map(|(revision, qualified)| RevisionQualificationV1 {
+                revision,
+                qualified,
+            })
+            .collect();
+        detail.operative_obligations = operative_obligations;
+        detail.diagnostics = diagnostics.into_iter().map(str::to_owned).collect();
+        detail
+    }
+
+    fn attention_value(detail: &ChangeDetailV1) -> serde_json::Value {
+        serde_json::to_value(attention_presentation_for_change(detail).unwrap()).unwrap()
     }
 
     fn resource(revision: &RevisionRefV1) -> RevisionResourceDocumentV1 {
@@ -2651,6 +2969,230 @@ mod tests {
     }
 
     #[test]
+    fn attention_helper_freezes_every_reason_copy_order_and_exact_peer() {
+        let first = reference("first", 'a');
+        let second = reference("second", 'b');
+        let request = InputRequestId::new("input-request:sha256:open");
+
+        let conflicted = attention_detail(
+            ChangeLifecycleV1::Conflicted,
+            vec![first.clone(), second.clone()],
+            vec![false, false],
+            vec![request.clone()],
+            vec!["change_relation_revision_artifact_conflict"],
+        );
+        assert_eq!(
+            attention_value(&conflicted),
+            serde_json::json!({
+                "primaryReason": {"kind": "conflicted"},
+                "reasons": [
+                    {"kind": "conflicted"},
+                    {
+                        "kind": "unresolved_operative_requests",
+                        "requestIds": [request.as_str()],
+                    },
+                    {
+                        "kind": "current_revisions_need_assessment",
+                        "revisions": [first, second],
+                    },
+                ],
+                "reasonPresentations": [
+                    {
+                        "cause": {"kind": "conflicted"},
+                        "ask": "Resolve the conflicting Change state.",
+                        "reason": "The Change has conflicting current state.",
+                        "evidence": "Lifecycle is conflicted.",
+                        "nextAction": "Review the conflicting Change records.",
+                    },
+                    {
+                        "cause": {
+                            "kind": "unresolved_operative_requests",
+                            "requestIds": [request.as_str()],
+                        },
+                        "ask": "Respond to every operative request.",
+                        "reason": "Operative requests remain unresolved.",
+                        "evidence": format!("Open requests: {}.", request.as_str()),
+                        "nextAction": "Open the Change and respond to each request.",
+                    },
+                    {
+                        "cause": {
+                            "kind": "current_revisions_need_assessment",
+                            "revisions": [
+                                {
+                                    "revisionId": "rev:sha256:first",
+                                    "objectArtifactContentHash": format!("sha256:{}", "a".repeat(64)),
+                                },
+                                {
+                                    "revisionId": "rev:sha256:second",
+                                    "objectArtifactContentHash": format!("sha256:{}", "b".repeat(64)),
+                                },
+                            ],
+                        },
+                        "ask": "Assess every current Revision.",
+                        "reason": "Current Revision assessment coverage is incomplete.",
+                        "evidence": format!(
+                            "Unassessed exact Revisions: rev:sha256:first; artifact sha256:{}; rev:sha256:second; artifact sha256:{}.",
+                            "a".repeat(64),
+                            "b".repeat(64),
+                        ),
+                        "nextAction": "Open an exact Revision and record its assessment.",
+                    },
+                ],
+                "diagnostics": ["change_relation_revision_artifact_conflict"],
+            })
+        );
+
+        let incomplete = attention_detail(
+            ChangeLifecycleV1::Incomplete,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            attention_value(&incomplete),
+            serde_json::json!({
+                "primaryReason": {"kind": "incomplete"},
+                "reasons": [
+                    {"kind": "incomplete"},
+                    {"kind": "no_current_revision"},
+                ],
+                "reasonPresentations": [
+                    {
+                        "cause": {"kind": "incomplete"},
+                        "ask": "Complete the missing Change state.",
+                        "reason": "The Change state is incomplete.",
+                        "evidence": "Lifecycle is incomplete.",
+                        "nextAction": "Review the missing Change records.",
+                    },
+                    {
+                        "cause": {"kind": "no_current_revision"},
+                        "ask": "Establish one exact current Revision.",
+                        "reason": "No current Revision is available for review.",
+                        "evidence": "The current Revision set is empty.",
+                        "nextAction": "Review the Change and establish a current Revision.",
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn attention_helper_keeps_single_cause_primary_for_each_in_progress_gap() {
+        let revision = reference("one", 'a');
+        let request = InputRequestId::new("input-request:sha256:open");
+
+        let no_current = attention_detail(
+            ChangeLifecycleV1::InProgress,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            attention_value(&no_current),
+            serde_json::json!({
+                "primaryReason": {"kind": "no_current_revision"},
+                "reasons": [{"kind": "no_current_revision"}],
+                "reasonPresentations": [{
+                    "cause": {"kind": "no_current_revision"},
+                    "ask": "Establish one exact current Revision.",
+                    "reason": "No current Revision is available for review.",
+                    "evidence": "The current Revision set is empty.",
+                    "nextAction": "Review the Change and establish a current Revision.",
+                }],
+            })
+        );
+
+        let unresolved = attention_detail(
+            ChangeLifecycleV1::InProgress,
+            vec![revision.clone()],
+            vec![true],
+            vec![request.clone()],
+            Vec::new(),
+        );
+        assert_eq!(
+            attention_value(&unresolved),
+            serde_json::json!({
+                "primaryReason": {
+                    "kind": "unresolved_operative_requests",
+                    "requestIds": [request.as_str()],
+                },
+                "reasons": [{
+                    "kind": "unresolved_operative_requests",
+                    "requestIds": [request.as_str()],
+                }],
+                "reasonPresentations": [{
+                    "cause": {
+                        "kind": "unresolved_operative_requests",
+                        "requestIds": [request.as_str()],
+                    },
+                    "ask": "Respond to every operative request.",
+                    "reason": "Operative requests remain unresolved.",
+                    "evidence": format!("Open requests: {}.", request.as_str()),
+                    "nextAction": "Open the Change and respond to each request.",
+                }],
+            })
+        );
+
+        let unassessed = attention_detail(
+            ChangeLifecycleV1::InProgress,
+            vec![revision],
+            vec![false],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            attention_value(&unassessed),
+            serde_json::json!({
+                "primaryReason": {
+                    "kind": "current_revisions_need_assessment",
+                    "revisions": [{
+                        "revisionId": "rev:sha256:one",
+                        "objectArtifactContentHash": format!("sha256:{}", "a".repeat(64)),
+                    }],
+                },
+                "reasons": [{
+                    "kind": "current_revisions_need_assessment",
+                    "revisions": [{
+                        "revisionId": "rev:sha256:one",
+                        "objectArtifactContentHash": format!("sha256:{}", "a".repeat(64)),
+                    }],
+                }],
+                "reasonPresentations": [{
+                    "cause": {
+                        "kind": "current_revisions_need_assessment",
+                        "revisions": [{
+                            "revisionId": "rev:sha256:one",
+                            "objectArtifactContentHash": format!("sha256:{}", "a".repeat(64)),
+                        }],
+                    },
+                    "ask": "Assess every current Revision.",
+                    "reason": "Current Revision assessment coverage is incomplete.",
+                    "evidence": format!(
+                        "Unassessed exact Revisions: rev:sha256:one; artifact sha256:{}.",
+                        "a".repeat(64),
+                    ),
+                    "nextAction": "Open an exact Revision and record its assessment.",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn attention_helper_refuses_an_accepted_change() {
+        let accepted = attention_detail(
+            ChangeLifecycleV1::Accepted,
+            vec![reference("accepted", 'c')],
+            vec![false],
+            vec![InputRequestId::new("input-request:sha256:open")],
+            Vec::new(),
+        );
+
+        assert!(attention_presentation_for_change(&accepted).is_err());
+    }
+
+    #[test]
     fn change_summary_availability_is_independent_of_exact_resource_bytes() {
         let (change_id, revision, facade) = facade();
         assert_eq!(
@@ -2846,6 +3388,148 @@ mod tests {
 
         assert_eq!(actual_list, expected_list);
         assert_eq!(actual_attention, expected_attention);
+    }
+
+    #[test]
+    fn proposal_search_validates_all_candidates_before_matching_and_sorts_results() {
+        let (first_change, first_revision, facade) = facade();
+        let second_change = ChangeId::new("change:sha256:two");
+        let second_revision = reference("second", 'b');
+        let facade = with_additional_change(
+            &facade,
+            second_change.clone(),
+            vec![second_revision.clone()],
+        );
+        let hydrated = vec![
+            proposal_event(&first_revision, Some("Needle summary"), "proposal:first"),
+            proposal_event(&second_revision, Some("Other summary"), "proposal:second"),
+        ];
+        let candidates = vec![second_change.clone(), first_change.clone()];
+
+        assert_eq!(
+            facade
+                .search_change_ids_with_proposal_presentations(&candidates, &hydrated, "needle")
+                .unwrap(),
+            vec![first_change.clone()]
+        );
+        assert_eq!(
+            facade
+                .search_change_ids_with_proposal_presentations(
+                    &candidates,
+                    &hydrated,
+                    "rev:sha256:second",
+                )
+                .unwrap(),
+            vec![second_change.clone()]
+        );
+        assert_eq!(
+            facade
+                .search_change_ids_with_proposal_presentations(
+                    &candidates,
+                    &hydrated,
+                    "change:sha256",
+                )
+                .unwrap(),
+            vec![first_change.clone(), second_change.clone()]
+        );
+
+        let mut diagnostic_only = facade.clone();
+        diagnostic_only
+            .provenance
+            .diagnostics
+            .push("needle appears only in a diagnostic".to_owned());
+        assert!(
+            diagnostic_only
+                .search_change_ids_with_proposal_presentations(
+                    &candidates,
+                    &hydrated,
+                    "needle appears only in a diagnostic",
+                )
+                .unwrap()
+                .is_empty()
+        );
+
+        let error = facade
+            .search_change_ids_with_proposal_presentations(
+                &candidates,
+                &[
+                    proposal_event(&first_revision, Some("one"), "proposal:first-one"),
+                    proposal_event(&first_revision, Some("two"), "proposal:first-two"),
+                    proposal_event(&second_revision, Some("Other summary"), "proposal:second"),
+                ],
+                "rev:sha256:second",
+            )
+            .expect_err("a nonmatching candidate duplicate conflict must fail before matching");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting proposal summaries for exact Revision")
+        );
+
+        let some_none = facade
+            .search_change_ids_with_proposal_presentations(
+                &candidates,
+                &[
+                    proposal_event(&first_revision, Some("one"), "proposal:first-present"),
+                    proposal_event(&first_revision, None, "proposal:first-absent"),
+                    proposal_event(&second_revision, Some("Other summary"), "proposal:second"),
+                ],
+                "rev:sha256:second",
+            )
+            .expect_err("Some and None conflict before a different candidate can match");
+        assert!(
+            some_none
+                .to_string()
+                .contains("conflicting proposal summaries for exact Revision")
+        );
+    }
+
+    #[test]
+    fn proposal_search_rejects_missing_or_unrelated_hydrated_carriers() {
+        let (first_change, first_revision, facade) = facade();
+        let second_change = ChangeId::new("change:sha256:two");
+        let second_revision = reference("second", 'b');
+        let facade = with_additional_change(
+            &facade,
+            second_change.clone(),
+            vec![second_revision.clone()],
+        );
+        let candidates = vec![first_change, second_change];
+
+        let missing = facade
+            .search_change_ids_with_proposal_presentations(
+                &candidates,
+                &[proposal_event(
+                    &first_revision,
+                    Some("first"),
+                    "proposal:first",
+                )],
+                "first",
+            )
+            .expect_err("every candidate current Revision needs an authoritative proposal carrier");
+        assert!(
+            missing
+                .to_string()
+                .contains("has no hydrated proposal carrier")
+        );
+
+        let unrelated = reference("unrelated", 'c');
+        let unrelated_error = facade
+            .search_change_ids_with_proposal_presentations(
+                &candidates,
+                &[
+                    proposal_event(&first_revision, Some("first"), "proposal:first"),
+                    proposal_event(&second_revision, Some("second"), "proposal:second"),
+                    proposal_event(&unrelated, Some("unrelated"), "proposal:unrelated"),
+                ],
+                "first",
+            )
+            .expect_err("unrelated proposal carrier must not be silently ignored");
+        assert!(
+            unrelated_error
+                .to_string()
+                .contains("targets unselected exact Revision")
+        );
     }
 
     #[test]
