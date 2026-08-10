@@ -140,6 +140,37 @@ pub enum RevisionRefUnavailableReasonV1 {
     InvalidObjectArtifactContentHash,
 }
 
+/// Bodyless Change fact plus the exact carrier provenance needed by documents.
+///
+/// The semantic fact remains the sole input to effective Change policy. The
+/// support envelope retains only stable identity needed to explain duplicate
+/// and cross-actor claim carriers; it deliberately excludes prose and storage
+/// details.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangeDocumentProjectionFact {
+    pub(crate) change: ChangeProjectionFact,
+    pub(crate) support: ChangeClaimSupportV1,
+}
+
+impl ChangeDocumentProjectionFact {
+    pub(crate) fn new(
+        change: ChangeProjectionFact,
+        event_id: EventId,
+        actor_id: ActorId,
+        track_id: Option<TrackId>,
+    ) -> Self {
+        Self {
+            change,
+            support: ChangeClaimSupportV1 {
+                event_id,
+                actor_id,
+                track_id,
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 struct ClaimProvenanceInput {
     revisions: BTreeMap<RevisionId, BTreeSet<String>>,
@@ -161,83 +192,86 @@ struct ClaimProvenanceInput {
 /// Project complete Change claim provenance without changing effective-state
 /// policy or requiring a document consumer to inspect raw events.
 pub fn project_change_documents(events: &[ShoreEvent]) -> Result<ChangeDocumentProjectionV1> {
-    let semantic = project_changes(events)?;
-    let mut input = ClaimProvenanceInput::default();
+    let mut facts = Vec::new();
     for event in events {
-        let support = ChangeClaimSupportV1 {
-            event_id: event.event_id.clone(),
-            actor_id: event.writer.actor_id.clone(),
-            track_id: event.target.track_id.clone(),
-        };
-        match event.event_type {
-            EventType::WorkObjectProposed => {
-                let payload: WorkObjectProposedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                if let WorkObjectProposal::Revision {
-                    revision,
-                    object_artifact_content_hash,
-                    ..
-                } = payload.work_object
-                {
-                    input
-                        .revisions
-                        .entry(revision.id)
-                        .or_default()
-                        .insert(object_artifact_content_hash);
-                }
+        if let Some(change) = extract_change_projection_fact(event)? {
+            facts.push(ChangeDocumentProjectionFact::new(
+                change,
+                event.event_id.clone(),
+                event.writer.actor_id.clone(),
+                event.target.track_id.clone(),
+            ));
+        }
+    }
+    project_change_documents_from_facts(&facts)
+}
+
+/// Project complete Change document provenance from compact persisted facts.
+///
+/// Effective Change state is always delegated to [`project_changes_from_facts`]
+/// so strict replay and derived reads cannot acquire separate lifecycle or
+/// topology policy.
+pub(crate) fn project_change_documents_from_facts(
+    facts: &[ChangeDocumentProjectionFact],
+) -> Result<ChangeDocumentProjectionV1> {
+    let semantic_facts = facts
+        .iter()
+        .map(|fact| fact.change.clone())
+        .collect::<Vec<_>>();
+    let semantic = project_changes_from_facts(&semantic_facts)?;
+    let mut input = ClaimProvenanceInput::default();
+    for fact in facts {
+        match &fact.change {
+            ChangeProjectionFact::Revision {
+                revision_id,
+                object_artifact_content_hash,
+            } => {
+                input
+                    .revisions
+                    .entry(revision_id.clone())
+                    .or_default()
+                    .insert(object_artifact_content_hash.clone());
             }
-            EventType::ChangeMembershipAsserted => {
-                let payload: ChangeMembershipAssertedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
+            ChangeProjectionFact::MembershipAsserted {
+                claim_id,
+                change_id,
+                revision_id,
+            } => {
                 let entry = input
                     .memberships
-                    .entry(payload.membership_claim_id)
-                    .or_insert_with(|| {
-                        (
-                            payload.change_id.clone(),
-                            payload.revision_id.clone(),
-                            BTreeSet::new(),
-                        )
-                    });
-                entry.2.insert(support);
+                    .entry(claim_id.clone())
+                    .or_insert_with(|| (change_id.clone(), revision_id.clone(), BTreeSet::new()));
+                entry.2.insert(fact.support.clone());
             }
-            EventType::ChangeMembershipWithdrawn => {
-                let payload: ChangeMembershipWithdrawnPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
+            ChangeProjectionFact::MembershipWithdrawn { claim_id } => {
                 input
                     .membership_withdrawals
-                    .entry(payload.membership_claim_id)
+                    .entry(claim_id.clone())
                     .or_default()
-                    .insert(support);
+                    .insert(fact.support.clone());
             }
-            EventType::ChangeRevisionRelationAsserted => {
-                let payload: ChangeRevisionRelationAssertedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                let entry = input
-                    .relations
-                    .entry(payload.relation_claim_id)
-                    .or_insert_with(|| {
-                        (
-                            payload.change_id.clone(),
-                            payload.successor.clone(),
-                            payload.predecessor.clone(),
-                            BTreeSet::new(),
-                        )
-                    });
-                entry.3.insert(support);
+            ChangeProjectionFact::RelationAsserted {
+                claim_id,
+                change_id,
+                successor,
+                predecessor,
+            } => {
+                let entry = input.relations.entry(claim_id.clone()).or_insert_with(|| {
+                    (
+                        change_id.clone(),
+                        successor.clone(),
+                        predecessor.clone(),
+                        BTreeSet::new(),
+                    )
+                });
+                entry.3.insert(fact.support.clone());
             }
-            EventType::ChangeRevisionRelationWithdrawn => {
-                let payload: ChangeRevisionRelationWithdrawnPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
+            ChangeProjectionFact::RelationWithdrawn { claim_id } => {
                 input
                     .relation_withdrawals
-                    .entry(payload.relation_claim_id)
+                    .entry(claim_id.clone())
                     .or_default()
-                    .insert(support);
+                    .insert(fact.support.clone());
             }
             _ => {}
         }
@@ -1061,9 +1095,10 @@ mod tests {
     use crate::session::event::{
         AssertionMode, ChangeRevisionRelationV1, EventPayload, EventTarget,
         InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
-        InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload, Revision,
-        ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload, Writer, build_change_declared,
-        build_membership_asserted, build_membership_withdrawn, build_revision_relation_asserted,
+        InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
+        ReviewFactPortDraftV1, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
+        Writer, build_change_declared, build_change_link_asserted, build_membership_asserted,
+        build_membership_withdrawn, build_review_fact_ported, build_revision_relation_asserted,
         build_revision_relation_withdrawn,
     };
 
@@ -1198,6 +1233,64 @@ mod tests {
             },
             key,
         )
+    }
+
+    fn compact_document_facts(events: &[ShoreEvent]) -> Result<Vec<ChangeDocumentProjectionFact>> {
+        let mut facts = Vec::new();
+        for event in events {
+            if let Some(change) = extract_change_projection_fact(event)? {
+                facts.push(ChangeDocumentProjectionFact::new(
+                    change,
+                    event.event_id.clone(),
+                    event.writer.actor_id.clone(),
+                    event.target.track_id.clone(),
+                ));
+            }
+        }
+        Ok(facts)
+    }
+
+    fn assert_compact_document_parity(events: &[ShoreEvent]) {
+        let strict_semantic = project_changes(events).expect("strict Change projection");
+        let strict = project_change_documents(events).expect("strict document projection");
+        let facts = compact_document_facts(events).expect("compact document facts");
+        let compact_semantic = project_changes_from_facts(
+            &facts
+                .iter()
+                .map(|fact| fact.change.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("compact Change projection");
+        let compact =
+            project_change_documents_from_facts(&facts).expect("compact document projection");
+        assert_eq!(compact_semantic, strict_semantic);
+        assert_eq!(compact, strict);
+        assert_eq!(compact.projection_stamp, strict.projection_stamp);
+
+        let strict_facade =
+            crate::documents::ChangeDocumentFacadeV1::new(strict_semantic.clone(), strict)
+                .expect("strict Change facade");
+        let compact_facade =
+            crate::documents::ChangeDocumentFacadeV1::new(compact_semantic, compact)
+                .expect("compact Change facade");
+        assert_eq!(
+            compact_facade.list_document(),
+            strict_facade.list_document()
+        );
+        assert_eq!(
+            compact_facade.attention_document(false),
+            strict_facade.attention_document(false)
+        );
+        assert_eq!(
+            compact_facade.attention_document(true),
+            strict_facade.attention_document(true)
+        );
+        for change_id in strict_semantic.changes.keys() {
+            assert_eq!(
+                compact_facade.detail_document(change_id).unwrap(),
+                strict_facade.detail_document(change_id).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -1357,6 +1450,7 @@ mod tests {
             relation(&change_id, b_ref.clone(), a_ref.clone(), 20),
             relation(&change_id, c_ref.clone(), a_ref, 21),
         ];
+        assert_compact_document_parity(&events);
         let divergent = project_changes(&events).unwrap();
         assert_eq!(
             divergent.changes[&change_id].topology,
@@ -1371,11 +1465,13 @@ mod tests {
             divergent.changes[&change_id].current_revisions
         );
         events.push(relation(&change_id, d_ref.clone(), b_ref, 22));
+        assert_compact_document_parity(&events);
         assert_eq!(
             project_changes(&events).unwrap().changes[&change_id].topology,
             ChangeTopologyV1::ReplacementDivergent
         );
         events.push(relation(&change_id, d_ref, c_ref, 23));
+        assert_compact_document_parity(&events);
         let consolidated = project_changes(&events).unwrap();
         assert_eq!(
             consolidated.changes[&change_id].topology,
@@ -1407,6 +1503,7 @@ mod tests {
             relation(&change_id, b_ref, a_ref, 32),
             assessment(a, 33),
         ];
+        assert_compact_document_parity(&events);
         let view = &project_changes(&events).unwrap().changes[&change_id];
         assert_eq!(view.current_revisions, [b].into());
         assert!(view.qualified_current_revisions.is_empty());
@@ -1438,9 +1535,216 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
 
+        assert_compact_document_parity(&events);
         assert_eq!(
             project_changes_from_facts(&facts).unwrap(),
             project_changes(&events).unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_change_document_projection_matches_strict_matrix_and_permutations() {
+        let (change_id, declared) = declaration_with_nonce(100);
+        let (first, first_ref, first_event) = revision("document-parity-first", '7');
+        let (second, second_ref, second_event) = revision("document-parity-second", '8');
+        let (_, first_membership) = membership(&change_id, &first, 101);
+        let (_, second_membership) = membership(&change_id, &second, 102);
+
+        let initial = vec![
+            declared.clone(),
+            first_event.clone(),
+            first_membership.clone(),
+            assessment(first.clone(), 103),
+        ];
+        let parallel = vec![
+            declared.clone(),
+            first_event.clone(),
+            second_event.clone(),
+            first_membership.clone(),
+            second_membership.clone(),
+            assessment(first.clone(), 104),
+            assessment(second.clone(), 105),
+        ];
+        let mut replacement = parallel.clone();
+        replacement.push(relation(
+            &change_id,
+            second_ref.clone(),
+            first_ref.clone(),
+            106,
+        ));
+
+        let (third, _, third_event) = revision("document-parity-third", '9');
+        let (_, third_membership) = membership(&change_id, &third, 107);
+        let mut mixed = parallel.clone();
+        mixed.extend([
+            third_event,
+            third_membership,
+            assessment(third, 108),
+            relation(&change_id, second_ref.clone(), first_ref.clone(), 109),
+        ]);
+
+        let mismatched_first =
+            RevisionRefV1::new(first, format!("sha256:{}", "f".repeat(64))).unwrap();
+        let mut missing_exact_relation = parallel.clone();
+        missing_exact_relation.push(relation(&change_id, second_ref, mismatched_first, 110));
+
+        for events in [
+            initial,
+            parallel,
+            replacement,
+            mixed,
+            missing_exact_relation,
+        ] {
+            assert_compact_document_parity(&events);
+
+            let mut reversed = events.clone();
+            reversed.reverse();
+            assert_compact_document_parity(&reversed);
+            assert_eq!(
+                project_change_documents(&reversed).unwrap(),
+                project_change_documents(&events).unwrap(),
+            );
+
+            let mut rotated = events.clone();
+            rotated.rotate_left(2);
+            assert_compact_document_parity(&rotated);
+            assert_eq!(
+                project_change_documents(&rotated).unwrap(),
+                project_change_documents(&events).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn compact_document_provenance_preserves_duplicates_cross_actor_and_orphans() {
+        let (change_id, declared) = declaration_with_nonce(110);
+        let (revision_id, revision_ref, revision_event) = revision("compact-provenance", '9');
+        let (_, membership_event) = membership(&change_id, &revision_id, 111);
+        let membership_payload: ChangeMembershipAssertedPayload =
+            serde_json::from_value(membership_event.payload.clone()).unwrap();
+        let duplicate_membership =
+            event(membership_payload.clone(), "compact-membership:duplicate");
+        let membership_withdrawal = event_with_actor(
+            build_membership_withdrawn(&membership_payload.membership_claim_id, [112; 32]).unwrap(),
+            "compact-membership:cross-actor-withdrawal",
+            crate::model::ActorId::new("actor:reviewer"),
+        );
+
+        let relation_event = relation(&change_id, revision_ref.clone(), revision_ref, 113);
+        let relation_payload: ChangeRevisionRelationAssertedPayload =
+            serde_json::from_value(relation_event.payload.clone()).unwrap();
+        let duplicate_relation = event(relation_payload.clone(), "compact-relation:duplicate");
+        let relation_withdrawal = event_with_actor(
+            build_revision_relation_withdrawn(&relation_payload.relation_claim_id, [114; 32])
+                .unwrap(),
+            "compact-relation:cross-actor-withdrawal",
+            crate::model::ActorId::new("actor:reviewer"),
+        );
+        let orphan_membership = event(
+            build_membership_withdrawn(
+                &crate::model::ChangeMembershipClaimId::new("membership:sha256:orphan"),
+                [115; 32],
+            )
+            .unwrap(),
+            "compact-membership:orphan-withdrawal",
+        );
+        let orphan_relation = event(
+            build_revision_relation_withdrawn(
+                &crate::model::ChangeRevisionRelationClaimId::new("change-relation:sha256:orphan"),
+                [116; 32],
+            )
+            .unwrap(),
+            "compact-relation:orphan-withdrawal",
+        );
+
+        let events = vec![
+            declared,
+            revision_event,
+            membership_event,
+            duplicate_membership,
+            membership_withdrawal,
+            relation_event,
+            duplicate_relation,
+            relation_withdrawal,
+            orphan_membership,
+            orphan_relation,
+        ];
+        assert_compact_document_parity(&events);
+
+        let compact =
+            project_change_documents_from_facts(&compact_document_facts(&events).unwrap()).unwrap();
+        assert_eq!(compact.membership_claims[0].supports.len(), 2);
+        assert_eq!(compact.membership_claims[0].withdrawals.len(), 1);
+        assert_eq!(
+            compact.membership_claims[0].diagnostics,
+            ["cross_actor_withdrawal", "duplicate_claim_support"]
+        );
+        assert_eq!(compact.relation_claims[0].supports.len(), 2);
+        assert_eq!(compact.relation_claims[0].withdrawals.len(), 1);
+        assert_eq!(
+            compact.relation_claims[0].diagnostics,
+            ["cross_actor_withdrawal", "duplicate_claim_support"]
+        );
+        assert!(compact.diagnostics.iter().any(|diagnostic| {
+            diagnostic.starts_with("change_membership_withdrawal_claim_missing:")
+        }));
+        assert!(compact.diagnostics.iter().any(|diagnostic| {
+            diagnostic.starts_with("change_relation_withdrawal_claim_missing:")
+        }));
+
+        let mut reversed = events;
+        reversed.reverse();
+        assert_compact_document_parity(&reversed);
+        assert_eq!(
+            project_change_documents_from_facts(&compact_document_facts(&reversed).unwrap())
+                .unwrap(),
+            compact,
+        );
+    }
+
+    #[test]
+    fn compact_document_revision_refs_preserve_equal_conflicting_and_legacy_bindings() {
+        let (revision_id, _, first) = revision("compact-document-conflict", '1');
+        let (_, _, conflicting) = revision("compact-document-conflict", '2');
+        let first_payload: WorkObjectProposedPayload =
+            serde_json::from_value(first.payload.clone()).unwrap();
+        let equal_duplicate = event(first_payload, "compact-revision:equal-duplicate");
+
+        let legacy_revision_id = RevisionId::new("review-unit:sha256:compact-legacy");
+        let legacy = event(
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new("engagement:sha256:test"),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: legacy_revision_id.clone(),
+                        object_id: ObjectId::new("obj:sha256:compact-legacy"),
+                        git_provenance: None,
+                    },
+                    summary: None,
+                    object_artifact_content_hash: "legacy-artifact-hash".to_owned(),
+                    supersedes: Vec::new(),
+                },
+            },
+            "compact-revision:legacy",
+        );
+        let events = vec![first, equal_duplicate, conflicting, legacy];
+
+        assert_compact_document_parity(&events);
+        let compact =
+            project_change_documents_from_facts(&compact_document_facts(&events).unwrap()).unwrap();
+        assert_eq!(compact.revision_refs[&revision_id].len(), 2);
+        assert_eq!(
+            compact.unavailable_revision_refs[&legacy_revision_id],
+            RevisionRefUnavailableReasonV1::InvalidRevisionId,
+        );
+
+        let mut reversed = events;
+        reversed.reverse();
+        assert_compact_document_parity(&reversed);
+        assert_eq!(
+            project_change_documents_from_facts(&compact_document_facts(&reversed).unwrap())
+                .unwrap(),
+            compact,
         );
     }
 
@@ -1467,6 +1771,7 @@ mod tests {
             "assessment:duplicate:second",
         );
         let events = vec![declared, revision_event, membership, first, second];
+        assert_compact_document_parity(&events);
         let projection = project_changes(&events).unwrap();
         let mut reversed = events;
         reversed.reverse();
@@ -1495,8 +1800,9 @@ mod tests {
             ReviewAssessment::Accepted,
             "assessment:file-target",
         );
-        let projection =
-            project_changes(&[declared, revision_event, membership, assessment]).unwrap();
+        let events = [declared, revision_event, membership, assessment];
+        assert_compact_document_parity(&events);
+        let projection = project_changes(&events).unwrap();
         assert_eq!(
             projection.changes[&change_id].lifecycle,
             ChangeLifecycleV1::Accepted
@@ -1509,7 +1815,9 @@ mod tests {
         let (revision_id, _, revision_event) = revision("backfill", 'f');
         let (_, membership) = membership(&change_id, &revision_id, 35);
 
-        let incomplete = project_changes(&[declared.clone(), membership.clone()]).unwrap();
+        let incomplete_events = [declared.clone(), membership.clone()];
+        assert_compact_document_parity(&incomplete_events);
+        let incomplete = project_changes(&incomplete_events).unwrap();
         let view = &incomplete.changes[&change_id];
         assert_eq!(view.topology, ChangeTopologyV1::Incomplete);
         assert_eq!(view.lifecycle, ChangeLifecycleV1::Incomplete);
@@ -1528,6 +1836,7 @@ mod tests {
             revision_event,
             assessment(revision_id.clone(), 36),
         ];
+        assert_compact_document_parity(&complete_events);
         let complete = project_changes(&complete_events).unwrap();
         let view = &complete.changes[&change_id];
         assert_eq!(view.members, [revision_id.clone()].into());
@@ -1547,6 +1856,7 @@ mod tests {
         let (_, _, second) = revision("same", '2');
         let (_, membership) = membership(&change_id, &revision_id, 81);
         let events = vec![declared, first, second, membership];
+        assert_compact_document_parity(&events);
         let projected = project_changes(&events).unwrap();
         let mut reversed = events;
         reversed.reverse();
@@ -1612,18 +1922,119 @@ mod tests {
             opened,
             response("first", InputRequestResponseOutcome::Approved),
         ];
+        assert_compact_document_parity(&events);
         assert_eq!(
             project_changes(&events).unwrap().changes[&change_id].lifecycle,
             ChangeLifecycleV1::Accepted
         );
 
         events.push(response("second", InputRequestResponseOutcome::Rejected));
+        assert_compact_document_parity(&events);
         let projection = project_changes(&events).unwrap();
         let view = &projection.changes[&change_id];
         assert_eq!(view.lifecycle, ChangeLifecycleV1::InProgress);
         assert!(
             view.diagnostics
                 .contains(&"operative_request_response_ambiguous".to_owned())
+        );
+    }
+
+    #[test]
+    fn compact_documents_preserve_links_and_fact_port_policy_without_prose() {
+        const TITLE_SENTINEL: &str = "PRIVATE OPERATIVE REQUEST TITLE COMPACT READER";
+
+        let (change_id, declared) = declaration_with_nonce(120);
+        let (linked_change_id, linked_declared) = declaration_with_nonce(121);
+        let (first, first_ref, first_event) = revision("fact-port-first", 'a');
+        let (second, second_ref, second_event) = revision("fact-port-second", 'b');
+        let (_, first_membership) = membership(&change_id, &first, 122);
+        let (_, second_membership) = membership(&change_id, &second, 123);
+        let origin_request = InputRequestId::new("input-request:sha256:fact-port-origin");
+        let target_request = InputRequestId::new("input-request:sha256:fact-port-target");
+        let request = |request_id: InputRequestId, revision_id: RevisionId, key: &str| {
+            event(
+                InputRequestOpenedPayload {
+                    input_request_id: request_id,
+                    target: ReviewTargetRef::Revision { revision_id },
+                    task_target: None,
+                    reason_code: InputRequestReasonCode::ManualDecisionRequired,
+                    title: TITLE_SENTINEL.to_owned(),
+                    body: None,
+                    body_content_type: Default::default(),
+                    body_artifact_path: None,
+                    body_byte_size: None,
+                    body_content_hash: None,
+                    target_fingerprint: None,
+                },
+                key,
+            )
+            .with_assertion_mode(AssertionMode::Operative)
+        };
+        let writer = Writer::shore_local("test");
+        let track_id = crate::model::TrackId::new("track:fact-port");
+        let fact_port = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: first_ref.clone(),
+                origin_fact: FactRefV1::InputRequest {
+                    input_request_id: origin_request.clone(),
+                },
+                target_revision: second_ref.clone(),
+                relation: FactPortRelationV1::CarriedOpenAs,
+                target_fact: Some(FactRefV1::InputRequest {
+                    input_request_id: target_request.clone(),
+                }),
+                rationale_content_hash: None,
+                context_change_id: Some(change_id.clone()),
+            },
+            &writer.actor_id,
+            &track_id,
+        )
+        .unwrap();
+        let fact_port = ShoreEvent::new(
+            EventType::ReviewFactPorted,
+            "fact-port:carried-open",
+            EventTarget::for_revision(
+                JournalId::new("journal:test"),
+                first_ref.revision_id.clone(),
+                Some(track_id),
+            )
+            .unwrap(),
+            writer,
+            fact_port,
+            "2026-08-04T00:00:00Z",
+        )
+        .unwrap();
+        let link = event(
+            build_change_link_asserted(
+                &change_id,
+                &linked_change_id,
+                crate::session::event::ChangeLinkRelationV1::RelatedWork,
+                [124; 32],
+            )
+            .unwrap(),
+            "change-link:related",
+        );
+        let events = vec![
+            declared,
+            linked_declared,
+            first_event,
+            second_event,
+            first_membership,
+            second_membership,
+            relation(&change_id, second_ref, first_ref, 125),
+            request(origin_request, first, "request:origin"),
+            request(target_request, second, "request:target"),
+            fact_port,
+            link,
+        ];
+
+        assert_compact_document_parity(&events);
+        let semantic = project_changes(&events).unwrap();
+        assert_eq!(semantic.links.len(), 1);
+        let encoded = serde_json::to_string(&compact_document_facts(&events).unwrap()).unwrap();
+        assert!(
+            !encoded.contains(TITLE_SENTINEL),
+            "compact Change facts retained request prose"
         );
     }
 
@@ -1648,6 +2059,7 @@ mod tests {
             second_b,
             relation(&first_change, b_ref.clone(), a_ref.clone(), 43),
         ];
+        assert_compact_document_parity(&events);
         let projection = project_changes(&events).unwrap();
         assert_eq!(
             projection.changes[&first_change].topology,
@@ -1741,7 +2153,7 @@ mod tests {
         let withdrawal =
             build_revision_relation_withdrawn(&first.relation_claim_id, [74; 32]).unwrap();
         let second = build_revision_relation_asserted(&change_id, b_ref, a_ref, [75; 32]).unwrap();
-        let projection = project_changes(&[
+        let events = vec![
             declared,
             a_event,
             b_event,
@@ -1750,8 +2162,9 @@ mod tests {
             event(first, "relation:first"),
             event(withdrawal, "relation:withdrawal"),
             event(second, "relation:second"),
-        ])
-        .unwrap();
+        ];
+        assert_compact_document_parity(&events);
+        let projection = project_changes(&events).unwrap();
         assert_eq!(
             projection.changes[&change_id].topology,
             ChangeTopologyV1::Replacement
@@ -1769,6 +2182,7 @@ mod tests {
         let mut accepted = base.clone();
         accepted.push(assessment(a.clone(), 63));
         accepted.push(assessment(b.clone(), 64));
+        assert_compact_document_parity(&accepted);
         assert_eq!(
             project_changes(&accepted).unwrap().changes[&change_id].lifecycle,
             ChangeLifecycleV1::Accepted
@@ -1777,6 +2191,7 @@ mod tests {
         let mut cyclic = base;
         cyclic.push(relation(&change_id, b_ref.clone(), a_ref.clone(), 65));
         cyclic.push(relation(&change_id, a_ref, b_ref, 66));
+        assert_compact_document_parity(&cyclic);
         let projection = project_changes(&cyclic).unwrap();
         let view = &projection.changes[&change_id];
         assert_eq!(view.topology, ChangeTopologyV1::CycleConflicted);

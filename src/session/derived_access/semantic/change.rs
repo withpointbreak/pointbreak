@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
+use crate::model::{ActorId, EventId, TrackId};
 use crate::session::derived_access::cursor::TruthCursor;
 use crate::session::derived_access::generation::{
     GenerationDescriptor, GenerationLayout, GenerationPublication,
@@ -16,7 +17,8 @@ use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::derived_access::semantic::{SemanticFact, SemanticSnapshot};
 use crate::session::event::ShoreEvent;
 use crate::session::projection::change::{
-    ChangeProjectionFact, extract_change_projection_fact, project_changes_from_facts,
+    ChangeDocumentProjectionFact, ChangeProjectionFact, extract_change_projection_fact,
+    project_change_documents_from_facts, project_changes_from_facts,
 };
 use crate::session::store::EventStore;
 use crate::session::store::backend::JournalChangeStamp;
@@ -43,7 +45,7 @@ const CURSOR_SCHEMA_VERSION_V1: u32 = 4;
 const LOCATOR_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-locator.v1";
 const LOCATOR_SCHEMA_VERSION_V1: u32 = 3;
 const SEMANTIC_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION_V1: u32 = 7;
+const SEMANTIC_SCHEMA_VERSION_V1: u32 = 8;
 const PRODUCT_HISTORY_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION_V1: u32 = 3;
 const READER_PROJECTOR_VERSIONS_V1: &[(&str, u32)] =
@@ -567,6 +569,7 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
     truth_cursor: TruthCursor,
     events: &[ShoreEvent],
     semantic_snapshot: &SemanticSnapshot,
+    compact_document_projection: &ChangeDocumentProjectionV1,
 ) -> Result<ChangeReaderProfileReceiptV3> {
     let StoreCapabilityStatus::Ready {
         activation_id,
@@ -589,6 +592,22 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
             inspection.cursor.event_count, truth_cursor.sequence
         )));
     }
+    let strict_projection = crate::session::project_changes(events)?;
+    if semantic_snapshot.changes != strict_projection {
+        return Err(ShoreError::Message(
+            "compact Change semantic projection diverges from strict replay".to_owned(),
+        ));
+    }
+    let strict_document_projection = crate::session::project_change_documents(events)?;
+    if compact_document_projection != &strict_document_projection {
+        return Err(ShoreError::Message(
+            "compact Change document projection diverges from strict replay".to_owned(),
+        ));
+    }
+    crate::documents::ChangeDocumentFacadeV1::new(
+        semantic_snapshot.changes.clone(),
+        compact_document_projection.clone(),
+    )?;
 
     let locator_checkpoint = publication_locator_checkpoint(truth_cursor)
         .map_err(|error| ShoreError::Message(error.to_string()))?;
@@ -604,8 +623,6 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
         truth_cursor,
     )
     .map_err(|error| ShoreError::Message(error.to_string()))?;
-    let projection = crate::session::project_changes(events)?;
-    let document_projection = crate::session::project_change_documents(events)?;
     let mut receipt = ChangeReaderProfileReceiptV3 {
         schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V3.to_owned(),
         version: 3,
@@ -638,9 +655,11 @@ pub(crate) fn build_change_reader_profile_receipt_v3(
         document_versions: reader_document_versions_v1(),
         fact_availability: fact_availability(events),
         resource_availability: resource_availability(events)?,
-        projection_sha256: sha256_json_prefixed(&serde_json::to_value(projection)?)?,
+        projection_sha256: sha256_json_prefixed(&serde_json::to_value(
+            &semantic_snapshot.changes,
+        )?)?,
         document_projection_sha256: sha256_json_prefixed(&serde_json::to_value(
-            document_projection,
+            compact_document_projection,
         )?)?,
         semantic_receipt: semantic_snapshot.semantic_receipt.clone(),
         reader_document_registry_sha256: reader_document_registry_sha256_v1()
@@ -1189,6 +1208,22 @@ struct ReaderReceiptPreimage<'a> {
     semantic_receipt: &'a str,
 }
 
+fn compact_change_document_facts(facts: &[SemanticFact]) -> Vec<ChangeDocumentProjectionFact> {
+    facts
+        .iter()
+        .filter_map(|fact| {
+            fact.change.clone().map(|change| {
+                ChangeDocumentProjectionFact::new(
+                    change,
+                    EventId::new(fact.event_id.clone()),
+                    ActorId::new(fact.actor_id.clone()),
+                    fact.track_id.clone().map(TrackId::new),
+                )
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn build_change_semantic_generation(
     inspection: &JournalInspection,
 ) -> Result<ChangeSemanticGenerationV2> {
@@ -1255,20 +1290,26 @@ pub(crate) fn build_change_semantic_generation(
         })
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| ShoreError::Message(error.to_string()))?;
-    if SemanticSnapshot::audit_from_facts(cursor, &rebuilt_facts)
-        .map_err(|error| ShoreError::Message(error.to_string()))?
-        .changes
-        != projection
-    {
+    let rebuilt_snapshot = SemanticSnapshot::audit_from_facts(cursor, &rebuilt_facts)
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let compact_projection = rebuilt_snapshot.changes;
+    if compact_projection != projection {
         return Err(ShoreError::Message(
             "rebuilt derived Change facts diverge from strict replay".to_owned(),
+        ));
+    }
+    let document_facts = compact_change_document_facts(&rebuilt_facts);
+    let compact_document_projection = project_change_documents_from_facts(&document_facts)?;
+    if compact_document_projection != document_projection {
+        return Err(ShoreError::Message(
+            "rebuilt derived Change document facts diverge from strict replay".to_owned(),
         ));
     }
 
     let fact_availability = fact_availability(&events);
     let resource_availability = resource_availability(&events)?;
     let document_versions = reader_document_versions_v1();
-    let projection_sha256 = sha256_json_prefixed(&serde_json::to_value(&projection)?)?;
+    let projection_sha256 = sha256_json_prefixed(&serde_json::to_value(&compact_projection)?)?;
     let mut reader_profile = ChangeReaderProfileReceiptV2 {
         schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V2.to_owned(),
         version: 2,
@@ -1279,7 +1320,7 @@ pub(crate) fn build_change_semantic_generation(
         resource_availability,
         projection_sha256,
         document_projection_sha256: sha256_json_prefixed(&serde_json::to_value(
-            &document_projection,
+            &compact_document_projection,
         )?)?,
         semantic_receipt: semantic_snapshot.semantic_receipt,
         receipt_sha256: String::new(),
@@ -1290,8 +1331,8 @@ pub(crate) fn build_change_semantic_generation(
         schema: CHANGE_SEMANTIC_GENERATION_SCHEMA_V2.to_owned(),
         version: 2,
         facts,
-        projection,
-        document_projection,
+        projection: compact_projection,
+        document_projection: compact_document_projection,
         reader_profile,
     })
 }
@@ -1863,6 +1904,91 @@ mod tests {
             );
             assert!(inspection.cursor.journal_record_count >= inspection.cursor.event_count);
         }
+    }
+
+    #[test]
+    fn v3_receipt_requires_strict_and_compact_change_document_parity() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let inspection = inspect_journal_records(backend.journal().as_ref()).unwrap();
+        let events = inspection
+            .event_entries
+            .iter()
+            .map(|entry| {
+                EventStore::decode_qualification_entry(
+                    entry.key_digest.clone(),
+                    entry.bytes.clone(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let truth_cursor = TruthCursor::new(1, inspection.cursor.event_count);
+        let semantic_facts = events
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                SemanticFact::from_event(
+                    TruthCursor::new(1, u64::try_from(index + 1).unwrap()),
+                    event,
+                    contract_raw_hash('f'),
+                )
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        let compact_snapshot = SemanticSnapshot::audit_from_facts(truth_cursor, &semantic_facts)
+            .expect("compact semantic projection");
+        let compact_facts = compact_change_document_facts(&semantic_facts);
+        let compact_documents = project_change_documents_from_facts(&compact_facts)
+            .expect("compact Change document projection");
+
+        let StoreCapabilityStatus::Ready { completion_id, .. } = &inspection.status else {
+            panic!("fixture must provide completed Change authority");
+        };
+        let activation = contract_capability_binding(
+            &inspection,
+            "store_capability_activation:review_change_revision_v1:root",
+        );
+        let completion = contract_capability_binding(
+            &inspection,
+            format!("bulk_adoption_completion:{completion_id}"),
+        );
+        let build = |snapshot: &SemanticSnapshot, documents: &ChangeDocumentProjectionV1| {
+            build_change_reader_profile_receipt_v3(
+                "generation:compact-parity",
+                "store:compact-parity",
+                &inspection,
+                activation.record_sha256.clone(),
+                completion.record_sha256.clone(),
+                JournalChangeStamp::Absent,
+                truth_cursor,
+                &events,
+                snapshot,
+                documents,
+            )
+        };
+
+        build(&compact_snapshot, &compact_documents)
+            .expect("matching compact projection may publish V3");
+
+        let mut changed_semantic = compact_snapshot.clone();
+        changed_semantic.changes = ChangeProjection::default();
+        assert!(
+            build(&changed_semantic, &compact_documents).is_err(),
+            "V3 publication must reject changed compact semantic state"
+        );
+
+        let mut changed = compact_documents;
+        changed
+            .diagnostics
+            .push("changed_compact_provenance".to_owned());
+        changed.projection_stamp =
+            crate::session::change_document_projection_stamp(&compact_snapshot.changes, &changed)
+                .unwrap();
+        assert!(
+            build(&compact_snapshot, &changed).is_err(),
+            "V3 publication must reject changed compact document provenance"
+        );
     }
 
     #[test]

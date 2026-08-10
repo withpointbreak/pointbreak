@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
     AppendCrashPoint, BootstrapPopulationEntry, CursorLedgerError, CursorLedgerIdentity,
-    CursorLedgerInventory, LocatorInventory, ProductHistoryFact, SemanticInventory,
-    SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError,
-    StoreWriterLock,
+    CursorLedgerInventory, LocatorInventory, MaterializedChangeProjection, ProductHistoryFact,
+    ProposalCarrierLocator, SemanticInventory, SqliteCursorLedger, SqliteLocator,
+    SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
 };
 use crate::error::Result as ShoreResult;
-use crate::model::RevisionId;
+use crate::model::{RevisionId, RevisionRefV1};
 use crate::session::EventWriteOutcome;
 use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, TruthAuthoritySnapshot, TruthCursor, TruthHead,
@@ -614,6 +614,21 @@ impl DerivedAccessService {
     ) -> Result<LocatorRead<SemanticSnapshot>, DerivedAccessServiceError> {
         let observed = self.cursor.head()?.cursor;
         Ok(self.semantic.materialized_audit_snapshot(observed)?)
+    }
+
+    pub(crate) fn semantic_materialized_change_projection(
+        &self,
+    ) -> Result<LocatorRead<MaterializedChangeProjection>, DerivedAccessServiceError> {
+        let observed = self.cursor.head()?.cursor;
+        Ok(self.semantic.materialized_change_projection(observed)?)
+    }
+
+    pub(crate) fn proposal_carrier_locators(
+        &self,
+        exact: &RevisionRefV1,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<ProposalCarrierLocator>>, DerivedAccessServiceError> {
+        Ok(self.semantic.proposal_carrier_locators(exact, observed)?)
     }
 
     pub(crate) fn semantic_materialized_attention_snapshot(

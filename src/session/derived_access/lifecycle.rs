@@ -741,6 +741,23 @@ impl DerivedAccessLifecycle {
                 ),
                 strict_events.clone(),
             )?;
+            let compact_change_projection =
+                match service.semantic_materialized_change_projection()? {
+                    LocatorRead::Ready(projection) => projection,
+                    LocatorRead::CatchUpRequired { applied, observed } => {
+                        return Err(LifecycleError::Validation(format!(
+                            "candidate Change projection remained behind after rebuild: \
+                             {applied:?} != {observed:?}"
+                        )));
+                    }
+                };
+            if compact_change_projection.as_of != head
+                || compact_change_projection.projection != semantic_snapshot.changes
+            {
+                return Err(LifecycleError::Validation(
+                    "materialized Change projection differs from the candidate snapshot".to_owned(),
+                ));
+            }
             let strict_complete = lifecycle_progress(
                 GenerationProgressPhase::StrictVerification,
                 population_total,
@@ -767,19 +784,27 @@ impl DerivedAccessLifecycle {
                 service,
                 head,
                 semantic_snapshot,
+                compact_change_projection,
                 strict_events,
                 change_inspection,
                 bootstrap_stamp,
             ))
         })();
-        let (service, head, semantic_snapshot, strict_events, change_inspection, bootstrap_stamp) =
-            match candidate_result {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    self.paths.discard_staging(&generation_id)?;
-                    return Err(error);
-                }
-            };
+        let (
+            service,
+            head,
+            semantic_snapshot,
+            compact_change_projection,
+            strict_events,
+            change_inspection,
+            bootstrap_stamp,
+        ) = match candidate_result {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(error);
+            }
+        };
 
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let finalization_phase = enter_derived_access_phase_v1(Phase::BootstrapFinalization);
@@ -878,6 +903,7 @@ impl DerivedAccessLifecycle {
                         head,
                         &strict_events,
                         &semantic_snapshot,
+                        &compact_change_projection.document_projection,
                     )
                     .map_err(|error| LifecycleError::Validation(error.to_string()))?;
                     let checkpoint = initial_reader_projection_checkpoint_v1(&receipt)

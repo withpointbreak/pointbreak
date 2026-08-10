@@ -8,9 +8,9 @@ use crate::crypto::SignerId;
 use crate::model::{
     AssessmentId, ChangeIdentityDescriptorV1, CheckpointId, EngagementId, InputRequestId,
     InputRequestResponseId, JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef,
-    RevisionId, RevisionSource, TargetRef, TaskTargetRef, TrackId, ValidationCheckId,
-    ValidationStatus, ValidationTarget, ValidationTrigger, WorkObjectId, WorkObjectType,
-    WorktreeCaptureMode,
+    RevisionId, RevisionRefV1, RevisionSource, TargetRef, TaskTargetRef, TrackId,
+    ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger, WorkObjectId,
+    WorkObjectType, WorktreeCaptureMode,
 };
 use crate::session::EventStore;
 use crate::session::derived_access::cursor::{AppendResolution, TruthCursor};
@@ -136,6 +136,40 @@ fn revision_event_for_engagement(
         occurred_at,
     )
     .expect("revision event")
+}
+
+fn proposal_carrier_event(
+    exact: &RevisionRefV1,
+    summary: Option<&str>,
+    idempotency_key: &str,
+    occurred_at: &str,
+) -> ShoreEvent {
+    ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        idempotency_key,
+        EventTarget::for_revision(
+            JournalId::new(JOURNAL),
+            exact.revision_id.clone(),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("proposal target"),
+        Writer::shore_local("0.9.0"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(ENGAGEMENT),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: exact.revision_id.clone(),
+                    object_id: ObjectId::new("obj:sha256:proposal-carrier"),
+                    git_provenance: None,
+                },
+                summary: summary.map(str::to_owned),
+                object_artifact_content_hash: exact.object_artifact_content_hash.clone(),
+                supersedes: Vec::new(),
+            },
+        },
+        occurred_at,
+    )
+    .expect("proposal carrier")
 }
 
 fn revision_target(revision_id: &RevisionId) -> EventTarget {
@@ -663,6 +697,321 @@ fn sqlite_change_facts_match_strict_replay_without_storing_event_bodies() {
 }
 
 #[test]
+fn proposal_carrier_locators_preserve_every_duplicate_at_one_exact_revision() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let exact = RevisionRefV1::new(
+        revision_id("proposal-carriers"),
+        format!("sha256:{}", "a".repeat(64)),
+    )
+    .expect("exact Revision");
+    let carriers = [
+        proposal_carrier_event(
+            &exact,
+            Some("equal proposal summary"),
+            "work_object_proposed:proposal-carrier:first",
+            "2026-08-04T00:02:01Z",
+        ),
+        proposal_carrier_event(
+            &exact,
+            Some("equal proposal summary"),
+            "work_object_proposed:proposal-carrier:equal-duplicate",
+            "2026-08-04T00:02:02Z",
+        ),
+        proposal_carrier_event(
+            &exact,
+            Some("conflicting proposal summary"),
+            "work_object_proposed:proposal-carrier:conflicting-duplicate",
+            "2026-08-04T00:02:03Z",
+        ),
+    ];
+    let other_artifact = RevisionRefV1::new(
+        exact.revision_id.clone(),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .expect("other exact Revision");
+    let conflicting_binding = proposal_carrier_event(
+        &other_artifact,
+        Some("conflicting artifact binding"),
+        "work_object_proposed:proposal-carrier:other-artifact",
+        "2026-08-04T00:02:04Z",
+    );
+    for (attempt, carrier) in carriers.iter().enumerate() {
+        append(&adapter, carrier, attempt);
+    }
+    append(&adapter, &conflicting_binding, carriers.len());
+
+    let rows = ready(
+        adapter
+            .proposal_carrier_locators(&exact, TruthCursor::new(1, 4))
+            .expect("proposal carrier locators"),
+    );
+    assert_eq!(rows.len(), carriers.len());
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.event_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        carriers
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        "equal and conflicting duplicates must remain independently discoverable"
+    );
+    for (index, (row, event)) in rows.iter().zip(&carriers).enumerate() {
+        assert_eq!(row.cursor, TruthCursor::new(1, index as u64 + 1));
+        assert_eq!(row.event_id.as_str(), event.event_id.as_str());
+        assert_eq!(row.event_type, EventType::WorkObjectProposed.as_str());
+        assert_eq!(row.payload_hash, event.payload_hash);
+        assert_eq!(row.revision, exact);
+        let expected_locator =
+            crate::canonical_hash::sha256_bytes_hex(event.idempotency_key.as_bytes());
+        assert_eq!(row.logical_reread_key_hash, expected_locator);
+        assert_eq!(row.replay_key, expected_locator);
+        assert_eq!(row.validation_witness.len(), 64);
+        assert!(
+            row.validation_witness
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    let prefix = ready(
+        adapter
+            .proposal_carrier_locators(&exact, TruthCursor::new(1, 2))
+            .expect("as-of proposal carrier locators"),
+    );
+    assert_eq!(prefix.len(), 2, "the exact lookup must respect its as-of");
+
+    let other_rows = ready(
+        adapter
+            .proposal_carrier_locators(&other_artifact, TruthCursor::new(1, 4))
+            .expect("other proposal carrier locators"),
+    );
+    assert_eq!(
+        other_rows.len(),
+        1,
+        "RevisionId equality alone must not weaken exact Revision binding"
+    );
+    assert_eq!(other_rows[0].event_id, conflicting_binding.event_id);
+    assert!(matches!(
+        adapter
+            .proposal_carrier_locators(&exact, TruthCursor::new(1, 5))
+            .expect("future proposal checkpoint"),
+        LocatorRead::CatchUpRequired {
+            applied: TruthCursor { sequence: 4, .. },
+            observed: TruthCursor { sequence: 5, .. }
+        }
+    ));
+
+    let expected_event_ids = carriers
+        .iter()
+        .map(|event| event.event_id.as_str().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    drop(adapter);
+    let reopened =
+        QualificationDerivedAccessAdapter::open(root.path(), CursorLedgerIdentity::new(STORE_ID))
+            .expect("reopen proposal carrier relation");
+    let restarted = ready(
+        reopened
+            .proposal_carrier_locators(&exact, TruthCursor::new(1, 4))
+            .expect("restarted proposal carrier locators"),
+    );
+    assert_eq!(
+        restarted
+            .iter()
+            .map(|row| row.event_id.as_str().to_owned())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_event_ids
+    );
+}
+
+#[test]
+fn proposal_carrier_locator_rejects_a_mismatched_receipt_epoch() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let exact = RevisionRefV1::new(
+        revision_id("proposal-receipt-epoch"),
+        format!("sha256:{}", "e".repeat(64)),
+    )
+    .expect("exact Revision");
+    append(
+        &adapter,
+        &proposal_carrier_event(
+            &exact,
+            None,
+            "work_object_proposed:proposal-carrier:receipt-epoch",
+            "2026-08-04T00:02:05Z",
+        ),
+        0,
+    );
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open corrupt sidecar");
+    connection
+        .execute("UPDATE cursor_receipt SET epoch = 2 WHERE sequence = 1", [])
+        .expect("corrupt receipt epoch");
+    drop(connection);
+
+    let error = adapter
+        .proposal_carrier_locators(&exact, TruthCursor::new(1, 1))
+        .expect_err("foreign receipt epoch must fail closed");
+    assert!(
+        error.to_string().contains("receipt epoch 2"),
+        "unexpected failure: {error}"
+    );
+}
+
+#[test]
+fn materialized_change_projection_rejects_a_mismatched_receipt_epoch() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let schedule = change_schedule();
+    for (attempt, event) in schedule.iter().take(3).enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open corrupt sidecar");
+    connection
+        .execute("UPDATE cursor_receipt SET epoch = 2 WHERE sequence = 2", [])
+        .expect("corrupt receipt epoch");
+    drop(connection);
+
+    let error = adapter
+        .semantic_materialized_change_projection()
+        .expect_err("foreign receipt epoch must fail closed");
+    assert!(
+        error.to_string().contains("receipt epoch 2"),
+        "unexpected failure: {error}"
+    );
+}
+
+#[test]
+fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
+    const SUMMARY_SENTINEL: &str = "PRIVATE PROPOSAL SUMMARY SENTINEL COMPACT READER";
+
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let exact = RevisionRefV1::new(
+        revision_id("proposal-inventory"),
+        format!("sha256:{}", "c".repeat(64)),
+    )
+    .expect("exact Revision");
+    append(
+        &adapter,
+        &proposal_carrier_event(
+            &exact,
+            Some(SUMMARY_SENTINEL),
+            "work_object_proposed:proposal-carrier:inventory",
+            "2026-08-04T00:03:01Z",
+        ),
+        0,
+    );
+
+    let inventory = adapter.semantic_inventory().expect("semantic inventory");
+    assert_eq!(inventory.schema_version, 8);
+    assert_eq!(inventory.proposal_carrier_count, 1);
+    assert!(
+        inventory
+            .tables
+            .iter()
+            .any(|table| table == "semantic_revision_proposal_carrier")
+    );
+    assert_eq!(
+        inventory.proposal_carrier_columns,
+        vec!["object_artifact_content_hash", "revision_id", "sequence",]
+    );
+    assert_eq!(
+        inventory.proposal_carrier_indexes,
+        vec!["semantic_revision_proposal_exact"]
+    );
+    assert_eq!(inventory.retained_body_object_bytes, 0);
+    for name in inventory
+        .proposal_carrier_columns
+        .iter()
+        .chain(&inventory.proposal_carrier_indexes)
+    {
+        let name = name.to_ascii_lowercase();
+        for forbidden in [
+            "summary",
+            "payload_json",
+            "event_json",
+            "document",
+            "prose",
+            "search",
+            "fts",
+        ] {
+            assert!(
+                !name.contains(forbidden),
+                "proposal schema contains {forbidden}"
+            );
+        }
+    }
+
+    let database = derived_database(root.path());
+    let query_connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open proposal index evidence");
+    let mut plan = query_connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT sequence
+             FROM semantic_revision_proposal_carrier
+             WHERE revision_id = ?1
+               AND object_artifact_content_hash = ?2
+               AND sequence <= ?3",
+        )
+        .expect("prepare proposal index evidence");
+    let plan_details = plan
+        .query_map(
+            rusqlite::params![
+                exact.revision_id.as_str(),
+                exact.object_artifact_content_hash,
+                1_i64
+            ],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("query proposal index evidence")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read proposal index evidence");
+    assert!(
+        plan_details
+            .iter()
+            .any(|detail| detail.contains("semantic_revision_proposal_exact")),
+        "exact proposal lookup must use its covering index: {plan_details:?}"
+    );
+    drop(plan);
+    drop(query_connection);
+
+    drop(adapter);
+    let sidecar_directory = database.parent().expect("sidecar directory");
+    let database_name = database
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("database name");
+    for entry in std::fs::read_dir(sidecar_directory).expect("read sidecar directory") {
+        let path = entry.expect("sidecar entry").path();
+        if !path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.starts_with(database_name))
+        {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("read SQLite carrier");
+        assert!(
+            !bytes
+                .windows(SUMMARY_SENTINEL.len())
+                .any(|window| window == SUMMARY_SENTINEL.as_bytes()),
+            "{} retained proposal summary prose",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn selected_engagement_retains_store_wide_change_semantics() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
@@ -880,7 +1229,14 @@ fn canonical_earlier_semantic_fact_replaces_a_later_representative() {
 fn semantic_delta_and_locator_checkpoint_commit_atomically() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
-    let event = revision_event("atomic", Vec::new(), "2026-07-27T16:00:00Z");
+    let exact = RevisionRefV1::new(revision_id("atomic"), format!("sha256:{}", "d".repeat(64)))
+        .expect("exact Revision");
+    let event = proposal_carrier_event(
+        &exact,
+        None,
+        "work_object_proposed:proposal-carrier:atomic",
+        "2026-07-27T16:00:00Z",
+    );
     SqliteCursorLedger::open(root.path(), CursorLedgerIdentity::new(STORE_ID))
         .expect("cursor")
         .append_event(&event, "truth-only")
@@ -900,6 +1256,14 @@ fn semantic_delta_and_locator_checkpoint_commit_atomically() {
             observed: TruthCursor { sequence: 1, .. }
         }
     ));
+    assert_eq!(
+        adapter
+            .semantic_inventory()
+            .expect("rolled-back inventory")
+            .proposal_carrier_count,
+        0,
+        "the proposal relation must roll back with its locator checkpoint"
+    );
 
     adapter.catch_up_to_head(32).expect("retry complete");
     assert_eq!(
@@ -910,6 +1274,22 @@ fn semantic_delta_and_locator_checkpoint_commit_atomically() {
         ready(adapter.semantic_audit_snapshot().expect("snapshot"))
             .state
             .event_count,
+        1
+    );
+    assert_eq!(
+        adapter
+            .semantic_inventory()
+            .expect("committed inventory")
+            .proposal_carrier_count,
+        1
+    );
+    assert_eq!(
+        ready(
+            adapter
+                .proposal_carrier_locators(&exact, TruthCursor::new(1, 1))
+                .expect("committed proposal carrier")
+        )
+        .len(),
         1
     );
 }
@@ -1095,7 +1475,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 7);
+    assert_eq!(inventory.schema_version, 8);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(
@@ -1116,6 +1496,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
             "semantic_request_fact",
             "semantic_response_fact",
             "semantic_revision_fact",
+            "semantic_revision_proposal_carrier",
             "semantic_state_projection",
             "semantic_validation_fact",
         ]

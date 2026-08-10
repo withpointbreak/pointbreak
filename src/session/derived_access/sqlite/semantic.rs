@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
+use crate::model::{ActorId, EventId, RevisionId, RevisionRefV1, TrackId};
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
@@ -30,12 +31,15 @@ use crate::session::event::{
     EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
     WorkObjectProposal, WorkObjectProposedPayload,
 };
-use crate::session::projection::change::{ChangeProjectionFact, project_changes_from_facts};
+use crate::session::projection::change::{
+    ChangeDocumentProjectionFact, ChangeProjectionFact, project_change_documents_from_facts,
+    project_changes_from_facts,
+};
 use crate::session::workflow::tag_completion_key;
 use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 7;
+const SEMANTIC_SCHEMA_VERSION: i64 = 8;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 3;
 
@@ -58,7 +62,34 @@ pub(crate) struct SemanticInventory {
     pub(crate) tables: Vec<String>,
     pub(crate) columns: Vec<String>,
     pub(crate) indexes: Vec<String>,
+    pub(crate) proposal_carrier_count: u64,
+    pub(crate) proposal_carrier_columns: Vec<String>,
+    pub(crate) proposal_carrier_indexes: Vec<String>,
     pub(crate) retained_body_object_bytes: u64,
+}
+
+/// One bodyless locator for an authoritative Revision proposal carrier.
+///
+/// Every field is either an exact identity, cursor/order locator, family, or
+/// validation witness. Human-authored proposal summaries remain solely in the
+/// loose authoritative carrier and are reopened only after selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProposalCarrierLocator {
+    pub(crate) cursor: TruthCursor,
+    pub(crate) logical_reread_key_hash: String,
+    pub(crate) replay_key: String,
+    pub(crate) event_id: EventId,
+    pub(crate) event_type: String,
+    pub(crate) payload_hash: String,
+    pub(crate) validation_witness: String,
+    pub(crate) revision: RevisionRefV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MaterializedChangeProjection {
+    pub(crate) as_of: TruthCursor,
+    pub(crate) projection: crate::session::ChangeProjection,
+    pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -262,7 +293,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 7),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 8),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -362,6 +393,16 @@ impl SqliteSemantic {
                      sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
                      fact_json TEXT NOT NULL
                  ) STRICT;
+                 CREATE TABLE IF NOT EXISTS semantic_revision_proposal_carrier (
+                     sequence INTEGER PRIMARY KEY
+                         REFERENCES semantic_revision_fact(sequence),
+                     revision_id TEXT NOT NULL,
+                     object_artifact_content_hash TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS semantic_revision_proposal_exact
+                     ON semantic_revision_proposal_carrier(
+                         revision_id, object_artifact_content_hash, sequence
+                     );
                  CREATE TABLE IF NOT EXISTS semantic_representative (
                      family_id INTEGER NOT NULL CHECK (family_id BETWEEN 1 AND 12),
                      semantic_key_prefix_id INTEGER
@@ -904,6 +945,108 @@ impl SqliteSemantic {
         ))
     }
 
+    /// Reconstruct the complete bodyless Change semantic and provenance pair
+    /// from every persisted Change fact at one checkpoint.
+    ///
+    /// This deliberately bypasses `semantic_representative`: duplicate claim
+    /// carriers are document provenance even when effective semantic state
+    /// deduplicates them.
+    pub(crate) fn materialized_change_projection(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedChangeProjection>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let (projection, document_projection) =
+            query_materialized_change_projections(&connection, observed.epoch, observed.sequence)?;
+        Ok(LocatorRead::Ready(MaterializedChangeProjection {
+            as_of: observed,
+            projection,
+            document_projection,
+        }))
+    }
+
+    /// Select every proposal carrier for one exact Revision without opening
+    /// authoritative bytes. The caller must hydrate and validate each returned
+    /// identity before presenting proposal prose.
+    pub(crate) fn proposal_carrier_locators(
+        &self,
+        exact: &RevisionRefV1,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<ProposalCarrierLocator>>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT receipt.epoch, proposal.sequence,
+                        receipt.logical_reread_key_hash, locator.replay_key,
+                        locator.event_id, locator.event_type, locator.payload_hash,
+                        receipt.validation_witness, proposal.revision_id,
+                        proposal.object_artifact_content_hash
+                 FROM semantic_revision_proposal_carrier AS proposal
+                 JOIN locator_event_text AS locator ON locator.sequence = proposal.sequence
+                 JOIN cursor_receipt_text AS receipt ON receipt.sequence = proposal.sequence
+                 WHERE proposal.revision_id = ?1
+                   AND proposal.object_artifact_content_hash = ?2
+                   AND locator.epoch = ?3
+                   AND proposal.sequence <= ?4
+                 ORDER BY proposal.sequence",
+            )
+            .map_err(|error| sqlite_error("prepare proposal carrier locators", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    exact.revision_id.as_str(),
+                    exact.object_artifact_content_hash,
+                    to_i64(observed.epoch, "proposal carrier epoch")?,
+                    to_i64(observed.sequence, "proposal carrier sequence")?,
+                ],
+                proposal_carrier_locator_from_sql,
+            )
+            .map_err(|error| sqlite_error("query proposal carrier locators", error))?;
+        let mut locators = Vec::new();
+        for row in rows {
+            let locator =
+                row.map_err(|error| sqlite_error("read proposal carrier locator", error))?;
+            if locator.cursor.epoch != observed.epoch {
+                return Err(SqliteSemanticError::Metadata(format!(
+                    "proposal carrier {} receipt epoch {} does not match locator epoch {}",
+                    locator.event_id.as_str(),
+                    locator.cursor.epoch,
+                    observed.epoch
+                )));
+            }
+            if locator.event_type != EventType::WorkObjectProposed.as_str()
+                || locator.revision != *exact
+            {
+                return Err(SqliteSemanticError::Metadata(format!(
+                    "proposal carrier {} does not match its indexed exact Revision",
+                    locator.event_id.as_str()
+                )));
+            }
+            locators.push(locator);
+        }
+        Ok(LocatorRead::Ready(locators))
+    }
+
     pub(crate) fn facts_for_revision_hydrated(
         &self,
         revision_id: &str,
@@ -1040,6 +1183,13 @@ impl SqliteSemantic {
                 row.get::<_, i64>(0)
             })
             .map_err(|error| sqlite_error("count semantic facts", error))?;
+        let proposal_carrier_count = connection
+            .query_row(
+                "SELECT count(*) FROM semantic_revision_proposal_carrier",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| sqlite_error("count proposal carriers", error))?;
         let retained_body_object_bytes = retained_body_object_bytes(&connection)?;
         Ok(SemanticInventory {
             profile_id,
@@ -1056,6 +1206,19 @@ impl SqliteSemantic {
             )?,
             columns: query_names(&connection, "PRAGMA table_info(semantic_event_fact)", 1)?,
             indexes: query_names(&connection, "PRAGMA index_list(semantic_event_fact)", 1)?,
+            proposal_carrier_count: u64::try_from(proposal_carrier_count).map_err(|_| {
+                SqliteSemanticError::Metadata("negative proposal carrier count".to_owned())
+            })?,
+            proposal_carrier_columns: query_names(
+                &connection,
+                "PRAGMA table_info(semantic_revision_proposal_carrier)",
+                1,
+            )?,
+            proposal_carrier_indexes: query_names(
+                &connection,
+                "PRAGMA index_list(semantic_revision_proposal_carrier)",
+                1,
+            )?,
             retained_body_object_bytes,
         })
     }
@@ -1386,6 +1549,21 @@ fn insert_family_fact(
         | SemanticFactKind::Other => return Ok(()),
     }
     .map_err(|error| locator_sqlite_error("insert semantic family fact", error))?;
+    if let Some(ChangeProjectionFact::Revision {
+        revision_id,
+        object_artifact_content_hash,
+    }) = &fact.change
+        && RevisionRefV1::new(revision_id.clone(), object_artifact_content_hash.clone()).is_ok()
+    {
+        transaction
+            .execute(
+                "INSERT INTO semantic_revision_proposal_carrier
+                 (sequence, revision_id, object_artifact_content_hash)
+                 VALUES (?1, ?2, ?3)",
+                params![sequence, revision_id.as_str(), object_artifact_content_hash],
+            )
+            .map_err(|error| locator_sqlite_error("insert proposal carrier", error))?;
+    }
     Ok(())
 }
 
@@ -2337,34 +2515,136 @@ fn query_materialized_change_projection(
     epoch: u64,
     sequence: u64,
 ) -> Result<crate::session::ChangeProjection, SqliteSemanticError> {
+    let facts = query_materialized_change_document_facts(connection, epoch, sequence)?;
+    project_changes_from_facts(
+        &facts
+            .into_iter()
+            .map(|fact| fact.change)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))
+}
+
+fn query_materialized_change_projections(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+) -> Result<
+    (
+        crate::session::ChangeProjection,
+        crate::session::ChangeDocumentProjectionV1,
+    ),
+    SqliteSemanticError,
+> {
+    let facts = query_materialized_change_document_facts(connection, epoch, sequence)?;
+    let projection_facts = facts
+        .iter()
+        .map(|fact| fact.change.clone())
+        .collect::<Vec<_>>();
+    let projection = project_changes_from_facts(&projection_facts)
+        .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))?;
+    let document_projection = project_change_documents_from_facts(&facts)
+        .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))?;
+    Ok((projection, document_projection))
+}
+
+fn query_materialized_change_document_facts(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+) -> Result<Vec<ChangeDocumentProjectionFact>, SqliteSemanticError> {
     let mut statement = connection
         .prepare(
-            "SELECT change_fact.fact_json
+            "SELECT change_fact.fact_json, locator.event_id,
+                    event.actor_id, locator.track_id,
+                    locator.epoch, receipt.epoch
              FROM semantic_change_fact AS change_fact
+             JOIN semantic_event_fact_text AS event
+               ON event.sequence = change_fact.sequence
              JOIN locator_event_text AS locator ON locator.sequence = change_fact.sequence
+             JOIN cursor_receipt_text AS receipt ON receipt.sequence = change_fact.sequence
              WHERE locator.epoch = ?1 AND change_fact.sequence <= ?2
-             ORDER BY locator.replay_key, change_fact.sequence",
+             ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
         )
-        .map_err(|error| sqlite_error("prepare materialized Change projection", error))?;
+        .map_err(|error| sqlite_error("prepare materialized Change projections", error))?;
     let rows = statement
         .query_map(
             params![
                 to_i64(epoch, "materialized Change epoch")?,
                 to_i64(sequence, "materialized Change sequence")?,
             ],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
         )
-        .map_err(|error| sqlite_error("query materialized Change projection", error))?;
+        .map_err(|error| sqlite_error("query materialized Change projections", error))?;
     let mut facts = Vec::new();
     for row in rows {
-        let json = row.map_err(|error| sqlite_error("read materialized Change fact", error))?;
-        facts.push(
+        let (json, event_id, actor_id, track_id, locator_epoch, receipt_epoch) =
+            row.map_err(|error| sqlite_error("read materialized Change fact", error))?;
+        let expected_epoch = to_i64(epoch, "materialized Change epoch")?;
+        if locator_epoch != expected_epoch || receipt_epoch != locator_epoch {
+            return Err(SqliteSemanticError::Metadata(format!(
+                "materialized Change fact {event_id} receipt epoch {receipt_epoch} does not match locator epoch {locator_epoch} at expected epoch {epoch}"
+            )));
+        }
+        facts.push(ChangeDocumentProjectionFact::new(
             serde_json::from_str::<ChangeProjectionFact>(&json)
                 .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Json(error)))?,
-        );
+            EventId::new(event_id),
+            ActorId::new(actor_id),
+            track_id.map(TrackId::new),
+        ));
     }
-    project_changes_from_facts(&facts)
-        .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))
+    Ok(facts)
+}
+
+fn proposal_carrier_locator_from_sql(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProposalCarrierLocator> {
+    let epoch = row.get::<_, i64>(0)?;
+    let sequence = row.get::<_, i64>(1)?;
+    let epoch = u64::try_from(epoch).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    let sequence = u64::try_from(sequence).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })?;
+    let revision_id = RevisionId::new(row.get::<_, String>(8)?);
+    let object_artifact_content_hash = row.get::<_, String>(9)?;
+    let revision =
+        RevisionRefV1::new(revision_id, object_artifact_content_hash).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    Ok(ProposalCarrierLocator {
+        cursor: TruthCursor::new(epoch, sequence),
+        logical_reread_key_hash: row.get(2)?,
+        replay_key: row.get(3)?,
+        event_id: EventId::new(row.get::<_, String>(4)?),
+        event_type: row.get(5)?,
+        payload_hash: row.get(6)?,
+        validation_witness: row.get(7)?,
+        revision,
+    })
 }
 
 fn semantic_fact_from_joined_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticFact> {
