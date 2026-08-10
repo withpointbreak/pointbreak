@@ -16,20 +16,19 @@
 		`${server.baseUrl}/#/?token=${encodeURIComponent(server.token)}`;
 	function isDeliberateChangeProjectionTransition(record, primaryBaseUrl) {
 		if (!record.insideAppendWindow || record.status !== 503) return false;
-		let responseUrl;
-		let primaryUrl;
-		try {
-			responseUrl = new URL(record.url);
-			primaryUrl = new URL(primaryBaseUrl);
-		} catch {
+		if (typeof record.url !== "string" || typeof primaryBaseUrl !== "string")
 			return false;
-		}
-		if (
-			responseUrl.origin !== primaryUrl.origin ||
-			(responseUrl.pathname !== "/api/v2/changes" &&
-				responseUrl.pathname !== "/api/v2/attention")
-		)
-			return false;
+		const primaryOrigin = primaryBaseUrl.endsWith("/")
+			? primaryBaseUrl.slice(0, -1)
+			: primaryBaseUrl;
+		const isPrimaryChangeRoute = [
+			"/api/v2/changes",
+			"/api/v2/attention",
+		].some((path) => {
+			const route = `${primaryOrigin}${path}`;
+			return record.url === route || record.url.startsWith(`${route}?`);
+		});
+		if (!isPrimaryChangeRoute) return false;
 		const body = record.body;
 		return (
 			typeof body === "object" &&

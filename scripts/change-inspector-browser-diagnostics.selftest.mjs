@@ -627,6 +627,9 @@ test("console 503 exemption accepts only typed primary Change transitions inside
 		{ ...typed, insideAppendWindow: false },
 		{ ...typed, status: 409 },
 		{ ...typed, url: `${baseUrl}/api/v2/profile` },
+		{ ...typed, url: `${baseUrl}/api/v2/changes-extra` },
+		{ ...typed, url: `${baseUrl}/api/v2/changes/` },
+		{ ...typed, url: `${baseUrl}.example/api/v2/changes` },
 		{ ...typed, url: "http://127.0.0.1:4999/api/v2/changes" },
 		{ ...typed, schema: "pointbreak.inspect-reader-profile" },
 		{
