@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod attention;
+pub(crate) mod changes;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;

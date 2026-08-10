@@ -1,3 +1,9 @@
+//! Session product APIs keep derived storage and runtime types private.
+//!
+//! ```compile_fail
+//! use pointbreak::session::{DerivedAccessRuntime, SqliteLocator};
+//! ```
+
 pub mod adapter;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod benchmark;
@@ -14,6 +20,16 @@ mod workflow;
 
 #[doc(hidden)]
 pub use derived_access::attention::{DerivedAttention, DerivedAttentionRoute};
+#[doc(hidden)]
+pub use derived_access::changes::{
+    DerivedAttentionPageV1, DerivedAttentionPresentationV1, DerivedAttentionReasonPresentationV1,
+    DerivedAttentionReasonV1, DerivedAuthorityFailureCodeV1, DerivedAuthorityFailureDocumentV1,
+    DerivedChangeAccess, DerivedChangeAttentionFilterV1, DerivedChangeAvailabilityFilterV1,
+    DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1, DerivedChangePageContinuationV1,
+    DerivedChangePageRequestV1, DerivedChangePageSelectionV1, DerivedChangePageV1,
+    DerivedChangePageWindowV1, DerivedProjectionFailureCodeV1,
+    DerivedProjectionUnavailableDocumentV1,
+};
 #[doc(hidden)]
 pub use derived_access::history::{
     DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryConflictPaths,
