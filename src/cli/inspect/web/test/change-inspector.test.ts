@@ -387,6 +387,20 @@ describe("Change-first composition", () => {
       expect(activation?.textContent).toBe("Open annotated diff");
       expect(document.activeElement).toBe(activation);
     });
+    // A same-event refresh replaces the projected detail body. Keep the
+    // primary exact action focused across that repaint.
+    const activationBeforeRefresh = document.querySelector<HTMLButtonElement>(
+      "[data-exact-diff-activation]",
+    );
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await vi.waitFor(() => {
+      const activation = document.querySelector<HTMLButtonElement>(
+        "[data-exact-diff-activation]",
+      );
+      expect(activation).not.toBe(activationBeforeRefresh);
+      expect(activation?.textContent).toBe("Open annotated diff");
+      expect(document.activeElement).toBe(activation);
+    });
     // HTMLElement.click() models the native button activation synthesized by
     // Enter; the document controller intentionally leaves native controls
     // alone.

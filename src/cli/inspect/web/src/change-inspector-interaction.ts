@@ -374,6 +374,7 @@ export function installChangeInspectorInteraction(
   let pendingDiffEntryFocus: DiffIdentity | null = null;
   let pendingDiffExitFocus: string | null = null;
   let pendingExactActivationFocus: string | null = null;
+  let focusedExactActivationIdentity: string | null = null;
   let diffReturnRoute: DiffReturnRoute | null = null;
   let commandFeedbackTimer: number | null = null;
   let copyAttempt = 0;
@@ -1376,6 +1377,11 @@ export function installChangeInspectorInteraction(
   document.addEventListener("click", onClick);
   const onFocusIn = (event: FocusEvent) => {
     const target = event.target instanceof Element ? event.target : null;
+    focusedExactActivationIdentity = target?.closest(
+      "#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]",
+    )
+      ? exactActivationIdentity(currentRoute)
+      : null;
     if (pendingChangePageSelection !== null && !target?.closest("#master")) {
       pendingChangePageSelection.restoreFocus = false;
     }
@@ -1957,6 +1963,7 @@ export function installChangeInspectorInteraction(
     pendingDiffEntryFocus = null;
     pendingDiffExitFocus = null;
     pendingExactActivationFocus = null;
+    focusedExactActivationIdentity = null;
     diffReturnRoute = null;
     copyAttempt += 1;
     if (commandFeedbackTimer !== null) {
@@ -2120,10 +2127,19 @@ export function installChangeInspectorInteraction(
         exactActivationIdentity(currentRoute);
       if (nextExactActivationIdentity === null) {
         pendingExactActivationFocus = null;
+        focusedExactActivationIdentity = null;
       } else if (
         currentRoute?.kind !== "diff" &&
-        nextExactActivationIdentity !== currentExactActivationIdentity
+        (nextExactActivationIdentity !== currentExactActivationIdentity ||
+          (nextExactActivationIdentity === focusedExactActivationIdentity &&
+            detailDomChanged &&
+            (active === null ||
+              active === document.body ||
+              !active.isConnected)))
       ) {
+        // Event details are projected again on refresh. If that replacement
+        // displaced the focused primary exact action, restore its new DOM
+        // instance without stealing focus after the user moved elsewhere.
         pendingExactActivationFocus = nextExactActivationIdentity;
       }
       const exactActivationTarget =
@@ -2181,6 +2197,7 @@ export function installChangeInspectorInteraction(
       if (exactActivationTarget !== null) {
         pendingExactActivationFocus = null;
         exactActivationTarget.focus({ preventScroll: true });
+        focusedExactActivationIdentity = nextExactActivationIdentity;
       } else if (entersVisibleDiff) {
         pendingDiffEntryFocus = null;
         // The full-frame diff replaces the split reader. Put focus on its

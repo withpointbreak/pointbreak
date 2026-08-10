@@ -2566,6 +2566,7 @@
     let pendingDiffEntryFocus = null;
     let pendingDiffExitFocus = null;
     let pendingExactActivationFocus = null;
+    let focusedExactActivationIdentity = null;
     let diffReturnRoute = null;
     let commandFeedbackTimer = null;
     let copyAttempt = 0;
@@ -3317,6 +3318,9 @@
     document.addEventListener("click", onClick);
     const onFocusIn = /* @__PURE__ */ __name((event) => {
       const target = event.target instanceof Element ? event.target : null;
+      focusedExactActivationIdentity = target?.closest(
+        "#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]"
+      ) ? exactActivationIdentity(currentRoute2) : null;
       if (pendingChangePageSelection !== null && !target?.closest("#master")) {
         pendingChangePageSelection.restoreFocus = false;
       }
@@ -3796,6 +3800,7 @@
       pendingDiffEntryFocus = null;
       pendingDiffExitFocus = null;
       pendingExactActivationFocus = null;
+      focusedExactActivationIdentity = null;
       diffReturnRoute = null;
       copyAttempt += 1;
       if (commandFeedbackTimer !== null) {
@@ -3891,7 +3896,8 @@
         const currentExactActivationIdentity = exactActivationIdentity(currentRoute2);
         if (nextExactActivationIdentity === null) {
           pendingExactActivationFocus = null;
-        } else if (currentRoute2?.kind !== "diff" && nextExactActivationIdentity !== currentExactActivationIdentity) {
+          focusedExactActivationIdentity = null;
+        } else if (currentRoute2?.kind !== "diff" && (nextExactActivationIdentity !== currentExactActivationIdentity || nextExactActivationIdentity === focusedExactActivationIdentity && detailDomChanged && (active3 === null || active3 === document.body || !active3.isConnected))) {
           pendingExactActivationFocus = nextExactActivationIdentity;
         }
         const exactActivationTarget = pendingExactActivationFocus === nextExactActivationIdentity ? document.querySelector(
@@ -3925,6 +3931,7 @@
         if (exactActivationTarget !== null) {
           pendingExactActivationFocus = null;
           exactActivationTarget.focus({ preventScroll: true });
+          focusedExactActivationIdentity = nextExactActivationIdentity;
         } else if (entersVisibleDiff) {
           pendingDiffEntryFocus = null;
           focusFallback(nextRoute);
