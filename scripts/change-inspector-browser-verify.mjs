@@ -1907,9 +1907,17 @@
 				height: layouts[0].height,
 			});
 			await page.waitForFunction(
-				() =>
-					getComputedStyle(document.querySelector("#detail-back")).display ===
-						"none" && document.activeElement?.id === "detail-close",
+				() => {
+					const exactAction = document.querySelector(
+						"#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]",
+					);
+					return (
+						getComputedStyle(document.querySelector("#detail-back")).display ===
+							"none" &&
+						exactAction !== null &&
+						document.activeElement === exactAction
+					);
+				},
 			);
 			expect(
 				await page.evaluate(() =>
