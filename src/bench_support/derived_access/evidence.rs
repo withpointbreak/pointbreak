@@ -16,7 +16,12 @@ use super::{
     QualificationDerivedAccessCountersV1, QualificationDerivedAccessEvaluationV1,
     QualificationDerivedAccessExecutionIdentityV1, QualificationDerivedAccessOperationV1,
     QualificationDerivedAccessPackageV1, QualificationDerivedAccessProcessScopeV1,
-    QualificationDerivedAccessStatusV1, QualificationDerivedAccessTierV1,
+    QualificationDerivedAccessProductIdentityV1, QualificationDerivedAccessStatusV1,
+    QualificationDerivedAccessTierV1, QualificationDerivedChangeControlBinaryIdentityV1,
+    QualificationDerivedChangeControlCaseV1, QualificationDerivedChangeControlEvidenceV1,
+    QualificationDerivedChangeEvidencePurposeV1, QualificationDerivedChangeFixtureV1,
+    QualificationDerivedChangeReadCaseV1, QualificationDerivedChangeReadEvidenceV1,
+    QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
     evaluate_qualification_derived_access_v1,
 };
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -84,6 +89,8 @@ pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-native-smoke-request.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-native-smoke-receipt.v1";
+pub const QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-change-read-receipt.v1";
 #[cfg(any(test, feature = "longitudinal-counting"))]
 pub const QUALIFICATION_DERIVED_ACCESS_PHASE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-phase-receipt.v1";
@@ -116,6 +123,273 @@ pub const QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1: &str = "--derived-acces
 pub const QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1: &str = "--derived-access-package";
 pub const QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1: &str =
     "--derived-access-verify-package";
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeReadReceiptV1 {
+    pub schema: String,
+    pub purpose: QualificationDerivedChangeEvidencePurposeV1,
+    pub execution: QualificationDerivedAccessExecutionIdentityV1,
+    pub product: QualificationDerivedAccessProductIdentityV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub fixture_builder_sha256: String,
+    pub activation_fixture_sha256: String,
+    pub completion_fixture_sha256: String,
+    pub fixture_inventory_sha256: String,
+    pub fixture_after_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_append_generation_sha256: Option<String>,
+    pub rows: Vec<QualificationDerivedChangeReadEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_cut_deficiencies: Vec<QualificationDerivedChangeReadCaseV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_binary_identities: Vec<QualificationDerivedChangeControlBinaryIdentityV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_rows: Vec<QualificationDerivedChangeControlEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub storage_rows: Vec<QualificationDerivedChangeStorageEvidenceV1>,
+    pub complete: bool,
+    pub receipt_sha256: String,
+}
+
+impl QualificationDerivedChangeReadReceiptV1 {
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.receipt_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1
+            || !self.complete
+            || self.rows.is_empty()
+        {
+            return Err("derived Change read receipt is incomplete".to_owned());
+        }
+        self.execution.validate()?;
+        self.product.validate()?;
+        let exact_source = self.product.is_exact_source_for(&self.execution);
+        match self.purpose {
+            QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+                if !exact_source || !self.pre_cut_deficiencies.is_empty() =>
+            {
+                return Err("Change read product differs from its exact harness source".to_owned());
+            }
+            QualificationDerivedChangeEvidencePurposeV1::PreCutFalsifier
+                if exact_source
+                    || !self.control_rows.is_empty()
+                    || !self.control_binary_identities.is_empty()
+                    || !self.storage_rows.is_empty() =>
+            {
+                return Err("pre-cut Change falsifier claims exact-source controls".to_owned());
+            }
+            _ => {}
+        }
+        if self.purpose == QualificationDerivedChangeEvidencePurposeV1::PreCutFalsifier {
+            let failed_cases = self
+                .rows
+                .iter()
+                .filter(|row| row.status == QualificationDerivedAccessStatusV1::Failed)
+                .map(|row| row.case)
+                .collect::<BTreeSet<_>>();
+            let declared_deficiencies = self
+                .pre_cut_deficiencies
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if failed_cases.is_empty()
+                || failed_cases.len() != self.pre_cut_deficiencies.len()
+                || failed_cases != declared_deficiencies
+            {
+                return Err(
+                    "pre-cut Change falsifier did not identify a failed matrix row".to_owned(),
+                );
+            }
+        }
+        validate_digest(&self.fixture_builder_sha256, "Change read fixture builder")?;
+        validate_digest(
+            &self.activation_fixture_sha256,
+            "Change read activation fixture",
+        )?;
+        validate_digest(
+            &self.completion_fixture_sha256,
+            "Change read completion fixture",
+        )?;
+        validate_digest(
+            &self.fixture_inventory_sha256,
+            "Change read fixture inventory",
+        )?;
+        validate_digest(
+            &self.fixture_after_inventory_sha256,
+            "Change read fixture after-inventory",
+        )?;
+        validate_digest(&self.fixture_witness_sha256, "Change read fixture witness")?;
+        match self.fixture {
+            QualificationDerivedChangeFixtureV1::TopologyV1 => {
+                if self.fixture_after_inventory_sha256 == self.fixture_inventory_sha256 {
+                    return Err("derived Change post-append fixture did not advance".to_owned());
+                }
+                validate_digest(
+                    self.post_append_generation_sha256
+                        .as_deref()
+                        .unwrap_or_default(),
+                    "Change read post-append generation",
+                )?;
+            }
+            _ if self.fixture_after_inventory_sha256 != self.fixture_inventory_sha256
+                || self.post_append_generation_sha256.is_some() =>
+            {
+                return Err("non-topology Change fixture mutated during evidence".to_owned());
+            }
+            _ => {}
+        }
+        validate_digest(&self.receipt_sha256, "Change read receipt")?;
+        if self.receipt_sha256 != self.canonical_sha256()? {
+            return Err("derived Change read receipt hash drifted".to_owned());
+        }
+        let identities = self
+            .rows
+            .iter()
+            .map(|row| (row.platform, row.fixture, row.case))
+            .collect::<BTreeSet<_>>();
+        if identities.len() != self.rows.len()
+            || self.rows.iter().any(|row| {
+                row.platform != self.execution.platform
+                    || row.fixture != self.fixture
+                    || row.fixture_inventory_sha256 != self.fixture_inventory_sha256
+                    || row.fixture_witness_sha256 != self.fixture_witness_sha256
+            })
+        {
+            return Err("derived Change read receipt mixes row authority".to_owned());
+        }
+        let product_identity_sha256 = self.product.canonical_sha256()?;
+        let execution_identity_sha256 = self.execution.canonical_sha256()?;
+        if self.rows.iter().any(|row| {
+            row.product_identity_sha256 != product_identity_sha256
+                || row.counter_execution_identity_sha256 != execution_identity_sha256
+                || row.counter_process_scope
+                    != QualificationDerivedAccessProcessScopeV1::QualificationHarness
+        }) {
+            return Err("derived Change read row identity drifted".to_owned());
+        }
+        let observed_cases = self
+            .rows
+            .iter()
+            .map(|row| row.case)
+            .collect::<BTreeSet<_>>();
+        let expected_cases = self
+            .fixture
+            .required_cases()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if observed_cases != expected_cases {
+            return Err("derived Change read receipt omitted required cases".to_owned());
+        }
+        if self.purpose == QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+            && self.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        {
+            let observed_control_binaries = self
+                .control_binary_identities
+                .iter()
+                .map(|identity| identity.kind)
+                .collect::<BTreeSet<_>>();
+            let expected_control_binaries =
+                super::QualificationDerivedChangeControlBinaryKindV1::ALL
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+            let observed_controls = self
+                .control_rows
+                .iter()
+                .map(|row| row.case)
+                .collect::<BTreeSet<_>>();
+            let expected_controls = QualificationDerivedChangeControlCaseV1::ALL
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            if observed_control_binaries != expected_control_binaries
+                || self.control_binary_identities.len() != expected_control_binaries.len()
+                || self.control_binary_identities.iter().any(|identity| {
+                    identity.validate().is_err() || !identity.is_exact_source_for(&self.execution)
+                })
+                || observed_controls != expected_controls
+                || self.control_rows.iter().any(|row| {
+                    let (expected_kind, expected_test_name) =
+                        super::qualification_derived_change_control_test_v1(row.case);
+                    let identity_sha256 = self
+                        .control_binary_identities
+                        .iter()
+                        .find(|identity| identity.kind == row.binary_kind)
+                        .and_then(|identity| identity.canonical_sha256().ok());
+                    let identity_binary_sha256 = self
+                        .control_binary_identities
+                        .iter()
+                        .find(|identity| identity.kind == row.binary_kind)
+                        .map(|identity| identity.binary_sha256.as_str());
+                    row.platform != self.execution.platform
+                        || row.status != QualificationDerivedAccessStatusV1::Passed
+                        || row.binary_kind != expected_kind
+                        || row.test_name != expected_test_name
+                        || row.command_sha256
+                            != super::qualification_derived_change_control_command_sha256_v1(
+                                expected_test_name,
+                            )
+                        || row.exit_code != 0
+                        || row.tests_run != 1
+                        || row.tests_passed != 1
+                        || row.product_identity_sha256 != product_identity_sha256
+                        || row.execution_identity_sha256 != execution_identity_sha256
+                        || identity_sha256.as_deref()
+                            != Some(row.test_binary_identity_sha256.as_str())
+                        || identity_binary_sha256 != Some(row.test_binary_sha256.as_str())
+                })
+            {
+                return Err("derived Change control receipt is incomplete".to_owned());
+            }
+        } else if !self.control_rows.is_empty() || !self.control_binary_identities.is_empty() {
+            return Err("non-topology Change receipt carries control evidence".to_owned());
+        }
+        let observed_storage_phases = self
+            .storage_rows
+            .iter()
+            .map(|row| row.phase)
+            .collect::<BTreeSet<_>>();
+        let expected_storage_phases = match (self.purpose, self.fixture) {
+            (
+                QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification,
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+            ) => BTreeSet::from([
+                QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+            ]),
+            (QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification, _) => {
+                BTreeSet::from([QualificationDerivedChangeStoragePhaseV1::InitialPublication])
+            }
+            (QualificationDerivedChangeEvidencePurposeV1::PreCutFalsifier, _) => BTreeSet::new(),
+        };
+        if observed_storage_phases != expected_storage_phases
+            || self.storage_rows.iter().any(|row| {
+                row.platform != self.execution.platform
+                    || row.fixture != self.fixture
+                    || row.fixture_inventory_sha256 != self.fixture_inventory_sha256
+                    || row.fixture_witness_sha256 != self.fixture_witness_sha256
+                    || row.product_identity_sha256 != product_identity_sha256
+                    || row.execution_identity_sha256 != execution_identity_sha256
+                    || row.witness.validate().is_err()
+            })
+        {
+            return Err("derived Change storage receipt is incomplete".to_owned());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -346,6 +620,7 @@ fn phase_counters_overflowed(counters: &LongitudinalCountersV1) -> bool {
         counters.authority_identity_rows_scanned,
         counters.change_candidates,
         counters.change_candidate_current_revisions,
+        counters.change_capability_carriers_opened,
         counters.change_proposal_carriers_opened,
         counters.change_proposal_carriers_validated,
         counters.change_support_carriers_opened,
@@ -2947,8 +3222,31 @@ pub(super) fn validate_summaries_against_raw(
     let mut expected_lifecycle = Vec::new();
     let mut expected_resources = None;
     let mut expected_bootstrap = Vec::new();
+    let mut expected_change_reads = Vec::new();
+    let mut expected_change_controls = Vec::new();
+    let mut expected_change_storage = Vec::new();
+    let mut expected_products = Vec::new();
+    let mut expected_control_binaries = Vec::new();
     for value in raw_receipts {
         match value.get("schema").and_then(serde_json::Value::as_str) {
+            Some(QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1) => {
+                let receipt: QualificationDerivedChangeReadReceiptV1 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                if receipt.purpose
+                    != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+                {
+                    return Err("pre-cut Change falsifier is not package evidence".to_owned());
+                }
+                require_packaged_execution(package, &receipt.execution)?;
+                if !expected_products.contains(&receipt.product) {
+                    expected_products.push(receipt.product.clone());
+                }
+                expected_control_binaries.extend(receipt.control_binary_identities);
+                expected_change_controls.extend(receipt.control_rows);
+                expected_change_storage.extend(receipt.storage_rows);
+                expected_change_reads.extend(receipt.rows);
+            }
             Some(QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1) => {
                 let receipt: QualificationDerivedAccessNativeSmokeRunReceiptV1 =
                     serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
@@ -3031,6 +3329,16 @@ pub(super) fn validate_summaries_against_raw(
         || package.resources != expected_resources
         || unordered_json_rows(&package.bootstrap_rows)?
             != unordered_json_rows(&expected_bootstrap)?
+        || unordered_json_rows(&package.change_read_rows)?
+            != unordered_json_rows(&expected_change_reads)?
+        || unordered_json_rows(&package.change_control_rows)?
+            != unordered_json_rows(&expected_change_controls)?
+        || unordered_json_rows(&package.change_storage_rows)?
+            != unordered_json_rows(&expected_change_storage)?
+        || unordered_json_rows(&package.product_identities)?
+            != unordered_json_rows(&expected_products)?
+        || unordered_json_rows(&package.change_control_binary_identities)?
+            != unordered_json_rows(&expected_control_binaries)?
     {
         return Err("derived-access package summaries differ from raw receipts".to_owned());
     }
@@ -3097,9 +3405,13 @@ pub fn build_qualification_derived_access_fragment_v1(
     request.execution.validate()?;
     let mut package = QualificationDerivedAccessPackageV1 {
         schema: super::QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
-        evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
+        evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
+        evaluator_procedure_sha256:
+            super::qualification_derived_access_evaluator_v3_procedure_sha256(),
         proposed_profile_id: "sqlite-wal-bodyless-v1".to_owned(),
         execution_identities: vec![request.execution.clone()],
+        product_identities: Vec::new(),
+        change_control_binary_identities: Vec::new(),
         root_bindings: Vec::new(),
         d0_rows: Vec::new(),
         operation_rows: Vec::new(),
@@ -3107,6 +3419,9 @@ pub fn build_qualification_derived_access_fragment_v1(
         resources: None,
         allocation_rows: Vec::new(),
         bootstrap_rows: Vec::new(),
+        change_read_rows: Vec::new(),
+        change_control_rows: Vec::new(),
+        change_storage_rows: Vec::new(),
         complete: false,
     };
     let mut raw_receipts = Vec::new();
@@ -3120,6 +3435,30 @@ pub fn build_qualification_derived_access_fragment_v1(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "derived-access receipt omitted schema".to_owned())?;
         match schema {
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1 => {
+                let receipt: QualificationDerivedChangeReadReceiptV1 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                if receipt.execution != request.execution {
+                    return Err("Change read receipt authority drifted".to_owned());
+                }
+                if receipt.purpose
+                    != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+                {
+                    return Err(
+                        "pre-cut Change falsifier is not admissible package evidence".to_owned(),
+                    );
+                }
+                if !package.product_identities.contains(&receipt.product) {
+                    package.product_identities.push(receipt.product);
+                }
+                package
+                    .change_control_binary_identities
+                    .extend(receipt.control_binary_identities);
+                package.change_control_rows.extend(receipt.control_rows);
+                package.change_storage_rows.extend(receipt.storage_rows);
+                package.change_read_rows.extend(receipt.rows);
+            }
             QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1 => {
                 let receipt: QualificationDerivedAccessNativeSmokeRunReceiptV1 =
                     serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
@@ -3496,10 +3835,12 @@ pub fn assemble_qualification_derived_access_package_v1(
         .ok_or_else(|| "derived-access evidence inputs are absent".to_owned())?;
     let schema = first.schema.clone();
     let evaluator_revision = first.evaluator_revision.clone();
+    let evaluator_procedure_sha256 = first.evaluator_procedure_sha256.clone();
     let proposed_profile_id = first.proposed_profile_id.clone();
     if packages.iter().any(|package| {
         package.schema != schema
             || package.evaluator_revision != evaluator_revision
+            || package.evaluator_procedure_sha256 != evaluator_procedure_sha256
             || package.proposed_profile_id != proposed_profile_id
     }) {
         return Err("derived-access evidence inputs mix package authority".to_owned());
@@ -3518,8 +3859,17 @@ pub fn assemble_qualification_derived_access_package_v1(
     let combined = QualificationDerivedAccessPackageV1 {
         schema,
         evaluator_revision,
+        evaluator_procedure_sha256,
         proposed_profile_id,
         execution_identities,
+        product_identities: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.product_identities))
+            .collect(),
+        change_control_binary_identities: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.change_control_binary_identities))
+            .collect(),
         root_bindings: packages
             .iter_mut()
             .flat_map(|package| std::mem::take(&mut package.root_bindings))
@@ -3544,6 +3894,18 @@ pub fn assemble_qualification_derived_access_package_v1(
         bootstrap_rows: packages
             .iter_mut()
             .flat_map(|package| std::mem::take(&mut package.bootstrap_rows))
+            .collect(),
+        change_read_rows: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.change_read_rows))
+            .collect(),
+        change_control_rows: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.change_control_rows))
+            .collect(),
+        change_storage_rows: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.change_storage_rows))
             .collect(),
         complete: true,
     };
@@ -4018,8 +4380,11 @@ impl QualificationDerivedAccessPackageV1 {
             schema: super::QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
             evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
                 .to_owned(),
+            evaluator_procedure_sha256: String::new(),
             proposed_profile_id: "sqlite-wal-bodyless-v1".to_owned(),
             execution_identities: Vec::new(),
+            product_identities: Vec::new(),
+            change_control_binary_identities: Vec::new(),
             root_bindings: Vec::new(),
             d0_rows: Vec::new(),
             operation_rows: Vec::new(),
@@ -4027,6 +4392,9 @@ impl QualificationDerivedAccessPackageV1 {
             resources: None,
             allocation_rows: Vec::new(),
             bootstrap_rows: Vec::new(),
+            change_read_rows: Vec::new(),
+            change_control_rows: Vec::new(),
+            change_storage_rows: Vec::new(),
             complete: false,
         }
     }

@@ -1761,6 +1761,37 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn qualification_cli_control_binary_attests_clean_source() {
+        if let Ok(expected_commit) =
+            std::env::var("POINTBREAK_QUALIFICATION_EXPECTED_CONTROL_COMMIT")
+        {
+            assert_eq!(env!("POINTBREAK_BUILD_SOURCE"), "git");
+            assert_eq!(env!("POINTBREAK_BUILD_COMMIT"), expected_commit);
+            assert_eq!(env!("POINTBREAK_BUILD_DIRTY"), "false");
+            let build_configuration = format!(
+                "debug={},gix={},bench={},longitudinal-counting={},lmdb-proof={},gix-parity={}",
+                cfg!(debug_assertions),
+                cfg!(feature = "gix"),
+                cfg!(feature = "bench"),
+                cfg!(feature = "longitudinal-counting"),
+                cfg!(feature = "lmdb-proof"),
+                cfg!(feature = "gix-parity"),
+            );
+            assert_eq!(
+                build_configuration,
+                "debug=true,gix=true,bench=true,longitudinal-counting=true,lmdb-proof=false,gix-parity=false"
+            );
+        }
+        println!(
+            "pointbreak-control-source={} commit={} dirty={} longitudinal-counting={}",
+            env!("POINTBREAK_BUILD_SOURCE"),
+            env!("POINTBREAK_BUILD_COMMIT"),
+            env!("POINTBREAK_BUILD_DIRTY"),
+            cfg!(feature = "longitudinal-counting"),
+        );
+    }
+
     const SERVER_SOURCE: &str = include_str!("server.rs");
     const API_SOURCE: &str = include_str!("api.rs");
 
@@ -1870,10 +1901,25 @@ mod tests {
             "if path == \"/api/v2/attention\"",
             "if path.starts_with(\"/api/v2/changes/\")",
         );
-        for (name, derived_route) in [
-            ("Profile", profile),
-            ("Changes", changes),
-            ("Attention", attention),
+        for (name, derived_route, authoritative_helper, derived_helper) in [
+            (
+                "Profile",
+                profile,
+                "authoritative_change_v2_profile_response",
+                "api::change_v2_profile_json",
+            ),
+            (
+                "Changes",
+                changes,
+                "authoritative_changes_v2_response",
+                "api::changes_v2_json",
+            ),
+            (
+                "Attention",
+                attention,
+                "authoritative_change_attention_v2_response",
+                "api::change_attention_v2_json",
+            ),
         ] {
             assert!(
                 derived_route.contains("state.derived_changes"),
@@ -1882,6 +1928,34 @@ mod tests {
             assert!(
                 !derived_route.contains("state.change_reader_cache"),
                 "{name} must not enter the strict Change reader cache"
+            );
+            assert_source_order(
+                derived_route,
+                "!state.derived_changes.is_active()",
+                authoritative_helper,
+            );
+            assert_source_order(derived_route, authoritative_helper, derived_helper);
+        }
+        let explicit_off_helpers = source_between(
+            SERVER_SOURCE,
+            "fn authoritative_change_v2_profile_response(",
+            "fn explicit_authoritative_response(",
+        );
+        assert_eq!(
+            explicit_off_helpers
+                .matches("&state.change_reader_cache")
+                .count(),
+            3,
+            "every explicit-off Change collection must use the strict reader cache"
+        );
+        for forbidden in [
+            "state.derived_changes",
+            "read_change_semantics_for_qualification",
+            "DerivedChangeAccess",
+        ] {
+            assert!(
+                !explicit_off_helpers.contains(forbidden),
+                "explicit-off Change routing must not enter {forbidden}"
             );
         }
         assert!(timeline.contains("state.change_reader_cache"));

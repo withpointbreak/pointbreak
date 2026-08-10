@@ -2,13 +2,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(feature = "longitudinal-counting")]
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde::{Deserialize, Serialize};
 
 use super::adapter::QualificationDerivedAccessAdapter;
 use super::sqlite_cursor::{BootstrapControl, CursorLedgerIdentity, SqliteCursorLedger};
 use super::{
     QualificationDerivedAccessCountersV1, QualificationDerivedAccessOperationV1,
-    qualification_derived_access_contract_v1,
+    QualificationDerivedChangeFixtureV1, QualificationDerivedStorageForbiddenProbeHashesV1,
+    qualification_derived_access_contract_v1, qualification_derived_change_storage_probe_hashes_v1,
 };
 use crate::bench_support::longitudinal::{
     LongitudinalCapacityOwnershipV1, LongitudinalExecutionIdentityV1,
@@ -22,7 +25,14 @@ use crate::bench_support::longitudinal::{
     LongitudinalCountersV1, LongitudinalCountingScopeV1, capture_longitudinal_process_snapshot_v1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
+#[cfg(feature = "longitudinal-counting")]
+use crate::crypto::{EventSignatureBytes, SignerId};
 use crate::model::JournalId;
+#[cfg(feature = "longitudinal-counting")]
+use crate::model::{
+    ChangeId, ChangeIdentityDescriptorV1, EngagementId, ObjectId, ObservationId, ReviewTargetRef,
+    RevisionId, RevisionRefV1, TrackId,
+};
 use crate::session::benchmark::{
     LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
     write_longitudinal_records_v1,
@@ -33,11 +43,25 @@ use crate::session::derived_access::locator::{ChronologicalWindowRequest, Locato
 use crate::session::derived_access::oracle::strict_bodyless_materialized_snapshot;
 #[cfg(feature = "longitudinal-counting")]
 use crate::session::derived_access::product_contract::DerivedAccessProfile;
+#[cfg(feature = "longitudinal-counting")]
+use crate::session::derived_access::writer::DerivedWriteCoordinator;
+#[cfg(feature = "longitudinal-counting")]
+use crate::session::event::{
+    ArtifactRemovedPayload, BodyContentType, EventSignature, EventSignatureRecordedPayload,
+    EventToBeSigned, ReviewObservationRecordedPayload, Revision, build_change_declared,
+    build_membership_asserted, build_revision_relation_asserted,
+    event_signature_pre_authentication_encoding,
+};
 use crate::session::event::{
     EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload, Writer,
 };
-use crate::session::{EventStore, StoreMode, set_store_mode_for_repo, store_dir_for_repo};
+use crate::session::{
+    ChangeLifecycleV1, ChangeTopologyV1, EventStore, StoreMode, set_store_mode_for_repo,
+    store_dir_for_repo,
+};
+#[cfg(feature = "longitudinal-counting")]
+use crate::session::{EventWriteOutcome, opaque_path_identity};
 
 pub const QUALIFICATION_DERIVED_ACCESS_D0_MATERIALIZER_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-d0-materializer.v1";
@@ -51,6 +75,333 @@ pub const QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-bootstrap-smoke.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_D0_PUBLIC_SEED_HEX_V1: &str =
     "27894b1b25292789e3e33911fa1d3e8ec80a7bc8e39069b09e9bf528a6e4b33c";
+pub const QUALIFICATION_DERIVED_CHANGE_FIXTURE_WITNESS_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-change-fixture-witness.v1";
+pub const QUALIFICATION_DERIVED_CHANGE_FIXTURE_MODE_V1: &str =
+    "--derived-change-fixture-materialize";
+pub const QUALIFICATION_DERIVED_CHANGE_ACTIVATION_FIXTURE_V1: &str =
+    "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json";
+pub const QUALIFICATION_DERIVED_CHANGE_COMPLETION_FIXTURE_V1: &str =
+    "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json";
+pub const QUALIFICATION_DERIVED_CHANGE_STORAGE_SUMMARY_PROBE_V1: &str =
+    "qualification storage summary sentinel v1";
+pub const QUALIFICATION_DERIVED_CHANGE_STORAGE_PROSE_PROBE_V1: &str =
+    "qualification storage prose sentinel v1";
+#[cfg(feature = "longitudinal-counting")]
+pub const QUALIFICATION_DERIVED_CHANGE_ACTIVATION_FIXTURE_SHA256_V1: &str =
+    "20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf";
+#[cfg(feature = "longitudinal-counting")]
+const QUALIFICATION_DERIVED_CHANGE_COMPLETION_FIXTURE_SHA256_V1: &str =
+    "b0c6360bd8c90a2e5ae336f3a2caf60aceb205ac3bdf53971bcfcd66bd21041f";
+
+/// A public, disposable fixture shape for Change-reader qualification.
+///
+/// These shapes intentionally name reader observations, not source-cut claims.
+/// They are distinct from D0/L1/L7 workload tiers and never label themselves as
+/// native workload evidence.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeFixtureKindV1 {
+    DuplicateEqual,
+    DuplicateConflicting,
+    OperativeRemoval,
+    MissingSelectedCarrier,
+    MutatedSelectedCarrier,
+    WrongFamilySelectedCarrier,
+    IncompleteChange,
+    CycleConflictedChange,
+}
+
+impl QualificationDerivedChangeFixtureKindV1 {
+    pub const ALL: [Self; 8] = [
+        Self::DuplicateEqual,
+        Self::DuplicateConflicting,
+        Self::OperativeRemoval,
+        Self::MissingSelectedCarrier,
+        Self::MutatedSelectedCarrier,
+        Self::WrongFamilySelectedCarrier,
+        Self::IncompleteChange,
+        Self::CycleConflictedChange,
+    ];
+
+    pub fn fixture_id(self) -> &'static str {
+        match self {
+            Self::DuplicateEqual => "duplicate-equal-v1",
+            Self::DuplicateConflicting => "duplicate-conflict-v1",
+            Self::OperativeRemoval => "removal-v1",
+            Self::MissingSelectedCarrier => "missing-carrier-v1",
+            Self::MutatedSelectedCarrier => "mutated-carrier-v1",
+            Self::WrongFamilySelectedCarrier => "wrong-family-carrier-v1",
+            Self::IncompleteChange => "incomplete-v1",
+            Self::CycleConflictedChange => "cycle-conflicted-v1",
+        }
+    }
+
+    fn contract_fixture(self) -> QualificationDerivedChangeFixtureV1 {
+        match self {
+            Self::DuplicateEqual => QualificationDerivedChangeFixtureV1::DuplicateEqualV1,
+            Self::DuplicateConflicting => QualificationDerivedChangeFixtureV1::DuplicateConflictV1,
+            Self::OperativeRemoval => QualificationDerivedChangeFixtureV1::RemovalV1,
+            Self::MissingSelectedCarrier => QualificationDerivedChangeFixtureV1::MissingCarrierV1,
+            Self::MutatedSelectedCarrier => QualificationDerivedChangeFixtureV1::MutatedCarrierV1,
+            Self::WrongFamilySelectedCarrier => {
+                QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1
+            }
+            Self::IncompleteChange => QualificationDerivedChangeFixtureV1::IncompleteV1,
+            Self::CycleConflictedChange => QualificationDerivedChangeFixtureV1::CycleConflictedV1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeFixtureRequestV1 {
+    pub source_checkout: PathBuf,
+    pub root: PathBuf,
+    pub kind: QualificationDerivedChangeFixtureKindV1,
+}
+
+impl QualificationDerivedChangeFixtureRequestV1 {
+    pub fn new(root: impl Into<PathBuf>, kind: QualificationDerivedChangeFixtureKindV1) -> Self {
+        Self {
+            source_checkout: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            root: root.into(),
+            kind,
+        }
+    }
+
+    pub fn with_source_checkout(mut self, source_checkout: impl Into<PathBuf>) -> Self {
+        self.source_checkout = source_checkout.into();
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeFixtureCarrierRoleV1 {
+    Primary,
+    EqualDuplicate,
+    ConflictingDuplicate,
+    Selected,
+    RemovalSupport,
+    SignatureSupport,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeFixtureCarrierStateV1 {
+    Present,
+    Missing,
+    Mutated,
+    WrongFamily,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeFixtureCarrierV1 {
+    pub role: QualificationDerivedChangeFixtureCarrierRoleV1,
+    pub state: QualificationDerivedChangeFixtureCarrierStateV1,
+    pub idempotency_key_sha256: String,
+    pub payload_sha256: String,
+    pub event_record_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeFixtureTopologyV1 {
+    pub change_id_sha256: String,
+    pub expected_topology: ChangeTopologyV1,
+    pub expected_lifecycle: ChangeLifecycleV1,
+    pub current_revision_ref_sha256: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeFixtureExpectedOutcomeV1 {
+    Ready,
+    ProjectionInvalid,
+    ProjectionRebuildRequired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeFixtureWitnessV1 {
+    pub schema: String,
+    pub fixture_id: String,
+    pub kind: QualificationDerivedChangeFixtureKindV1,
+    pub authoritative_inventory_sha256: String,
+    pub topology: QualificationDerivedChangeFixtureTopologyV1,
+    pub carriers: Vec<QualificationDerivedChangeFixtureCarrierV1>,
+    pub expected_outcome: QualificationDerivedChangeFixtureExpectedOutcomeV1,
+    pub storage_forbidden_probe_hashes: QualificationDerivedStorageForbiddenProbeHashesV1,
+    pub witness_sha256: String,
+}
+
+impl QualificationDerivedChangeFixtureWitnessV1 {
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.witness_sha256.clear();
+        canonical_sha256(&preimage)
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.witness_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_CHANGE_FIXTURE_WITNESS_SCHEMA_V1
+            || self.fixture_id != self.kind.fixture_id()
+            || self.carriers.is_empty()
+                && self.kind != QualificationDerivedChangeFixtureKindV1::IncompleteChange
+            || !is_sha256_unprefixed(&self.authoritative_inventory_sha256)
+            || !is_sha256_unprefixed(&self.witness_sha256)
+            || !is_sha256_unprefixed(&self.topology.change_id_sha256)
+            || self.storage_forbidden_probe_hashes.validate().is_err()
+            || self.storage_forbidden_probe_hashes
+                != qualification_derived_change_storage_probe_hashes_v1(
+                    self.kind.contract_fixture(),
+                )
+            || self
+                .topology
+                .current_revision_ref_sha256
+                .iter()
+                .any(|hash| !is_sha256_unprefixed(hash))
+            || self.witness_sha256 != self.canonical_sha256()?
+        {
+            return Err("derived Change fixture witness drifted".to_owned());
+        }
+        for carrier in &self.carriers {
+            if !is_sha256_prefixed(&carrier.payload_sha256)
+                || !is_sha256_prefixed(&carrier.event_record_sha256)
+                || !is_sha256_unprefixed(&carrier.idempotency_key_sha256)
+            {
+                return Err("derived Change fixture carrier witness drifted".to_owned());
+            }
+        }
+        let (topology, lifecycle, current_count, outcome, carrier_shape) = match self.kind {
+            QualificationDerivedChangeFixtureKindV1::DuplicateEqual => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                vec![
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::EqualDuplicate,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                ],
+            ),
+            QualificationDerivedChangeFixtureKindV1::DuplicateConflicting => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                vec![
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::ConflictingDuplicate,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                ],
+            ),
+            QualificationDerivedChangeFixtureKindV1::OperativeRemoval => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                vec![
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::RemovalSupport,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::SignatureSupport,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                ],
+            ),
+            QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                vec![(
+                    QualificationDerivedChangeFixtureCarrierRoleV1::Selected,
+                    QualificationDerivedChangeFixtureCarrierStateV1::Missing,
+                )],
+            ),
+            QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                vec![(
+                    QualificationDerivedChangeFixtureCarrierRoleV1::Selected,
+                    QualificationDerivedChangeFixtureCarrierStateV1::Mutated,
+                )],
+            ),
+            QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier => (
+                ChangeTopologyV1::Initial,
+                ChangeLifecycleV1::InProgress,
+                1,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                vec![(
+                    QualificationDerivedChangeFixtureCarrierRoleV1::Selected,
+                    QualificationDerivedChangeFixtureCarrierStateV1::WrongFamily,
+                )],
+            ),
+            QualificationDerivedChangeFixtureKindV1::IncompleteChange => (
+                ChangeTopologyV1::Incomplete,
+                ChangeLifecycleV1::Incomplete,
+                0,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                Vec::new(),
+            ),
+            QualificationDerivedChangeFixtureKindV1::CycleConflictedChange => (
+                ChangeTopologyV1::CycleConflicted,
+                ChangeLifecycleV1::Conflicted,
+                0,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                vec![
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                    (
+                        QualificationDerivedChangeFixtureCarrierRoleV1::Selected,
+                        QualificationDerivedChangeFixtureCarrierStateV1::Present,
+                    ),
+                ],
+            ),
+        };
+        let observed_carrier_shape = self
+            .carriers
+            .iter()
+            .map(|carrier| (carrier.role, carrier.state))
+            .collect::<Vec<_>>();
+        if self.topology.expected_topology != topology
+            || self.topology.expected_lifecycle != lifecycle
+            || self.topology.current_revision_ref_sha256.len() != current_count
+            || self.expected_outcome != outcome
+            || observed_carrier_shape != carrier_shape
+        {
+            return Err("derived Change fixture witness shape drifted".to_owned());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1161,6 +1512,670 @@ fn smoke_longitudinal_execution_identity() -> LongitudinalExecutionIdentityV1 {
     }
 }
 
+/// Materialize one deterministic, disposable public Change fixture and return
+/// only its bodyless authority witness. The root is always an ephemeral store;
+/// no owner store, source path, proposal summary, or event payload document is
+/// present in the witness.
+#[cfg(feature = "longitudinal-counting")]
+pub fn materialize_qualification_derived_change_fixture_v1(
+    request: QualificationDerivedChangeFixtureRequestV1,
+) -> Result<QualificationDerivedChangeFixtureWitnessV1, String> {
+    validate_change_fixture_request(&request)?;
+    initialize_disposable_change_fixture_root(&request.root)?;
+    let store_root = store_dir_for_repo(&request.root).map_err(|error| error.to_string())?;
+    copy_change_ready_fixture_records(&request.source_checkout, &store_root)?;
+    let store_identity =
+        opaque_path_identity("store", &store_root).map_err(|error| error.to_string())?;
+    let lifecycle = DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        &store_root,
+        store_identity,
+    )
+    .map_err(|error| error.to_string())?;
+    lifecycle
+        .rebuild(|_| LifecycleControl::Continue)
+        .map_err(|error| error.to_string())?;
+    let coordinator = DerivedWriteCoordinator::new(lifecycle).map_err(|error| error.to_string())?;
+    let store = EventStore::open(&store_root).with_coordinator(coordinator);
+    let fixture = ChangeFixtureEvents::new(request.kind)?;
+
+    record_fixture_event(&store, fixture.declaration.clone())?;
+    for event in &fixture.proposals {
+        record_fixture_event(&store, event.clone())?;
+    }
+    for event in &fixture.memberships {
+        record_fixture_event(&store, event.clone())?;
+    }
+    for event in &fixture.relations {
+        record_fixture_event(&store, event.clone())?;
+    }
+    if let Some(event) = &fixture.removal {
+        record_fixture_event(&store, event.clone())?;
+    }
+    if let Some(event) = &fixture.signature {
+        record_fixture_event(&store, event.clone())?;
+    }
+    for event in &fixture.storage_probe_events {
+        record_fixture_event(&store, event.clone())?;
+    }
+
+    let mut carriers = fixture
+        .proposals
+        .iter()
+        .enumerate()
+        .map(|(index, event)| {
+            carrier_witness(
+                event,
+                match request.kind {
+                    QualificationDerivedChangeFixtureKindV1::DuplicateEqual if index == 1 => {
+                        QualificationDerivedChangeFixtureCarrierRoleV1::EqualDuplicate
+                    }
+                    QualificationDerivedChangeFixtureKindV1::DuplicateConflicting if index == 1 => {
+                        QualificationDerivedChangeFixtureCarrierRoleV1::ConflictingDuplicate
+                    }
+                    _ if index == 0 => QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                    _ => QualificationDerivedChangeFixtureCarrierRoleV1::Selected,
+                },
+                QualificationDerivedChangeFixtureCarrierStateV1::Present,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(event) = &fixture.removal {
+        carriers.push(carrier_witness(
+            event,
+            QualificationDerivedChangeFixtureCarrierRoleV1::RemovalSupport,
+            QualificationDerivedChangeFixtureCarrierStateV1::Present,
+        )?);
+    }
+    if let Some(event) = &fixture.signature {
+        carriers.push(carrier_witness(
+            event,
+            QualificationDerivedChangeFixtureCarrierRoleV1::SignatureSupport,
+            QualificationDerivedChangeFixtureCarrierStateV1::Present,
+        )?);
+    }
+
+    match request.kind {
+        QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier => {
+            let selected = fixture.proposals.first().ok_or_else(|| {
+                "missing-carrier fixture omitted its selected proposal".to_owned()
+            })?;
+            std::fs::remove_file(store.event_path_for_idempotency_key(&selected.idempotency_key))
+                .map_err(|error| error.to_string())?;
+            carriers[0].role = QualificationDerivedChangeFixtureCarrierRoleV1::Selected;
+            carriers[0].state = QualificationDerivedChangeFixtureCarrierStateV1::Missing;
+        }
+        QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier => {
+            let selected = fixture.proposals.first().ok_or_else(|| {
+                "mutated-carrier fixture omitted its selected proposal".to_owned()
+            })?;
+            let mut mutated = selected.clone();
+            mutated.occurred_at = "2026-08-10T04:00:01Z".to_owned();
+            std::fs::write(
+                store.event_path_for_idempotency_key(&selected.idempotency_key),
+                serde_json::to_vec(&mutated).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            carriers[0].role = QualificationDerivedChangeFixtureCarrierRoleV1::Selected;
+            carriers[0].state = QualificationDerivedChangeFixtureCarrierStateV1::Mutated;
+        }
+        QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier => {
+            let selected = fixture
+                .proposals
+                .first()
+                .ok_or_else(|| "wrong-family fixture omitted its selected proposal".to_owned())?;
+            let replacement = ShoreEvent::new(
+                EventType::ReviewInitialized,
+                selected.idempotency_key.clone(),
+                EventTarget::for_journal(JournalId::new("journal:qualification-change-fixture")),
+                Writer::shore_local("qualification-fixture"),
+                ReviewInitializedPayload {},
+                selected.occurred_at.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+            std::fs::write(
+                store.event_path_for_idempotency_key(&selected.idempotency_key),
+                serde_json::to_vec(&replacement).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            carriers[0].role = QualificationDerivedChangeFixtureCarrierRoleV1::Selected;
+            carriers[0].state = QualificationDerivedChangeFixtureCarrierStateV1::WrongFamily;
+        }
+        _ => {}
+    }
+
+    let inventory = longitudinal_authoritative_store_data_inventory_v1(&request.root)
+        .map_err(|error| error.to_string())?;
+    let mut witness = QualificationDerivedChangeFixtureWitnessV1 {
+        schema: QUALIFICATION_DERIVED_CHANGE_FIXTURE_WITNESS_SCHEMA_V1.to_owned(),
+        fixture_id: request.kind.fixture_id().to_owned(),
+        kind: request.kind,
+        authoritative_inventory_sha256: inventory.inventory_sha256,
+        topology: fixture.topology,
+        carriers,
+        expected_outcome: fixture.expected_outcome,
+        storage_forbidden_probe_hashes: qualification_derived_change_storage_probe_hashes_v1(
+            request.kind.contract_fixture(),
+        ),
+        witness_sha256: String::new(),
+    };
+    witness.refresh_sha256()?;
+    witness.validate()?;
+    Ok(witness)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+pub fn materialize_qualification_derived_change_fixture_from_request_v1(
+    request_path: &Path,
+) -> Result<QualificationDerivedChangeFixtureWitnessV1, String> {
+    let file = std::fs::File::open(request_path).map_err(|error| error.to_string())?;
+    let request = serde_json::from_reader(file).map_err(|error| error.to_string())?;
+    materialize_qualification_derived_change_fixture_v1(request)
+}
+
+#[cfg(not(feature = "longitudinal-counting"))]
+pub fn materialize_qualification_derived_change_fixture_v1(
+    _request: QualificationDerivedChangeFixtureRequestV1,
+) -> Result<QualificationDerivedChangeFixtureWitnessV1, String> {
+    Err(
+        "derived Change fixture materialization requires --features longitudinal-counting"
+            .to_owned(),
+    )
+}
+
+#[cfg(not(feature = "longitudinal-counting"))]
+pub fn materialize_qualification_derived_change_fixture_from_request_v1(
+    _request_path: &Path,
+) -> Result<QualificationDerivedChangeFixtureWitnessV1, String> {
+    Err(
+        "derived Change fixture materialization requires --features longitudinal-counting"
+            .to_owned(),
+    )
+}
+
+#[cfg(feature = "longitudinal-counting")]
+struct ChangeFixtureEvents {
+    declaration: ShoreEvent,
+    proposals: Vec<ShoreEvent>,
+    memberships: Vec<ShoreEvent>,
+    relations: Vec<ShoreEvent>,
+    removal: Option<ShoreEvent>,
+    signature: Option<ShoreEvent>,
+    storage_probe_events: Vec<ShoreEvent>,
+    topology: QualificationDerivedChangeFixtureTopologyV1,
+    expected_outcome: QualificationDerivedChangeFixtureExpectedOutcomeV1,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+impl ChangeFixtureEvents {
+    fn new(kind: QualificationDerivedChangeFixtureKindV1) -> Result<Self, String> {
+        let descriptor = ChangeIdentityDescriptorV1::opaque_nonce([0x51; 32]);
+        let declaration_payload =
+            build_change_declared(descriptor, [0x52; 32]).map_err(|error| error.to_string())?;
+        let change_id = declaration_payload.change_id.clone();
+        let declaration = fixture_event(
+            declaration_payload,
+            "change-fixture:declared",
+            "2026-08-10T04:00:00Z",
+        )?;
+
+        let (left, left_proposal) =
+            fixture_revision_proposal("left", 'a', Some("fixture-left"), 0)?;
+        let (right, right_proposal) =
+            fixture_revision_proposal("right", 'b', Some("fixture-right"), 1)?;
+        let left_membership = fixture_event(
+            build_membership_asserted(&change_id, &left.revision_id, [0x53; 32])
+                .map_err(|error| error.to_string())?,
+            "change-fixture:membership:left",
+            "2026-08-10T04:00:03Z",
+        )?;
+        let right_membership = fixture_event(
+            build_membership_asserted(&change_id, &right.revision_id, [0x54; 32])
+                .map_err(|error| error.to_string())?,
+            "change-fixture:membership:right",
+            "2026-08-10T04:00:04Z",
+        )?;
+
+        let (proposals, memberships, relations, removal, topology, expected_outcome) = match kind {
+            QualificationDerivedChangeFixtureKindV1::DuplicateEqual => {
+                let duplicate = fixture_revision_proposal("left", 'a', Some("fixture-left"), 1)?.1;
+                (
+                    vec![left_proposal, duplicate],
+                    vec![left_membership],
+                    Vec::new(),
+                    None,
+                    fixture_topology(
+                        change_id,
+                        ChangeTopologyV1::Initial,
+                        ChangeLifecycleV1::InProgress,
+                        vec![left],
+                    )?,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                )
+            }
+            QualificationDerivedChangeFixtureKindV1::DuplicateConflicting => {
+                let conflict = fixture_revision_proposal("left", 'a', None, 1)?.1;
+                (
+                    vec![left_proposal, conflict],
+                    vec![left_membership],
+                    Vec::new(),
+                    None,
+                    fixture_topology(
+                        change_id,
+                        ChangeTopologyV1::Initial,
+                        ChangeLifecycleV1::InProgress,
+                        vec![left],
+                    )?,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                )
+            }
+            QualificationDerivedChangeFixtureKindV1::OperativeRemoval => {
+                let removal = ShoreEvent::new(
+                    EventType::ArtifactRemoved,
+                    ArtifactRemovedPayload::idempotency_key(&left.object_artifact_content_hash),
+                    EventTarget::for_journal(JournalId::new(
+                        "journal:qualification-change-fixture",
+                    )),
+                    Writer::shore_local("qualification-fixture"),
+                    ArtifactRemovedPayload {
+                        content_hash: left.object_artifact_content_hash.clone(),
+                    },
+                    "2026-08-10T04:00:05Z",
+                )
+                .map_err(|error| error.to_string())?;
+                (
+                    vec![left_proposal],
+                    vec![left_membership],
+                    Vec::new(),
+                    Some(removal),
+                    fixture_topology(
+                        change_id,
+                        ChangeTopologyV1::Initial,
+                        ChangeLifecycleV1::InProgress,
+                        vec![left],
+                    )?,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                )
+            }
+            QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier
+            | QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+            | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier => {
+                let expected = if kind
+                    == QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier
+                {
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired
+                } else {
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid
+                };
+                (
+                    vec![left_proposal],
+                    vec![left_membership],
+                    Vec::new(),
+                    None,
+                    fixture_topology(
+                        change_id,
+                        ChangeTopologyV1::Initial,
+                        ChangeLifecycleV1::InProgress,
+                        vec![left],
+                    )?,
+                    expected,
+                )
+            }
+            QualificationDerivedChangeFixtureKindV1::IncompleteChange => (
+                Vec::new(),
+                vec![left_membership],
+                Vec::new(),
+                None,
+                fixture_topology(
+                    change_id,
+                    ChangeTopologyV1::Incomplete,
+                    ChangeLifecycleV1::Incomplete,
+                    Vec::new(),
+                )?,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+            ),
+            QualificationDerivedChangeFixtureKindV1::CycleConflictedChange => {
+                let left_to_right = fixture_event(
+                    build_revision_relation_asserted(
+                        &change_id,
+                        left.clone(),
+                        right.clone(),
+                        [0x55; 32],
+                    )
+                    .map_err(|error| error.to_string())?,
+                    "change-fixture:relation:left-right",
+                    "2026-08-10T04:00:05Z",
+                )?;
+                let right_to_left = fixture_event(
+                    build_revision_relation_asserted(
+                        &change_id,
+                        right.clone(),
+                        left.clone(),
+                        [0x56; 32],
+                    )
+                    .map_err(|error| error.to_string())?,
+                    "change-fixture:relation:right-left",
+                    "2026-08-10T04:00:06Z",
+                )?;
+                (
+                    vec![left_proposal, right_proposal],
+                    vec![left_membership, right_membership],
+                    vec![left_to_right, right_to_left],
+                    None,
+                    fixture_topology(
+                        change_id,
+                        ChangeTopologyV1::CycleConflicted,
+                        ChangeLifecycleV1::Conflicted,
+                        Vec::new(),
+                    )?,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                )
+            }
+        };
+        let signature = removal
+            .as_ref()
+            .map(fixture_detached_signature)
+            .transpose()?;
+        let (storage_probe_revision, storage_probe_proposal) = fixture_revision_proposal(
+            "storage-probe",
+            'e',
+            Some(QUALIFICATION_DERIVED_CHANGE_STORAGE_SUMMARY_PROBE_V1),
+            7,
+        )?;
+        let storage_probe_body = QUALIFICATION_DERIVED_CHANGE_STORAGE_PROSE_PROBE_V1.to_owned();
+        let storage_probe_observation = ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            ReviewObservationRecordedPayload::idempotency_key(
+                &storage_probe_revision.revision_id,
+                &TrackId::new("agent:qualification-storage-probe"),
+                "storage-probe-v1",
+            ),
+            EventTarget::for_revision(
+                JournalId::new("journal:qualification-change-fixture"),
+                storage_probe_revision.revision_id.clone(),
+                Some(TrackId::new("agent:qualification-storage-probe")),
+            )
+            .map_err(|error| error.to_string())?,
+            Writer::shore_local("qualification-fixture"),
+            ReviewObservationRecordedPayload {
+                observation_id: ObservationId::new(
+                    "obs:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                ),
+                target: ReviewTargetRef::Revision {
+                    revision_id: storage_probe_revision.revision_id,
+                },
+                title: "Qualification storage probe".to_owned(),
+                body: Some(storage_probe_body.clone()),
+                body_content_type: BodyContentType::TextPlain,
+                body_artifact_path: None,
+                body_byte_size: Some(storage_probe_body.len() as u64),
+                body_content_hash: Some(format!(
+                    "sha256:{}",
+                    sha256_bytes_hex(storage_probe_body.as_bytes())
+                )),
+                tags: Vec::new(),
+                confidence: None,
+                supersedes_observation_ids: Vec::new(),
+                responds_to_observation_ids: Vec::new(),
+            },
+            "2026-08-10T04:00:07Z",
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(Self {
+            declaration,
+            proposals,
+            memberships,
+            relations,
+            removal,
+            signature,
+            storage_probe_events: vec![storage_probe_proposal, storage_probe_observation],
+            topology,
+            expected_outcome,
+        })
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn fixture_detached_signature(target: &ShoreEvent) -> Result<ShoreEvent, String> {
+    let signing_key = SigningKey::from_bytes(&[0x57; 32]);
+    let signer_id = SignerId::from_ed25519_public_key(signing_key.verifying_key().to_bytes());
+    let to_be_signed =
+        EventToBeSigned::from_event(target, &signer_id).map_err(|error| error.to_string())?;
+    let message = event_signature_pre_authentication_encoding(&to_be_signed)
+        .map_err(|error| error.to_string())?;
+    let signature = EventSignatureBytes::from_bytes(&signing_key.sign(&message).to_bytes());
+    let payload = EventSignatureRecordedPayload {
+        target_event_id: target.event_id.clone(),
+        target_event_record_hash: target
+            .event_record_hash()
+            .map_err(|error| error.to_string())?,
+        attesting_signer: signer_id,
+        attestation: EventSignature::ed25519_v1(signature),
+        inclusion_proof: None,
+    };
+    ShoreEvent::new(
+        EventType::EventSignatureRecorded,
+        EventSignatureRecordedPayload::idempotency_key(
+            &payload.target_event_record_hash,
+            &payload.attesting_signer,
+            payload.attestation.sig.as_str(),
+        ),
+        EventTarget::for_journal(JournalId::new("journal:qualification-change-fixture")),
+        Writer::shore_local("qualification-fixture"),
+        payload,
+        "2026-08-10T04:00:06Z",
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn fixture_revision_proposal(
+    name: &str,
+    marker: char,
+    summary: Option<&str>,
+    duplicate: usize,
+) -> Result<(RevisionRefV1, ShoreEvent), String> {
+    let revision_id = RevisionId::new(format!("rev:sha256:{}", marker.to_string().repeat(64)));
+    let artifact = format!("sha256:{}", marker.to_string().repeat(64));
+    let exact = RevisionRefV1::new(revision_id.clone(), artifact.clone())
+        .map_err(|error| error.to_string())?;
+    let event = ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        format!("change-fixture:proposal:{name}:{duplicate}"),
+        EventTarget::for_revision(
+            JournalId::new("journal:qualification-change-fixture"),
+            revision_id.clone(),
+            None,
+        )
+        .map_err(|error| error.to_string())?,
+        Writer::shore_local("qualification-fixture"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(format!(
+                "engagement:sha256:{}",
+                marker.to_string().repeat(64)
+            )),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id,
+                    object_id: ObjectId::new(format!(
+                        "obj:sha256:{}",
+                        marker.to_string().repeat(64)
+                    )),
+                    git_provenance: None,
+                },
+                summary: summary.map(str::to_owned),
+                object_artifact_content_hash: artifact,
+                supersedes: Vec::new(),
+            },
+        },
+        format!("2026-08-10T04:00:{duplicate:02}Z"),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((exact, event))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn fixture_event<P: crate::session::event::EventPayload>(
+    payload: P,
+    idempotency_key: &str,
+    occurred_at: &str,
+) -> Result<ShoreEvent, String> {
+    ShoreEvent::new(
+        payload.event_type(),
+        idempotency_key,
+        EventTarget::for_journal(JournalId::new("journal:qualification-change-fixture")),
+        Writer::shore_local("qualification-fixture"),
+        payload,
+        occurred_at,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn fixture_topology(
+    change_id: ChangeId,
+    expected_topology: ChangeTopologyV1,
+    expected_lifecycle: ChangeLifecycleV1,
+    current_revisions: Vec<RevisionRefV1>,
+) -> Result<QualificationDerivedChangeFixtureTopologyV1, String> {
+    Ok(QualificationDerivedChangeFixtureTopologyV1 {
+        change_id_sha256: sha256_bytes_hex(change_id.as_str().as_bytes()),
+        expected_topology,
+        expected_lifecycle,
+        current_revision_ref_sha256: current_revisions
+            .iter()
+            .map(canonical_sha256)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn record_fixture_event(store: &EventStore, event: ShoreEvent) -> Result<(), String> {
+    match store
+        .record_event_once(&event)
+        .map_err(|error| error.to_string())?
+    {
+        EventWriteOutcome::Created => Ok(()),
+        EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
+            Err("public Change fixture generated a duplicate idempotency key".to_owned())
+        }
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn carrier_witness(
+    event: &ShoreEvent,
+    role: QualificationDerivedChangeFixtureCarrierRoleV1,
+    state: QualificationDerivedChangeFixtureCarrierStateV1,
+) -> Result<QualificationDerivedChangeFixtureCarrierV1, String> {
+    Ok(QualificationDerivedChangeFixtureCarrierV1 {
+        role,
+        state,
+        idempotency_key_sha256: sha256_bytes_hex(event.idempotency_key.as_bytes()),
+        payload_sha256: event.payload_hash.clone(),
+        event_record_sha256: event
+            .event_record_hash()
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn is_sha256_prefixed(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(is_sha256_unprefixed)
+}
+
+fn is_sha256_unprefixed(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn validate_change_fixture_request(
+    request: &QualificationDerivedChangeFixtureRequestV1,
+) -> Result<(), String> {
+    if !request.root.is_absolute()
+        || !request.source_checkout.is_absolute()
+        || request.root == request.source_checkout
+        || request.root.starts_with(&request.source_checkout)
+        || request.source_checkout.starts_with(&request.root)
+        || !request.source_checkout.join("Cargo.toml").is_file()
+    {
+        return Err("invalid derived Change fixture request".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn initialize_disposable_change_fixture_root(root: &Path) -> Result<(), String> {
+    if root.exists() {
+        if root
+            .read_dir()
+            .map_err(|error| error.to_string())?
+            .next()
+            .is_some()
+        {
+            return Err("derived Change fixture root must be absent or empty".to_owned());
+        }
+    } else {
+        std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    }
+    run_git(root, &["init", "--quiet"])?;
+    run_git(root, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    run_git(root, &["config", "user.name", "Pointbreak Matrix"])?;
+    run_git(
+        root,
+        &["config", "user.email", "pointbreak-matrix@example.com"],
+    )?;
+    run_git(root, &["config", "commit.gpgsign", "false"])?;
+    std::fs::create_dir_all(root.join(".git/pointbreak-home"))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn run_git(root: &Path, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn copy_change_ready_fixture_records(
+    source_checkout: &Path,
+    store_root: &Path,
+) -> Result<(), String> {
+    let source = source_checkout.join("tests/support/assets/change-ready-store");
+    let destination = store_root.join("events");
+    std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+    for fixture in [
+        QUALIFICATION_DERIVED_CHANGE_ACTIVATION_FIXTURE_V1,
+        QUALIFICATION_DERIVED_CHANGE_COMPLETION_FIXTURE_V1,
+    ] {
+        let source_path = source.join(fixture);
+        let bytes = std::fs::read(&source_path).map_err(|error| error.to_string())?;
+        let expected_sha256 = if fixture == QUALIFICATION_DERIVED_CHANGE_ACTIVATION_FIXTURE_V1 {
+            QUALIFICATION_DERIVED_CHANGE_ACTIVATION_FIXTURE_SHA256_V1
+        } else {
+            QUALIFICATION_DERIVED_CHANGE_COMPLETION_FIXTURE_SHA256_V1
+        };
+        if sha256_bytes_hex(&bytes) != expected_sha256 {
+            return Err("derived Change activation fixture bytes drifted".to_owned());
+        }
+        std::fs::write(destination.join(fixture), bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn initialize_disposable_root(root: &Path) -> Result<(), String> {
     if root.exists() {
         if root
@@ -1190,4 +2205,292 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, String> {
     canonical_json_bytes(&value)
         .map(|bytes| sha256_bytes_hex(&bytes))
         .map_err(|error| error.to_string())
+}
+
+#[cfg(all(test, feature = "longitudinal-counting"))]
+mod change_fixture_tests {
+    use super::*;
+    use crate::session::{
+        DerivedChangeAccess, DerivedChangeOutcomeV1, DerivedChangePageRequestV1,
+        DerivedProjectionFailureCodeV1,
+    };
+
+    fn assert_declared_outcome<T: std::fmt::Debug>(
+        kind: QualificationDerivedChangeFixtureKindV1,
+        expected: QualificationDerivedChangeFixtureExpectedOutcomeV1,
+        observed: DerivedChangeOutcomeV1<T>,
+    ) {
+        match (expected, observed) {
+            (
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                DerivedChangeOutcomeV1::Ready(_),
+            ) => {}
+            (
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                DerivedChangeOutcomeV1::ProjectionUnavailable(document),
+            ) => assert_eq!(
+                document.code(),
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                "fixture {kind:?} typed code drifted"
+            ),
+            (
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                DerivedChangeOutcomeV1::ProjectionUnavailable(document),
+            ) => assert_eq!(
+                document.code(),
+                DerivedProjectionFailureCodeV1::ProjectionRebuildRequired,
+                "fixture {kind:?} typed code drifted"
+            ),
+            (expected, observed) => {
+                panic!("fixture {kind:?} outcome drifted: expected {expected:?}, got {observed:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn change_fixture_witnesses_are_deterministic_and_bind_public_authority() {
+        for kind in QualificationDerivedChangeFixtureKindV1::ALL {
+            let roots = tempfile::tempdir().expect("fixture parent");
+            let first = materialize_qualification_derived_change_fixture_v1(
+                QualificationDerivedChangeFixtureRequestV1::new(roots.path().join("first"), kind),
+            )
+            .expect("materialize first fixture");
+            let second = materialize_qualification_derived_change_fixture_v1(
+                QualificationDerivedChangeFixtureRequestV1::new(roots.path().join("second"), kind),
+            )
+            .expect("materialize second fixture");
+
+            first.validate().expect("validate first fixture witness");
+            second.validate().expect("validate second fixture witness");
+            assert_eq!(
+                first, second,
+                "fixture witness must not depend on root path"
+            );
+            assert_eq!(first.fixture_id, kind.fixture_id());
+            assert!(
+                !first
+                    .authoritative_inventory_sha256
+                    .contains(roots.path().to_str().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn change_fixture_witnesses_name_duplicate_removal_and_fault_carriers_without_prose() {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let equal = materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                parent.path().join("equal"),
+                QualificationDerivedChangeFixtureKindV1::DuplicateEqual,
+            ),
+        )
+        .expect("materialize equal fixture");
+        assert_eq!(
+            equal
+                .carriers
+                .iter()
+                .map(|carrier| carrier.role)
+                .collect::<Vec<_>>(),
+            vec![
+                QualificationDerivedChangeFixtureCarrierRoleV1::Primary,
+                QualificationDerivedChangeFixtureCarrierRoleV1::EqualDuplicate,
+            ]
+        );
+
+        let removal = materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                parent.path().join("removal"),
+                QualificationDerivedChangeFixtureKindV1::OperativeRemoval,
+            ),
+        )
+        .expect("materialize removal fixture");
+        assert!(removal.carriers.iter().any(|carrier| {
+            carrier.role == QualificationDerivedChangeFixtureCarrierRoleV1::RemovalSupport
+        }));
+        assert!(removal.carriers.iter().any(|carrier| {
+            carrier.role == QualificationDerivedChangeFixtureCarrierRoleV1::SignatureSupport
+        }));
+
+        for kind in [
+            QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier,
+            QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier,
+            QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier,
+        ] {
+            let witness = materialize_qualification_derived_change_fixture_v1(
+                QualificationDerivedChangeFixtureRequestV1::new(
+                    parent.path().join(kind.fixture_id()),
+                    kind,
+                ),
+            )
+            .expect("materialize fault fixture");
+            assert_eq!(
+                witness.expected_outcome,
+                if kind == QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier {
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired
+                } else {
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid
+                }
+            );
+            assert_eq!(
+                witness.carriers[0].state,
+                match kind {
+                    QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier => {
+                        QualificationDerivedChangeFixtureCarrierStateV1::Missing
+                    }
+                    QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier => {
+                        QualificationDerivedChangeFixtureCarrierStateV1::Mutated
+                    }
+                    QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier => {
+                        QualificationDerivedChangeFixtureCarrierStateV1::WrongFamily
+                    }
+                    _ => unreachable!(),
+                }
+            );
+            let json = serde_json::to_string(&witness).expect("serialize witness");
+            assert!(!json.contains("fixture-left"));
+            assert!(!json.contains("\"payload\":"));
+            assert!(!json.contains("rev:sha256:"));
+            assert!(!json.contains(parent.path().to_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn incomplete_and_cyclic_fixtures_have_their_declared_change_shapes() {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        let incomplete = materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                parent.path().join("incomplete"),
+                QualificationDerivedChangeFixtureKindV1::IncompleteChange,
+            ),
+        )
+        .expect("materialize incomplete fixture");
+        assert_eq!(
+            incomplete.topology.expected_topology,
+            ChangeTopologyV1::Incomplete
+        );
+        assert!(incomplete.topology.current_revision_ref_sha256.is_empty());
+
+        let cyclic = materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(
+                parent.path().join("cyclic"),
+                QualificationDerivedChangeFixtureKindV1::CycleConflictedChange,
+            ),
+        )
+        .expect("materialize cyclic fixture");
+        assert_eq!(
+            cyclic.topology.expected_topology,
+            ChangeTopologyV1::CycleConflicted
+        );
+        assert_eq!(
+            cyclic.topology.expected_lifecycle,
+            ChangeLifecycleV1::Conflicted
+        );
+    }
+
+    #[test]
+    fn change_fixtures_exercise_their_declared_derived_outcomes() {
+        let parent = tempfile::tempdir().expect("fixture parent");
+        for kind in QualificationDerivedChangeFixtureKindV1::ALL {
+            let root = parent.path().join(kind.fixture_id());
+            let witness = materialize_qualification_derived_change_fixture_v1(
+                QualificationDerivedChangeFixtureRequestV1::new(&root, kind),
+            )
+            .expect("materialize Change fixture");
+            let access = DerivedChangeAccess::resolve_for_inspector(&root)
+                .expect("resolve fixture derived access");
+            assert_declared_outcome(
+                kind,
+                if matches!(
+                    kind,
+                    QualificationDerivedChangeFixtureKindV1::DuplicateConflicting
+                        | QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+                        | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
+                ) {
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready
+                } else {
+                    witness.expected_outcome
+                },
+                access.profile().expect("read fixture Profile"),
+            );
+            assert_declared_outcome(
+                kind,
+                witness.expected_outcome,
+                access
+                    .attention(&DerivedChangePageRequestV1::Bare)
+                    .expect("read fixture Attention"),
+            );
+            let outcome = access
+                .changes(&DerivedChangePageRequestV1::Bare)
+                .expect("read fixture Changes");
+            match (witness.expected_outcome, outcome) {
+                (
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                    DerivedChangeOutcomeV1::Ready(page),
+                ) => {
+                    let value = serde_json::to_value(page.document)
+                        .expect("serialize fixture Change document");
+                    let change = value["changes"]
+                        .as_array()
+                        .and_then(|changes| changes.first())
+                        .expect("fixture emits one Change");
+                    assert_eq!(
+                        sha256_bytes_hex(
+                            change["changeId"]
+                                .as_str()
+                                .expect("fixture Change id")
+                                .as_bytes()
+                        ),
+                        witness.topology.change_id_sha256
+                    );
+                    assert_eq!(
+                        change["topology"],
+                        serde_json::to_value(witness.topology.expected_topology)
+                            .expect("serialize expected topology")
+                    );
+                    assert_eq!(
+                        change["lifecycle"],
+                        serde_json::to_value(witness.topology.expected_lifecycle)
+                            .expect("serialize expected lifecycle")
+                    );
+                    let observed_current = change["currentRevisionRefs"]
+                        .as_array()
+                        .expect("fixture current exact Revisions")
+                        .iter()
+                        .map(canonical_sha256)
+                        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+                        .expect("hash fixture current exact Revisions");
+                    assert_eq!(
+                        observed_current,
+                        witness
+                            .topology
+                            .current_revision_ref_sha256
+                            .iter()
+                            .cloned()
+                            .collect()
+                    );
+                }
+                (
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                    DerivedChangeOutcomeV1::ProjectionUnavailable(document),
+                ) => assert_eq!(
+                    document.code(),
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    "fixture {kind:?} typed code drifted"
+                ),
+                (
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired,
+                    DerivedChangeOutcomeV1::ProjectionUnavailable(document),
+                ) => assert_eq!(
+                    document.code(),
+                    DerivedProjectionFailureCodeV1::ProjectionRebuildRequired,
+                    "fixture {kind:?} typed code drifted"
+                ),
+                (expected, observed) => {
+                    panic!(
+                        "fixture {kind:?} outcome drifted: expected {expected:?}, got {observed:?}"
+                    )
+                }
+            }
+        }
+    }
 }

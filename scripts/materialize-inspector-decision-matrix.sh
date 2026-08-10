@@ -18,8 +18,32 @@ normalize_for_shell_comparison() {
   fi
 }
 
-command -v git >/dev/null 2>&1 || die "git is required"
-command -v jq >/dev/null 2>&1 || die "jq is required"
+for command in git jq find sort wc tr awk; do
+  command -v "$command" >/dev/null 2>&1 || die "$command is required"
+done
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_command="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_command="shasum -a 256"
+else
+  die "sha256sum or shasum is required"
+fi
+
+sha256_file() {
+  if [ "$sha256_command" = "sha256sum" ]; then
+    sha256sum -- "$1" | awk '{print $1}'
+  else
+    shasum -a 256 -- "$1" | awk '{print $1}'
+  fi
+}
+
+sha256_stdin() {
+  if [ "$sha256_command" = "sha256sum" ]; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
 
 [ "$#" -eq 1 ] || die "usage: $0 <empty-destination>"
 
@@ -514,7 +538,63 @@ case "$common_store_for_comparison" in
   *) die "generated store escaped the isolated repository: $common_store" ;;
 esac
 
+# Hash the same complete authoritative file inventory used by the qualification
+# runner. Only the two governed top-level disposable namespaces are excluded;
+# lookalikes or nested names remain authoritative.
+is_governed_derived_entry() {
+  local name="$1"
+  local path="$2"
+  if [ -d "$path" ]; then
+    case "$name" in
+      derived|.pointbreak-derived) return 0 ;;
+    esac
+    [[ "$name" =~ ^(derived|\.pointbreak-derived)\.(quarantine|retired)-[0-9]+-[0-9]+$ ]]
+    return
+  fi
+  if [ -f "$path" ]; then
+    case "$name" in
+      derived.writer.lock|derived.rebuild.lock|.pointbreak-derived.writer.lock|.pointbreak-derived.rebuild.lock)
+        return 0
+        ;;
+    esac
+    [[ "$name" =~ ^(derived|\.pointbreak-derived)\.generation-lease-.+\.lock$ ]]
+    return
+  fi
+  return 1
+}
+
+while IFS= read -r path; do
+  relative_path="${path#"$common_store_for_comparison"/}"
+  top_level_name="${relative_path%%/*}"
+  if ! is_governed_derived_entry \
+    "$top_level_name" "$common_store_for_comparison/$top_level_name"; then
+    die "decision matrix authoritative inventory rejects non-file path: $relative_path"
+  fi
+done < <(find "$common_store_for_comparison" ! -type d ! -type f -print | LC_ALL=C sort)
+inventory_rows="$(
+  while IFS= read -r file; do
+    relative_path="${file#"$common_store_for_comparison"/}"
+    top_level_name="${relative_path%%/*}"
+    if is_governed_derived_entry \
+      "$top_level_name" "$common_store_for_comparison/$top_level_name"; then
+      continue
+    fi
+    byte_count="$(wc -c < "$file" | tr -d '[:space:]')"
+    file_sha256="$(sha256_file "$file")"
+    jq -cnS \
+      --arg relativePath "$relative_path" \
+      --argjson bytes "$byte_count" \
+      --arg sha256 "$file_sha256" \
+      '{relativePath: $relativePath, bytes: $bytes, sha256: $sha256}'
+  done < <(find "$common_store_for_comparison" -type f -print | LC_ALL=C sort)
+)"
+authoritative_inventory="$(printf '%s\n' "$inventory_rows" | jq -csS '.')"
+authoritative_inventory_sha256="$(printf '%s' "$authoritative_inventory" | sha256_stdin)"
+[[ "$authoritative_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] \
+  || die "decision matrix authoritative inventory hash is invalid"
+
 jq -n \
+  --arg authoritative_inventory_sha256 "$authoritative_inventory_sha256" \
   --arg primary_change "$primary_change" \
   --arg primary_revision "$primary_revision" \
   --arg primary_artifact "$primary_artifact" \
@@ -553,6 +633,14 @@ jq -n \
   --arg second_landing "$second_landing" \
   --arg live_landing "$live_landing" \
   '{
+    schema: "pointbreak.qualification-derived-change-fixture-witness.v1",
+    fixtureId: "topology-v1",
+    authoritativeInventorySha256: $authoritative_inventory_sha256,
+    storageForbiddenProbeHashes: {
+      proposalSummarySha256: "21f749c5f166ae819a99a8ff0e303297a43685fd14cc7f1b86a90751989b167c",
+      proseSha256: "da79cc8c9b04f41616275f4a6bd027acf6d0358f3605dac74ccadfeea92945a4",
+      payloadDocumentSha256: "20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf"
+    },
     primary_revision: $primary_revision,
     fact_port: {
       port_id: $fact_port_id,

@@ -768,6 +768,60 @@ just derived-access-resource /absolute/path/to/resource-request.json
 just derived-access-fragment /absolute/path/to/fragment-request.json
 ```
 
+The additive Change-read evidence mode binds the public Inspector decision matrix to the same execution
+identity and fragment/package pipeline:
+
+```sh
+just derived-change-fixture /absolute/path/to/change-fixture-request.json
+just derived-change-read /absolute/path/to/change-read-request.json
+```
+
+The fixture mode accepts one absolute disposable root and one typed public fixture kind. Its bodyless witness
+binds the complete authoritative inventory, expected Change topology/lifecycle, exact Revision-ref hashes,
+duplicate proposal states, and removal plus detached-signature support without copying proposal prose, event
+payloads, raw Change/Revision identities, source paths, or owner/private paths into the witness.
+
+The read mode requires `longitudinal-counting`, a clean harness checkout, a separately identified clean product
+checkout, the clean-source-attesting `pointbreak` product binary, and the disposable matrix home beneath its
+repository. Exact-source qualification requires the harness and product to agree on platform, source commit,
+tree, and `Cargo.lock`; the product identity additionally binds the binary and version-document hashes, build
+profile, sorted feature set, build-command hash, operating system, and architecture. A pre-cut falsifier may
+name a different exact product checkout and binary, but its receipt is deliberately inadmissible as package
+evidence. The receipt hashes the fixture builder, frozen activation/completion records, and complete
+authoritative fixture inventory. It compares active Profile, Changes, and Attention responses with an
+explicit-off strict Inspector child, normalizing only generation stamps and independently signed opaque
+page-token bytes. Direct `DerivedChangeAccess` candidate, capability, proposal, support, emitted-row, fallback,
+fold, and rebuild counters are separately labeled as successor-harness characterization rather than product-
+process observations. The evaluator rejects absent direct-read work and bounds current-Revision, proposal,
+support, match, and emitted-row counts against the frozen fixture and request shape; bounded topology pages
+must stay proportional to their two-row window rather than hydrating every candidate. Ready fixtures cover
+bare/bounded Changes and Attention, every bodyless filter, summary
+search alone and combined with every filter on both lenses, concurrent readers, a second fresh process, and
+unchanged warm reuse. The topology fixture additionally proves next/previous/last, tampered/cross-lens/query-
+mismatched tokens, an actual stale signed token after same-generation checkpoint advance, governed catch-up,
+idempotent repeated append, and a fresh post-catch-up process. Fault fixtures preserve Profile's independent
+checkpoint semantics while requiring typed list failure where proposal authority is missing, mutated,
+wrong-family, or conflicting. The mutated and wrong-family Profile oracle is platform-specific: APFS preserves
+the already-admitted checkpoint, while real NTFS may first observe the carrier rewrite and require a typed
+rebuild. Exact-source typed failures compare the product's complete canonical error document with the direct
+harness outcome; the stale-page document is independently frozen at the signed-token boundary.
+
+Exact-source topology evidence also binds separately hashed library and CLI test executables and retains one result for
+each reader-V3, authority, checkpoint, publication, catch-up, lease/reclamation, call-graph, explicit-off, and
+writer/concurrency control. Storage rows retain the selected publication and descriptor identities, reader
+receipt and live checkpoint, complete SQLite table/column/index catalog, and every database/WAL/shared-memory/
+temporary carrier's byte count and content hash. Hash-only fixture sentinels prove that proposal summaries,
+prose, payload documents, and private paths are absent from those bytes. Capture holds a generation read lease,
+uses a read-only SQLite snapshot, rechecks publication stability, and rejects symbolic links or non-file
+carriers.
+
+`execution.rootProvenanceSha256` remains the campaign-level authority shared by every native fragment; it is
+not any one fixture's inventory. Each Change receipt separately binds its exact fixture-before inventory,
+completion inventory, witness, builder, activation/completion carriers, and (for the post-append topology row)
+the stable generation identity. The evaluator requires each fixture's inventory and witness to be byte-equal
+between APFS and NTFS. The source-bound raw receipt is accepted only through the existing fragment builder and
+completion-last package verifier.
+
 The retained-root modes accept L7, L100, or C262. They require a separately admitted immutable input and
 a distinct, precreated qualification clone; no runner mode can materialize those tiers. Preflight compares
 the complete authoritative inventory. Bootstrap writes only the selected disposable derived root, reports
@@ -809,6 +863,15 @@ Private-corpus configuration, source/build/private-store paths in evidence, body
 mutated immutable roots, ambiguous CPU units, semantic mismatches, and corrupt or unlisted package files
 fail closed. Missing native evidence remains an explicit `insufficient_evidence` result rather than a
 package error.
+
+Historical evaluator-v2 packages remain verifiable as recorded. The frozen v1 parameter document and table
+retain their v2 identity, while the current publication envelope and every newly assembled fragment bind the
+additive `pointbreak.qualification-derived-access-evaluator-v3-procedure.v1` procedure at
+`7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1`. Evaluator v3 requires separate exact
+product and harness identities, the raw-bound Change-read matrix, complete canonical typed-error documents, the
+control matrix, and storage witnesses from both macOS/APFS and real Windows/NTFS. Missing rows remain
+`insufficient_evidence`; semantic, wire, counter-classification, lifecycle, storage, or authority drift rejects
+the package.
 
 ## Prospective feasibility contract
 

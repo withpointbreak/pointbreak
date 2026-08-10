@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::record_change_capability_carriers_opened;
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::{
     EventSignatureBytes, EventSigner, EventVerificationStatus, SignerId, verify_ed25519_strict,
@@ -766,6 +768,8 @@ pub(crate) fn validate_bounded_change_capability_pair(
     activation_logical_key: &str,
     completion_logical_key: &str,
 ) -> Result<BoundedChangeCapabilityPairV1> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_change_capability_carriers_opened(1);
     let activation_bytes = journal
         .read_event_bytes(activation_logical_key)?
         .ok_or_else(|| {
@@ -781,6 +785,8 @@ pub(crate) fn validate_bounded_change_capability_pair(
         );
     }
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_change_capability_carriers_opened(1);
     let completion_bytes = journal
         .read_event_bytes(completion_logical_key)?
         .ok_or_else(|| {
@@ -2225,6 +2231,7 @@ mod tests {
         let counters = scope.snapshot().counters;
         assert_eq!(counters.directory_entries_walked, 0);
         assert_eq!(counters.carrier_opens, 2);
+        assert_eq!(counters.change_capability_carriers_opened, 2);
     }
 
     #[test]

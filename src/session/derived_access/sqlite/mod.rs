@@ -12,7 +12,7 @@ pub(crate) use locator::*;
 pub(crate) use semantic::*;
 pub(crate) use writer_lock::*;
 
-fn sqlite_companion_exists(path: &Path) -> bool {
+pub(crate) fn sqlite_companion_exists(path: &Path) -> bool {
     ["-wal", "-shm"].into_iter().any(|suffix| {
         let mut companion = path.as_os_str().to_owned();
         companion.push(suffix);
@@ -53,7 +53,7 @@ pub(super) fn immutable_read_only_open_is_safe(_path: &Path) -> bool {
     false
 }
 
-pub(super) fn sqlite_immutable_read_only_uri(path: &Path) -> String {
+pub(crate) fn sqlite_immutable_read_only_uri(path: &Path) -> String {
     let mut uri = String::from("file:");
     for byte in path.as_os_str().as_encoded_bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~') {

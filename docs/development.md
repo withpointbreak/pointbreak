@@ -15,7 +15,7 @@ a change and how to interpret its result. Script-level ownership and side effect
 | Rust library, CLI, or headless behavior | `just check` | Focused `just test-file <name>` or `just test -E '<filter>'` while iterating | Commit range, build, format, Clippy, and nextest suite pass |
 | Platform-conditional Rust code | `just check` | `just check-types` on relevant non-Linux hosts/CI | All workspace targets and feature-gated arms type-check |
 | Longitudinal evidence façade or contract | Focused longitudinal nextest filters, `just longitudinal-contract`, and `just longitudinal-smoke` | Verify each completed native package with `just longitudinal-verify-package <root>`; native collection remains an explicit operator ledger | Contract hashes remain stable; disposable non-timing construction/pair/preflight/package mechanics pass; package verification is read-only and recursively hash-complete |
-| Derived-access product core or bundled SQLite closure | Focused service and SQLite cursor/locator/semantic tests, default and `--no-default-features` builds, `just check`, and `just derived-access-tests` | `just store-foundation-qualification-smoke` when changing default routing, derived-store filesystem scope, or qualification integration; `just package-archive-selftest`; native Windows focused open/close test when changing SQLite ownership or linkage | One product SQLite implementation serves qualification; bundled SQLite remains in the normal package closure; explicit `off` records zero physical actions and creates no derived path |
+| Derived-access product core or bundled SQLite closure | Focused service and SQLite cursor/locator/semantic tests, default and `--no-default-features` builds, `just check`, and `just derived-access-tests` | `just store-foundation-qualification-smoke` when changing default routing, derived-store filesystem scope, or qualification integration; run `just derived-change-read <request>` on both native package hosts when changing Profile/Changes/Attention routing or its evidence contract, binding separate clean harness/product identities plus the exact control-test binary and storage probes; `just package-archive-selftest`; native Windows focused open/close test when changing SQLite ownership or linkage | One product SQLite implementation serves qualification; strict and active Change documents remain wire-equivalent under exact public fixture authority; exact-source evidence retains full typed-error, lifecycle/control, and bodyless-storage witnesses; bundled SQLite remains in the normal package closure; explicit `off` records zero physical actions and creates no derived path |
 | Developer-only LMDB proof surface | Focused closure/core/lifecycle tests plus `cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- --lmdb-proof-open-close`, `--lmdb-smoke`, and `--lmdb-lifecycle-smoke` | Compile every `.github/binary-targets.json` target; run plain open/close and native dependency inspection on representative macOS, Linux glibc, Linux musl, and Windows hosts; run the lifecycle smoke natively on Windows for open-handle replacement, interrupted-copy cleanup, and reopen evidence | Exact reviewed sources compile and link statically; semantic and lifecycle smoke are non-timing, public-input-only, and disposable; online copy/restore/repair receipts and native allocation inventory are exact; no encryption, production routing, performance evaluation, or default-package/release inclusion |
 | Inspector `web/src` | `just check`, `just web-check`, `just web-verify` | `just web-test` while iterating; `just web-build` when intentionally refreshing the bundle | Rust gate passes, front-end lint/types/tests pass, and committed `assets/app.js` matches source |
 | VS Code extension | `just check`, `just extension-check` | `just extension-package` when packaging, binary selection, or extension delivery changes | Rust and extension checks pass; optional host VSIX contains the intended binary |
@@ -29,6 +29,26 @@ a change and how to interpret its result. Script-level ownership and side effect
 
 These are minimum gates, not substitutes for a task-specific acceptance matrix. A change that crosses
 surfaces inherits every affected row.
+
+For exact-source Change-read evidence, build the library and CLI control executables from the same clean
+commit as the qualification harness with these frozen commands:
+
+```bash
+cargo +stable test --locked --features longitudinal-counting --lib --no-run
+cargo +stable test --locked --features longitudinal-counting --bin pointbreak --no-run
+```
+
+The request binds each executable's bytes and canonical build command. Before accepting any lifecycle or
+call-graph row, the runner executes a source-attestation test inside each binary and requires libtest output
+proving that exactly one frozen, fully qualified test ran and passed. An exit code of zero with no matching
+test is not evidence.
+
+Bodyless-storage evidence derives its summary, prose, and raw-payload probe hashes from the public fixture
+witness, binds the fixture-private path to the disposable repository, and derives the selected-store path
+probe internally. The SQLite table, column, and index catalog must also remain free of body/search names.
+Checkpoint/catalog reads occur in one read transaction and are retained only when before/during/after
+carrier inventories and the selected publication remain unchanged. Pre-cut receipts are diagnostic-only and
+must name the complete non-empty set of failed matrix rows; they can never enter a qualification package.
 
 Any new external longitudinal driver that captures process CPU on macOS must use
 `capture_longitudinal_process_snapshot_v1`. The helper applies the live Mach timebase before returning

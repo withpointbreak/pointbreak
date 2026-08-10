@@ -423,6 +423,7 @@ fn counter_delta(
         authority_identity_rows_scanned: delta!(authority_identity_rows_scanned),
         change_candidates: delta!(change_candidates),
         change_candidate_current_revisions: delta!(change_candidate_current_revisions),
+        change_capability_carriers_opened: delta!(change_capability_carriers_opened),
         change_proposal_carriers_opened: delta!(change_proposal_carriers_opened),
         change_proposal_carriers_validated: delta!(change_proposal_carriers_validated),
         change_support_carriers_opened: delta!(change_support_carriers_opened),
@@ -516,6 +517,10 @@ change_counter!(record_change_candidates, change_candidates);
 change_counter!(
     record_change_candidate_current_revisions,
     change_candidate_current_revisions
+);
+change_counter!(
+    record_change_capability_carriers_opened,
+    change_capability_carriers_opened
 );
 change_counter!(
     record_change_proposal_carriers_opened,
@@ -881,11 +886,12 @@ mod tests {
         record_authority_identity_rows_scanned(6);
         record_change_candidates(71);
         record_change_candidate_current_revisions(73);
-        record_change_proposal_carriers_opened(79);
-        record_change_proposal_carriers_validated(83);
-        record_change_support_carriers_opened(89);
-        record_change_matches(97);
-        record_change_rows_emitted(101);
+        record_change_capability_carriers_opened(79);
+        record_change_proposal_carriers_opened(83);
+        record_change_proposal_carriers_validated(89);
+        record_change_support_carriers_opened(97);
+        record_change_matches(101);
+        record_change_rows_emitted(103);
         record_authoritative_fallback();
         record_full_history_fallback();
         record_event_decode();
@@ -919,11 +925,12 @@ mod tests {
                 authority_identity_rows_scanned: 6,
                 change_candidates: 71,
                 change_candidate_current_revisions: 73,
-                change_proposal_carriers_opened: 79,
-                change_proposal_carriers_validated: 83,
-                change_support_carriers_opened: 89,
-                change_matches: 97,
-                change_rows_emitted: 101,
+                change_capability_carriers_opened: 79,
+                change_proposal_carriers_opened: 83,
+                change_proposal_carriers_validated: 89,
+                change_support_carriers_opened: 97,
+                change_matches: 101,
+                change_rows_emitted: 103,
                 authoritative_fallbacks: 1,
                 full_history_fallbacks: 1,
                 event_decodes: 1,

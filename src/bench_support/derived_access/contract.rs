@@ -2,6 +2,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::storage_witness::{
+    QualificationDerivedStorageForbiddenProbeHashesV1,
+    QualificationDerivedStorageForbiddenProbeKindV1, QualificationDerivedStorageWitnessV1,
+};
+use crate::bench_support::longitudinal::LongitudinalCountersV1;
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SCHEMA_V1: &str =
@@ -21,6 +26,36 @@ pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1: &str =
     "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2: &str =
     "pointbreak.qualification-derived-access-evaluator.v2";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3: &str =
+    "pointbreak.qualification-derived-access-evaluator.v3";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-evaluator-v3-procedure.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1: &str =
+    "7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1";
+
+const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
+    "change-read-parity-and-bounds-v1",
+    "exact-product-and-harness-identity-v1",
+    "complete-typed-error-documents-v1",
+    "reader-v3-authority-lifecycle-concurrency-v1",
+    "immutable-schema-and-byte-inventory-v1",
+    "completion-last-independent-package-verification-v1",
+];
+
+pub fn qualification_derived_access_evaluator_v3_procedure_sha256() -> String {
+    let procedure = serde_json::json!({
+        "schema": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SCHEMA_V1,
+        "steps": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1,
+    });
+    let bytes = canonical_json_bytes(&procedure)
+        .expect("the derived-access evaluator-v3 procedure is canonical");
+    let digest = sha256_bytes_hex(&bytes);
+    assert_eq!(
+        digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1,
+        "compiled derived-access evaluator-v3 procedure drifted"
+    );
+    digest
+}
 
 const DERIVATION_COMMIT_V1: &str = "a0d1519e5dc86d385114abfbd8e806b1456f0474";
 const DERIVATION_TREE_V1: &str = "6445e9e5af5062924ecee29647e8288c8865060d";
@@ -55,7 +90,7 @@ pub enum QualificationDerivedAccessTierV1 {
 
 impl QualificationDerivedAccessTierV1 {
     pub const ALL: [Self; 5] = [Self::D0_128, Self::L1, Self::L7, Self::L100, Self::C262];
-    const NATIVE: [Self; 3] = [Self::D0_128, Self::L1, Self::L7];
+    pub(crate) const NATIVE: [Self; 3] = [Self::D0_128, Self::L1, Self::L7];
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -120,6 +155,7 @@ impl QualificationDerivedAccessOperationV1 {
 pub enum QualificationDerivedAccessProcessScopeV1 {
     InspectorServiceChild,
     Driver,
+    QualificationHarness,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -588,6 +624,7 @@ pub struct QualificationDerivedAccessContractPublicationV1 {
     pub schema: String,
     pub mode: String,
     pub evaluator_revision: String,
+    pub evaluator_procedure_sha256: String,
     pub contract: QualificationDerivedAccessContractV1,
     pub contract_sha256: String,
     pub decision_table_markdown: String,
@@ -599,7 +636,8 @@ pub fn qualification_derived_access_contract_v1_publication()
     QualificationDerivedAccessContractPublicationV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_CONTRACT_PUBLICATION_SCHEMA_V1.to_owned(),
         mode: "non_timing_contract_publication".to_owned(),
-        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
+        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
+        evaluator_procedure_sha256: qualification_derived_access_evaluator_v3_procedure_sha256(),
         contract_sha256: contract
             .canonical_sha256()
             .expect("the frozen derived-access contract is canonical"),
@@ -701,6 +739,86 @@ impl QualificationDerivedAccessExecutionIdentityV1 {
             return Err("derived-access platform identity is inconsistent".to_owned());
         }
         Ok(())
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_sha256(self)
+    }
+}
+
+/// Exact product binary and source identity, kept separate from the
+/// instrumented qualification-harness execution identity.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessProductIdentityV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub source_commit: String,
+    pub source_tree: String,
+    pub cargo_lock_sha256: String,
+    pub binary_sha256: String,
+    pub version_sha256: String,
+    pub build_profile: String,
+    pub enabled_features: Vec<String>,
+    pub build_command_sha256: String,
+    pub operating_system: String,
+    pub architecture: String,
+    pub source_dirty: bool,
+}
+
+impl QualificationDerivedAccessProductIdentityV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_hex(&self.source_commit, 40, "product source commit")?;
+        validate_hex(&self.source_tree, 40, "product source tree")?;
+        for (value, label) in [
+            (&self.cargo_lock_sha256, "product Cargo.lock SHA-256"),
+            (&self.binary_sha256, "product binary SHA-256"),
+            (&self.version_sha256, "product version SHA-256"),
+            (&self.build_command_sha256, "product build command SHA-256"),
+        ] {
+            validate_hex(value, 64, label)?;
+        }
+        if self.source_dirty
+            || self.build_profile.trim().is_empty()
+            || self.build_profile.trim() != self.build_profile
+            || self.operating_system.trim().is_empty()
+            || self.architecture.trim().is_empty()
+            || self
+                .enabled_features
+                .iter()
+                .any(|feature| feature.trim().is_empty() || feature.trim() != feature)
+            || !self
+                .enabled_features
+                .windows(2)
+                .all(|features| features[0] < features[1])
+        {
+            return Err("derived-access product identity is not admissible".to_owned());
+        }
+        let platform_matches = match self.platform {
+            QualificationDerivedAccessPlatformV1::MacosApfs => self.operating_system == "macos",
+            QualificationDerivedAccessPlatformV1::WindowsNtfs => self.operating_system == "windows",
+            QualificationDerivedAccessPlatformV1::LinuxCompileCi => false,
+        };
+        if !platform_matches {
+            return Err("derived-access product platform identity is inconsistent".to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_sha256(self)
+    }
+
+    pub fn is_exact_source_for(
+        &self,
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+    ) -> bool {
+        self.platform == execution.platform
+            && self.source_commit == execution.source_commit
+            && self.source_tree == execution.source_tree
+            && self.cargo_lock_sha256 == execution.cargo_lock_sha256
+            && self.operating_system == execution.operating_system
+            && self.architecture == execution.architecture
+            && !self.source_dirty
     }
 }
 
@@ -810,13 +928,638 @@ pub struct QualificationDerivedAccessBootstrapEvidenceV1 {
     pub high_water_derived_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeReadCaseV1 {
+    Profile,
+    ChangesBare,
+    ChangesBounded,
+    AttentionBare,
+    AttentionBounded,
+    BodylessFilterSuite,
+    SummaryQuery,
+    SummaryFilterSuite,
+    PageTokenSuite,
+    ConcurrentReaders,
+    FreshProcessSuite,
+    WarmReuseSuite,
+    StalePageToken,
+    PostAppendSuite,
+    PostAppendFreshProcessSuite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeEvidencePurposeV1 {
+    PreCutFalsifier,
+    ExactSourceQualification,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeTypedDocumentV1 {
+    pub schema: String,
+    pub version: u32,
+    pub code: String,
+    pub retryable: Option<bool>,
+    pub canonical_sha256: String,
+}
+
+impl QualificationDerivedChangeTypedDocumentV1 {
+    fn validate(&self) -> Result<(), String> {
+        if self.schema.trim().is_empty()
+            || self.schema.trim() != self.schema
+            || self.version == 0
+            || self.code.trim().is_empty()
+            || self.code.trim() != self.code
+        {
+            return Err("typed Change failure document is incomplete".to_owned());
+        }
+        validate_hex(&self.canonical_sha256, 64, "typed Change failure document")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeControlCaseV1 {
+    L0NoGeneration,
+    M1PreactivationInvalidation,
+    L2CurrentProfile,
+    AuthorityFailureAxes,
+    IncompatibleReader,
+    AbsentV3,
+    StaleV3,
+    CorruptV3,
+    CheckpointAuthorityMismatch,
+    CheckpointStampMismatch,
+    CheckpointAnchorMismatch,
+    InterruptedPublication,
+    InterruptedCatchUpResume,
+    CatchUpMaintenanceAttribution,
+    CurrentReadNoMaintenance,
+    MovingCheckpoint,
+    MovingPublication,
+    GenerationLeaseOverlap,
+    NPlusOnePublication,
+    GenerationReclamation,
+    DirectReadyCallGraphRefusal,
+    AutomaticErrorCallGraphRefusal,
+    CapabilityClassifierAuthorityOnly,
+    ExplicitOffIsolation,
+    ExplicitOffStrictReader,
+    ConcurrentWritersAndReaders,
+    BusyWriterNonblocking,
+}
+
+impl QualificationDerivedChangeControlCaseV1 {
+    pub const ALL: [Self; 27] = [
+        Self::L0NoGeneration,
+        Self::M1PreactivationInvalidation,
+        Self::L2CurrentProfile,
+        Self::AuthorityFailureAxes,
+        Self::IncompatibleReader,
+        Self::AbsentV3,
+        Self::StaleV3,
+        Self::CorruptV3,
+        Self::CheckpointAuthorityMismatch,
+        Self::CheckpointStampMismatch,
+        Self::CheckpointAnchorMismatch,
+        Self::InterruptedPublication,
+        Self::InterruptedCatchUpResume,
+        Self::CatchUpMaintenanceAttribution,
+        Self::CurrentReadNoMaintenance,
+        Self::MovingCheckpoint,
+        Self::MovingPublication,
+        Self::GenerationLeaseOverlap,
+        Self::NPlusOnePublication,
+        Self::GenerationReclamation,
+        Self::DirectReadyCallGraphRefusal,
+        Self::AutomaticErrorCallGraphRefusal,
+        Self::CapabilityClassifierAuthorityOnly,
+        Self::ExplicitOffIsolation,
+        Self::ExplicitOffStrictReader,
+        Self::ConcurrentWritersAndReaders,
+        Self::BusyWriterNonblocking,
+    ];
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeControlBinaryKindV1 {
+    Library,
+    Cli,
+}
+
+impl QualificationDerivedChangeControlBinaryKindV1 {
+    pub const ALL: [Self; 2] = [Self::Library, Self::Cli];
+}
+
+pub(crate) fn qualification_derived_change_control_test_v1(
+    case: QualificationDerivedChangeControlCaseV1,
+) -> (QualificationDerivedChangeControlBinaryKindV1, &'static str) {
+    use QualificationDerivedChangeControlBinaryKindV1 as Binary;
+    use QualificationDerivedChangeControlCaseV1 as Case;
+    match case {
+        Case::L0NoGeneration => (
+            Binary::Library,
+            "session::derived_access::changes::tests::l0_control_path_survives_a_preactivation_generation_without_a_live_checkpoint",
+        ),
+        Case::M1PreactivationInvalidation => (
+            Binary::Library,
+            "session::derived_access::changes::tests::m1_control_path_invalidates_a_preactivation_current_without_semantic_fallback",
+        ),
+        Case::L2CurrentProfile => (
+            Binary::Library,
+            "session::derived_access::changes::tests::receipt_backed_profile_matches_strict_oracle_at_the_live_checkpoint",
+        ),
+        Case::AuthorityFailureAxes => (
+            Binary::Library,
+            "session::derived_access::changes::tests::derived_change_outcomes_keep_failure_axes_distinct",
+        ),
+        Case::IncompatibleReader | Case::AbsentV3 => (
+            Binary::Library,
+            "session::derived_access::changes::tests::missing_and_incompatible_v3_profiles_are_typed_without_strict_fallback",
+        ),
+        Case::StaleV3 | Case::CorruptV3 | Case::CheckpointAnchorMismatch => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::change_receipt_failures_are_classified_without_strict_fallback",
+        ),
+        Case::CheckpointAuthorityMismatch | Case::CheckpointStampMismatch => (
+            Binary::Library,
+            "session::derived_access::changes::tests::strict_stamp_binder_never_binds_a_mismatched_or_moving_checkpoint",
+        ),
+        Case::MovingCheckpoint => (
+            Binary::Library,
+            "session::derived_access::changes::tests::derived_change_reads_retry_when_the_checkpoint_moves_mid_read",
+        ),
+        Case::InterruptedPublication => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::every_publication_boundary_is_process_interruption_safe",
+        ),
+        Case::InterruptedCatchUpResume => (
+            Binary::Library,
+            "session::derived_access::writer::tests::interrupted_change_catch_up_rolls_back_identity_and_checkpoint_then_resumes",
+        ),
+        Case::CatchUpMaintenanceAttribution => (
+            Binary::Library,
+            "session::derived_access::writer::tests::governed_change_catch_up_counts_bodyless_authority_maintenance_separately",
+        ),
+        Case::CurrentReadNoMaintenance => (
+            Binary::Library,
+            "session::derived_access::writer::tests::current_change_read_does_not_run_authority_cursor_maintenance",
+        ),
+        Case::MovingPublication => (
+            Binary::Library,
+            "session::derived_access::changes::tests::derived_change_reads_retry_when_publication_moves_mid_read",
+        ),
+        Case::GenerationLeaseOverlap => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::replacement_keeps_an_open_reader_on_the_prior_generation",
+        ),
+        Case::NPlusOnePublication => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::reader_retries_when_publication_changes_before_lease_acquisition",
+        ),
+        Case::GenerationReclamation => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::repeated_rebuilds_collect_reclaimed_generation_leases",
+        ),
+        Case::DirectReadyCallGraphRefusal => (
+            Binary::Cli,
+            "cli::inspect::server::tests::change_query_validation_precedes_derived_generation_access",
+        ),
+        Case::AutomaticErrorCallGraphRefusal => (
+            Binary::Cli,
+            "cli::inspect::server::tests::l0_v2_routes_survive_the_automatic_preactivation_generation",
+        ),
+        Case::CapabilityClassifierAuthorityOnly => (
+            Binary::Library,
+            "session::derived_access::changes::tests::m1_control_path_invalidates_a_preactivation_current_without_semantic_fallback",
+        ),
+        Case::ExplicitOffIsolation => (
+            Binary::Library,
+            "session::derived_access::service_tests::explicit_off_stays_off_through_the_change_recovery_adapter",
+        ),
+        Case::ExplicitOffStrictReader => (
+            Binary::Cli,
+            "cli::inspect::server::tests::routes_split_derived_collections_from_strict_timeline_and_exact_reads",
+        ),
+        Case::ConcurrentWritersAndReaders => (
+            Binary::Library,
+            "session::derived_access::writer::tests::concurrent_product_writers_preserve_authoritative_events",
+        ),
+        Case::BusyWriterNonblocking => (
+            Binary::Library,
+            "session::derived_access::lifecycle::tests::stable_authority_successor_does_not_wait_for_a_busy_writer",
+        ),
+    }
+}
+
+pub(crate) fn qualification_derived_change_control_attestation_test_v1(
+    kind: QualificationDerivedChangeControlBinaryKindV1,
+) -> &'static str {
+    match kind {
+        QualificationDerivedChangeControlBinaryKindV1::Library => {
+            "bench_support::derived_access::contract::tests::qualification_library_control_binary_attests_clean_source"
+        }
+        QualificationDerivedChangeControlBinaryKindV1::Cli => {
+            "cli::inspect::server::tests::qualification_cli_control_binary_attests_clean_source"
+        }
+    }
+}
+
+pub(crate) fn qualification_derived_change_control_command_sha256_v1(test_name: &str) -> String {
+    let arguments = ["--exact", test_name, "--nocapture", "--test-threads=1"];
+    sha256_bytes_hex(
+        &canonical_json_bytes(&serde_json::json!({ "arguments": arguments }))
+            .expect("the exact control command is canonical"),
+    )
+}
+
+pub(crate) fn qualification_derived_change_control_build_command_sha256_v1(
+    kind: QualificationDerivedChangeControlBinaryKindV1,
+) -> String {
+    let arguments = match kind {
+        QualificationDerivedChangeControlBinaryKindV1::Library => vec![
+            "+stable",
+            "test",
+            "--locked",
+            "--features",
+            "longitudinal-counting",
+            "--lib",
+            "--no-run",
+        ],
+        QualificationDerivedChangeControlBinaryKindV1::Cli => vec![
+            "+stable",
+            "test",
+            "--locked",
+            "--features",
+            "longitudinal-counting",
+            "--bin",
+            "pointbreak",
+            "--no-run",
+        ],
+    };
+    sha256_bytes_hex(
+        &canonical_json_bytes(&serde_json::json!({
+            "program": "cargo",
+            "arguments": arguments,
+        }))
+        .expect("the exact control build command is canonical"),
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeControlBinaryIdentityV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub kind: QualificationDerivedChangeControlBinaryKindV1,
+    pub source_commit: String,
+    pub source_tree: String,
+    pub cargo_lock_sha256: String,
+    pub binary_sha256: String,
+    pub build_command_sha256: String,
+    pub operating_system: String,
+    pub architecture: String,
+    pub source_dirty: bool,
+    pub attestation_test: String,
+    pub attestation_command_sha256: String,
+    pub attestation_stdout_sha256: String,
+    pub attestation_stderr_sha256: String,
+}
+
+impl QualificationDerivedChangeControlBinaryIdentityV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_hex(&self.source_commit, 40, "control source commit")?;
+        validate_hex(&self.source_tree, 40, "control source tree")?;
+        for (value, label) in [
+            (&self.cargo_lock_sha256, "control Cargo.lock SHA-256"),
+            (&self.binary_sha256, "control binary SHA-256"),
+            (&self.build_command_sha256, "control build command SHA-256"),
+            (
+                &self.attestation_command_sha256,
+                "control attestation command SHA-256",
+            ),
+            (
+                &self.attestation_stdout_sha256,
+                "control attestation stdout SHA-256",
+            ),
+            (
+                &self.attestation_stderr_sha256,
+                "control attestation stderr SHA-256",
+            ),
+        ] {
+            validate_hex(value, 64, label)?;
+        }
+        if self.source_dirty
+            || self.operating_system.trim().is_empty()
+            || self.architecture.trim().is_empty()
+            || self.attestation_test
+                != qualification_derived_change_control_attestation_test_v1(self.kind)
+            || self.attestation_command_sha256
+                != qualification_derived_change_control_command_sha256_v1(&self.attestation_test)
+            || self.build_command_sha256
+                != qualification_derived_change_control_build_command_sha256_v1(self.kind)
+        {
+            return Err("derived Change control binary identity is not admissible".to_owned());
+        }
+        Ok(())
+    }
+
+    pub fn is_exact_source_for(
+        &self,
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+    ) -> bool {
+        self.platform == execution.platform
+            && self.source_commit == execution.source_commit
+            && self.source_tree == execution.source_tree
+            && self.cargo_lock_sha256 == execution.cargo_lock_sha256
+            && self.operating_system == execution.operating_system
+            && self.architecture == execution.architecture
+            && !self.source_dirty
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_sha256(self)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeControlEvidenceV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub case: QualificationDerivedChangeControlCaseV1,
+    pub binary_kind: QualificationDerivedChangeControlBinaryKindV1,
+    pub test_name: String,
+    pub status: QualificationDerivedAccessStatusV1,
+    pub execution_identity_sha256: String,
+    pub product_identity_sha256: String,
+    pub test_binary_identity_sha256: String,
+    pub test_binary_sha256: String,
+    pub command_sha256: String,
+    pub stdout_sha256: String,
+    pub stderr_sha256: String,
+    pub exit_code: i32,
+    pub tests_run: u16,
+    pub tests_passed: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeStoragePhaseV1 {
+    InitialPublication,
+    PostAppendCheckpoint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeStorageEvidenceV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub phase: QualificationDerivedChangeStoragePhaseV1,
+    pub fixture_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    pub product_identity_sha256: String,
+    pub execution_identity_sha256: String,
+    pub witness: QualificationDerivedStorageWitnessV1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QualificationDerivedChangeFixtureV1 {
+    TopologyV1,
+    DuplicateEqualV1,
+    DuplicateConflictV1,
+    RemovalV1,
+    MissingCarrierV1,
+    MutatedCarrierV1,
+    WrongFamilyCarrierV1,
+    IncompleteV1,
+    CycleConflictedV1,
+}
+
+impl QualificationDerivedChangeReadCaseV1 {
+    pub const ALL: [Self; 15] = [
+        Self::Profile,
+        Self::ChangesBare,
+        Self::ChangesBounded,
+        Self::AttentionBare,
+        Self::AttentionBounded,
+        Self::BodylessFilterSuite,
+        Self::SummaryQuery,
+        Self::SummaryFilterSuite,
+        Self::PageTokenSuite,
+        Self::ConcurrentReaders,
+        Self::FreshProcessSuite,
+        Self::WarmReuseSuite,
+        Self::StalePageToken,
+        Self::PostAppendSuite,
+        Self::PostAppendFreshProcessSuite,
+    ];
+}
+
+impl QualificationDerivedChangeFixtureV1 {
+    const COMPLETE_READY_CASES: [QualificationDerivedChangeReadCaseV1; 8] = [
+        QualificationDerivedChangeReadCaseV1::Profile,
+        QualificationDerivedChangeReadCaseV1::ChangesBare,
+        QualificationDerivedChangeReadCaseV1::ChangesBounded,
+        QualificationDerivedChangeReadCaseV1::AttentionBare,
+        QualificationDerivedChangeReadCaseV1::AttentionBounded,
+        QualificationDerivedChangeReadCaseV1::BodylessFilterSuite,
+        QualificationDerivedChangeReadCaseV1::SummaryQuery,
+        QualificationDerivedChangeReadCaseV1::SummaryFilterSuite,
+    ];
+    const TYPED_FAILURE_CASES: [QualificationDerivedChangeReadCaseV1; 6] = [
+        QualificationDerivedChangeReadCaseV1::Profile,
+        QualificationDerivedChangeReadCaseV1::ChangesBare,
+        QualificationDerivedChangeReadCaseV1::ChangesBounded,
+        QualificationDerivedChangeReadCaseV1::AttentionBare,
+        QualificationDerivedChangeReadCaseV1::AttentionBounded,
+        QualificationDerivedChangeReadCaseV1::SummaryQuery,
+    ];
+    pub const ALL: [Self; 9] = [
+        Self::TopologyV1,
+        Self::DuplicateEqualV1,
+        Self::DuplicateConflictV1,
+        Self::RemovalV1,
+        Self::MissingCarrierV1,
+        Self::MutatedCarrierV1,
+        Self::WrongFamilyCarrierV1,
+        Self::IncompleteV1,
+        Self::CycleConflictedV1,
+    ];
+
+    pub fn required_cases(self) -> &'static [QualificationDerivedChangeReadCaseV1] {
+        use QualificationDerivedChangeReadCaseV1 as Case;
+        match self {
+            Self::TopologyV1 => &Case::ALL,
+            Self::DuplicateConflictV1
+            | Self::MissingCarrierV1
+            | Self::MutatedCarrierV1
+            | Self::WrongFamilyCarrierV1 => &Self::TYPED_FAILURE_CASES,
+            Self::DuplicateEqualV1
+            | Self::RemovalV1
+            | Self::IncompleteV1
+            | Self::CycleConflictedV1 => &Self::COMPLETE_READY_CASES,
+        }
+    }
+}
+
+pub fn qualification_derived_change_storage_probe_hashes_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+) -> QualificationDerivedStorageForbiddenProbeHashesV1 {
+    let (proposal_summary_sha256, prose_sha256) = match fixture {
+        QualificationDerivedChangeFixtureV1::TopologyV1 => (
+            "21f749c5f166ae819a99a8ff0e303297a43685fd14cc7f1b86a90751989b167c",
+            "da79cc8c9b04f41616275f4a6bd027acf6d0358f3605dac74ccadfeea92945a4",
+        ),
+        _ => (
+            "c28dcb78bb4ccee57a2c6af8c1496b9fc8a14dd4860404907cc8607077ef4fc7",
+            "50598e3fd911558ba8a903c07689d5128156d63db94dbcce8deda237e8bc73aa",
+        ),
+    };
+    QualificationDerivedStorageForbiddenProbeHashesV1 {
+        proposal_summary_sha256: proposal_summary_sha256.to_owned(),
+        prose_sha256: prose_sha256.to_owned(),
+        payload_document_sha256: "20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf"
+            .to_owned(),
+    }
+}
+
+fn required_change_read_rows_v1() -> impl Iterator<
+    Item = (
+        QualificationDerivedChangeFixtureV1,
+        QualificationDerivedChangeReadCaseV1,
+    ),
+> {
+    QualificationDerivedChangeFixtureV1::ALL
+        .into_iter()
+        .flat_map(|fixture| {
+            fixture
+                .required_cases()
+                .iter()
+                .copied()
+                .map(move |case| (fixture, case))
+        })
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedChangeReadOracleV1 {
+    StrictParity,
+    TypedFailure,
+}
+
+pub(crate) fn qualification_derived_change_expected_outcome_v1(
+    platform: QualificationDerivedAccessPlatformV1,
+    fixture: QualificationDerivedChangeFixtureV1,
+    case: QualificationDerivedChangeReadCaseV1,
+) -> (
+    QualificationDerivedChangeReadOracleV1,
+    u16,
+    Option<&'static str>,
+) {
+    if case == QualificationDerivedChangeReadCaseV1::StalePageToken {
+        return (
+            QualificationDerivedChangeReadOracleV1::TypedFailure,
+            409,
+            Some("stale_projection"),
+        );
+    }
+    let profile_remains_ready = case == QualificationDerivedChangeReadCaseV1::Profile
+        && matches!(
+            fixture,
+            QualificationDerivedChangeFixtureV1::DuplicateConflictV1
+        );
+    let apfs_existing_carrier_profile_remains_ready = platform
+        == QualificationDerivedAccessPlatformV1::MacosApfs
+        && case == QualificationDerivedChangeReadCaseV1::Profile
+        && matches!(
+            fixture,
+            QualificationDerivedChangeFixtureV1::MutatedCarrierV1
+                | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1
+        );
+    if profile_remains_ready || apfs_existing_carrier_profile_remains_ready {
+        return (
+            QualificationDerivedChangeReadOracleV1::StrictParity,
+            200,
+            None,
+        );
+    }
+    match fixture {
+        QualificationDerivedChangeFixtureV1::DuplicateConflictV1 => (
+            QualificationDerivedChangeReadOracleV1::TypedFailure,
+            503,
+            Some("projection_invalid"),
+        ),
+        QualificationDerivedChangeFixtureV1::MutatedCarrierV1
+        | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1
+            if platform == QualificationDerivedAccessPlatformV1::MacosApfs =>
+        {
+            (
+                QualificationDerivedChangeReadOracleV1::TypedFailure,
+                503,
+                Some("projection_invalid"),
+            )
+        }
+        QualificationDerivedChangeFixtureV1::MutatedCarrierV1
+        | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1 => (
+            QualificationDerivedChangeReadOracleV1::TypedFailure,
+            503,
+            Some("projection_rebuild_required"),
+        ),
+        QualificationDerivedChangeFixtureV1::MissingCarrierV1 => (
+            QualificationDerivedChangeReadOracleV1::TypedFailure,
+            503,
+            Some("projection_rebuild_required"),
+        ),
+        _ => (
+            QualificationDerivedChangeReadOracleV1::StrictParity,
+            200,
+            None,
+        ),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeReadEvidenceV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub fixture_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    pub case: QualificationDerivedChangeReadCaseV1,
+    pub semantic_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub counter_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub product_identity_sha256: String,
+    pub counter_execution_identity_sha256: String,
+    pub status: QualificationDerivedAccessStatusV1,
+    pub oracle: QualificationDerivedChangeReadOracleV1,
+    pub strict_semantic_sha256: Option<String>,
+    pub derived_semantic_sha256: String,
+    pub wire_contract_matches: bool,
+    pub expected_http_status: u16,
+    pub observed_http_status: u16,
+    pub expected_code: Option<String>,
+    pub observed_code: Option<String>,
+    pub expected_typed_document: Option<QualificationDerivedChangeTypedDocumentV1>,
+    pub observed_typed_document: Option<QualificationDerivedChangeTypedDocumentV1>,
+    pub counters: LongitudinalCountersV1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualificationDerivedAccessPackageV1 {
     pub schema: String,
     pub evaluator_revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub evaluator_procedure_sha256: String,
     pub proposed_profile_id: String,
     pub execution_identities: Vec<QualificationDerivedAccessExecutionIdentityV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub product_identities: Vec<QualificationDerivedAccessProductIdentityV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_control_binary_identities: Vec<QualificationDerivedChangeControlBinaryIdentityV1>,
     pub root_bindings: Vec<QualificationDerivedAccessRootBindingV1>,
     pub d0_rows: Vec<QualificationDerivedAccessD0EvidenceV1>,
     pub operation_rows: Vec<QualificationDerivedAccessOperationEvidenceV1>,
@@ -824,6 +1567,12 @@ pub struct QualificationDerivedAccessPackageV1 {
     pub resources: Option<QualificationDerivedAccessResourceEvidenceV1>,
     pub allocation_rows: Vec<QualificationDerivedAccessAllocationEvidenceV1>,
     pub bootstrap_rows: Vec<QualificationDerivedAccessBootstrapEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_read_rows: Vec<QualificationDerivedChangeReadEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_control_rows: Vec<QualificationDerivedChangeControlEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_storage_rows: Vec<QualificationDerivedChangeStorageEvidenceV1>,
     pub complete: bool,
 }
 
@@ -843,10 +1592,30 @@ pub fn evaluate_qualification_derived_access_v1(
     package: &QualificationDerivedAccessPackageV1,
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
     if package.schema != QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1
-        || package.evaluator_revision != QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
+        || !matches!(
+            package.evaluator_revision.as_str(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
+                | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+        )
         || package.proposed_profile_id.trim().is_empty()
     {
         return Err("unsupported derived-access package".to_owned());
+    }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
+        && (!package.change_read_rows.is_empty()
+            || !package.change_control_rows.is_empty()
+            || !package.change_storage_rows.is_empty()
+            || !package.product_identities.is_empty()
+            || !package.change_control_binary_identities.is_empty()
+            || !package.evaluator_procedure_sha256.is_empty())
+    {
+        return Err("evaluator v2 cannot carry successor evidence".to_owned());
+    }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+        && package.evaluator_procedure_sha256
+            != qualification_derived_access_evaluator_v3_procedure_sha256()
+    {
+        return Err("evaluator v3 procedure binding drifted".to_owned());
     }
     let missing_platforms = validate_execution_identities(package)?;
     reject_duplicate_rows(package)?;
@@ -864,6 +1633,11 @@ pub fn evaluate_qualification_derived_access_v1(
     evaluate_resources(package, &contract, &mut failed, &mut missing);
     evaluate_allocation(package, &contract, &mut failed, &mut missing);
     evaluate_bootstrap(package, &contract, &mut failed, &mut missing);
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3 {
+        evaluate_change_reads(package, &mut failed, &mut missing);
+        evaluate_change_controls(package, &mut failed, &mut missing);
+        evaluate_change_storage(package, &mut failed, &mut missing);
+    }
     if !package.complete {
         missing.push("completion-last package marker".to_owned());
     }
@@ -878,7 +1652,7 @@ pub fn evaluate_qualification_derived_access_v1(
     Ok(QualificationDerivedAccessEvaluationV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_EVALUATION_SCHEMA_V1.to_owned(),
         contract_sha256: QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1.to_owned(),
-        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
+        evaluator_revision: package.evaluator_revision.clone(),
         proposed_profile_id: package.proposed_profile_id.clone(),
         outcome,
         failed_criteria: failed,
@@ -1056,6 +1830,12 @@ fn validate_execution_identities(
     for identity in &package.execution_identities {
         identity.validate()?;
     }
+    for identity in &package.product_identities {
+        identity.validate()?;
+    }
+    for identity in &package.change_control_binary_identities {
+        identity.validate()?;
+    }
     let platforms = package
         .execution_identities
         .iter()
@@ -1072,6 +1852,40 @@ fn validate_execution_identities(
         .any(|(index, identity)| package.execution_identities[..index].contains(identity));
     if !platforms.is_subset(&required) || duplicated {
         return Err("derived-access execution identities are duplicated or unsupported".to_owned());
+    }
+    let product_platforms = package
+        .product_identities
+        .iter()
+        .map(|identity| identity.platform)
+        .collect::<BTreeSet<_>>();
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+        && (product_platforms.len() != package.product_identities.len()
+            || !product_platforms.is_subset(&required))
+    {
+        return Err("derived-access product identities are duplicated or unsupported".to_owned());
+    }
+    let control_binaries = package
+        .change_control_binary_identities
+        .iter()
+        .map(|identity| (identity.platform, identity.kind))
+        .collect::<BTreeSet<_>>();
+    let expected_control_binaries = [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ]
+    .into_iter()
+    .flat_map(|platform| {
+        QualificationDerivedChangeControlBinaryKindV1::ALL
+            .into_iter()
+            .map(move |kind| (platform, kind))
+    })
+    .collect::<BTreeSet<_>>();
+    if control_binaries.len() != package.change_control_binary_identities.len()
+        || !control_binaries.is_subset(&expected_control_binaries)
+    {
+        return Err(
+            "derived-access control binary identities are duplicated or unsupported".to_owned(),
+        );
     }
     let root_bindings = package.root_bindings.iter().collect::<BTreeSet<_>>();
     if root_bindings.len() != package.root_bindings.len() {
@@ -1123,6 +1937,32 @@ fn validate_execution_identities(
                 return Err(
                     "derived-access execution identities mix native platform authority".to_owned(),
                 );
+            }
+        }
+        for product in &package.product_identities {
+            let Some(execution) = package
+                .execution_identities
+                .iter()
+                .find(|execution| execution.platform == product.platform)
+            else {
+                return Err("derived-access product identity lacks execution authority".to_owned());
+            };
+            if !product.is_exact_source_for(execution) {
+                return Err(
+                    "derived-access product identity differs from harness source".to_owned(),
+                );
+            }
+        }
+        for control in &package.change_control_binary_identities {
+            let Some(execution) = package
+                .execution_identities
+                .iter()
+                .find(|execution| execution.platform == control.platform)
+            else {
+                return Err("control binary identity lacks execution authority".to_owned());
+            };
+            if !control.is_exact_source_for(execution) {
+                return Err("control binary differs from harness source".to_owned());
             }
         }
     }
@@ -1215,6 +2055,78 @@ fn reject_duplicate_rows(package: &QualificationDerivedAccessPackageV1) -> Resul
     if bootstrap.len() != package.bootstrap_rows.len() || !bootstrap.is_subset(&expected_bootstrap)
     {
         return Err("duplicate or unsupported bootstrap row".to_owned());
+    }
+    let change_reads = package
+        .change_read_rows
+        .iter()
+        .map(|row| (row.platform, row.fixture, row.case))
+        .collect::<BTreeSet<_>>();
+    let expected_change_reads = [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ]
+    .into_iter()
+    .flat_map(|platform| {
+        required_change_read_rows_v1().map(move |(fixture, case)| (platform, fixture, case))
+    })
+    .collect::<BTreeSet<_>>();
+    if change_reads.len() != package.change_read_rows.len()
+        || !change_reads.is_subset(&expected_change_reads)
+    {
+        return Err("duplicate or unsupported Change read row".to_owned());
+    }
+    let change_controls = package
+        .change_control_rows
+        .iter()
+        .map(|row| (row.platform, row.case))
+        .collect::<BTreeSet<_>>();
+    let expected_change_controls = [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ]
+    .into_iter()
+    .flat_map(|platform| {
+        QualificationDerivedChangeControlCaseV1::ALL
+            .into_iter()
+            .map(move |case| (platform, case))
+    })
+    .collect::<BTreeSet<_>>();
+    if change_controls.len() != package.change_control_rows.len()
+        || !change_controls.is_subset(&expected_change_controls)
+    {
+        return Err("duplicate or unsupported Change control row".to_owned());
+    }
+    let change_storage = package
+        .change_storage_rows
+        .iter()
+        .map(|row| (row.platform, row.fixture, row.phase))
+        .collect::<BTreeSet<_>>();
+    let expected_change_storage = [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ]
+    .into_iter()
+    .flat_map(|platform| {
+        QualificationDerivedChangeFixtureV1::ALL
+            .into_iter()
+            .map(move |fixture| {
+                (
+                    platform,
+                    fixture,
+                    QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                )
+            })
+            .chain(std::iter::once((
+                platform,
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+                QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+            )))
+    })
+    .collect::<BTreeSet<_>>();
+    if change_storage.len() != package.change_storage_rows.len()
+        || !change_storage.is_subset(&expected_change_storage)
+    {
+        return Err("duplicate or unsupported Change storage row".to_owned());
     }
     Ok(())
 }
@@ -1683,6 +2595,621 @@ fn evaluate_bootstrap(
     }
 }
 
+fn evaluate_change_reads(
+    package: &QualificationDerivedAccessPackageV1,
+    failed: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        if !package
+            .product_identities
+            .iter()
+            .any(|identity| identity.platform == platform)
+        {
+            missing.push(format!("exact product identity on {platform:?}"));
+        }
+    }
+    if package.change_read_rows.is_empty() {
+        missing.push("Change read matrix".to_owned());
+        return;
+    }
+    for fixture in QualificationDerivedChangeFixtureV1::ALL {
+        let authorities = package
+            .change_read_rows
+            .iter()
+            .filter(|row| row.fixture == fixture)
+            .map(|row| {
+                (
+                    row.fixture_inventory_sha256.as_str(),
+                    row.fixture_witness_sha256.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if authorities.len() > 1 {
+            failed.push(format!("{fixture:?} cross-platform fixture authority"));
+        }
+    }
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        for (fixture, case) in required_change_read_rows_v1() {
+            let criterion = format!("{platform:?}/{fixture:?}/{case:?} Change read");
+            let Some(row) = package
+                .change_read_rows
+                .iter()
+                .find(|row| row.platform == platform && row.fixture == fixture && row.case == case)
+            else {
+                missing.push(criterion);
+                continue;
+            };
+            let product_identity_sha256 = package
+                .product_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .and_then(|identity| identity.canonical_sha256().ok());
+            let execution_identity_sha256 = package
+                .execution_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .and_then(|identity| identity.canonical_sha256().ok());
+            if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
+                || execution_identity_sha256.as_deref()
+                    != Some(row.counter_execution_identity_sha256.as_str())
+            {
+                failed.push(format!(
+                    "{platform:?}/{fixture:?}/{case:?} source authority"
+                ));
+            }
+            match row.status {
+                QualificationDerivedAccessStatusV1::Unknown => missing.push(criterion),
+                QualificationDerivedAccessStatusV1::Failed => failed.push(criterion),
+                QualificationDerivedAccessStatusV1::Passed if change_read_row_failed(row) => {
+                    failed.push(criterion);
+                }
+                QualificationDerivedAccessStatusV1::Passed => {}
+            }
+        }
+        for fixture in QualificationDerivedChangeFixtureV1::ALL {
+            for (index, case) in fixture.required_cases().iter().copied().enumerate() {
+                let Some(row) = package.change_read_rows.iter().find(|row| {
+                    row.platform == platform && row.fixture == fixture && row.case == case
+                }) else {
+                    continue;
+                };
+                if matches!(
+                    case,
+                    QualificationDerivedChangeReadCaseV1::StalePageToken
+                        | QualificationDerivedChangeReadCaseV1::PostAppendSuite
+                ) {
+                    continue;
+                }
+                let expected_capability_opens = if index == 0
+                    || matches!(
+                        case,
+                        QualificationDerivedChangeReadCaseV1::FreshProcessSuite
+                            | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite
+                    ) {
+                    2
+                } else {
+                    0
+                };
+                if row.counters.change_capability_carriers_opened != expected_capability_opens {
+                    failed.push(format!(
+                        "{platform:?}/{fixture:?}/{case:?} Change capability cache"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn evaluate_change_controls(
+    package: &QualificationDerivedAccessPackageV1,
+    failed: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        let product_identity_sha256 = package
+            .product_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        let execution_identity_sha256 = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        for kind in QualificationDerivedChangeControlBinaryKindV1::ALL {
+            if !package
+                .change_control_binary_identities
+                .iter()
+                .any(|identity| identity.platform == platform && identity.kind == kind)
+            {
+                missing.push(format!("{platform:?}/{kind:?} Change control binary"));
+            }
+        }
+        for case in QualificationDerivedChangeControlCaseV1::ALL {
+            let criterion = format!("{platform:?}/{case:?} Change control");
+            let Some(row) = package
+                .change_control_rows
+                .iter()
+                .find(|row| row.platform == platform && row.case == case)
+            else {
+                missing.push(criterion);
+                continue;
+            };
+            let digests_valid = [
+                (&row.test_binary_sha256, "Change control test binary"),
+                (&row.command_sha256, "Change control command"),
+                (&row.stdout_sha256, "Change control stdout"),
+                (&row.stderr_sha256, "Change control stderr"),
+            ]
+            .into_iter()
+            .all(|(value, label)| validate_hex(value, 64, label).is_ok());
+            let (expected_kind, expected_test_name) =
+                qualification_derived_change_control_test_v1(case);
+            let binary_identity = package
+                .change_control_binary_identities
+                .iter()
+                .find(|identity| identity.platform == platform && identity.kind == expected_kind);
+            let binary_identity_sha256 =
+                binary_identity.and_then(|identity| identity.canonical_sha256().ok());
+            match row.status {
+                QualificationDerivedAccessStatusV1::Unknown => missing.push(criterion),
+                QualificationDerivedAccessStatusV1::Failed => failed.push(criterion),
+                QualificationDerivedAccessStatusV1::Passed
+                    if row.exit_code != 0
+                        || !digests_valid
+                        || row.binary_kind != expected_kind
+                        || row.test_name != expected_test_name
+                        || row.command_sha256
+                            != qualification_derived_change_control_command_sha256_v1(
+                                expected_test_name,
+                            )
+                        || row.tests_run != 1
+                        || row.tests_passed != 1
+                        || binary_identity.is_none()
+                        || binary_identity_sha256.as_deref()
+                            != Some(row.test_binary_identity_sha256.as_str())
+                        || binary_identity.is_some_and(|identity| {
+                            identity.binary_sha256 != row.test_binary_sha256
+                        })
+                        || product_identity_sha256.as_deref()
+                            != Some(row.product_identity_sha256.as_str())
+                        || execution_identity_sha256.as_deref()
+                            != Some(row.execution_identity_sha256.as_str()) =>
+                {
+                    failed.push(criterion);
+                }
+                QualificationDerivedAccessStatusV1::Passed => {}
+            }
+        }
+    }
+}
+
+fn evaluate_change_storage(
+    package: &QualificationDerivedAccessPackageV1,
+    failed: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        let product_identity_sha256 = package
+            .product_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        let execution_identity_sha256 = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        for fixture in QualificationDerivedChangeFixtureV1::ALL {
+            let phases: &[QualificationDerivedChangeStoragePhaseV1] =
+                if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+                    &[
+                        QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                        QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+                    ]
+                } else {
+                    &[QualificationDerivedChangeStoragePhaseV1::InitialPublication]
+                };
+            for &phase in phases {
+                let criterion = format!("{platform:?}/{fixture:?}/{phase:?} Change storage");
+                let Some(row) = package.change_storage_rows.iter().find(|row| {
+                    row.platform == platform && row.fixture == fixture && row.phase == phase
+                }) else {
+                    missing.push(criterion);
+                    continue;
+                };
+                let expected_fixture_probes =
+                    qualification_derived_change_storage_probe_hashes_v1(fixture);
+                let observed_fixture_probes = row
+                    .witness
+                    .forbidden_probes
+                    .iter()
+                    .filter_map(|probe| match probe.kind {
+                        QualificationDerivedStorageForbiddenProbeKindV1::ProposalSummary
+                        | QualificationDerivedStorageForbiddenProbeKindV1::Prose
+                        | QualificationDerivedStorageForbiddenProbeKindV1::PayloadDocument => {
+                            Some((probe.kind, probe.sentinel_sha256.clone()))
+                        }
+                        QualificationDerivedStorageForbiddenProbeKindV1::FixturePrivatePath
+                        | QualificationDerivedStorageForbiddenProbeKindV1::StoreRootPath => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                let required_fixture_probes = [
+                    (
+                        QualificationDerivedStorageForbiddenProbeKindV1::ProposalSummary,
+                        expected_fixture_probes.proposal_summary_sha256,
+                    ),
+                    (
+                        QualificationDerivedStorageForbiddenProbeKindV1::Prose,
+                        expected_fixture_probes.prose_sha256,
+                    ),
+                    (
+                        QualificationDerivedStorageForbiddenProbeKindV1::PayloadDocument,
+                        expected_fixture_probes.payload_document_sha256,
+                    ),
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+                let forbidden_search_schema =
+                    row.witness.sqlite_catalog.entries.iter().any(|entry| {
+                        forbidden_bodyless_storage_name_v1(&entry.name)
+                            || entry
+                                .columns
+                                .iter()
+                                .any(|column| forbidden_bodyless_storage_name_v1(&column.name))
+                            || entry.indexes.iter().any(|index| {
+                                forbidden_bodyless_storage_name_v1(&index.name)
+                                    || index.columns.iter().any(|column| {
+                                        column
+                                            .name
+                                            .as_deref()
+                                            .is_some_and(forbidden_bodyless_storage_name_v1)
+                                    })
+                            })
+                    });
+                if row.witness.validate().is_err()
+                    || observed_fixture_probes != required_fixture_probes
+                    || forbidden_search_schema
+                    || product_identity_sha256.as_deref()
+                        != Some(row.product_identity_sha256.as_str())
+                    || execution_identity_sha256.as_deref()
+                        != Some(row.execution_identity_sha256.as_str())
+                {
+                    failed.push(criterion);
+                }
+            }
+            let initial = package.change_storage_rows.iter().find(|row| {
+                row.platform == platform
+                    && row.fixture == fixture
+                    && row.phase == QualificationDerivedChangeStoragePhaseV1::InitialPublication
+            });
+            let counterpart_platform = match platform {
+                QualificationDerivedAccessPlatformV1::MacosApfs => {
+                    QualificationDerivedAccessPlatformV1::WindowsNtfs
+                }
+                QualificationDerivedAccessPlatformV1::WindowsNtfs => {
+                    QualificationDerivedAccessPlatformV1::MacosApfs
+                }
+                QualificationDerivedAccessPlatformV1::LinuxCompileCi => unreachable!(),
+            };
+            let counterpart = package.change_storage_rows.iter().find(|row| {
+                row.platform == counterpart_platform
+                    && row.fixture == fixture
+                    && row.phase == QualificationDerivedChangeStoragePhaseV1::InitialPublication
+            });
+            if let (Some(initial), Some(counterpart)) = (initial, counterpart) {
+                let fixture_probes = |witness: &QualificationDerivedStorageWitnessV1| {
+                    witness
+                        .forbidden_probes
+                        .iter()
+                        .filter(|probe| {
+                            matches!(
+                                probe.kind,
+                                QualificationDerivedStorageForbiddenProbeKindV1::ProposalSummary
+                                    | QualificationDerivedStorageForbiddenProbeKindV1::Prose
+                                    | QualificationDerivedStorageForbiddenProbeKindV1::PayloadDocument
+                            )
+                        })
+                        .map(|probe| (probe.kind, probe.sentinel_sha256.clone()))
+                        .collect::<BTreeSet<_>>()
+                };
+                if initial.witness.sqlite_catalog != counterpart.witness.sqlite_catalog
+                    || initial.fixture_inventory_sha256 != counterpart.fixture_inventory_sha256
+                    || initial.fixture_witness_sha256 != counterpart.fixture_witness_sha256
+                    || fixture_probes(&initial.witness) != fixture_probes(&counterpart.witness)
+                {
+                    failed.push(format!("{fixture:?} cross-platform storage authority"));
+                }
+            }
+        }
+        let initial = package.change_storage_rows.iter().find(|row| {
+            row.platform == platform
+                && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                && row.phase == QualificationDerivedChangeStoragePhaseV1::InitialPublication
+        });
+        let post_append = package.change_storage_rows.iter().find(|row| {
+            row.platform == platform
+                && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                && row.phase == QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint
+        });
+        if let (Some(initial), Some(post_append)) = (initial, post_append)
+            && (initial.witness.publication.generation_id_sha256
+                != post_append.witness.publication.generation_id_sha256
+                || initial.witness.publication.descriptor_sha256
+                    != post_append.witness.publication.descriptor_sha256
+                || initial.witness.sqlite_catalog != post_append.witness.sqlite_catalog
+                || initial
+                    .witness
+                    .live_checkpoint
+                    .as_ref()
+                    .zip(post_append.witness.live_checkpoint.as_ref())
+                    .is_none_or(|(before, after)| {
+                        before.checkpoint_sha256 == after.checkpoint_sha256
+                            || before.reader_receipt_sha256 != after.reader_receipt_sha256
+                    }))
+        {
+            failed.push(format!("{platform:?} same-generation checkpoint advance"));
+        }
+    }
+}
+
+fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if [
+        "fts",
+        "search",
+        "summary",
+        "snippet",
+        "prose",
+        "private_path",
+        "owner_path",
+    ]
+    .into_iter()
+    .any(|forbidden| name.contains(forbidden))
+    {
+        return true;
+    }
+    let tokens = name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .collect::<BTreeSet<_>>();
+    let names_body_material = ["body", "payload", "document", "documents"]
+        .into_iter()
+        .any(|subject| tokens.contains(subject));
+    let names_metadata_only = [
+        "hash",
+        "digest",
+        "sha256",
+        "id",
+        "type",
+        "size",
+        "count",
+        "encoding",
+        "version",
+        "availability",
+        "removed",
+        "ordinal",
+    ]
+    .into_iter()
+    .any(|metadata| tokens.contains(metadata));
+    names_body_material && !names_metadata_only
+}
+
+fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> bool {
+    const TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ: u64 = 14;
+    const TOPOLOGY_ROWS_PER_BOUNDED_READ: u64 = 2;
+    const TOPOLOGY_PROPOSAL_OPENS_PER_BOUNDED_READ_MAX: u64 = 4;
+    const TOPOLOGY_SUPPORT_OPENS_PER_BOUNDED_READ_MAX: u64 = 8;
+
+    let counters = &row.counters;
+    let (expected_oracle, expected_http_status, expected_code) =
+        qualification_derived_change_expected_outcome_v1(row.platform, row.fixture, row.case);
+    let classified_opens = counters
+        .change_capability_carriers_opened
+        .saturating_add(counters.change_proposal_carriers_opened)
+        .saturating_add(counters.change_support_carriers_opened);
+    let oracle_failed = match row.oracle {
+        QualificationDerivedChangeReadOracleV1::StrictParity => {
+            row.expected_typed_document.is_some()
+                || row.observed_typed_document.is_some()
+                || row.strict_semantic_sha256.as_deref().is_none_or(|strict| {
+                    validate_hex(strict, 64, "strict Change semantic receipt").is_err()
+                        || strict != row.derived_semantic_sha256
+                })
+        }
+        QualificationDerivedChangeReadOracleV1::TypedFailure => {
+            let expected_document_shape = row.expected_code.as_deref().map(|code| {
+                if code == "stale_projection" {
+                    ("pointbreak.inspect-change-page-error", 1, None)
+                } else {
+                    ("pointbreak.inspect-change-projection-error", 1, Some(false))
+                }
+            });
+            row.strict_semantic_sha256.is_some()
+                || row.expected_http_status < 400
+                || row
+                    .expected_code
+                    .as_deref()
+                    .is_none_or(|code| code.trim().is_empty() || code.trim() != code)
+                || row
+                    .expected_typed_document
+                    .as_ref()
+                    .is_none_or(|document| document.validate().is_err())
+                || row
+                    .observed_typed_document
+                    .as_ref()
+                    .is_none_or(|document| document.validate().is_err())
+                || row.expected_typed_document != row.observed_typed_document
+                || row.expected_typed_document.as_ref().is_none_or(|document| {
+                    expected_document_shape.is_none_or(|(schema, version, retryable)| {
+                        document.schema != schema
+                            || document.version != version
+                            || document.code != row.expected_code.as_deref().unwrap_or_default()
+                            || document.retryable != retryable
+                    })
+                })
+        }
+    };
+    let case_failed = match row.case {
+        QualificationDerivedChangeReadCaseV1::Profile => {
+            counters.change_candidates != 0
+                || counters.change_candidate_current_revisions != 0
+                || counters.change_proposal_carriers_opened != 0
+                || counters.change_proposal_carriers_validated != 0
+                || counters.change_support_carriers_opened != 0
+                || counters.change_matches != 0
+                || counters.change_rows_emitted != 0
+        }
+        QualificationDerivedChangeReadCaseV1::ChangesBounded
+        | QualificationDerivedChangeReadCaseV1::AttentionBounded => {
+            counters.change_rows_emitted > 2
+        }
+        QualificationDerivedChangeReadCaseV1::SummaryQuery
+        | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite => {
+            counters.change_proposal_carriers_opened < counters.change_candidate_current_revisions
+        }
+        _ => false,
+    };
+    let direct_work_expected = row.case != QualificationDerivedChangeReadCaseV1::Profile
+        && (row.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+            || row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1);
+    let direct_work_failed = direct_work_expected
+        && (counters.change_candidates == 0
+            || counters.change_candidate_current_revisions
+                > counters.change_candidates.saturating_mul(2)
+            || counters.change_proposal_carriers_opened
+                > counters
+                    .change_candidate_current_revisions
+                    .saturating_mul(2)
+            || counters.change_support_carriers_opened
+                > counters.change_proposal_carriers_opened.saturating_mul(4)
+            || !matches!(
+                row.case,
+                QualificationDerivedChangeReadCaseV1::SummaryQuery
+                    | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite
+            ) && counters.change_matches != 0);
+    let topology_work_failed = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case != QualificationDerivedChangeReadCaseV1::Profile
+        && (counters.change_candidate_current_revisions == 0
+            || counters.change_proposal_carriers_opened == 0
+            || counters.change_rows_emitted == 0
+            || matches!(
+                row.case,
+                QualificationDerivedChangeReadCaseV1::SummaryQuery
+                    | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite
+            ) && counters.change_matches == 0);
+    let bounded_topology_page_count = match row.case {
+        QualificationDerivedChangeReadCaseV1::ChangesBounded
+        | QualificationDerivedChangeReadCaseV1::AttentionBounded
+        | QualificationDerivedChangeReadCaseV1::StalePageToken => Some(1_u64),
+        QualificationDerivedChangeReadCaseV1::PageTokenSuite
+        | QualificationDerivedChangeReadCaseV1::FreshProcessSuite
+        | QualificationDerivedChangeReadCaseV1::PostAppendSuite
+        | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite => Some(2),
+        QualificationDerivedChangeReadCaseV1::ConcurrentReaders
+        | QualificationDerivedChangeReadCaseV1::WarmReuseSuite => Some(4),
+        _ => None,
+    };
+    let bounded_topology_failed = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && bounded_topology_page_count.is_some_and(|page_count| {
+            let expected_candidates =
+                page_count.saturating_mul(TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ);
+            counters.change_candidates != expected_candidates
+                || counters.change_candidate_current_revisions != expected_candidates
+                || counters.change_rows_emitted
+                    != page_count.saturating_mul(TOPOLOGY_ROWS_PER_BOUNDED_READ)
+                || counters.change_proposal_carriers_opened
+                    > page_count.saturating_mul(TOPOLOGY_PROPOSAL_OPENS_PER_BOUNDED_READ_MAX)
+                || counters.change_support_carriers_opened
+                    > page_count.saturating_mul(TOPOLOGY_SUPPORT_OPENS_PER_BOUNDED_READ_MAX)
+        });
+    let fixture_failed = match (row.fixture, row.case) {
+        (
+            QualificationDerivedChangeFixtureV1::DuplicateEqualV1,
+            QualificationDerivedChangeReadCaseV1::ChangesBare
+            | QualificationDerivedChangeReadCaseV1::ChangesBounded
+            | QualificationDerivedChangeReadCaseV1::AttentionBare
+            | QualificationDerivedChangeReadCaseV1::AttentionBounded
+            | QualificationDerivedChangeReadCaseV1::SummaryQuery,
+        ) => {
+            counters.change_proposal_carriers_opened != 2
+                || counters.change_proposal_carriers_validated != 2
+        }
+        (
+            QualificationDerivedChangeFixtureV1::RemovalV1,
+            QualificationDerivedChangeReadCaseV1::ChangesBare
+            | QualificationDerivedChangeReadCaseV1::ChangesBounded
+            | QualificationDerivedChangeReadCaseV1::AttentionBare
+            | QualificationDerivedChangeReadCaseV1::AttentionBounded
+            | QualificationDerivedChangeReadCaseV1::SummaryQuery,
+        ) => {
+            counters.change_proposal_carriers_opened != 1
+                || counters.change_proposal_carriers_validated != 1
+                || counters.change_support_carriers_opened != 2
+        }
+        _ => false,
+    };
+    oracle_failed
+        || row.oracle != expected_oracle
+        || row.expected_http_status != expected_http_status
+        || row.expected_code.as_deref() != expected_code
+        || case_failed
+        || direct_work_failed
+        || topology_work_failed
+        || bounded_topology_failed
+        || fixture_failed
+        || validate_hex(
+            &row.fixture_inventory_sha256,
+            64,
+            "Change fixture inventory",
+        )
+        .is_err()
+        || validate_hex(&row.fixture_witness_sha256, 64, "Change fixture witness").is_err()
+        || row.expected_http_status < 200
+        || row.expected_http_status > 599
+        || row.observed_http_status != row.expected_http_status
+        || row.observed_code != row.expected_code
+        || validate_hex(
+            &row.derived_semantic_sha256,
+            64,
+            "derived Change semantic receipt",
+        )
+        .is_err()
+        || row.semantic_process_scope
+            != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
+        || row.counter_process_scope
+            != QualificationDerivedAccessProcessScopeV1::QualificationHarness
+        || !row.wire_contract_matches
+        || counters.directory_entries_walked != 0
+        || counters.carrier_opens != classified_opens
+        || !matches!(counters.change_capability_carriers_opened, 0 | 2)
+        || counters.change_proposal_carriers_validated > counters.change_proposal_carriers_opened
+        || row.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+            && counters.change_proposal_carriers_opened
+                != counters.change_proposal_carriers_validated
+        || counters.change_matches > counters.change_candidates
+        || counters.change_rows_emitted > counters.change_candidates
+        || counters.authoritative_fallbacks != 0
+        || counters.full_history_fallbacks != 0
+        || counters.event_folds != 0
+        || counters.body_artifact_reads != 0
+        || counters.object_artifact_reads != 0
+        || counters.projection_rebuilds != 0
+        || counters.state_rebuilds != 0
+}
+
 fn validate_hex(value: &str, width: usize, label: &str) -> Result<(), String> {
     if value.len() != width
         || !value
@@ -1707,6 +3234,37 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn qualification_library_control_binary_attests_clean_source() {
+        if let Ok(expected_commit) =
+            std::env::var("POINTBREAK_QUALIFICATION_EXPECTED_CONTROL_COMMIT")
+        {
+            assert_eq!(env!("POINTBREAK_BUILD_SOURCE"), "git");
+            assert_eq!(env!("POINTBREAK_BUILD_COMMIT"), expected_commit);
+            assert_eq!(env!("POINTBREAK_BUILD_DIRTY"), "false");
+            let build_configuration = format!(
+                "debug={},gix={},bench={},longitudinal-counting={},lmdb-proof={},gix-parity={}",
+                cfg!(debug_assertions),
+                cfg!(feature = "gix"),
+                cfg!(feature = "bench"),
+                cfg!(feature = "longitudinal-counting"),
+                cfg!(feature = "lmdb-proof"),
+                cfg!(feature = "gix-parity"),
+            );
+            assert_eq!(
+                build_configuration,
+                "debug=true,gix=true,bench=true,longitudinal-counting=true,lmdb-proof=false,gix-parity=false"
+            );
+        }
+        println!(
+            "pointbreak-control-source={} commit={} dirty={} longitudinal-counting={}",
+            env!("POINTBREAK_BUILD_SOURCE"),
+            env!("POINTBREAK_BUILD_COMMIT"),
+            env!("POINTBREAK_BUILD_DIRTY"),
+            cfg!(feature = "longitudinal-counting"),
+        );
+    }
+
     fn zeros() -> QualificationDerivedAccessCountersV1 {
         QualificationDerivedAccessCountersV1 {
             directory_entries_walked: 0,
@@ -1730,6 +3288,86 @@ mod tests {
 
     fn digest(label: &str) -> String {
         sha256_bytes_hex(label.as_bytes())
+    }
+
+    fn product_identity(
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+    ) -> QualificationDerivedAccessProductIdentityV1 {
+        QualificationDerivedAccessProductIdentityV1 {
+            platform: execution.platform,
+            source_commit: execution.source_commit.clone(),
+            source_tree: execution.source_tree.clone(),
+            cargo_lock_sha256: execution.cargo_lock_sha256.clone(),
+            binary_sha256: digest(&format!("{:?} product binary", execution.platform)),
+            version_sha256: digest(&format!("{:?} product version", execution.platform)),
+            build_profile: "release".to_owned(),
+            enabled_features: vec!["default".to_owned()],
+            build_command_sha256: digest(&format!("{:?} product build", execution.platform)),
+            operating_system: execution.operating_system.clone(),
+            architecture: execution.architecture.clone(),
+            source_dirty: false,
+        }
+    }
+
+    fn control_binary_identity(
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+        kind: QualificationDerivedChangeControlBinaryKindV1,
+    ) -> QualificationDerivedChangeControlBinaryIdentityV1 {
+        let attestation_test =
+            qualification_derived_change_control_attestation_test_v1(kind).to_owned();
+        QualificationDerivedChangeControlBinaryIdentityV1 {
+            platform: execution.platform,
+            kind,
+            source_commit: execution.source_commit.clone(),
+            source_tree: execution.source_tree.clone(),
+            cargo_lock_sha256: execution.cargo_lock_sha256.clone(),
+            binary_sha256: digest(&format!("{:?}/{kind:?} control binary", execution.platform)),
+            build_command_sha256: qualification_derived_change_control_build_command_sha256_v1(
+                kind,
+            ),
+            operating_system: execution.operating_system.clone(),
+            architecture: execution.architecture.clone(),
+            source_dirty: false,
+            attestation_command_sha256: qualification_derived_change_control_command_sha256_v1(
+                &attestation_test,
+            ),
+            attestation_stdout_sha256: digest(&format!(
+                "{:?}/{kind:?} attestation stdout",
+                execution.platform
+            )),
+            attestation_stderr_sha256: digest(&format!(
+                "{:?}/{kind:?} attestation stderr",
+                execution.platform
+            )),
+            attestation_test,
+        }
+    }
+
+    fn storage_witness(
+        checkpoint: &str,
+        fixture: QualificationDerivedChangeFixtureV1,
+    ) -> QualificationDerivedStorageWitnessV1 {
+        let hashes = qualification_derived_change_storage_probe_hashes_v1(fixture);
+        let mut witness = QualificationDerivedStorageWitnessV1::test_fixture(checkpoint);
+        for probe in &mut witness.forbidden_probes {
+            probe.sentinel_sha256 = match probe.kind {
+                QualificationDerivedStorageForbiddenProbeKindV1::ProposalSummary => {
+                    hashes.proposal_summary_sha256.clone()
+                }
+                QualificationDerivedStorageForbiddenProbeKindV1::Prose => {
+                    hashes.prose_sha256.clone()
+                }
+                QualificationDerivedStorageForbiddenProbeKindV1::PayloadDocument => {
+                    hashes.payload_document_sha256.clone()
+                }
+                QualificationDerivedStorageForbiddenProbeKindV1::FixturePrivatePath
+                | QualificationDerivedStorageForbiddenProbeKindV1::StoreRootPath => {
+                    probe.sentinel_sha256.clone()
+                }
+            };
+        }
+        witness.refresh_sha256().expect("storage witness hash");
+        witness
     }
 
     fn complete_package() -> QualificationDerivedAccessPackageV1 {
@@ -1843,6 +3481,7 @@ mod tests {
         QualificationDerivedAccessPackageV1 {
             schema: QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
             evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
+            evaluator_procedure_sha256: String::new(),
             proposed_profile_id: "example-physical-profile-v1".to_owned(),
             execution_identities: vec![
                 QualificationDerivedAccessExecutionIdentityV1 {
@@ -1880,6 +3519,8 @@ mod tests {
                     private_corpus_configured: false,
                 },
             ],
+            product_identities: Vec::new(),
+            change_control_binary_identities: Vec::new(),
             root_bindings: Vec::new(),
             d0_rows: [
                 QualificationDerivedAccessPlatformV1::MacosApfs,
@@ -1938,6 +3579,9 @@ mod tests {
                     high_water_derived_bytes: 1,
                 },
             ],
+            change_read_rows: Vec::new(),
+            change_control_rows: Vec::new(),
+            change_storage_rows: Vec::new(),
             complete: true,
         }
     }
@@ -2036,6 +3680,27 @@ mod tests {
     }
 
     #[test]
+    fn bodyless_schema_names_allow_hash_metadata_and_refuse_body_material() {
+        for allowed in [
+            "payload_hash",
+            "event_payload_sha256",
+            "body_content_type",
+            "content_digest",
+        ] {
+            assert!(!forbidden_bodyless_storage_name_v1(allowed), "{allowed}");
+        }
+        for forbidden in [
+            "payload_documents",
+            "proposal_summary",
+            "body_text",
+            "private_path_cache",
+            "semantic_search",
+        ] {
+            assert!(forbidden_bodyless_storage_name_v1(forbidden), "{forbidden}");
+        }
+    }
+
+    #[test]
     fn derived_access_evaluator_rejects_incomplete_or_ambiguous_rows() {
         let passing = complete_package();
         assert_eq!(
@@ -2043,6 +3708,566 @@ mod tests {
                 .expect("evaluation")
                 .outcome,
             QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+
+        let mut missing_change_reads = passing.clone();
+        missing_change_reads.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned();
+        missing_change_reads.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v3_procedure_sha256();
+        let evaluation = evaluate_qualification_derived_access_v1(&missing_change_reads)
+            .expect("the successor evaluator classifies missing Change-read evidence");
+        assert_eq!(
+            evaluation.outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+        );
+        assert!(
+            evaluation
+                .missing_or_unknown_criteria
+                .iter()
+                .any(|criterion| criterion == "Change read matrix")
+        );
+
+        let mut complete_change_reads = passing.clone();
+        complete_change_reads.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned();
+        complete_change_reads.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v3_procedure_sha256();
+        complete_change_reads.product_identities = complete_change_reads
+            .execution_identities
+            .iter()
+            .map(product_identity)
+            .collect();
+        complete_change_reads.change_control_binary_identities = complete_change_reads
+            .execution_identities
+            .iter()
+            .flat_map(|execution| {
+                QualificationDerivedChangeControlBinaryKindV1::ALL
+                    .into_iter()
+                    .map(|kind| control_binary_identity(execution, kind))
+            })
+            .collect();
+        let product_identities = complete_change_reads.product_identities.clone();
+        let execution_identities = complete_change_reads.execution_identities.clone();
+        let control_binary_identities = complete_change_reads
+            .change_control_binary_identities
+            .clone();
+        complete_change_reads.change_read_rows = [
+            QualificationDerivedAccessPlatformV1::MacosApfs,
+            QualificationDerivedAccessPlatformV1::WindowsNtfs,
+        ]
+        .into_iter()
+        .flat_map(|platform| {
+            let product_identities = product_identities.clone();
+            let execution_identities = execution_identities.clone();
+            required_change_read_rows_v1().map(move |(fixture, case)| {
+                let semantic = digest(&format!("{platform:?}/{fixture:?}/{case:?}"));
+                let (oracle, http_status, typed_code) =
+                    qualification_derived_change_expected_outcome_v1(platform, fixture, case);
+                let typed_failure = oracle == QualificationDerivedChangeReadOracleV1::TypedFailure;
+                let typed_document =
+                    typed_code.map(|code| QualificationDerivedChangeTypedDocumentV1 {
+                        schema: if code == "stale_projection" {
+                            "pointbreak.inspect-change-page-error"
+                        } else {
+                            "pointbreak.inspect-change-projection-error"
+                        }
+                        .to_owned(),
+                        version: 1,
+                        code: code.to_owned(),
+                        retryable: (code != "stale_projection").then_some(false),
+                        canonical_sha256: digest(&format!(
+                            "{platform:?}/{fixture:?}/{case:?}/typed"
+                        )),
+                    });
+                let product_identity_sha256 = product_identities
+                    .iter()
+                    .find(|identity| identity.platform == platform)
+                    .expect("product identity")
+                    .canonical_sha256()
+                    .expect("product identity hash");
+                let counter_execution_identity_sha256 = execution_identities
+                    .iter()
+                    .find(|identity| identity.platform == platform)
+                    .expect("execution identity")
+                    .canonical_sha256()
+                    .expect("execution identity hash");
+                let mut counters = LongitudinalCountersV1::default();
+                if fixture.required_cases().first() == Some(&case)
+                    || matches!(
+                        case,
+                        QualificationDerivedChangeReadCaseV1::FreshProcessSuite
+                            | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite
+                    )
+                {
+                    counters.change_capability_carriers_opened = 2;
+                }
+                let direct_work_expected = case != QualificationDerivedChangeReadCaseV1::Profile
+                    && (!typed_failure
+                        || fixture == QualificationDerivedChangeFixtureV1::TopologyV1);
+                if direct_work_expected {
+                    let topology = fixture == QualificationDerivedChangeFixtureV1::TopologyV1;
+                    counters.change_candidates = if topology { 14 } else { 1 };
+                    counters.change_candidate_current_revisions = if topology {
+                        14
+                    } else if matches!(
+                        fixture,
+                        QualificationDerivedChangeFixtureV1::IncompleteV1
+                            | QualificationDerivedChangeFixtureV1::CycleConflictedV1
+                    ) {
+                        0
+                    } else {
+                        1
+                    };
+                    if topology {
+                        if matches!(
+                            case,
+                            QualificationDerivedChangeReadCaseV1::ConcurrentReaders
+                                | QualificationDerivedChangeReadCaseV1::WarmReuseSuite
+                        ) {
+                            counters.change_candidates = 56;
+                            counters.change_candidate_current_revisions = 56;
+                        } else if matches!(
+                            case,
+                            QualificationDerivedChangeReadCaseV1::PageTokenSuite
+                                | QualificationDerivedChangeReadCaseV1::FreshProcessSuite
+                                | QualificationDerivedChangeReadCaseV1::PostAppendSuite
+                                | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite
+                        ) {
+                            counters.change_candidates = 28;
+                            counters.change_candidate_current_revisions = 28;
+                        }
+                        let (proposal_opens, rows_emitted) = match case {
+                            QualificationDerivedChangeReadCaseV1::ChangesBounded
+                            | QualificationDerivedChangeReadCaseV1::AttentionBounded
+                            | QualificationDerivedChangeReadCaseV1::StalePageToken => (2, 2),
+                            QualificationDerivedChangeReadCaseV1::PageTokenSuite
+                            | QualificationDerivedChangeReadCaseV1::FreshProcessSuite
+                            | QualificationDerivedChangeReadCaseV1::PostAppendSuite
+                            | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite => {
+                                (4, 4)
+                            }
+                            QualificationDerivedChangeReadCaseV1::ConcurrentReaders
+                            | QualificationDerivedChangeReadCaseV1::WarmReuseSuite => (8, 8),
+                            QualificationDerivedChangeReadCaseV1::SummaryQuery
+                            | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite => {
+                                counters.change_matches = 1;
+                                (14, 1)
+                            }
+                            _ => (14, 8),
+                        };
+                        counters.change_proposal_carriers_opened = proposal_opens;
+                        counters.change_proposal_carriers_validated = proposal_opens;
+                        counters.change_rows_emitted = rows_emitted;
+                    } else {
+                        counters.change_proposal_carriers_opened =
+                            counters.change_candidate_current_revisions;
+                        counters.change_proposal_carriers_validated =
+                            counters.change_proposal_carriers_opened;
+                        counters.change_rows_emitted = if matches!(
+                            case,
+                            QualificationDerivedChangeReadCaseV1::SummaryQuery
+                                | QualificationDerivedChangeReadCaseV1::SummaryFilterSuite
+                        ) {
+                            0
+                        } else {
+                            1
+                        };
+                    }
+                }
+                let single_fixture_read = matches!(
+                    case,
+                    QualificationDerivedChangeReadCaseV1::ChangesBare
+                        | QualificationDerivedChangeReadCaseV1::ChangesBounded
+                        | QualificationDerivedChangeReadCaseV1::AttentionBare
+                        | QualificationDerivedChangeReadCaseV1::AttentionBounded
+                        | QualificationDerivedChangeReadCaseV1::SummaryQuery
+                );
+                match (fixture, single_fixture_read) {
+                    (QualificationDerivedChangeFixtureV1::DuplicateEqualV1, true) => {
+                        counters.change_proposal_carriers_opened = 2;
+                        counters.change_proposal_carriers_validated = 2;
+                        counters.change_rows_emitted = 1;
+                    }
+                    (QualificationDerivedChangeFixtureV1::RemovalV1, true) => {
+                        counters.change_proposal_carriers_opened = 1;
+                        counters.change_proposal_carriers_validated = 1;
+                        counters.change_support_carriers_opened = 2;
+                        counters.change_rows_emitted = 1;
+                    }
+                    _ => {}
+                }
+                counters.carrier_opens = counters
+                    .change_capability_carriers_opened
+                    .saturating_add(counters.change_proposal_carriers_opened)
+                    .saturating_add(counters.change_support_carriers_opened);
+                QualificationDerivedChangeReadEvidenceV1 {
+                    platform,
+                    fixture,
+                    fixture_inventory_sha256: digest("fixture inventory"),
+                    fixture_witness_sha256: digest("fixture witness"),
+                    case,
+                    semantic_process_scope:
+                        QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+                    counter_process_scope: QualificationDerivedAccessProcessScopeV1::Driver,
+                    product_identity_sha256,
+                    counter_execution_identity_sha256,
+                    status: QualificationDerivedAccessStatusV1::Passed,
+                    oracle,
+                    strict_semantic_sha256: (!typed_failure).then(|| semantic.clone()),
+                    derived_semantic_sha256: semantic,
+                    wire_contract_matches: true,
+                    expected_http_status: http_status,
+                    observed_http_status: http_status,
+                    expected_code: typed_code.map(str::to_owned),
+                    observed_code: typed_code.map(str::to_owned),
+                    expected_typed_document: typed_document.clone(),
+                    observed_typed_document: typed_document,
+                    counters,
+                }
+            })
+        })
+        .collect();
+        for row in &mut complete_change_reads.change_read_rows {
+            row.counter_process_scope =
+                QualificationDerivedAccessProcessScopeV1::QualificationHarness;
+        }
+        complete_change_reads.change_control_rows = [
+            QualificationDerivedAccessPlatformV1::MacosApfs,
+            QualificationDerivedAccessPlatformV1::WindowsNtfs,
+        ]
+        .into_iter()
+        .flat_map(|platform| {
+            let product_identity_sha256 = product_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("product identity")
+                .canonical_sha256()
+                .expect("product identity hash");
+            let execution_identity_sha256 = execution_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("execution identity")
+                .canonical_sha256()
+                .expect("execution identity hash");
+            let control_binary_identities = control_binary_identities.clone();
+            QualificationDerivedChangeControlCaseV1::ALL
+                .into_iter()
+                .map(move |case| {
+                    let (binary_kind, test_name) =
+                        qualification_derived_change_control_test_v1(case);
+                    let binary_identity = control_binary_identities
+                        .iter()
+                        .find(|identity| {
+                            identity.platform == platform && identity.kind == binary_kind
+                        })
+                        .expect("control binary identity");
+                    QualificationDerivedChangeControlEvidenceV1 {
+                        platform,
+                        case,
+                        binary_kind,
+                        test_name: test_name.to_owned(),
+                        status: QualificationDerivedAccessStatusV1::Passed,
+                        execution_identity_sha256: execution_identity_sha256.clone(),
+                        product_identity_sha256: product_identity_sha256.clone(),
+                        test_binary_identity_sha256: binary_identity
+                            .canonical_sha256()
+                            .expect("control binary identity hash"),
+                        test_binary_sha256: binary_identity.binary_sha256.clone(),
+                        command_sha256: qualification_derived_change_control_command_sha256_v1(
+                            test_name,
+                        ),
+                        stdout_sha256: digest(&format!("{platform:?}/{case:?} stdout")),
+                        stderr_sha256: digest(&format!("{platform:?}/{case:?} stderr")),
+                        exit_code: 0,
+                        tests_run: 1,
+                        tests_passed: 1,
+                    }
+                })
+        })
+        .collect();
+        complete_change_reads.change_storage_rows = [
+            QualificationDerivedAccessPlatformV1::MacosApfs,
+            QualificationDerivedAccessPlatformV1::WindowsNtfs,
+        ]
+        .into_iter()
+        .flat_map(|platform| {
+            let product_identity_sha256 = product_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("product identity")
+                .canonical_sha256()
+                .expect("product identity hash");
+            let execution_identity_sha256 = execution_identities
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("execution identity")
+                .canonical_sha256()
+                .expect("execution identity hash");
+            let initial_product_identity_sha256 = product_identity_sha256.clone();
+            let initial_execution_identity_sha256 = execution_identity_sha256.clone();
+            QualificationDerivedChangeFixtureV1::ALL
+                .into_iter()
+                .map(move |fixture| QualificationDerivedChangeStorageEvidenceV1 {
+                    platform,
+                    fixture,
+                    phase: QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                    fixture_inventory_sha256: digest("fixture inventory"),
+                    fixture_witness_sha256: digest("fixture witness"),
+                    product_identity_sha256: initial_product_identity_sha256.clone(),
+                    execution_identity_sha256: initial_execution_identity_sha256.clone(),
+                    witness: storage_witness("initial checkpoint", fixture),
+                })
+                .chain(std::iter::once(
+                    QualificationDerivedChangeStorageEvidenceV1 {
+                        platform,
+                        fixture: QualificationDerivedChangeFixtureV1::TopologyV1,
+                        phase: QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+                        fixture_inventory_sha256: digest("fixture inventory"),
+                        fixture_witness_sha256: digest("fixture witness"),
+                        product_identity_sha256,
+                        execution_identity_sha256,
+                        witness: storage_witness(
+                            "post-append checkpoint",
+                            QualificationDerivedChangeFixtureV1::TopologyV1,
+                        ),
+                    },
+                ))
+        })
+        .collect();
+        let complete_evaluation = evaluate_qualification_derived_access_v1(&complete_change_reads)
+            .expect("complete successor evaluation");
+        assert_eq!(
+            complete_evaluation.outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier,
+            "{complete_evaluation:?}"
+        );
+
+        let mut dead_bounded_instrumentation = complete_change_reads.clone();
+        let dead_bounded = dead_bounded_instrumentation
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::ChangesBounded
+            })
+            .expect("bounded topology Change row");
+        dead_bounded.counters = LongitudinalCountersV1::default();
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&dead_bounded_instrumentation)
+                .expect("dead bounded instrumentation evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut candidate_wide_bounded_hydration = complete_change_reads.clone();
+        let candidate_wide = candidate_wide_bounded_hydration
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::ChangesBounded
+            })
+            .expect("bounded topology Change row");
+        candidate_wide.counters.change_candidates = 14;
+        candidate_wide.counters.change_candidate_current_revisions = 14;
+        candidate_wide.counters.change_proposal_carriers_opened = 14;
+        candidate_wide.counters.change_proposal_carriers_validated = 14;
+        candidate_wide.counters.change_rows_emitted = 2;
+        candidate_wide.counters.carrier_opens = 14;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&candidate_wide_bounded_hydration)
+                .expect("candidate-wide bounded hydration evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut support_wide_bounded_hydration = complete_change_reads.clone();
+        let support_wide = support_wide_bounded_hydration
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::ChangesBounded
+            })
+            .expect("bounded topology Change row");
+        support_wide.counters.change_support_carriers_opened = 9;
+        support_wide.counters.carrier_opens = support_wide
+            .counters
+            .change_proposal_carriers_opened
+            .saturating_add(9);
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&support_wide_bounded_hydration)
+                .expect("support-wide bounded hydration evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut zero_control_tests = complete_change_reads.clone();
+        zero_control_tests.change_control_rows[0].tests_run = 0;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&zero_control_tests)
+                .expect("zero-test control evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut drifted_control_source = complete_change_reads.clone();
+        drifted_control_source.change_control_binary_identities[0].source_commit =
+            if drifted_control_source.change_control_binary_identities[0].source_commit
+                == "a".repeat(40)
+            {
+                "b".repeat(40)
+            } else {
+                "a".repeat(40)
+            };
+        assert!(evaluate_qualification_derived_access_v1(&drifted_control_source).is_err());
+
+        let mut arbitrary_storage_probe = complete_change_reads.clone();
+        let witness = &mut arbitrary_storage_probe.change_storage_rows[0].witness;
+        witness
+            .forbidden_probes
+            .iter_mut()
+            .find(|probe| {
+                probe.kind == QualificationDerivedStorageForbiddenProbeKindV1::ProposalSummary
+            })
+            .expect("summary probe")
+            .sentinel_sha256 = digest("arbitrary absent summary");
+        witness.refresh_sha256().expect("changed storage witness");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&arbitrary_storage_probe)
+                .expect("arbitrary storage probe evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut forbidden_storage_table = complete_change_reads.clone();
+        let witness = &mut forbidden_storage_table.change_storage_rows[0].witness;
+        witness.sqlite_catalog.entries.push(
+            crate::bench_support::derived_access::QualificationDerivedStorageCatalogEntryV1 {
+                schema: "main".to_owned(),
+                name: "payload_documents".to_owned(),
+                kind: "table".to_owned(),
+                declared_column_count: 0,
+                strict: true,
+                without_rowid: false,
+                columns: Vec::new(),
+                indexes: Vec::new(),
+            },
+        );
+        witness.sqlite_catalog.catalog_sha256 =
+            canonical_sha256(&witness.sqlite_catalog.entries).expect("catalog hash");
+        witness.refresh_sha256().expect("forbidden-table witness");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&forbidden_storage_table)
+                .expect("forbidden storage table evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut downgraded_change_reads = complete_change_reads.clone();
+        downgraded_change_reads.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned();
+        assert!(
+            evaluate_qualification_derived_access_v1(&downgraded_change_reads).is_err(),
+            "successor Change rows must not be silently ignored by evaluator v2"
+        );
+
+        let mut mismatched_change_read = complete_change_reads.clone();
+        mismatched_change_read.change_read_rows[0].derived_semantic_sha256 = digest("mismatch");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&mismatched_change_read)
+                .expect("mismatched Change read evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut mismatched_typed_document = complete_change_reads.clone();
+        mismatched_typed_document
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::StalePageToken
+            })
+            .and_then(|row| row.observed_typed_document.as_mut())
+            .expect("typed Change document")
+            .canonical_sha256 = digest("drifted typed document");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&mismatched_typed_document)
+                .expect("mismatched typed Change document evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut warm_capability_reopen = complete_change_reads.clone();
+        let warm = warm_capability_reopen
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::ChangesBare
+            })
+            .expect("warm Change row");
+        warm.counters.change_capability_carriers_opened = 2;
+        warm.counters.carrier_opens = 2;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&warm_capability_reopen)
+                .expect("warm capability reopen evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut incomplete_removal_support = complete_change_reads.clone();
+        let removal = incomplete_removal_support
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::RemovalV1
+                    && row.case == QualificationDerivedChangeReadCaseV1::ChangesBounded
+            })
+            .expect("removal Change row");
+        removal.counters.change_support_carriers_opened = 1;
+        removal.counters.carrier_opens -= 1;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&incomplete_removal_support)
+                .expect("incomplete removal support evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut mixed_fixture_authority = complete_change_reads.clone();
+        mixed_fixture_authority
+            .change_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::WindowsNtfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+            })
+            .expect("Windows topology row")
+            .fixture_witness_sha256 = digest("different topology witness");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&mixed_fixture_authority)
+                .expect("mixed fixture authority evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut unclassified_change_open = complete_change_reads;
+        unclassified_change_open.change_read_rows[0]
+            .counters
+            .carrier_opens = 1;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&unclassified_change_open)
+                .expect("unclassified Change carrier open evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
         );
 
         let mut missing = passing.clone();

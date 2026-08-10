@@ -1397,6 +1397,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ready_retry_may_preserve_the_current_projection_stamp() {
+        let (_temp, access) = active_history(1);
+        let DerivedHistoryRoute::Ready(before) = access.freshness().unwrap() else {
+            panic!("initial generation should be current");
+        };
+        let lifecycle = access.lifecycle().expect("test access should be active");
+        let before_generation = lifecycle.published_generation_id().unwrap();
+
+        access.restart_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "ready retry maintenance");
+
+        let DerivedHistoryRoute::Ready(after) = access.freshness().unwrap() else {
+            panic!("ready retry should preserve a current generation");
+        };
+        assert_eq!(after.projection_stamp, before.projection_stamp);
+        assert_eq!(
+            lifecycle.published_generation_id().unwrap(),
+            before_generation
+        );
+    }
+
     fn unbuilt_active_history_from_events(
         events: Vec<ShoreEvent>,
     ) -> (TempDir, DerivedHistoryAccess) {

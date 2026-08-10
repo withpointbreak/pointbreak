@@ -264,7 +264,7 @@ store-foundation-qualification-smoke:
 [group('quality')]
 derived-access-tests:
     cargo +stable nextest run --features longitudinal-counting \
-        -E 'test(candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces) | test(bound_smoke_fragment_assembles_into_a_verified_incomplete_evidence_package)'
+        -E 'test(candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces) | test(bound_smoke_fragment_assembles_into_a_verified_incomplete_evidence_package) | test(bounded_capability_pair_uses_exactly_two_point_reads) | test(derived_access_evaluator_rejects_incomplete_or_ambiguous_rows) | test(bodyless_schema_names_allow_hash_metadata_and_refuse_body_material) | test(bound_change_read_receipt_crosses_the_fragment_boundary) | test(change_read_summaries_require_raw_receipt_authority) | test(change_fixture_witnesses_are_deterministic_and_bind_public_authority) | test(change_fixture_witnesses_name_duplicate_removal_and_fault_carriers_without_prose) | test(change_fixtures_exercise_their_declared_derived_outcomes) | test(incomplete_and_cyclic_fixtures_have_their_declared_change_shapes) | test(topology_witness_preflight_binds_classification_and_exact_current_revisions) | test(topology_witness_binds_the_complete_authoritative_inventory) | test(derived_change_carrier_work_is_page_proportional_and_hydrates_required_support) | test(derived_change_selected_proposal_failures_are_typed_and_fail_closed) | test(derived_change_compact_proposal_mismatches_fail_closed) | test(ordinary_bodyless_change_pages_refuse_summary_search_and_stale_continuations) | test(previous_and_last_keep_typed_lens_query_tamper_and_stale_refusals) | test(qualification_typed_document_freezes_the_complete_direct_or_page_document) | test(stale_token_oracle_uses_a_distinct_governed_append_instead_of_ready_retry) | test(ready_retry_may_preserve_the_current_projection_stamp) | test(exact_control_parser_requires_one_named_passing_test) | test(published_generation_witness_is_hash_only_and_deterministic) | test(forbidden_probe_detection_marks_a_selected_carrier) | test(stable_snapshot_refuses_a_carrier_created_between_reads)'
 
 # Run the developer evidence lane with repeated raw performance samples. This
 # remains environment evidence rather than a default-test timing gate.
@@ -390,6 +390,19 @@ derived-access-scale request:
 derived-access-resource request:
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-access-resource-evidence --derived-access-request="{{ request }}"
+
+# Materialize one typed public Change-reader fixture and print its authority witness.
+[group('quality')]
+derived-change-fixture request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-change-fixture-materialize --derived-access-request="{{ request }}"
+
+# Compare strict and active Inspector Change reads and classify direct adapter work.
+[group('quality')]
+derived-change-read request:
+    POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
+        cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-change-read-evidence --derived-access-request="{{ request }}"
 
 # Convert typed raw receipts into one independently verifiable package fragment.
 [group('quality')]

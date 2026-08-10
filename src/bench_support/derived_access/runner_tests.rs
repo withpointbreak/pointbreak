@@ -12,6 +12,54 @@ fn digest(value: u8) -> String {
     format!("{value:02x}").repeat(32)
 }
 
+fn product_identity(
+    execution: &QualificationDerivedAccessExecutionIdentityV1,
+) -> QualificationDerivedAccessProductIdentityV1 {
+    QualificationDerivedAccessProductIdentityV1 {
+        platform: execution.platform,
+        source_commit: execution.source_commit.clone(),
+        source_tree: execution.source_tree.clone(),
+        cargo_lock_sha256: execution.cargo_lock_sha256.clone(),
+        binary_sha256: digest(16),
+        version_sha256: digest(22),
+        build_profile: "release".to_owned(),
+        enabled_features: vec!["default".to_owned()],
+        build_command_sha256: digest(17),
+        operating_system: execution.operating_system.clone(),
+        architecture: execution.architecture.clone(),
+        source_dirty: false,
+    }
+}
+
+fn control_binary_identity(
+    execution: &QualificationDerivedAccessExecutionIdentityV1,
+    kind: QualificationDerivedChangeControlBinaryKindV1,
+) -> QualificationDerivedChangeControlBinaryIdentityV1 {
+    let attestation_test =
+        qualification_derived_change_control_attestation_test_v1(kind).to_owned();
+    QualificationDerivedChangeControlBinaryIdentityV1 {
+        platform: execution.platform,
+        kind,
+        source_commit: execution.source_commit.clone(),
+        source_tree: execution.source_tree.clone(),
+        cargo_lock_sha256: execution.cargo_lock_sha256.clone(),
+        binary_sha256: digest(match kind {
+            QualificationDerivedChangeControlBinaryKindV1::Library => 29,
+            QualificationDerivedChangeControlBinaryKindV1::Cli => 30,
+        }),
+        build_command_sha256: qualification_derived_change_control_build_command_sha256_v1(kind),
+        operating_system: execution.operating_system.clone(),
+        architecture: execution.architecture.clone(),
+        source_dirty: false,
+        attestation_command_sha256: qualification_derived_change_control_command_sha256_v1(
+            &attestation_test,
+        ),
+        attestation_stdout_sha256: digest(33),
+        attestation_stderr_sha256: digest(34),
+        attestation_test,
+    }
+}
+
 #[test]
 fn execution_identity_diagnostic_names_every_drifted_field() {
     let expected = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
@@ -492,6 +540,260 @@ fn package_summaries_require_raw_receipt_authority() {
         .is_err()
     );
     assert!(!root.path().join("output").exists());
+}
+
+#[test]
+fn change_read_summaries_require_raw_receipt_authority() {
+    let mut package = QualificationDerivedAccessPackageV1::test_fixture();
+    package.evaluator_revision = QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned();
+    package
+        .change_read_rows
+        .push(QualificationDerivedChangeReadEvidenceV1 {
+            platform: QualificationDerivedAccessPlatformV1::MacosApfs,
+            fixture: QualificationDerivedChangeFixtureV1::TopologyV1,
+            fixture_inventory_sha256: digest(13),
+            fixture_witness_sha256: digest(14),
+            case: QualificationDerivedChangeReadCaseV1::Profile,
+            semantic_process_scope: QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+            counter_process_scope: QualificationDerivedAccessProcessScopeV1::QualificationHarness,
+            product_identity_sha256: digest(26),
+            counter_execution_identity_sha256: digest(27),
+            status: QualificationDerivedAccessStatusV1::Passed,
+            oracle: QualificationDerivedChangeReadOracleV1::StrictParity,
+            strict_semantic_sha256: Some(digest(15)),
+            derived_semantic_sha256: digest(15),
+            wire_contract_matches: true,
+            expected_http_status: 200,
+            observed_http_status: 200,
+            expected_code: None,
+            observed_code: None,
+            expected_typed_document: None,
+            observed_typed_document: None,
+            counters: crate::bench_support::longitudinal::LongitudinalCountersV1::default(),
+        });
+
+    assert!(validate_summaries_against_raw(&package, &[]).is_err());
+}
+
+#[test]
+fn bound_change_read_receipt_crosses_the_fragment_boundary() {
+    let root = tempfile::tempdir().expect("Change receipt workspace");
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let product = product_identity(&execution);
+    let product_identity_sha256 = product.canonical_sha256().expect("product identity hash");
+    let execution_identity_sha256 = execution
+        .canonical_sha256()
+        .expect("execution identity hash");
+    let rows = QualificationDerivedChangeFixtureV1::TopologyV1
+        .required_cases()
+        .iter()
+        .copied()
+        .map(|case| {
+            let (oracle, http_status, code) = qualification_derived_change_expected_outcome_v1(
+                execution.platform,
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+                case,
+            );
+            let typed_document = code.map(|code| QualificationDerivedChangeTypedDocumentV1 {
+                schema: if code == "stale_projection" {
+                    "pointbreak.inspect-change-page-error"
+                } else {
+                    "pointbreak.inspect-change-projection-error"
+                }
+                .to_owned(),
+                version: 1,
+                code: code.to_owned(),
+                retryable: (code != "stale_projection").then_some(false),
+                canonical_sha256: digest(28),
+            });
+            QualificationDerivedChangeReadEvidenceV1 {
+                platform: execution.platform,
+                fixture: QualificationDerivedChangeFixtureV1::TopologyV1,
+                fixture_inventory_sha256: digest(25),
+                fixture_witness_sha256: digest(20),
+                case,
+                semantic_process_scope:
+                    QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+                counter_process_scope:
+                    QualificationDerivedAccessProcessScopeV1::QualificationHarness,
+                product_identity_sha256: product_identity_sha256.clone(),
+                counter_execution_identity_sha256: execution_identity_sha256.clone(),
+                status: QualificationDerivedAccessStatusV1::Passed,
+                oracle,
+                strict_semantic_sha256: (oracle
+                    == QualificationDerivedChangeReadOracleV1::StrictParity)
+                    .then(|| digest(21)),
+                derived_semantic_sha256: digest(21),
+                wire_contract_matches: true,
+                expected_http_status: http_status,
+                observed_http_status: http_status,
+                expected_code: code.map(str::to_owned),
+                observed_code: code.map(str::to_owned),
+                expected_typed_document: typed_document.clone(),
+                observed_typed_document: typed_document,
+                counters: crate::bench_support::longitudinal::LongitudinalCountersV1::default(),
+            }
+        })
+        .collect();
+    let control_binary_identities = QualificationDerivedChangeControlBinaryKindV1::ALL
+        .into_iter()
+        .map(|kind| control_binary_identity(&execution, kind))
+        .collect::<Vec<_>>();
+    let control_rows = QualificationDerivedChangeControlCaseV1::ALL
+        .into_iter()
+        .map(|case| {
+            let (binary_kind, test_name) = qualification_derived_change_control_test_v1(case);
+            let binary_identity = control_binary_identities
+                .iter()
+                .find(|identity| identity.kind == binary_kind)
+                .expect("control binary identity");
+            QualificationDerivedChangeControlEvidenceV1 {
+                platform: execution.platform,
+                case,
+                binary_kind,
+                test_name: test_name.to_owned(),
+                status: QualificationDerivedAccessStatusV1::Passed,
+                execution_identity_sha256: execution_identity_sha256.clone(),
+                product_identity_sha256: product_identity_sha256.clone(),
+                test_binary_identity_sha256: binary_identity
+                    .canonical_sha256()
+                    .expect("control binary identity hash"),
+                test_binary_sha256: binary_identity.binary_sha256.clone(),
+                command_sha256: qualification_derived_change_control_command_sha256_v1(test_name),
+                stdout_sha256: digest(35),
+                stderr_sha256: digest(36),
+                exit_code: 0,
+                tests_run: 1,
+                tests_passed: 1,
+            }
+        })
+        .collect();
+    let storage_rows = [
+        (
+            QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+            "initial checkpoint",
+        ),
+        (
+            QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+            "post-append checkpoint",
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(phase, checkpoint)| QualificationDerivedChangeStorageEvidenceV1 {
+            platform: execution.platform,
+            fixture: QualificationDerivedChangeFixtureV1::TopologyV1,
+            phase,
+            fixture_inventory_sha256: digest(25),
+            fixture_witness_sha256: digest(20),
+            product_identity_sha256: product_identity_sha256.clone(),
+            execution_identity_sha256: execution_identity_sha256.clone(),
+            witness: QualificationDerivedStorageWitnessV1::test_fixture(checkpoint),
+        },
+    )
+    .collect();
+    let mut receipt = QualificationDerivedChangeReadReceiptV1 {
+        schema: QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1.to_owned(),
+        purpose: QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification,
+        execution: execution.clone(),
+        product,
+        fixture: QualificationDerivedChangeFixtureV1::TopologyV1,
+        fixture_builder_sha256: digest(17),
+        activation_fixture_sha256: digest(18),
+        completion_fixture_sha256: digest(19),
+        fixture_inventory_sha256: digest(25),
+        fixture_after_inventory_sha256: digest(23),
+        fixture_witness_sha256: digest(20),
+        post_append_generation_sha256: Some(digest(24)),
+        rows,
+        pre_cut_deficiencies: Vec::new(),
+        control_binary_identities,
+        control_rows,
+        storage_rows,
+        complete: true,
+        receipt_sha256: String::new(),
+    };
+    receipt.refresh_sha256().expect("hash Change read receipt");
+    receipt
+        .validate()
+        .expect("valid exact-source Change receipt");
+
+    let mut pre_cut = receipt.clone();
+    pre_cut.purpose = QualificationDerivedChangeEvidencePurposeV1::PreCutFalsifier;
+    pre_cut.product.source_commit = if pre_cut.product.source_commit == "1".repeat(40) {
+        "2".repeat(40)
+    } else {
+        "1".repeat(40)
+    };
+    let pre_cut_product_sha256 = pre_cut
+        .product
+        .canonical_sha256()
+        .expect("pre-cut product identity hash");
+    for row in &mut pre_cut.rows {
+        row.product_identity_sha256 = pre_cut_product_sha256.clone();
+    }
+    pre_cut.control_binary_identities.clear();
+    pre_cut.control_rows.clear();
+    pre_cut.storage_rows.clear();
+    pre_cut.pre_cut_deficiencies.clear();
+    pre_cut
+        .refresh_sha256()
+        .expect("hash all-pass pre-cut receipt");
+    assert!(pre_cut.validate().is_err());
+
+    let deficiency = pre_cut.rows[0].case;
+    pre_cut.rows[0].status = QualificationDerivedAccessStatusV1::Failed;
+    pre_cut.pre_cut_deficiencies.push(deficiency);
+    pre_cut
+        .refresh_sha256()
+        .expect("hash deficient pre-cut receipt");
+    pre_cut
+        .validate()
+        .expect("pre-cut receipt must identify its failed row");
+
+    let receipt_path = root.path().join("change-read.json");
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize Change read receipt"),
+    )
+    .expect("write Change read receipt");
+    let request_path = root.path().join("fragment-request.json");
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&QualificationDerivedAccessFragmentRequestV1 {
+            schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+            execution,
+            receipt_paths: vec![receipt_path.clone()],
+        })
+        .expect("serialize fragment request"),
+    )
+    .expect("write fragment request");
+
+    let fragment = build_qualification_derived_access_fragment_v1(&request_path)
+        .expect("build raw-bound Change fragment");
+    assert_eq!(fragment.package.change_read_rows, receipt.rows);
+    assert_eq!(
+        fragment.package.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+    );
+
+    let mut incomplete = receipt.clone();
+    incomplete.rows.pop();
+    incomplete
+        .refresh_sha256()
+        .expect("rehash incomplete Change read receipt");
+    assert_eq!(
+        incomplete.validate().unwrap_err(),
+        "derived Change read receipt omitted required cases"
+    );
+
+    receipt.rows[0].wire_contract_matches = false;
+    std::fs::write(
+        receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize forged Change read receipt"),
+    )
+    .expect("write forged Change read receipt");
+    assert!(build_qualification_derived_access_fragment_v1(&request_path).is_err());
 }
 
 #[test]
