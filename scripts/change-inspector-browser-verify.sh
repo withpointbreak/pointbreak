@@ -669,7 +669,49 @@ start_reader_state_server() {
   ' "$startup" >/dev/null || die "$state Inspector did not emit valid startup JSON"
 }
 
+retry_empty_ready_l2() {
+  local startup="$log_dir/reader-empty-ready-l2-startup.json"
+  local base_url
+  local token
+  local retry_log="$log_dir/browser-empty-ready-l2-retry.json"
+  local ready_log="$log_dir/browser-empty-ready-l2-ready.json"
+  local ready_tmp="$ready_log.tmp"
+  local response_status
+
+  base_url="http://$(jq -r '.host' "$startup"):$(jq -r '.port' "$startup")"
+  token="$(jq -r '.token' "$startup")"
+  response_status="$(curl -sS -o "$retry_log" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $token" \
+    "$base_url/api/derived-access/retry")"
+  [ "$response_status" = "200" ] \
+    || die "empty-ready-l2 derived-access retry returned HTTP $response_status"
+  jq -e '
+    .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
+    .active == true and (.availability | type == "string") and
+    (.rebuildInFlight | type == "boolean") and (.actions | type == "array")
+  ' "$retry_log" >/dev/null \
+    || die "empty-ready-l2 derived-access retry did not return typed status"
+
+  for _ in $(seq 1 200); do
+    response_status="$(curl -sS -o "$ready_tmp" -w '%{http_code}' \
+      -H "Authorization: Bearer $token" \
+      "$base_url/api/derived-access/status")"
+    if [ "$response_status" = "200" ] && jq -e '
+      .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
+      .active == true and .servingCurrent == true and .availability == "current" and
+      .rebuildInFlight == false and .rebuildPaused == false
+    ' "$ready_tmp" >/dev/null; then
+      mv "$ready_tmp" "$ready_log"
+      return 0
+    fi
+    sleep 0.05
+  done
+  [ -f "$ready_tmp" ] && mv "$ready_tmp" "$ready_log"
+  die "empty-ready-l2 did not publish a current derived generation after explicit retry"
+}
+
 start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
+retry_empty_ready_l2
 start_reader_state_server "l0" "$reader_l0_repo"
 start_reader_state_server "m1" "$reader_m1_repo"
 reader_servers="$(jq -cn \
@@ -874,6 +916,8 @@ manifest_tmp="$root/.manifest.json.tmp"
 [ "$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')" = "$harness_record_sha256" ] \
   || die "browser harness digest record changed during qualification"
 for required_evidence_path in \
+  logs/browser-empty-ready-l2-retry.json \
+  logs/browser-empty-ready-l2-ready.json \
   logs/browser-result.json \
   logs/browser-gate.log \
   logs/browser-program.mjs; do

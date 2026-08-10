@@ -14,8 +14,10 @@ use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use super::semantic::change::{
     CHANGE_READER_PROFILE_RESOURCE_V3, ChangeReaderContractError,
     ChangeReaderProfileReceiptProbeV1, ChangeReaderProfileReceiptV3, ReaderProjectionCheckpointV1,
-    build_change_reader_profile_receipt_v3, derived_change_generation_stamp_v1,
+    RuntimeTrustIdentityV1, build_change_reader_profile_receipt_v3,
+    change_generation_stamp_sha256_v1, derived_change_generation_stamp_v1,
     initial_reader_projection_checkpoint_v1, probe_change_reader_profile_receipt,
+    strict_change_generation_stamp_preimage_v1,
 };
 use super::service::{
     BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError,
@@ -1738,6 +1740,30 @@ impl CurrentGeneration {
             document_projection,
         )
         .map_err(change_reader_contract_lifecycle_error)
+    }
+
+    pub(crate) fn strict_change_generation_stamp(
+        &self,
+        checkpoint: &ReaderProjectionCheckpointV1,
+        authority_cursor: &crate::session::AuthorityCursorV2,
+        semantic_projection: &crate::session::ChangeProjection,
+        document_projection: &crate::session::ChangeDocumentProjectionV1,
+    ) -> Result<String, LifecycleError> {
+        let receipt = self.reader_receipt.as_ref().ok_or_else(|| {
+            LifecycleError::RebuildRequired(
+                "current generation has no Change reader-profile receipt".to_owned(),
+            )
+        })?;
+        let preimage = strict_change_generation_stamp_preimage_v1(
+            receipt,
+            checkpoint,
+            authority_cursor,
+            semantic_projection,
+            document_projection,
+            RuntimeTrustIdentityV1::NotApplicable,
+        )
+        .map_err(change_reader_contract_lifecycle_error)?;
+        change_generation_stamp_sha256_v1(&preimage).map_err(change_reader_contract_lifecycle_error)
     }
 }
 

@@ -36,7 +36,10 @@ use crate::session::store::capabilities::{
     inspect_change_reader_journal_records,
 };
 use crate::session::store::resolution::resolve_change_read_backend;
-use crate::session::{ChangeLifecycleV1, ChangeTopologyV1};
+use crate::session::{
+    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeProjection,
+    ChangeTopologyV1,
+};
 
 const AUTHORITY_ERROR_SCHEMA: &str = "pointbreak.inspect-change-authority-error";
 const PROJECTION_ERROR_SCHEMA: &str = "pointbreak.inspect-change-projection-error";
@@ -220,6 +223,15 @@ impl DerivedChangeAccess {
     #[doc(hidden)]
     pub fn recovery_access(&self) -> super::history::DerivedHistoryAccess {
         super::history::DerivedHistoryAccess::from_runtime(Arc::clone(&self.runtime))
+    }
+
+    /// Bind strict Change projections to the checkpoint already selected by
+    /// this process without giving strict reads a derived content dependency.
+    #[doc(hidden)]
+    pub fn strict_stamp_binder(&self) -> StrictChangeStampBinder {
+        StrictChangeStampBinder {
+            runtime: Arc::clone(&self.runtime),
+        }
     }
 
     #[doc(hidden)]
@@ -761,6 +773,106 @@ impl DerivedChangeAccess {
         record_change_rows_emitted(emitted_row_count);
         Ok(DerivedChangeOutcomeV1::Ready(prepared))
     }
+}
+
+/// Metadata-only bridge between strict Change content and one cached reader
+/// checkpoint. The strict projections remain the complete content authority.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct StrictChangeStampBinder {
+    runtime: Arc<DerivedAccessRuntime>,
+}
+
+/// Result of attempting to bind strict Change content to cached generation
+/// metadata.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StrictChangeStampBindingV1 {
+    Unavailable,
+    Bound(String),
+    Moving,
+}
+
+impl StrictChangeStampBinder {
+    pub fn bind(
+        &self,
+        authority_cursor: &AuthorityCursorV2,
+        semantic_projection: &ChangeProjection,
+        document_projection: &ChangeDocumentProjectionV1,
+    ) -> Result<StrictChangeStampBindingV1> {
+        self.bind_with_hook(
+            authority_cursor,
+            semantic_projection,
+            document_projection,
+            || {},
+        )
+    }
+
+    fn bind_with_hook(
+        &self,
+        authority_cursor: &AuthorityCursorV2,
+        semantic_projection: &ChangeProjection,
+        document_projection: &ChangeDocumentProjectionV1,
+        hook: impl FnOnce(),
+    ) -> Result<StrictChangeStampBindingV1> {
+        bind_strict_change_stamp_with_hook(
+            &self.runtime,
+            authority_cursor,
+            semantic_projection,
+            document_projection,
+            hook,
+        )
+    }
+}
+
+fn bind_strict_change_stamp_with_hook(
+    runtime: &DerivedAccessRuntime,
+    authority_cursor: &AuthorityCursorV2,
+    semantic_projection: &ChangeProjection,
+    document_projection: &ChangeDocumentProjectionV1,
+    hook: impl FnOnce(),
+) -> Result<StrictChangeStampBindingV1> {
+    let Some(current) = runtime.cached_current() else {
+        return Ok(StrictChangeStampBindingV1::Unavailable);
+    };
+    let checkpoint = match current.pin_change_reader_checkpoint() {
+        Ok(checkpoint) => checkpoint,
+        Err(LifecycleError::TruthChanged) => return Ok(StrictChangeStampBindingV1::Moving),
+        Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
+    };
+    if &checkpoint.authority_cursor != authority_cursor {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    }
+    let stamp = current
+        .strict_change_generation_stamp(
+            &checkpoint,
+            authority_cursor,
+            semantic_projection,
+            document_projection,
+        )
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+
+    hook();
+
+    let Some(final_current) = runtime.cached_current() else {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    };
+    if !Arc::ptr_eq(&current, &final_current)
+        || current.generation_id() != final_current.generation_id()
+    {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    }
+    let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
+        Ok(checkpoint) => checkpoint,
+        Err(LifecycleError::TruthChanged) => return Ok(StrictChangeStampBindingV1::Moving),
+        Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
+    };
+    if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256
+        || &final_checkpoint.authority_cursor != authority_cursor
+    {
+        return Ok(StrictChangeStampBindingV1::Moving);
+    }
+    Ok(StrictChangeStampBindingV1::Bound(stamp))
 }
 
 /// Independent authority, compatibility, and projection outcomes.
@@ -2835,6 +2947,185 @@ mod tests {
             attention.attention_presentations,
             BTreeMap::from([(selected_change.clone(), expected_attention_presentation)])
         );
+    }
+
+    #[test]
+    fn strict_stamp_binder_matches_the_bodyless_generation_stamp() {
+        let fixture =
+            ActiveChangeFixture::new(&[&[Some("shared stamp state"), Some("shared stamp state")]]);
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the cached Change generation")
+        else {
+            panic!("fixture Changes must be ready");
+        };
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("bind strict projection stamp"),
+            StrictChangeStampBindingV1::Bound(page.document.document.projection_stamp)
+        );
+
+        let mut invalid_strict_documents = strict_documents;
+        invalid_strict_documents.projection_stamp = "not-a-projection-hash".to_owned();
+        assert!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &invalid_strict_documents,)
+                .is_err(),
+            "invalid strict projection input must not be mistaken for cached metadata absence"
+        );
+    }
+
+    #[test]
+    fn strict_stamp_binder_leaves_an_empty_runtime_cache_unavailable() {
+        let fixture = ActiveChangeFixture::new(&[]);
+        let access = fixture.fresh_access();
+        let scope = LongitudinalCountingScopeV1::new("8".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let binding = access
+            .strict_stamp_binder()
+            .bind(
+                &empty_authority_cursor(),
+                &crate::session::ChangeProjection::default(),
+                &crate::session::ChangeDocumentProjectionV1::default(),
+            )
+            .expect("inspect an empty cached-current slot");
+        drop(guard);
+
+        assert_eq!(binding, StrictChangeStampBindingV1::Unavailable);
+        assert!(access.runtime.cached_current().is_none());
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(counters.event_folds, 0);
+        assert_eq!(counters.projection_rebuilds, 0);
+        assert_eq!(counters.state_rebuilds, 0);
+        assert_eq!(counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn strict_stamp_binder_never_binds_a_mismatched_or_moving_checkpoint() {
+        let fixture =
+            ActiveChangeFixture::new(&[&[Some("moving stamp state"), Some("moving stamp state")]]);
+        fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the cached Change generation");
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+        let mut mismatched_authority = authority.clone();
+        mismatched_authority.event_count += 1;
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&mismatched_authority, &strict_projection, &strict_documents,)
+                .expect("classify mismatched authority"),
+            StrictChangeStampBindingV1::Moving
+        );
+
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind_with_hook(&authority, &strict_projection, &strict_documents, || {
+                    fixture.append_unrelated("strict-stamp-movement");
+                })
+                .expect("classify a moving live checkpoint"),
+            StrictChangeStampBindingV1::Moving
+        );
+    }
+
+    #[test]
+    fn strict_stamp_binder_treats_invalid_cached_metadata_as_unavailable() {
+        let fixture =
+            ActiveChangeFixture::new(&[&[Some("cached stamp state"), Some("cached stamp state")]]);
+        fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the cached Change generation");
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+        fixture.mutate_database(|connection| {
+            connection
+                .execute(
+                    "UPDATE reader_projection_checkpoint
+                     SET checkpoint_json = '{'
+                     WHERE singleton = 1",
+                    [],
+                )
+                .expect("invalidate the disposable cached checkpoint");
+        });
+
+        assert_eq!(
+            fixture
+                .access
+                .strict_stamp_binder()
+                .bind(&authority, &strict_projection, &strict_documents)
+                .expect("classify invalid cached metadata"),
+            StrictChangeStampBindingV1::Unavailable
+        );
+    }
+
+    #[test]
+    fn strict_stamp_binder_source_has_no_query_hydration_or_activation_path() {
+        let source = include_str!("changes.rs");
+        let start = source
+            .find("fn bind_strict_change_stamp_with_hook")
+            .expect("binder implementation marker");
+        let end = source[start..]
+            .find("\n}\n\n/// Independent authority")
+            .map(|offset| start + offset)
+            .expect("binder implementation terminator");
+        let implementation = &source[start..end];
+        for forbidden in [
+            ".current(",
+            "semantic_materialized",
+            "read_page",
+            "LocatorRead",
+            "hydrate",
+            "rebuild",
+            "maintenance",
+        ] {
+            assert!(
+                !implementation.contains(forbidden),
+                "strict stamp binding must not contain {forbidden:?}"
+            );
+        }
     }
 
     #[test]

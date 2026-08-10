@@ -41,6 +41,38 @@ test("browser program remains one expression for the Playwright runner", async (
 	);
 });
 
+test("empty ready L2 recovery is explicit, authenticated, and retained before browser readiness", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const retry = source.indexOf("retry_empty_ready_l2() {");
+	const emptyStart = source.indexOf(
+		'start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"',
+	);
+	const retryCall = source.indexOf("retry_empty_ready_l2", emptyStart);
+	const l0Start = source.indexOf('start_reader_state_server "l0" "$reader_l0_repo"');
+	assert.ok(retry >= 0, "missing empty-ready-l2 retry helper");
+	assert.ok(
+		emptyStart >= 0 && retryCall > emptyStart && l0Start > retryCall,
+		"empty-ready-l2 must recover before another reader fixture starts",
+	);
+	const helper = source.slice(retry, emptyStart);
+	assert.match(helper, /-X POST[\s\\]+-H "Authorization: Bearer \$token"[\s\\]+"\$base_url\/api\/derived-access\/retry"/);
+	assert.match(helper, /browser-empty-ready-l2-retry\.json/);
+	assert.match(helper, /browser-empty-ready-l2-ready\.json/);
+	assert.match(
+		source,
+		/logs\/browser-empty-ready-l2-retry\.json[\s\\]+logs\/browser-empty-ready-l2-ready\.json/,
+		"completion must require both retained recovery records",
+	);
+	assert.match(
+		helper,
+		/servingCurrent == true[\s\S]*availability == "current"[\s\S]*rebuildInFlight == false/,
+		"the ready record must wait for the recovered derived generation",
+	);
+});
+
 test("reports failures from independently recoverable sections together", async () => {
 	const diagnostics = createBrowserDiagnostics({ context });
 

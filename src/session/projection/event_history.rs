@@ -36,6 +36,25 @@ pub(crate) enum EventHistoryTypeClassV1 {
     Carrier,
 }
 
+/// Rebind a complete strict Timeline to the Change generation identity
+/// selected by the Inspector, without changing its authoritative entries.
+#[doc(hidden)]
+pub fn rebind_event_history_source_projection_stamp(
+    mut document: EventHistoryDocumentV1,
+    source_change_projection_stamp: String,
+) -> Result<EventHistoryDocumentV1> {
+    document.source_change_projection_stamp = source_change_projection_stamp;
+    document.timeline_projection_stamp = sha256_json_prefixed(&serde_json::json!({
+        "schema": "pointbreak.inspect-event-history-projection.v1",
+        "authorityCursor": &document.authority_cursor,
+        "sourceChangeProjectionStamp": &document.source_change_projection_stamp,
+        "order": "normalized_occurred_at_event_id_asc.v1",
+        "entries": &document.entries,
+        "diagnostics": &document.diagnostics,
+    }))?;
+    Ok(document)
+}
+
 pub(crate) fn event_history_type_class(event_type: EventType) -> EventHistoryTypeClassV1 {
     match event_type {
         EventType::ReviewInitialized
@@ -163,33 +182,29 @@ pub(crate) fn project_event_history(
         }
     }
     let diagnostics = diagnostics.into_iter().collect::<Vec<_>>();
-    let timeline_projection_stamp = sha256_json_prefixed(&serde_json::json!({
-        "schema": "pointbreak.inspect-event-history-projection.v1",
-        "authorityCursor": &authority_cursor,
-        "sourceChangeProjectionStamp": &source_change_projection_stamp,
-        "order": "normalized_occurred_at_event_id_asc.v1",
-        "entries": &entries,
-        "diagnostics": &diagnostics,
-    }))?;
-    Ok(EventHistoryFacadeV1::new(EventHistoryDocumentV1 {
-        schema: INSPECT_EVENT_HISTORY_SCHEMA.to_owned(),
-        version: 1,
-        event_count: authority_cursor.event_count,
-        authority_cursor,
+    let document = rebind_event_history_source_projection_stamp(
+        EventHistoryDocumentV1 {
+            schema: INSPECT_EVENT_HISTORY_SCHEMA.to_owned(),
+            version: 1,
+            event_count: authority_cursor.event_count,
+            authority_cursor,
+            source_change_projection_stamp: String::new(),
+            timeline_projection_stamp: String::new(),
+            order: EventHistoryOrderV1::Asc,
+            match_count: entries.len(),
+            offset: 0,
+            match_index: None,
+            facets,
+            completion,
+            diagnostics,
+            query_notices: Vec::new(),
+            entries,
+            previous: None,
+            next: None,
+        },
         source_change_projection_stamp,
-        timeline_projection_stamp,
-        order: EventHistoryOrderV1::Asc,
-        match_count: entries.len(),
-        offset: 0,
-        match_index: None,
-        facets,
-        completion,
-        diagnostics,
-        query_notices: Vec::new(),
-        entries,
-        previous: None,
-        next: None,
-    }))
+    )?;
+    Ok(EventHistoryFacadeV1::new(document))
 }
 
 fn project_event(
@@ -1250,6 +1265,37 @@ mod tests {
         );
         assert!(json["entries"][0]["summary"].get("kind").is_some());
         assert_eq!(json["entries"][0]["verificationStatus"], "unsigned");
+    }
+
+    #[test]
+    fn timeline_source_stamp_rebind_recomputes_only_the_timeline_identity() {
+        let event = observation("rebind", "rev:sha256:r", "unix-ms:1");
+        let original = project_event_history(
+            std::slice::from_ref(&event),
+            &ChangeDocumentProjectionV1::default(),
+            cursor(std::slice::from_ref(&event)),
+            "sha256:legacy".to_owned(),
+            &TrustSet::default(),
+        )
+        .unwrap()
+        .document();
+
+        let rebound = rebind_event_history_source_projection_stamp(
+            original.clone(),
+            "sha256:checkpoint".to_owned(),
+        )
+        .unwrap();
+
+        assert_eq!(rebound.source_change_projection_stamp, "sha256:checkpoint");
+        assert_ne!(
+            rebound.timeline_projection_stamp,
+            original.timeline_projection_stamp
+        );
+        assert_eq!(rebound.authority_cursor, original.authority_cursor);
+        assert_eq!(rebound.entries, original.entries);
+        assert_eq!(rebound.diagnostics, original.diagnostics);
+        assert_eq!(rebound.facets, original.facets);
+        assert_eq!(rebound.completion, original.completion);
     }
 
     #[test]

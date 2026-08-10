@@ -102,6 +102,7 @@ impl From<std::io::Error> for RequestParseError {
 pub(super) struct InspectState {
     pub repo: PathBuf,
     pub derived_changes: pointbreak::session::DerivedChangeAccess,
+    pub strict_change_stamp: pointbreak::session::StrictChangeStampBinder,
     pub derived_history: pointbreak::session::DerivedHistoryAccess,
     pub highlight_cache: RwLock<HighlightCache>,
     /// The single-slot exhaustive-search cache (#255). Default-off requests
@@ -138,6 +139,7 @@ impl InspectState {
         let derived_changes =
             pointbreak::session::DerivedChangeAccess::resolve_for_inspector(&repo)
                 .map_err(|error| error.to_string())?;
+        let strict_change_stamp = derived_changes.strict_stamp_binder();
         let derived_history = derived_changes.recovery_access();
         if start_background_rebuild && let Err(error) = derived_history.start_background_rebuild() {
             tracing::warn!(error = %error, "derived_access_background_rebuild_start_failed");
@@ -145,6 +147,7 @@ impl InspectState {
         Ok(Self {
             repo,
             derived_changes,
+            strict_change_stamp,
             derived_history,
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
             history_cache: super::cache::HistoryProjectionCache::new(),
@@ -964,6 +967,7 @@ fn route(
         return change_v2_response(api::event_history_v2_json(
             repo,
             &state.change_reader_cache,
+            &state.strict_change_stamp,
             query,
             &state.page_token_signer,
         ));
@@ -1174,6 +1178,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
     };
     let repo = state.repo.as_path();
     let cache = &state.change_reader_cache;
+    let stamp_binder = &state.strict_change_stamp;
     let segments = member_path
         .split('/')
         .map(|raw| {
@@ -1186,7 +1191,12 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
         return exact_selection_error_response("invalid Change route identity");
     };
     match segments.as_slice() {
-        [change_id] => change_v2_response(api::change_detail_v2_json(repo, cache, change_id)),
+        [change_id] => change_v2_response(api::change_detail_v2_json(
+            repo,
+            cache,
+            stamp_binder,
+            change_id,
+        )),
         [change_id, revisions, revision_id] if revisions == "revisions" => {
             let artifact_hash = match exact_selector_values(query, &["artifactHash"]) {
                 Ok(mut values) => values.remove(0),
@@ -1195,6 +1205,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             change_v2_response(api::change_revision_v2_json(
                 repo,
                 cache,
+                stamp_binder,
                 change_id,
                 revision_id,
                 &artifact_hash,
@@ -1211,6 +1222,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             change_v2_response(api::change_revision_v2_json(
                 repo,
                 cache,
+                stamp_binder,
                 change_id,
                 revision_id,
                 &artifact_hash,
@@ -1226,6 +1238,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             change_v2_response(api::change_interdiff_v2_json(
                 repo,
                 cache,
+                stamp_binder,
                 change_id,
                 from_revision_id,
                 &values[0],
@@ -1790,6 +1803,10 @@ mod tests {
             state.contains("derived_history: pointbreak::session::DerivedHistoryAccess"),
             "the supported recovery facade remains explicit"
         );
+        assert!(
+            state.contains("strict_change_stamp: pointbreak::session::StrictChangeStampBinder"),
+            "strict documents must own the product runtime's metadata-only stamp binder"
+        );
 
         let constructor = source_between(
             SERVER_SOURCE,
@@ -1808,7 +1825,12 @@ mod tests {
             constructor.contains("let derived_history = derived_changes."),
             "the recovery facade must be obtained from the resolved product facade"
         );
+        assert!(
+            constructor.contains("let strict_change_stamp = derived_changes.strict_stamp_binder()"),
+            "strict stamp binding must reuse the resolved product runtime"
+        );
         assert!(constructor.contains("derived_changes,"));
+        assert!(constructor.contains("strict_change_stamp,"));
         assert!(constructor.contains("derived_history,"));
 
         let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
@@ -1863,6 +1885,7 @@ mod tests {
             );
         }
         assert!(timeline.contains("state.change_reader_cache"));
+        assert!(timeline.contains("state.strict_change_stamp"));
         assert!(!timeline.contains("state.derived_changes"));
 
         let exact = source_between(
@@ -1871,6 +1894,7 @@ mod tests {
             "fn exact_selector_values(",
         );
         assert!(exact.contains("let cache = &state.change_reader_cache"));
+        assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
         assert!(!exact.contains("state.derived_changes"));
 
         let profile_api = source_between(
@@ -1908,6 +1932,7 @@ mod tests {
             );
         }
         assert!(timeline_api.contains("ChangeReaderCache"));
+        assert!(timeline_api.contains("StrictChangeStampBinder"));
         assert!(!timeline_api.contains("DerivedChangeAccess"));
     }
 
@@ -3264,8 +3289,9 @@ mod tests {
         let signer = super::super::page_token::PageTokenSigner::from_seed([7_u8; 32]);
         let request = super::super::event_history_page::parse_signed(None, &signer)
             .expect("bare Timeline request is valid");
-        let retryable = api::event_history_v2_from_loaded(repo.path(), request, &signer, moving)
-            .expect("moving journal is a typed Timeline response");
+        let retryable =
+            api::event_history_v2_from_loaded(repo.path(), request, &signer, None, moving)
+                .expect("moving journal is a typed Timeline response");
         let api::ChangeV2Json::Retryable(body) = retryable else {
             panic!("a real append race must remain retryable")
         };

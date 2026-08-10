@@ -38,15 +38,15 @@ use pointbreak::session::{
     RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
     RevisionOverviewsOptions, RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError,
     RevisionShowOptions, RevisionShowResult, SessionState, SnapshotSummaryCache, StoreIdentity,
-    StoreIdentityOptions, SupersessionView, TrustSet, ValidationContinuitySummary,
-    ValidationContinuityView, apply_history_query, classify_validation_continuity,
-    commit_graph_stamp, compare_event_instants, count_new_since,
+    StoreIdentityOptions, StrictChangeStampBinder, StrictChangeStampBindingV1, SupersessionView,
+    TrustSet, ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
+    classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, parse_event_instant,
     read_bound_object_artifact, read_events_for_display, read_object_artifact,
-    revision_supersession_classification, show_revision_for_inspector, show_revision_overviews,
-    stale_review_fact_count, store_identity,
+    rebind_event_history_source_projection_stamp, revision_supersession_classification,
+    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -137,6 +137,7 @@ pub(super) fn changes_v2_json(
 pub(super) fn event_history_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: &StrictChangeStampBinder,
     query: Option<&str>,
     signer: &super::page_token::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
@@ -151,7 +152,13 @@ pub(super) fn event_history_v2_json(
         }
     };
     let trust_set = crate::cli::common::discover_trust_set(repo);
-    event_history_v2_from_loaded(repo, request, signer, cache.load_timeline(repo, &trust_set))
+    event_history_v2_from_loaded(
+        repo,
+        request,
+        signer,
+        Some(stamp_binder),
+        cache.load_timeline(repo, &trust_set),
+    )
 }
 
 /// Finish a Timeline response after its signed request has passed the closed
@@ -162,6 +169,7 @@ pub(super) fn event_history_v2_from_loaded(
     _repo: &Path,
     request: super::event_history_page::Request,
     signer: &super::page_token::PageTokenSigner,
+    stamp_binder: Option<&StrictChangeStampBinder>,
     loaded: Result<super::server::ChangeReaderGeneration, super::server::ChangeReaderLoadError>,
 ) -> Result<ChangeV2Json, String> {
     let generation = match loaded {
@@ -182,16 +190,30 @@ pub(super) fn event_history_v2_from_loaded(
             .map(ChangeV2Json::Unavailable)
             .map_err(|error| error.to_string());
     }
-    generation
+    let ready = generation
         .state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
-    let document = generation
+    let mut document = generation
         .timeline
         .as_ref()
         .ok_or_else(|| "Change reader Timeline is unavailable".to_owned())?
         .as_ref()
         .clone();
+    match bind_strict_change_stamp(stamp_binder, &generation.state, ready)? {
+        StrictChangeStampBindingV1::Unavailable => {}
+        StrictChangeStampBindingV1::Bound(stamp) => {
+            document = rebind_event_history_source_projection_stamp(document, stamp)
+                .map_err(|error| error.to_string())?;
+        }
+        StrictChangeStampBindingV1::Moving => {
+            return Ok(ChangeV2Json::Retryable(event_history_error_json(
+                "moving_journal",
+                "Change generation moved while the Timeline was binding; retry",
+                true,
+            )));
+        }
+    }
     match super::event_history_query::apply(document, &request, signer) {
         Ok(document) => serde_json::to_string(&document)
             .map(ChangeV2Json::Ok)
@@ -343,7 +365,7 @@ pub(super) fn authoritative_changes_v2_json(
             Ok(request) => request,
             Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
         };
-    with_change_v2_outcome(repo, cache, |facade, _| {
+    with_change_v2_outcome(repo, cache, None, |facade, _| {
         let document = facade
             .list_document_for_inspector_with_presentations()
             .map_err(|error| error.to_string())?;
@@ -365,7 +387,7 @@ pub(super) fn authoritative_change_attention_v2_json(
         Ok(request) => request,
         Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
     };
-    with_change_v2_outcome(repo, cache, |facade, _| {
+    with_change_v2_outcome(repo, cache, None, |facade, _| {
         let document = facade
             .attention_document_with_presentations(true)
             .map_err(|error| error.to_string())?;
@@ -456,9 +478,10 @@ fn authoritative_paged_change_json(
 pub(super) fn change_detail_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: &StrictChangeStampBinder,
     change_id: &str,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2(repo, cache, |facade, _| {
+    with_change_v2(repo, cache, Some(stamp_binder), |facade, _| {
         let document = facade
             .detail_document(&ChangeId::new(change_id))
             .map_err(|error| error.to_string())?;
@@ -474,12 +497,13 @@ pub(super) fn change_detail_v2_json(
 pub(super) fn change_revision_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: &StrictChangeStampBinder,
     change_id: &str,
     revision_id: &str,
     artifact_hash: &str,
     resource_only: bool,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2_outcome(repo, cache, |facade, ready| {
+    with_change_v2_outcome(repo, cache, Some(stamp_binder), |facade, ready| {
         let change_id = ChangeId::new(change_id);
         let exact = match crate::cli::change::exact_ref(
             ready,
@@ -533,16 +557,18 @@ pub(super) fn change_revision_v2_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn change_interdiff_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: &StrictChangeStampBinder,
     change_id: &str,
     from_revision_id: &str,
     from_artifact_hash: &str,
     to_revision_id: &str,
     to_artifact_hash: &str,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2_outcome(repo, cache, |facade, ready| {
+    with_change_v2_outcome(repo, cache, Some(stamp_binder), |facade, ready| {
         let change_id = ChangeId::new(change_id);
         for (revision_id, artifact_hash) in [
             (from_revision_id, from_artifact_hash),
@@ -578,12 +604,13 @@ pub(super) fn change_interdiff_v2_json(
 fn with_change_v2(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: Option<&StrictChangeStampBinder>,
     build: impl FnOnce(
         &ChangeDocumentFacadeV1,
         &pointbreak::session::ChangeReaderReadyV1,
     ) -> Result<String, String>,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2_outcome(repo, cache, |facade, ready| {
+    with_change_v2_outcome(repo, cache, stamp_binder, |facade, ready| {
         build(facade, ready).map(ChangeV2Json::Ok)
     })
 }
@@ -591,6 +618,7 @@ fn with_change_v2(
 fn with_change_v2_outcome(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: Option<&StrictChangeStampBinder>,
     build: impl FnOnce(
         &ChangeDocumentFacadeV1,
         &pointbreak::session::ChangeReaderReadyV1,
@@ -610,12 +638,54 @@ fn with_change_v2_outcome(
         .state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
-    let facade = generation
+    let mut facade = generation
         .presentation
         .as_ref()
         .ok_or_else(|| "Change reader presentation is unavailable".to_owned())?
-        .change_document_facade();
-    build(facade, ready)
+        .change_document_facade()
+        .clone();
+    match bind_strict_change_stamp(stamp_binder, &generation.state, ready)? {
+        StrictChangeStampBindingV1::Unavailable => {}
+        StrictChangeStampBindingV1::Bound(stamp) => {
+            facade = facade
+                .with_generation_stamp(stamp)
+                .map_err(|error| error.to_string())?;
+        }
+        StrictChangeStampBindingV1::Moving => {
+            return Ok(ChangeV2Json::Retryable(
+                strict_change_stamp_moving_error_json(),
+            ));
+        }
+    }
+    build(&facade, ready)
+}
+
+fn bind_strict_change_stamp(
+    stamp_binder: Option<&StrictChangeStampBinder>,
+    state: &pointbreak::session::ChangeReaderStateV1,
+    ready: &pointbreak::session::ChangeReaderReadyV1,
+) -> Result<StrictChangeStampBindingV1, String> {
+    let Some(stamp_binder) = stamp_binder else {
+        return Ok(StrictChangeStampBindingV1::Unavailable);
+    };
+    stamp_binder
+        .bind(
+            &state.capability.cursor,
+            &ready.projection,
+            &ready.document_projection,
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn strict_change_stamp_moving_error_json() -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-change-projection-error",
+        "version": 1,
+        "code": "projection_unstable",
+        "message": "Change generation moved while strict content was binding; retry",
+        "retryable": true,
+    })
+    .to_string()
 }
 
 #[derive(Serialize)]

@@ -168,6 +168,16 @@ impl DerivedAccessRuntime {
         Some(lifecycle)
     }
 
+    /// Clone the process-local reader already selected by another product
+    /// path. This is deliberately a cache observation: it performs no
+    /// publication discovery, validation, opening, or maintenance work.
+    pub(super) fn cached_current(&self) -> Option<Arc<CurrentGeneration>> {
+        let DerivedAccessMode::Active { current, .. } = &self.mode else {
+            return None;
+        };
+        lock(current).as_ref().map(Arc::clone)
+    }
+
     pub(super) fn rebuild_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) == BackgroundWorkState::Rebuild as u8
     }

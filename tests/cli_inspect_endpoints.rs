@@ -299,6 +299,10 @@ fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
         .expect("exact artifact identity");
 
     let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+    assert_eq!(
+        detail["projectionStamp"], changes["projectionStamp"],
+        "strict Change detail must bind to the staged derived generation"
+    );
     let revision_graph = &detail["inspectorPresentation"]["revisionGraph"];
     assert_eq!(revision_graph["nodes"].as_array().unwrap().len(), 1);
     assert_eq!(revision_graph["nodes"][0]["revision"], *exact);
@@ -332,6 +336,20 @@ fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
         urlencode(&revision_id),
         urlencode(artifact_hash)
     ));
+    assert_eq!(
+        revision["projectionStamp"], changes["projectionStamp"],
+        "strict exact Revision must bind to the staged derived generation"
+    );
+    let resource = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+        urlencode(change_id),
+        urlencode(&revision_id),
+        urlencode(artifact_hash)
+    ));
+    assert_eq!(
+        resource["projectionStamp"], changes["projectionStamp"],
+        "strict exact resource must bind to the staged derived generation"
+    );
     let fact_graph = &revision["inspectorPresentation"]["factGraph"];
     assert_eq!(fact_graph["nodes"].as_array().unwrap().len(), 1);
     assert_eq!(fact_graph["nodes"][0]["kind"], "fact");
@@ -424,6 +442,22 @@ fn change_revision_graph_keeps_effective_edges_separate_from_unresolved_claims()
             .expect("unresolved claim graph edges")
             .is_empty(),
         "effective topology must not be echoed as an unresolved claim: {graph}"
+    );
+
+    let changes = inspector.get_json("/api/v2/changes");
+    let from = &first["reviewCursor"]["cursor"]["revision"];
+    let to = &second["reviewCursor"]["cursor"]["revision"];
+    let interdiff = inspector.get_json(&format!(
+        "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+        urlencode(change_id),
+        urlencode(from["revisionId"].as_str().unwrap()),
+        urlencode(to["revisionId"].as_str().unwrap()),
+        urlencode(from["objectArtifactContentHash"].as_str().unwrap()),
+        urlencode(to["objectArtifactContentHash"].as_str().unwrap())
+    ));
+    assert_eq!(
+        interdiff["projectionStamp"], changes["projectionStamp"],
+        "strict interdiff must bind to the staged derived generation"
     );
 }
 
@@ -672,6 +706,7 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
     );
 
     let first = inspector.get_json("/api/v2/history?limit=1&order=asc");
+    let changes = inspector.get_json("/api/v2/changes?limit=50&order=change_id_asc");
     assert_eq!(first["schema"], "pointbreak.inspect-event-history");
     assert_eq!(first["version"], 1);
     assert_eq!(first["order"], "asc");
@@ -686,6 +721,14 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
             .as_str()
             .unwrap()
             .starts_with("sha256:")
+    );
+    assert_eq!(
+        first["sourceChangeProjectionStamp"], changes["projectionStamp"],
+        "strict Timeline must bind to the staged derived generation"
+    );
+    assert_eq!(
+        first["authorityCursor"], profile["authorityCursor"],
+        "strict Timeline and derived Profile must name one authority checkpoint"
     );
     assert!(
         first["timelineProjectionStamp"]

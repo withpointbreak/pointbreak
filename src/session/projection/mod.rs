@@ -32,6 +32,8 @@ pub use commit_range::{
     WithdrawnRefAssociation,
 };
 pub use engagement::{EngagementGrouping, EngagementLifecycle, EngagementView};
+#[doc(hidden)]
+pub use event_history::rebind_event_history_source_projection_stamp;
 pub use id_index::{StoreIdIndex, store_id_index};
 pub use liveness::{LivenessScope, LivenessToken};
 pub(crate) use read::skipped_to_diagnostics;

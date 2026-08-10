@@ -28,7 +28,7 @@ pub use derived_access::changes::{
     DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1, DerivedChangePageContinuationV1,
     DerivedChangePageRequestV1, DerivedChangePageSelectionV1, DerivedChangePageV1,
     DerivedChangePageWindowV1, DerivedProjectionFailureCodeV1,
-    DerivedProjectionUnavailableDocumentV1,
+    DerivedProjectionUnavailableDocumentV1, StrictChangeStampBinder, StrictChangeStampBindingV1,
 };
 #[doc(hidden)]
 pub use derived_access::history::{
@@ -88,7 +88,8 @@ pub use projection::{
     RevisionClassificationFacet, RevisionCommitRangeProjection, RevisionCommitRangeView,
     RevisionRefUnavailableReasonV1, RevisionsByBase, SessionState, StoreIdIndex, SupersessionView,
     WithdrawnCommitAssociation, WithdrawnRefAssociation, change_document_projection_stamp,
-    project_change_documents, project_changes, read_events, read_events_for_display, rebuild_state,
+    project_change_documents, project_changes, read_events, read_events_for_display,
+    rebind_event_history_source_projection_stamp, rebuild_state,
     revision_supersession_classification, store_id_index,
 };
 pub use sensitivity_vocabulary::{SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity};

@@ -609,6 +609,19 @@ impl ChangeDocumentFacadeV1 {
         &self.projection_stamp
     }
 
+    /// Rebind strict document presentation to a checkpoint-selected Change
+    /// generation without changing any semantic or authoritative content.
+    #[doc(hidden)]
+    pub fn with_generation_stamp(mut self, generation_stamp: String) -> Result<Self> {
+        if generation_stamp.is_empty() {
+            return Err(ShoreError::Message(
+                "Change generation projection stamp is empty".to_owned(),
+            ));
+        }
+        self.projection_stamp = generation_stamp;
+        Ok(self)
+    }
+
     /// Select fact-port authority for one exact contextual Revision from the
     /// same validated event generation as the facade.
     ///
@@ -3588,6 +3601,27 @@ mod tests {
             list.document.projection_stamp,
             facade.provenance.projection_stamp
         );
+    }
+
+    #[test]
+    fn strict_facade_generation_stamp_rebind_preserves_authoritative_content() {
+        let (change_id, _, facade) = facade();
+        let original = facade.detail_document(&change_id).unwrap();
+        let rebound = facade
+            .clone()
+            .with_generation_stamp("sha256:checkpoint".to_owned())
+            .unwrap();
+        let detail = rebound.detail_document(&change_id).unwrap();
+
+        assert_eq!(rebound.projection_stamp(), "sha256:checkpoint");
+        assert_eq!(detail.detail.projection_stamp, "sha256:checkpoint");
+        assert_eq!(detail.detail.summary.projection_stamp, "sha256:checkpoint");
+        let mut normalized = detail;
+        normalized.detail.projection_stamp = original.detail.projection_stamp.clone();
+        normalized.detail.summary.projection_stamp =
+            original.detail.summary.projection_stamp.clone();
+        assert_eq!(normalized, original);
+        assert_eq!(facade.detail_document(&change_id).unwrap(), original);
     }
 
     #[test]
