@@ -2419,7 +2419,8 @@ mod instrumented {
             return Err("Change read fixture is not the public decision matrix".to_owned());
         }
         let store_root = store_dir_for_repo(&repository).map_err(|error| error.to_string())?;
-        if store_root != repository.join(".git/pointbreak") {
+        let expected_store_root = repository.join(".git/pointbreak");
+        if !same_existing_path(&store_root, &expected_store_root)? {
             return Err(
                 "Change read evidence requires the disposable shared-store root".to_owned(),
             );
@@ -2437,6 +2438,12 @@ mod instrumented {
             }
         }
         Ok(())
+    }
+
+    fn same_existing_path(left: &Path, right: &Path) -> Result<bool, String> {
+        let left = std::fs::canonicalize(left).map_err(|error| error.to_string())?;
+        let right = std::fs::canonicalize(right).map_err(|error| error.to_string())?;
+        Ok(left == right)
     }
 
     fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
@@ -2498,6 +2505,20 @@ mod instrumented {
                 "running 2 tests\ntest {test_name} ... ok\ntest module::tests::other ... ok\n\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n"
             );
             assert!(!exact_libtest_passed(multiple.as_bytes(), test_name).expect("valid output"));
+        }
+
+        #[test]
+        fn existing_path_identity_ignores_equivalent_lexical_spellings() {
+            let root = tempfile::tempdir().expect("fixture root");
+            let store = root.path().join("store");
+            let sibling = root.path().join("sibling");
+            std::fs::create_dir_all(&store).expect("store directory");
+            std::fs::create_dir_all(&sibling).expect("sibling directory");
+
+            assert!(
+                same_existing_path(&store, &sibling.join("..").join("store"))
+                    .expect("compare existing paths")
+            );
         }
 
         #[test]
