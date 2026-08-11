@@ -13,8 +13,8 @@ use pointbreak::bench_support::derived_access::{
     DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
     DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1, DERIVED_ACCESS_ROLLOUT_CONTRACT_MODE_V1,
     DERIVED_ACCESS_ROLLOUT_CONTRACT_SMOKE_MODE_V1, DERIVED_ACCESS_ROLLOUT_CONTRACT_VERIFY_MODE_V1,
-    DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1, DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,
-    QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_MODE_V1,
+    DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1, DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1,
+    DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1, QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1,
@@ -38,6 +38,7 @@ use pointbreak::bench_support::derived_access::{
     derived_access_readiness_contract_verify_json_v1,
     derived_access_rollout_contract_publication_json_v1,
     derived_access_rollout_contract_smoke_json_v1, derived_access_rollout_contract_verify_json_v1,
+    derived_change_diagnostic_harness_identity_v1,
     materialize_qualification_derived_change_fixture_from_request_v1,
     preflight_qualification_derived_access_retained_root_v1,
     qualification_derived_access_contract_v1_publication, run_authority_stamp_child_v1,
@@ -111,7 +112,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-rollout-contract|--derived-access-rollout-contract-verify|--derived-access-rollout-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-phase-evidence|--derived-access-phase-verify|--derived-access-lifecycle|--derived-access-lifecycle-diagnostic|--derived-change-diagnostic-native|--derived-change-read-diagnostic|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-change-fixture-materialize|--derived-change-read-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-rollout-contract|--derived-access-rollout-contract-verify|--derived-access-rollout-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-phase-evidence|--derived-access-phase-verify|--derived-access-lifecycle|--derived-access-lifecycle-diagnostic|--derived-change-diagnostic-identity|--derived-change-diagnostic-native|--derived-change-read-diagnostic|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-change-fixture-materialize|--derived-change-read-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
@@ -482,6 +483,7 @@ fn main() -> ExitCode {
         QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1,
         DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1,
+        DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1,
         DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1,
@@ -594,6 +596,7 @@ fn main() -> ExitCode {
             && argument != QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1
             && argument != DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1
+            && argument != DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1
             && argument != DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1
@@ -659,6 +662,19 @@ fn main() -> ExitCode {
     {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1)
+    {
+        let identity = derived_change_diagnostic_harness_identity_v1();
+        println!(
+            "{}",
+            serde_json::to_string(&identity)
+                .expect("derived Change diagnostic harness identity serializes")
+        );
+        return ExitCode::SUCCESS;
     }
 
     if arguments
@@ -757,6 +773,7 @@ fn main() -> ExitCode {
              --derived-access-phase-verify --derived-access-request=<path> --derived-access-input=<bundle.json>\n\
              --derived-access-lifecycle --derived-access-request=<path>\n\
              --derived-access-lifecycle-diagnostic --derived-access-request=<path>\n\
+             --derived-change-diagnostic-identity\n\
              --derived-change-diagnostic-native --derived-access-request=<path>\n\
              --derived-access-retained-preflight --derived-access-request=<path>\n\
              --derived-access-retained-bootstrap --derived-access-request=<path>\n\

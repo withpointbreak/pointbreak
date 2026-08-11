@@ -1378,12 +1378,6 @@ async function runCommand(program, args, options = {}) {
 	});
 }
 
-async function sha256File(path) {
-	return createHash("sha256")
-		.update(await readFile(path))
-		.digest("hex");
-}
-
 function oneNamedControlPass(outcome, testName) {
 	const output = outcome.stdout.toString("utf8");
 	const namedRows = output
@@ -1439,22 +1433,32 @@ async function runBinaryPreflight() {
 
 	const harnessOutcome = await runCommand(
 		config.harness,
-		["--derived-access-contract"],
+		["--derived-change-diagnostic-identity"],
 		{ cwd: config.sourceCheckout, env: process.env },
 	);
 	if (harnessOutcome.code !== 0 || harnessOutcome.signal !== null) {
 		throw new Error("diagnostic harness identity command failed");
 	}
 	const harness = JSON.parse(harnessOutcome.stdout.toString("utf8"));
-	const derivation = harness?.contract?.derivation;
+	const harnessKeys = [
+		"benchEnabled",
+		"buildSource",
+		"longitudinalCountingEnabled",
+		"mode",
+		"privateCorpusConfigured",
+		"sourceCommit",
+		"sourceDirty",
+	];
 	if (
-		harness?.schema !==
-			"pointbreak.qualification-derived-access-contract-publication.v1" ||
-		derivation?.pointbreakCommit !== config.source.commit ||
-		derivation?.pointbreakTree !== config.source.tree ||
-		derivation?.cargoLockSha256 !==
-			(await sha256File(join(config.sourceCheckout, "Cargo.lock"))) ||
-		derivation?.privateCorpusUsed !== false
+		JSON.stringify(Object.keys(harness).sort()) !==
+			JSON.stringify(harnessKeys) ||
+		harness.mode !== "--derived-change-diagnostic-identity" ||
+		harness.buildSource !== "git" ||
+		harness.sourceCommit !== config.source.commit ||
+		harness.sourceDirty !== false ||
+		harness.benchEnabled !== true ||
+		harness.longitudinalCountingEnabled !== true ||
+		harness.privateCorpusConfigured !== false
 	) {
 		throw new Error(
 			"diagnostic harness binary differs from exact public source",
@@ -1494,7 +1498,7 @@ async function runBinaryPreflight() {
 	process.stdout.write(
 		`${JSON.stringify({
 			productCommit: product.build.commit,
-			harnessCommit: derivation.pointbreakCommit,
+			harnessCommit: harness.sourceCommit,
 			libraryControlCommit: config.source.commit,
 			cliControlCommit: config.source.commit,
 		})}\n`,

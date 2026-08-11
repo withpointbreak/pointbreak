@@ -253,6 +253,7 @@ test("the supported derived Change campaign retains every diagnostic lane", asyn
 		"existing_path_identity_ignores_equivalent_lexical_spellings",
 		"stable_authority_successor_does_not_wait_for_a_busy_writer",
 		"native_ntfs_stable_continuation_persists_unrelated_volume_churn",
+		"--derived-change-diagnostic-identity",
 		"derived-change-diagnostic-browser.sh",
 		"derived-change-diagnostic-native.mjs",
 	]) {
@@ -264,6 +265,7 @@ test("the supported derived Change campaign retains every diagnostic lane", asyn
 	assert.match(source, /dependsOn/);
 	assert.match(source, /mutatesRoot/);
 	assert.match(source, /\["--exact", config\.testName/);
+	assert.doesNotMatch(source, /harness\?\.contract\?\.derivation/);
 	assert.doesNotMatch(
 		source,
 		/DERIVED_CHANGE_DIAGNOSTIC_HOST_FRAGMENT_BASENAME_V1,\s*DERIVED_CHANGE_DIAGNOSTIC_HOST_FRAGMENT_BASENAME_V1/s,

@@ -12,6 +12,17 @@ fn digest(value: u8) -> String {
     format!("{value:02x}").repeat(32)
 }
 
+#[test]
+fn diagnostic_harness_identity_is_schema_less_and_build_bound() {
+    let identity = derived_change_diagnostic_harness_identity_v1();
+    let value = serde_json::to_value(identity).expect("diagnostic harness identity serializes");
+
+    assert_eq!(value["mode"], DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1);
+    assert!(value.get("schema").is_none());
+    assert_eq!(value["buildSource"], env!("POINTBREAK_BUILD_SOURCE"));
+    assert_eq!(value["sourceCommit"], env!("POINTBREAK_BUILD_COMMIT"));
+}
+
 fn product_identity(
     execution: &QualificationDerivedAccessExecutionIdentityV1,
 ) -> QualificationDerivedAccessProductIdentityV1 {
