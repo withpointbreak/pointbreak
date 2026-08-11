@@ -2028,7 +2028,10 @@
 						getComputedStyle(document.querySelector("#detail-back")).display ===
 							"none" &&
 						exactAction !== null &&
-						document.activeElement === exactAction
+						document.activeElement === exactAction &&
+						["#topbar", "#toolbar", "#master-rail", "#master", ".divider"].every(
+							(selector) => document.querySelector(selector)?.inert === false,
+						)
 					);
 				},
 			);

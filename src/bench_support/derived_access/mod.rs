@@ -2,6 +2,7 @@ mod adapter;
 mod authority_stamp;
 mod change_read;
 mod contract;
+mod diagnostic;
 mod evidence;
 mod lifecycle;
 mod materializer;
@@ -20,6 +21,7 @@ pub(crate) mod sqlite_locator {
 pub use authority_stamp::*;
 pub use change_read::*;
 pub use contract::*;
+pub use diagnostic::*;
 pub use evidence::*;
 pub use lifecycle::*;
 pub use materializer::*;

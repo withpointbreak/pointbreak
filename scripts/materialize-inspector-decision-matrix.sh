@@ -11,37 +11,100 @@ die() {
 
 normalize_for_shell_comparison() {
   local native_path="${1//\\//}"
-  if command -v cygpath >/dev/null 2>&1; then
-    cygpath -u "$native_path"
+  if [ -n "$cygpath_program" ]; then
+    "$cygpath_program" -u "$native_path"
   else
     printf '%s\n' "$native_path"
   fi
 }
 
-for command in git jq find sort wc tr awk; do
-  command -v "$command" >/dev/null 2>&1 || die "$command is required"
-done
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256_command="sha256sum"
+resolve_program() {
+  local requested="$1"
+  local explicit="$2"
+  if [ -n "$explicit" ]; then
+    case "$explicit" in
+      /* | [A-Za-z]:/* | [A-Za-z]:\\* | \\\\*) ;;
+      *) die "$explicit must be an absolute program path" ;;
+    esac
+  fi
+  command -v "$requested" 2>/dev/null || die "$requested is required"
+}
+
+git_program="$(resolve_program "${POINTBREAK_GIT_PROGRAM:-git}" "${POINTBREAK_GIT_PROGRAM:-}")"
+jq_program="$(resolve_program "${POINTBREAK_JQ_PROGRAM:-jq}" "${POINTBREAK_JQ_PROGRAM:-}")"
+find_program="$(resolve_program "${POINTBREAK_FIND_PROGRAM:-find}" "${POINTBREAK_FIND_PROGRAM:-}")"
+sort_program="$(resolve_program "${POINTBREAK_SORT_PROGRAM:-sort}" "${POINTBREAK_SORT_PROGRAM:-}")"
+wc_program="$(resolve_program "${POINTBREAK_WC_PROGRAM:-wc}" "${POINTBREAK_WC_PROGRAM:-}")"
+tr_program="$(resolve_program "${POINTBREAK_TR_PROGRAM:-tr}" "${POINTBREAK_TR_PROGRAM:-}")"
+awk_program="$(resolve_program "${POINTBREAK_AWK_PROGRAM:-awk}" "${POINTBREAK_AWK_PROGRAM:-}")"
+cp_program="$(resolve_program "${POINTBREAK_CP_PROGRAM:-cp}" "${POINTBREAK_CP_PROGRAM:-}")"
+head_program="$(resolve_program "${POINTBREAK_HEAD_PROGRAM:-head}" "${POINTBREAK_HEAD_PROGRAM:-}")"
+dirname_program="$(resolve_program "${POINTBREAK_DIRNAME_PROGRAM:-dirname}" "${POINTBREAK_DIRNAME_PROGRAM:-}")"
+mkdir_program="$(resolve_program "${POINTBREAK_MKDIR_PROGRAM:-mkdir}" "${POINTBREAK_MKDIR_PROGRAM:-}")"
+rm_program="$(resolve_program "${POINTBREAK_RM_PROGRAM:-rm}" "${POINTBREAK_RM_PROGRAM:-}")"
+hash_program_request="${POINTBREAK_HASH_PROGRAM:-${POINTBREAK_SHASUM_PROGRAM:-}}"
+hash_program_mode="${POINTBREAK_HASH_PROGRAM_MODE:-}"
+if [ -n "$hash_program_request" ]; then
+  hash_program="$(resolve_program "$hash_program_request" "$hash_program_request")"
+  case "$hash_program_mode" in
+    shasum|sha256sum) hash_mode="$hash_program_mode" ;;
+    *) die "POINTBREAK_HASH_PROGRAM_MODE must be shasum or sha256sum with POINTBREAK_HASH_PROGRAM" ;;
+  esac
+elif [ -n "$hash_program_mode" ]; then
+  die "POINTBREAK_HASH_PROGRAM_MODE requires POINTBREAK_HASH_PROGRAM"
+elif command -v sha256sum >/dev/null 2>&1; then
+  hash_program="$(command -v sha256sum)"
+  hash_mode="sha256sum"
 elif command -v shasum >/dev/null 2>&1; then
-  sha256_command="shasum -a 256"
+  hash_program="$(command -v shasum)"
+  hash_mode="shasum"
 else
   die "sha256sum or shasum is required"
 fi
 
+# An unset binding preserves normal recipe behavior: use cygpath when it is
+# available. Diagnostic callers set this explicitly to either a fixed absolute
+# executable or `absent`, which prevents PATH discovery from entering their
+# witness calculation.
+cygpath_program=""
+if [ "${POINTBREAK_CYGPATH_PROGRAM+x}" = x ]; then
+  case "${POINTBREAK_CYGPATH_PROGRAM}" in
+    absent) ;;
+    /* | [A-Za-z]:/* | [A-Za-z]:\\* | \\\\*)
+      cygpath_program="$(resolve_program "$POINTBREAK_CYGPATH_PROGRAM" "$POINTBREAK_CYGPATH_PROGRAM")"
+      ;;
+    *) die "POINTBREAK_CYGPATH_PROGRAM must be an absolute program path or absent" ;;
+  esac
+elif command -v cygpath >/dev/null 2>&1; then
+  cygpath_program="$(command -v cygpath)"
+fi
+
+git() { "$git_program" "$@"; }
+jq() { "$jq_program" "$@"; }
+find() { "$find_program" "$@"; }
+sort() { "$sort_program" "$@"; }
+wc() { "$wc_program" "$@"; }
+tr() { "$tr_program" "$@"; }
+awk() { "$awk_program" "$@"; }
+cp() { "$cp_program" "$@"; }
+head() { "$head_program" "$@"; }
+dirname() { "$dirname_program" "$@"; }
+mkdir() { "$mkdir_program" "$@"; }
+rm() { "$rm_program" "$@"; }
+
 sha256_file() {
-  if [ "$sha256_command" = "sha256sum" ]; then
-    sha256sum -- "$1" | awk '{print $1}'
+  if [ "$hash_mode" = "sha256sum" ]; then
+    "$hash_program" -- "$1" | awk '{print $1}'
   else
-    shasum -a 256 -- "$1" | awk '{print $1}'
+    "$hash_program" -a 256 -- "$1" | awk '{print $1}'
   fi
 }
 
 sha256_stdin() {
-  if [ "$sha256_command" = "sha256sum" ]; then
-    sha256sum | awk '{print $1}'
+  if [ "$hash_mode" = "sha256sum" ]; then
+    "$hash_program" | awk '{print $1}'
   else
-    shasum -a 256 | awk '{print $1}'
+    "$hash_program" -a 256 | awk '{print $1}'
   fi
 }
 

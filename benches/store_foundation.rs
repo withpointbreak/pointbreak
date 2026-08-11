@@ -7,11 +7,13 @@ use std::process::{Command, ExitCode};
 
 use pointbreak::bench_support::derived_access::{
     DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1, DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1,
-    DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1,
-    DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1,
-    DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1, DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
+    DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1, DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1,
+    DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1,
+    DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1, DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1,
+    DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
     DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1, DERIVED_ACCESS_ROLLOUT_CONTRACT_MODE_V1,
     DERIVED_ACCESS_ROLLOUT_CONTRACT_SMOKE_MODE_V1, DERIVED_ACCESS_ROLLOUT_CONTRACT_VERIFY_MODE_V1,
+    DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1, DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
@@ -39,8 +41,10 @@ use pointbreak::bench_support::derived_access::{
     materialize_qualification_derived_change_fixture_from_request_v1,
     preflight_qualification_derived_access_retained_root_v1,
     qualification_derived_access_contract_v1_publication, run_authority_stamp_child_v1,
-    run_authority_stamp_native_probe_v1, run_qualification_derived_access_bootstrap_smoke_v1,
+    run_authority_stamp_native_probe_v1, run_derived_change_diagnostic_native_v1,
+    run_derived_change_read_diagnostic_v1, run_qualification_derived_access_bootstrap_smoke_v1,
     run_qualification_derived_access_lifecycle_child_v1,
+    run_qualification_derived_access_lifecycle_diagnostic_v1,
     run_qualification_derived_access_lifecycle_v1,
     run_qualification_derived_access_longitudinal_smoke_at_v1,
     run_qualification_derived_access_longitudinal_smoke_v1,
@@ -107,7 +111,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-rollout-contract|--derived-access-rollout-contract-verify|--derived-access-rollout-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-phase-evidence|--derived-access-phase-verify|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-change-fixture-materialize|--derived-change-read-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-rollout-contract|--derived-access-rollout-contract-verify|--derived-access-rollout-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-phase-evidence|--derived-access-phase-verify|--derived-access-lifecycle|--derived-access-lifecycle-diagnostic|--derived-change-diagnostic-native|--derived-change-read-diagnostic|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-change-fixture-materialize|--derived-change-read-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
@@ -119,6 +123,7 @@ Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--gener
        --derived-access-phase-verify --derived-access-request=<path> --derived-access-input=<bundle.json>\n\
        --derived-change-fixture-materialize --derived-access-request=<path>\n\
        --derived-change-read-evidence --derived-access-request=<path>\n\
+       --derived-change-read-diagnostic --derived-access-request=<path>\n\
        --derived-access-authority-stamp --derived-access-source=<clean-checkout> --derived-access-root=<empty-path> --derived-access-output=<receipt.json>\n\
        --derived-access-authority-stamp-verify --derived-access-input=<apfs.json> --derived-access-input=<ntfs.json>\n\
        (authority-stamp modes require --features longitudinal-counting)\n\
@@ -236,6 +241,26 @@ struct ReceiptAlternativeMetadataV1 {
     projection: ReceiptProjectionConsequenceV1,
     backup: ReceiptBackupConsequenceV1,
     emits_local_provenance_event: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedAccessLifecycleDiagnosticCaseCollectionOutputV1 {
+    mode: &'static str,
+    source_unchanged: bool,
+    cases: Vec<
+        pointbreak::bench_support::derived_access::QualificationDerivedAccessLifecycleDiagnosticCaseV1,
+    >,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedChangeDiagnosticNativeOutputV1 {
+    mode: String,
+    tier: QualificationDerivedAccessTierV1,
+    admitted_root_path: std::path::PathBuf,
+    admitted_root_sha256: String,
+    source_unchanged: bool,
 }
 
 fn main() -> ExitCode {
@@ -456,12 +481,15 @@ fn main() -> ExitCode {
         QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1,
+        DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1,
+        DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1,
         QUALIFICATION_DERIVED_CHANGE_FIXTURE_MODE_V1,
         QUALIFICATION_DERIVED_CHANGE_READ_MODE_V1,
+        DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1,
@@ -565,12 +593,15 @@ fn main() -> ExitCode {
             && argument != QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1
+            && argument != DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1
+            && argument != DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1
             && argument != QUALIFICATION_DERIVED_CHANGE_FIXTURE_MODE_V1
             && argument != QUALIFICATION_DERIVED_CHANGE_READ_MODE_V1
+            && argument != DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1
@@ -725,6 +756,8 @@ fn main() -> ExitCode {
              --derived-access-phase-evidence --derived-access-request=<path>\n\
              --derived-access-phase-verify --derived-access-request=<path> --derived-access-input=<bundle.json>\n\
              --derived-access-lifecycle --derived-access-request=<path>\n\
+             --derived-access-lifecycle-diagnostic --derived-access-request=<path>\n\
+             --derived-change-diagnostic-native --derived-access-request=<path>\n\
              --derived-access-retained-preflight --derived-access-request=<path>\n\
              --derived-access-retained-bootstrap --derived-access-request=<path>\n\
              --derived-access-scale-evidence --derived-access-request=<path>\n\
@@ -914,6 +947,18 @@ fn main() -> ExitCode {
     }
     if arguments
         .iter()
+        .any(|argument| argument == DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived Change diagnostic requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_change_read_diagnostic(run_derived_change_read_diagnostic_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
         .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1)
     {
         if derived_requests.len() != 1 {
@@ -1016,6 +1061,32 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         return report_derived_access_smoke(run_qualification_derived_access_lifecycle_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access lifecycle diagnostic requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_lifecycle_diagnostic(
+            run_qualification_derived_access_lifecycle_diagnostic_v1(std::path::Path::new(
+                derived_requests[0],
+            )),
+        );
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-Change diagnostic native requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_change_diagnostic_native(run_derived_change_diagnostic_native_v1(
             std::path::Path::new(derived_requests[0]),
         ));
     }
@@ -1390,6 +1461,84 @@ fn report_derived_access_smoke<T: Serialize>(result: Result<T, String>) -> ExitC
         }
         Err(error) => {
             eprintln!("store foundation derived-access smoke failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn report_derived_access_lifecycle_diagnostic(
+    result: Result<
+        pointbreak::bench_support::derived_access::QualificationDerivedAccessLifecycleDiagnosticCollectionV1,
+        String,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(collection) => {
+            let output = DerivedAccessLifecycleDiagnosticCaseCollectionOutputV1 {
+                mode: DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1,
+                source_unchanged: collection.source_unchanged,
+                cases: collection.cases,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&output)
+                    .expect("derived-access lifecycle diagnostic collection serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation derived-access lifecycle diagnostic failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn report_derived_change_diagnostic_native(
+    result: Result<
+        pointbreak::bench_support::derived_access::DerivedChangeDiagnosticNativeResultV1,
+        String,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(result) => {
+            let output = DerivedChangeDiagnosticNativeOutputV1 {
+                mode: result.mode,
+                tier: result.tier,
+                admitted_root_path: result.admitted_root_path,
+                admitted_root_sha256: result.admitted_root_sha256,
+                source_unchanged: result.source_unchanged,
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&output)
+                    .expect("derived-Change diagnostic native output serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation derived-Change diagnostic native failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn report_derived_change_read_diagnostic(
+    result: Result<
+        pointbreak::bench_support::derived_access::DerivedChangeReadDiagnosticCollectionV1,
+        String,
+    >,
+) -> ExitCode {
+    match result {
+        Ok(collection) => {
+            println!(
+                "{}",
+                serde_json::to_string(&collection)
+                    .expect("derived-Change read diagnostic collection serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation derived-Change read diagnostic failed: {error}");
             ExitCode::from(1)
         }
     }

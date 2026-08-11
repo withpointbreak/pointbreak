@@ -5,6 +5,45 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const stableStatFields = ["dev", "ino", "size", "mtimeNs", "ctimeNs"];
+const derivedChangeDiagnosticSchemas = new Set([
+	"pointbreak.derived-change-diagnostic-report.v1",
+	"pointbreak.derived-change-diagnostic-fragment.v1",
+	"pointbreak.derived-change-diagnostic-collection.v1",
+]);
+const derivedChangeDiagnosticRootComponent = "derived-change-diagnostic";
+const derivedChangeDiagnosticReportBasename =
+	"derived-change-diagnostic-report.json";
+const derivedChangeDiagnosticBoundaryError =
+	"derived Change diagnostic output is never browser completion evidence";
+
+function rejectDerivedChangeDiagnosticDocument(value) {
+	if (derivedChangeDiagnosticSchemas.has(value?.schema)) {
+		throw new Error(derivedChangeDiagnosticBoundaryError);
+	}
+}
+
+function rejectDerivedChangeDiagnosticBytes(bytes) {
+	let value;
+	try {
+		value = JSON.parse(bytes.toString("utf8"));
+	} catch {
+		return;
+	}
+	rejectDerivedChangeDiagnosticDocument(value);
+}
+
+function rejectDerivedChangeDiagnosticPath(path) {
+	const components = String(path).split(/[\\/]/u);
+	if (
+		components.some(
+			(component) =>
+				component.toLowerCase() === derivedChangeDiagnosticRootComponent ||
+				component.toLowerCase() === derivedChangeDiagnosticReportBasename,
+		)
+	) {
+		throw new Error(derivedChangeDiagnosticBoundaryError);
+	}
+}
 
 const sameFileVersion = (left, right) =>
 	stableStatFields.every((field) => left[field] === right[field]);
@@ -90,8 +129,18 @@ export async function publishPassingManifest({
 	candidatePath,
 	manifestPath,
 	browserResult,
+	browserResultPath,
 	evidenceRoot,
 }) {
+	rejectDerivedChangeDiagnosticDocument(browserResult);
+	for (const path of [
+		candidatePath,
+		manifestPath,
+		...(browserResultPath ? [browserResultPath] : []),
+		evidenceRoot ?? dirname(resolve(manifestPath)),
+	]) {
+		rejectDerivedChangeDiagnosticPath(path);
+	}
 	if (
 		browserResult?.schema !== "pointbreak.change-inspector-browser-report" ||
 		browserResult?.version !== 1
@@ -139,6 +188,7 @@ export async function publishPassingManifest({
 	);
 	await candidateSnapshot.handle.close();
 	const candidate = JSON.parse(candidateSnapshot.bytes.toString("utf8"));
+	rejectDerivedChangeDiagnosticDocument(candidate);
 	if (
 		candidate?.gate !== "change-inspector-browser-verify" ||
 		candidate?.status !== "passed"
@@ -181,6 +231,7 @@ export async function publishPassingManifest({
 			"browser evidence inventory paths are invalid or duplicated",
 		);
 	}
+	for (const path of inventoryPaths) rejectDerivedChangeDiagnosticPath(path);
 	const sortedInventoryPaths = [...inventoryPaths].sort(comparePaths);
 	if (
 		inventoryPaths.some((path, index) => path !== sortedInventoryPaths[index])
@@ -267,6 +318,7 @@ export async function publishPassingManifest({
 				`browser evidence ${entry.path}`,
 			);
 			evidenceSnapshots.push(snapshot);
+			rejectDerivedChangeDiagnosticBytes(snapshot.bytes);
 			const actualSha256 = createHash("sha256")
 				.update(snapshot.bytes)
 				.digest("hex");
@@ -338,6 +390,7 @@ if (
 		candidatePath,
 		manifestPath,
 		browserResult,
+		browserResultPath: resultPath,
 		evidenceRoot: dirname(resolve(manifestPath)),
 	});
 }

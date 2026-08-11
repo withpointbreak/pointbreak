@@ -51,14 +51,19 @@ test("empty ready L2 recovery is explicit, authenticated, and retained before br
 		'start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"',
 	);
 	const retryCall = source.indexOf("retry_empty_ready_l2", emptyStart);
-	const l0Start = source.indexOf('start_reader_state_server "l0" "$reader_l0_repo"');
+	const l0Start = source.indexOf(
+		'start_reader_state_server "l0" "$reader_l0_repo"',
+	);
 	assert.ok(retry >= 0, "missing empty-ready-l2 retry helper");
 	assert.ok(
 		emptyStart >= 0 && retryCall > emptyStart && l0Start > retryCall,
 		"empty-ready-l2 must recover before another reader fixture starts",
 	);
 	const helper = source.slice(retry, emptyStart);
-	assert.match(helper, /-X POST[\s\\]+-H "Authorization: Bearer \$token"[\s\\]+"\$base_url\/api\/derived-access\/retry"/);
+	assert.match(
+		helper,
+		/-X POST[\s\\]+-H "Authorization: Bearer \$token"[\s\\]+"\$base_url\/api\/derived-access\/retry"/,
+	);
 	assert.match(helper, /browser-empty-ready-l2-retry\.json/);
 	assert.match(helper, /browser-empty-ready-l2-ready\.json/);
 	assert.match(
@@ -588,6 +593,53 @@ test("annotated-diff focus assertions wait for routed hydration and active focus
 	);
 });
 
+test("Timeline event widen waits for the complete split-pane transition", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const narrowDetailScreenshot = source.indexOf(
+		'await screenshot("narrow-timeline-event-detail");',
+	);
+	assert.notEqual(
+		narrowDetailScreenshot,
+		-1,
+		"missing narrow Timeline event detail checkpoint",
+	);
+	const postWidenWaitStart = source.indexOf(
+		"await page.waitForFunction(",
+		narrowDetailScreenshot,
+	);
+	const postWidenAssertion = source.indexOf(
+		'"Timeline event widen",',
+		postWidenWaitStart,
+	);
+	assert.ok(
+		postWidenWaitStart > narrowDetailScreenshot,
+		"missing post-widen wait",
+	);
+	assert.ok(
+		postWidenAssertion > postWidenWaitStart,
+		"missing post-widen diagnostic assertion",
+	);
+	const wait = source.slice(postWidenWaitStart, postWidenAssertion);
+	assert.match(
+		wait,
+		/getComputedStyle\(document\.querySelector\("#detail-back"\)\)\.display ===\s*"none"/,
+		"post-widen readiness must require the wide CSS state",
+	);
+	assert.match(
+		wait,
+		/exactAction !== null[\s\S]*document\.activeElement === exactAction/,
+		"post-widen readiness must retain exact-action focus",
+	);
+	assert.match(
+		wait,
+		/\["#topbar", "#toolbar", "#master-rail", "#master", "\.divider"\]\.every\([\s\S]*?document\.querySelector\(selector\)\?\.inert === false/,
+		"post-widen readiness must wait for every ordinary split-pane surface to become non-inert",
+	);
+});
+
 test("console 503 exemption accepts only typed primary Change transitions inside append", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
@@ -775,6 +827,172 @@ test("an aggregate failure cannot publish a passing completion manifest", async 
 	assert.deepEqual(
 		JSON.parse(await readFile(manifestPath, "utf8")),
 		passingCandidate,
+	);
+});
+
+test("derived Change diagnostics are inadmissible to browser completion publication", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-boundary-"));
+	const candidatePath = join(root, ".renamed-candidate.json.tmp");
+	const manifestPath = join(root, "manifest.json");
+	const passingResult = {
+		schema: "pointbreak.change-inspector-browser-report",
+		version: 1,
+		status: "passed",
+		assertionCount: 0,
+		screenshotCount: 0,
+		sectionCount: 1,
+		globalInvalid: false,
+		sections: [{ name: "Timeline", status: "passed", failureCount: 0 }],
+		failures: [],
+	};
+
+	for (const schema of [
+		"pointbreak.derived-change-diagnostic-report.v1",
+		"pointbreak.derived-change-diagnostic-fragment.v1",
+		"pointbreak.derived-change-diagnostic-collection.v1",
+	]) {
+		await assert.rejects(
+			publishPassingManifest({
+				candidatePath,
+				manifestPath,
+				browserResult: { ...passingResult, schema },
+				evidenceRoot: root,
+			}),
+			/derived Change diagnostic.*never browser completion evidence/,
+		);
+		await writeFile(
+			candidatePath,
+			`${JSON.stringify({
+				schema,
+				gate: "change-inspector-browser-verify",
+				status: "passed",
+				assertionCount: 0,
+				screenshotCount: 0,
+			})}\n`,
+		);
+		await assert.rejects(
+			publishPassingManifest({
+				candidatePath,
+				manifestPath,
+				browserResult: passingResult,
+				evidenceRoot: root,
+			}),
+			/derived Change diagnostic.*never browser completion evidence/,
+		);
+	}
+
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: join(root, "derived-change-diagnostic-report.json"),
+			manifestPath,
+			browserResult: passingResult,
+			evidenceRoot: root,
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath,
+			manifestPath,
+			browserResult: passingResult,
+			evidenceRoot: join(root, "derived-change-diagnostic", "browser"),
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
+	);
+
+	await writeFile(
+		candidatePath,
+		`${JSON.stringify({
+			gate: "change-inspector-browser-verify",
+			status: "passed",
+			assertionCount: 0,
+			screenshotCount: 0,
+			evidenceInventory: [],
+		})}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath,
+			manifestPath,
+			browserResult: passingResult,
+			browserResultPath: join(
+				root,
+				"derived-change-diagnostic",
+				"browser-result.json",
+			),
+			evidenceRoot: root,
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
+	);
+
+	await writeFile(
+		candidatePath,
+		`${JSON.stringify({
+			gate: "change-inspector-browser-verify",
+			status: "passed",
+			assertionCount: 0,
+			screenshotCount: 0,
+			evidenceInventory: [
+				{
+					path: "logs/derived-change-diagnostic/payload.json",
+					sha256: "0".repeat(64),
+				},
+			],
+		})}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath,
+			manifestPath,
+			browserResult: passingResult,
+			evidenceRoot: root,
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
+	);
+
+	const inventoryRoot = await mkdtemp(
+		join(tmpdir(), "pointbreak-browser-inventory-boundary-"),
+	);
+	await mkdir(join(inventoryRoot, "browser-artifacts"));
+	await mkdir(join(inventoryRoot, "logs"));
+	const diagnosticBytes = `${JSON.stringify({
+		schema: "pointbreak.derived-change-diagnostic-collection.v1",
+		cases: [],
+	})}\n`;
+	const retainedFiles = new Map([
+		["logs/browser-gate.log", "browser gate log bytes"],
+		["logs/browser-program.mjs", "browser program bytes"],
+		["logs/browser-result.json", diagnosticBytes],
+	]);
+	for (const [path, bytes] of retainedFiles) {
+		await writeFile(join(inventoryRoot, path), bytes);
+	}
+	const inventoryCandidate = {
+		gate: "change-inspector-browser-verify",
+		status: "passed",
+		assertionCount: 0,
+		screenshotCount: 0,
+		evidenceInventory: [...retainedFiles.entries()]
+			.map(([path, bytes]) => ({
+				path,
+				sha256: createHash("sha256").update(bytes).digest("hex"),
+			}))
+			.sort((left, right) => left.path.localeCompare(right.path)),
+	};
+	const inventoryCandidatePath = join(inventoryRoot, ".candidate.json.tmp");
+	const inventoryManifestPath = join(inventoryRoot, "manifest.json");
+	await writeFile(
+		inventoryCandidatePath,
+		`${JSON.stringify(inventoryCandidate)}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: inventoryCandidatePath,
+			manifestPath: inventoryManifestPath,
+			browserResult: passingResult,
+			evidenceRoot: inventoryRoot,
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
 	);
 });
 

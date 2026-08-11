@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::adapter::QualificationDerivedAccessAdapter;
+use super::diagnostic::{
+    reject_derived_change_diagnostic_evidence_document_v1,
+    reject_derived_change_diagnostic_evidence_input_v1,
+    reject_derived_change_diagnostic_evidence_path_v1,
+};
 use super::sqlite_cursor::{BootstrapControl, CursorLedgerIdentity, SqliteCursorLedger};
 use super::{
     QUALIFICATION_DERIVED_ACCESS_EVALUATION_SCHEMA_V1, QualificationDerivedAccessComplexityV1,
@@ -999,6 +1004,7 @@ pub fn verify_qualification_derived_access_phase_v1(
     request_path: &Path,
     bundle_path: &Path,
 ) -> Result<QualificationDerivedAccessPhaseBundleV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(bundle_path)?;
     let request: QualificationDerivedAccessPhaseRunRequestV1 = read_json(request_path)?;
     let bundle: QualificationDerivedAccessPhaseBundleV1 = read_json(bundle_path)?;
     request.validate()?;
@@ -1485,6 +1491,16 @@ pub struct QualificationDerivedAccessNativeSmokeRunReceiptV1 {
     pub payload: QualificationDerivedAccessNativeSmokePayloadV1,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeDiagnosticNativeResultV1 {
+    pub mode: String,
+    pub tier: QualificationDerivedAccessTierV1,
+    pub admitted_root_path: PathBuf,
+    pub admitted_root_sha256: String,
+    pub source_unchanged: bool,
+}
+
 pub fn run_qualification_derived_access_native_smoke_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedAccessNativeSmokeRunReceiptV1, String> {
@@ -1526,6 +1542,57 @@ pub fn run_qualification_derived_access_native_smoke_v1(
         schema: QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1.to_owned(),
         execution: request.execution,
         payload,
+    })
+}
+
+/// Run one disposable native smoke tier and expose only the admitted root
+/// needed by the separate diagnostic collector.
+pub fn run_derived_change_diagnostic_native_v1(
+    request_path: &Path,
+) -> Result<DerivedChangeDiagnosticNativeResultV1, String> {
+    let request: QualificationDerivedAccessNativeSmokeRunRequestV1 = read_json(request_path)?;
+    if request.schema != QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1
+        || !matches!(
+            request.tier,
+            QualificationDerivedAccessTierV1::D0_128
+                | QualificationDerivedAccessTierV1::L1
+                | QualificationDerivedAccessTierV1::L7
+        )
+    {
+        return Err("invalid derived-Change diagnostic native request".to_owned());
+    }
+    let receipt = run_qualification_derived_access_native_smoke_v1(request_path)?;
+    let admitted_root_sha256 = match receipt.payload {
+        QualificationDerivedAccessNativeSmokePayloadV1::D0_128(receipt) => receipt
+            .d0_pair
+            .root_a
+            .store_inventory
+            .inventory_sha256
+            .clone(),
+        QualificationDerivedAccessNativeSmokePayloadV1::Longitudinal(receipt) => {
+            receipt.root_a_sha256.clone()
+        }
+    };
+    let admitted_root_path = request.workspace_root.join("root-a");
+    let source_before = longitudinal_authoritative_store_data_inventory_v1(&admitted_root_path)
+        .map_err(|error| error.to_string())?;
+    if source_before.inventory_sha256 != admitted_root_sha256 {
+        return Err("derived-Change diagnostic admitted root drifted".to_owned());
+    }
+    let source_after = longitudinal_authoritative_store_data_inventory_v1(&admitted_root_path)
+        .map_err(|error| error.to_string())?;
+    let source_unchanged = source_before == source_after;
+    if !source_unchanged {
+        return Err(
+            "derived-Change diagnostic native collector mutated its admitted root".to_owned(),
+        );
+    }
+    Ok(DerivedChangeDiagnosticNativeResultV1 {
+        mode: super::DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1.to_owned(),
+        tier: request.tier,
+        admitted_root_path,
+        admitted_root_sha256,
+        source_unchanged,
     })
 }
 
@@ -3228,6 +3295,7 @@ pub(super) fn validate_summaries_against_raw(
     let mut expected_products = Vec::new();
     let mut expected_control_binaries = Vec::new();
     for value in raw_receipts {
+        reject_derived_change_diagnostic_evidence_document_v1(value)?;
         match value.get("schema").and_then(serde_json::Value::as_str) {
             Some(QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1) => {
                 let receipt: QualificationDerivedChangeReadReceiptV1 =
@@ -3396,6 +3464,7 @@ fn unordered_json_rows<T: Serialize>(rows: &[T]) -> Result<BTreeSet<String>, Str
 pub fn build_qualification_derived_access_fragment_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedAccessEvidenceFragmentV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(request_path)?;
     let request: QualificationDerivedAccessFragmentRequestV1 = read_json(request_path)?;
     if request.schema != QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1
         || request.receipt_paths.is_empty()
@@ -3430,6 +3499,7 @@ pub fn build_qualification_derived_access_fragment_v1(
         let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        reject_derived_change_diagnostic_evidence_input_v1(path, &value)?;
         let schema = value
             .get("schema")
             .and_then(serde_json::Value::as_str)
@@ -3765,6 +3835,7 @@ pub fn publish_qualification_derived_access_package_v1(
     package: &QualificationDerivedAccessPackageV1,
     raw_receipts: &[(&str, &[u8])],
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(root)?;
     if root.exists() {
         if root
             .read_dir()
@@ -3789,6 +3860,9 @@ pub fn publish_qualification_derived_access_package_v1(
     for (name, bytes) in raw_receipts {
         let relative = PathBuf::from("raw").join(name);
         validate_qualification_evidence_relative_path_v1(&relative)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        reject_derived_change_diagnostic_evidence_input_v1(&relative, &value)?;
         write_bytes_entry(root, &relative, bytes, &mut entries)?;
     }
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -3808,6 +3882,7 @@ pub fn assemble_qualification_derived_access_package_v1(
     inputs: &[PathBuf],
     output_root: &Path,
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(output_root)?;
     if inputs.is_empty() {
         return Err("derived-access package assembly requires evidence inputs".to_owned());
     }
@@ -3816,6 +3891,7 @@ pub fn assemble_qualification_derived_access_package_v1(
         .map(|path| {
             validate_receipt_input_path(path)?;
             let value: serde_json::Value = read_json(path)?;
+            reject_derived_change_diagnostic_evidence_input_v1(path, &value)?;
             match value.get("schema").and_then(serde_json::Value::as_str) {
                 Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1) => {
                     let fragment: QualificationDerivedAccessEvidenceFragmentV1 =
@@ -3932,6 +4008,7 @@ pub fn assemble_qualification_derived_access_package_v1(
 pub fn verify_qualification_derived_access_package_v1(
     root: &Path,
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(root)?;
     let manifest_bytes =
         std::fs::read(root.join("manifest.json")).map_err(|error| error.to_string())?;
     let manifest: QualificationDerivedAccessPackageManifestV1 =
@@ -3978,6 +4055,10 @@ pub fn verify_qualification_derived_access_package_v1(
             continue;
         }
         let value: serde_json::Value = read_json(root.join(&entry.relative_path).as_path())?;
+        reject_derived_change_diagnostic_evidence_input_v1(
+            Path::new(&entry.relative_path),
+            &value,
+        )?;
         if value.get("schema").and_then(serde_json::Value::as_str)
             == Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1)
         {
@@ -3998,6 +4079,7 @@ pub fn verify_qualification_derived_access_package_v1(
 }
 
 pub fn validate_qualification_evidence_relative_path_v1(path: &Path) -> Result<(), String> {
+    reject_derived_change_diagnostic_evidence_path_v1(path)?;
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err("evidence path must be a non-empty relative path".to_owned());
     }
@@ -4020,6 +4102,7 @@ pub fn validate_qualification_evidence_relative_path_v1(path: &Path) -> Result<(
 }
 
 fn validate_receipt_input_path(path: &Path) -> Result<(), String> {
+    reject_derived_change_diagnostic_evidence_path_v1(path)?;
     if path.as_os_str().is_empty() {
         return Err("evidence receipt path is empty".to_owned());
     }

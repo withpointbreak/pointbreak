@@ -6,7 +6,10 @@ use std::sync::{Arc, Barrier};
 
 use serde::{Deserialize, Serialize};
 
-use super::DerivedStorageLayout;
+use super::{
+    DerivedStorageLayout, reject_derived_change_diagnostic_evidence_document_v1,
+    reject_derived_change_diagnostic_evidence_path_v1,
+};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::JournalId;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
@@ -299,6 +302,7 @@ pub fn run_authority_stamp_native_probe_v1(
     probe_root: &Path,
     output_path: &Path,
 ) -> Result<AuthorityStampNativeReceiptV1, String> {
+    reject_derived_change_diagnostic_evidence_path_v1(output_path)?;
     #[cfg(not(feature = "longitudinal-counting"))]
     {
         let _ = (source_checkout, probe_root, output_path);
@@ -338,10 +342,14 @@ pub fn verify_authority_stamp_native_receipts_v1(
     }
     let mut receipts = Vec::new();
     for path in inputs {
-        let receipt: AuthorityStampNativeReceiptV1 = serde_json::from_slice(
+        reject_derived_change_diagnostic_evidence_path_v1(path)?;
+        let document: serde_json::Value = serde_json::from_slice(
             &fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?,
         )
         .map_err(|error| format!("{}: {error}", path.display()))?;
+        reject_derived_change_diagnostic_evidence_document_v1(&document)?;
+        let receipt: AuthorityStampNativeReceiptV1 = serde_json::from_value(document)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         receipt.validate()?;
         receipts.push(receipt);
     }
@@ -1152,6 +1160,58 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pair_verifier_rejects_diagnostic_documents_by_schema_and_reserved_path() {
+        let root = tempfile::tempdir().expect("diagnostic native-pair root");
+        let reserved = root.path().join(
+            crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1,
+        );
+        fs::write(&reserved, b"{}").expect("write reserved diagnostic report");
+
+        assert_eq!(
+            verify_authority_stamp_native_receipts_v1(&[reserved.clone(), reserved])
+                .unwrap_err(),
+            crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+
+        for (name, schema) in [
+            (
+                "report",
+                crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1,
+            ),
+            (
+                "fragment",
+                crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
+            ),
+            (
+                "collection",
+                crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
+            ),
+        ] {
+            let path = root.path().join(format!("renamed-{name}.json"));
+            fs::write(&path, serde_json::json!({ "schema": schema }).to_string())
+                .expect("write diagnostic schema document");
+            assert_eq!(
+                verify_authority_stamp_native_receipts_v1(&[path.clone(), path])
+                    .unwrap_err(),
+                crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+            );
+        }
+
+        let nested = root
+            .path()
+            .join(crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1)
+            .join("receipt.json");
+        fs::create_dir_all(nested.parent().expect("nested parent"))
+            .expect("create reserved diagnostic root");
+        fs::write(&nested, b"{}").expect("write nested diagnostic document");
+        assert_eq!(
+            verify_authority_stamp_native_receipts_v1(&[nested.clone(), nested])
+                .unwrap_err(),
+            crate::bench_support::derived_access::DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+    }
 
     #[test]
     fn native_scenario_runner_covers_the_frozen_matrix_with_bounded_stamp_reads() {

@@ -1512,9 +1512,15 @@ describe("Change Inspector interaction lifecycle", () => {
       snapshot,
       timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
     );
+    const ordinarySplitPaneSurfaces = () =>
+      ["#topbar", "#toolbar", "#master-rail", "#master", ".divider"].map(
+        (selector) => document.querySelector<HTMLElement>(selector),
+      );
     const back = document.querySelector<HTMLButtonElement>("#detail-back");
     expect(document.activeElement).toBe(back);
-    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(true);
+    expect(
+      ordinarySplitPaneSurfaces().every((surface) => surface?.inert === true),
+    ).toBe(true);
 
     back?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "j", bubbles: true }),
@@ -1555,12 +1561,16 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(document.activeElement).toBe(
       document.querySelector("#detail-close"),
     );
-    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(false);
+    expect(
+      ordinarySplitPaneSurfaces().every((surface) => surface?.inert === false),
+    ).toBe(true);
 
     narrow = true;
     window.dispatchEvent(new Event("resize"));
     expect(document.activeElement).toBe(back);
-    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(true);
+    expect(
+      ordinarySplitPaneSurfaces().every((surface) => surface?.inert === true),
+    ).toBe(true);
   });
 
   it("does not activate a retained Change cursor through a narrow exact-detail Enter", () => {

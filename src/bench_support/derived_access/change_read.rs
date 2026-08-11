@@ -30,23 +30,24 @@ use super::{
     QUALIFICATION_DERIVED_CHANGE_COMPLETION_FIXTURE_V1,
     QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1, QualificationDerivedAccessPlatformV1,
     QualificationDerivedAccessProcessScopeV1, QualificationDerivedAccessStatusV1,
-    QualificationDerivedChangeControlBinaryIdentityV1, QualificationDerivedChangeControlCaseV1,
-    QualificationDerivedChangeControlEvidenceV1, QualificationDerivedChangeFixtureWitnessV1,
-    QualificationDerivedChangeReadCaseV1, QualificationDerivedChangeReadEvidenceV1,
-    QualificationDerivedChangeReadOracleV1, QualificationDerivedChangeStorageEvidenceV1,
-    QualificationDerivedChangeStoragePhaseV1, QualificationDerivedChangeTypedDocumentV1,
-    QualificationDerivedStorageForbiddenProbeHashesV1,
+    QualificationDerivedChangeControlBinaryIdentityV1, QualificationDerivedChangeControlEvidenceV1,
+    QualificationDerivedChangeFixtureWitnessV1, QualificationDerivedChangeReadCaseV1,
+    QualificationDerivedChangeReadEvidenceV1, QualificationDerivedChangeReadOracleV1,
+    QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
+    QualificationDerivedChangeTypedDocumentV1, QualificationDerivedStorageForbiddenProbeHashesV1,
     capture_qualification_derived_storage_witness_v1,
     qualification_derived_change_control_attestation_test_v1,
     qualification_derived_change_control_command_sha256_v1,
-    qualification_derived_change_control_test_v1, qualification_derived_change_expected_outcome_v1,
+    qualification_derived_change_expected_outcome_v1,
     qualification_derived_change_storage_probe_hashes_v1,
 };
 use super::{
     QualificationDerivedAccessExecutionIdentityV1, QualificationDerivedAccessProductIdentityV1,
-    QualificationDerivedChangeControlBinaryKindV1, QualificationDerivedChangeEvidencePurposeV1,
-    QualificationDerivedChangeFixtureV1, QualificationDerivedStorageForbiddenProbeInputV1,
+    QualificationDerivedChangeControlBinaryKindV1, QualificationDerivedChangeControlCaseV1,
+    QualificationDerivedChangeEvidencePurposeV1, QualificationDerivedChangeFixtureV1,
+    QualificationDerivedStorageForbiddenProbeInputV1,
     qualification_derived_change_control_build_command_sha256_v1,
+    qualification_derived_change_control_test_v1,
 };
 #[cfg(feature = "longitudinal-counting")]
 use crate::bench_support::longitudinal::{
@@ -75,6 +76,329 @@ use crate::session::{
 pub const QUALIFICATION_DERIVED_CHANGE_READ_REQUEST_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-change-read-request.v1";
 pub const QUALIFICATION_DERIVED_CHANGE_READ_MODE_V1: &str = "--derived-change-read-evidence";
+pub const DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1: &str = "--derived-change-read-diagnostic";
+pub const DERIVED_CHANGE_READ_DIAGNOSTIC_REQUEST_SCHEMA_V1: &str =
+    "pointbreak.derived-change-read-diagnostic-request.v1";
+
+/// A disposable, non-evidence wrapper around one public Change-read fixture.
+/// Its output is intentionally schema-less so it cannot be mistaken for a
+/// receipt or any other terminal evidence input.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivedChangeReadDiagnosticRunRequestV1 {
+    pub schema: String,
+    pub read_request: QualificationDerivedChangeReadRunRequestV1,
+    pub workspace_root: PathBuf,
+}
+
+impl DerivedChangeReadDiagnosticRunRequestV1 {
+    fn validate(&self) -> Result<(), String> {
+        self.read_request.validate()?;
+        if self.schema != DERIVED_CHANGE_READ_DIAGNOSTIC_REQUEST_SCHEMA_V1
+            || !self.workspace_root.is_absolute()
+            || self.read_request.purpose
+                != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+            || self.workspace_root == self.read_request.repository
+            || self
+                .workspace_root
+                .starts_with(&self.read_request.repository)
+            || self
+                .read_request
+                .repository
+                .starts_with(&self.workspace_root)
+            || self
+                .workspace_root
+                .starts_with(&self.read_request.source_checkout)
+            || self
+                .read_request
+                .source_checkout
+                .starts_with(&self.workspace_root)
+            || self
+                .workspace_root
+                .starts_with(&self.read_request.product_source_checkout)
+            || self
+                .read_request
+                .product_source_checkout
+                .starts_with(&self.workspace_root)
+        {
+            return Err("invalid derived Change diagnostic request".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedChangeReadDiagnosticStatusV1 {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedChangeReadDiagnosticPreflightKindV1 {
+    Source,
+    Fixture,
+    LibraryControl,
+    CliControl,
+    TemplatePostflight,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeReadDiagnosticPreflightV1 {
+    pub kind: DerivedChangeReadDiagnosticPreflightKindV1,
+    pub status: DerivedChangeReadDiagnosticStatusV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+}
+
+impl DerivedChangeReadDiagnosticPreflightV1 {
+    pub fn passed(kind: DerivedChangeReadDiagnosticPreflightKindV1) -> Self {
+        Self {
+            kind,
+            status: DerivedChangeReadDiagnosticStatusV1::Passed,
+            failure_detail: None,
+        }
+    }
+
+    pub fn failed(
+        kind: DerivedChangeReadDiagnosticPreflightKindV1,
+        failure_detail: String,
+    ) -> Self {
+        Self {
+            kind,
+            status: DerivedChangeReadDiagnosticStatusV1::Failed,
+            failure_detail: Some(failure_detail),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeReadDiagnosticRowV1 {
+    pub case: QualificationDerivedChangeReadCaseV1,
+    pub status: DerivedChangeReadDiagnosticStatusV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeReadDiagnosticControlV1 {
+    pub case: QualificationDerivedChangeControlCaseV1,
+    pub status: DerivedChangeReadDiagnosticStatusV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DerivedChangeReadDiagnosticStorageCaseV1 {
+    Initial,
+    PostAppend,
+}
+
+impl DerivedChangeReadDiagnosticStorageCaseV1 {
+    pub const ALL: [Self; 2] = [Self::Initial, Self::PostAppend];
+    pub const INITIAL_ONLY: [Self; 1] = [Self::Initial];
+
+    pub fn required_for(fixture: QualificationDerivedChangeFixtureV1) -> &'static [Self] {
+        if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+            &Self::ALL
+        } else {
+            &Self::INITIAL_ONLY
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeReadDiagnosticStorageV1 {
+    pub case: DerivedChangeReadDiagnosticStorageCaseV1,
+    pub status: DerivedChangeReadDiagnosticStatusV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_detail: Option<String>,
+}
+
+/// Schema-less transport for the derived-Change diagnostic wrapper. Never use
+/// this type to construct a terminal evidence document.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedChangeReadDiagnosticCollectionV1 {
+    pub mode: String,
+    pub source_unchanged: bool,
+    pub preflight: Vec<DerivedChangeReadDiagnosticPreflightV1>,
+    pub rows: Vec<DerivedChangeReadDiagnosticRowV1>,
+    pub controls: Vec<DerivedChangeReadDiagnosticControlV1>,
+    pub storage: Vec<DerivedChangeReadDiagnosticStorageV1>,
+}
+
+pub fn collect_derived_change_read_diagnostic_rows_v1<F>(
+    run: F,
+) -> Vec<DerivedChangeReadDiagnosticRowV1>
+where
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+{
+    collect_derived_change_read_diagnostic_rows_for_cases_v1(
+        &QualificationDerivedChangeReadCaseV1::ALL,
+        run,
+    )
+}
+
+fn collect_derived_change_read_diagnostic_rows_for_cases_v1<F>(
+    cases: &[QualificationDerivedChangeReadCaseV1],
+    mut run: F,
+) -> Vec<DerivedChangeReadDiagnosticRowV1>
+where
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+{
+    cases
+        .iter()
+        .copied()
+        .map(|case| match run(case) {
+            Ok(()) => DerivedChangeReadDiagnosticRowV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Passed,
+                failure_detail: None,
+            },
+            Err(failure_detail) => DerivedChangeReadDiagnosticRowV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Failed,
+                failure_detail: Some(failure_detail),
+            },
+        })
+        .collect()
+}
+
+pub fn collect_derived_change_read_diagnostic_rows_after_preflight_v1<F>(
+    preflight: &DerivedChangeReadDiagnosticPreflightV1,
+    run: F,
+) -> Vec<DerivedChangeReadDiagnosticRowV1>
+where
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+{
+    collect_derived_change_read_diagnostic_rows_after_preflight_for_cases_v1(
+        &QualificationDerivedChangeReadCaseV1::ALL,
+        preflight,
+        run,
+    )
+}
+
+fn collect_derived_change_read_diagnostic_rows_after_preflight_for_cases_v1<F>(
+    cases: &[QualificationDerivedChangeReadCaseV1],
+    preflight: &DerivedChangeReadDiagnosticPreflightV1,
+    run: F,
+) -> Vec<DerivedChangeReadDiagnosticRowV1>
+where
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+{
+    if preflight.status == DerivedChangeReadDiagnosticStatusV1::Passed {
+        collect_derived_change_read_diagnostic_rows_for_cases_v1(cases, run)
+    } else {
+        cases
+            .iter()
+            .copied()
+            .map(|case| DerivedChangeReadDiagnosticRowV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                failure_detail: preflight.failure_detail.clone(),
+            })
+            .collect()
+    }
+}
+
+pub fn collect_derived_change_read_diagnostic_controls_v1<F>(
+    preflight: [DerivedChangeReadDiagnosticPreflightV1; 2],
+    mut run: F,
+) -> Vec<DerivedChangeReadDiagnosticControlV1>
+where
+    F: FnMut(QualificationDerivedChangeControlCaseV1) -> Result<(), String>,
+{
+    QualificationDerivedChangeControlCaseV1::ALL
+        .into_iter()
+        .map(|case| {
+            let kind = qualification_derived_change_control_test_v1(case).0;
+            let prerequisite = preflight.iter().find(|candidate| {
+                candidate.kind
+                    == match kind {
+                        QualificationDerivedChangeControlBinaryKindV1::Library => {
+                            DerivedChangeReadDiagnosticPreflightKindV1::LibraryControl
+                        }
+                        QualificationDerivedChangeControlBinaryKindV1::Cli => {
+                            DerivedChangeReadDiagnosticPreflightKindV1::CliControl
+                        }
+                    }
+            });
+            match prerequisite {
+                Some(candidate)
+                    if candidate.status == DerivedChangeReadDiagnosticStatusV1::Passed =>
+                {
+                    match run(case) {
+                        Ok(()) => DerivedChangeReadDiagnosticControlV1 {
+                            case,
+                            status: DerivedChangeReadDiagnosticStatusV1::Passed,
+                            failure_detail: None,
+                        },
+                        Err(failure_detail) => DerivedChangeReadDiagnosticControlV1 {
+                            case,
+                            status: DerivedChangeReadDiagnosticStatusV1::Failed,
+                            failure_detail: Some(failure_detail),
+                        },
+                    }
+                }
+                Some(candidate) => DerivedChangeReadDiagnosticControlV1 {
+                    case,
+                    status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                    failure_detail: candidate.failure_detail.clone(),
+                },
+                None => DerivedChangeReadDiagnosticControlV1 {
+                    case,
+                    status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                    failure_detail: Some("control diagnostic preflight is missing".to_owned()),
+                },
+            }
+        })
+        .collect()
+}
+
+pub fn collect_derived_change_read_diagnostic_storage_v1<F>(
+    run: F,
+) -> Vec<DerivedChangeReadDiagnosticStorageV1>
+where
+    F: FnMut(DerivedChangeReadDiagnosticStorageCaseV1) -> Result<(), String>,
+{
+    collect_derived_change_read_diagnostic_storage_for_cases_v1(
+        &DerivedChangeReadDiagnosticStorageCaseV1::ALL,
+        run,
+    )
+}
+
+fn collect_derived_change_read_diagnostic_storage_for_cases_v1<F>(
+    cases: &[DerivedChangeReadDiagnosticStorageCaseV1],
+    mut run: F,
+) -> Vec<DerivedChangeReadDiagnosticStorageV1>
+where
+    F: FnMut(DerivedChangeReadDiagnosticStorageCaseV1) -> Result<(), String>,
+{
+    cases
+        .iter()
+        .copied()
+        .map(|case| match run(case) {
+            Ok(()) => DerivedChangeReadDiagnosticStorageV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Passed,
+                failure_detail: None,
+            },
+            Err(failure_detail) => DerivedChangeReadDiagnosticStorageV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Failed,
+                failure_detail: Some(failure_detail),
+            },
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -240,6 +564,22 @@ pub fn run_qualification_derived_change_read_v1(
     {
         let _ = request_path;
         Err("derived Change read evidence requires --features longitudinal-counting".to_owned())
+    }
+}
+
+/// Run isolated derived-Change diagnostics without constructing qualification
+/// evidence. The schema-less result is transport for the diagnostic wrapper.
+pub fn run_derived_change_read_diagnostic_v1(
+    request_path: &Path,
+) -> Result<DerivedChangeReadDiagnosticCollectionV1, String> {
+    #[cfg(feature = "longitudinal-counting")]
+    {
+        instrumented::run_derived_change_read_diagnostic_v1(request_path)
+    }
+    #[cfg(not(feature = "longitudinal-counting"))]
+    {
+        let _ = request_path;
+        Err("derived Change diagnostic requires --features longitudinal-counting".to_owned())
     }
 }
 
@@ -526,6 +866,561 @@ mod instrumented {
         receipt.refresh_sha256()?;
         receipt.validate()?;
         Ok(receipt)
+    }
+
+    pub(super) fn run_derived_change_read_diagnostic_v1(
+        request_path: &Path,
+    ) -> Result<DerivedChangeReadDiagnosticCollectionV1, String> {
+        let diagnostic: DerivedChangeReadDiagnosticRunRequestV1 = read_json(request_path)?;
+        diagnostic.validate()?;
+
+        let request = &diagnostic.read_request;
+        let source = diagnostic_preflight(
+            DerivedChangeReadDiagnosticPreflightKindV1::Source,
+            diagnostic_source_preflight(request),
+        );
+        if source.status != DerivedChangeReadDiagnosticStatusV1::Passed {
+            let detail = source
+                .failure_detail
+                .clone()
+                .unwrap_or_else(|| "source diagnostic preflight failed".to_owned());
+            let mut preflight = vec![
+                source,
+                diagnostic_skipped_preflight(
+                    DerivedChangeReadDiagnosticPreflightKindV1::Fixture,
+                    &detail,
+                ),
+            ];
+            if request.fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+                preflight.extend([
+                    diagnostic_skipped_preflight(
+                        DerivedChangeReadDiagnosticPreflightKindV1::LibraryControl,
+                        &detail,
+                    ),
+                    diagnostic_skipped_preflight(
+                        DerivedChangeReadDiagnosticPreflightKindV1::CliControl,
+                        &detail,
+                    ),
+                ]);
+            }
+            preflight.push(diagnostic_skipped_preflight(
+                DerivedChangeReadDiagnosticPreflightKindV1::TemplatePostflight,
+                &detail,
+            ));
+            return Ok(DerivedChangeReadDiagnosticCollectionV1 {
+                mode: DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1.to_owned(),
+                source_unchanged: true,
+                preflight,
+                rows: diagnostic_skipped_rows(request.fixture, &detail),
+                controls: diagnostic_skipped_controls(request.fixture, &detail),
+                storage: diagnostic_skipped_storage(request.fixture, &detail),
+            });
+        }
+
+        let template_before =
+            longitudinal_authoritative_store_data_inventory_v1(&request.repository)
+                .map_err(|error| error.to_string());
+        let fixture = diagnostic_preflight(
+            DerivedChangeReadDiagnosticPreflightKindV1::Fixture,
+            match &template_before {
+                Ok(inventory) => diagnostic_fixture_preflight(
+                    request,
+                    &diagnostic.workspace_root,
+                    &inventory.inventory_sha256,
+                ),
+                Err(detail) => Err(detail.clone()),
+            },
+        );
+
+        let library =
+            (request.fixture == QualificationDerivedChangeFixtureV1::TopologyV1).then(|| {
+                diagnostic_control_preflight(
+                    request,
+                    QualificationDerivedChangeControlBinaryKindV1::Library,
+                )
+            });
+        let cli = (request.fixture == QualificationDerivedChangeFixtureV1::TopologyV1).then(|| {
+            diagnostic_control_preflight(
+                request,
+                QualificationDerivedChangeControlBinaryKindV1::Cli,
+            )
+        });
+        let rows = collect_derived_change_read_diagnostic_rows_after_preflight_for_cases_v1(
+            request.fixture.required_cases(),
+            &fixture,
+            |case| run_diagnostic_read_case(request, &diagnostic.workspace_root, case),
+        );
+        let controls = match (library.as_ref(), cli.as_ref()) {
+            (Some(library), Some(cli)) => collect_derived_change_read_diagnostic_controls_v1(
+                [library.clone(), cli.clone()],
+                |case| run_diagnostic_control_case(request, case),
+            ),
+            (None, None) => Vec::new(),
+            _ => {
+                return Err(
+                    "derived Change diagnostic control preflight is inconsistent".to_owned(),
+                );
+            }
+        };
+        let storage = if fixture.status == DerivedChangeReadDiagnosticStatusV1::Passed {
+            collect_derived_change_read_diagnostic_storage_for_cases_v1(
+                DerivedChangeReadDiagnosticStorageCaseV1::required_for(request.fixture),
+                |case| run_diagnostic_storage_case(request, &diagnostic.workspace_root, case),
+            )
+        } else {
+            diagnostic_skipped_storage(
+                request.fixture,
+                fixture
+                    .failure_detail
+                    .as_deref()
+                    .unwrap_or("fixture diagnostic preflight failed"),
+            )
+        };
+
+        let (source_unchanged, postflight) = match template_before {
+            Ok(template_before) => diagnostic_template_postflight(
+                longitudinal_authoritative_store_data_inventory_v1(&request.repository)
+                    .map(|template_after| template_before == template_after)
+                    .map_err(|error| error.to_string()),
+            ),
+            Err(detail) => diagnostic_template_postflight(Err(format!(
+                "initial immutable fixture inventory failed: {detail}"
+            ))),
+        };
+        Ok(DerivedChangeReadDiagnosticCollectionV1 {
+            mode: DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1.to_owned(),
+            source_unchanged,
+            preflight: [Some(source), Some(fixture), library, cli, Some(postflight)]
+                .into_iter()
+                .flatten()
+                .collect(),
+            rows,
+            controls,
+            storage,
+        })
+    }
+
+    fn diagnostic_preflight(
+        kind: DerivedChangeReadDiagnosticPreflightKindV1,
+        result: Result<(), String>,
+    ) -> DerivedChangeReadDiagnosticPreflightV1 {
+        match result {
+            Ok(()) => DerivedChangeReadDiagnosticPreflightV1::passed(kind),
+            Err(detail) => DerivedChangeReadDiagnosticPreflightV1::failed(kind, detail),
+        }
+    }
+
+    pub(super) fn diagnostic_template_postflight(
+        result: Result<bool, String>,
+    ) -> (bool, DerivedChangeReadDiagnosticPreflightV1) {
+        match result {
+            Ok(true) => (
+                true,
+                DerivedChangeReadDiagnosticPreflightV1::passed(
+                    DerivedChangeReadDiagnosticPreflightKindV1::TemplatePostflight,
+                ),
+            ),
+            Ok(false) => (
+                false,
+                DerivedChangeReadDiagnosticPreflightV1::failed(
+                    DerivedChangeReadDiagnosticPreflightKindV1::TemplatePostflight,
+                    "derived Change diagnostic mutated its immutable fixture template".to_owned(),
+                ),
+            ),
+            Err(detail) => (
+                false,
+                DerivedChangeReadDiagnosticPreflightV1::failed(
+                    DerivedChangeReadDiagnosticPreflightKindV1::TemplatePostflight,
+                    detail,
+                ),
+            ),
+        }
+    }
+
+    fn diagnostic_skipped_preflight(
+        kind: DerivedChangeReadDiagnosticPreflightKindV1,
+        detail: &str,
+    ) -> DerivedChangeReadDiagnosticPreflightV1 {
+        DerivedChangeReadDiagnosticPreflightV1 {
+            kind,
+            status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+            failure_detail: Some(detail.to_owned()),
+        }
+    }
+
+    fn diagnostic_skipped_rows(
+        fixture: QualificationDerivedChangeFixtureV1,
+        detail: &str,
+    ) -> Vec<DerivedChangeReadDiagnosticRowV1> {
+        fixture
+            .required_cases()
+            .iter()
+            .copied()
+            .map(|case| DerivedChangeReadDiagnosticRowV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                failure_detail: Some(detail.to_owned()),
+            })
+            .collect()
+    }
+
+    fn diagnostic_skipped_controls(
+        fixture: QualificationDerivedChangeFixtureV1,
+        detail: &str,
+    ) -> Vec<DerivedChangeReadDiagnosticControlV1> {
+        if fixture != QualificationDerivedChangeFixtureV1::TopologyV1 {
+            return Vec::new();
+        }
+        QualificationDerivedChangeControlCaseV1::ALL
+            .into_iter()
+            .map(|case| DerivedChangeReadDiagnosticControlV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                failure_detail: Some(detail.to_owned()),
+            })
+            .collect()
+    }
+
+    fn diagnostic_skipped_storage(
+        fixture: QualificationDerivedChangeFixtureV1,
+        detail: &str,
+    ) -> Vec<DerivedChangeReadDiagnosticStorageV1> {
+        DerivedChangeReadDiagnosticStorageCaseV1::required_for(fixture)
+            .iter()
+            .copied()
+            .map(|case| DerivedChangeReadDiagnosticStorageV1 {
+                case,
+                status: DerivedChangeReadDiagnosticStatusV1::Skipped,
+                failure_detail: Some(detail.to_owned()),
+            })
+            .collect()
+    }
+
+    fn require_empty_diagnostic_workspace(workspace: &Path) -> Result<(), String> {
+        if workspace.exists()
+            && workspace
+                .read_dir()
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_some()
+        {
+            return Err("derived Change diagnostic workspace must be absent or empty".to_owned());
+        }
+        Ok(())
+    }
+
+    fn diagnostic_source_preflight(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+    ) -> Result<(), String> {
+        for variable in [
+            "POINTBREAK_HOME",
+            "POINTBREAK_STORE",
+            "POINTBREAK_QUALIFICATION_CORPUS",
+            "POINTBREAK_CHANGE_READY_FIXTURE_DIR",
+        ] {
+            if std::env::var_os(variable).is_some() {
+                return Err(format!(
+                    "derived Change diagnostic forbids ambient {variable}"
+                ));
+            }
+        }
+        validate_current_execution_identity_v1(
+            &request.execution,
+            &request.source_checkout,
+            &request.repository,
+        )?;
+        validate_product_identity(request)?;
+        if sha256_file(&request.product_binary)? != request.product.binary_sha256 {
+            return Err("derived Change product binary drifted".to_owned());
+        }
+        Ok(())
+    }
+
+    fn diagnostic_fixture_preflight(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+        workspace: &Path,
+        inventory_sha256: &str,
+    ) -> Result<(), String> {
+        require_empty_diagnostic_workspace(workspace)?;
+        validate_public_fixture_shape(request)?;
+        validate_fixture_witness(request, inventory_sha256)
+    }
+
+    fn diagnostic_control_preflight(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+        kind: QualificationDerivedChangeControlBinaryKindV1,
+    ) -> DerivedChangeReadDiagnosticPreflightV1 {
+        let result = (|| {
+            let (binary, expected_sha256, build_command_sha256) = match kind {
+                QualificationDerivedChangeControlBinaryKindV1::Library => (
+                    request
+                        .control_test_binary
+                        .as_deref()
+                        .ok_or_else(|| "Change library control test binary is absent".to_owned())?,
+                    request
+                        .control_test_binary_sha256
+                        .as_deref()
+                        .ok_or_else(|| {
+                            "Change library control test binary hash is absent".to_owned()
+                        })?,
+                    request
+                        .control_test_build_command_sha256
+                        .as_deref()
+                        .ok_or_else(|| {
+                            "Change library control build command is absent".to_owned()
+                        })?,
+                ),
+                QualificationDerivedChangeControlBinaryKindV1::Cli => (
+                    request
+                        .control_cli_test_binary
+                        .as_deref()
+                        .ok_or_else(|| "Change CLI control test binary is absent".to_owned())?,
+                    request
+                        .control_cli_test_binary_sha256
+                        .as_deref()
+                        .ok_or_else(|| {
+                            "Change CLI control test binary hash is absent".to_owned()
+                        })?,
+                    request
+                        .control_cli_test_build_command_sha256
+                        .as_deref()
+                        .ok_or_else(|| "Change CLI control build command is absent".to_owned())?,
+                ),
+            };
+            let actual_sha256 = sha256_file(binary)?;
+            if actual_sha256 != expected_sha256 {
+                return Err("Change control test binary drifted".to_owned());
+            }
+            attest_control_binary(request, kind, binary, &actual_sha256, build_command_sha256)
+                .map(|_| ())
+        })();
+        diagnostic_preflight(
+            match kind {
+                QualificationDerivedChangeControlBinaryKindV1::Library => {
+                    DerivedChangeReadDiagnosticPreflightKindV1::LibraryControl
+                }
+                QualificationDerivedChangeControlBinaryKindV1::Cli => {
+                    DerivedChangeReadDiagnosticPreflightKindV1::CliControl
+                }
+            },
+            result,
+        )
+    }
+
+    fn run_diagnostic_control_case(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+        case: QualificationDerivedChangeControlCaseV1,
+    ) -> Result<(), String> {
+        let (kind, test_name) = qualification_derived_change_control_test_v1(case);
+        let binary = match kind {
+            QualificationDerivedChangeControlBinaryKindV1::Library => request
+                .control_test_binary
+                .as_deref()
+                .ok_or_else(|| "Change library control test binary is absent".to_owned())?,
+            QualificationDerivedChangeControlBinaryKindV1::Cli => request
+                .control_cli_test_binary
+                .as_deref()
+                .ok_or_else(|| "Change CLI control test binary is absent".to_owned())?,
+        };
+        let output = run_exact_control_test(binary, test_name, None)
+            .map_err(|error| format!("run Change control {case:?}: {error}"))?;
+        if !output.status.success() || !exact_libtest_passed(&output.stdout, test_name)? {
+            return Err(format!("Change control {case:?} failed"));
+        }
+        Ok(())
+    }
+
+    fn run_diagnostic_read_case(
+        template: &QualificationDerivedChangeReadRunRequestV1,
+        workspace: &Path,
+        case: QualificationDerivedChangeReadCaseV1,
+    ) -> Result<(), String> {
+        let root = diagnostic_case_root(workspace, "rows", case as u8, &format!("{case:?}"));
+        let request = diagnostic_clone_request(template, &root)?;
+        validate_diagnostic_clone(&request)?;
+        let expected = expected_fixture_outcome(request.execution.platform, request.fixture, case);
+
+        let semantic = match case {
+            QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite => {
+                establish_diagnostic_post_append(&request)?;
+                fresh_process_semantic_pair(&request, case, &expected)?
+            }
+            QualificationDerivedChangeReadCaseV1::FreshProcessSuite => {
+                fresh_process_semantic_pair(&request, case, &expected)?
+            }
+            QualificationDerivedChangeReadCaseV1::PostAppendSuite => {
+                let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
+                derived.ensure_ready()?;
+                let authoritative = InspectorChild::spawn(&request, "off")?;
+                validate_fixture_semantics(&request, &derived.endpoint)?;
+                validate_fixture_semantics(&request, &authoritative.endpoint)?;
+                post_append_semantic_pair(&request, &derived.endpoint, &authoritative.endpoint)?.0
+            }
+            _ => {
+                let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
+                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity {
+                    derived.ensure_ready()?;
+                }
+                let authoritative = (expected.oracle
+                    == QualificationDerivedChangeReadOracleV1::StrictParity)
+                    .then(|| InspectorChild::spawn(&request, "off"))
+                    .transpose()?;
+                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity {
+                    validate_fixture_semantics(&request, &derived.endpoint)?;
+                    validate_fixture_semantics(
+                        &request,
+                        &authoritative
+                            .as_ref()
+                            .ok_or_else(|| {
+                                "strict diagnostic fixture omitted its authoritative child"
+                                    .to_owned()
+                            })?
+                            .endpoint,
+                    )?;
+                }
+                semantic_pair(
+                    &request,
+                    case,
+                    &request.summary_query,
+                    &derived.endpoint,
+                    authoritative.as_ref().map(|child| &child.endpoint),
+                    &expected,
+                )?
+            }
+        };
+        let access = DerivedChangeAccess::resolve_for_inspector(&request.repository)
+            .map_err(|error| error.to_string())?;
+        if !access.is_active() {
+            return Err("derived Change diagnostic adapter resolved explicit-off state".to_owned());
+        }
+        let measured = measure_case(
+            &access,
+            &request.repository,
+            case,
+            &request.summary_query,
+            &expected,
+        )?;
+        if !semantic.wire_contract_matches
+            || measured.expected_typed_document != semantic.typed_document
+        {
+            return Err(format!(
+                "derived Change diagnostic case {case:?} did not satisfy its oracle"
+            ));
+        }
+        Ok(())
+    }
+
+    fn establish_diagnostic_post_append(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+    ) -> Result<(), String> {
+        let derived = InspectorChild::spawn(request, "sqlite-wal-bodyless-v1")?;
+        derived.ensure_ready()?;
+        let authoritative = InspectorChild::spawn(request, "off")?;
+        validate_fixture_semantics(request, &derived.endpoint)?;
+        validate_fixture_semantics(request, &authoritative.endpoint)?;
+        post_append_semantic_pair(request, &derived.endpoint, &authoritative.endpoint).map(|_| ())
+    }
+
+    fn run_diagnostic_storage_case(
+        template: &QualificationDerivedChangeReadRunRequestV1,
+        workspace: &Path,
+        case: DerivedChangeReadDiagnosticStorageCaseV1,
+    ) -> Result<(), String> {
+        let root = diagnostic_case_root(workspace, "storage", case as u8, &format!("{case:?}"));
+        let request = diagnostic_clone_request(template, &root)?;
+        validate_diagnostic_clone(&request)?;
+        let probes = request
+            .storage_forbidden_probes
+            .as_ref()
+            .ok_or_else(|| "derived Change diagnostic storage probes are absent".to_owned())?;
+        match case {
+            DerivedChangeReadDiagnosticStorageCaseV1::Initial => {
+                let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
+                derived.ensure_ready()?;
+            }
+            DerivedChangeReadDiagnosticStorageCaseV1::PostAppend => {
+                establish_diagnostic_post_append(&request)?;
+            }
+        }
+        let store_root =
+            store_dir_for_repo(&request.repository).map_err(|error| error.to_string())?;
+        capture_qualification_derived_storage_witness_v1(&store_root, probes).map(|_| ())
+    }
+
+    fn diagnostic_case_root(workspace: &Path, family: &str, ordinal: u8, label: &str) -> PathBuf {
+        workspace.join(family).join(format!("{ordinal:02}-{label}"))
+    }
+
+    fn diagnostic_clone_request(
+        template: &QualificationDerivedChangeReadRunRequestV1,
+        root: &Path,
+    ) -> Result<QualificationDerivedChangeReadRunRequestV1, String> {
+        copy_public_fixture_tree(&template.repository, root)?;
+        let mut request = template.clone();
+        request.repository = root.to_path_buf();
+        request.pointbreak_home = root.join(".git/pointbreak-home");
+        if let Some(probes) = request.storage_forbidden_probes.as_mut() {
+            probes.private_path = root
+                .to_str()
+                .ok_or_else(|| "diagnostic fixture root is not UTF-8".to_owned())?
+                .to_owned();
+        }
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn validate_diagnostic_clone(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+    ) -> Result<(), String> {
+        validate_public_fixture_shape(request)?;
+        let inventory = longitudinal_authoritative_store_data_inventory_v1(&request.repository)
+            .map_err(|error| error.to_string())?;
+        validate_fixture_witness(request, &inventory.inventory_sha256)?;
+        if sha256_file(&request.product_binary)? != request.product.binary_sha256 {
+            return Err("derived Change product binary drifted".to_owned());
+        }
+        if validate_product_version(request)? != request.product.version_sha256 {
+            return Err("derived Change product version drifted".to_owned());
+        }
+        Ok(())
+    }
+
+    pub(super) fn copy_public_fixture_tree(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), String> {
+        if destination.exists() {
+            return Err("derived Change diagnostic clone destination already exists".to_owned());
+        }
+        let source = std::fs::canonicalize(source).map_err(|error| error.to_string())?;
+        let destination_parent = destination.parent().ok_or_else(|| {
+            "derived Change diagnostic clone destination has no parent".to_owned()
+        })?;
+        std::fs::create_dir_all(destination_parent).map_err(|error| error.to_string())?;
+        copy_public_fixture_tree_inner(&source, destination)
+    }
+
+    fn copy_public_fixture_tree_inner(source: &Path, destination: &Path) -> Result<(), String> {
+        let metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("derived Change diagnostic fixture must not contain symlinks".to_owned());
+        }
+        if metadata.is_dir() {
+            std::fs::create_dir(destination).map_err(|error| error.to_string())?;
+            for entry in std::fs::read_dir(source).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                copy_public_fixture_tree_inner(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                )?;
+            }
+            return Ok(());
+        }
+        if metadata.is_file() {
+            std::fs::copy(source, destination).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        Err("derived Change diagnostic fixture contains an unsupported file type".to_owned())
     }
 
     #[derive(Clone, Copy)]
@@ -2608,7 +3503,8 @@ mod instrumented {
 mod tests {
     #[cfg(feature = "longitudinal-counting")]
     use super::instrumented::{
-        normalize_change_semantic, percent_encode, validate_fixture_authoritative_inventory,
+        copy_public_fixture_tree, diagnostic_template_postflight, normalize_change_semantic,
+        percent_encode, validate_fixture_authoritative_inventory,
         validate_topology_fixture_semantics,
     };
     use super::*;
@@ -2760,5 +3656,44 @@ mod tests {
             include_str!("../../../scripts/materialize-inspector-decision-matrix.sh");
         assert!(materializer.contains("authoritativeInventorySha256"));
         assert!(materializer.contains("authoritative_inventory_sha256"));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_fixture_copy_is_isolated_and_refuses_an_existing_destination() {
+        let root = tempfile::tempdir().expect("diagnostic fixture root");
+        let source = root.path().join("source");
+        let destination = root.path().join("workspace/clone");
+        std::fs::create_dir_all(source.join("nested")).expect("create source");
+        std::fs::write(source.join("nested/input.txt"), b"public fixture")
+            .expect("write source fixture");
+        copy_public_fixture_tree(&source, &destination).expect("copy public fixture");
+        std::fs::write(destination.join("nested/input.txt"), b"mutated clone")
+            .expect("mutate clone");
+        assert_eq!(
+            std::fs::read(source.join("nested/input.txt")).expect("read source fixture"),
+            b"public fixture"
+        );
+        assert!(copy_public_fixture_tree(&source, &destination).is_err());
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_template_postflight_records_inventory_failure() {
+        let (source_unchanged, postflight) =
+            diagnostic_template_postflight(Err("template inventory diagnostic".to_owned()));
+        assert!(!source_unchanged);
+        assert_eq!(
+            postflight.kind,
+            DerivedChangeReadDiagnosticPreflightKindV1::TemplatePostflight
+        );
+        assert_eq!(
+            postflight.status,
+            DerivedChangeReadDiagnosticStatusV1::Failed
+        );
+        assert_eq!(
+            postflight.failure_detail.as_deref(),
+            Some("template inventory diagnostic")
+        );
     }
 }

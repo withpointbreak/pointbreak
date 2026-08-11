@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Command;
 
@@ -72,6 +72,464 @@ fn execution_identity_diagnostic_names_every_drifted_field() {
         super::evidence::execution_identity_mismatches(&expected, &observed),
         ["platform", "binary_sha256", "architecture"]
     );
+}
+
+#[test]
+fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries() {
+    let root = tempfile::tempdir().expect("diagnostic evidence root");
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let reserved_paths = [
+        root.path()
+            .join(DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1),
+        root.path()
+            .join(DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1)
+            .join("receipt.json"),
+    ];
+    for (index, path) in reserved_paths.into_iter().enumerate() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create reserved diagnostic parent");
+        }
+        std::fs::write(&path, b"{}").expect("write reserved diagnostic document");
+        let request_path = root.path().join(format!("reserved-fragment-{index}.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                receipt_paths: vec![path.clone()],
+            })
+            .expect("serialize reserved fragment request"),
+        )
+        .expect("write reserved fragment request");
+        assert_eq!(
+            build_qualification_derived_access_fragment_v1(&request_path).unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+        assert_eq!(
+            assemble_qualification_derived_access_package_v1(
+                &[path],
+                &root.path().join(format!("reserved-package-{index}")),
+            )
+            .unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+    }
+
+    for (name, document) in [
+        (
+            "report",
+            serde_json::json!({
+                "schema": DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1,
+                "version": 1,
+                "admissible": false,
+            }),
+        ),
+        (
+            "fragment",
+            serde_json::json!({
+                "schema": DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
+                "version": 1,
+            }),
+        ),
+        (
+            "collection",
+            serde_json::json!({
+                "schema": DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
+                "cases": [],
+            }),
+        ),
+    ] {
+        let path = root.path().join(format!("renamed-{name}.json"));
+        let bytes = serde_json::to_vec(&document).expect("serialize diagnostic document");
+        std::fs::write(&path, &bytes).expect("write diagnostic document");
+        let request_path = root.path().join(format!("fragment-{name}.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                receipt_paths: vec![path.clone()],
+            })
+            .expect("serialize fragment request"),
+        )
+        .expect("write fragment request");
+        assert_eq!(
+            build_qualification_derived_access_fragment_v1(&request_path).unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+        assert_eq!(
+            assemble_qualification_derived_access_package_v1(
+                &[path],
+                &root.path().join(format!("package-{name}")),
+            )
+            .unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+        assert_eq!(
+            validate_summaries_against_raw(
+                &QualificationDerivedAccessPackageV1::test_fixture(),
+                &[document],
+            )
+            .unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
+    }
+
+    assert_eq!(
+        reject_derived_change_diagnostic_evidence_path_v1(Path::new(
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1,
+        ))
+        .unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+    assert_eq!(
+        reject_derived_change_diagnostic_evidence_path_v1(Path::new(
+            "nested/derived-change-diagnostic/receipt.json",
+        ))
+        .unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+
+    let reserved_root = root
+        .path()
+        .join(DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1);
+    std::fs::create_dir_all(&reserved_root).expect("create reserved request root");
+    let ordinary_receipt = root.path().join("ordinary-receipt.json");
+    std::fs::write(&ordinary_receipt, b"{}").expect("write ordinary receipt");
+    let reserved_request = reserved_root.join("fragment-request.json");
+    std::fs::write(
+        &reserved_request,
+        serde_json::to_vec(&QualificationDerivedAccessFragmentRequestV1 {
+            schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+            execution: execution.clone(),
+            receipt_paths: vec![ordinary_receipt],
+        })
+        .expect("serialize reserved-path fragment request"),
+    )
+    .expect("write reserved-path fragment request");
+    assert_eq!(
+        build_qualification_derived_access_fragment_v1(&reserved_request).unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+    assert_eq!(
+        publish_qualification_derived_access_package_v1(
+            &reserved_root,
+            &QualificationDerivedAccessPackageV1::test_fixture(),
+            &[],
+        )
+        .unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+    assert_eq!(
+        verify_qualification_derived_access_package_v1(&reserved_root).unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+    assert_eq!(
+        assemble_qualification_derived_access_package_v1(&[], &reserved_root).unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+    assert_eq!(
+        verify_qualification_derived_access_phase_v1(
+            &root.path().join("phase-request.json"),
+            &reserved_root.join("phase-bundle.json"),
+        )
+        .unwrap_err(),
+        DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+    );
+}
+
+#[test]
+fn diagnostic_lifecycle_collection_continues_after_an_isolated_vector_failure() {
+    let mut attempted = Vec::new();
+    let cases = collect_qualification_derived_access_lifecycle_diagnostics_v1(|criterion| {
+        attempted.push(criterion);
+        if criterion == QualificationDerivedAccessLifecycleCriterionV1::WrongRoot {
+            Err("wrong-root diagnostic".to_owned())
+        } else {
+            Ok(format!("{criterion:?}"))
+        }
+    });
+
+    assert_eq!(
+        attempted.len(),
+        QualificationDerivedAccessLifecycleCriterionV1::ALL.len(),
+    );
+    assert_eq!(cases.len(), attempted.len());
+    assert_eq!(
+        cases
+            .iter()
+            .filter(|case| {
+                case.status == QualificationDerivedAccessLifecycleDiagnosticStatusV1::Failed
+            })
+            .count(),
+        1,
+    );
+    assert!(cases.iter().any(|case| {
+        case.criterion == QualificationDerivedAccessLifecycleCriterionV1::WrongRoot
+            && case.status == QualificationDerivedAccessLifecycleDiagnosticStatusV1::Failed
+            && case.failure_detail.as_deref() == Some("wrong-root diagnostic")
+    }));
+
+    let collection = QualificationDerivedAccessLifecycleDiagnosticCollectionV1 {
+        cases,
+        source_unchanged: true,
+    };
+    let value = serde_json::to_value(collection).expect("serialize diagnostic collection");
+    assert_eq!(
+        value
+            .as_object()
+            .expect("diagnostic collection object")
+            .len(),
+        2,
+    );
+    assert_eq!(value["sourceUnchanged"], true);
+    assert_eq!(
+        value["cases"].as_array().expect("diagnostic cases").len(),
+        18
+    );
+    assert!(value.get("schema").is_none());
+}
+
+#[test]
+fn native_diagnostic_result_exposes_only_the_admitted_root() {
+    let result = DerivedChangeDiagnosticNativeResultV1 {
+        mode: DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1.to_owned(),
+        tier: QualificationDerivedAccessTierV1::L1,
+        admitted_root_path: PathBuf::from("/tmp/diagnostic-root/root-a"),
+        admitted_root_sha256: digest(53),
+        source_unchanged: true,
+    };
+    let value = serde_json::to_value(result).expect("serialize native diagnostic result");
+    assert_eq!(
+        value
+            .as_object()
+            .expect("native diagnostic result object")
+            .len(),
+        5,
+    );
+    assert_eq!(value["mode"], DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1);
+    assert_eq!(value["tier"], "L1");
+    assert_eq!(value["sourceUnchanged"], true);
+    for forbidden in [
+        "schema", "payload", "receipt", "fragment", "package", "report",
+    ] {
+        assert!(
+            value.get(forbidden).is_none(),
+            "native result leaked {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn change_read_diagnostic_collection_continues_rows_controls_and_stays_schema_less() {
+    let mut attempted_rows = Vec::new();
+    let rows = collect_derived_change_read_diagnostic_rows_v1(|case| {
+        attempted_rows.push(case);
+        if case == QualificationDerivedChangeReadCaseV1::ChangesBare {
+            Err("changes diagnostic".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(
+        attempted_rows.len(),
+        QualificationDerivedChangeReadCaseV1::ALL.len()
+    );
+    assert!(rows.iter().any(|row| {
+        row.case == QualificationDerivedChangeReadCaseV1::ChangesBare
+            && row.status == DerivedChangeReadDiagnosticStatusV1::Failed
+            && row.failure_detail.as_deref() == Some("changes diagnostic")
+    }));
+
+    let mut attempted_controls = Vec::new();
+    let controls = collect_derived_change_read_diagnostic_controls_v1(
+        [
+            DerivedChangeReadDiagnosticPreflightV1::passed(
+                DerivedChangeReadDiagnosticPreflightKindV1::LibraryControl,
+            ),
+            DerivedChangeReadDiagnosticPreflightV1::failed(
+                DerivedChangeReadDiagnosticPreflightKindV1::CliControl,
+                "cli attestation diagnostic".to_owned(),
+            ),
+        ],
+        |case| {
+            attempted_controls.push(case);
+            if case == QualificationDerivedChangeControlCaseV1::L0NoGeneration {
+                Err("library control diagnostic".to_owned())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(attempted_controls.contains(&QualificationDerivedChangeControlCaseV1::L0NoGeneration));
+    assert_eq!(
+        attempted_controls.len(),
+        QualificationDerivedChangeControlCaseV1::ALL
+            .into_iter()
+            .filter(|case| {
+                qualification_derived_change_control_test_v1(*case).0
+                    == QualificationDerivedChangeControlBinaryKindV1::Library
+            })
+            .count()
+    );
+    assert!(controls.iter().any(|control| {
+        control.case == QualificationDerivedChangeControlCaseV1::L0NoGeneration
+            && control.status == DerivedChangeReadDiagnosticStatusV1::Failed
+    }));
+    assert!(controls.iter().any(|control| {
+        qualification_derived_change_control_test_v1(control.case).0
+            == QualificationDerivedChangeControlBinaryKindV1::Cli
+            && control.status == DerivedChangeReadDiagnosticStatusV1::Skipped
+            && control.failure_detail.as_deref() == Some("cli attestation diagnostic")
+    }));
+
+    let collection = DerivedChangeReadDiagnosticCollectionV1 {
+        mode: DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1.to_owned(),
+        source_unchanged: true,
+        preflight: vec![DerivedChangeReadDiagnosticPreflightV1::passed(
+            DerivedChangeReadDiagnosticPreflightKindV1::Fixture,
+        )],
+        rows,
+        controls,
+        storage: vec![DerivedChangeReadDiagnosticStorageV1 {
+            case: DerivedChangeReadDiagnosticStorageCaseV1::Initial,
+            status: DerivedChangeReadDiagnosticStatusV1::Passed,
+            failure_detail: None,
+        }],
+    };
+    let value = serde_json::to_value(collection).expect("serialize diagnostic collection");
+    assert_eq!(value["mode"], DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1);
+    assert_eq!(value["sourceUnchanged"], true);
+    assert!(value.get("schema").is_none());
+    for forbidden in [
+        "receipt",
+        "fragment",
+        "package",
+        "report",
+        "storageRows",
+        "controlBinaryIdentities",
+    ] {
+        assert!(
+            value.get(forbidden).is_none(),
+            "collection leaked {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn change_read_diagnostic_storage_collection_continues_after_initial_failure() {
+    let mut attempted = Vec::new();
+    let storage = collect_derived_change_read_diagnostic_storage_v1(|case| {
+        attempted.push(case);
+        if case == DerivedChangeReadDiagnosticStorageCaseV1::Initial {
+            Err("initial storage diagnostic".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(
+        attempted,
+        DerivedChangeReadDiagnosticStorageCaseV1::ALL.to_vec()
+    );
+    assert!(storage.iter().any(|row| {
+        row.case == DerivedChangeReadDiagnosticStorageCaseV1::Initial
+            && row.status == DerivedChangeReadDiagnosticStatusV1::Failed
+            && row.failure_detail.as_deref() == Some("initial storage diagnostic")
+    }));
+    assert!(storage.iter().any(|row| {
+        row.case == DerivedChangeReadDiagnosticStorageCaseV1::PostAppend
+            && row.status == DerivedChangeReadDiagnosticStatusV1::Passed
+    }));
+}
+
+#[test]
+fn change_read_diagnostic_fixture_inventory_is_fixture_scoped() {
+    assert_eq!(
+        QualificationDerivedChangeFixtureV1::TopologyV1
+            .required_cases()
+            .len(),
+        QualificationDerivedChangeReadCaseV1::ALL.len()
+    );
+    assert_eq!(
+        DerivedChangeReadDiagnosticStorageCaseV1::required_for(
+            QualificationDerivedChangeFixtureV1::TopologyV1,
+        ),
+        &DerivedChangeReadDiagnosticStorageCaseV1::ALL,
+    );
+    for fixture in [
+        QualificationDerivedChangeFixtureV1::DuplicateEqualV1,
+        QualificationDerivedChangeFixtureV1::MissingCarrierV1,
+        QualificationDerivedChangeFixtureV1::IncompleteV1,
+    ] {
+        assert_ne!(
+            fixture.required_cases().len(),
+            QualificationDerivedChangeReadCaseV1::ALL.len(),
+        );
+        assert_eq!(
+            DerivedChangeReadDiagnosticStorageCaseV1::required_for(fixture),
+            &DerivedChangeReadDiagnosticStorageCaseV1::INITIAL_ONLY,
+        );
+    }
+}
+
+#[test]
+fn change_read_diagnostic_fixture_matrix_has_complete_case_inventory() {
+    assert_eq!(
+        QualificationDerivedChangeFixtureV1::ALL
+            .into_iter()
+            .map(|fixture| fixture.required_cases().len())
+            .sum::<usize>(),
+        71
+    );
+    assert_eq!(QualificationDerivedChangeControlCaseV1::ALL.len(), 27);
+    assert_eq!(
+        QualificationDerivedChangeFixtureV1::ALL
+            .into_iter()
+            .map(|fixture| DerivedChangeReadDiagnosticStorageCaseV1::required_for(fixture).len())
+            .sum::<usize>(),
+        10
+    );
+}
+
+#[test]
+fn change_read_diagnostic_uses_public_kebab_fixture_identifiers() {
+    assert_eq!(
+        serde_json::to_value(QualificationDerivedChangeFixtureV1::TopologyV1)
+            .expect("serialize public fixture"),
+        serde_json::json!("topology-v1"),
+    );
+    assert_eq!(
+        serde_json::from_value::<QualificationDerivedChangeFixtureV1>(serde_json::json!(
+            "topology-v1"
+        ))
+        .expect("parse public fixture"),
+        QualificationDerivedChangeFixtureV1::TopologyV1,
+    );
+    assert!(
+        serde_json::from_value::<QualificationDerivedChangeFixtureV1>(serde_json::json!(
+            "topology_v1"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn change_read_diagnostic_fixture_failure_skips_only_read_rows() {
+    let preflight = DerivedChangeReadDiagnosticPreflightV1::failed(
+        DerivedChangeReadDiagnosticPreflightKindV1::Fixture,
+        "fixture diagnostic".to_owned(),
+    );
+    let mut attempted = false;
+    let rows = collect_derived_change_read_diagnostic_rows_after_preflight_v1(&preflight, |_| {
+        attempted = true;
+        Ok(())
+    });
+    assert!(!attempted);
+    assert_eq!(rows.len(), QualificationDerivedChangeReadCaseV1::ALL.len());
+    assert!(rows.iter().all(|row| {
+        row.status == DerivedChangeReadDiagnosticStatusV1::Skipped
+            && row.failure_detail.as_deref() == Some("fixture diagnostic")
+    }));
 }
 
 #[cfg(feature = "longitudinal-counting")]

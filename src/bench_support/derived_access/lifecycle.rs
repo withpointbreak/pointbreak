@@ -203,6 +203,28 @@ pub struct QualificationDerivedAccessLifecycleRunReceiptV1 {
     pub source_unchanged: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedAccessLifecycleDiagnosticStatusV1 {
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualificationDerivedAccessLifecycleDiagnosticCaseV1 {
+    pub criterion: QualificationDerivedAccessLifecycleCriterionV1,
+    pub status: QualificationDerivedAccessLifecycleDiagnosticStatusV1,
+    pub failure_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QualificationDerivedAccessLifecycleDiagnosticCollectionV1 {
+    pub cases: Vec<QualificationDerivedAccessLifecycleDiagnosticCaseV1>,
+    pub source_unchanged: bool,
+}
+
 pub fn qualification_derived_access_lifecycle_vectors_v1()
 -> Vec<QualificationDerivedAccessLifecycleVectorV1> {
     use QualificationDerivedAccessLifecycleCriterionV1 as Criterion;
@@ -455,6 +477,85 @@ pub fn run_qualification_derived_access_lifecycle_v1(
         vectors: receipts,
         source_unchanged,
     })
+}
+
+/// Collect every independently isolated lifecycle vector for diagnostic use.
+/// Unlike the terminal receipt runner, a failed vector does not hide later
+/// vector outcomes; callers must not treat this collection as qualification
+/// evidence.
+pub fn run_qualification_derived_access_lifecycle_diagnostic_v1(
+    request_path: &Path,
+) -> Result<QualificationDerivedAccessLifecycleDiagnosticCollectionV1, String> {
+    let request: QualificationDerivedAccessLifecycleRunRequestV1 =
+        serde_json::from_slice(&std::fs::read(request_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    request.validate()?;
+    super::evidence::validate_current_execution_identity_v1(
+        &request.execution,
+        &request.source_checkout,
+        &request.workspace_root,
+    )?;
+    let source_before = longitudinal_authoritative_store_data_inventory_v1(&request.source_root)
+        .map_err(|error| error.to_string())?;
+    if source_before.inventory_sha256 != request.admitted_root_sha256 {
+        return Err("lifecycle source root does not match its admitted identity".to_owned());
+    }
+    if request.workspace_root.exists()
+        && request
+            .workspace_root
+            .read_dir()
+            .map_err(|error| error.to_string())?
+            .next()
+            .is_some()
+    {
+        return Err("lifecycle workspace must be absent or empty".to_owned());
+    }
+    std::fs::create_dir_all(&request.workspace_root).map_err(|error| error.to_string())?;
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let cases = collect_qualification_derived_access_lifecycle_diagnostics_v1(|criterion| {
+        let ordinal = QualificationDerivedAccessLifecycleCriterionV1::ALL
+            .into_iter()
+            .position(|candidate| candidate == criterion)
+            .ok_or_else(|| "unknown lifecycle diagnostic criterion".to_owned())?;
+        let vector_root = request
+            .workspace_root
+            .join(format!("{ordinal:02}-{criterion:?}"));
+        copy_tree(&request.source_root, &vector_root)?;
+        run_lifecycle_vector(&executable, &vector_root, criterion)
+    });
+    let source_after = longitudinal_authoritative_store_data_inventory_v1(&request.source_root)
+        .map_err(|error| error.to_string())?;
+    let source_unchanged = source_before == source_after;
+    if !source_unchanged {
+        return Err("lifecycle run mutated its source root".to_owned());
+    }
+    Ok(QualificationDerivedAccessLifecycleDiagnosticCollectionV1 {
+        cases,
+        source_unchanged,
+    })
+}
+
+pub fn collect_qualification_derived_access_lifecycle_diagnostics_v1<F>(
+    mut run: F,
+) -> Vec<QualificationDerivedAccessLifecycleDiagnosticCaseV1>
+where
+    F: FnMut(QualificationDerivedAccessLifecycleCriterionV1) -> Result<String, String>,
+{
+    QualificationDerivedAccessLifecycleCriterionV1::ALL
+        .into_iter()
+        .map(|criterion| match run(criterion) {
+            Ok(_) => QualificationDerivedAccessLifecycleDiagnosticCaseV1 {
+                criterion,
+                status: QualificationDerivedAccessLifecycleDiagnosticStatusV1::Passed,
+                failure_detail: None,
+            },
+            Err(failure_detail) => QualificationDerivedAccessLifecycleDiagnosticCaseV1 {
+                criterion,
+                status: QualificationDerivedAccessLifecycleDiagnosticStatusV1::Failed,
+                failure_detail: Some(failure_detail),
+            },
+        })
+        .collect()
 }
 
 pub fn unknown_qualification_derived_access_lifecycle_rows_v1(
