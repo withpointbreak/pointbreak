@@ -8,6 +8,7 @@ import { executeDerivedChangeDiagnosticCases } from "./derived-change-diagnostic
 import {
 	createDerivedChangeDiagnosticCampaign,
 	createDerivedChangeDiagnosticHostRequest,
+	derivedChangeDiagnosticFilesystemProbeArguments,
 	DERIVED_CHANGE_DIAGNOSTIC_AUTHORITY_SEED_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1,
@@ -157,6 +158,16 @@ const diagnosticRoot = async (prefix) =>
 		await mkdtemp(join(tmpdir(), prefix)),
 		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 	);
+
+test("Windows filesystem probes use the fsutil volume spelling", () => {
+	assert.deepEqual(
+		derivedChangeDiagnosticFilesystemProbeArguments(
+			"windows",
+			"C:\\Users\\kevin\\diagnostic",
+		),
+		["fsinfo", "volumeinfo", "C:"],
+	);
+});
 
 const hostConfig = async () => ({
 	schema: DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,

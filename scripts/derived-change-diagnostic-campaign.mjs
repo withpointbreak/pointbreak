@@ -1525,11 +1525,24 @@ function observedHostIdentitySha256() {
 		.digest("hex");
 }
 
+export function derivedChangeDiagnosticFilesystemProbeArguments(
+	operatingSystem,
+	root,
+) {
+	return operatingSystem === "macos"
+		? ["-Y", root]
+		: [
+				"fsinfo",
+				"volumeinfo",
+				win32.parse(root).root.replace(/[\\/]+$/u, ""),
+			];
+}
+
 async function observedFilesystem(program, operatingSystem, root) {
-	const args =
-		operatingSystem === "macos"
-			? ["-Y", root]
-			: ["fsinfo", "volumeinfo", win32.parse(root).root];
+	const args = derivedChangeDiagnosticFilesystemProbeArguments(
+		operatingSystem,
+		root,
+	);
 	const outcome = await runCommand(program, args);
 	if (outcome.code !== 0 || outcome.signal !== null) {
 		throw new Error(
