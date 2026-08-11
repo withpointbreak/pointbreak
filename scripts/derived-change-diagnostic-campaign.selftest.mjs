@@ -335,6 +335,7 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	const changeRead = request.cases.find(({ id }) =>
 		id.endsWith("change-read-stateful"),
 	);
+	assert.equal(changeRead.failureClass, "lane_invalid");
 	assert.equal(changeRead.collection.expectedCaseIds.length, 147);
 	assert.ok(
 		changeRead.collection.expectedCaseIds.includes(

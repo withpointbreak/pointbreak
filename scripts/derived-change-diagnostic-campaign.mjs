@@ -964,7 +964,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			args: [changeReadModule, "--config-env"],
 			root: changeReadRoot,
 			campaign,
-			failureClass: "global_invalid",
+			failureClass: "lane_invalid",
 			phase: "derived-change-read-stateful-collection",
 			env: {
 				POINTBREAK_DERIVED_CHANGE_CHANGE_READ_CONFIG:
