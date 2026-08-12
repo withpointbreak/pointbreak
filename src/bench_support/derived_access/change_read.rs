@@ -182,6 +182,62 @@ pub struct DerivedChangeReadDiagnosticRowV1 {
     pub status: DerivedChangeReadDiagnosticStatusV1,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_witness: Option<DerivedChangeReadDiagnosticFailureWitnessV1>,
+}
+
+/// Bounded, diagnostic-only oracle witness. It intentionally carries hashes and
+/// typed envelope fields, never response documents, messages, or filesystem paths.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(
+    tag = "oracle",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum DerivedChangeReadDiagnosticFailureWitnessV1 {
+    StrictParity {
+        derived: DerivedChangeReadDiagnosticSemanticWitnessV1,
+        strict: DerivedChangeReadDiagnosticSemanticWitnessV1,
+        expected_http_status: u16,
+        expected_code: Option<String>,
+    },
+    TypedFailure {
+        observed: DerivedChangeReadDiagnosticTypedWitnessV1,
+        expected: DerivedChangeReadDiagnosticTypedWitnessV1,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivedChangeReadDiagnosticSemanticWitnessV1 {
+    pub http_status: u16,
+    pub code: Option<String>,
+    pub normalized_document_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DerivedChangeReadDiagnosticTypedWitnessV1 {
+    pub schema: Option<String>,
+    pub version: Option<u64>,
+    pub code: Option<String>,
+    pub retryable: Option<bool>,
+    pub key_set: Vec<String>,
+    pub canonical_sha256: String,
+}
+
+struct DiagnosticReadFailure {
+    detail: String,
+    witness: Option<DerivedChangeReadDiagnosticFailureWitnessV1>,
+}
+
+impl From<String> for DiagnosticReadFailure {
+    fn from(detail: String) -> Self {
+        Self {
+            detail,
+            witness: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -247,12 +303,13 @@ where
     )
 }
 
-fn collect_derived_change_read_diagnostic_rows_for_cases_v1<F>(
+fn collect_derived_change_read_diagnostic_rows_for_cases_v1<F, E>(
     cases: &[QualificationDerivedChangeReadCaseV1],
     mut run: F,
 ) -> Vec<DerivedChangeReadDiagnosticRowV1>
 where
-    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), E>,
+    E: Into<DiagnosticReadFailure>,
 {
     cases
         .iter()
@@ -262,12 +319,17 @@ where
                 case,
                 status: DerivedChangeReadDiagnosticStatusV1::Passed,
                 failure_detail: None,
+                failure_witness: None,
             },
-            Err(failure_detail) => DerivedChangeReadDiagnosticRowV1 {
-                case,
-                status: DerivedChangeReadDiagnosticStatusV1::Failed,
-                failure_detail: Some(failure_detail),
-            },
+            Err(failure) => {
+                let failure = failure.into();
+                DerivedChangeReadDiagnosticRowV1 {
+                    case,
+                    status: DerivedChangeReadDiagnosticStatusV1::Failed,
+                    failure_detail: Some(failure.detail),
+                    failure_witness: failure.witness,
+                }
+            }
         })
         .collect()
 }
@@ -286,13 +348,14 @@ where
     )
 }
 
-fn collect_derived_change_read_diagnostic_rows_after_preflight_for_cases_v1<F>(
+fn collect_derived_change_read_diagnostic_rows_after_preflight_for_cases_v1<F, E>(
     cases: &[QualificationDerivedChangeReadCaseV1],
     preflight: &DerivedChangeReadDiagnosticPreflightV1,
     run: F,
 ) -> Vec<DerivedChangeReadDiagnosticRowV1>
 where
-    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), String>,
+    F: FnMut(QualificationDerivedChangeReadCaseV1) -> Result<(), E>,
+    E: Into<DiagnosticReadFailure>,
 {
     if preflight.status == DerivedChangeReadDiagnosticStatusV1::Passed {
         collect_derived_change_read_diagnostic_rows_for_cases_v1(cases, run)
@@ -304,6 +367,7 @@ where
                 case,
                 status: DerivedChangeReadDiagnosticStatusV1::Skipped,
                 failure_detail: preflight.failure_detail.clone(),
+                failure_witness: None,
             })
             .collect()
     }
@@ -1060,6 +1124,7 @@ mod instrumented {
                 case,
                 status: DerivedChangeReadDiagnosticStatusV1::Skipped,
                 failure_detail: Some(detail.to_owned()),
+                failure_witness: None,
             })
             .collect()
     }
@@ -1230,11 +1295,30 @@ mod instrumented {
         Ok(())
     }
 
+    fn measure_diagnostic_read_case(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+        case: QualificationDerivedChangeReadCaseV1,
+        expected: &ExpectedFixtureOutcome,
+    ) -> Result<MeasuredCase, String> {
+        let access = DerivedChangeAccess::resolve_for_inspector(&request.repository)
+            .map_err(|error| error.to_string())?;
+        if !access.is_active() {
+            return Err("derived Change diagnostic adapter resolved explicit-off state".to_owned());
+        }
+        measure_case(
+            &access,
+            &request.repository,
+            case,
+            &request.summary_query,
+            expected,
+        )
+    }
+
     fn run_diagnostic_read_case(
         template: &QualificationDerivedChangeReadRunRequestV1,
         workspace: &Path,
         case: QualificationDerivedChangeReadCaseV1,
-    ) -> Result<(), String> {
+    ) -> Result<(), DiagnosticReadFailure> {
         let root = diagnostic_case_root(workspace, "rows", case as u8, &format!("{case:?}"));
         let request = diagnostic_clone_request(template, &root)?;
         validate_diagnostic_clone(&request)?;
@@ -1278,34 +1362,69 @@ mod instrumented {
                             .endpoint,
                     )?;
                 }
-                semantic_pair(
+                match semantic_pair_observed(
                     &request,
                     case,
                     &request.summary_query,
                     &derived.endpoint,
                     authoritative.as_ref().map(|child| &child.endpoint),
                     &expected,
-                )?
+                ) {
+                    Ok(semantic) => semantic,
+                    Err(failure)
+                        if expected.oracle
+                            == QualificationDerivedChangeReadOracleV1::TypedFailure =>
+                    {
+                        let measured = measure_diagnostic_read_case(&request, case, &expected)?;
+                        let expected_document =
+                            measured.expected_typed_document.as_ref().ok_or_else(|| {
+                                "typed diagnostic witness omitted its expected document".to_owned()
+                            })?;
+                        return Err(DiagnosticReadFailure {
+                            detail: failure.detail,
+                            witness: Some(
+                                DerivedChangeReadDiagnosticFailureWitnessV1::TypedFailure {
+                                    observed: failure.typed_witness.ok_or_else(|| {
+                                        "typed diagnostic failure omitted its observed witness"
+                                            .to_owned()
+                                    })?,
+                                    expected: diagnostic_expected_typed_witness(expected_document),
+                                },
+                            ),
+                        });
+                    }
+                    Err(failure) => return Err(failure.detail.into()),
+                }
             }
         };
-        let access = DerivedChangeAccess::resolve_for_inspector(&request.repository)
-            .map_err(|error| error.to_string())?;
-        if !access.is_active() {
-            return Err("derived Change diagnostic adapter resolved explicit-off state".to_owned());
-        }
-        let measured = measure_case(
-            &access,
-            &request.repository,
-            case,
-            &request.summary_query,
-            &expected,
-        )?;
+        let measured = measure_diagnostic_read_case(&request, case, &expected)?;
         if !semantic.wire_contract_matches
             || measured.expected_typed_document != semantic.typed_document
         {
-            return Err(format!(
-                "derived Change diagnostic case {case:?} did not satisfy its oracle"
-            ));
+            let witness = match expected.oracle {
+                QualificationDerivedChangeReadOracleV1::StrictParity => {
+                    strict_diagnostic_witness(&semantic, &expected)?
+                }
+                QualificationDerivedChangeReadOracleV1::TypedFailure => {
+                    let observed = semantic.typed_document.as_ref().ok_or_else(|| {
+                        "typed diagnostic witness omitted its observed document".to_owned()
+                    })?;
+                    let expected_document =
+                        measured.expected_typed_document.as_ref().ok_or_else(|| {
+                            "typed diagnostic witness omitted its expected document".to_owned()
+                        })?;
+                    DerivedChangeReadDiagnosticFailureWitnessV1::TypedFailure {
+                        observed: diagnostic_expected_typed_witness(observed),
+                        expected: diagnostic_expected_typed_witness(expected_document),
+                    }
+                }
+            };
+            return Err(DiagnosticReadFailure {
+                detail: format!(
+                    "derived Change diagnostic case {case:?} did not satisfy its oracle"
+                ),
+                witness: Some(witness),
+            });
         }
         Ok(())
     }
@@ -2104,11 +2223,27 @@ mod instrumented {
 
     struct SemanticPair {
         strict_sha256: Option<String>,
+        strict_http_status: Option<u16>,
+        strict_code: Option<String>,
         derived_sha256: String,
         wire_contract_matches: bool,
         observed_http_status: u16,
         observed_code: Option<String>,
         typed_document: Option<QualificationDerivedChangeTypedDocumentV1>,
+    }
+
+    struct SemanticPairFailure {
+        detail: String,
+        typed_witness: Option<DerivedChangeReadDiagnosticTypedWitnessV1>,
+    }
+
+    impl From<String> for SemanticPairFailure {
+        fn from(detail: String) -> Self {
+            Self {
+                detail,
+                typed_witness: None,
+            }
+        }
     }
 
     fn semantic_pair(
@@ -2119,6 +2254,25 @@ mod instrumented {
         authoritative: Option<&InspectorEndpoint>,
         expected: &ExpectedFixtureOutcome,
     ) -> Result<SemanticPair, String> {
+        semantic_pair_observed(
+            request,
+            case,
+            summary_query,
+            derived,
+            authoritative,
+            expected,
+        )
+        .map_err(|failure| failure.detail)
+    }
+
+    fn semantic_pair_observed(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+        case: QualificationDerivedChangeReadCaseV1,
+        summary_query: &str,
+        derived: &InspectorEndpoint,
+        authoritative: Option<&InspectorEndpoint>,
+        expected: &ExpectedFixtureOutcome,
+    ) -> Result<SemanticPair, SemanticPairFailure> {
         let (derived_status, derived_value, derived_consistent) =
             semantic_case(request, case, summary_query, derived)?;
         let observed_code = derived_value
@@ -2127,7 +2281,20 @@ mod instrumented {
             .map(str::to_owned);
         let typed_document =
             if expected.oracle == QualificationDerivedChangeReadOracleV1::TypedFailure {
-                Some(typed_failure_document(&derived_value, expected)?)
+                match typed_failure_document(&derived_value, expected) {
+                    Ok(document) => Some(document),
+                    Err(detail) => {
+                        return Err(SemanticPairFailure {
+                            detail,
+                            typed_witness: Some(diagnostic_typed_witness(&derived_value).map_err(
+                                |detail| SemanticPairFailure {
+                                    detail,
+                                    typed_witness: None,
+                                },
+                            )?),
+                        });
+                    }
+                }
             } else {
                 None
             };
@@ -2135,37 +2302,48 @@ mod instrumented {
         let derived_bytes =
             canonical_json_bytes(&derived_normalized).map_err(|error| error.to_string())?;
         let derived_sha256 = sha256_bytes_hex(&derived_bytes);
-        let (strict_sha256, wire_contract_matches) = match expected.oracle {
-            QualificationDerivedChangeReadOracleV1::StrictParity => {
-                let authoritative = authoritative.ok_or_else(|| {
-                    "strict-parity Change fixture omitted its authoritative child".to_owned()
-                })?;
-                let (strict_status, strict_value, strict_consistent) =
-                    semantic_case(request, case, summary_query, authoritative)?;
-                let strict_normalized = normalize_change_semantic(strict_value);
-                let strict_bytes =
-                    canonical_json_bytes(&strict_normalized).map_err(|error| error.to_string())?;
-                let strict_sha256 = sha256_bytes_hex(&strict_bytes);
-                (
-                    Some(strict_sha256.clone()),
-                    derived_status == expected.http_status
-                        && strict_status == expected.http_status
+        let (strict_sha256, strict_http_status, strict_code, wire_contract_matches) =
+            match expected.oracle {
+                QualificationDerivedChangeReadOracleV1::StrictParity => {
+                    let authoritative = authoritative.ok_or_else(|| {
+                        "strict-parity Change fixture omitted its authoritative child".to_owned()
+                    })?;
+                    let (strict_status, strict_value, strict_consistent) =
+                        semantic_case(request, case, summary_query, authoritative)?;
+                    let strict_normalized = normalize_change_semantic(strict_value);
+                    let strict_code = strict_normalized
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let strict_bytes = canonical_json_bytes(&strict_normalized)
+                        .map_err(|error| error.to_string())?;
+                    let strict_sha256 = sha256_bytes_hex(&strict_bytes);
+                    (
+                        Some(strict_sha256.clone()),
+                        Some(strict_status),
+                        strict_code,
+                        derived_status == expected.http_status
+                            && strict_status == expected.http_status
+                            && observed_code.as_deref() == expected.code
+                            && derived_consistent
+                            && strict_consistent
+                            && strict_sha256 == derived_sha256,
+                    )
+                }
+                QualificationDerivedChangeReadOracleV1::TypedFailure => (
+                    None,
+                    None,
+                    None,
+                    authoritative.is_none()
+                        && derived_status == expected.http_status
                         && observed_code.as_deref() == expected.code
-                        && derived_consistent
-                        && strict_consistent
-                        && strict_sha256 == derived_sha256,
-                )
-            }
-            QualificationDerivedChangeReadOracleV1::TypedFailure => (
-                None,
-                authoritative.is_none()
-                    && derived_status == expected.http_status
-                    && observed_code.as_deref() == expected.code
-                    && derived_consistent,
-            ),
-        };
+                        && derived_consistent,
+                ),
+            };
         Ok(SemanticPair {
             strict_sha256,
+            strict_http_status,
+            strict_code,
             derived_sha256,
             wire_contract_matches,
             observed_http_status: derived_status,
@@ -2228,6 +2406,83 @@ mod instrumented {
             code: code.to_owned(),
             retryable,
             canonical_sha256,
+        })
+    }
+
+    fn diagnostic_typed_witness(
+        value: &Value,
+    ) -> Result<DerivedChangeReadDiagnosticTypedWitnessV1, String> {
+        let object = value.as_object();
+        let canonical_sha256 = canonical_json_bytes(value)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())?;
+        Ok(DerivedChangeReadDiagnosticTypedWitnessV1 {
+            schema: object
+                .and_then(|document| document.get("schema"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            version: object
+                .and_then(|document| document.get("version"))
+                .and_then(Value::as_u64),
+            code: object
+                .and_then(|document| document.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            retryable: object
+                .and_then(|document| document.get("retryable"))
+                .and_then(Value::as_bool),
+            key_set: object
+                .map(|document| document.keys().cloned().collect())
+                .unwrap_or_default(),
+            canonical_sha256,
+        })
+    }
+
+    fn diagnostic_expected_typed_witness(
+        document: &QualificationDerivedChangeTypedDocumentV1,
+    ) -> DerivedChangeReadDiagnosticTypedWitnessV1 {
+        let mut key_set = vec![
+            "code".to_owned(),
+            "message".to_owned(),
+            "schema".to_owned(),
+            "version".to_owned(),
+        ];
+        if document.retryable.is_some() {
+            key_set.push("retryable".to_owned());
+            key_set.sort();
+        }
+        DerivedChangeReadDiagnosticTypedWitnessV1 {
+            schema: Some(document.schema.clone()),
+            version: Some(u64::from(document.version)),
+            code: Some(document.code.clone()),
+            retryable: document.retryable,
+            key_set,
+            canonical_sha256: document.canonical_sha256.clone(),
+        }
+    }
+
+    fn strict_diagnostic_witness(
+        semantic: &SemanticPair,
+        expected: &ExpectedFixtureOutcome,
+    ) -> Result<DerivedChangeReadDiagnosticFailureWitnessV1, String> {
+        Ok(DerivedChangeReadDiagnosticFailureWitnessV1::StrictParity {
+            derived: DerivedChangeReadDiagnosticSemanticWitnessV1 {
+                http_status: semantic.observed_http_status,
+                code: semantic.observed_code.clone(),
+                normalized_document_sha256: semantic.derived_sha256.clone(),
+            },
+            strict: DerivedChangeReadDiagnosticSemanticWitnessV1 {
+                http_status: semantic
+                    .strict_http_status
+                    .ok_or_else(|| "strict diagnostic witness omitted HTTP status".to_owned())?,
+                code: semantic.strict_code.clone(),
+                normalized_document_sha256: semantic
+                    .strict_sha256
+                    .clone()
+                    .ok_or_else(|| "strict diagnostic witness omitted document hash".to_owned())?,
+            },
+            expected_http_status: expected.http_status,
+            expected_code: expected.code.map(str::to_owned),
         })
     }
 
@@ -2322,6 +2577,8 @@ mod instrumented {
         Ok((
             SemanticPair {
                 strict_sha256: Some(strict_sha256),
+                strict_http_status: Some(200),
+                strict_code: None,
                 derived_sha256,
                 wire_contract_matches: consistent,
                 observed_http_status: 200,
@@ -3461,6 +3718,28 @@ mod instrumented {
         }
 
         #[test]
+        fn diagnostic_typed_witness_hashes_but_does_not_retain_the_message() {
+            let witness = diagnostic_typed_witness(&json!({
+                "schema": "pointbreak.inspect-change-projection-error",
+                "version": 1,
+                "code": "projection_invalid",
+                "message": "raw diagnostic message must not escape",
+            }))
+            .expect("bounded typed witness");
+
+            assert_eq!(
+                witness.key_set,
+                ["code", "message", "schema", "version"].map(str::to_owned)
+            );
+            assert_eq!(witness.canonical_sha256.len(), 64);
+            assert!(
+                !serde_json::to_string(&witness)
+                    .expect("serialize witness")
+                    .contains("raw diagnostic message")
+            );
+        }
+
+        #[test]
         fn stale_token_oracle_uses_a_distinct_governed_append_instead_of_ready_retry() {
             let source = include_str!("change_read.rs");
             let stale_token_body = source
@@ -3695,5 +3974,58 @@ mod tests {
             postflight.failure_detail.as_deref(),
             Some("template inventory diagnostic")
         );
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn failed_diagnostic_read_row_retains_a_bounded_oracle_witness() {
+        let witness = DerivedChangeReadDiagnosticFailureWitnessV1::StrictParity {
+            derived: DerivedChangeReadDiagnosticSemanticWitnessV1 {
+                http_status: 200,
+                code: None,
+                normalized_document_sha256: "1".repeat(64),
+            },
+            strict: DerivedChangeReadDiagnosticSemanticWitnessV1 {
+                http_status: 200,
+                code: None,
+                normalized_document_sha256: "2".repeat(64),
+            },
+            expected_http_status: 200,
+            expected_code: None,
+        };
+        let rows = collect_derived_change_read_diagnostic_rows_for_cases_v1(
+            &[QualificationDerivedChangeReadCaseV1::SummaryQuery],
+            |_| {
+                Err(DiagnosticReadFailure {
+                    detail: "generic mismatch".to_owned(),
+                    witness: Some(witness.clone()),
+                })
+            },
+        );
+
+        assert_eq!(rows[0].failure_witness.as_ref(), Some(&witness));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn typed_diagnostic_failure_does_not_replay_the_semantic_probe() {
+        let source = include_str!("change_read.rs");
+        let diagnostic = source
+            .split("fn run_diagnostic_read_case(")
+            .nth(1)
+            .expect("diagnostic read case")
+            .split("fn establish_diagnostic_post_append(")
+            .next()
+            .expect("bounded diagnostic read case");
+        let failure_branch = diagnostic
+            .split("match semantic_pair_observed(")
+            .nth(1)
+            .expect("diagnostic semantic-pair branch")
+            .split("Err(failure) => return Err(failure.detail.into())")
+            .next()
+            .expect("diagnostic semantic-pair failure branch");
+
+        assert_eq!(diagnostic.matches("semantic_pair_observed(").count(), 1);
+        assert!(!failure_branch.contains("semantic_case("));
     }
 }

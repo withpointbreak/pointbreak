@@ -243,7 +243,7 @@ const request=JSON.parse(await readFile(requestArg.slice(requestArg.indexOf("=")
 const ids={duplicate_equal:"duplicate-equal-v1",duplicate_conflicting:"duplicate-conflict-v1",operative_removal:"removal-v1",missing_selected_carrier:"missing-carrier-v1",mutated_selected_carrier:"mutated-carrier-v1",wrong_family_selected_carrier:"wrong-family-carrier-v1",incomplete_change:"incomplete-v1",cycle_conflicted_change:"cycle-conflicted-v1"};
 const witness=(fixtureId)=>JSON.stringify({schema:"pointbreak.qualification-derived-change-fixture-witness.v1",fixtureId,authoritativeInventorySha256:"${digest("f")}",storageForbiddenProbeHashes:{proposalSummarySha256:"${digest("1")}",proseSha256:"${digest("2")}",payloadDocumentSha256:"${digest("3")}"}});
 if(process.argv.includes("--derived-change-fixture-materialize")){if(request.kind === "mutated_selected_carrier" && process.argv.includes("--test-fail-mutated")){process.stderr.write("fixture fail");process.exit(7)}await mkdir(request.root,{recursive:true});console.log(witness(ids[request.kind]) + (request.kind === "mutated_selected_carrier" && process.argv.includes("--test-witness-mismatch") ? " " : ""));process.exit(0)}
-const fixture=request.readRequest.fixture; const typed=new Set(["duplicate-conflict-v1","missing-carrier-v1","mutated-carrier-v1","wrong-family-carrier-v1"]); const sourceFailure=process.argv.includes("--test-source-preflight-failure"); const caseStatus=sourceFailure?{status:"skipped",failureDetail:"synthetic source preflight failure"}:{status:"passed"}; const rows=(fixture === "topology-v1" ? ${JSON.stringify(readCases)} : typed.has(fixture) ? ${JSON.stringify(["profile", "changes_bare", "changes_bounded", "attention_bare", "attention_bounded", "summary_query"])} : ${JSON.stringify(readCases.slice(0, 8))}).map((caseName)=>({case:caseName,...caseStatus}));
+const fixture=request.readRequest.fixture; const typed=new Set(["duplicate-conflict-v1","missing-carrier-v1","mutated-carrier-v1","wrong-family-carrier-v1"]); const sourceFailure=process.argv.includes("--test-source-preflight-failure"); const witnessFailure=process.argv.includes("--test-witness-failure"); const typedWitnessFailure=process.argv.includes("--test-typed-witness-failure"); const caseStatus=sourceFailure?{status:"skipped",failureDetail:"synthetic source preflight failure"}:{status:"passed"}; const strictWitness={oracle:"strict_parity",derived:{httpStatus:200,code:null,normalizedDocumentSha256:"${digest("1")}"},strict:{httpStatus:200,code:null,normalizedDocumentSha256:"${digest("2")}"},expectedHttpStatus:200,expectedCode:null}; const typedWitness={oracle:"typed_failure",observed:{schema:"pointbreak.inspect-change-projection-error",version:1,code:"projection_invalid",retryable:null,keySet:["code","message","schema","version"],canonicalSha256:"${digest("3")}"},expected:{schema:"pointbreak.inspect-change-projection-error",version:1,code:"projection_invalid",retryable:null,keySet:["code","message","schema","version"],canonicalSha256:"${digest("4")}"}}; const rows=(fixture === "topology-v1" ? ${JSON.stringify(readCases)} : typed.has(fixture) ? ${JSON.stringify(["profile", "changes_bare", "changes_bounded", "attention_bare", "attention_bounded", "summary_query"])} : ${JSON.stringify(readCases.slice(0, 8))}).map((caseName,index)=>(witnessFailure||typedWitnessFailure)&&index===0?{case:caseName,status:"failed",failureDetail:"bounded mismatch",failureWitness:typedWitnessFailure?typedWitness:strictWitness}:{case:caseName,...caseStatus});
 const commandSha256=createHash("sha256").update(JSON.stringify([process.argv[1],...process.argv.slice(2)])).digest("hex"); if(request.readRequest.execution.commandSha256 !== commandSha256) throw new Error("per-fixture command identity differs");
 const capture=process.argv.find((value)=>value.startsWith("--test-capture=")); if(capture){const activation=await readFile(join(request.readRequest.sourceCheckout,"tests","support","assets","change-ready-store",${JSON.stringify(activationRecord)}),"utf8"); const probes=request.readRequest.storageForbiddenProbes; const expected=fixture === "topology-v1" ? ["Decision continuity matrix","The matrix keeps evidence classes distinct."] : ["qualification storage summary sentinel v1","qualification storage prose sentinel v1"]; if(probes.proposalSummary !== expected[0] || probes.prose !== expected[1]) throw new Error("fixture probes must match public materializer authority"); if(probes.payloadDocument !== activation) throw new Error("payload probe must be authoritative activation bytes"); for(const key of ["HOME","TMP","TEMP"]){if(!existsSync(process.env[key])) throw new Error(key+" must name an existing isolated root")} await appendFile(capture.slice(capture.indexOf("=")+1),JSON.stringify({fixture,platform:request.readRequest.execution.platform,probes,environment:{HOME:process.env.HOME,TMP:process.env.TMP,TEMP:process.env.TEMP}})+"\\n")}
 if(process.argv.includes("--test-invalid-output")){console.log("{}"),process.exit(0)}
@@ -510,6 +510,52 @@ test("collects exact named inventories from all nine public fixtures", async () 
 			(await lstat(join(input.caseRoot, retainedPath))).isFile(),
 			true,
 		);
+});
+
+test("promotes only a bounded read mismatch witness into aggregate actual", async () => {
+	const input = await fixture();
+	input.config.harness.argsPrefix = ["--test-witness-failure"];
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const failed = result.cases.find(
+		({ id }) => id === "topology-v1.read.profile",
+	);
+	assert.equal(failed.status, "failed");
+	assert.deepEqual(failed.actual, {
+		oracle: "strict_parity",
+		derived: {
+			httpStatus: 200,
+			code: null,
+			normalizedDocumentSha256: digest("1"),
+		},
+		strict: {
+			httpStatus: 200,
+			code: null,
+			normalizedDocumentSha256: digest("2"),
+		},
+		expectedHttpStatus: 200,
+		expectedCode: null,
+	});
+	assert.equal(JSON.stringify(failed.actual).includes(input.root), false);
+});
+
+test("promotes typed envelopes and hashes without raw failure messages", async () => {
+	const input = await fixture();
+	input.config.harness.argsPrefix = ["--test-typed-witness-failure"];
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const actual = result.cases.find(
+		({ id }) => id === "duplicate-conflict-v1.read.profile",
+	).actual;
+	assert.equal(actual.oracle, "typed_failure");
+	assert.deepEqual(actual.observed.keySet, [
+		"code",
+		"message",
+		"schema",
+		"version",
+	]);
+	assert.equal(actual.observed.canonicalSha256, digest("3"));
+	assert.equal(actual.expected.canonicalSha256, digest("4"));
+	assert.equal(Object.hasOwn(actual.observed, "message"), false);
+	assert.equal(JSON.stringify(actual).includes(input.root), false);
 });
 
 test("binds each read request to retained witness file bytes, not its path spelling", async () => {

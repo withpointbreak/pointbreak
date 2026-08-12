@@ -12,12 +12,12 @@ const source = async (name) =>
 	readFile(new URL(`./${name}`, import.meta.url), "utf8");
 
 const browserRunner = (browser, config) => {
-	const expression = browser.trim().replace(/;$/u, "");
+	const source = browser.replace(
+		"__POINTBREAK_DERIVED_CHANGE_DIAGNOSTIC_BROWSER_CONFIG__",
+		JSON.stringify(config),
+	);
 	return new Function(
-		`return (${expression.replace(
-			"__POINTBREAK_DERIVED_CHANGE_DIAGNOSTIC_BROWSER_CONFIG__",
-			JSON.stringify(config),
-		)})`,
+		`return (${source}\n)`,
 	)();
 };
 

@@ -716,7 +716,14 @@ function statusRow(
 		phase,
 		fixtureCheckpoint: { fixture, checkpoint: phase },
 		...(status === "failed"
-			? { failureClass, expected: "passed", actual: String(detail) }
+			? {
+					failureClass,
+					expected: "passed",
+					actual:
+						typeof detail === "object" && detail !== null
+							? structuredClone(detail)
+							: String(detail),
+				}
 			: {}),
 		...(status === "skipped"
 			? { skipReason: String(detail ?? "dependency did not pass") }
@@ -737,6 +744,88 @@ function outputStatus(row, fallback) {
 		throw new Error("change read diagnostic failure lacks detail");
 	return fallback ? "skipped" : row.status;
 }
+function exactKeys(value, expected, label) {
+	object(value, label);
+	if (!sameSet(Object.keys(value), expected))
+		throw new Error(`${label} keys differ`);
+}
+function nullableText(value, label) {
+	if (value !== null) text(value, label);
+}
+function semanticWitness(value, label) {
+	exactKeys(
+		value,
+		["httpStatus", "code", "normalizedDocumentSha256"],
+		label,
+	);
+	if (!Number.isInteger(value.httpStatus) || value.httpStatus < 100)
+		throw new Error(`${label} HTTP status is invalid`);
+	nullableText(value.code, `${label} code`);
+	digest(value.normalizedDocumentSha256, `${label} normalized document`);
+}
+function typedWitness(value, label) {
+	exactKeys(
+		value,
+		[
+			"schema",
+			"version",
+			"code",
+			"retryable",
+			"keySet",
+			"canonicalSha256",
+		],
+		label,
+	);
+	nullableText(value.schema, `${label} schema`);
+	if (value.version !== null && !Number.isInteger(value.version))
+		throw new Error(`${label} version is invalid`);
+	nullableText(value.code, `${label} code`);
+	if (value.retryable !== null && typeof value.retryable !== "boolean")
+		throw new Error(`${label} retryable is invalid`);
+	if (
+		!Array.isArray(value.keySet) ||
+		value.keySet.length > 32 ||
+		!value.keySet.every(
+			(key) => typeof key === "string" && key.length > 0 && key.length <= 64,
+		) ||
+		new Set(value.keySet).size !== value.keySet.length ||
+		JSON.stringify(value.keySet) !== JSON.stringify([...value.keySet].sort())
+	)
+		throw new Error(`${label} key set is invalid`);
+	digest(value.canonicalSha256, `${label} canonical document`);
+}
+function failureWitness(value) {
+	object(value, "change read diagnostic failure witness");
+	if (value.oracle === "strict_parity") {
+		exactKeys(
+			value,
+			[
+				"oracle",
+				"derived",
+				"strict",
+				"expectedHttpStatus",
+				"expectedCode",
+			],
+			"strict-parity diagnostic witness",
+		);
+		semanticWitness(value.derived, "derived semantic witness");
+		semanticWitness(value.strict, "strict semantic witness");
+		if (!Number.isInteger(value.expectedHttpStatus))
+			throw new Error("strict-parity expected HTTP status is invalid");
+		nullableText(value.expectedCode, "strict-parity expected code");
+	} else if (value.oracle === "typed_failure") {
+		exactKeys(
+			value,
+			["oracle", "observed", "expected"],
+			"typed-failure diagnostic witness",
+		);
+		typedWitness(value.observed, "observed typed witness");
+		typedWitness(value.expected, "expected typed witness");
+	} else {
+		throw new Error("change read diagnostic failure witness oracle is invalid");
+	}
+	return value;
+}
 function validateExactRows(rows, expected, label) {
 	if (
 		!Array.isArray(rows) ||
@@ -747,6 +836,13 @@ function validateExactRows(rows, expected, label) {
 		new Set(rows.map((row) => row.case)).size !== expected.length
 	)
 		throw new Error(`change read diagnostic ${label} inventory differs`);
+	for (const row of rows) {
+		if (row.failureWitness !== undefined) {
+			if (row.status !== "failed")
+				throw new Error(`change read diagnostic ${label} witness is misplaced`);
+			failureWitness(row.failureWitness);
+		}
+	}
 	return [...rows].sort((a, b) => a.case.localeCompare(b.case));
 }
 function validateOutput(value, fixture, rows, controls, storage) {
@@ -1276,7 +1372,9 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 					readDeps,
 					fixture,
 					`read-${row.case}`,
-					readReady ? row.failureDetail : "read preflight did not pass",
+					readReady
+						? (row.failureWitness ?? row.failureDetail)
+						: "read preflight did not pass",
 				),
 			);
 		for (const row of output.controls) {
