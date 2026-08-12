@@ -307,6 +307,7 @@ test("runtime error cases retain their own empty-error expectations", async () =
 	assert.deepEqual(pageErrors.expected, { pageErrors: [] });
 	assert.deepEqual(consoleErrors.expected, { consoleErrors: [] });
 	assert.deepEqual(pageErrors.fixtureCheckpoint, {
+		fixture: "fixture-selftest",
 		fixtureId: "fixture-selftest",
 		rawWitnessSha256: "c".repeat(64),
 		actualAuthoritativeInventorySha256: "a".repeat(64),
@@ -369,6 +370,11 @@ test("a rejected authenticated bootstrap is aggregated and skips only transition
 	assert.equal(result.cases[0].failureClass, "lane_invalid");
 	assert.deepEqual(result.cases[1].dependsOn, ["browser-bootstrap"]);
 	assert.match(result.cases[1].skipReason, /browser-bootstrap/);
+	assert.ok(
+		result.cases.every(
+			({ fixtureCheckpoint }) => fixtureCheckpoint.fixture === "fixture-selftest",
+		),
+	);
 });
 
 test("materializer requires an explicit hash mode for an explicit hash program", async () => {

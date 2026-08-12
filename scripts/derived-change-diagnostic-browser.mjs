@@ -17,6 +17,7 @@
 		if (message.type() === "error") consoleErrors.push(message.text());
 	});
 	const fixtureCheckpoint = (checkpoint) => ({
+		fixture: config.fixture.id,
 		fixtureId: config.fixture.id,
 		rawWitnessSha256: config.fixture.rawWitnessSha256,
 		actualAuthoritativeInventorySha256:
