@@ -305,6 +305,30 @@ test("continues independent cases and skips only a failed dependency subtree", a
 	);
 });
 
+test("creates a nested absent output root after validating its existing ancestor", async () => {
+	const parent = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-nested-output-"),
+	);
+	const scratch = join(parent, "scratch");
+	const root = join(
+		parent,
+		"evidence",
+		"host",
+		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	);
+	await mkdir(scratch);
+	const input = request(root);
+	input.temporaryRoot = scratch;
+
+	const result = await executeDerivedChangeDiagnosticCases(input);
+
+	assert.equal(result.cases.length, input.cases.length);
+	assert.equal(
+		await readFile(join(root, "cases", "browser", "artifact.txt"), "utf8"),
+		"browser",
+	);
+});
+
 test("captures stable command logs and declared artifacts by SHA-256", async () => {
 	const root = await diagnosticRoot("pointbreak-diagnostic-hashes-");
 	const input = request(root);

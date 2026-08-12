@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmod,
+	appendFile,
 	lstat,
 	mkdir,
 	mkdtemp,
@@ -90,6 +91,8 @@ const controls = [
 	"concurrent_writers_and_readers",
 	"busy_writer_nonblocking",
 ];
+const activationRecord =
+	"5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json";
 
 const storageForbiddenProbeHashes = {
 	proposalSummarySha256:
@@ -98,6 +101,12 @@ const storageForbiddenProbeHashes = {
 		"da79cc8c9b04f41616275f4a6bd027acf6d0358f3605dac74ccadfeea92945a4",
 	payloadDocumentSha256:
 		"20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf",
+};
+const ordinaryStorageForbiddenProbeHashes = {
+	proposalSummarySha256:
+		"c28dcb78bb4ccee57a2c6af8c1496b9fc8a14dd4860404907cc8607077ef4fc7",
+	proseSha256:
+		"50598e3fd911558ba8a903c07689d5128156d63db94dbcce8deda237e8bc73aa",
 };
 
 const topologyWitness = ({ dynamic = "a", inventory = "f" } = {}) => {
@@ -224,8 +233,10 @@ async function fixture({ topologyActual = topologyWitness() } = {}) {
 	await writeFile(
 		fake,
 		`#!${process.execPath}
-import { readFile, mkdir } from "node:fs/promises";
+import { appendFile, readFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 if(!process.env.POINTBREAK_GIT_PROGRAM) throw new Error("exact Git program is required");
 const requestArg=process.argv.find((value)=>value.startsWith("--derived-access-request="));
 const request=JSON.parse(await readFile(requestArg.slice(requestArg.indexOf("=")+1),"utf8"));
@@ -234,6 +245,7 @@ const witness=(fixtureId)=>JSON.stringify({schema:"pointbreak.qualification-deri
 if(process.argv.includes("--derived-change-fixture-materialize")){if(request.kind === "mutated_selected_carrier" && process.argv.includes("--test-fail-mutated")){process.stderr.write("fixture fail");process.exit(7)}await mkdir(request.root,{recursive:true});console.log(witness(ids[request.kind]) + (request.kind === "mutated_selected_carrier" && process.argv.includes("--test-witness-mismatch") ? " " : ""));process.exit(0)}
 const fixture=request.readRequest.fixture; const typed=new Set(["duplicate-conflict-v1","missing-carrier-v1","mutated-carrier-v1","wrong-family-carrier-v1"]); const sourceFailure=process.argv.includes("--test-source-preflight-failure"); const caseStatus=sourceFailure?{status:"skipped",failureDetail:"synthetic source preflight failure"}:{status:"passed"}; const rows=(fixture === "topology-v1" ? ${JSON.stringify(readCases)} : typed.has(fixture) ? ${JSON.stringify(["profile", "changes_bare", "changes_bounded", "attention_bare", "attention_bounded", "summary_query"])} : ${JSON.stringify(readCases.slice(0, 8))}).map((caseName)=>({case:caseName,...caseStatus}));
 const commandSha256=createHash("sha256").update(JSON.stringify([process.argv[1],...process.argv.slice(2)])).digest("hex"); if(request.readRequest.execution.commandSha256 !== commandSha256) throw new Error("per-fixture command identity differs");
+const capture=process.argv.find((value)=>value.startsWith("--test-capture=")); if(capture){const activation=await readFile(join(request.readRequest.sourceCheckout,"tests","support","assets","change-ready-store",${JSON.stringify(activationRecord)}),"utf8"); const probes=request.readRequest.storageForbiddenProbes; const expected=fixture === "topology-v1" ? ["Decision continuity matrix","The matrix keeps evidence classes distinct."] : ["qualification storage summary sentinel v1","qualification storage prose sentinel v1"]; if(probes.proposalSummary !== expected[0] || probes.prose !== expected[1]) throw new Error("fixture probes must match public materializer authority"); if(probes.payloadDocument !== activation) throw new Error("payload probe must be authoritative activation bytes"); for(const key of ["HOME","TMP","TEMP"]){if(!existsSync(process.env[key])) throw new Error(key+" must name an existing isolated root")} await appendFile(capture.slice(capture.indexOf("=")+1),JSON.stringify({fixture,platform:request.readRequest.execution.platform,probes,environment:{HOME:process.env.HOME,TMP:process.env.TMP,TEMP:process.env.TEMP}})+"\\n")}
 if(process.argv.includes("--test-invalid-output")){console.log("{}"),process.exit(0)}
 const topology=fixture === "topology-v1"; const preflight=(topology?["source","fixture","library_control","cli_control","template_postflight"]:["source","fixture","template_postflight"]).map((kind)=>sourceFailure?{kind,status:kind === "source"?"failed":"skipped",failureDetail:"synthetic source preflight failure"}:{kind,status:"passed"});
 for(const field of ["controlTestBinary","controlTestBinarySha256","controlTestBuildCommandSha256","controlCliTestBinary","controlCliTestBinarySha256","controlCliTestBuildCommandSha256"]){if(Object.hasOwn(request.readRequest,field) !== topology) throw new Error("control identity presence differs from fixture authority")}
@@ -528,6 +540,68 @@ test("binds each read request to retained witness file bytes, not its path spell
 		request.readRequest.fixtureWitnessSha256,
 		createHash("sha256").update(witness).digest("hex"),
 	);
+});
+
+test("uses authority-bound activation bytes and existing isolated fixture roots on Windows", async () => {
+	const input = await fixture();
+	const capture = join(input.root, "read-request-capture.jsonl");
+	input.config.harness.argsPrefix = [`--test-capture=${capture}`];
+	input.config.execution.platform = "windows_ntfs";
+	input.config.execution.operatingSystem = "windows";
+	input.config.execution.filesystem = "ntfs";
+	input.config.product.platform = "windows_ntfs";
+	input.config.product.operatingSystem = "windows";
+
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	assert.equal(
+		result.cases.find(({ id }) => id === "topology-v1.preflight.fixture").status,
+		"passed",
+	);
+	assert.equal(
+		result.cases.find(({ id }) => id === "duplicate-equal-v1.preflight.fixture")
+			.status,
+		"passed",
+	);
+	const requests = (await readFile(capture, "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	assert.equal(requests.length, 9);
+	assert.deepEqual(
+		new Set(requests.map(({ fixture }) => fixture)),
+		new Set([
+			"topology-v1",
+			"duplicate-equal-v1",
+			"duplicate-conflict-v1",
+			"removal-v1",
+			"missing-carrier-v1",
+			"mutated-carrier-v1",
+			"wrong-family-carrier-v1",
+			"incomplete-v1",
+			"cycle-conflicted-v1",
+		]),
+	);
+	for (const { environment, probes } of requests) {
+		const expected =
+			probes.proposalSummary === "Decision continuity matrix"
+				? storageForbiddenProbeHashes
+				: ordinaryStorageForbiddenProbeHashes;
+		assert.equal(environment.HOME, environment.TMP);
+		assert.equal(environment.HOME, environment.TEMP);
+		assert.match(environment.HOME, /environments/);
+		assert.equal(
+			createHash("sha256").update(probes.payloadDocument).digest("hex"),
+			input.config.fixtureAuthority.activationSha256,
+		);
+		assert.equal(
+			createHash("sha256").update(probes.proposalSummary).digest("hex"),
+			expected.proposalSummarySha256,
+		);
+		assert.equal(
+			createHash("sha256").update(probes.prose).digest("hex"),
+			expected.proseSha256,
+		);
+	}
 });
 
 test("rejects a same-byte symlinked jq binding as a global identity failure", async () => {

@@ -2629,7 +2629,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn native_ntfs_stable_continuation_persists_unrelated_volume_churn() {
+    fn native_ntfs_stable_continuation_defers_unrelated_volume_churn_to_maintenance() {
         let temp = populated_store(1);
         let lifecycle = active_lifecycle(temp.path());
         lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
@@ -2637,19 +2637,20 @@ mod tests {
         let before = current.service().truth_authority_snapshot().unwrap();
         std::fs::write(temp.path().join("unrelated-to-events.bin"), b"volume churn").unwrap();
 
-        let continued = lifecycle
+        let validation = lifecycle
             .validate_cached_current(&current)
-            .expect("unrelated NTFS churn remains stable")
-            .authority;
+            .expect("unrelated NTFS churn remains stable");
 
-        assert_ne!(continued.change_stamp, before.change_stamp);
+        assert_ne!(validation.authority.change_stamp, before.change_stamp);
+        assert!(validation.authority_maintenance_pending);
         assert_eq!(
             current
                 .service()
                 .truth_authority_snapshot()
                 .unwrap()
                 .change_stamp,
-            continued.change_stamp
+            before.change_stamp,
+            "cached-current validation observes a successor without persisting it"
         );
     }
 

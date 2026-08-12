@@ -920,10 +920,22 @@ async function readRequest(
 					}
 				: {}),
 			storageForbiddenProbes: {
-				proposalSummary: "qualification storage summary sentinel v1",
-				prose: "qualification storage prose sentinel v1",
-				payloadDocument:
-					"20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf",
+				...(fixture === "topology-v1"
+					? {
+						proposalSummary: "Decision continuity matrix",
+						prose: "The matrix keeps evidence classes distinct.",
+					}
+					: {
+						proposalSummary: "qualification storage summary sentinel v1",
+						prose: "qualification storage prose sentinel v1",
+					}),
+				payloadDocument: await readFile(
+					join(
+						config.fixtureAuthority.readyStore,
+						ACTIVATION_RECORD.split("/").at(-1),
+					),
+					"utf8",
+				),
 				privatePath: template,
 			},
 			summaryQuery: config.summaryQuery,
@@ -1042,6 +1054,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 		}
 		const template = join(config.workRoot, "templates", fixture);
 		const workspace = join(config.workRoot, "workspaces", fixture);
+		const environmentRoot = join(config.workRoot, "environments", fixture);
 		const requestRoot = join(config.caseRoot, "requests");
 		const logRoot = join(config.caseRoot, "logs");
 		await Promise.all([
@@ -1049,6 +1062,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 			mkdir(logRoot, { recursive: true }),
 			mkdir(join(config.workRoot, "templates"), { recursive: true }),
 			mkdir(join(config.workRoot, "workspaces"), { recursive: true }),
+			mkdir(environmentRoot, { recursive: true }),
 		]);
 		const materializeRequest = join(requestRoot, `${fixture}.materialize.json`);
 		await writeFile(
@@ -1182,7 +1196,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 				`--derived-access-request=${requestPath}`,
 			],
 			config.sourceCheckout,
-			cleanEnv(config, workspace),
+			cleanEnv(config, environmentRoot),
 		);
 		artifacts.push(
 			await retain(

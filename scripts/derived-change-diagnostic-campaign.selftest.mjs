@@ -25,6 +25,7 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_UNAVAILABLE_HOST_CONFIG_SCHEMA_V1,
 	mergeDerivedChangeDiagnosticCampaign,
+	runDerivedChangeDiagnosticHost,
 	writeUnavailableDerivedChangeDiagnosticHost,
 } from "./derived-change-diagnostic-campaign.mjs";
 import {
@@ -209,6 +210,14 @@ const diagnosticRoot = async (prefix) =>
 		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 	);
 
+const nestedDiagnosticRoot = async (prefix) =>
+	join(
+		await mkdtemp(join(await realpath(tmpdir()), prefix)),
+		"evidence",
+		"host",
+		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	);
+
 test("Windows filesystem probes use the fsutil volume spelling", () => {
 	assert.deepEqual(
 		derivedChangeDiagnosticFilesystemProbeArguments(
@@ -323,7 +332,7 @@ test("the supported derived Change campaign retains every diagnostic lane", asyn
 		"--no-fail-fast",
 		"existing_path_identity_ignores_equivalent_lexical_spellings",
 		"stable_authority_successor_does_not_wait_for_a_busy_writer",
-		"native_ntfs_stable_continuation_persists_unrelated_volume_churn",
+		"native_ntfs_stable_continuation_defers_unrelated_volume_churn_to_maintenance",
 		"--derived-change-diagnostic-identity",
 		"derived-change-diagnostic-browser.sh",
 		"derived-change-diagnostic-native.mjs",
@@ -701,7 +710,23 @@ test("Windows host requests retain the complete native Change-read collection", 
 	);
 	assert.equal(
 		JSON.parse(volumeChurn.env.POINTBREAK_DERIVED_CHANGE_CONTROL_CASE).testName,
-		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_persists_unrelated_volume_churn",
+		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_defers_unrelated_volume_churn_to_maintenance",
+	);
+});
+
+test("run-host creates a nested absent output root after safety validation", async () => {
+	const config = await hostConfig();
+	config.outputRoot = await nestedDiagnosticRoot(
+		"pointbreak-diagnostic-run-host-nested-",
+	);
+
+	const { fragment, fragmentPath } =
+		await runDerivedChangeDiagnosticHost(config);
+
+	assert.equal(fragment.platform.id, config.platformId);
+	assert.equal(
+		JSON.parse(await readFile(fragmentPath, "utf8")).fragmentSha256,
+		fragment.fragmentSha256,
 	);
 });
 
@@ -709,7 +734,7 @@ test("unavailable hosts retain complete cases and merge to one non-admissible Re
 	const authority = campaign();
 	const fragments = [];
 	for (const platformId of authority.requiredPlatformIds) {
-		const outputRoot = await diagnosticRoot(
+		const outputRoot = await nestedDiagnosticRoot(
 			`pointbreak-diagnostic-${platformId}-`,
 		);
 		const { fragment, fragmentPath } =
@@ -724,7 +749,9 @@ test("unavailable hosts retain complete cases and merge to one non-admissible Re
 		assert.ok(fragment.cases.every(({ status }) => status === "unavailable"));
 		fragments.push(fragmentPath);
 	}
-	const outputRoot = await diagnosticRoot("pointbreak-diagnostic-merge-");
+	const outputRoot = await nestedDiagnosticRoot(
+		"pointbreak-diagnostic-merge-",
+	);
 	const { report, reportPath } = await mergeDerivedChangeDiagnosticCampaign({
 		schema: DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1,
 		campaign: authority,

@@ -134,7 +134,7 @@ const PLATFORM_CONTROL_TESTS = Object.freeze([
 const NTFS_CONTROL_TEST = Object.freeze({
 	name: "volume-churn",
 	testName:
-		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_persists_unrelated_volume_churn",
+		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_defers_unrelated_volume_churn_to_maintenance",
 	checkpoint: "irrelevant-volume-churn",
 });
 const CONTROL_BUILD_COMMAND_ARGUMENTS = Object.freeze({
@@ -1248,7 +1248,7 @@ async function requireEmptyRoot(root) {
 		}
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw error;
-		await mkdir(root);
+		await mkdir(root, { recursive: true });
 	}
 }
 

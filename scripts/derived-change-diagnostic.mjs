@@ -716,7 +716,7 @@ async function rootMustBeEmpty(root) {
 			throw new Error("diagnostic output root must be empty");
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw error;
-		await mkdir(root, { recursive: false });
+		await mkdir(root, { recursive: true });
 	}
 }
 
