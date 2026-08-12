@@ -133,8 +133,30 @@ const PLATFORM_CONTROL_TESTS = Object.freeze([
 
 const NTFS_CONTROL_TEST = Object.freeze({
 	name: "volume-churn",
-	testName: "native_ntfs_stable_continuation_persists_unrelated_volume_churn",
+	testName:
+		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_persists_unrelated_volume_churn",
 	checkpoint: "irrelevant-volume-churn",
+});
+const CONTROL_BUILD_COMMAND_ARGUMENTS = Object.freeze({
+	library: Object.freeze([
+		"+stable",
+		"test",
+		"--locked",
+		"--features",
+		"longitudinal-counting",
+		"--lib",
+		"--no-run",
+	]),
+	cli: Object.freeze([
+		"+stable",
+		"test",
+		"--locked",
+		"--features",
+		"longitudinal-counting",
+		"--bin",
+		"pointbreak",
+		"--no-run",
+	]),
 });
 
 const CHANGE_READ_PROGRAM_NAMES = Object.freeze([
@@ -479,6 +501,30 @@ function campaignBinarySha256(campaign, identity, platformId, role) {
 	return binary.binarySha256;
 }
 
+function controlBuildCommandSha256(kind) {
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				arguments: CONTROL_BUILD_COMMAND_ARGUMENTS[kind],
+				program: "cargo",
+			}),
+		)
+		.digest("hex");
+}
+
+function validateControlBuildCommandMetadata(controls) {
+	for (const [kind, field] of [
+		["library", "libraryBuildCommandSha256"],
+		["cli", "cliBuildCommandSha256"],
+	]) {
+		if (controls[field] !== controlBuildCommandSha256(kind)) {
+			throw new Error(
+				"diagnostic Change-read control build command metadata differs from frozen contract",
+			);
+		}
+	}
+}
+
 function changeReadProgramIdentities(config) {
 	requireObject(
 		config.changeRead.programSha256,
@@ -516,6 +562,7 @@ function createChangeReadDiagnosticConfig(config, platform) {
 		config.changeRead.controls,
 		"diagnostic Change-read control identity",
 	);
+	validateControlBuildCommandMetadata(config.changeRead.controls);
 	if (
 		!Array.isArray(config.changeRead.harnessArgsPrefix) ||
 		config.changeRead.harnessArgsPrefix.some(
@@ -609,8 +656,7 @@ function createChangeReadDiagnosticConfig(config, platform) {
 					platform.id,
 					"library",
 				),
-				buildCommandSha256:
-					config.changeRead.controls.libraryBuildCommandSha256,
+				buildCommandSha256: controlBuildCommandSha256("library"),
 			},
 			cli: {
 				program: config.identityPaths.controlCli,
@@ -620,7 +666,7 @@ function createChangeReadDiagnosticConfig(config, platform) {
 					platform.id,
 					"cli",
 				),
-				buildCommandSha256: config.changeRead.controls.cliBuildCommandSha256,
+				buildCommandSha256: controlBuildCommandSha256("cli"),
 			},
 		},
 		fixtureAuthority: {

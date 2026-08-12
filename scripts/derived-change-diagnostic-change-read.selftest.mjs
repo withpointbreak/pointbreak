@@ -7,6 +7,7 @@ import {
 	mkdir,
 	mkdtemp,
 	readFile,
+	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -497,6 +498,58 @@ test("collects exact named inventories from all nine public fixtures", async () 
 			(await lstat(join(input.caseRoot, retainedPath))).isFile(),
 			true,
 		);
+});
+
+test("binds each read request to retained witness file bytes, not its path spelling", async () => {
+	const input = await fixture();
+	input.config.caseRoot = join(input.root, "C:\\pb17\\witness-root");
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	assert.equal(
+		result.cases.find(({ id }) => id === "duplicate-equal-v1.template").status,
+		"passed",
+	);
+	const witness = join(
+		input.config.caseRoot,
+		"witnesses",
+		"duplicate-equal-v1.json",
+	);
+	const request = JSON.parse(
+		await readFile(
+			join(input.config.caseRoot, "requests", "duplicate-equal-v1.read.json"),
+			"utf8",
+		),
+	);
+	const retainedWitnessSha256 = await sha256(witness);
+	assert.equal(
+		request.readRequest.fixtureWitnessSha256,
+		retainedWitnessSha256,
+	);
+	assert.notEqual(
+		request.readRequest.fixtureWitnessSha256,
+		createHash("sha256").update(witness).digest("hex"),
+	);
+});
+
+test("rejects a same-byte symlinked jq binding as a global identity failure", async () => {
+	const input = await fixture();
+	const jqLink = join(input.root, "jq-link");
+	await symlink(input.config.programs.jq.program, jqLink);
+	input.config.programs.jq.program = jqLink;
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const preflight = result.cases.find(
+		({ id }) => id === "change-read.global-preflight",
+	);
+	assert.equal(preflight.status, "failed");
+	assert.equal(preflight.failureClass, "global_invalid");
+	assert.ok(
+		result.cases
+			.filter(({ id }) => id !== preflight.id)
+			.every(({ status }) => status === "skipped"),
+	);
+	assert.equal(
+		result.cases.length,
+		derivedChangeChangeReadChildDescriptors().length,
+	);
 });
 
 test("records one failed setup and continues independent public fixtures", async () => {

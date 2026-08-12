@@ -43,6 +43,37 @@ const commit = (digit) => digit.repeat(40);
 const binarySha256 = createHash("sha256")
 	.update(await readFile(process.execPath))
 	.digest("hex");
+const controlBuildCommandSha256 = (arguments_) =>
+	createHash("sha256")
+		.update(JSON.stringify({ arguments: arguments_, program: "cargo" }))
+		.digest("hex");
+const libraryControlBuildCommandSha256 = controlBuildCommandSha256([
+	"+stable",
+	"test",
+	"--locked",
+	"--features",
+	"longitudinal-counting",
+	"--lib",
+	"--no-run",
+]);
+const cliControlBuildCommandSha256 = controlBuildCommandSha256([
+	"+stable",
+	"test",
+	"--locked",
+	"--features",
+	"longitudinal-counting",
+	"--bin",
+	"pointbreak",
+	"--no-run",
+]);
+assert.equal(
+	libraryControlBuildCommandSha256,
+	"966d15957e6ecda1a78444e921bb84b3bec41f2c62217162404c861695f02ae8",
+);
+assert.equal(
+	cliControlBuildCommandSha256,
+	"8b9e6043823a7c106699b6737bfba986a21fcdb53c1259a9ad648a1ad2188add",
+);
 const binaryIdentities = {
 	macos_apfs: {
 		product: digest("0"),
@@ -255,8 +286,8 @@ const hostConfig = async () => ({
 		},
 		harnessArgsPrefix: [],
 		controls: {
-			libraryBuildCommandSha256: digest("c"),
-			cliBuildCommandSha256: digest("d"),
+			libraryBuildCommandSha256: libraryControlBuildCommandSha256,
+			cliBuildCommandSha256: cliControlBuildCommandSha256,
 		},
 		programSha256: Object.fromEntries(
 			[
@@ -518,6 +549,14 @@ test("host requests execute only the configured candidate checkout and retained 
 		).binarySha256,
 	);
 	assert.equal(changeReadConfig.workRoot, config.temporaryRoot);
+	assert.equal(
+		changeReadConfig.controls.library.buildCommandSha256,
+		libraryControlBuildCommandSha256,
+	);
+	assert.equal(
+		changeReadConfig.controls.cli.buildCommandSha256,
+		cliControlBuildCommandSha256,
+	);
 	const nativeConfig = JSON.parse(
 		native.env.POINTBREAK_DERIVED_CHANGE_NATIVE_CONFIG,
 	);
@@ -590,6 +629,31 @@ test("host requests execute only the configured candidate checkout and retained 
 	assert.equal(boundRequest.temporaryRoot, config.temporaryRoot);
 });
 
+test("rejects absolute Cargo control build metadata without the frozen stable contract", async () => {
+	const config = await hostConfig();
+	config.changeRead.controls.libraryBuildCommandSha256 =
+		createHash("sha256")
+			.update(
+				JSON.stringify({
+					arguments: [
+						"+stable",
+						"test",
+						"--locked",
+						"--features",
+						"longitudinal-counting",
+						"--lib",
+						"--no-run",
+					],
+					program: config.programs.cargo,
+				}),
+			)
+			.digest("hex");
+	assert.throws(
+		() => createDerivedChangeDiagnosticHostRequest(config),
+		/control build command metadata differs from frozen contract/,
+	);
+});
+
 test("serialized postflight bindings accept a populated preserved scratch root", async () => {
 	const config = await hostConfig();
 	const request = createDerivedChangeDiagnosticHostRequest(config);
@@ -631,6 +695,13 @@ test("Windows host requests retain the complete native Change-read collection", 
 	);
 	assert.ok(
 		request.cases.some(({ id }) => id.endsWith("platform-volume-churn")),
+	);
+	const volumeChurn = request.cases.find(({ id }) =>
+		id.endsWith("platform-volume-churn"),
+	);
+	assert.equal(
+		JSON.parse(volumeChurn.env.POINTBREAK_DERIVED_CHANGE_CONTROL_CASE).testName,
+		"session::derived_access::lifecycle::tests::native_ntfs_stable_continuation_persists_unrelated_volume_churn",
 	);
 });
 

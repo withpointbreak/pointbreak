@@ -869,7 +869,7 @@ function materializerEnv(config, template) {
 		if (name !== "hash") additions[envName] = config.programs[name].program;
 	return cleanEnv(config, template, additions);
 }
-function readRequest(
+async function readRequest(
 	config,
 	fixture,
 	template,
@@ -877,7 +877,7 @@ function readRequest(
 	workspace,
 	requestPath,
 ) {
-	const witnessSha256 = createHash("sha256").update(witness).digest("hex");
+	const witnessSha256 = await sha256File(witness);
 	const execution = structuredClone(config.execution);
 	execution.commandSha256 = createHash("sha256")
 		.update(
@@ -1163,7 +1163,14 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 		await writeFile(
 			requestPath,
 			JSON.stringify(
-				readRequest(config, fixture, template, witness, workspace, requestPath),
+				await readRequest(
+					config,
+					fixture,
+					template,
+					witness,
+					workspace,
+					requestPath,
+				),
 			),
 		);
 		artifacts.push(pathInside(config.caseRoot, requestPath));

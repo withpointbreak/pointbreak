@@ -2247,6 +2247,57 @@ mod change_fixture_tests {
         }
     }
 
+    fn effective_fixture_expected_outcome(
+        kind: QualificationDerivedChangeFixtureKindV1,
+        declared: QualificationDerivedChangeFixtureExpectedOutcomeV1,
+        windows_ntfs: bool,
+    ) -> QualificationDerivedChangeFixtureExpectedOutcomeV1 {
+        if windows_ntfs
+            && matches!(
+                kind,
+                QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+                    | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
+            )
+        {
+            QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired
+        } else {
+            declared
+        }
+    }
+
+    #[test]
+    fn windows_selected_carrier_fixture_oracle_requires_a_rebuild() {
+        for kind in [
+            QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier,
+            QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier,
+        ] {
+            assert_eq!(
+                effective_fixture_expected_outcome(
+                    kind,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                    true,
+                ),
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionRebuildRequired
+            );
+            assert_eq!(
+                effective_fixture_expected_outcome(
+                    kind,
+                    QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid,
+                    false,
+                ),
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::ProjectionInvalid
+            );
+        }
+        assert_eq!(
+            effective_fixture_expected_outcome(
+                QualificationDerivedChangeFixtureKindV1::DuplicateConflicting,
+                QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
+                true,
+            ),
+            QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready
+        );
+    }
+
     #[test]
     fn change_fixture_witnesses_are_deterministic_and_bind_public_authority() {
         for kind in QualificationDerivedChangeFixtureKindV1::ALL {
@@ -2400,21 +2451,25 @@ mod change_fixture_tests {
                 .expect("resolve fixture derived access");
             assert_declared_outcome(
                 kind,
-                if matches!(
+                effective_fixture_expected_outcome(
                     kind,
-                    QualificationDerivedChangeFixtureKindV1::DuplicateConflicting
-                        | QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
-                        | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
-                ) {
-                    QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready
-                } else {
-                    witness.expected_outcome
-                },
+                    if matches!(
+                        kind,
+                        QualificationDerivedChangeFixtureKindV1::DuplicateConflicting
+                            | QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+                            | QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
+                    ) {
+                        QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready
+                    } else {
+                        witness.expected_outcome
+                    },
+                    cfg!(windows),
+                ),
                 access.profile().expect("read fixture Profile"),
             );
             assert_declared_outcome(
                 kind,
-                witness.expected_outcome,
+                effective_fixture_expected_outcome(kind, witness.expected_outcome, cfg!(windows)),
                 access
                     .attention(&DerivedChangePageRequestV1::Bare)
                     .expect("read fixture Attention"),
@@ -2422,7 +2477,10 @@ mod change_fixture_tests {
             let outcome = access
                 .changes(&DerivedChangePageRequestV1::Bare)
                 .expect("read fixture Changes");
-            match (witness.expected_outcome, outcome) {
+            match (
+                effective_fixture_expected_outcome(kind, witness.expected_outcome, cfg!(windows)),
+                outcome,
+            ) {
                 (
                     QualificationDerivedChangeFixtureExpectedOutcomeV1::Ready,
                     DerivedChangeOutcomeV1::Ready(page),
