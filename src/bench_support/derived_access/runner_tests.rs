@@ -331,6 +331,53 @@ fn native_diagnostic_result_exposes_only_the_admitted_root() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn native_diagnostic_bridge_admits_post_smoke_authoritative_roots_for_each_tier() {
+    let workspace = tempfile::tempdir().expect("native diagnostic bridge workspace");
+    let source_checkout = workspace.path().join("source");
+    initialize_clean_test_source_checkout(&source_checkout);
+
+    for tier in [
+        QualificationDerivedAccessTierV1::D0_128,
+        QualificationDerivedAccessTierV1::L1,
+        QualificationDerivedAccessTierV1::L7,
+    ] {
+        let tier_root = workspace.path().join(format!("native-{tier:?}"));
+        let execution = super::evidence::observe_current_execution_identity_v1(
+            native_test_platform(),
+            digest(54),
+            &source_checkout,
+            &tier_root,
+        )
+        .expect("observe exact diagnostic execution");
+        let request = QualificationDerivedAccessNativeSmokeRunRequestV1 {
+            schema: QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1.to_owned(),
+            source_checkout: source_checkout.clone(),
+            workspace_root: tier_root,
+            execution,
+            tier,
+        };
+        let request_path = workspace.path().join(format!("native-{tier:?}.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&request).expect("serialize native diagnostic request"),
+        )
+        .expect("write native diagnostic request");
+
+        let result = run_derived_change_diagnostic_native_v1(&request_path)
+            .expect("diagnostic bridge retains the post-smoke admitted root");
+        let observed =
+            crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
+                &result.admitted_root_path,
+            )
+            .expect("inventory retained admitted root");
+        assert_eq!(result.tier, tier);
+        assert_eq!(result.admitted_root_sha256, observed.inventory_sha256);
+        assert!(result.source_unchanged);
+    }
+}
+
 #[test]
 fn change_read_diagnostic_collection_continues_rows_controls_and_stays_schema_less() {
     let mut attempted_rows = Vec::new();

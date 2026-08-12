@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	lstat,
+	mkdir,
+	mkdtemp,
+	readFile,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +25,7 @@ test("native diagnostic continues independent tiers and skips only a failed tier
 	const root = await mkdtemp(join(tmpdir(), "pointbreak-native-diagnostic-"));
 	const sourceCheckout = join(root, "source");
 	const caseRoot = join(root, "case");
+	const workRoot = await mkdtemp(join(tmpdir(), "pbnw-"));
 	await mkdir(sourceCheckout);
 	await writeFile(join(sourceCheckout, "Cargo.lock"), "locked\n");
 	const fakeHarness = join(root, "fake-harness.mjs");
@@ -31,6 +39,11 @@ if (process.argv.includes("--derived-access-contract")) {
   process.exit(0);
 }
 const request = JSON.parse(await readFile(requestArgument.split("=")[1], "utf8"));
+const ownerNames = new Set(["POINTBREAK_HOME", "POINTBREAK_CHANGE_READY_FIXTURE_DIR"]);
+if (Object.keys(process.env).some((key) => ownerNames.has(key.toUpperCase()))) {
+  console.error("owner-store environment escaped native isolation");
+  process.exit(91);
+}
 if (process.argv.includes("--derived-change-diagnostic-native")) {
   if (request.tier === "L1") { console.error("synthetic L1 failure"); process.exit(7); }
   await mkdir(request.workspaceRoot + "/root-a", { recursive: true });
@@ -56,29 +69,47 @@ process.exit(2);
 	);
 	await chmod(fakeHarness, 0o755);
 
-	const result = await runDerivedChangeNativeDiagnostic({
-		schema: DERIVED_CHANGE_NATIVE_DIAGNOSTIC_CONFIG_SCHEMA_V1,
-		campaignId: "derived-change-diagnostic-test",
-		rootAuthoritySha256: digest("d"),
-		caseRoot,
-		sourceCheckout,
-		gitProgram: process.execPath,
-		source: {
-			commit: commit("1"),
-			tree: commit("2"),
-			rangeBaseCommit: commit("3"),
-			rangeSha256: digest("4"),
-		},
-		platform: {
-			id: "macos_apfs",
-			operatingSystem: "macos",
-			architecture: "aarch64",
-			filesystem: "apfs",
-			hostIdentitySha256: digest("5"),
-		},
-		harness: { program: fakeHarness, argsPrefix: [] },
-		lifecycleCriteria: ["open_bootstrap_reopen_replay_equality", "wrong_root"],
-	});
+	const oldPointbreakHome = process.env.pointbreak_home;
+	const oldReadyFixture = process.env.Pointbreak_Change_Ready_Fixture_Dir;
+	process.env.pointbreak_home = "/ambient-owner-store";
+	process.env.Pointbreak_Change_Ready_Fixture_Dir =
+		"/ambient-change-ready-fixture";
+	let result;
+	try {
+		result = await runDerivedChangeNativeDiagnostic({
+			schema: DERIVED_CHANGE_NATIVE_DIAGNOSTIC_CONFIG_SCHEMA_V1,
+			campaignId: "derived-change-diagnostic-test",
+			rootAuthoritySha256: digest("d"),
+			caseRoot,
+			workRoot,
+			sourceCheckout,
+			gitProgram: process.execPath,
+			source: {
+				commit: commit("1"),
+				tree: commit("2"),
+				rangeBaseCommit: commit("3"),
+				rangeSha256: digest("4"),
+			},
+			platform: {
+				id: "macos_apfs",
+				operatingSystem: "macos",
+				architecture: "aarch64",
+				filesystem: "apfs",
+				hostIdentitySha256: digest("5"),
+			},
+			harness: { program: fakeHarness, argsPrefix: [] },
+			lifecycleCriteria: [
+				"open_bootstrap_reopen_replay_equality",
+				"wrong_root",
+			],
+		});
+	} finally {
+		if (oldPointbreakHome === undefined) delete process.env.pointbreak_home;
+		else process.env.pointbreak_home = oldPointbreakHome;
+		if (oldReadyFixture === undefined)
+			delete process.env.Pointbreak_Change_Ready_Fixture_Dir;
+		else process.env.Pointbreak_Change_Ready_Fixture_Dir = oldReadyFixture;
+	}
 	assert.equal(
 		result.schema,
 		DERIVED_CHANGE_DIAGNOSTIC_CASE_COLLECTION_SCHEMA_V1,
@@ -117,6 +148,15 @@ process.exit(2);
 	assert.ok(
 		result.artifactPaths.some((path) => path.endsWith("native-L1.stderr.log")),
 	);
+	assert.equal(
+		(await lstat(join(workRoot, "native-D0-128"))).isDirectory(),
+		true,
+	);
+	await assert.rejects(() => lstat(join(caseRoot, "native-D0-128")), {
+		code: "ENOENT",
+	});
+	for (const artifact of result.artifactPaths)
+		assert.equal((await lstat(join(caseRoot, artifact))).isFile(), true);
 });
 
 test("the frozen lifecycle inventory is complete and unique", () => {
@@ -133,6 +173,7 @@ test("native diagnostic calls the non-terminal native collection mode", async ()
 		"utf8",
 	);
 	assert.match(source, /"--derived-change-diagnostic-native"/);
+	assert.match(source, /POINTBREAK_DIAGNOSTIC_WORK_ROOT/);
 	assert.doesNotMatch(source, /"--derived-access-smoke"/);
 	assert.doesNotMatch(source, /payload\?\.receipt/);
 });

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	lstat,
+	mkdir,
+	mkdtemp,
+	readFile,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,9 +19,26 @@ import {
 	runDerivedChangeChangeReadDiagnostic,
 	validateDerivedChangeChangeReadDiagnosticConfig,
 } from "./derived-change-diagnostic-change-read.mjs";
+import {
+	DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2,
+	DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1,
+	deriveTopologyCheckpointV1,
+} from "./derived-change-diagnostic-fixture.mjs";
+import {
+	DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
+	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	finalizeDerivedChangeDiagnosticFragment,
+	mergeDerivedChangeDiagnosticReport,
+} from "./derived-change-diagnostic-report.mjs";
 
 const digest = (digit) => digit.repeat(64);
 const commit = (digit) => digit.repeat(40);
+const revision = (digit) => `rev:sha256:${digest(digit)}`;
+const change = (digit) => `change:sha256:${digest(digit)}`;
+const event = (digit) => `evt:sha256:${digest(digit)}`;
+const observation = (digit) => `obs:sha256:${digest(digit)}`;
+const factPort = (digit) => `fact-port:sha256:${digest(digit)}`;
+const artifact = (digit) => `sha256:${digest(digit)}`;
 const sha256 = async (path) =>
 	createHash("sha256")
 		.update(await readFile(path))
@@ -66,12 +90,109 @@ const controls = [
 	"busy_writer_nonblocking",
 ];
 
-async function fixture() {
+const storageForbiddenProbeHashes = {
+	proposalSummarySha256:
+		"21f749c5f166ae819a99a8ff0e303297a43685fd14cc7f1b86a90751989b167c",
+	proseSha256:
+		"da79cc8c9b04f41616275f4a6bd027acf6d0358f3605dac74ccadfeea92945a4",
+	payloadDocumentSha256:
+		"20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf",
+};
+
+const topologyWitness = ({ dynamic = "a", inventory = "f" } = {}) => {
+	const primary = revision(dynamic);
+	const root = revision("c");
+	const shared = revision("d");
+	const peer = revision("e");
+	const replacementChange = change("2");
+	const divergentChange = change("3");
+	const parallelChange = change("4");
+	const consolidationChange = change("5");
+	return {
+		schema: "pointbreak.qualification-derived-change-fixture-witness.v1",
+		fixtureId: "topology-v1",
+		authoritativeInventorySha256: digest(inventory),
+		storageForbiddenProbeHashes,
+		primary_revision: primary,
+		fact_port: {
+			port_id: factPort(dynamic),
+			event_id: event(dynamic),
+			origin: {
+				revision: shared,
+				artifact: artifact("6"),
+				observation: observation(dynamic),
+			},
+		},
+		live_revision: revision("7"),
+		unassessed_revision: revision("8"),
+		superseded_revision: revision("9"),
+		ambiguous_assessment_revision: revision("a"),
+		competing_revision: revision("b"),
+		range_revision: revision("c"),
+		root_revision: root,
+		staged_revision: revision("d"),
+		unstaged_revision: revision("e"),
+		detached_revision: revision("f"),
+		missing_change: change("6"),
+		missing_revision: revision("1"),
+		missing_artifact: artifact("7"),
+		topology: {
+			initial: {
+				change: change("1"),
+				current: { revision: primary, artifact: artifact("1") },
+			},
+			replacement: {
+				change: replacementChange,
+				current: { revision: shared, artifact: artifact("6") },
+				predecessor: { revision: root, artifact: artifact("2") },
+			},
+			parallel_current: {
+				change: parallelChange,
+				current: [
+					{ revision: shared, artifact: artifact("6") },
+					{ revision: peer, artifact: artifact("3") },
+				],
+			},
+			replacement_divergent: {
+				change: divergentChange,
+				current: [
+					{ revision: shared, artifact: artifact("6") },
+					{ revision: peer, artifact: artifact("3") },
+				],
+			},
+			consolidation: {
+				change: consolidationChange,
+				current: { revision: revision("f"), artifact: artifact("4") },
+				predecessors: [
+					{ revision: shared, artifact: artifact("6") },
+					{ revision: peer, artifact: artifact("3") },
+				],
+			},
+		},
+		shared_revision: {
+			revision: shared,
+			artifact: artifact("6"),
+			changes: [
+				replacementChange,
+				divergentChange,
+				parallelChange,
+				consolidationChange,
+			],
+		},
+		base_commit: commit(dynamic),
+		first_landing: commit("1"),
+		second_landing: commit("2"),
+		live_landing: commit("3"),
+	};
+};
+
+async function fixture({ topologyActual = topologyWitness() } = {}) {
 	const root = await mkdtemp(
 		join(tmpdir(), "pointbreak-change-read-diagnostic-"),
 	);
 	const source = join(root, "source");
 	const caseRoot = join(root, "case");
+	const workRoot = await mkdtemp(join(tmpdir(), "pbcw-"));
 	const readyStore = join(
 		source,
 		"tests",
@@ -87,6 +208,11 @@ async function fixture() {
 		source,
 		"scripts",
 		"materialize-inspector-decision-matrix.sh",
+	);
+	const fixtureModule = join(
+		source,
+		"scripts",
+		"derived-change-diagnostic-fixture.mjs",
 	);
 	const authority = join(root, "fixture-authority.json");
 	await mkdir(join(source, "src", "bench_support", "derived_access"), {
@@ -105,26 +231,25 @@ const request=JSON.parse(await readFile(requestArg.slice(requestArg.indexOf("=")
 const ids={duplicate_equal:"duplicate-equal-v1",duplicate_conflicting:"duplicate-conflict-v1",operative_removal:"removal-v1",missing_selected_carrier:"missing-carrier-v1",mutated_selected_carrier:"mutated-carrier-v1",wrong_family_selected_carrier:"wrong-family-carrier-v1",incomplete_change:"incomplete-v1",cycle_conflicted_change:"cycle-conflicted-v1"};
 const witness=(fixtureId)=>JSON.stringify({schema:"pointbreak.qualification-derived-change-fixture-witness.v1",fixtureId,authoritativeInventorySha256:"${digest("f")}",storageForbiddenProbeHashes:{proposalSummarySha256:"${digest("1")}",proseSha256:"${digest("2")}",payloadDocumentSha256:"${digest("3")}"}});
 if(process.argv.includes("--derived-change-fixture-materialize")){if(request.kind === "mutated_selected_carrier" && process.argv.includes("--test-fail-mutated")){process.stderr.write("fixture fail");process.exit(7)}await mkdir(request.root,{recursive:true});console.log(witness(ids[request.kind]) + (request.kind === "mutated_selected_carrier" && process.argv.includes("--test-witness-mismatch") ? " " : ""));process.exit(0)}
-const fixture=request.readRequest.fixture; const typed=new Set(["duplicate-conflict-v1","missing-carrier-v1","mutated-carrier-v1","wrong-family-carrier-v1"]); const rows=(fixture === "topology-v1" ? ${JSON.stringify(readCases)} : typed.has(fixture) ? ${JSON.stringify(["profile", "changes_bare", "changes_bounded", "attention_bare", "attention_bounded", "summary_query"])} : ${JSON.stringify(readCases.slice(0, 8))}).map((caseName)=>({case:caseName,status:"passed"}));
+const fixture=request.readRequest.fixture; const typed=new Set(["duplicate-conflict-v1","missing-carrier-v1","mutated-carrier-v1","wrong-family-carrier-v1"]); const sourceFailure=process.argv.includes("--test-source-preflight-failure"); const caseStatus=sourceFailure?{status:"skipped",failureDetail:"synthetic source preflight failure"}:{status:"passed"}; const rows=(fixture === "topology-v1" ? ${JSON.stringify(readCases)} : typed.has(fixture) ? ${JSON.stringify(["profile", "changes_bare", "changes_bounded", "attention_bare", "attention_bounded", "summary_query"])} : ${JSON.stringify(readCases.slice(0, 8))}).map((caseName)=>({case:caseName,...caseStatus}));
 const commandSha256=createHash("sha256").update(JSON.stringify([process.argv[1],...process.argv.slice(2)])).digest("hex"); if(request.readRequest.execution.commandSha256 !== commandSha256) throw new Error("per-fixture command identity differs");
 if(process.argv.includes("--test-invalid-output")){console.log("{}"),process.exit(0)}
-const topology=fixture === "topology-v1"; const preflight=(topology?["source","fixture","library_control","cli_control","template_postflight"]:["source","fixture","template_postflight"]).map((kind)=>({kind,status:"passed"}));
-console.log(JSON.stringify({mode:"--derived-change-read-diagnostic",sourceUnchanged:!process.argv.includes("--test-template-mutation"),preflight,rows,controls:topology?${JSON.stringify(controls)}.map((caseName)=>({case:caseName,status:"passed"})):[],storage:[{case:"initial",status:"passed"},...(topology?[{case:"post_append",status:"passed"}]:[])]}));
+const topology=fixture === "topology-v1"; const preflight=(topology?["source","fixture","library_control","cli_control","template_postflight"]:["source","fixture","template_postflight"]).map((kind)=>sourceFailure?{kind,status:kind === "source"?"failed":"skipped",failureDetail:"synthetic source preflight failure"}:{kind,status:"passed"});
+for(const field of ["controlTestBinary","controlTestBinarySha256","controlTestBuildCommandSha256","controlCliTestBinary","controlCliTestBinarySha256","controlCliTestBuildCommandSha256"]){if(Object.hasOwn(request.readRequest,field) !== topology) throw new Error("control identity presence differs from fixture authority")}
+if(process.argv.includes("--test-read-nonzero")){process.stderr.write("synthetic read failure");process.exit(9)}
+console.log(JSON.stringify({mode:"--derived-change-read-diagnostic",sourceUnchanged:!process.argv.includes("--test-template-mutation"),preflight,rows,controls:topology?${JSON.stringify(controls)}.map((caseName)=>({case:caseName,...caseStatus})):[],storage:[{case:"initial",...caseStatus},...(topology?[{case:"post_append",...caseStatus}]:[])]}));
 `,
 	);
-	const topologyWitness = JSON.stringify({
-		schema: "pointbreak.qualification-derived-change-fixture-witness.v1",
-		fixtureId: "topology-v1",
-		authoritativeInventorySha256: digest("f"),
-		storageForbiddenProbeHashes: {
-			proposalSummarySha256: digest("1"),
-			proseSha256: digest("2"),
-			payloadDocumentSha256: digest("3"),
-		},
-	});
+	const topologyWitnessBytes = JSON.stringify(topologyActual);
 	await writeFile(
 		materializer,
-		`#!/bin/sh\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\nmkdir -p "$1"\nprintf '%s\\n' '${topologyWitness}'\n`,
+		`#!/bin/sh\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\nmkdir -p "$1"\nprintf '%s\\n' '${topologyWitnessBytes}'\n`,
+	);
+	await writeFile(
+		fixtureModule,
+		await readFile(
+			new URL("./derived-change-diagnostic-fixture.mjs", import.meta.url),
+		),
 	);
 	await writeFile(
 		join(source, "src", "bench_support", "derived_access", "materializer.rs"),
@@ -172,23 +297,29 @@ console.log(JSON.stringify({mode:"--derived-change-read-diagnostic",sourceUnchan
 		),
 	);
 	const fixtureIds = [
-		"topology-v1",
-		"duplicate-equal-v1",
+		"cycle-conflicted-v1",
 		"duplicate-conflict-v1",
-		"removal-v1",
+		"duplicate-equal-v1",
+		"incomplete-v1",
 		"missing-carrier-v1",
 		"mutated-carrier-v1",
+		"removal-v1",
 		"wrong-family-carrier-v1",
-		"incomplete-v1",
-		"cycle-conflicted-v1",
 	];
 	const witnessBytes = (fixtureId) =>
-		`${fixtureId === "topology-v1" ? topologyWitness : JSON.stringify({ schema: "pointbreak.qualification-derived-change-fixture-witness.v1", fixtureId, authoritativeInventorySha256: digest("f"), storageForbiddenProbeHashes: { proposalSummarySha256: digest("1"), proseSha256: digest("2"), payloadDocumentSha256: digest("3") } })}\n`;
+		`${JSON.stringify({ schema: "pointbreak.qualification-derived-change-fixture-witness.v1", fixtureId, authoritativeInventorySha256: digest("f"), storageForbiddenProbeHashes: { proposalSummarySha256: digest("1"), proseSha256: digest("2"), payloadDocumentSha256: digest("3") } })}\n`;
+	const topologyCheckpointSha256 = deriveTopologyCheckpointV1(
+		topologyWitness(),
+	).sha256;
 	const authorityDocument = {
-		schema: "pointbreak.derived-change-public-fixture-authority.v1",
+		schema: DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2,
 		sourceCommit: commit("1"),
 		sourceTree: commit("2"),
 		sourceFiles: [
+			{
+				path: "scripts/derived-change-diagnostic-fixture.mjs",
+				sha256: await sha256(fixtureModule),
+			},
 			{
 				path: "scripts/materialize-inspector-decision-matrix.sh",
 				sha256: await sha256(materializer),
@@ -221,17 +352,24 @@ console.log(JSON.stringify({mode:"--derived-change-read-diagnostic",sourceUnchan
 				.update(witnessBytes(fixtureId))
 				.digest("hex"),
 		})),
+		topologyCheckpoint: {
+			schema: DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1,
+			fixtureId: "topology-v1",
+			checkpointSha256: topologyCheckpointSha256,
+		},
 	};
 	await writeFile(authority, `${JSON.stringify(authorityDocument)}\n`);
 	const authoritySha256 = await sha256(authority);
 	return {
 		root,
 		caseRoot,
+		workRoot,
 		config: {
 			schema: DERIVED_CHANGE_CHANGE_READ_DIAGNOSTIC_CONFIG_SCHEMA_V1,
 			campaignId: "diagnostic-test",
 			rootAuthoritySha256: authoritySha256,
 			caseRoot,
+			workRoot,
 			sourceCheckout: source,
 			execution: {
 				platform: "macos_apfs",
@@ -344,6 +482,21 @@ test("collects exact named inventories from all nine public fixtures", async () 
 		result.cases.some(({ id }) => id.includes("receipt")),
 		false,
 	);
+	assert.equal(
+		(
+			await lstat(join(input.workRoot, "templates", "topology-v1"))
+		).isDirectory(),
+		true,
+	);
+	await assert.rejects(
+		() => lstat(join(input.caseRoot, "templates", "topology-v1")),
+		{ code: "ENOENT" },
+	);
+	for (const retainedPath of result.artifactPaths)
+		assert.equal(
+			(await lstat(join(input.caseRoot, retainedPath))).isFile(),
+			true,
+		);
 });
 
 test("records one failed setup and continues independent public fixtures", async () => {
@@ -383,6 +536,7 @@ test("remains a diagnostic-only adapter", async () => {
 	);
 	assert.match(source, /--derived-change-read-diagnostic/);
 	assert.match(source, /POINTBREAK_HASH_PROGRAM_MODE/);
+	assert.match(source, /POINTBREAK_DIAGNOSTIC_WORK_ROOT/);
 	assert.match(source, /HOME:\s*root/);
 	assert.match(source, /USERPROFILE:\s*root/);
 	assert.doesNotMatch(source, /qualification-derived-change-read-receipt/);
@@ -398,6 +552,38 @@ test("root provenance is the exact public fixture authority", async () => {
 	);
 });
 
+test("serializes initial authority drift as a complete global-invalid collection", async () => {
+	const input = await fixture();
+	await writeFile(input.config.fixtureAuthority.path, "{}\n");
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const preflight = result.cases.find(
+		({ id }) => id === "change-read.global-preflight",
+	);
+	assert.equal(preflight.status, "failed");
+	assert.equal(preflight.failureClass, "global_invalid");
+	for (const id of [
+		"topology-v1.template",
+		"change-read.identity-postflight",
+	]) {
+		const row = result.cases.find((candidate) => candidate.id === id);
+		assert.equal(row.status, "skipped");
+		assert.deepEqual(row.dependsOn, [preflight.id]);
+	}
+	assert.equal(
+		result.cases.length,
+		derivedChangeChangeReadChildDescriptors().length,
+	);
+});
+
+test("work roots must be disjoint from retained and source roots", async () => {
+	const input = await fixture();
+	input.config.workRoot = input.caseRoot;
+	assert.throws(
+		() => validateDerivedChangeChangeReadDiagnosticConfig(input.config),
+		/work root must be disjoint/,
+	);
+});
+
 test("passes an exact optional cygpath binding to topology materialization", async () => {
 	const input = await fixture();
 	input.config.programs.cygpath = structuredClone(input.config.programs.hash);
@@ -408,6 +594,36 @@ test("passes an exact optional cygpath binding to topology materialization", asy
 	);
 });
 
+test("accepts dynamic topology witness bytes only through the frozen normalized checkpoint", async () => {
+	const input = await fixture({
+		topologyActual: topologyWitness({ dynamic: "f", inventory: "e" }),
+	});
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	assert.equal(
+		result.cases.find(({ id }) => id === "topology-v1.template").status,
+		"passed",
+	);
+});
+
+test("rejects a topology witness whose stable normalized checkpoint differs", async () => {
+	const changed = topologyWitness();
+	for (const entry of [
+		changed.fact_port.origin,
+		changed.shared_revision,
+		changed.topology.replacement.current,
+		changed.topology.parallel_current.current[0],
+		changed.topology.replacement_divergent.current[0],
+		changed.topology.consolidation.predecessors[0],
+	])
+		entry.artifact = artifact("f");
+	const input = await fixture({ topologyActual: changed });
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const setup = result.cases.find(({ id }) => id === "topology-v1.template");
+	assert.equal(setup.status, "failed");
+	assert.equal(setup.failureClass, "global_invalid");
+	assert.equal(setup.phase, "fixture-witness");
+});
+
 test("exports a deterministic complete child inventory", () => {
 	const first = derivedChangeChangeReadChildDescriptors();
 	assert.deepEqual(first, derivedChangeChangeReadChildDescriptors());
@@ -415,7 +631,7 @@ test("exports a deterministic complete child inventory", () => {
 	assert.ok(first.some(({ id }) => id === "change-read.identity-postflight"));
 });
 
-test("classifies a witness mismatch without dropping independent fixture rows", async () => {
+test("keeps complete skipped inventory after a global witness mismatch", async () => {
 	const input = await fixture();
 	input.config.harness.argsPrefix = ["--test-witness-mismatch"];
 	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
@@ -432,7 +648,12 @@ test("classifies a witness mismatch without dropping independent fixture rows", 
 	assert.equal(
 		result.cases.find(({ id }) => id === "cycle-conflicted-v1.read.profile")
 			.status,
-		"passed",
+		"skipped",
+	);
+	assert.ok(
+		result.cases
+			.find(({ id }) => id === "cycle-conflicted-v1.template")
+			.dependsOn.includes(setup.id),
 	);
 });
 
@@ -445,6 +666,12 @@ test("converts a false sourceUnchanged output into template-postflight failure",
 			({ id }) => id === "topology-v1.preflight.template_postflight",
 		).status,
 		"failed",
+	);
+	assert.equal(
+		result.cases.find(
+			({ id }) => id === "topology-v1.preflight.template_postflight",
+		).failureClass,
+		"lane_invalid",
 	);
 	assert.equal(
 		result.cases.find(({ id }) => id === "topology-v1.read.profile").status,
@@ -473,14 +700,141 @@ test("keeps every preflight child when a completed harness output is invalid", a
 		"topology-v1.preflight.template_postflight",
 	])
 		assert.equal(result.cases.find((row) => row.id === id).status, "skipped");
+	const setup = result.cases.find((row) => row.id === "topology-v1.template");
+	assert.equal(setup.status, "failed");
+	assert.equal(setup.failureClass, "lane_invalid");
+	assert.equal(setup.phase, "diagnostic-output");
+	assert.deepEqual(
+		result.cases.find((row) => row.id === "topology-v1.preflight.source")
+			.dependsOn,
+		[setup.id],
+	);
+});
+
+test("a nonzero read harness preserves every row behind a failed setup authority", async () => {
+	const input = await fixture();
+	input.config.harness.argsPrefix = ["--test-read-nonzero"];
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const setup = result.cases.find((row) => row.id === "topology-v1.template");
+	assert.equal(setup.status, "failed");
+	assert.equal(setup.failureClass, "lane_invalid");
+	assert.equal(setup.phase, "diagnostic-output");
+	assert.equal(
+		result.cases.find((row) => row.id === "topology-v1.read.profile").status,
+		"skipped",
+	);
+	assert.equal(
+		result.cases.length,
+		derivedChangeChangeReadChildDescriptors().length,
+	);
+});
+
+test("source-preflight failure remains a mergeable global Red collection", async () => {
+	const input = await fixture();
+	input.config.harness.argsPrefix = ["--test-source-preflight-failure"];
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	const source = result.cases.find(
+		({ id }) => id === "topology-v1.preflight.source",
+	);
+	assert.equal(source.status, "failed");
+	assert.equal(source.failureClass, "global_invalid");
+	for (const id of [
+		"topology-v1.preflight.fixture",
+		"topology-v1.preflight.library_control",
+		"topology-v1.preflight.cli_control",
+		"topology-v1.preflight.template_postflight",
+	]) {
+		const row = result.cases.find((candidate) => candidate.id === id);
+		assert.equal(row.status, "skipped");
+		assert.ok(row.dependsOn.includes(source.id));
+	}
+	const laterTemplate = result.cases.find(
+		({ id }) => id === "duplicate-equal-v1.template",
+	);
+	assert.equal(laterTemplate.status, "skipped");
+	assert.ok(laterTemplate.dependsOn.includes(source.id));
+	const authorityDocument = JSON.parse(
+		await readFile(input.config.fixtureAuthority.path, "utf8"),
+	);
+	const platform = {
+		id: "macos_apfs",
+		operatingSystem: "macos",
+		architecture: "aarch64",
+		filesystem: "apfs",
+		hostIdentitySha256: input.config.execution.hostIdentitySha256,
+	};
+	const campaign = {
+		id: input.config.campaignId,
+		requiredCaseIds: result.cases.map(({ id }) => id).sort(),
+		requiredPlatformIds: [platform.id],
+		source: {
+			commit: input.config.execution.sourceCommit,
+			tree: input.config.execution.sourceTree,
+			rangeBaseCommit: commit("3"),
+			rangeSha256: digest("4"),
+		},
+		rootComponent: DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+		product: {
+			binaries: [
+				{
+					platformId: platform.id,
+					binarySha256: input.config.product.binarySha256,
+				},
+			],
+		},
+		harness: {
+			binaries: [
+				{
+					platformId: platform.id,
+					binarySha256: input.config.harness.binarySha256,
+				},
+			],
+		},
+		control: {
+			binaries: [
+				{
+					platformId: platform.id,
+					role: "cli",
+					binarySha256: input.config.controls.cli.binarySha256,
+				},
+				{
+					platformId: platform.id,
+					role: "library",
+					binarySha256: input.config.controls.library.binarySha256,
+				},
+			],
+		},
+		fixture: {
+			authoritySha256: input.config.rootAuthoritySha256,
+			document: authorityDocument,
+		},
+		platforms: [platform],
+	};
+	const fragment = finalizeDerivedChangeDiagnosticFragment({
+		schema: DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
+		campaign,
+		platform,
+		artifacts: [],
+		cases: result.cases,
+	});
+	assert.equal(
+		mergeDerivedChangeDiagnosticReport({ campaign, fragments: [fragment] })
+			.verdict,
+		"red",
+	);
 });
 
 test("CLI reads its config from the diagnostic environment and emits only collection JSON", async () => {
 	const input = await fixture();
+	input.config.workRoot = join(
+		input.root,
+		"configured-work-root-must-be-overridden",
+	);
 	const env = {
 		...process.env,
 		POINTBREAK_DERIVED_CHANGE_CHANGE_READ_CONFIG: JSON.stringify(input.config),
 		POINTBREAK_DIAGNOSTIC_CASE_ROOT: input.caseRoot,
+		POINTBREAK_DIAGNOSTIC_WORK_ROOT: input.workRoot,
 	};
 	const outcome = await new Promise((done) => {
 		const child = spawn(

@@ -17,9 +17,12 @@
 		if (message.type() === "error") consoleErrors.push(message.text());
 	});
 	const fixtureCheckpoint = (checkpoint) => ({
-		fixture: config.fixture.authoritativeInventorySha256,
 		fixtureId: config.fixture.id,
-		witnessSha256: config.fixture.witnessSha256,
+		rawWitnessSha256: config.fixture.rawWitnessSha256,
+		actualAuthoritativeInventorySha256:
+			config.fixture.actualAuthoritativeInventorySha256,
+		topologyCheckpointSha256: config.fixture.topologyCheckpointSha256,
+		fixtureModuleSha256: config.fixture.fixtureModuleSha256,
 		topologyMaterializerSha256: config.fixture.topologyMaterializerSha256,
 		checkpoint,
 	});

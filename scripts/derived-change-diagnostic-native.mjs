@@ -67,6 +67,17 @@ function requireAbsolutePath(value, label) {
 	if (!isAbsolute(value)) throw new Error(`${label} must be absolute`);
 }
 
+function pathsOverlap(left, right) {
+	const relation = relative(resolve(left), resolve(right));
+	if (
+		relation === "" ||
+		(relation !== ".." && !relation.startsWith(`..${sep}`))
+	)
+		return true;
+	const reverse = relative(resolve(right), resolve(left));
+	return reverse !== ".." && !reverse.startsWith(`..${sep}`);
+}
+
 function requireSha256(value, label) {
 	if (typeof value !== "string" || !SHA256.test(value)) {
 		throw new Error(`${label} must be a lowercase SHA-256`);
@@ -81,10 +92,19 @@ function validateConfig(config) {
 	requireText(config.campaignId, "native diagnostic campaign id");
 	requireSha256(config.rootAuthoritySha256, "native diagnostic root authority");
 	requireAbsolutePath(config.caseRoot, "native diagnostic case root");
+	requireAbsolutePath(config.workRoot, "native diagnostic work root");
 	requireAbsolutePath(
 		config.sourceCheckout,
 		"native diagnostic source checkout",
 	);
+	if (
+		pathsOverlap(config.workRoot, config.caseRoot) ||
+		pathsOverlap(config.workRoot, config.sourceCheckout)
+	) {
+		throw new Error(
+			"native diagnostic work root must be disjoint from retained and source roots",
+		);
+	}
 	requireAbsolutePath(config.gitProgram, "native diagnostic Git program");
 	requireObject(config.source, "native diagnostic source identity");
 	for (const field of ["commit", "tree", "rangeBaseCommit"]) {
@@ -322,27 +342,44 @@ function outcomeActual(outcome) {
 
 export async function runDerivedChangeNativeDiagnostic(input) {
 	const config = validateConfig(input);
-	await requireEmptyRoot(config.caseRoot);
+	await Promise.all([
+		requireEmptyRoot(config.caseRoot),
+		requireEmptyRoot(config.workRoot),
+	]);
 	const requestRoot = join(config.caseRoot, "requests");
 	const logRoot = join(config.caseRoot, "logs");
 	await Promise.all([mkdir(requestRoot), mkdir(logRoot)]);
 	const artifactPaths = [];
 	const cases = [];
+	const isolatedEnvironmentNames = new Set([
+		"HOME",
+		"PATH",
+		"TEMP",
+		"TMP",
+		"TMPDIR",
+		"USERPROFILE",
+	]);
 	const cleanEnvironment = {
-		...process.env,
-		HOME: config.caseRoot,
-		USERPROFILE: config.caseRoot,
-		TMPDIR: config.caseRoot,
-		TMP: config.caseRoot,
-		TEMP: config.caseRoot,
+		...Object.fromEntries(
+			Object.entries(process.env).filter(([key]) => {
+				const normalizedKey = key.toUpperCase();
+				return (
+					!normalizedKey.startsWith("POINTBREAK_") &&
+					!isolatedEnvironmentNames.has(normalizedKey)
+				);
+			}),
+		),
+		HOME: config.workRoot,
+		USERPROFILE: config.workRoot,
+		TMPDIR: config.workRoot,
+		TMP: config.workRoot,
+		TEMP: config.workRoot,
+		POINTBREAK_DIAGNOSTIC_CASE_ROOT: config.workRoot,
+		POINTBREAK_DIAGNOSTIC_WORK_ROOT: config.workRoot,
 		PATH: [dirname(config.gitProgram), process.env.PATH]
 			.filter(Boolean)
 			.join(delimiter),
 	};
-	delete cleanEnvironment.POINTBREAK_HOME;
-	delete cleanEnvironment.POINTBREAK_QUALIFICATION_CORPUS;
-	delete cleanEnvironment.POINTBREAK_CHANGE_READY_FIXTURE_DIR;
-	delete cleanEnvironment.POINTBREAK_GIT_BACKEND;
 
 	const contractOutcome = await runCommand(
 		config.harness.program,
@@ -373,7 +410,7 @@ export async function runDerivedChangeNativeDiagnostic(input) {
 
 	for (const tier of TIERS) {
 		const nativeId = `native-${tier}`;
-		const nativeRoot = join(config.caseRoot, `native-${tier}`);
+		const nativeRoot = join(config.workRoot, `native-${tier}`);
 		const nativeRequestPath = join(requestRoot, `native-${tier}.json`);
 		const nativeArgs = commandArguments(
 			config,
@@ -485,7 +522,7 @@ export async function runDerivedChangeNativeDiagnostic(input) {
 			),
 			rootAuthoritySha256: config.rootAuthoritySha256,
 			sourceRoot: admitted.path,
-			workspaceRoot: join(config.caseRoot, `lifecycle-${tier}`),
+			workspaceRoot: join(config.workRoot, `lifecycle-${tier}`),
 			admittedRootSha256: admitted.sha256,
 			platform: config.platform.id,
 			tier,
@@ -652,6 +689,7 @@ if (
 			: JSON.parse(await readFile(configInput, "utf8"));
 	if (configInput === "--config-env") {
 		config.caseRoot = process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT;
+		config.workRoot = process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT;
 	}
 	const result = await runDerivedChangeNativeDiagnostic(config);
 	process.stdout.write(`${JSON.stringify(result)}\n`);

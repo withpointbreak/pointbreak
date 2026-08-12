@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 
+import {
+	DERIVED_CHANGE_DETERMINISTIC_FIXTURE_IDS_V2,
+	DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2,
+	DERIVED_CHANGE_PUBLIC_FIXTURE_SOURCE_PATHS_V2,
+	DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1,
+} from "./derived-change-diagnostic-fixture.mjs";
+
 export const DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1 =
 	"pointbreak.derived-change-diagnostic-report.v1";
 export const DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1 =
@@ -23,25 +30,6 @@ const FAILURE_CLASSES = new Set([
 ]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
-const PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V1 =
-	"pointbreak.derived-change-public-fixture-authority.v1";
-const PUBLIC_FIXTURE_SOURCE_PATHS_V1 = Object.freeze([
-	"scripts/materialize-inspector-decision-matrix.sh",
-	"src/bench_support/derived_access/materializer.rs",
-	"tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
-	"tests/support/assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
-]);
-const PUBLIC_FIXTURE_IDS_V1 = Object.freeze([
-	"cycle-conflicted-v1",
-	"duplicate-conflict-v1",
-	"duplicate-equal-v1",
-	"incomplete-v1",
-	"missing-carrier-v1",
-	"mutated-carrier-v1",
-	"removal-v1",
-	"topology-v1",
-	"wrong-family-carrier-v1",
-]);
 
 const copy = (value) => structuredClone(value);
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
@@ -124,11 +112,19 @@ function validateFixture(fixture, label, source) {
 	requireObject(fixture.document, `${label} public fixture authority`);
 	requireExactKeys(
 		fixture.document,
-		["schema", "sourceCommit", "sourceTree", "sourceFiles", "witnesses"],
+		[
+			"schema",
+			"sourceCommit",
+			"sourceTree",
+			"sourceFiles",
+			"topologyCheckpoint",
+			"witnesses",
+		],
 		`${label} public fixture authority`,
 	);
 	if (
-		fixture.document.schema !== PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V1 ||
+		fixture.document.schema !==
+			DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2 ||
 		fixture.document.sourceCommit !== source.commit ||
 		fixture.document.sourceTree !== source.tree
 	) {
@@ -137,7 +133,9 @@ function validateFixture(fixture, label, source) {
 		);
 	}
 	if (!Array.isArray(fixture.document.sourceFiles)) {
-		throw new Error(`${label} public fixture source authority must be an array`);
+		throw new Error(
+			`${label} public fixture source authority must be an array`,
+		);
 	}
 	const sourcePaths = fixture.document.sourceFiles.map((entry) => {
 		requireObject(entry, `${label} public fixture source authority entry`);
@@ -150,21 +148,19 @@ function validateFixture(fixture, label, source) {
 		requireSha256(entry.sha256, `${label} public fixture source SHA-256`);
 		return entry.path;
 	});
-	if (!equal(sourcePaths, PUBLIC_FIXTURE_SOURCE_PATHS_V1)) {
+	if (!equal(sourcePaths, DERIVED_CHANGE_PUBLIC_FIXTURE_SOURCE_PATHS_V2)) {
 		throw new Error(`${label} public fixture source authority is incomplete`);
 	}
 	if (!Array.isArray(fixture.document.witnesses)) {
-		throw new Error(`${label} public fixture witness inventory must be an array`);
+		throw new Error(
+			`${label} public fixture witness inventory must be an array`,
+		);
 	}
 	const fixtureIds = fixture.document.witnesses.map((entry) => {
 		requireObject(entry, `${label} public fixture witness authority entry`);
 		requireExactKeys(
 			entry,
-			[
-				"fixtureId",
-				"authoritativeInventorySha256",
-				"witnessSha256",
-			],
+			["fixtureId", "authoritativeInventorySha256", "witnessSha256"],
 			`${label} public fixture witness authority entry`,
 		);
 		requireText(entry.fixtureId, `${label} public fixture witness id`);
@@ -178,9 +174,29 @@ function validateFixture(fixture, label, source) {
 		);
 		return entry.fixtureId;
 	});
-	if (!equal(fixtureIds, PUBLIC_FIXTURE_IDS_V1)) {
+	if (!equal(fixtureIds, DERIVED_CHANGE_DETERMINISTIC_FIXTURE_IDS_V2)) {
 		throw new Error(`${label} public fixture witness inventory is incomplete`);
 	}
+	requireObject(
+		fixture.document.topologyCheckpoint,
+		`${label} public fixture topology checkpoint`,
+	);
+	requireExactKeys(
+		fixture.document.topologyCheckpoint,
+		["schema", "fixtureId", "checkpointSha256"],
+		`${label} public fixture topology checkpoint`,
+	);
+	if (
+		fixture.document.topologyCheckpoint.schema !==
+			DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1 ||
+		fixture.document.topologyCheckpoint.fixtureId !== "topology-v1"
+	) {
+		throw new Error(`${label} public fixture topology checkpoint is invalid`);
+	}
+	requireSha256(
+		fixture.document.topologyCheckpoint.checkpointSha256,
+		`${label} public fixture topology checkpoint SHA-256`,
+	);
 }
 
 function validatePlatform(platform, label) {

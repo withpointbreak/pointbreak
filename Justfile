@@ -385,6 +385,7 @@ derived-change-diagnostic-selftest:
     node --test \
         scripts/derived-change-diagnostic-report.selftest.mjs \
         scripts/derived-change-diagnostic.selftest.mjs \
+        scripts/derived-change-diagnostic-fixture.selftest.mjs \
         scripts/derived-change-diagnostic-native.selftest.mjs \
         scripts/derived-change-diagnostic-change-read.selftest.mjs \
         scripts/derived-change-diagnostic-browser.selftest.mjs \

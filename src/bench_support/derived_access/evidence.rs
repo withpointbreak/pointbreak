@@ -1561,24 +1561,11 @@ pub fn run_derived_change_diagnostic_native_v1(
     {
         return Err("invalid derived-Change diagnostic native request".to_owned());
     }
-    let receipt = run_qualification_derived_access_native_smoke_v1(request_path)?;
-    let admitted_root_sha256 = match receipt.payload {
-        QualificationDerivedAccessNativeSmokePayloadV1::D0_128(receipt) => receipt
-            .d0_pair
-            .root_a
-            .store_inventory
-            .inventory_sha256
-            .clone(),
-        QualificationDerivedAccessNativeSmokePayloadV1::Longitudinal(receipt) => {
-            receipt.root_a_sha256.clone()
-        }
-    };
+    run_qualification_derived_access_native_smoke_v1(request_path)?;
     let admitted_root_path = request.workspace_root.join("root-a");
     let source_before = longitudinal_authoritative_store_data_inventory_v1(&admitted_root_path)
         .map_err(|error| error.to_string())?;
-    if source_before.inventory_sha256 != admitted_root_sha256 {
-        return Err("derived-Change diagnostic admitted root drifted".to_owned());
-    }
+    let admitted_root_sha256 = source_before.inventory_sha256.clone();
     let source_after = longitudinal_authoritative_store_data_inventory_v1(&admitted_root_path)
         .map_err(|error| error.to_string())?;
     let source_unchanged = source_before == source_after;

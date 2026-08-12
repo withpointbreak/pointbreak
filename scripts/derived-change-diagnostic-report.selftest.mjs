@@ -36,10 +36,14 @@ const fixtureIds = [
 const fixtureAuthority = () => ({
 	authoritySha256: digest("1"),
 	document: {
-		schema: "pointbreak.derived-change-public-fixture-authority.v1",
+		schema: "pointbreak.derived-change-public-fixture-authority.v2",
 		sourceCommit: commit("a"),
 		sourceTree: commit("b"),
 		sourceFiles: [
+			{
+				path: "scripts/derived-change-diagnostic-fixture.mjs",
+				sha256: digest("6"),
+			},
 			{
 				path: "scripts/materialize-inspector-decision-matrix.sh",
 				sha256: digest("2"),
@@ -57,11 +61,18 @@ const fixtureAuthority = () => ({
 				sha256: digest("5"),
 			},
 		],
-		witnesses: fixtureIds.map((fixtureId, index) => ({
-			fixtureId,
-			authoritativeInventorySha256: digest(String((index + 4) % 10)),
-			witnessSha256: digest(String((index + 5) % 10)),
-		})),
+		witnesses: fixtureIds
+			.filter((fixtureId) => fixtureId !== "topology-v1")
+			.map((fixtureId, index) => ({
+				fixtureId,
+				authoritativeInventorySha256: digest(String((index + 4) % 10)),
+				witnessSha256: digest(String((index + 5) % 10)),
+			})),
+		topologyCheckpoint: {
+			schema: "pointbreak.derived-change-topology-fixture-checkpoint.v1",
+			fixtureId: "topology-v1",
+			checkpointSha256: digest("7"),
+		},
 	},
 });
 
@@ -285,7 +296,7 @@ test("requires both exact control binary roles on every platform", () => {
 	);
 });
 
-test("binds the complete public fixture witness and source authority", () => {
+test("binds deterministic witnesses, the topology checkpoint, and source authority", () => {
 	const missingWitness = campaign();
 	missingWitness.fixture.document.witnesses.pop();
 	assert.throws(
@@ -293,11 +304,19 @@ test("binds the complete public fixture witness and source authority", () => {
 		/public fixture witness inventory/i,
 	);
 
+	const missingTopology = campaign();
+	delete missingTopology.fixture.document.topologyCheckpoint;
+	assert.throws(
+		() => merge([fragment({ campaign: missingTopology })], missingTopology),
+		/public fixture authority|topology checkpoint/i,
+	);
+
 	const missingMaterializer = campaign();
 	missingMaterializer.fixture.document.sourceFiles =
 		missingMaterializer.fixture.document.sourceFiles.slice(1);
 	assert.throws(
-		() => merge([fragment({ campaign: missingMaterializer })], missingMaterializer),
+		() =>
+			merge([fragment({ campaign: missingMaterializer })], missingMaterializer),
 		/public fixture source authority/i,
 	);
 });

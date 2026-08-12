@@ -22,6 +22,7 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_REQUEST_SCHEMA_V1,
 	executeDerivedChangeDiagnosticCases,
+	validateDerivedChangeDiagnosticRequest,
 	verifyDerivedChangeDiagnosticBindings,
 } from "./derived-change-diagnostic.mjs";
 import {
@@ -96,6 +97,7 @@ const SCRIPT_POLICY_FILES = Object.freeze([
 	"scripts/change-inspector-browser-diagnostics.selftest.mjs",
 	"scripts/derived-change-diagnostic-report.selftest.mjs",
 	"scripts/derived-change-diagnostic.selftest.mjs",
+	"scripts/derived-change-diagnostic-fixture.selftest.mjs",
 	"scripts/derived-change-diagnostic-native.selftest.mjs",
 	"scripts/derived-change-diagnostic-browser.selftest.mjs",
 	"scripts/derived-change-diagnostic-change-read.selftest.mjs",
@@ -105,23 +107,26 @@ const SCRIPT_POLICY_FILES = Object.freeze([
 const PLATFORM_CONTROL_TESTS = Object.freeze([
 	{
 		name: "path-identity",
-		testName: "existing_path_identity_ignores_equivalent_lexical_spellings",
+		testName:
+			"bench_support::derived_access::change_read::instrumented::tests::existing_path_identity_ignores_equivalent_lexical_spellings",
 		checkpoint: "canonical-path-identity",
 	},
 	{
 		name: "carrier-mutation",
 		testName:
-			"candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces",
+			"bench_support::derived_access::runner_tests::candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces",
 		checkpoint: "authoritative-carrier-mutation",
 	},
 	{
 		name: "carrier-missing",
-		testName: "change_fixtures_exercise_their_declared_derived_outcomes",
+		testName:
+			"bench_support::derived_access::materializer::change_fixture_tests::change_fixtures_exercise_their_declared_derived_outcomes",
 		checkpoint: "missing-carrier-fixtures",
 	},
 	{
 		name: "busy-writer",
-		testName: "stable_authority_successor_does_not_wait_for_a_busy_writer",
+		testName:
+			"session::derived_access::lifecycle::tests::stable_authority_successor_does_not_wait_for_a_busy_writer",
 		checkpoint: "busy-writer-continuation",
 	},
 ]);
@@ -192,16 +197,6 @@ function publicFixtureCheckpoint(campaign, checkpoint) {
 		fixture: campaign.fixture.authoritySha256,
 		checkpoint,
 	};
-}
-
-function fixtureWitnessAuthority(campaign, fixtureId) {
-	const authority = campaign.fixture.document.witnesses.find(
-		(candidate) => candidate.fixtureId === fixtureId,
-	);
-	if (!authority) {
-		throw new Error(`public fixture authority is missing ${fixtureId}`);
-	}
-	return authority;
 }
 
 function fixtureSourceAuthority(campaign, path) {
@@ -436,6 +431,8 @@ function validateProgramInventory(programs, platform) {
 	const required = [
 		"node",
 		"cargo",
+		"cargoNextest",
+		"rustc",
 		"git",
 		"filesystemProbe",
 		"bash",
@@ -578,6 +575,7 @@ function createChangeReadDiagnosticConfig(config, platform) {
 		campaignId: campaign.id,
 		rootAuthoritySha256: campaign.fixture.authoritySha256,
 		caseRoot: caseRoot(config, "change-read-stateful"),
+		workRoot: config.temporaryRoot,
 		sourceCheckout: config.sourceCheckout,
 		execution,
 		product: {
@@ -680,6 +678,21 @@ function validateHostConfig(config) {
 			`diagnostic host output root must end in ${DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1}`,
 		);
 	}
+	requireOutsideSourceRoot(
+		config.temporaryRoot,
+		config.sourceCheckout,
+		"diagnostic host temporary root",
+	);
+	requireOutsideSourceRoot(
+		config.temporaryRoot,
+		config.outputRoot,
+		"diagnostic host temporary root",
+	);
+	requireOutsideSourceRoot(
+		config.outputRoot,
+		config.temporaryRoot,
+		"diagnostic host output root",
+	);
 	requireObject(config.identityPaths, "diagnostic identity paths");
 	for (const name of [
 		"product",
@@ -795,6 +808,7 @@ function browserArtifacts() {
 		"logs/harness.json",
 		"logs/pointbreak-version.json",
 		"logs/fixture-witness.json",
+		"logs/fixture-checkpoint.json",
 		"logs/fixture-materialize.log",
 		"logs/derived-build.json",
 		"logs/derived-build.log",
@@ -807,6 +821,7 @@ function browserArtifacts() {
 		"logs/browser-close.log",
 		"harness/scripts/derived-change-diagnostic-browser.sh",
 		"harness/scripts/derived-change-diagnostic-browser.mjs",
+		"harness/scripts/derived-change-diagnostic-fixture.mjs",
 		"harness/scripts/change-inspector-browser-diagnostics.mjs",
 		"harness/scripts/materialize-inspector-decision-matrix.sh",
 		"harness/tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
@@ -819,6 +834,8 @@ function bindingRequest(request) {
 	return {
 		campaign: request.campaign,
 		platformId: request.platformId,
+		outputRoot: request.outputRoot,
+		temporaryRoot: request.temporaryRoot,
 		sourcePreflight: request.sourcePreflight,
 		identityPaths: request.identityPaths,
 		requiredExecutables: request.requiredExecutables,
@@ -892,6 +909,9 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					harness: config.identityPaths.harness,
 					control: config.identityPaths.control,
 					controlCli: config.identityPaths.controlCli,
+					cargo: config.programs.cargo,
+					cargoNextest: config.programs.cargoNextest,
+					rustc: config.programs.rustc,
 					sourceCheckout: config.sourceCheckout,
 					source: campaign.source,
 				}),
@@ -906,24 +926,20 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			dependsOn: [preflight, binaryPreflight],
 			program: config.programs.cargo,
 			args: [
-				"+stable",
 				"build",
 				"--locked",
 				"--workspace",
 				"--all-targets",
 				"--all-features",
 				"--keep-going",
+				"--jobs",
+				"2",
 			],
 			root: "compile-all-targets",
 			campaign,
 			phase: "compile-all-diagnostic-targets",
 			cwd: config.sourceCheckout,
-			env: {
-				CARGO_TARGET_DIR: join(
-					caseRoot(config, "compile-all-targets"),
-					"target",
-				),
-			},
+			env: { CARGO: config.programs.cargo, RUSTC: config.programs.rustc },
 		}),
 	);
 	cases.push(
@@ -931,9 +947,8 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			id: `${prefix}.policy-derived-access`,
 			lane: "policy",
 			dependsOn: [preflight, binaryPreflight],
-			program: config.programs.cargo,
+			program: config.programs.cargoNextest,
 			args: [
-				"+stable",
 				"nextest",
 				"run",
 				"--locked",
@@ -946,12 +961,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			campaign,
 			phase: "affected-policy-suite",
 			cwd: config.sourceCheckout,
-			env: {
-				CARGO_TARGET_DIR: join(
-					caseRoot(config, "policy-derived-access"),
-					"target",
-				),
-			},
+			env: { CARGO: config.programs.cargo, RUSTC: config.programs.rustc },
 		}),
 	);
 	const changeReadRoot = "change-read-stateful";
@@ -1021,6 +1031,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					campaignId: campaign.id,
 					rootAuthoritySha256: campaign.fixture.authoritySha256,
 					caseRoot: caseRoot(config, nativeRoot),
+					workRoot: config.temporaryRoot,
 					sourceCheckout: config.sourceCheckout,
 					gitProgram: config.programs.git,
 					source: campaign.source,
@@ -1064,18 +1075,13 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				campaign,
 				phase: "browser-lifecycle-policy",
 				cwd: join(config.sourceCheckout, "src/cli/inspect/web"),
-				env: {
-					npm_config_cache: join(caseRoot(config, "policy-web"), "npm-cache"),
-				},
 			}),
 		);
 	}
 	if (config.browserIterations > 0) {
 		const browserRoot = "browser-transition";
-		const topologyFixtureAuthority = fixtureWitnessAuthority(
-			campaign,
-			"topology-v1",
-		);
+		const topologyFixtureAuthority =
+			campaign.fixture.document.topologyCheckpoint;
 		const topologyMaterializerAuthority = fixtureSourceAuthority(
 			campaign,
 			"scripts/materialize-inspector-decision-matrix.sh",
@@ -1121,10 +1127,8 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					POINTBREAK_AWK_PROGRAM: config.programs.awk,
 					POINTBREAK_CYGPATH_PROGRAM: config.programs.cygpath ?? "absent",
 					POINTBREAK_EXPECTED_FIXTURE_ID: "topology-v1",
-					POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256:
-						topologyFixtureAuthority.authoritativeInventorySha256,
-					POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256:
-						topologyFixtureAuthority.witnessSha256,
+					POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256:
+						topologyFixtureAuthority.checkpointSha256,
 					POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256:
 						topologyMaterializerAuthority.sha256,
 					...(config.allowedSignersPath
@@ -1154,6 +1158,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 		campaign,
 		platformId: config.platformId,
 		outputRoot: config.outputRoot,
+		temporaryRoot: config.temporaryRoot,
 		sourcePreflight,
 		identityPaths: structuredClone(config.identityPaths),
 		requiredExecutables: [
@@ -1183,7 +1188,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 	});
 	cases.push(postflight);
 	postflight.env[BOUND_REQUEST_ENV] = JSON.stringify(bindingRequest(request));
-	return request;
+	return validateDerivedChangeDiagnosticRequest(request);
 }
 
 async function requireEmptyRoot(root) {
@@ -1396,19 +1401,48 @@ function oneNamedControlPass(outcome, testName) {
 	);
 }
 
+export function derivedChangeDiagnosticToolchainPreflightEnvironment(
+	environment,
+) {
+	return {
+		...environment,
+		RUSTUP_AUTO_INSTALL: "0",
+		RUSTUP_DIST_SERVER: "http://127.0.0.1:9",
+		RUSTUP_UPDATE_ROOT: "http://127.0.0.1:9/rustup",
+	};
+}
+
 async function runBinaryPreflight() {
 	const config = JSON.parse(process.env[BINARY_PREFLIGHT_ENV] ?? "");
 	requireObject(config, "diagnostic binary preflight");
 	for (const name of [
+		"cargo",
+		"cargoNextest",
 		"product",
 		"harness",
 		"control",
 		"controlCli",
+		"rustc",
 		"sourceCheckout",
 	]) {
 		requireAbsolutePath(config[name], `diagnostic ${name} path`);
 	}
 	requireObject(config.source, "diagnostic binary preflight source");
+	for (const [name, program] of [
+		["cargo", config.cargo],
+		["cargo-nextest", config.cargoNextest],
+		["rustc", config.rustc],
+	]) {
+		const outcome = await runCommand(program, ["--version"], {
+			cwd: config.sourceCheckout,
+			env: derivedChangeDiagnosticToolchainPreflightEnvironment(process.env),
+		});
+		if (outcome.code !== 0 || outcome.signal !== null) {
+			throw new Error(
+				`diagnostic ${name} must be an actual preinstalled executable`,
+			);
+		}
+	}
 
 	const productOutcome = await runCommand(
 		config.product,
@@ -1535,11 +1569,7 @@ export function derivedChangeDiagnosticFilesystemProbeArguments(
 ) {
 	return operatingSystem === "macos"
 		? ["-Y", root]
-		: [
-				"fsinfo",
-				"volumeinfo",
-				win32.parse(root).root.replace(/[\\/]+$/u, ""),
-			];
+		: ["fsinfo", "volumeinfo", win32.parse(root).root.replace(/[\\/]+$/u, "")];
 }
 
 async function observedFilesystem(program, operatingSystem, root) {

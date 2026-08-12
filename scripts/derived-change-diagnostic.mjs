@@ -63,6 +63,12 @@ const OWNER_STORE_COMPONENTS = new Set([
 export const DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1 =
 	"pointbreak.derived-change-diagnostic-collection.v1";
 
+function ownerStoreEnvironmentEntries(environment = process.env) {
+	return Object.entries(environment).filter(([key]) =>
+		OWNER_STORE_ENV.has(key.toUpperCase()),
+	);
+}
+
 function requireObject(value, label) {
 	if (value === null || typeof value !== "object" || Array.isArray(value))
 		throw new Error(`${label} must be an object`);
@@ -162,8 +168,130 @@ function validateIdentityPaths(value) {
 function isWithin(candidate, parent) {
 	const relation = relative(resolve(parent), resolve(candidate));
 	return (
-		relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`))
+		relation === "" ||
+		(!isAbsolute(relation) &&
+			relation !== ".." &&
+			!relation.startsWith(`..${sep}`))
 	);
+}
+
+function pathComponents(path) {
+	const absolute = resolve(path);
+	return absolute
+		.slice(parse(absolute).root.length)
+		.split(/[\\/]/u)
+		.filter(Boolean);
+}
+
+function pathsOverlap(left, right) {
+	return isWithin(left, right) || isWithin(right, left);
+}
+
+async function assertNoSymlinkTraversal(path, label) {
+	let current = parse(resolve(path)).root;
+	for (const component of pathComponents(path)) {
+		current = join(current, component);
+		if ((await lstat(current)).isSymbolicLink())
+			throw new Error(`${label} must not traverse symbolic links`);
+	}
+}
+
+async function canonicalPath(path, label) {
+	let existing = resolve(path);
+	while (true) {
+		try {
+			await lstat(existing);
+			break;
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+			const parent = dirname(existing);
+			if (parent === existing)
+				throw new Error(`${label} has no existing ancestor`);
+			existing = parent;
+		}
+	}
+	return resolve(await realpath(existing), relative(existing, resolve(path)));
+}
+
+function validateTemporaryRootShape(temporaryRoot, outputRoot, sourceRoot) {
+	if (typeof temporaryRoot !== "string" || !isAbsolute(temporaryRoot))
+		throw new Error("diagnostic temporary root must be absolute");
+	if (pathsOverlap(temporaryRoot, outputRoot))
+		throw new Error(
+			"diagnostic temporary root must be disjoint from the diagnostic output root",
+		);
+	if (pathsOverlap(temporaryRoot, sourceRoot))
+		throw new Error(
+			"diagnostic temporary root must be disjoint from the source checkout",
+		);
+	const components = pathComponents(temporaryRoot).map((component) =>
+		component.toLowerCase(),
+	);
+	if (
+		components.includes(DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1) ||
+		components.some((component) => OWNER_STORE_COMPONENTS.has(component))
+	)
+		throw new Error(
+			"diagnostic temporary root cannot enter a diagnostic or owner-store component",
+		);
+}
+
+async function assertDerivedChangeDiagnosticTemporaryRootIdentity(
+	temporaryRoot,
+	outputRoot,
+	sourceRoot,
+) {
+	validateTemporaryRootShape(temporaryRoot, outputRoot, sourceRoot);
+	const temporaryStat = await lstat(temporaryRoot).catch((error) => {
+		if (error?.code === "ENOENT")
+			throw new Error("diagnostic temporary root must already exist");
+		throw error;
+	});
+	if (temporaryStat.isSymbolicLink())
+		throw new Error(
+			"diagnostic temporary root must not traverse symbolic links",
+		);
+	if (!temporaryStat.isDirectory())
+		throw new Error(
+			"diagnostic temporary root must be an empty real directory",
+		);
+	await assertNoSymlinkTraversal(temporaryRoot, "diagnostic temporary root");
+	const [canonicalTemporary, canonicalOutput, canonicalSource] =
+		await Promise.all([
+			realpath(temporaryRoot),
+			canonicalPath(outputRoot, "diagnostic output root"),
+			realpath(sourceRoot),
+		]);
+	if (pathsOverlap(canonicalTemporary, canonicalOutput))
+		throw new Error(
+			"diagnostic temporary root must be disjoint from the diagnostic output root",
+		);
+	if (pathsOverlap(canonicalTemporary, canonicalSource))
+		throw new Error(
+			"diagnostic temporary root must be disjoint from the source checkout",
+		);
+	for (const [key, ownerPath] of ownerStoreEnvironmentEntries()) {
+		if (!ownerPath || !isAbsolute(ownerPath)) continue;
+		const canonicalOwner = await realpath(ownerPath).catch(() =>
+			resolve(ownerPath),
+		);
+		if (pathsOverlap(canonicalTemporary, canonicalOwner))
+			throw new Error(`diagnostic temporary root cannot enter ${key}`);
+	}
+}
+
+async function assertDerivedChangeDiagnosticTemporaryRootSafety(
+	temporaryRoot,
+	outputRoot,
+	sourceRoot,
+) {
+	await assertDerivedChangeDiagnosticTemporaryRootIdentity(
+		temporaryRoot,
+		outputRoot,
+		sourceRoot,
+	);
+	if ((await readdir(temporaryRoot)).length)
+		throw new Error("diagnostic temporary root must be empty");
 }
 
 export async function assertDerivedChangeDiagnosticOutputRootSafety(
@@ -196,8 +324,7 @@ export async function assertDerivedChangeDiagnosticOutputRootSafety(
 			"diagnostic output root cannot enter a source or owner-store component",
 		);
 	}
-	for (const key of OWNER_STORE_ENV) {
-		const ownerPath = process.env[key];
+	for (const [key, ownerPath] of ownerStoreEnvironmentEntries()) {
 		if (ownerPath && isAbsolute(ownerPath) && isWithin(outputRoot, ownerPath)) {
 			throw new Error(`diagnostic output root cannot enter ${key}`);
 		}
@@ -240,8 +367,7 @@ export async function assertDerivedChangeDiagnosticOutputRootSafety(
 			"diagnostic output root cannot resolve into an owner-store component",
 		);
 	}
-	for (const key of OWNER_STORE_ENV) {
-		const ownerPath = process.env[key];
+	for (const [key, ownerPath] of ownerStoreEnvironmentEntries()) {
 		if (!ownerPath || !isAbsolute(ownerPath)) continue;
 		const canonicalOwner = await realpath(ownerPath).catch(() =>
 			resolve(ownerPath),
@@ -302,6 +428,11 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 				"diagnostic output root must be outside the source checkout",
 			);
 	}
+	validateTemporaryRootShape(
+		request.temporaryRoot,
+		request.outputRoot,
+		request.sourcePreflight?.sourceRoot ?? process.cwd(),
+	);
 	if (!Array.isArray(request.cases) || !request.cases.length)
 		throw new Error("diagnostic request requires cases");
 	const ids = new Set();
@@ -371,7 +502,7 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 			if (
 				Object.entries(caseRequest.env).some(
 					([key, value]) =>
-						typeof value !== "string" || OWNER_STORE_ENV.has(key),
+						typeof value !== "string" || OWNER_STORE_ENV.has(key.toUpperCase()),
 				)
 			)
 				throw new Error(
@@ -442,15 +573,35 @@ async function sha256File(path) {
 }
 
 async function requireRetainedFile(path, root, label) {
-	const relation = relative(resolve(root), resolve(path));
-	if (!relation || relation === ".." || relation.startsWith(`..${sep}`))
+	const absoluteRoot = resolve(root);
+	const absolutePath = resolve(path);
+	const relation = relative(absoluteRoot, absolutePath);
+	if (
+		!relation ||
+		isAbsolute(relation) ||
+		relation === ".." ||
+		relation.startsWith(`..${sep}`)
+	)
 		throw new Error(`${label} escapes the diagnostic output root`);
-	const stat = await lstat(resolve(path));
-	if (stat.isSymbolicLink() || !stat.isFile())
+	let current = absoluteRoot;
+	let stat;
+	for (const component of relation.split(sep)) {
+		current = join(current, component);
+		stat = await lstat(current);
+		if (stat.isSymbolicLink())
+			throw new Error(`${label} traverses a symbolic link`);
+	}
+	const [canonicalRoot, canonicalPath] = await Promise.all([
+		realpath(absoluteRoot),
+		realpath(absolutePath),
+	]);
+	if (!isWithin(canonicalPath, canonicalRoot))
+		throw new Error(`${label} escapes the diagnostic output root`);
+	if (!stat?.isFile())
 		throw new Error(`${label} is not a retained regular file`);
 	return {
 		path: relation.split(sep).join("/"),
-		sha256: await sha256File(resolve(path)),
+		sha256: await sha256File(absolutePath),
 	};
 }
 
@@ -464,27 +615,91 @@ function retainArtifact(artifacts, artifact) {
 	return artifact;
 }
 
-function sanitizedEnvironment(caseRequest, caseRoot) {
-	const environment = { ...process.env };
-	for (const key of OWNER_STORE_ENV) delete environment[key];
-	return {
-		...environment,
-		...caseRequest.env,
-		POINTBREAK_DIAGNOSTIC_CASE_ROOT: caseRoot,
-		TMPDIR: caseRoot,
-		TMP: caseRoot,
-		TEMP: caseRoot,
-	};
+function isIsolatedRustEnvironmentName(normalizedKey) {
+	return (
+		normalizedKey === "CARGO" ||
+		normalizedKey.startsWith("CARGO_") ||
+		normalizedKey === "NEXTEST" ||
+		normalizedKey.startsWith("NEXTEST_") ||
+		normalizedKey.startsWith("RUST")
+	);
 }
 
-async function runCommand(caseRequest, caseRoot, stdoutPath, stderrPath) {
+function sanitizedEnvironment(caseRequest, caseRoot, workRoot) {
+	const environment = {};
+	const isolatedNames = new Set([
+		"APPDATA",
+		"HOME",
+		"LOCALAPPDATA",
+		"NPM_CONFIG_CACHE",
+		"POINTBREAK_DIAGNOSTIC_CASE_ROOT",
+		"POINTBREAK_DIAGNOSTIC_WORK_ROOT",
+		"TEMP",
+		"TMP",
+		"TMPDIR",
+		"USERPROFILE",
+		"XDG_CACHE_HOME",
+		"XDG_CONFIG_HOME",
+		"XDG_DATA_HOME",
+		"XDG_STATE_HOME",
+	]);
+	for (const [key, value] of Object.entries(process.env)) {
+		const normalizedKey = key.toUpperCase();
+		if (
+			normalizedKey.startsWith("POINTBREAK_") ||
+			isolatedNames.has(normalizedKey) ||
+			isIsolatedRustEnvironmentName(normalizedKey)
+		)
+			continue;
+		environment[key] = value;
+	}
+	const explicitProgramNames = new Set(["CARGO", "RUSTC"]);
+	for (const [key, value] of Object.entries(caseRequest.env ?? {})) {
+		const normalizedKey = key.toUpperCase();
+		if (
+			OWNER_STORE_ENV.has(normalizedKey) ||
+			((isolatedNames.has(normalizedKey) ||
+				isIsolatedRustEnvironmentName(normalizedKey)) &&
+				!explicitProgramNames.has(normalizedKey))
+		)
+			continue;
+		environment[key] = value;
+	}
+	return Object.assign(environment, {
+		HOME: workRoot,
+		USERPROFILE: workRoot,
+		APPDATA: join(workRoot, "app-data"),
+		LOCALAPPDATA: join(workRoot, "local-app-data"),
+		XDG_CACHE_HOME: join(workRoot, "xdg-cache"),
+		XDG_CONFIG_HOME: join(workRoot, "xdg-config"),
+		XDG_DATA_HOME: join(workRoot, "xdg-data"),
+		XDG_STATE_HOME: join(workRoot, "xdg-state"),
+		npm_config_cache: join(workRoot, "npm-cache"),
+		CARGO_HOME: join(workRoot, "cargo-home"),
+		RUSTUP_HOME: join(workRoot, "rustup-home"),
+		POINTBREAK_DIAGNOSTIC_CASE_ROOT: caseRoot,
+		POINTBREAK_DIAGNOSTIC_WORK_ROOT: workRoot,
+		TMPDIR: workRoot,
+		TMP: workRoot,
+		TEMP: workRoot,
+		CARGO_TARGET_DIR: join(workRoot, "target"),
+	});
+}
+
+async function runCommand(
+	caseRequest,
+	caseRoot,
+	workRoot,
+	stdoutPath,
+	stderrPath,
+) {
 	const stdout = await open(stdoutPath, "wx");
 	const stderr = await open(stderrPath, "wx");
 	try {
 		return await new Promise((done, fail) => {
 			const child = spawn(caseRequest.program, caseRequest.args, {
 				cwd: caseRequest.cwd,
-				env: sanitizedEnvironment(caseRequest, caseRoot),
+				env: sanitizedEnvironment(caseRequest, caseRoot, workRoot),
 				stdio: ["ignore", stdout.fd, stderr.fd],
 			});
 			child.once("error", fail);
@@ -502,6 +717,14 @@ async function rootMustBeEmpty(root) {
 	} catch (error) {
 		if (error?.code !== "ENOENT") throw error;
 		await mkdir(root, { recursive: false });
+	}
+}
+
+async function assertRootEmptyOrAbsent(root, label) {
+	try {
+		if ((await readdir(root)).length) throw new Error(`${label} must be empty`);
+	} catch (error) {
+		if (error?.code !== "ENOENT") throw error;
 	}
 }
 
@@ -675,6 +898,16 @@ async function verifyBoundIdentities(request) {
 
 export async function verifyDerivedChangeDiagnosticBindings(request) {
 	const sourcePreflightFailure = await verifySourcePreflight(request);
+	let temporaryRootFailure = null;
+	try {
+		await assertDerivedChangeDiagnosticTemporaryRootIdentity(
+			request.temporaryRoot,
+			request.outputRoot,
+			request.sourcePreflight?.sourceRoot ?? process.cwd(),
+		);
+	} catch (error) {
+		temporaryRootFailure = String(error);
+	}
 	const identityFailures = await verifyBoundIdentities(request);
 	const requiredPrograms = [
 		...new Set([
@@ -696,10 +929,12 @@ export async function verifyDerivedChangeDiagnosticBindings(request) {
 	);
 	const executableFailures = executableResults.filter(Boolean);
 	return sourcePreflightFailure ||
+		temporaryRootFailure ||
 		executableFailures.length ||
 		identityFailures.length
 		? {
 				...(sourcePreflightFailure ? { sourcePreflightFailure } : {}),
+				...(temporaryRootFailure ? { temporaryRootFailure } : {}),
 				...(executableFailures.length ? { executableFailures } : {}),
 				...(identityFailures.length ? { identityFailures } : {}),
 			}
@@ -887,9 +1122,16 @@ async function expandCollection(
 
 export async function executeDerivedChangeDiagnosticCases(request) {
 	validateDerivedChangeDiagnosticRequest(request);
+	const sourceRoot = request.sourcePreflight?.sourceRoot ?? process.cwd();
 	await assertDerivedChangeDiagnosticOutputRootSafety(
 		request.outputRoot,
-		request.sourcePreflight?.sourceRoot ?? process.cwd(),
+		sourceRoot,
+	);
+	await assertRootEmptyOrAbsent(request.outputRoot, "diagnostic output root");
+	await assertDerivedChangeDiagnosticTemporaryRootSafety(
+		request.temporaryRoot,
+		request.outputRoot,
+		sourceRoot,
 	);
 	await rootMustBeEmpty(request.outputRoot);
 	const casesRoot = join(request.outputRoot, "cases");
@@ -927,7 +1169,7 @@ export async function executeDerivedChangeDiagnosticCases(request) {
 	const rows = [];
 	const rowById = new Map();
 	let globalInvalidCase;
-	for (const caseRequest of request.cases) {
+	for (const [caseIndex, caseRequest] of request.cases.entries()) {
 		const dependencies = caseRequest.dependsOn.map((id) => rowById.get(id));
 		const invalid = dependencies.find((record) => record.status !== "passed");
 		if (globalInvalidCase || invalid) {
@@ -968,10 +1210,18 @@ export async function executeDerivedChangeDiagnosticCases(request) {
 			continue;
 		}
 		const caseRoot = join(casesRoot, caseRequest.root ?? caseRequest.id);
+		const workRoot = join(
+			request.temporaryRoot,
+			"w",
+			caseIndex.toString().padStart(3, "0"),
+		);
 		const stdoutPath = join(logsRoot, `${caseRequest.id}.stdout.log`);
 		const stderrPath = join(logsRoot, `${caseRequest.id}.stderr.log`);
 		try {
-			await mkdir(caseRoot);
+			await Promise.all([
+				mkdir(caseRoot),
+				mkdir(workRoot, { recursive: true }),
+			]);
 		} catch (error) {
 			const stdoutFile = await open(stdoutPath, "wx");
 			await stdoutFile.close();
@@ -995,6 +1245,7 @@ export async function executeDerivedChangeDiagnosticCases(request) {
 			retainArtifact(artifacts, stderr);
 			const row = failureRow(caseRequest, [...caseRequest.dependsOn], stderr, {
 				caseRoot,
+				workRoot,
 				setupError: String(error),
 			});
 			rows.push(row);
@@ -1028,6 +1279,7 @@ export async function executeDerivedChangeDiagnosticCases(request) {
 				outcome = await runCommand(
 					caseRequest,
 					caseRoot,
+					workRoot,
 					stdoutPath,
 					stderrPath,
 				);

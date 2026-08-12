@@ -49,12 +49,12 @@ case "${BASH:-}" in
 esac
 allowed_signers_path="${POINTBREAK_ALLOWED_SIGNERS_PATH:-}"
 expected_fixture_id="${POINTBREAK_EXPECTED_FIXTURE_ID:-}"
-expected_authoritative_inventory_sha256="${POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256:-}"
-expected_fixture_witness_sha256="${POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256:-}"
+expected_topology_checkpoint_sha256="${POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256:-}"
 expected_topology_materializer_sha256="${POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256:-}"
 expected_source_commit="${POINTBREAK_EXPECTED_SOURCE_COMMIT:-}"
 expected_source_tree="${POINTBREAK_EXPECTED_SOURCE_TREE:-}"
 cygpath_binding="${POINTBREAK_CYGPATH_PROGRAM:-}"
+diagnostic_work_root="${POINTBREAK_DIAGNOSTIC_WORK_ROOT:-}"
 
 if [ -n "$allowed_signers_path" ]; then
   case "$allowed_signers_path" in
@@ -65,10 +65,8 @@ if [ -n "$allowed_signers_path" ]; then
     || die "POINTBREAK_ALLOWED_SIGNERS_PATH must be a regular non-symlink file"
 fi
 [ -n "$expected_fixture_id" ] || die "POINTBREAK_EXPECTED_FIXTURE_ID is required"
-[[ "$expected_authoritative_inventory_sha256" =~ ^[0-9a-f]{64}$ ]] \
-  || die "POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256 must be a SHA-256"
-[[ "$expected_fixture_witness_sha256" =~ ^[0-9a-f]{64}$ ]] \
-  || die "POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256 must be a SHA-256"
+[[ "$expected_topology_checkpoint_sha256" =~ ^[0-9a-f]{64}$ ]] \
+  || die "POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256 must be a SHA-256"
 [[ "$expected_topology_materializer_sha256" =~ ^[0-9a-f]{64}$ ]] \
   || die "POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256 must be a SHA-256"
 [[ "$expected_source_commit" =~ ^[0-9a-f]{40}$ ]] \
@@ -82,12 +80,18 @@ case "$cygpath_binding" in
     ;;
   *) die "POINTBREAK_CYGPATH_PROGRAM must be an absolute program path or absent" ;;
 esac
+[ -n "$diagnostic_work_root" ] || die "POINTBREAK_DIAGNOSTIC_WORK_ROOT is required"
+case "$diagnostic_work_root" in
+  /* | [A-Za-z]:/* | [A-Za-z]:\\* | \\\\*) ;;
+  *) die "POINTBREAK_DIAGNOSTIC_WORK_ROOT must be an absolute path" ;;
+esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 template="$script_dir/derived-change-diagnostic-browser.mjs"
 diagnostics="$script_dir/change-inspector-browser-diagnostics.mjs"
 materializer="$script_dir/materialize-inspector-decision-matrix.sh"
+fixture_module="$script_dir/derived-change-diagnostic-fixture.mjs"
 pointbreak_binary="${POINTBREAK_BINARY:-}"
 root=""
 campaign_id=""
@@ -118,6 +122,7 @@ esac
 [ -f "$template" ] || die "browser diagnostic template is missing"
 [ -f "$diagnostics" ] || die "browser diagnostics are missing"
 [ -x "$materializer" ] || die "public fixture materializer is not executable"
+[ -f "$fixture_module" ] || die "topology fixture checkpoint module is missing"
 
 verify_source_state() {
   local phase="$1"
@@ -150,16 +155,32 @@ root="$(cd "$root" && pwd -P)"
 case "$root" in
   "$repo_root"|"$repo_root"/*) die "root must be outside the source worktree" ;;
 esac
+"$mkdir_program" -p "$diagnostic_work_root"
+diagnostic_work_root="$(cd "$diagnostic_work_root" && pwd -P)"
+case "$diagnostic_work_root" in
+  "$repo_root"|"$repo_root"/*) die "POINTBREAK_DIAGNOSTIC_WORK_ROOT must be outside the source worktree" ;;
+esac
+case "$diagnostic_work_root" in
+  "$root"|"$root"/*) die "fixture root must be outside --root" ;;
+esac
 
 log_dir="$root/logs"
 artifact_dir="$root/browser-artifacts"
 harness_dir="$root/harness"
 snapshot_scripts="$harness_dir/scripts"
 snapshot_ready_store="$harness_dir/tests/support/assets/change-ready-store"
-fixture_root="$root/public-l2"
+fixture_scope_sha256="$(printf '%s' "$campaign_id" | "$shasum_program" -a 256 | "$awk_program" '{print $1}')"
+fixture_root="$diagnostic_work_root/public-l2-$fixture_scope_sha256"
 fixture_repo="$fixture_root/repository"
 pointbreak_home="$fixture_root/pointbreak-home"
-"$mkdir_program" -p "$log_dir" "$artifact_dir" "$snapshot_scripts" "$snapshot_ready_store" "$fixture_root" "$pointbreak_home"
+if [ -e "$fixture_root" ]; then
+  [ -d "$fixture_root" ] || die "fixture root exists and is not a directory"
+  [ -z "$("$find_program" "$fixture_root" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || die "fixture root must be empty"
+else
+  "$mkdir_program" -p "$fixture_root"
+fi
+"$mkdir_program" -p "$log_dir" "$artifact_dir" "$snapshot_scripts" "$snapshot_ready_store" "$pointbreak_home"
 
 background_pids=()
 session=""
@@ -188,6 +209,7 @@ completion_fixture="f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8b
 for path in \
   scripts/derived-change-diagnostic-browser.sh \
   scripts/derived-change-diagnostic-browser.mjs \
+  scripts/derived-change-diagnostic-fixture.mjs \
   scripts/change-inspector-browser-diagnostics.mjs \
   scripts/materialize-inspector-decision-matrix.sh; do
   "$git_program" -C "$repo_root" show "$source_commit:$path" >"$harness_dir/$path"
@@ -196,7 +218,7 @@ for fixture in "$activation_fixture" "$completion_fixture"; do
   "$git_program" -C "$repo_root" show "$source_commit:tests/support/assets/change-ready-store/$fixture" >"$snapshot_ready_store/$fixture"
 done
 "$chmod_program" 0555 "$snapshot_scripts/derived-change-diagnostic-browser.sh" "$snapshot_scripts/materialize-inspector-decision-matrix.sh"
-"$chmod_program" 0444 "$snapshot_scripts/derived-change-diagnostic-browser.mjs" "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" "$snapshot_ready_store/$activation_fixture" "$snapshot_ready_store/$completion_fixture"
+"$chmod_program" 0444 "$snapshot_scripts/derived-change-diagnostic-browser.mjs" "$snapshot_scripts/derived-change-diagnostic-fixture.mjs" "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" "$snapshot_ready_store/$activation_fixture" "$snapshot_ready_store/$completion_fixture"
 
 requested_binary="$pointbreak_binary"
 binary_sha256="$("$shasum_program" -a 256 "$pointbreak_binary" | "$awk_program" '{print $1}')"
@@ -207,6 +229,7 @@ binary_snapshot="$harness_dir/pointbreak"
 
 shell_sha256="$("$shasum_program" -a 256 "$snapshot_scripts/derived-change-diagnostic-browser.sh" | "$awk_program" '{print $1}')"
 template_sha256="$("$shasum_program" -a 256 "$snapshot_scripts/derived-change-diagnostic-browser.mjs" | "$awk_program" '{print $1}')"
+fixture_module_sha256="$("$shasum_program" -a 256 "$snapshot_scripts/derived-change-diagnostic-fixture.mjs" | "$awk_program" '{print $1}')"
 diagnostics_sha256="$("$shasum_program" -a 256 "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" | "$awk_program" '{print $1}')"
 materializer_sha256="$("$shasum_program" -a 256 "$snapshot_scripts/materialize-inspector-decision-matrix.sh" | "$awk_program" '{print $1}')"
 [ "$materializer_sha256" = "$expected_topology_materializer_sha256" ] \
@@ -239,11 +262,10 @@ materializer_tools="$(materializer_tool_inventory)"
   --arg campaignId "$campaign_id" --arg sourceCommit "$source_commit" --arg sourceTree "$source_tree" \
   --arg requestedBinary "$requested_binary" --arg binarySha256 "$binary_sha256" \
   --arg shellSha256 "$shell_sha256" --arg templateSha256 "$template_sha256" \
-  --arg diagnosticsSha256 "$diagnostics_sha256" --arg materializerSha256 "$materializer_sha256" \
-  --arg fixtureId "$expected_fixture_id" --arg authoritativeInventorySha256 "$expected_authoritative_inventory_sha256" \
-  --arg fixtureWitnessSha256 "$expected_fixture_witness_sha256" \
+  --arg diagnosticsSha256 "$diagnostics_sha256" --arg fixtureModuleSha256 "$fixture_module_sha256" --arg materializerSha256 "$materializer_sha256" \
+  --arg fixtureId "$expected_fixture_id" --arg topologyCheckpointSha256 "$expected_topology_checkpoint_sha256" \
   --arg topologyMaterializerSha256 "$expected_topology_materializer_sha256" --arg cygpathBinding "$cygpath_binding" --argjson materializerTools "$materializer_tools" \
-  '{campaignId: $campaignId, sourceCommit: $sourceCommit, sourceTree: $sourceTree, binary: {requestedPath: $requestedBinary, sha256: $binarySha256}, harness: {shellSha256: $shellSha256, templateSha256: $templateSha256, diagnosticsSha256: $diagnosticsSha256, materializerSha256: $materializerSha256, materializerCygpathBinding: $cygpathBinding, materializerTools: $materializerTools}, fixture: {id: $fixtureId, authoritativeInventorySha256: $authoritativeInventorySha256, witnessSha256: $fixtureWitnessSha256, topologyMaterializerSha256: $topologyMaterializerSha256}}' \
+  '{campaignId: $campaignId, sourceCommit: $sourceCommit, sourceTree: $sourceTree, binary: {requestedPath: $requestedBinary, sha256: $binarySha256}, harness: {shellSha256: $shellSha256, templateSha256: $templateSha256, diagnosticsSha256: $diagnosticsSha256, fixtureModuleSha256: $fixtureModuleSha256, materializerSha256: $materializerSha256, materializerCygpathBinding: $cygpathBinding, materializerTools: $materializerTools}, fixture: {id: $fixtureId, topologyCheckpointSha256: $topologyCheckpointSha256, topologyMaterializerSha256: $topologyMaterializerSha256}}' \
   >"$log_dir/harness.json"
 
 pointbreak_binary="$binary_snapshot"
@@ -253,13 +275,27 @@ pointbreak_binary="$binary_snapshot"
 POINTBREAK_HOME="$pointbreak_home" POINTBREAK_BINARY="$pointbreak_binary" POINTBREAK_CHANGE_READY_FIXTURE_DIR="$snapshot_ready_store" \
   POINTBREAK_GIT_PROGRAM="$git_program" POINTBREAK_JQ_PROGRAM="$jq_program" POINTBREAK_FIND_PROGRAM="$find_program" POINTBREAK_SORT_PROGRAM="$sort_program" POINTBREAK_WC_PROGRAM="$wc_program" POINTBREAK_TR_PROGRAM="$tr_program" POINTBREAK_AWK_PROGRAM="$awk_program" POINTBREAK_HASH_PROGRAM="$shasum_program" POINTBREAK_HASH_PROGRAM_MODE=shasum POINTBREAK_CP_PROGRAM="$cp_program" POINTBREAK_HEAD_PROGRAM="$head_program" POINTBREAK_DIRNAME_PROGRAM="$dirname_program" POINTBREAK_MKDIR_PROGRAM="$mkdir_program" POINTBREAK_RM_PROGRAM="$rm_program" POINTBREAK_CYGPATH_PROGRAM="$cygpath_binding" \
   "$BASH" "$snapshot_scripts/materialize-inspector-decision-matrix.sh" "$fixture_repo" >"$log_dir/fixture-witness.json" 2>"$log_dir/fixture-materialize.log"
-fixture_witness_sha256="$("$shasum_program" -a 256 "$log_dir/fixture-witness.json" | "$awk_program" '{print $1}')"
-[ "$fixture_witness_sha256" = "$expected_fixture_witness_sha256" ] \
-  || die "fixture witness bytes differ from the expected SHA-256"
+"$node_program" "$snapshot_scripts/derived-change-diagnostic-fixture.mjs" --witness "$log_dir/fixture-witness.json" >"$log_dir/fixture-checkpoint.json"
+fixture_witness_sha256="$("$jq_program" -er '.rawWitnessSha256' "$log_dir/fixture-checkpoint.json")"
+actual_authoritative_inventory_sha256="$("$jq_program" -er '.authoritativeInventorySha256' "$log_dir/fixture-checkpoint.json")"
+actual_topology_checkpoint_sha256="$("$jq_program" -er '.topologyCheckpointSha256' "$log_dir/fixture-checkpoint.json")"
+[ "$fixture_witness_sha256" = "$("$shasum_program" -a 256 "$log_dir/fixture-witness.json" | "$awk_program" '{print $1}')" ] \
+  || die "public fixture checkpoint raw witness hash differs from fixture bytes"
+"$jq_program" -e --arg raw_witness_sha256 "$fixture_witness_sha256" --arg fixture_id "$expected_fixture_id" \
+  '.schema == "pointbreak.derived-change-topology-checkpoint-report.v1" and .fixtureId == $fixture_id and .rawWitnessSha256 == $raw_witness_sha256 and (.authoritativeInventorySha256 | test("^[0-9a-f]{64}$")) and (.topologyCheckpointSha256 | test("^[0-9a-f]{64}$"))' \
+  "$log_dir/fixture-checkpoint.json" >/dev/null || die "public fixture checkpoint is invalid"
+"$node_program" --input-type=module -e '
+  import fs from "node:fs";
+  const [path, rawWitnessSha256, actualAuthoritativeInventorySha256, topologyCheckpointSha256] = process.argv.slice(1);
+  const harness = JSON.parse(fs.readFileSync(path, "utf8"));
+  harness.fixture.actualRawWitnessSha256 = rawWitnessSha256;
+  harness.fixture.actualAuthoritativeInventorySha256 = actualAuthoritativeInventorySha256;
+  harness.fixture.actualTopologyCheckpointSha256 = topologyCheckpointSha256;
+  fs.writeFileSync(path, `${JSON.stringify(harness)}\n`);
+' "$log_dir/harness.json" "$fixture_witness_sha256" "$actual_authoritative_inventory_sha256" "$actual_topology_checkpoint_sha256"
+[ "$actual_topology_checkpoint_sha256" = "$expected_topology_checkpoint_sha256" ] \
+  || die "public fixture topology checkpoint differs from the expected authority"
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" store derived build --repo "$fixture_repo" --format json >"$log_dir/derived-build.json" 2>"$log_dir/derived-build.log"
-"$jq_program" -e --arg fixture_id "$expected_fixture_id" --arg authoritative_inventory_sha256 "$expected_authoritative_inventory_sha256" \
-  '.schema == "pointbreak.qualification-derived-change-fixture-witness.v1" and .fixtureId == $fixture_id and .authoritativeInventorySha256 == $authoritative_inventory_sha256' \
-  "$log_dir/fixture-witness.json" >/dev/null || die "public fixture witness differs from the expected authority"
 
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json >"$log_dir/inspect-startup.json" 2>"$log_dir/inspect-server.log" &
 server_pid=$!
@@ -282,7 +318,7 @@ else
 fi
 session="pointbreak-derived-change-diagnostic-browser-$$"
 browser_open=true
-browser_config="$("$jq_program" -cn --arg campaignId "$campaign_id" --arg artifactDir "$artifact_dir" --arg sourceCommit "$source_commit" --arg sourceTree "$source_tree" --arg fixtureId "$expected_fixture_id" --arg authoritativeInventorySha256 "$expected_authoritative_inventory_sha256" --arg witnessSha256 "$expected_fixture_witness_sha256" --arg topologyMaterializerSha256 "$expected_topology_materializer_sha256" --argjson server "$server" --argjson iterations "$iterations" '{campaignId: $campaignId, artifactDir: $artifactDir, source: {commit: $sourceCommit, tree: $sourceTree}, fixture: {id: $fixtureId, authoritativeInventorySha256: $authoritativeInventorySha256, witnessSha256: $witnessSha256, topologyMaterializerSha256: $topologyMaterializerSha256}, server: $server, iterations: $iterations}')"
+browser_config="$("$jq_program" -cn --arg campaignId "$campaign_id" --arg artifactDir "$artifact_dir" --arg sourceCommit "$source_commit" --arg sourceTree "$source_tree" --arg fixtureId "$expected_fixture_id" --arg rawWitnessSha256 "$fixture_witness_sha256" --arg actualAuthoritativeInventorySha256 "$actual_authoritative_inventory_sha256" --arg topologyCheckpointSha256 "$actual_topology_checkpoint_sha256" --arg fixtureModuleSha256 "$fixture_module_sha256" --arg topologyMaterializerSha256 "$expected_topology_materializer_sha256" --argjson server "$server" --argjson iterations "$iterations" '{campaignId: $campaignId, artifactDir: $artifactDir, source: {commit: $sourceCommit, tree: $sourceTree}, fixture: {id: $fixtureId, rawWitnessSha256: $rawWitnessSha256, actualAuthoritativeInventorySha256: $actualAuthoritativeInventorySha256, topologyCheckpointSha256: $topologyCheckpointSha256, fixtureModuleSha256: $fixtureModuleSha256, topologyMaterializerSha256: $topologyMaterializerSha256}, server: $server, iterations: $iterations}')"
 browser_program="$log_dir/browser-program.mjs"
 "$node_program" --input-type=module -e '
   import fs from "node:fs";
@@ -302,6 +338,7 @@ printf '%s\n' "$browser_result_line" >"$browser_result"
 [ "$browser_status" -eq 0 ] || die "browser diagnostic program did not complete"
 [ "$("$shasum_program" -a 256 "$pointbreak_binary" | "$awk_program" '{print $1}')" = "$binary_sha256" ] || die "executed binary snapshot changed during the diagnostic"
 [ "$("$shasum_program" -a 256 "$snapshot_scripts/derived-change-diagnostic-browser.mjs" | "$awk_program" '{print $1}')" = "$template_sha256" ] || die "browser template snapshot changed during the diagnostic"
+[ "$("$shasum_program" -a 256 "$snapshot_scripts/derived-change-diagnostic-fixture.mjs" | "$awk_program" '{print $1}')" = "$fixture_module_sha256" ] || die "fixture checkpoint module snapshot changed during the diagnostic"
 [ "$("$shasum_program" -a 256 "$snapshot_scripts/materialize-inspector-decision-matrix.sh" | "$awk_program" '{print $1}')" = "$materializer_sha256" ] || die "materializer snapshot changed during the diagnostic"
 [ "$(materializer_tool_inventory)" = "$materializer_tools" ] || die "materializer tools changed during the diagnostic"
 verify_source_state "after browser diagnostic"

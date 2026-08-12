@@ -11,10 +11,19 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+	DERIVED_CHANGE_DETERMINISTIC_FIXTURE_IDS_V2,
+	DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2,
+	DERIVED_CHANGE_PUBLIC_FIXTURE_SOURCE_PATHS_V2,
+	DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1,
+	deriveTopologyCheckpointV1,
+} from "./derived-change-diagnostic-fixture.mjs";
+
 export const DERIVED_CHANGE_CHANGE_READ_DIAGNOSTIC_CONFIG_SCHEMA_V1 =
 	"pointbreak.derived-change-read-diagnostic-config.v1";
 export const DERIVED_CHANGE_DIAGNOSTIC_CASE_COLLECTION_SCHEMA_V1 =
 	"pointbreak.derived-change-diagnostic-collection.v1";
+const CHANGE_READ_GLOBAL_PREFLIGHT_ID = "change-read.global-preflight";
 
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
@@ -104,12 +113,6 @@ const ACTIVATION_RECORD =
 	"tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json";
 const COMPLETION_RECORD =
 	"tests/support/assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json";
-const AUTHORITY_SOURCE_PATHS = [
-	"scripts/materialize-inspector-decision-matrix.sh",
-	"src/bench_support/derived_access/materializer.rs",
-	ACTIVATION_RECORD,
-	COMPLETION_RECORD,
-];
 const FIXTURES = [
 	["topology-v1", null, READ_CASES, CONTROL_CASES, ["initial", "post_append"]],
 	["duplicate-equal-v1", "duplicate_equal", READY_READ_CASES, [], ["initial"]],
@@ -173,6 +176,16 @@ function pathInside(root, path) {
 		throw new Error("diagnostic artifact escaped its case root");
 	return result.split(sep).join("/");
 }
+function pathsOverlap(left, right) {
+	const relation = relative(resolve(left), resolve(right));
+	if (
+		relation === "" ||
+		(relation !== ".." && !relation.startsWith(`..${sep}`))
+	)
+		return true;
+	const reverse = relative(resolve(right), resolve(left));
+	return reverse !== ".." && !reverse.startsWith(`..${sep}`);
+}
 function sameSet(actual, expected) {
 	return (
 		JSON.stringify([...actual].sort()) === JSON.stringify([...expected].sort())
@@ -184,16 +197,31 @@ function fixturePreflights(fixture) {
 		: ["source", "fixture", "template_postflight"];
 }
 
+function preflightDependencies(fixture, kind) {
+	const setup = `${fixture}.template`;
+	return kind === "source" ? [setup] : [setup, `${fixture}.preflight.source`];
+}
+
+function preflightFailureClass(kind) {
+	return kind === "source" ? "global_invalid" : "lane_invalid";
+}
+
 export function derivedChangeChangeReadChildDescriptors() {
-	const children = [];
+	const children = [
+		{ id: CHANGE_READ_GLOBAL_PREFLIGHT_ID, lane: "preflight", dependsOn: [] },
+	];
 	for (const [fixture, , rows, controls, storage] of FIXTURES) {
 		const template = `${fixture}.template`;
-		children.push({ id: template, lane: "native", dependsOn: [] });
+		children.push({
+			id: template,
+			lane: "native",
+			dependsOn: [CHANGE_READ_GLOBAL_PREFLIGHT_ID],
+		});
 		for (const kind of fixturePreflights(fixture))
 			children.push({
 				id: `${fixture}.preflight.${kind}`,
 				lane: kind.includes("control") ? "control" : "native",
-				dependsOn: [template],
+				dependsOn: preflightDependencies(fixture, kind),
 			});
 		const readDeps = [
 			`${fixture}.preflight.source`,
@@ -245,7 +273,15 @@ export function validateDerivedChangeChangeReadDiagnosticConfig(config) {
 	text(config.campaignId, "change read diagnostic campaign id");
 	digest(config.rootAuthoritySha256, "change read diagnostic root authority");
 	absolute(config.caseRoot, "change read diagnostic case root");
+	absolute(config.workRoot, "change read diagnostic work root");
 	absolute(config.sourceCheckout, "change read diagnostic source checkout");
+	if (
+		pathsOverlap(config.workRoot, config.caseRoot) ||
+		pathsOverlap(config.workRoot, config.sourceCheckout)
+	)
+		throw new Error(
+			"change read diagnostic work root must be disjoint from retained and source roots",
+		);
 	object(config.execution, "change read diagnostic execution");
 	for (const field of ["sourceCommit", "sourceTree"])
 		if (!COMMIT.test(config.execution[field] ?? ""))
@@ -448,25 +484,32 @@ async function parseFixtureAuthority(config) {
 	);
 	object(document, "change read diagnostic fixture authority document");
 	if (
-		document.schema !==
-			"pointbreak.derived-change-public-fixture-authority.v1" ||
+		!sameSet(Object.keys(document), [
+			"schema",
+			"sourceCommit",
+			"sourceTree",
+			"sourceFiles",
+			"topologyCheckpoint",
+			"witnesses",
+		]) ||
+		document.schema !== DERIVED_CHANGE_PUBLIC_FIXTURE_AUTHORITY_SCHEMA_V2 ||
 		document.sourceCommit !== config.execution.sourceCommit ||
 		document.sourceTree !== config.execution.sourceTree
 	)
 		throw new Error("change read diagnostic fixture authority source differs");
 	if (
 		!Array.isArray(document.sourceFiles) ||
-		!sameSet(
-			document.sourceFiles.map((entry) => entry?.path),
-			AUTHORITY_SOURCE_PATHS,
-		) ||
-		new Set(document.sourceFiles.map((entry) => entry.path)).size !==
-			AUTHORITY_SOURCE_PATHS.length
+		JSON.stringify(document.sourceFiles.map((entry) => entry?.path)) !==
+			JSON.stringify(DERIVED_CHANGE_PUBLIC_FIXTURE_SOURCE_PATHS_V2)
 	)
 		throw new Error(
 			"change read diagnostic fixture authority source inventory differs",
 		);
 	for (const entry of document.sourceFiles) {
+		if (!sameSet(Object.keys(entry ?? {}), ["path", "sha256"]))
+			throw new Error(
+				"change read diagnostic fixture authority source entry differs",
+			);
 		digest(
 			entry.sha256,
 			"change read diagnostic fixture authority source hash",
@@ -493,17 +536,23 @@ async function parseFixtureAuthority(config) {
 		throw new Error("change read diagnostic fixture authority binding differs");
 	if (
 		!Array.isArray(document.witnesses) ||
-		!sameSet(
-			document.witnesses.map((entry) => entry?.fixtureId),
-			FIXTURES.map(([fixture]) => fixture),
-		) ||
-		new Set(document.witnesses.map((entry) => entry.fixtureId)).size !==
-			FIXTURES.length
+		JSON.stringify(document.witnesses.map((entry) => entry?.fixtureId)) !==
+			JSON.stringify(DERIVED_CHANGE_DETERMINISTIC_FIXTURE_IDS_V2)
 	)
 		throw new Error(
 			"change read diagnostic fixture authority witness inventory differs",
 		);
 	for (const witness of document.witnesses) {
+		if (
+			!sameSet(Object.keys(witness ?? {}), [
+				"fixtureId",
+				"authoritativeInventorySha256",
+				"witnessSha256",
+			])
+		)
+			throw new Error(
+				"change read diagnostic fixture witness authority entry differs",
+			);
 		digest(
 			witness.authoritativeInventorySha256,
 			"change read diagnostic fixture authority inventory",
@@ -513,11 +562,33 @@ async function parseFixtureAuthority(config) {
 			"change read diagnostic fixture authority witness",
 		);
 	}
+	object(
+		document.topologyCheckpoint,
+		"change read diagnostic topology checkpoint authority",
+	);
+	if (
+		!sameSet(Object.keys(document.topologyCheckpoint), [
+			"schema",
+			"fixtureId",
+			"checkpointSha256",
+		]) ||
+		document.topologyCheckpoint.schema !==
+			DERIVED_CHANGE_TOPOLOGY_FIXTURE_CHECKPOINT_SCHEMA_V1 ||
+		document.topologyCheckpoint.fixtureId !== "topology-v1"
+	)
+		throw new Error(
+			"change read diagnostic topology checkpoint authority differs",
+		);
+	digest(
+		document.topologyCheckpoint.checkpointSha256,
+		"change read diagnostic topology checkpoint authority",
+	);
 	return {
 		document,
 		witnesses: new Map(
 			document.witnesses.map((entry) => [entry.fixtureId, entry]),
 		),
+		topologyCheckpoint: document.topologyCheckpoint,
 	};
 }
 async function verifyBoundIdentities(config) {
@@ -766,12 +837,24 @@ function verifyWitness(bytes, fixture, expected) {
 	if (
 		witness.schema !==
 			"pointbreak.qualification-derived-change-fixture-witness.v1" ||
-		witness.fixtureId !== fixture ||
+		witness.fixtureId !== fixture
+	)
+		throw new Error("fixture witness differs from public authority");
+	if (fixture === "topology-v1") {
+		if (
+			deriveTopologyCheckpointV1(witness).sha256 !== expected.checkpointSha256
+		)
+			throw new Error(
+				"topology fixture checkpoint differs from public authority",
+			);
+	} else if (
 		witness.authoritativeInventorySha256 !==
 			expected.authoritativeInventorySha256 ||
 		createHash("sha256").update(bytes).digest("hex") !== expected.witnessSha256
-	)
+	) {
 		throw new Error("fixture witness differs from public authority");
+	}
+	return witness;
 }
 function materializerEnv(config, template) {
 	const additions = {
@@ -824,12 +907,18 @@ function readRequest(
 			repository: template,
 			pointbreakHome: join(template, ".git", "pointbreak-home"),
 			productBinary: config.product.program,
-			controlTestBinary: config.controls.library.program,
-			controlTestBinarySha256: config.controls.library.binarySha256,
-			controlTestBuildCommandSha256: config.controls.library.buildCommandSha256,
-			controlCliTestBinary: config.controls.cli.program,
-			controlCliTestBinarySha256: config.controls.cli.binarySha256,
-			controlCliTestBuildCommandSha256: config.controls.cli.buildCommandSha256,
+			...(fixture === "topology-v1"
+				? {
+						controlTestBinary: config.controls.library.program,
+						controlTestBinarySha256: config.controls.library.binarySha256,
+						controlTestBuildCommandSha256:
+							config.controls.library.buildCommandSha256,
+						controlCliTestBinary: config.controls.cli.program,
+						controlCliTestBinarySha256: config.controls.cli.binarySha256,
+						controlCliTestBuildCommandSha256:
+							config.controls.cli.buildCommandSha256,
+					}
+				: {}),
 			storageForbiddenProbes: {
 				proposalSummary: "qualification storage summary sentinel v1",
 				prose: "qualification storage prose sentinel v1",
@@ -844,9 +933,78 @@ function readRequest(
 
 export async function runDerivedChangeChangeReadDiagnostic(input) {
 	const config = validateDerivedChangeChangeReadDiagnosticConfig(input);
-	await empty(config.caseRoot);
-	const authorityState = await parseFixtureAuthority(config);
-	await verifyBoundIdentities(config);
+	await Promise.all([empty(config.caseRoot), empty(config.workRoot)]);
+	const artifacts = [];
+	const cases = [];
+	let authorityState;
+	try {
+		authorityState = await parseFixtureAuthority(config);
+		await verifyBoundIdentities(config);
+		cases.push(
+			statusRow(
+				CHANGE_READ_GLOBAL_PREFLIGHT_ID,
+				"preflight",
+				"passed",
+				[],
+				"all-fixtures",
+				"authority-and-identity-preflight",
+			),
+		);
+	} catch (error) {
+		cases.push(
+			statusRow(
+				CHANGE_READ_GLOBAL_PREFLIGHT_ID,
+				"preflight",
+				"failed",
+				[],
+				"all-fixtures",
+				"authority-and-identity-preflight",
+				String(error),
+				"global_invalid",
+			),
+		);
+		for (const [fixture, , rows, controls, storage] of FIXTURES) {
+			const setupId = `${fixture}.template`;
+			cases.push(
+				statusRow(
+					setupId,
+					"native",
+					"skipped",
+					[CHANGE_READ_GLOBAL_PREFLIGHT_ID],
+					fixture,
+					"authority-and-identity-preflight",
+					`dependency ${CHANGE_READ_GLOBAL_PREFLIGHT_ID} did not pass`,
+				),
+			);
+			addSkippedFixture(
+				cases,
+				fixture,
+				rows,
+				controls,
+				storage,
+				setupId,
+				"authority-and-identity-preflight",
+				`dependency ${CHANGE_READ_GLOBAL_PREFLIGHT_ID} did not pass`,
+			);
+		}
+		cases.push(
+			statusRow(
+				"change-read.identity-postflight",
+				"native",
+				"skipped",
+				[CHANGE_READ_GLOBAL_PREFLIGHT_ID],
+				"all-fixtures",
+				"identity-postflight",
+				`dependency ${CHANGE_READ_GLOBAL_PREFLIGHT_ID} did not pass`,
+			),
+		);
+		return {
+			schema: DERIVED_CHANGE_DIAGNOSTIC_CASE_COLLECTION_SCHEMA_V1,
+			campaignId: config.campaignId,
+			cases: cases.sort((a, b) => a.id.localeCompare(b.id)),
+			artifactPaths: [],
+		};
+	}
 	const authority = join(
 		config.caseRoot,
 		"authority",
@@ -854,20 +1012,44 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 	);
 	await mkdir(join(config.caseRoot, "authority"), { recursive: true });
 	await cp(config.fixtureAuthority.path, authority);
-	const artifacts = [pathInside(config.caseRoot, authority)];
-	const cases = [];
+	artifacts.push(pathInside(config.caseRoot, authority));
+	let globalInvalidDependency = null;
 	for (const [fixture, kind, rows, controls, storage] of FIXTURES) {
-		const template = join(config.caseRoot, "templates", fixture);
-		const workspace = join(config.caseRoot, "workspaces", fixture);
+		const setupId = `${fixture}.template`;
+		if (globalInvalidDependency) {
+			cases.push(
+				statusRow(
+					setupId,
+					"native",
+					"skipped",
+					[globalInvalidDependency],
+					fixture,
+					"global-source-or-authority-invalid",
+					`dependency ${globalInvalidDependency} did not pass`,
+				),
+			);
+			addSkippedFixture(
+				cases,
+				fixture,
+				rows,
+				controls,
+				storage,
+				setupId,
+				"global-source-or-authority-invalid",
+				`dependency ${globalInvalidDependency} did not pass`,
+			);
+			continue;
+		}
+		const template = join(config.workRoot, "templates", fixture);
+		const workspace = join(config.workRoot, "workspaces", fixture);
 		const requestRoot = join(config.caseRoot, "requests");
 		const logRoot = join(config.caseRoot, "logs");
 		await Promise.all([
 			mkdir(requestRoot, { recursive: true }),
 			mkdir(logRoot, { recursive: true }),
-			mkdir(join(config.caseRoot, "templates"), { recursive: true }),
-			mkdir(join(config.caseRoot, "workspaces"), { recursive: true }),
+			mkdir(join(config.workRoot, "templates"), { recursive: true }),
+			mkdir(join(config.workRoot, "workspaces"), { recursive: true }),
 		]);
-		const setupId = `${fixture}.template`;
 		const materializeRequest = join(requestRoot, `${fixture}.materialize.json`);
 		await writeFile(
 			materializeRequest,
@@ -915,7 +1097,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 				setupId,
 				"native",
 				setupFailed ? "failed" : "passed",
-				[],
+				[CHANGE_READ_GLOBAL_PREFLIGHT_ID],
 				fixture,
 				"template-materialization",
 				setupFailed
@@ -949,14 +1131,16 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 			verifyWitness(
 				outcome.stdout,
 				fixture,
-				authorityState.witnesses.get(fixture),
+				fixture === "topology-v1"
+					? authorityState.topologyCheckpoint
+					: authorityState.witnesses.get(fixture),
 			);
 		} catch (error) {
 			cases[cases.length - 1] = statusRow(
 				setupId,
 				"native",
 				"failed",
-				[],
+				[CHANGE_READ_GLOBAL_PREFLIGHT_ID],
 				fixture,
 				"fixture-witness",
 				String(error),
@@ -972,6 +1156,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 				"fixture-witness",
 				String(error),
 			);
+			globalInvalidDependency = setupId;
 			continue;
 		}
 		const requestPath = join(requestRoot, `${fixture}.read.json`);
@@ -1016,6 +1201,16 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 				storage,
 			);
 		} catch (error) {
+			cases[cases.length - 1] = statusRow(
+				setupId,
+				"native",
+				"failed",
+				[CHANGE_READ_GLOBAL_PREFLIGHT_ID],
+				fixture,
+				"diagnostic-output",
+				String(error),
+				"lane_invalid",
+			);
 			addSkippedFixture(
 				cases,
 				fixture,
@@ -1036,11 +1231,11 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 					`${fixture}.preflight.${kind}`,
 					kind.includes("control") ? "control" : "native",
 					row.status,
-					[setupId],
+					preflightDependencies(fixture, kind),
 					fixture,
 					`preflight-${kind}`,
 					row.failureDetail,
-					row.status === "failed" ? "lane_invalid" : "case_failure",
+					preflightFailureClass(kind),
 				),
 			);
 		}
@@ -1097,6 +1292,8 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 					readReady ? row.failureDetail : "storage preflight did not pass",
 				),
 			);
+		if (preflight.get("source").status === "failed")
+			globalInvalidDependency = `${fixture}.preflight.source`;
 	}
 	let postflight;
 	try {
@@ -1141,6 +1338,8 @@ async function main() {
 	const config = JSON.parse(encoded);
 	if (process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT)
 		config.caseRoot = process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT;
+	if (process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT)
+		config.workRoot = process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT;
 	process.stdout.write(
 		`${JSON.stringify(await runDerivedChangeChangeReadDiagnostic(config))}\n`,
 	);

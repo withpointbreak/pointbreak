@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -12,6 +19,7 @@ import {
 	assertDerivedChangeDiagnosticOutputRootSafety,
 	executeDerivedChangeDiagnosticCases,
 	validateDerivedChangeDiagnosticRequest,
+	verifyDerivedChangeDiagnosticBindings,
 } from "./derived-change-diagnostic.mjs";
 
 const digest = (digit) => digit.repeat(64);
@@ -20,10 +28,14 @@ const executableSha256 = createHash("sha256")
 	.update(await readFile(process.execPath))
 	.digest("hex");
 const fixtureAuthorityDocument = {
-	schema: "pointbreak.derived-change-public-fixture-authority.v1",
+	schema: "pointbreak.derived-change-public-fixture-authority.v2",
 	sourceCommit: commit("a"),
 	sourceTree: commit("b"),
 	sourceFiles: [
+		{
+			path: "scripts/derived-change-diagnostic-fixture.mjs",
+			sha256: digest("3"),
+		},
 		{
 			path: "scripts/materialize-inspector-decision-matrix.sh",
 			sha256: digest("4"),
@@ -51,11 +63,18 @@ const fixtureAuthorityDocument = {
 		"removal-v1",
 		"topology-v1",
 		"wrong-family-carrier-v1",
-	].map((fixtureId, index) => ({
-		fixtureId,
-		authoritativeInventorySha256: digest(String((index + 1) % 10)),
-		witnessSha256: digest(String((index + 2) % 10)),
-	})),
+	]
+		.filter((fixtureId) => fixtureId !== "topology-v1")
+		.map((fixtureId, index) => ({
+			fixtureId,
+			authoritativeInventorySha256: digest(String((index + 1) % 10)),
+			witnessSha256: digest(String((index + 2) % 10)),
+		})),
+	topologyCheckpoint: {
+		schema: "pointbreak.derived-change-topology-fixture-checkpoint.v1",
+		fixtureId: "topology-v1",
+		checkpointSha256: digest("9"),
+	},
 };
 const fixtureAuthorityBytes = `${JSON.stringify(fixtureAuthorityDocument)}\n`;
 const fixtureAuthoritySha256 = createHash("sha256")
@@ -155,11 +174,11 @@ const command = (source, { exitCode = 0 } = {}) => ({
 	artifactPaths: ["artifact.txt"],
 });
 
-const diagnosticRoot = async (prefix) =>
-	join(
-		await mkdtemp(join(tmpdir(), prefix)),
-		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
-	);
+const diagnosticRoot = async (prefix) => {
+	const parent = await mkdtemp(join(await realpath(tmpdir()), prefix));
+	await mkdir(join(parent, "scratch"));
+	return join(parent, DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1);
+};
 
 const request = (root) => ({
 	schema: DERIVED_CHANGE_DIAGNOSTIC_REQUEST_SCHEMA_V1,
@@ -174,6 +193,7 @@ const request = (root) => ({
 	},
 	requiredExecutables: [process.execPath],
 	outputRoot: root,
+	temporaryRoot: join(dirname(root), "scratch"),
 	cases: [
 		{
 			id: "global-preflight",
@@ -363,17 +383,39 @@ test("preflights every executable, records global invalidity, and does not start
 
 test("sanitizes owner-store state and records missing declared artifacts without stopping peers", async () => {
 	const root = await diagnosticRoot("pointbreak-diagnostic-sanitized-");
+	const invalid = request(root);
+	invalid.cases[0].env = { pointbreak_home: "/must-not-be-admitted" };
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(invalid),
+		/owner-store state/,
+	);
 	const input = request(root);
 	input.cases[0] = {
 		...input.cases[0],
 		...command("preflight"),
 		args: [
 			"-e",
-			`require('node:fs').writeFileSync(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT + '/artifact.txt', process.env.POINTBREAK_HOME ?? 'unset')`,
+			`const ownerNames=new Set(['POINTBREAK_HOME','POINTBREAK_STORE','POINTBREAK_QUALIFICATION_CORPUS','POINTBREAK_DERIVED_ACCESS','POINTBREAK_CHANGE_READY_FIXTURE_DIR']);const observed=Object.keys(process.env).filter((key)=>ownerNames.has(key.toUpperCase()));require('node:fs').writeFileSync(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT + '/artifact.txt', observed.join(',') || 'unset')`,
 		],
 	};
 	input.cases[1].artifactPaths = ["missing.txt"];
-	const result = await executeDerivedChangeDiagnosticCases(input);
+	const ownerEnvironment = {
+		pointbreak_home: process.env.pointbreak_home,
+		Pointbreak_Change_Ready_Fixture_Dir:
+			process.env.Pointbreak_Change_Ready_Fixture_Dir,
+	};
+	process.env.pointbreak_home = "/ambient-owner-store";
+	process.env.Pointbreak_Change_Ready_Fixture_Dir =
+		"/ambient-change-ready-fixture";
+	let result;
+	try {
+		result = await executeDerivedChangeDiagnosticCases(input);
+	} finally {
+		for (const [key, value] of Object.entries(ownerEnvironment)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
 	assert.equal(result.cases[1].status, "failed");
 	assert.match(result.cases[1].actual.artifactErrors[0], /not retained|ENOENT/);
 	assert.equal(
@@ -388,6 +430,212 @@ test("sanitizes owner-store state and records missing declared artifacts without
 		"unset",
 	);
 	assert.match(result.fragmentSha256, /^[0-9a-f]{64}$/);
+});
+
+test("routes each case's temporary environment through an isolated scratch directory", async () => {
+	const root = await diagnosticRoot("pointbreak-diagnostic-scratch-env-");
+	const input = request(root);
+	input.campaign.requiredCaseIds = ["global-preflight"];
+	input.campaign.requiredPlatformIds = ["macos_apfs"];
+	input.campaign.platforms = input.campaign.platforms.slice(0, 1);
+	retainOnlyMacosBinaryAuthority(input);
+	input.cases = [
+		{
+			...input.cases[0],
+			env: { CARGO_TARGET_DIR: "/must-be-overridden" },
+			args: [
+				"-e",
+				`require('node:fs').writeFileSync(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT+'/artifact.txt',JSON.stringify({caseRoot:process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT,workRoot:process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT,home:process.env.HOME,userprofile:process.env.USERPROFILE,npmCache:process.env.npm_config_cache,xdgCache:process.env.XDG_CACHE_HOME,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,xdgState:process.env.XDG_STATE_HOME,appData:process.env.APPDATA,localAppData:process.env.LOCALAPPDATA,tmpdir:process.env.TMPDIR,tmp:process.env.TMP,temp:process.env.TEMP,cargo:process.env.CARGO,cargoBuildRustc:process.env.CARGO_BUILD_RUSTC,cargoNetOffline:process.env.CARGO_NET_OFFLINE,cargoTargetRustc:process.env.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC,nextestProfile:process.env.NEXTEST_PROFILE,nextestUserConfig:process.env.NEXTEST_USER_CONFIG_FILE,rustc:process.env.RUSTC,rustcWrapper:process.env.RUSTC_WRAPPER,rustupToolchain:process.env.RUSTUP_TOOLCHAIN,cargoHome:process.env.CARGO_HOME,rustupHome:process.env.RUSTUP_HOME,target:process.env.CARGO_TARGET_DIR}))`,
+			],
+		},
+	];
+
+	const ambient = Object.fromEntries(
+		[
+			"CARGO",
+			"CARGO_BUILD_RUSTC",
+			"CARGO_HOME",
+			"CARGO_NET_OFFLINE",
+			"CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC",
+			"NEXTEST_PROFILE",
+			"NEXTEST_USER_CONFIG_FILE",
+			"RUSTC",
+			"RUSTC_WRAPPER",
+			"RUSTUP_HOME",
+			"RUSTUP_TOOLCHAIN",
+		].map((key) => [key, process.env[key]]),
+	);
+	Object.assign(process.env, {
+		CARGO: "/ambient/cargo",
+		CARGO_BUILD_RUSTC: "/ambient/cargo-build-rustc",
+		CARGO_HOME: "/ambient/cargo-home",
+		CARGO_NET_OFFLINE: "true",
+		CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC: "/ambient/target-rustc",
+		NEXTEST_PROFILE: "ambient-profile",
+		NEXTEST_USER_CONFIG_FILE: "/ambient/nextest-config.toml",
+		RUSTC: "/ambient/rustc",
+		RUSTC_WRAPPER: "/ambient/rustc-wrapper",
+		RUSTUP_HOME: "/ambient/rustup-home",
+		RUSTUP_TOOLCHAIN: "ambient-toolchain",
+	});
+	try {
+		await executeDerivedChangeDiagnosticCases(input);
+	} finally {
+		for (const [key, value] of Object.entries(ambient)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+	const environment = JSON.parse(
+		await readFile(
+			join(root, "cases", "global-preflight", "artifact.txt"),
+			"utf8",
+		),
+	);
+	assert.equal(environment.caseRoot, join(root, "cases", "global-preflight"));
+	assert.equal(environment.workRoot, join(input.temporaryRoot, "w", "000"));
+	assert.equal(environment.home, environment.workRoot);
+	assert.equal(environment.userprofile, environment.workRoot);
+	assert.equal(environment.npmCache, join(environment.workRoot, "npm-cache"));
+	assert.equal(environment.xdgCache, join(environment.workRoot, "xdg-cache"));
+	assert.equal(environment.xdgConfig, join(environment.workRoot, "xdg-config"));
+	assert.equal(environment.xdgData, join(environment.workRoot, "xdg-data"));
+	assert.equal(environment.xdgState, join(environment.workRoot, "xdg-state"));
+	assert.equal(environment.appData, join(environment.workRoot, "app-data"));
+	assert.equal(
+		environment.localAppData,
+		join(environment.workRoot, "local-app-data"),
+	);
+	assert.equal(environment.tmpdir, environment.workRoot);
+	assert.equal(environment.tmp, environment.workRoot);
+	assert.equal(environment.temp, environment.workRoot);
+	assert.equal(environment.cargo, undefined);
+	assert.equal(environment.cargoBuildRustc, undefined);
+	assert.equal(environment.cargoNetOffline, undefined);
+	assert.equal(environment.cargoTargetRustc, undefined);
+	assert.equal(environment.nextestProfile, undefined);
+	assert.equal(environment.nextestUserConfig, undefined);
+	assert.equal(environment.rustc, undefined);
+	assert.equal(environment.rustcWrapper, undefined);
+	assert.equal(environment.rustupToolchain, undefined);
+	assert.equal(environment.cargoHome, join(environment.workRoot, "cargo-home"));
+	assert.equal(
+		environment.rustupHome,
+		join(environment.workRoot, "rustup-home"),
+	);
+	assert.equal(environment.target, join(environment.workRoot, "target"));
+	assert.equal(
+		environment.workRoot.includes(DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1),
+		false,
+	);
+	assert.equal(await verifyDerivedChangeDiagnosticBindings(input), null);
+});
+
+test("requires an empty, non-symlink scratch root disjoint from output and source", async () => {
+	const root = await diagnosticRoot("pointbreak-diagnostic-scratch-safety-");
+	const missing = request(root);
+	delete missing.temporaryRoot;
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(missing),
+		/temporary root must be absolute/,
+	);
+
+	const nested = request(root);
+	nested.temporaryRoot = join(root, "scratch");
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(nested),
+		/temporary root must be disjoint from the diagnostic output root/,
+	);
+
+	const sourceNested = request(root);
+	sourceNested.temporaryRoot = join(process.cwd(), "scratch");
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(sourceNested),
+		/temporary root must be disjoint from the source checkout/,
+	);
+
+	const reserved = request(root);
+	reserved.temporaryRoot = join(
+		dirname(root),
+		"separate",
+		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+		"scratch",
+	);
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(reserved),
+		/temporary root cannot enter a diagnostic or owner-store component/,
+	);
+
+	const ownerComponent = request(root);
+	ownerComponent.temporaryRoot = join(
+		dirname(root),
+		"separate",
+		".git",
+		"scratch",
+	);
+	assert.throws(
+		() => validateDerivedChangeDiagnosticRequest(ownerComponent),
+		/temporary root cannot enter a diagnostic or owner-store component/,
+	);
+
+	const nonempty = request(root);
+	await writeFile(join(nonempty.temporaryRoot, "preserve.txt"), "preserve");
+	await assert.rejects(
+		() => executeDerivedChangeDiagnosticCases(nonempty),
+		/temporary root must be empty/,
+	);
+	assert.equal(
+		await readFile(join(nonempty.temporaryRoot, "preserve.txt"), "utf8"),
+		"preserve",
+	);
+
+	const parent = await mkdtemp(
+		join(tmpdir(), "pointbreak-diagnostic-scratch-link-"),
+	);
+	const target = join(parent, "target");
+	const linked = join(parent, "scratch");
+	await mkdir(target);
+	await symlink(
+		target,
+		linked,
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	const linkedInput = request(root);
+	linkedInput.temporaryRoot = linked;
+	await assert.rejects(
+		() => executeDerivedChangeDiagnosticCases(linkedInput),
+		/temporary root must not traverse symbolic links/,
+	);
+	const ancestorTarget = join(parent, "ancestor-target");
+	const ancestorLink = join(parent, "ancestor-link");
+	await mkdir(join(ancestorTarget, "scratch"), { recursive: true });
+	await symlink(
+		ancestorTarget,
+		ancestorLink,
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	const ancestorLinkedInput = request(root);
+	ancestorLinkedInput.temporaryRoot = join(ancestorLink, "scratch");
+	await assert.rejects(
+		() => executeDerivedChangeDiagnosticCases(ancestorLinkedInput),
+		/temporary root must not traverse symbolic links/,
+	);
+
+	const ownerRoot = await diagnosticRoot(
+		"pointbreak-diagnostic-scratch-owner-",
+	);
+	const ownerInput = request(ownerRoot);
+	const oldPointbreakHome = process.env.pointbreak_home;
+	process.env.pointbreak_home = ownerInput.temporaryRoot;
+	try {
+		await assert.rejects(
+			() => executeDerivedChangeDiagnosticCases(ownerInput),
+			/cannot enter pointbreak_home/i,
+		);
+	} finally {
+		if (oldPointbreakHome === undefined) delete process.env.pointbreak_home;
+		else process.env.pointbreak_home = oldPointbreakHome;
+	}
 });
 
 test("a case-root creation failure is retained without aborting an independent peer", async () => {
@@ -627,6 +875,70 @@ test("deduplicates shared collection artifacts retained by the launcher and chil
 	);
 });
 
+test("rejects collection artifacts that traverse a symlinked parent", async () => {
+	const root = await diagnosticRoot(
+		"pointbreak-diagnostic-collection-symlink-",
+	);
+	const input = request(root);
+	input.campaign.requiredCaseIds = ["collection-child"];
+	input.campaign.requiredPlatformIds = ["macos_apfs"];
+	input.campaign.platforms = input.campaign.platforms.slice(0, 1);
+	retainOnlyMacosBinaryAuthority(input);
+	const collection = {
+		schema: DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
+		campaignId: input.campaign.id,
+		cases: [
+			{
+				id: "child",
+				lane: "native",
+				required: true,
+				status: "passed",
+				dependsOn: [],
+				artifactPaths: ["escape/secret.txt"],
+			},
+		],
+	};
+	input.cases = [
+		{
+			id: "launcher",
+			lane: "native",
+			required: false,
+			dependsOn: [],
+			failureClass: "lane_invalid",
+			phase: "native-collection",
+			fixtureCheckpoint: {
+				fixture: "public-fixture",
+				checkpoint: "native",
+			},
+			program: process.execPath,
+			args: [
+				"-e",
+				`const fs=require("node:fs"),p=require("node:path");const outside=p.join(process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT,"outside");fs.mkdirSync(outside);fs.writeFileSync(p.join(outside,"secret.txt"),"private");fs.symlinkSync(outside,p.join(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT,"escape"),process.platform==="win32"?"junction":"dir");process.stdout.write(${JSON.stringify(JSON.stringify(collection))})`,
+			],
+			collection: {
+				schema: DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
+				source: "stdout",
+				idPrefix: "collection-",
+				expectedCaseIds: ["child"],
+			},
+			mutatesRoot: true,
+		},
+	];
+
+	const result = await executeDerivedChangeDiagnosticCases(input);
+	assert.deepEqual(
+		result.cases.map(({ id, status }) => ({ id, status })),
+		[
+			{ id: "launcher", status: "failed" },
+			{ id: "collection-child", status: "skipped" },
+		],
+	);
+	assert.equal(
+		result.artifacts.some(({ path }) => path.endsWith("/escape/secret.txt")),
+		false,
+	);
+});
+
 test("a recoverable collection exit cannot hide a missing declared artifact", async () => {
 	const root = await diagnosticRoot(
 		"pointbreak-diagnostic-collection-missing-",
@@ -719,8 +1031,8 @@ test("rejects destructive-root symlinks and canonical owner-store targets", asyn
 		indirection,
 		process.platform === "win32" ? "junction" : "dir",
 	);
-	const oldPointbreakHome = process.env.POINTBREAK_HOME;
-	process.env.POINTBREAK_HOME = ownerStore;
+	const oldPointbreakHome = process.env.Pointbreak_Home;
+	process.env.Pointbreak_Home = ownerStore;
 	try {
 		await assert.rejects(
 			() =>
@@ -728,11 +1040,11 @@ test("rejects destructive-root symlinks and canonical owner-store targets", asyn
 					join(indirection, DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1),
 					process.cwd(),
 				),
-			/cannot enter POINTBREAK_HOME/,
+			/cannot enter Pointbreak_Home/i,
 		);
 	} finally {
-		if (oldPointbreakHome === undefined) delete process.env.POINTBREAK_HOME;
-		else process.env.POINTBREAK_HOME = oldPointbreakHome;
+		if (oldPointbreakHome === undefined) delete process.env.Pointbreak_Home;
+		else process.env.Pointbreak_Home = oldPointbreakHome;
 	}
 
 	const target = await mkdtemp(

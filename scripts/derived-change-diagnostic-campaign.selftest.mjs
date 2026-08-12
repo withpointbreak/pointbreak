@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { executeDerivedChangeDiagnosticCases } from "./derived-change-diagnostic.mjs";
+import {
+	executeDerivedChangeDiagnosticCases,
+	verifyDerivedChangeDiagnosticBindings,
+} from "./derived-change-diagnostic.mjs";
 import {
 	createDerivedChangeDiagnosticCampaign,
 	createDerivedChangeDiagnosticHostRequest,
+	derivedChangeDiagnosticToolchainPreflightEnvironment,
 	derivedChangeDiagnosticFilesystemProbeArguments,
 	DERIVED_CHANGE_DIAGNOSTIC_AUTHORITY_SEED_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,
@@ -47,10 +58,14 @@ const binaryIdentities = {
 	},
 };
 const fixtureAuthorityDocument = {
-	schema: "pointbreak.derived-change-public-fixture-authority.v1",
+	schema: "pointbreak.derived-change-public-fixture-authority.v2",
 	sourceCommit: commit("1"),
 	sourceTree: commit("2"),
 	sourceFiles: [
+		{
+			path: "scripts/derived-change-diagnostic-fixture.mjs",
+			sha256: digest("4"),
+		},
 		{
 			path: "scripts/materialize-inspector-decision-matrix.sh",
 			sha256: digest("5"),
@@ -76,13 +91,17 @@ const fixtureAuthorityDocument = {
 		"missing-carrier-v1",
 		"mutated-carrier-v1",
 		"removal-v1",
-		"topology-v1",
 		"wrong-family-carrier-v1",
 	].map((fixtureId, index) => ({
 		fixtureId,
 		authoritativeInventorySha256: digest(String((index + 1) % 10)),
 		witnessSha256: digest(String((index + 2) % 10)),
 	})),
+	topologyCheckpoint: {
+		schema: "pointbreak.derived-change-topology-fixture-checkpoint.v1",
+		fixtureId: "topology-v1",
+		checkpointSha256: digest("9"),
+	},
 };
 const fixtureAuthorityBytes = `${JSON.stringify(fixtureAuthorityDocument)}\n`;
 const fixtureAuthoritySha256 = createHash("sha256")
@@ -155,7 +174,7 @@ const campaign = () =>
 
 const diagnosticRoot = async (prefix) =>
 	join(
-		await mkdtemp(join(tmpdir(), prefix)),
+		await mkdtemp(join(await realpath(tmpdir()), prefix)),
 		DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 	);
 
@@ -169,12 +188,31 @@ test("Windows filesystem probes use the fsutil volume spelling", () => {
 	);
 });
 
+test("toolchain preflight blocks rustup installation without changing compile policy env", () => {
+	assert.deepEqual(
+		derivedChangeDiagnosticToolchainPreflightEnvironment({
+			CARGO_HOME: "/scratch/cargo-home",
+			RUSTUP_HOME: "/scratch/rustup-home",
+		}),
+		{
+			CARGO_HOME: "/scratch/cargo-home",
+			RUSTUP_AUTO_INSTALL: "0",
+			RUSTUP_DIST_SERVER: "http://127.0.0.1:9",
+			RUSTUP_HOME: "/scratch/rustup-home",
+			RUSTUP_UPDATE_ROOT: "http://127.0.0.1:9/rustup",
+		},
+	);
+});
+
 const hostConfig = async () => ({
 	schema: DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,
 	campaign: campaign(),
 	platformId: "macos_apfs",
 	sourceCheckout: process.cwd(),
 	outputRoot: await diagnosticRoot("pointbreak-diagnostic-host-"),
+	temporaryRoot: await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-work-"),
+	),
 	identityPaths: {
 		product: join(fixtureAuthorityRoot, "product"),
 		harness: join(fixtureAuthorityRoot, "harness"),
@@ -185,6 +223,8 @@ const hostConfig = async () => ({
 	programs: {
 		node: process.execPath,
 		cargo: process.execPath,
+		cargoNextest: process.execPath,
+		rustc: process.execPath,
 		git: process.execPath,
 		filesystemProbe: process.execPath,
 		bash: process.execPath,
@@ -256,6 +296,10 @@ test("the supported derived Change campaign retains every diagnostic lane", asyn
 		"--derived-change-diagnostic-identity",
 		"derived-change-diagnostic-browser.sh",
 		"derived-change-diagnostic-native.mjs",
+		"derived-change-diagnostic-fixture.selftest.mjs",
+		"cargoNextest",
+		"rustc",
+		"actual preinstalled executable",
 	]) {
 		assert.match(source, new RegExp(required.replaceAll("-", "\\-")));
 	}
@@ -305,7 +349,8 @@ test("campaign authority freezes complete platform, native, and browser inventor
 });
 
 test("host requests use explicit dependencies and disjoint destructive roots", async () => {
-	const request = createDerivedChangeDiagnosticHostRequest(await hostConfig());
+	const config = await hostConfig();
+	const request = createDerivedChangeDiagnosticHostRequest(config);
 	const mutableRoots = request.cases
 		.filter(({ mutatesRoot }) => mutatesRoot)
 		.map(({ root }) => root);
@@ -320,15 +365,55 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	const compile = request.cases.find(({ id }) =>
 		id.endsWith("compile-all-targets"),
 	);
-	assert.equal(compile.args[1], "build");
+	assert.equal(compile.program, config.programs.cargo);
+	assert.equal(compile.args[0], "build");
+	assert.equal(compile.args.includes("+stable"), false);
 	assert.equal(compile.args.includes("--no-run"), false);
 	assert.ok(compile.args.includes("--all-targets"));
 	assert.ok(compile.args.includes("--all-features"));
 	assert.ok(compile.args.includes("--keep-going"));
+	assert.deepEqual(compile.args.slice(-2), ["--jobs", "2"]);
 	const policy = request.cases.find(({ id }) =>
 		id.endsWith("policy-derived-access"),
 	);
+	assert.equal(policy.program, config.programs.cargoNextest);
+	assert.deepEqual(policy.args.slice(0, 3), ["nextest", "run", "--locked"]);
 	assert.ok(policy.args.includes("--no-fail-fast"));
+	for (const entry of [compile, policy]) {
+		assert.equal(entry.env.CARGO_TARGET_DIR, undefined);
+		assert.equal(entry.env.CARGO, config.programs.cargo);
+		assert.equal(entry.env.RUSTC, config.programs.rustc);
+		assert.equal(entry.env.RUSTUP_AUTO_INSTALL, undefined);
+		assert.equal(entry.env.RUSTUP_DIST_SERVER, undefined);
+		assert.equal(entry.env.RUSTUP_UPDATE_ROOT, undefined);
+	}
+	assert.ok(request.requiredExecutables.includes(config.programs.cargo));
+	assert.ok(request.requiredExecutables.includes(config.programs.cargoNextest));
+	assert.ok(request.requiredExecutables.includes(config.programs.rustc));
+	const preflightConfig = JSON.parse(
+		request.cases.find(({ id }) => id.endsWith("product-version")).env[
+			"POINTBREAK_DERIVED_CHANGE_BINARY_PREFLIGHT"
+		],
+	);
+	assert.equal(preflightConfig.cargo, config.programs.cargo);
+	assert.equal(preflightConfig.cargoNextest, config.programs.cargoNextest);
+	assert.equal(preflightConfig.rustc, config.programs.rustc);
+	assert.deepEqual(
+		request.cases
+			.filter(
+				({ id }) => id.includes(".platform-") && !id.endsWith("volume-churn"),
+			)
+			.map(
+				({ env }) =>
+					JSON.parse(env.POINTBREAK_DERIVED_CHANGE_CONTROL_CASE).testName,
+			),
+		[
+			"bench_support::derived_access::change_read::instrumented::tests::existing_path_identity_ignores_equivalent_lexical_spellings",
+			"bench_support::derived_access::runner_tests::candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces",
+			"bench_support::derived_access::materializer::change_fixture_tests::change_fixtures_exercise_their_declared_derived_outcomes",
+			"session::derived_access::lifecycle::tests::stable_authority_successor_does_not_wait_for_a_busy_writer",
+		],
+	);
 
 	const native = request.cases.find(({ id }) => id.endsWith("native-stateful"));
 	assert.equal(native.collection.expectedCaseIds.length, 60);
@@ -336,7 +421,12 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 		id.endsWith("change-read-stateful"),
 	);
 	assert.equal(changeRead.failureClass, "lane_invalid");
-	assert.equal(changeRead.collection.expectedCaseIds.length, 147);
+	assert.equal(changeRead.collection.expectedCaseIds.length, 148);
+	assert.ok(
+		changeRead.collection.expectedCaseIds.includes(
+			"change-read.global-preflight",
+		),
+	);
 	assert.ok(
 		changeRead.collection.expectedCaseIds.includes(
 			"topology-v1.read.stale_page_token",
@@ -358,7 +448,14 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 		"browser-widen-1",
 		"browser-widen-2",
 	]);
+	assert.ok(browser.artifactPaths.includes("logs/fixture-checkpoint.json"));
+	assert.ok(
+		browser.artifactPaths.includes(
+			"harness/scripts/derived-change-diagnostic-fixture.mjs",
+		),
+	);
 	assert.ok(request.requiredExecutables.includes(process.execPath));
+	assert.equal(request.temporaryRoot, config.temporaryRoot);
 	assert.ok(
 		request.cases.every(
 			({ program }) => program === undefined || program.startsWith("/"),
@@ -420,6 +517,11 @@ test("host requests execute only the configured candidate checkout and retained 
 			({ platformId }) => platformId === config.platformId,
 		).binarySha256,
 	);
+	assert.equal(changeReadConfig.workRoot, config.temporaryRoot);
+	const nativeConfig = JSON.parse(
+		native.env.POINTBREAK_DERIVED_CHANGE_NATIVE_CONFIG,
+	);
+	assert.equal(nativeConfig.workRoot, config.temporaryRoot);
 	const browser = request.cases.find(({ id }) =>
 		id.endsWith("browser-transition"),
 	);
@@ -459,21 +561,23 @@ test("host requests execute only the configured candidate checkout and retained 
 	]) {
 		assert.equal(browser.env[environmentName], config.programs[name]);
 	}
-	const topologyAuthority = config.campaign.fixture.document.witnesses.find(
-		({ fixtureId }) => fixtureId === "topology-v1",
-	);
+	const topologyAuthority = config.campaign.fixture.document.topologyCheckpoint;
 	const materializerAuthority =
 		config.campaign.fixture.document.sourceFiles.find(
 			({ path }) => path === "scripts/materialize-inspector-decision-matrix.sh",
 		);
 	assert.equal(browser.env.POINTBREAK_EXPECTED_FIXTURE_ID, "topology-v1");
 	assert.equal(
+		browser.env.POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256,
+		topologyAuthority.checkpointSha256,
+	);
+	assert.equal(
 		browser.env.POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256,
-		topologyAuthority.authoritativeInventorySha256,
+		undefined,
 	);
 	assert.equal(
 		browser.env.POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256,
-		topologyAuthority.witnessSha256,
+		undefined,
 	);
 	assert.equal(
 		browser.env.POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256,
@@ -482,6 +586,19 @@ test("host requests execute only the configured candidate checkout and retained 
 	const postflight = request.cases.find(({ id }) => id.endsWith("postflight"));
 	const boundRequest = JSON.parse(Object.values(postflight.env)[0]);
 	assert.equal(boundRequest.cases.length, request.cases.length);
+	assert.equal(boundRequest.outputRoot, config.outputRoot);
+	assert.equal(boundRequest.temporaryRoot, config.temporaryRoot);
+});
+
+test("serialized postflight bindings accept a populated preserved scratch root", async () => {
+	const config = await hostConfig();
+	const request = createDerivedChangeDiagnosticHostRequest(config);
+	const postflight = request.cases.find(({ id }) => id.endsWith("postflight"));
+	const boundRequest = JSON.parse(Object.values(postflight.env)[0]);
+	await mkdir(join(config.temporaryRoot, "w", "000"), { recursive: true });
+	const bindingFailure =
+		await verifyDerivedChangeDiagnosticBindings(boundRequest);
+	assert.equal(bindingFailure?.temporaryRootFailure, undefined);
 });
 
 test("Windows host requests retain the complete native Change-read collection", async () => {
@@ -498,7 +615,7 @@ test("Windows host requests retain the complete native Change-read collection", 
 	const changeRead = request.cases.find(({ id }) =>
 		id.endsWith("change-read-stateful"),
 	);
-	assert.equal(changeRead.collection.expectedCaseIds.length, 147);
+	assert.equal(changeRead.collection.expectedCaseIds.length, 148);
 	assert.equal(
 		JSON.parse(changeRead.env.POINTBREAK_DERIVED_CHANGE_CHANGE_READ_CONFIG)
 			.programs.hash.mode,

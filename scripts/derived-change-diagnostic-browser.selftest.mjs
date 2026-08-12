@@ -28,8 +28,10 @@ const runtimeFailureResult = async (browser) => {
 		iterations: 0,
 		fixture: {
 			id: "fixture-selftest",
-			authoritativeInventorySha256: "a".repeat(64),
-			witnessSha256: "c".repeat(64),
+			rawWitnessSha256: "c".repeat(64),
+			actualAuthoritativeInventorySha256: "a".repeat(64),
+			topologyCheckpointSha256: "d".repeat(64),
+			fixtureModuleSha256: "e".repeat(64),
 			topologyMaterializerSha256: "b".repeat(64),
 		},
 		artifactDir: "/tmp/unused",
@@ -73,12 +75,18 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	assert.match(shell, /inspect --repo/);
 	assert.match(shell, /derived-change-diagnostic-browser\.mjs/);
 	assert.match(shell, /POINTBREAK_EXPECTED_FIXTURE_ID/);
-	assert.match(shell, /POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256/);
-	assert.match(shell, /POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256/);
+	assert.match(shell, /POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256/);
 	assert.match(shell, /POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256/);
-	assert.match(shell, /qualification-derived-change-fixture-witness\.v1/);
-	assert.match(shell, /fixture witness bytes differ from the expected SHA-256/);
-	assert.match(shell, /"\$BASH" "\$snapshot_scripts\/materialize-inspector-decision-matrix\.sh"/);
+	assert.match(shell, /fixture-checkpoint\.json/);
+	assert.match(shell, /raw witness hash differs from fixture bytes/);
+	assert.match(
+		shell,
+		/public fixture topology checkpoint differs from the expected authority/,
+	);
+	assert.match(
+		shell,
+		/"\$BASH" "\$snapshot_scripts\/materialize-inspector-decision-matrix\.sh"/,
+	);
 	for (const program of [
 		"GIT",
 		"JQ",
@@ -154,8 +162,9 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	assert.doesNotMatch(browser, /const failures = \[\]/);
 	assert.doesNotMatch(browser, /\n\t\tfailures,/);
 	assert.match(shell, /fixtureId/);
-	assert.match(browser, /authoritativeInventorySha256/);
-	assert.match(browser, /witnessSha256/);
+	assert.match(browser, /actualAuthoritativeInventorySha256/);
+	assert.match(browser, /rawWitnessSha256/);
+	assert.match(browser, /topologyCheckpointSha256/);
 	assert.match(browser, /topologyMaterializerSha256/);
 	assert.match(shell, /all\(\.status == "passed"\)/);
 	assert.doesNotMatch(browser, /pointbreak\.change-inspector-browser-report/);
@@ -184,11 +193,42 @@ test("browser snapshots the authority source and binds optional cygpath explicit
 	assert.match(shell, /POINTBREAK_CYGPATH_PROGRAM/);
 	assert.match(shell, /must be an absolute program path or absent/);
 	assert.match(shell, /materializerCygpathBinding/);
-	assert.match(shell, /cygpath: \{path: \$cygpathPath, sha256: \$cygpathSha256\}/);
+	assert.match(
+		shell,
+		/cygpath: \{path: \$cygpathPath, sha256: \$cygpathSha256\}/,
+	);
 	assert.match(materializer, /POINTBREAK_CYGPATH_PROGRAM/);
 	assert.match(materializer, /POINTBREAK_CYGPATH_PROGRAM\+x/);
 	assert.match(materializer, /"\$cygpath_program" -u/);
 	assert.doesNotMatch(materializer, /cygpath -u/);
+});
+
+test("browser binds a normalized topology checkpoint while retaining raw fixture observations", async () => {
+	const shell = await source("derived-change-diagnostic-browser.sh");
+	const browser = await source("derived-change-diagnostic-browser.mjs");
+
+	assert.match(shell, /POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256/);
+	assert.match(shell, /POINTBREAK_DIAGNOSTIC_WORK_ROOT/);
+	assert.match(shell, /scripts\/derived-change-diagnostic-fixture\.mjs/);
+	assert.match(shell, /fixtureModuleSha256/);
+	assert.match(shell, /fixture-checkpoint\.json/);
+	assert.match(shell, /topologyCheckpointSha256/);
+	assert.match(shell, /rawWitnessSha256/);
+	assert.match(shell, /actualAuthoritativeInventorySha256/);
+	assert.match(shell, /fixture_root="\$diagnostic_work_root\//);
+	assert.match(shell, /fixture root must be outside --root/);
+	assert.doesNotMatch(
+		shell,
+		/POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256/,
+	);
+	assert.doesNotMatch(shell, /POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256/);
+	assert.doesNotMatch(
+		shell,
+		/fixture witness bytes differ from the expected SHA-256/,
+	);
+	assert.match(browser, /rawWitnessSha256/);
+	assert.match(browser, /actualAuthoritativeInventorySha256/);
+	assert.match(browser, /topologyCheckpointSha256/);
 });
 
 test("browser rejects a signed-source snapshot before it can drift from authority", async () => {
@@ -209,36 +249,41 @@ exit 0
 	try {
 		let error;
 		try {
-			await execFileAsync(process.env.BASH ?? "/bin/bash", [
-				new URL("./derived-change-diagnostic-browser.sh", import.meta.url)
-					.pathname,
-				"--root",
-				caseRoot,
-				"--campaign-id",
-				"selftest-source-authority",
-				"--iterations",
-				"1",
-			], {
-				env: {
-					...process.env,
-					POINTBREAK_BINARY: process.execPath,
-					POINTBREAK_GIT_PROGRAM: fakeGit,
-					POINTBREAK_EXPECTED_FIXTURE_ID: "fixture-selftest",
-					POINTBREAK_EXPECTED_AUTHORITATIVE_INVENTORY_SHA256:
-						"a".repeat(64),
-					POINTBREAK_EXPECTED_FIXTURE_WITNESS_SHA256: "b".repeat(64),
-					POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256:
-						"c".repeat(64),
-					POINTBREAK_EXPECTED_SOURCE_COMMIT: "d".repeat(40),
-					POINTBREAK_EXPECTED_SOURCE_TREE: "e".repeat(40),
-					POINTBREAK_CYGPATH_PROGRAM: "absent",
+			await execFileAsync(
+				process.env.BASH ?? "/bin/bash",
+				[
+					new URL("./derived-change-diagnostic-browser.sh", import.meta.url)
+						.pathname,
+					"--root",
+					caseRoot,
+					"--campaign-id",
+					"selftest-source-authority",
+					"--iterations",
+					"1",
+				],
+				{
+					env: {
+						...process.env,
+						POINTBREAK_BINARY: process.execPath,
+						POINTBREAK_GIT_PROGRAM: fakeGit,
+						POINTBREAK_EXPECTED_FIXTURE_ID: "fixture-selftest",
+						POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256: "a".repeat(64),
+						POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256: "c".repeat(64),
+						POINTBREAK_EXPECTED_SOURCE_COMMIT: "d".repeat(40),
+						POINTBREAK_EXPECTED_SOURCE_TREE: "e".repeat(40),
+						POINTBREAK_CYGPATH_PROGRAM: "absent",
+						POINTBREAK_DIAGNOSTIC_WORK_ROOT: join(root, "fixture-work"),
+					},
 				},
-			});
+			);
 		} catch (caught) {
 			error = caught;
 		}
 		assert.ok(error, "browser wrapper accepted a source commit mismatch");
-		assert.match(error.stderr, /commit that differs from the expected authority/);
+		assert.match(
+			error.stderr,
+			/commit that differs from the expected authority/,
+		);
 		await assert.rejects(readFile(caseRoot));
 	} finally {
 		await rm(root, { recursive: true, force: true });
@@ -262,9 +307,11 @@ test("runtime error cases retain their own empty-error expectations", async () =
 	assert.deepEqual(pageErrors.expected, { pageErrors: [] });
 	assert.deepEqual(consoleErrors.expected, { consoleErrors: [] });
 	assert.deepEqual(pageErrors.fixtureCheckpoint, {
-		fixture: "a".repeat(64),
 		fixtureId: "fixture-selftest",
-		witnessSha256: "c".repeat(64),
+		rawWitnessSha256: "c".repeat(64),
+		actualAuthoritativeInventorySha256: "a".repeat(64),
+		topologyCheckpointSha256: "d".repeat(64),
+		fixtureModuleSha256: "e".repeat(64),
 		topologyMaterializerSha256: "b".repeat(64),
 		checkpoint: "browser-runtime",
 	});
@@ -285,8 +332,10 @@ test("a rejected authenticated bootstrap is aggregated and skips only transition
 		iterations: 2,
 		fixture: {
 			id: "fixture-selftest",
-			authoritativeInventorySha256: "a".repeat(64),
-			witnessSha256: "c".repeat(64),
+			rawWitnessSha256: "c".repeat(64),
+			actualAuthoritativeInventorySha256: "a".repeat(64),
+			topologyCheckpointSha256: "d".repeat(64),
+			fixtureModuleSha256: "e".repeat(64),
 			topologyMaterializerSha256: "b".repeat(64),
 		},
 		artifactDir: "/tmp/unused",
@@ -329,13 +378,17 @@ test("materializer requires an explicit hash mode for an explicit hash program",
 	);
 	let error;
 	try {
-		await execFileAsync(process.env.BASH ?? "/bin/bash", [materializer.pathname], {
-			env: {
-				...process.env,
-				POINTBREAK_HASH_PROGRAM: process.execPath,
-				POINTBREAK_HASH_PROGRAM_MODE: "unsupported",
+		await execFileAsync(
+			process.env.BASH ?? "/bin/bash",
+			[materializer.pathname],
+			{
+				env: {
+					...process.env,
+					POINTBREAK_HASH_PROGRAM: process.execPath,
+					POINTBREAK_HASH_PROGRAM_MODE: "unsupported",
+				},
 			},
-		});
+		);
 	} catch (caught) {
 		error = caught;
 	}
