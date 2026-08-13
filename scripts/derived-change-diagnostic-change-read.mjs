@@ -165,7 +165,13 @@ function text(value, label) {
 }
 function absolute(value, label) {
 	text(value, label);
-	if (!isAbsolute(value)) throw new Error(`${label} must be absolute`);
+	if (
+		!isAbsolute(value) &&
+		!/^[A-Za-z]:[\\/]/u.test(value) &&
+		!/^\\\\[^\\]+\\[^\\]+/u.test(value)
+	) {
+		throw new Error(`${label} must be absolute`);
+	}
 }
 function digest(value, label) {
 	if (!SHA256.test(value ?? "")) throw new Error(`${label} must be SHA-256`);

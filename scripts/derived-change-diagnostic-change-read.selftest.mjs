@@ -629,10 +629,7 @@ test("binds each read request to retained witness file bytes, not its path spell
 		),
 	);
 	const retainedWitnessSha256 = await sha256(witness);
-	assert.equal(
-		request.readRequest.fixtureWitnessSha256,
-		retainedWitnessSha256,
-	);
+	assert.equal(request.readRequest.fixtureWitnessSha256, retainedWitnessSha256);
 	assert.notEqual(
 		request.readRequest.fixtureWitnessSha256,
 		createHash("sha256").update(witness).digest("hex"),
@@ -651,7 +648,8 @@ test("uses authority-bound activation bytes and existing isolated fixture roots 
 
 	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
 	assert.equal(
-		result.cases.find(({ id }) => id === "topology-v1.preflight.fixture").status,
+		result.cases.find(({ id }) => id === "topology-v1.preflight.fixture")
+			.status,
 		"passed",
 	);
 	assert.equal(
@@ -1051,6 +1049,41 @@ test("source-preflight failure remains a mergeable global Red collection", async
 				},
 			],
 		},
+		programs: [
+			"awk",
+			"bash",
+			"browserExecutable",
+			"cargo",
+			"cargoNextest",
+			"chmod",
+			"cp",
+			"dirname",
+			"filesystemProbe",
+			"find",
+			"git",
+			"hash",
+			"head",
+			"jq",
+			"mkdir",
+			"node",
+			"playwrightCli",
+			"rm",
+			"rustc",
+			"shasum",
+			"sleep",
+			"sort",
+			"tr",
+			"vitestCli",
+			"wc",
+		].map((name) => ({
+			platformId: platform.id,
+			name,
+			program: `/tools/${name}`,
+			binarySha256: digest("8"),
+			...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+				? { treeRoot: "/tools", treeSha256: digest("7") }
+				: {}),
+		})),
 		fixture: {
 			authoritySha256: input.config.rootAuthoritySha256,
 			document: authorityDocument,

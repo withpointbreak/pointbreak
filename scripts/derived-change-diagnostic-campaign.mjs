@@ -39,6 +39,7 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 	finalizeDerivedChangeDiagnosticFragment,
+	derivedChangeDiagnosticProgramNamesForOperatingSystem,
 	mergeDerivedChangeDiagnosticReport,
 	validateDerivedChangeDiagnosticCampaign,
 	validateDerivedChangeDiagnosticReport,
@@ -199,7 +200,13 @@ function requireText(value, label) {
 
 function requireAbsolutePath(value, label) {
 	requireText(value, label);
-	if (!isAbsolute(value)) throw new Error(`${label} must be absolute`);
+	if (
+		!isAbsolute(value) &&
+		!/^[A-Za-z]:[\\/]/u.test(value) &&
+		!/^\\\\[^\\]+\\[^\\]+/u.test(value)
+	) {
+		throw new Error(`${label} must be absolute`);
+	}
 }
 
 function requireOutsideSourceRoot(root, sourceRoot, label) {
@@ -412,6 +419,9 @@ export function createDerivedChangeDiagnosticCampaign(seed) {
 	if (!Array.isArray(seed.platforms) || seed.platforms.length === 0) {
 		throw new Error("diagnostic authority seed requires platforms");
 	}
+	if (!Array.isArray(seed.programs) || seed.programs.length === 0) {
+		throw new Error("diagnostic authority seed requires program identities");
+	}
 	for (const platform of seed.platforms) {
 		requireText(platform.architecture, "diagnostic platform architecture");
 		if (!["macos", "windows"].includes(platform.operatingSystem)) {
@@ -433,6 +443,11 @@ export function createDerivedChangeDiagnosticCampaign(seed) {
 		product: structuredClone(seed.product),
 		harness: structuredClone(seed.harness),
 		control: structuredClone(seed.control),
+		programs: structuredClone(seed.programs).sort((left, right) => {
+			const leftKey = `${left.platformId}\u0000${left.name}`;
+			const rightKey = `${right.platformId}\u0000${right.name}`;
+			return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+		}),
 		requiredCaseIds: [],
 	};
 	for (const platform of campaign.platforms) {
@@ -448,39 +463,30 @@ export function createDerivedChangeDiagnosticCampaign(seed) {
 	return campaign;
 }
 
-function validateProgramInventory(programs, platform) {
+function validateProgramInventory(programs, platform, campaign) {
 	requireObject(programs, "diagnostic host programs");
-	const required = [
-		"node",
-		"cargo",
-		"cargoNextest",
-		"rustc",
-		"git",
-		"filesystemProbe",
-		"bash",
-		"jq",
-		"find",
-		"sort",
-		"wc",
-		"tr",
-		"awk",
-		"cp",
-		"head",
-		"dirname",
-		"mkdir",
-		"rm",
-		"hash",
-	];
-	if (platform.operatingSystem === "macos") {
-		required.push("npm", "playwrightCli", "shasum", "chmod");
-	} else {
-		required.push("cygpath");
+	const required = derivedChangeDiagnosticProgramNamesForOperatingSystem(
+		platform.operatingSystem,
+	);
+	if (
+		JSON.stringify(Object.keys(programs).sort()) !== JSON.stringify(required)
+	) {
+		throw new Error(
+			"diagnostic host program inventory differs from campaign authority",
+		);
 	}
+	const authority = new Map(
+		campaign.programs
+			.filter(({ platformId }) => platformId === platform.id)
+			.map((entry) => [entry.name, entry]),
+	);
 	for (const name of required) {
 		requireAbsolutePath(programs[name], `diagnostic ${name} program`);
-	}
-	for (const [name, program] of Object.entries(programs)) {
-		requireAbsolutePath(program, `diagnostic ${name} program`);
+		if (programs[name] !== authority.get(name)?.program) {
+			throw new Error(
+				`diagnostic ${name} program identity differs from campaign authority`,
+			);
+		}
 	}
 	return [...new Set(Object.values(programs))];
 }
@@ -526,23 +532,24 @@ function validateControlBuildCommandMetadata(controls) {
 }
 
 function changeReadProgramIdentities(config) {
-	requireObject(
-		config.changeRead.programSha256,
-		"diagnostic Change-read program hashes",
+	const authority = new Map(
+		config.campaign.programs
+			.filter(({ platformId }) => platformId === config.platformId)
+			.map((entry) => [entry.name, entry]),
 	);
 	const identities = Object.fromEntries(
 		CHANGE_READ_PROGRAM_NAMES.map((name) => [
 			name,
 			{
 				program: config.programs[name],
-				binarySha256: config.changeRead.programSha256[name],
+				binarySha256: authority.get(name).binarySha256,
 			},
 		]),
 	);
 	if (config.programs.cygpath !== undefined) {
 		identities.cygpath = {
 			program: config.programs.cygpath,
-			binarySha256: config.changeRead.programSha256.cygpath,
+			binarySha256: authority.get("cygpath").binarySha256,
 		};
 	}
 	return identities;
@@ -761,6 +768,7 @@ function validateHostConfig(config) {
 	const requiredExecutables = validateProgramInventory(
 		config.programs,
 		platform,
+		config.campaign,
 	);
 	const observedIterations = browserIterationsFromCampaign(
 		config.campaign,
@@ -860,6 +868,7 @@ function browserArtifacts() {
 		"logs/derived-build.log",
 		"logs/inspect-startup.json",
 		"logs/inspect-server.log",
+		"logs/playwright-cli.config.json",
 		"logs/browser-program.mjs",
 		"logs/browser-open.log",
 		"logs/browser.log",
@@ -951,6 +960,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			phase: "product-self-identity",
 			env: {
 				[BINARY_PREFLIGHT_ENV]: JSON.stringify({
+					operatingSystem: platform.operatingSystem,
 					product: config.identityPaths.product,
 					harness: config.identityPaths.harness,
 					control: config.identityPaths.control,
@@ -958,6 +968,14 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					cargo: config.programs.cargo,
 					cargoNextest: config.programs.cargoNextest,
 					rustc: config.programs.rustc,
+					node: config.programs.node,
+					...(platform.operatingSystem === "macos"
+						? {
+								browserExecutable: config.programs.browserExecutable,
+								playwrightCli: config.programs.playwrightCli,
+								vitestCli: config.programs.vitestCli,
+							}
+						: {}),
 					sourceCheckout: config.sourceCheckout,
 					source: campaign.source,
 				}),
@@ -1110,11 +1128,11 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				id: `${prefix}.policy-web`,
 				lane: "policy",
 				dependsOn: [preflight, binaryPreflight],
-				program: config.programs.npm,
+				program: config.programs.node,
 				args: [
-					"exec",
-					"vitest",
+					config.programs.vitestCli,
 					"run",
+					"--no-cache",
 					"test/change-inspector-interaction-lifecycle.test.ts",
 				],
 				root: "policy-web",
@@ -1152,7 +1170,11 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				failureClass: "lane_invalid",
 				phase: "focused-real-browser-collection",
 				env: {
+					CI: "1",
+					NO_UPDATE_NOTIFIER: "1",
 					POINTBREAK_BINARY: config.identityPaths.product,
+					POINTBREAK_BASH_PROGRAM: config.programs.bash,
+					POINTBREAK_BROWSER_EXECUTABLE: config.programs.browserExecutable,
 					POINTBREAK_EXPECTED_SOURCE_COMMIT: campaign.source.commit,
 					POINTBREAK_EXPECTED_SOURCE_TREE: campaign.source.tree,
 					PLAYWRIGHT_CLI: config.programs.playwrightCli,
@@ -1169,6 +1191,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					POINTBREAK_DIRNAME_PROGRAM: config.programs.dirname,
 					POINTBREAK_MKDIR_PROGRAM: config.programs.mkdir,
 					POINTBREAK_RM_PROGRAM: config.programs.rm,
+					POINTBREAK_SLEEP_PROGRAM: config.programs.sleep,
 					POINTBREAK_CHMOD_PROGRAM: config.programs.chmod,
 					POINTBREAK_AWK_PROGRAM: config.programs.awk,
 					POINTBREAK_CYGPATH_PROGRAM: config.programs.cygpath ?? "absent",
@@ -1458,6 +1481,43 @@ export function derivedChangeDiagnosticToolchainPreflightEnvironment(
 	};
 }
 
+export async function runDerivedChangeDiagnosticScriptToolPreflight(
+	config,
+	environment = process.env,
+) {
+	requireObject(config, "diagnostic script tool preflight");
+	for (const name of [
+		"node",
+		"vitestCli",
+		"playwrightCli",
+		"browserExecutable",
+		"sourceCheckout",
+	]) {
+		requireAbsolutePath(config[name], `diagnostic ${name} path`);
+	}
+	const isolatedEnvironment = {
+		...environment,
+		CI: "1",
+		NO_UPDATE_NOTIFIER: "1",
+	};
+	for (const [name, program, args] of [
+		["node", config.node, ["--version"]],
+		["Vitest", config.node, [config.vitestCli, "--version"]],
+		["Playwright", config.node, [config.playwrightCli, "--version"]],
+		["browser", config.browserExecutable, ["--version"]],
+	]) {
+		const outcome = await runCommand(program, args, {
+			cwd: config.sourceCheckout,
+			env: isolatedEnvironment,
+		});
+		if (outcome.code !== 0 || outcome.signal !== null) {
+			throw new Error(
+				`diagnostic ${name} must be loadable through its exact bound launcher`,
+			);
+		}
+	}
+}
+
 async function runBinaryPreflight() {
 	const config = JSON.parse(process.env[BINARY_PREFLIGHT_ENV] ?? "");
 	requireObject(config, "diagnostic binary preflight");
@@ -1468,11 +1528,16 @@ async function runBinaryPreflight() {
 		"harness",
 		"control",
 		"controlCli",
+		"node",
 		"rustc",
 		"sourceCheckout",
 	]) {
 		requireAbsolutePath(config[name], `diagnostic ${name} path`);
 	}
+	requireText(
+		config.operatingSystem,
+		"diagnostic binary preflight operating system",
+	);
 	requireObject(config.source, "diagnostic binary preflight source");
 	for (const [name, program] of [
 		["cargo", config.cargo],
@@ -1488,6 +1553,13 @@ async function runBinaryPreflight() {
 				`diagnostic ${name} must be an actual preinstalled executable`,
 			);
 		}
+	}
+	if (config.operatingSystem === "macos") {
+		await runDerivedChangeDiagnosticScriptToolPreflight(config);
+	} else if (config.operatingSystem !== "windows") {
+		throw new Error(
+			"diagnostic binary preflight operating system is unsupported",
+		);
 	}
 
 	const productOutcome = await runCommand(

@@ -63,12 +63,20 @@ pub fn reject_derived_change_diagnostic_evidence_path_v1(path: &Path) -> Result<
 pub fn reject_derived_change_diagnostic_evidence_document_v1(
     document: &serde_json::Value,
 ) -> Result<(), String> {
-    if matches!(
+    let diagnostic_schema = matches!(
         document.get("schema").and_then(serde_json::Value::as_str),
         Some(DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1)
             | Some(DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1)
             | Some(DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1)
-    ) {
+    );
+    let diagnostic_mode = matches!(
+        document.get("mode").and_then(serde_json::Value::as_str),
+        Some(DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1)
+            | Some(DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1)
+            | Some(DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1)
+            | Some(super::change_read::DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1)
+    );
+    if diagnostic_schema || diagnostic_mode {
         Err(DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1.to_owned())
     } else {
         Ok(())

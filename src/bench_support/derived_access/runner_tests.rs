@@ -149,6 +149,39 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
                 "cases": [],
             }),
         ),
+        (
+            "change-read-child",
+            serde_json::json!({
+                "mode": DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,
+                "sourceUnchanged": true,
+                "preflight": [],
+                "rows": [],
+                "controls": [],
+                "storage": [],
+            }),
+        ),
+        (
+            "lifecycle-child",
+            serde_json::json!({
+                "mode": DERIVED_ACCESS_LIFECYCLE_DIAGNOSTIC_MODE_V1,
+                "sourceUnchanged": true,
+                "cases": [],
+            }),
+        ),
+        (
+            "native-child",
+            serde_json::json!({
+                "mode": DERIVED_CHANGE_DIAGNOSTIC_NATIVE_MODE_V1,
+                "sourceUnchanged": true,
+            }),
+        ),
+        (
+            "identity-child",
+            serde_json::json!({
+                "mode": DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1,
+                "sourceCommit": "0".repeat(40),
+            }),
+        ),
     ] {
         let path = root.path().join(format!("renamed-{name}.json"));
         let bytes = serde_json::to_vec(&document).expect("serialize diagnostic document");
@@ -184,7 +217,35 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
             .unwrap_err(),
             DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
         );
+        assert_eq!(
+            publish_qualification_derived_access_package_v1(
+                &root.path().join(format!("published-package-{name}")),
+                &QualificationDerivedAccessPackageV1::test_fixture(),
+                &[("renamed.json", bytes.as_slice())],
+            )
+            .unwrap_err(),
+            DERIVED_CHANGE_DIAGNOSTIC_REPORT_INADMISSIBLE_ERROR_V1,
+        );
     }
+
+    assert_eq!(
+        validate_summaries_against_raw(
+            &QualificationDerivedAccessPackageV1::test_fixture(),
+            &[serde_json::json!({
+                "schema": "pointbreak.unknown-terminal-receipt.v1"
+            })],
+        )
+        .unwrap_err(),
+        "unsupported derived-access raw receipt schema: pointbreak.unknown-terminal-receipt.v1",
+    );
+    assert_eq!(
+        validate_summaries_against_raw(
+            &QualificationDerivedAccessPackageV1::test_fixture(),
+            &[serde_json::json!({"ordinary": true})],
+        )
+        .unwrap_err(),
+        "derived-access raw receipt omitted schema",
+    );
 
     assert_eq!(
         reject_derived_change_diagnostic_evidence_path_v1(Path::new(

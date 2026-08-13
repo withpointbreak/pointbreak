@@ -994,6 +994,44 @@ test("derived Change diagnostics are inadmissible to browser completion publicat
 		}),
 		/derived Change diagnostic.*never browser completion evidence/,
 	);
+
+	const schemaLessDiagnosticBytes = `${JSON.stringify({
+		mode: "--derived-change-read-diagnostic",
+		sourceUnchanged: true,
+		preflight: [],
+		rows: [],
+		controls: [],
+		storage: [],
+	})}\n`;
+	await writeFile(
+		join(inventoryRoot, "logs", "browser-result.json"),
+		schemaLessDiagnosticBytes,
+	);
+	inventoryCandidate.evidenceInventory = [...retainedFiles.entries()]
+		.map(([path, bytes]) => ({
+			path,
+			sha256: createHash("sha256")
+				.update(
+					path === "logs/browser-result.json"
+						? schemaLessDiagnosticBytes
+						: bytes,
+				)
+				.digest("hex"),
+		}))
+		.sort((left, right) => left.path.localeCompare(right.path));
+	await writeFile(
+		inventoryCandidatePath,
+		`${JSON.stringify(inventoryCandidate)}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: inventoryCandidatePath,
+			manifestPath: inventoryManifestPath,
+			browserResult: passingResult,
+			evidenceRoot: inventoryRoot,
+		}),
+		/derived Change diagnostic.*never browser completion evidence/,
+	);
 });
 
 test("completion manifests bind a sorted SHA-256 inventory of retained browser evidence", async () => {

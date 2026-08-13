@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+	chmod,
+	copyFile,
 	mkdir,
 	mkdtemp,
 	readFile,
@@ -18,6 +20,7 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 	assertDerivedChangeDiagnosticOutputRootSafety,
 	executeDerivedChangeDiagnosticCases,
+	sha256DerivedChangeDiagnosticTree,
 	validateDerivedChangeDiagnosticRequest,
 	verifyDerivedChangeDiagnosticBindings,
 } from "./derived-change-diagnostic.mjs";
@@ -27,6 +30,14 @@ const commit = (digit) => digit.repeat(40);
 const executableSha256 = createHash("sha256")
 	.update(await readFile(process.execPath))
 	.digest("hex");
+const executableTreeRoot = await mkdtemp(
+	join(await realpath(tmpdir()), "pointbreak-diagnostic-bound-tools-"),
+);
+const treeBoundExecutable = join(executableTreeRoot, "node");
+await copyFile(process.execPath, treeBoundExecutable);
+await chmod(treeBoundExecutable, 0o755);
+const executableTreeSha256 =
+	await sha256DerivedChangeDiagnosticTree(executableTreeRoot);
 const fixtureAuthorityDocument = {
 	schema: "pointbreak.derived-change-public-fixture-authority.v2",
 	sourceCommit: commit("a"),
@@ -89,6 +100,28 @@ const fixtureAuthorityPath = join(
 );
 await writeFile(fixtureAuthorityPath, fixtureAuthorityBytes);
 
+const commonProgramNames = [
+	"awk",
+	"bash",
+	"cargo",
+	"cargoNextest",
+	"cp",
+	"dirname",
+	"filesystemProbe",
+	"find",
+	"git",
+	"hash",
+	"head",
+	"jq",
+	"mkdir",
+	"node",
+	"rm",
+	"rustc",
+	"sort",
+	"tr",
+	"wc",
+];
+
 const campaign = () => ({
 	id: "derived-change-diagnostic-001",
 	requiredCaseIds: [
@@ -143,6 +176,40 @@ const campaign = () => ({
 			},
 		],
 	},
+	programs: [
+		...[
+			...commonProgramNames,
+			"browserExecutable",
+			"chmod",
+			"playwrightCli",
+			"shasum",
+			"sleep",
+			"vitestCli",
+		]
+			.sort()
+			.map((name) => ({
+				platformId: "macos_apfs",
+				name,
+				program: ["browserExecutable", "playwrightCli", "vitestCli"].includes(
+					name,
+				)
+					? treeBoundExecutable
+					: process.execPath,
+				binarySha256: executableSha256,
+				...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+					? {
+							treeRoot: executableTreeRoot,
+							treeSha256: executableTreeSha256,
+						}
+					: {}),
+			})),
+		...[...commonProgramNames, "cygpath"].sort().map((name) => ({
+			platformId: "windows_ntfs",
+			name,
+			program: `C:\\tools\\${name}.exe`,
+			binarySha256: executableSha256,
+		})),
+	],
 	fixture: {
 		authoritySha256: fixtureAuthoritySha256,
 		document: structuredClone(fixtureAuthorityDocument),
@@ -272,6 +339,9 @@ function retainOnlyMacosBinaryAuthority(input) {
 	input.campaign.control.binaries = input.campaign.control.binaries.filter(
 		({ platformId }) => platformId === "macos_apfs",
 	);
+	input.campaign.programs = input.campaign.programs.filter(
+		({ platformId }) => platformId === "macos_apfs",
+	);
 }
 
 test("continues independent cases and skips only a failed dependency subtree", async () => {
@@ -339,6 +409,9 @@ test("captures stable command logs and declared artifacts by SHA-256", async () 
 	for (const identity of [input.campaign.product, input.campaign.harness])
 		identity.binaries = identity.binaries.slice(0, 1);
 	input.campaign.control.binaries = input.campaign.control.binaries.slice(0, 2);
+	input.campaign.programs = input.campaign.programs.filter(
+		({ platformId }) => platformId === "macos_apfs",
+	);
 	const result = await executeDerivedChangeDiagnosticCases(input);
 	const [row] = result.cases;
 	assert.match(row.log.sha256, /^[0-9a-f]{64}$/);
@@ -398,7 +471,14 @@ test("the runner refuses a non-empty output root before executing a case", async
 test("preflights every executable, records global invalidity, and does not start commands", async () => {
 	const root = await diagnosticRoot("pointbreak-diagnostic-executable-");
 	const input = request(root);
-	input.cases[4].program = "/definitely/not/a-pointbreak-executable";
+	const missingProgram = "/definitely/not/a-pointbreak-executable";
+	input.cases[4].program = missingProgram;
+	const identity = input.campaign.programs.find(
+		({ platformId, name }) =>
+			platformId === input.platformId && name === "cargo",
+	);
+	identity.program = missingProgram;
+	identity.binarySha256 = digest("f");
 	const result = await executeDerivedChangeDiagnosticCases(input);
 	assert.equal(result.cases[0].status, "failed");
 	assert.equal(result.cases[0].failureClass, "global_invalid");

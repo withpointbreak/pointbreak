@@ -3368,7 +3368,12 @@ pub(super) fn validate_summaries_against_raw(
                     return Err("raw receipts duplicate resource evidence".to_owned());
                 }
             }
-            _ => {}
+            Some(schema) => {
+                return Err(format!(
+                    "unsupported derived-access raw receipt schema: {schema}"
+                ));
+            }
+            None => return Err("derived-access raw receipt omitted schema".to_owned()),
         }
     }
     if package.operation_rows.len() != expected_operations.len()
@@ -3823,6 +3828,23 @@ pub fn publish_qualification_derived_access_package_v1(
     raw_receipts: &[(&str, &[u8])],
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
     reject_derived_change_diagnostic_evidence_path_v1(root)?;
+    let validated_raw_paths = raw_receipts
+        .iter()
+        .map(|(name, bytes)| {
+            let relative = PathBuf::from("raw").join(name);
+            validate_qualification_evidence_relative_path_v1(&relative)?;
+            let value: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+            reject_derived_change_diagnostic_evidence_input_v1(&relative, &value)?;
+            match value.get("schema").and_then(serde_json::Value::as_str) {
+                Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1) => Ok(relative),
+                Some(schema) => Err(format!(
+                    "unsupported derived-access package raw input schema: {schema}"
+                )),
+                None => Err("derived-access package raw input omitted schema".to_owned()),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     if root.exists() {
         if root
             .read_dir()
@@ -3844,13 +3866,8 @@ pub fn publish_qualification_derived_access_package_v1(
         &evaluation,
         &mut entries,
     )?;
-    for (name, bytes) in raw_receipts {
-        let relative = PathBuf::from("raw").join(name);
-        validate_qualification_evidence_relative_path_v1(&relative)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-        reject_derived_change_diagnostic_evidence_input_v1(&relative, &value)?;
-        write_bytes_entry(root, &relative, bytes, &mut entries)?;
+    for ((_, bytes), relative) in raw_receipts.iter().zip(&validated_raw_paths) {
+        write_bytes_entry(root, relative, bytes, &mut entries)?;
     }
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     let manifest = QualificationDerivedAccessPackageManifestV1 {
@@ -4046,13 +4063,19 @@ pub fn verify_qualification_derived_access_package_v1(
             Path::new(&entry.relative_path),
             &value,
         )?;
-        if value.get("schema").and_then(serde_json::Value::as_str)
-            == Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1)
-        {
-            let fragment: QualificationDerivedAccessEvidenceFragmentV1 =
-                serde_json::from_value(value).map_err(|error| error.to_string())?;
-            fragment.validate()?;
-            raw_receipts.extend(fragment.raw_receipts);
+        match value.get("schema").and_then(serde_json::Value::as_str) {
+            Some(QUALIFICATION_DERIVED_ACCESS_FRAGMENT_SCHEMA_V1) => {
+                let fragment: QualificationDerivedAccessEvidenceFragmentV1 =
+                    serde_json::from_value(value).map_err(|error| error.to_string())?;
+                fragment.validate()?;
+                raw_receipts.extend(fragment.raw_receipts);
+            }
+            Some(schema) => {
+                return Err(format!(
+                    "unsupported derived-access package raw input schema: {schema}"
+                ));
+            }
+            None => return Err("derived-access package raw input omitted schema".to_owned()),
         }
     }
     validate_summaries_against_raw(&package, &raw_receipts)?;

@@ -30,6 +30,27 @@ const FAILURE_CLASSES = new Set([
 ]);
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
+const COMMON_PROGRAM_NAMES = Object.freeze([
+	"awk",
+	"bash",
+	"cargo",
+	"cargoNextest",
+	"cp",
+	"dirname",
+	"filesystemProbe",
+	"find",
+	"git",
+	"hash",
+	"head",
+	"jq",
+	"mkdir",
+	"node",
+	"rm",
+	"rustc",
+	"sort",
+	"tr",
+	"wc",
+]);
 
 const copy = (value) => structuredClone(value);
 const equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);
@@ -91,6 +112,47 @@ function requireRelativePath(value, label) {
 	) {
 		throw new Error(`${label} must be a normal relative path`);
 	}
+}
+
+function requirePortableAbsolutePath(value, label) {
+	requireText(value, label);
+	if (
+		!value.startsWith("/") &&
+		!/^[A-Za-z]:[\\/]/u.test(value) &&
+		!/^\\\\[^\\]+\\[^\\]+/u.test(value)
+	) {
+		throw new Error(`${label} must be an absolute POSIX, drive, or UNC path`);
+	}
+}
+
+export function derivedChangeDiagnosticProgramNamesForOperatingSystem(
+	operatingSystem,
+) {
+	if (operatingSystem === "macos") {
+		return [
+			...COMMON_PROGRAM_NAMES,
+			"browserExecutable",
+			"chmod",
+			"playwrightCli",
+			"shasum",
+			"sleep",
+			"vitestCli",
+		].sort();
+	}
+	if (operatingSystem === "windows") {
+		return [...COMMON_PROGRAM_NAMES, "cygpath"].sort();
+	}
+	throw new Error("diagnostic platform operating system is unsupported");
+}
+
+export function derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem(
+	operatingSystem,
+) {
+	if (operatingSystem === "macos") {
+		return ["browserExecutable", "playwrightCli", "vitestCli"];
+	}
+	if (operatingSystem === "windows") return [];
+	throw new Error("diagnostic platform operating system is unsupported");
 }
 
 function validateSource(source, label) {
@@ -285,6 +347,83 @@ function validateBinaryInventory(
 	}
 }
 
+function validateProgramInventory(programs, platforms, label) {
+	if (!Array.isArray(programs) || programs.length === 0) {
+		throw new Error(`${label} program inventory must be a non-empty array`);
+	}
+	const platformById = new Map(
+		platforms.map((platform) => [platform.id, platform]),
+	);
+	const keys = [];
+	for (const program of programs) {
+		requireObject(program, `${label} program inventory entry`);
+		const platform = platformById.get(program.platformId);
+		if (!platform) {
+			throw new Error(`${label} program inventory names an unknown platform`);
+		}
+		const treeBound =
+			derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem(
+				platform.operatingSystem,
+			).includes(program.name);
+		requireExactKeys(
+			program,
+			treeBound
+				? [
+						"platformId",
+						"name",
+						"program",
+						"binarySha256",
+						"treeRoot",
+						"treeSha256",
+					]
+				: ["platformId", "name", "program", "binarySha256"],
+			`${label} program inventory entry`,
+		);
+		requireText(program.platformId, `${label} program platform id`);
+		requireText(program.name, `${label} program name`);
+		requirePortableAbsolutePath(program.program, `${label} program path`);
+		requireSha256(program.binarySha256, `${label} program SHA-256`);
+		if (treeBound) {
+			requirePortableAbsolutePath(
+				program.treeRoot,
+				`${label} program tree root`,
+			);
+			requireSha256(program.treeSha256, `${label} program tree SHA-256`);
+			const root = program.treeRoot.replaceAll("\\", "/").replace(/\/+$/u, "");
+			const leaf = program.program.replaceAll("\\", "/");
+			if (!leaf.startsWith(`${root}/`)) {
+				throw new Error(
+					`${label} tree-bound program must be inside its bound tree root`,
+				);
+			}
+		}
+		if (
+			!derivedChangeDiagnosticProgramNamesForOperatingSystem(
+				platform.operatingSystem,
+			).includes(program.name)
+		) {
+			throw new Error(`${label} program inventory names an unknown program`);
+		}
+		keys.push(`${program.platformId}\u0000${program.name}`);
+	}
+	const expected = platforms
+		.flatMap((platform) =>
+			derivedChangeDiagnosticProgramNamesForOperatingSystem(
+				platform.operatingSystem,
+			).map((name) => `${platform.id}\u0000${name}`),
+		)
+		.sort();
+	if (
+		!equal(keys, [...keys].sort()) ||
+		new Set(keys).size !== keys.length ||
+		!equal(keys, expected)
+	) {
+		throw new Error(
+			`${label} program inventory must be sorted, unique, complete, and exactly platform-bound`,
+		);
+	}
+}
+
 export function validateDerivedChangeDiagnosticRootComponent(rootComponent) {
 	if (rootComponent !== DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1) {
 		throw new Error(
@@ -325,6 +464,7 @@ export function validateDerivedChangeDiagnosticCampaign(
 	validateBinaryInventory(campaign.control, `${label} control`, platformIds, {
 		roles: ["cli", "library"],
 	});
+	validateProgramInventory(campaign.programs, campaign.platforms, label);
 }
 
 function validateFragmentShape(fragment) {

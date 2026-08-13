@@ -105,6 +105,41 @@ const campaign = () => ({
 			},
 		],
 	},
+	programs: [
+		"awk",
+		"bash",
+		"browserExecutable",
+		"cargo",
+		"cargoNextest",
+		"chmod",
+		"cp",
+		"dirname",
+		"filesystemProbe",
+		"find",
+		"git",
+		"hash",
+		"head",
+		"jq",
+		"mkdir",
+		"node",
+		"playwrightCli",
+		"rm",
+		"rustc",
+		"shasum",
+		"sleep",
+		"sort",
+		"tr",
+		"vitestCli",
+		"wc",
+	].map((name) => ({
+		platformId: "macos_apfs",
+		name,
+		program: `/tools/${name}`,
+		binarySha256: digest("9"),
+		...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+			? { treeRoot: "/tools", treeSha256: digest("8") }
+			: {}),
+	})),
 	fixture: fixtureAuthority(),
 	requiredCaseIds: ["compile-product"],
 	platforms: [
@@ -293,6 +328,43 @@ test("requires both exact control binary roles on every platform", () => {
 	assert.throws(
 		() => merge([fragment({ campaign: duplicateLibrary })], duplicateLibrary),
 		/control binary inventory.*cli.*library/i,
+	);
+});
+
+test("requires one exact program inventory per platform", () => {
+	const missing = campaign();
+	missing.programs.pop();
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(missing),
+		/program inventory/i,
+	);
+
+	const missingTree = campaign();
+	delete missingTree.programs.find(({ name }) => name === "playwrightCli")
+		.treeSha256;
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(missingTree),
+		/program inventory entry has an invalid field inventory/i,
+	);
+
+	const escapedTree = campaign();
+	escapedTree.programs.find(({ name }) => name === "playwrightCli").treeRoot =
+		"/different-tools";
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(escapedTree),
+		/tree-bound program must be inside its bound tree root/i,
+	);
+
+	const substituted = campaign();
+	substituted.programs[0].binarySha256 = digest("8");
+	const originalFragment = fragment();
+	assert.throws(
+		() =>
+			mergeDerivedChangeDiagnosticReport({
+				campaign: substituted,
+				fragments: [originalFragment],
+			}),
+		/campaign identity differs/i,
 	);
 });
 

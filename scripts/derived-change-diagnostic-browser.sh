@@ -43,10 +43,16 @@ dirname_program="$(resolve_program "${POINTBREAK_DIRNAME_PROGRAM:-dirname}" "${P
 mkdir_program="$(resolve_program "${POINTBREAK_MKDIR_PROGRAM:-mkdir}" "${POINTBREAK_MKDIR_PROGRAM:-}")"
 rm_program="$(resolve_program "${POINTBREAK_RM_PROGRAM:-rm}" "${POINTBREAK_RM_PROGRAM:-}")"
 chmod_program="$(resolve_program "${POINTBREAK_CHMOD_PROGRAM:-chmod}" "${POINTBREAK_CHMOD_PROGRAM:-}")"
-case "${BASH:-}" in
-  /*) bash_program="$BASH" ;;
-  *) die "current Bash interpreter must be absolute" ;;
-esac
+sleep_program="$(resolve_program "${POINTBREAK_SLEEP_PROGRAM:-sleep}" "${POINTBREAK_SLEEP_PROGRAM:-}")"
+[ -n "${POINTBREAK_BASH_PROGRAM:-}" ] \
+  || die "POINTBREAK_BASH_PROGRAM must be an absolute program path"
+bash_program="$(resolve_program "$POINTBREAK_BASH_PROGRAM" "$POINTBREAK_BASH_PROGRAM")"
+[ -n "${PLAYWRIGHT_CLI:-}" ] \
+  || die "PLAYWRIGHT_CLI must be an absolute program path"
+playwright_cli_program="$(resolve_program "$PLAYWRIGHT_CLI" "$PLAYWRIGHT_CLI")"
+[ -n "${POINTBREAK_BROWSER_EXECUTABLE:-}" ] \
+  || die "POINTBREAK_BROWSER_EXECUTABLE must be an absolute program path"
+browser_executable_program="$(resolve_program "$POINTBREAK_BROWSER_EXECUTABLE" "$POINTBREAK_BROWSER_EXECUTABLE")"
 allowed_signers_path="${POINTBREAK_ALLOWED_SIGNERS_PATH:-}"
 expected_fixture_id="${POINTBREAK_EXPECTED_FIXTURE_ID:-}"
 expected_topology_checkpoint_sha256="${POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256:-}"
@@ -86,7 +92,7 @@ case "$diagnostic_work_root" in
   *) die "POINTBREAK_DIAGNOSTIC_WORK_ROOT must be an absolute path" ;;
 esac
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
+script_dir="$(cd "$("$dirname_program" "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 template="$script_dir/derived-change-diagnostic-browser.mjs"
 diagnostics="$script_dir/change-inspector-browser-diagnostics.mjs"
@@ -274,7 +280,7 @@ pointbreak_binary="$binary_snapshot"
 
 POINTBREAK_HOME="$pointbreak_home" POINTBREAK_BINARY="$pointbreak_binary" POINTBREAK_CHANGE_READY_FIXTURE_DIR="$snapshot_ready_store" \
   POINTBREAK_GIT_PROGRAM="$git_program" POINTBREAK_JQ_PROGRAM="$jq_program" POINTBREAK_FIND_PROGRAM="$find_program" POINTBREAK_SORT_PROGRAM="$sort_program" POINTBREAK_WC_PROGRAM="$wc_program" POINTBREAK_TR_PROGRAM="$tr_program" POINTBREAK_AWK_PROGRAM="$awk_program" POINTBREAK_HASH_PROGRAM="$shasum_program" POINTBREAK_HASH_PROGRAM_MODE=shasum POINTBREAK_CP_PROGRAM="$cp_program" POINTBREAK_HEAD_PROGRAM="$head_program" POINTBREAK_DIRNAME_PROGRAM="$dirname_program" POINTBREAK_MKDIR_PROGRAM="$mkdir_program" POINTBREAK_RM_PROGRAM="$rm_program" POINTBREAK_CYGPATH_PROGRAM="$cygpath_binding" \
-  "$BASH" "$snapshot_scripts/materialize-inspector-decision-matrix.sh" "$fixture_repo" >"$log_dir/fixture-witness.json" 2>"$log_dir/fixture-materialize.log"
+  "$bash_program" "$snapshot_scripts/materialize-inspector-decision-matrix.sh" "$fixture_repo" >"$log_dir/fixture-witness.json" 2>"$log_dir/fixture-materialize.log"
 "$node_program" "$snapshot_scripts/derived-change-diagnostic-fixture.mjs" --witness "$log_dir/fixture-witness.json" >"$log_dir/fixture-checkpoint.json"
 fixture_witness_sha256="$("$jq_program" -er '.rawWitnessSha256' "$log_dir/fixture-checkpoint.json")"
 actual_authoritative_inventory_sha256="$("$jq_program" -er '.authoritativeInventorySha256' "$log_dir/fixture-checkpoint.json")"
@@ -300,24 +306,23 @@ POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" store derived build --re
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json >"$log_dir/inspect-startup.json" 2>"$log_dir/inspect-server.log" &
 server_pid=$!
 background_pids+=("$server_pid")
-for _ in $(seq 1 100); do
+startup_attempt=0
+while [ "$startup_attempt" -lt 100 ]; do
   [ -s "$log_dir/inspect-startup.json" ] && break
   kill -0 "$server_pid" >/dev/null 2>&1 || die "Inspector exited before startup"
-  sleep 0.05
+  "$sleep_program" 0.05
+  startup_attempt=$((startup_attempt + 1))
 done
 "$jq_program" -e '.schema == "pointbreak.inspect-startup" and .version == 1 and (.port > 0) and (.token | length > 0)' "$log_dir/inspect-startup.json" >/dev/null || die "Inspector did not emit valid startup JSON"
 server="$("$jq_program" -c '{baseUrl: ("http://" + .host + ":" + (.port | tostring)), token}' "$log_dir/inspect-startup.json")"
 
-if [ -n "${PLAYWRIGHT_CLI:-}" ]; then
-  pwcli=("$PLAYWRIGHT_CLI")
-elif command -v playwright-cli >/dev/null 2>&1; then
-  pwcli=(playwright-cli)
-else
-  command -v npx >/dev/null 2>&1 || die "playwright-cli and npx are unavailable"
-  pwcli=(npx --yes --package @playwright/cli@0.1.17 playwright-cli)
-fi
+pwcli=("$node_program" "$playwright_cli_program")
 session="pointbreak-derived-change-diagnostic-browser-$$"
 browser_open=true
+playwright_config="$log_dir/playwright-cli.config.json"
+"$jq_program" -cn --arg executablePath "$browser_executable_program" \
+  '{browser: {browserName: "chromium", isolated: true, launchOptions: {executablePath: $executablePath, headless: true}}}' \
+  >"$playwright_config"
 browser_config="$("$jq_program" -cn --arg campaignId "$campaign_id" --arg artifactDir "$artifact_dir" --arg sourceCommit "$source_commit" --arg sourceTree "$source_tree" --arg fixtureId "$expected_fixture_id" --arg rawWitnessSha256 "$fixture_witness_sha256" --arg actualAuthoritativeInventorySha256 "$actual_authoritative_inventory_sha256" --arg topologyCheckpointSha256 "$actual_topology_checkpoint_sha256" --arg fixtureModuleSha256 "$fixture_module_sha256" --arg topologyMaterializerSha256 "$expected_topology_materializer_sha256" --argjson server "$server" --argjson iterations "$iterations" '{campaignId: $campaignId, artifactDir: $artifactDir, source: {commit: $sourceCommit, tree: $sourceTree}, fixture: {id: $fixtureId, rawWitnessSha256: $rawWitnessSha256, actualAuthoritativeInventorySha256: $actualAuthoritativeInventorySha256, topologyCheckpointSha256: $topologyCheckpointSha256, fixtureModuleSha256: $fixtureModuleSha256, topologyMaterializerSha256: $topologyMaterializerSha256}, server: $server, iterations: $iterations}')"
 browser_program="$log_dir/browser-program.mjs"
 "$node_program" --input-type=module -e '
@@ -327,7 +332,7 @@ browser_program="$log_dir/browser-program.mjs"
   fs.writeFileSync(process.argv[3], source.replace("__POINTBREAK_DERIVED_CHANGE_DIAGNOSTIC_BROWSER_CONFIG__", process.argv[2]));
 ' "$snapshot_scripts/derived-change-diagnostic-browser.mjs" "$browser_config" "$browser_program"
 
-run_pw open about:blank >"$log_dir/browser-open.log" 2>&1
+run_pw open --config="$playwright_config" about:blank >"$log_dir/browser-open.log" 2>&1
 browser_status=0
 run_pw run-code --filename="$browser_program" >"$log_dir/browser.log" 2>&1 || browser_status=$?
 browser_result="$log_dir/browser-result.json"

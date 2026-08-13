@@ -10,6 +10,7 @@ import {
 	open,
 	readdir,
 	readFile,
+	readlink,
 	realpath,
 } from "node:fs/promises";
 import {
@@ -62,6 +63,15 @@ const OWNER_STORE_COMPONENTS = new Set([
 ]);
 export const DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1 =
 	"pointbreak.derived-change-diagnostic-collection.v1";
+
+function isPortableAbsolutePath(value) {
+	return (
+		typeof value === "string" &&
+		(isAbsolute(value) ||
+			/^[A-Za-z]:[\\/]/u.test(value) ||
+			/^\\\\[^\\]+\\[^\\]+/u.test(value))
+	);
+}
 
 function ownerStoreEnvironmentEntries(environment = process.env) {
 	return Object.entries(environment).filter(([key]) =>
@@ -141,7 +151,10 @@ function validateSourcePreflight(value) {
 	requireObject(value, "diagnostic source preflight");
 	if (!isAbsolute(value.sourceRoot))
 		throw new Error("diagnostic source preflight root must be absolute");
-	if (value.gitProgram !== undefined && !isAbsolute(value.gitProgram))
+	if (
+		value.gitProgram !== undefined &&
+		!isPortableAbsolutePath(value.gitProgram)
+	)
 		throw new Error("diagnostic source preflight Git program must be absolute");
 	if (
 		value.allowedSignersPath !== undefined &&
@@ -389,7 +402,7 @@ function validateRequiredExecutables(value) {
 			"diagnostic required executables must be a non-empty array",
 		);
 	if (
-		value.some((program) => !isAbsolute(program)) ||
+		value.some((program) => !isPortableAbsolutePath(program)) ||
 		new Set(value).size !== value.length
 	) {
 		throw new Error(
@@ -415,6 +428,11 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 	validateSourcePreflight(request.sourcePreflight);
 	validateIdentityPaths(request.identityPaths);
 	validateRequiredExecutables(request.requiredExecutables);
+	const campaignPrograms = new Set(
+		request.campaign.programs
+			.filter(({ platformId }) => platformId === request.platformId)
+			.map(({ program }) => program),
+	);
 	if (request.sourcePreflight) {
 		const outputRelation = relative(
 			resolve(request.sourcePreflight.sourceRoot),
@@ -479,10 +497,15 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 			caseRequest.fixtureCheckpoint,
 			`diagnostic case ${caseRequest.id}`,
 		);
-		if (!isAbsolute(caseRequest.program))
+		if (!isPortableAbsolutePath(caseRequest.program))
 			throw new Error(
 				`diagnostic case ${caseRequest.id} program must be an absolute executable path`,
 			);
+		if (!campaignPrograms.has(caseRequest.program)) {
+			throw new Error(
+				`diagnostic case ${caseRequest.id} uses a program absent from campaign authority`,
+			);
+		}
 		if (
 			!Array.isArray(caseRequest.args) ||
 			caseRequest.args.some((arg) => typeof arg !== "string")
@@ -570,6 +593,71 @@ async function sha256File(path) {
 		stream.on("end", done);
 	});
 	return hash.digest("hex");
+}
+
+export async function sha256DerivedChangeDiagnosticTree(root) {
+	if (!isAbsolute(root)) {
+		throw new Error("diagnostic program tree root must be absolute");
+	}
+	const absoluteRoot = resolve(root);
+	const rootStat = await lstat(absoluteRoot);
+	if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+		throw new Error("diagnostic program tree root must be a real directory");
+	}
+	const entries = [];
+	const visit = async (directory, relativeDirectory = "") => {
+		const children = (await readdir(directory, { withFileTypes: true })).sort(
+			(left, right) =>
+				left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+		);
+		for (const child of children) {
+			const absolutePath = join(directory, child.name);
+			const relativePath = relativeDirectory
+				? `${relativeDirectory}/${child.name}`
+				: child.name;
+			const stat = await lstat(absolutePath);
+			const mode = stat.mode & 0o777;
+			if (stat.isDirectory()) {
+				entries.push(["directory", relativePath, mode]);
+				await visit(absolutePath, relativePath);
+				continue;
+			}
+			if (stat.isFile()) {
+				entries.push([
+					"file",
+					relativePath,
+					mode,
+					stat.size,
+					await sha256File(absolutePath),
+				]);
+				continue;
+			}
+			if (stat.isSymbolicLink()) {
+				const target = await readlink(absolutePath);
+				const resolvedTarget = resolve(directory, target);
+				if (isAbsolute(target) || !isWithin(resolvedTarget, absoluteRoot)) {
+					throw new Error(
+						`diagnostic program tree symlink escapes its root: ${relativePath}`,
+					);
+				}
+				entries.push(["symlink", relativePath, mode, target]);
+				continue;
+			}
+			throw new Error(
+				`diagnostic program tree contains unsupported entry: ${relativePath}`,
+			);
+		}
+	};
+	await visit(absoluteRoot);
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				schema: "pointbreak.derived-change-diagnostic-program-tree.v1",
+				rootMode: rootStat.mode & 0o777,
+				entries,
+			}),
+		)
+		.digest("hex");
 }
 
 async function requireRetainedFile(path, root, label) {
@@ -896,6 +984,38 @@ async function verifyBoundIdentities(request) {
 	return failures;
 }
 
+async function verifyBoundPrograms(request) {
+	const failures = [];
+	for (const identity of request.campaign.programs.filter(
+		({ platformId }) => platformId === request.platformId,
+	)) {
+		try {
+			const stat = await lstat(identity.program);
+			if (
+				stat.isSymbolicLink() ||
+				!stat.isFile() ||
+				(await sha256File(identity.program)) !== identity.binarySha256
+			) {
+				throw new Error("not an exact regular-file program identity");
+			}
+			if (
+				identity.treeRoot !== undefined &&
+				(await sha256DerivedChangeDiagnosticTree(identity.treeRoot)) !==
+					identity.treeSha256
+			) {
+				throw new Error("program dependency tree identity differs");
+			}
+		} catch (error) {
+			failures.push({
+				name: identity.name,
+				program: identity.program,
+				error: String(error),
+			});
+		}
+	}
+	return failures;
+}
+
 export async function verifyDerivedChangeDiagnosticBindings(request) {
 	const sourcePreflightFailure = await verifySourcePreflight(request);
 	let temporaryRootFailure = null;
@@ -909,6 +1029,7 @@ export async function verifyDerivedChangeDiagnosticBindings(request) {
 		temporaryRootFailure = String(error);
 	}
 	const identityFailures = await verifyBoundIdentities(request);
+	const programIdentityFailures = await verifyBoundPrograms(request);
 	const requiredPrograms = [
 		...new Set([
 			...request.requiredExecutables,
@@ -931,12 +1052,14 @@ export async function verifyDerivedChangeDiagnosticBindings(request) {
 	return sourcePreflightFailure ||
 		temporaryRootFailure ||
 		executableFailures.length ||
-		identityFailures.length
+		identityFailures.length ||
+		programIdentityFailures.length
 		? {
 				...(sourcePreflightFailure ? { sourcePreflightFailure } : {}),
 				...(temporaryRootFailure ? { temporaryRootFailure } : {}),
 				...(executableFailures.length ? { executableFailures } : {}),
 				...(identityFailures.length ? { identityFailures } : {}),
+				...(programIdentityFailures.length ? { programIdentityFailures } : {}),
 			}
 		: null;
 }

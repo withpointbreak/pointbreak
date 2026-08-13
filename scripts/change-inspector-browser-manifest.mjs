@@ -10,6 +10,12 @@ const derivedChangeDiagnosticSchemas = new Set([
 	"pointbreak.derived-change-diagnostic-fragment.v1",
 	"pointbreak.derived-change-diagnostic-collection.v1",
 ]);
+const derivedChangeDiagnosticModes = new Set([
+	"--derived-access-lifecycle-diagnostic",
+	"--derived-change-diagnostic-identity",
+	"--derived-change-diagnostic-native",
+	"--derived-change-read-diagnostic",
+]);
 const derivedChangeDiagnosticRootComponent = "derived-change-diagnostic";
 const derivedChangeDiagnosticReportBasename =
 	"derived-change-diagnostic-report.json";
@@ -17,7 +23,10 @@ const derivedChangeDiagnosticBoundaryError =
 	"derived Change diagnostic output is never browser completion evidence";
 
 function rejectDerivedChangeDiagnosticDocument(value) {
-	if (derivedChangeDiagnosticSchemas.has(value?.schema)) {
+	if (
+		derivedChangeDiagnosticSchemas.has(value?.schema) ||
+		derivedChangeDiagnosticModes.has(value?.mode)
+	) {
 		throw new Error(derivedChangeDiagnosticBoundaryError);
 	}
 }

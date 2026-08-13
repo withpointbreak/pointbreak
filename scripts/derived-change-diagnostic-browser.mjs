@@ -94,21 +94,37 @@
 			},
 			{ expectedEventId: eventId, selectors: ordinarySplitPaneSelectors },
 		);
-	const waitForWideExactEvent = () =>
-		page.waitForFunction((selectors) => {
-			const exactAction = document.querySelector(
-				"#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]",
-			);
-			return (
-				getComputedStyle(document.querySelector("#detail-back")).display ===
-					"none" &&
-				exactAction !== null &&
-				document.activeElement === exactAction &&
-				selectors.every(
-					(selector) => document.querySelector(selector)?.inert === false,
-				)
-			);
-		}, ordinarySplitPaneSelectors);
+	const waitForWideExactEvent = (eventId, route) =>
+		page.waitForFunction(
+			({ expectedEventId, expectedRoute, selectors }) => {
+				const exactAction = document.querySelector(
+					"#detail-body [data-exact-diff-activation], #detail-body [data-event-diff-refusal]",
+				);
+				const selected = document.querySelector(
+					'#timeline [aria-selected="true"]',
+				);
+				const detailEvent = document.querySelector(
+					"#detail-body [data-event-id]",
+				);
+				return (
+					getComputedStyle(document.querySelector("#detail-back")).display ===
+						"none" &&
+					location.hash === expectedRoute &&
+					detailEvent?.dataset.eventId === expectedEventId &&
+					selected?.dataset.eventId === expectedEventId &&
+					exactAction !== null &&
+					document.activeElement === exactAction &&
+					selectors.every(
+						(selector) => document.querySelector(selector)?.inert === false,
+					)
+				);
+			},
+			{
+				expectedEventId: eventId,
+				expectedRoute: route,
+				selectors: ordinarySplitPaneSelectors,
+			},
+		);
 	const returnToTimeline = async () => {
 		await page.setViewportSize(narrow);
 		await page.waitForFunction(
@@ -192,8 +208,12 @@
 			await event.click();
 			opened = true;
 			await waitForNarrowExactEvent(eventId);
+			const exactEventUrl = page.url();
+			const hashOffset = exactEventUrl.indexOf("#");
+			const exactEventRoute =
+				hashOffset === -1 ? "" : exactEventUrl.slice(hashOffset);
 			await page.setViewportSize(wide);
-			await waitForWideExactEvent();
+			await waitForWideExactEvent(eventId, exactEventRoute);
 			await page.screenshot({
 				path: `${config.artifactDir}/browser-widen-${iteration}.png`,
 				type: "png",

@@ -16,9 +16,7 @@ const browserRunner = (browser, config) => {
 		"__POINTBREAK_DERIVED_CHANGE_DIAGNOSTIC_BROWSER_CONFIG__",
 		JSON.stringify(config),
 	);
-	return new Function(
-		`return (${source}\n)`,
-	)();
+	return new Function(`return (${source}\n)`)();
 };
 
 const runtimeFailureResult = async (browser) => {
@@ -74,6 +72,18 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	assert.match(shell, /store derived build/);
 	assert.match(shell, /inspect --repo/);
 	assert.match(shell, /derived-change-diagnostic-browser\.mjs/);
+	assert.match(shell, /PLAYWRIGHT_CLI.*must be an absolute program path/);
+	assert.match(
+		shell,
+		/POINTBREAK_BROWSER_EXECUTABLE.*must be an absolute program path/,
+	);
+	assert.match(shell, /pwcli=\("\$node_program" "\$playwright_cli_program"\)/);
+	assert.doesNotMatch(shell, /command -v (?:playwright-cli|npx)/);
+	assert.doesNotMatch(shell, /@playwright\/cli@/);
+	assert.doesNotMatch(shell, /\$\(seq\b|(?:^|\n)\s*sleep\s/m);
+	assert.match(shell, /"\$sleep_program" 0\.05/);
+	assert.match(shell, /launchOptions: \{executablePath: \$executablePath/);
+	assert.match(shell, /run_pw open --config="\$playwright_config" about:blank/);
 	assert.match(shell, /POINTBREAK_EXPECTED_FIXTURE_ID/);
 	assert.match(shell, /POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256/);
 	assert.match(shell, /POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256/);
@@ -85,7 +95,7 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	);
 	assert.match(
 		shell,
-		/"\$BASH" "\$snapshot_scripts\/materialize-inspector-decision-matrix\.sh"/,
+		/"\$bash_program" "\$snapshot_scripts\/materialize-inspector-decision-matrix\.sh"/,
 	);
 	for (const program of [
 		"GIT",
@@ -108,6 +118,8 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	assert.match(shell, /materializer tools changed during the diagnostic/);
 	assert.match(shell, /materializer snapshot changed during the diagnostic/);
 	assert.match(shell, /POINTBREAK_HASH_PROGRAM_MODE=shasum/);
+	assert.match(shell, /POINTBREAK_BASH_PROGRAM/);
+	assert.match(shell, /POINTBREAK_SLEEP_PROGRAM/);
 	assert.match(materializer, /POINTBREAK_HASH_PROGRAM_MODE/);
 	assert.match(materializer, /shasum\|sha256sum/);
 	assert.doesNotMatch(shell, /change-inspector-browser-manifest/);
@@ -130,6 +142,7 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 		browser,
 		/waitForWideExactEvent[\s\S]*?selectors\.every\([\s\S]*?document\.querySelector\(selector\)\?\.inert === false/,
 	);
+	assert.doesNotMatch(browser, /new URL\(page\.url\(\)\)/);
 	assert.match(
 		browser,
 		/for \(let iteration = 1; iteration <= config\.iterations; iteration \+= 1\)/,
@@ -264,8 +277,12 @@ exit 0
 				{
 					env: {
 						...process.env,
+						PLAYWRIGHT_CLI: process.execPath,
+						POINTBREAK_BASH_PROGRAM: process.env.BASH ?? "/bin/bash",
 						POINTBREAK_BINARY: process.execPath,
+						POINTBREAK_BROWSER_EXECUTABLE: process.execPath,
 						POINTBREAK_GIT_PROGRAM: fakeGit,
+						POINTBREAK_SLEEP_PROGRAM: "/bin/sleep",
 						POINTBREAK_EXPECTED_FIXTURE_ID: "fixture-selftest",
 						POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256: "a".repeat(64),
 						POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256: "c".repeat(64),
@@ -326,6 +343,65 @@ test("runtime error cases retain their own empty-error expectations", async () =
 	);
 });
 
+test("wide settlement retains the narrow exact event and route", async () => {
+	const browser = await source("derived-change-diagnostic-browser.mjs");
+	const runner = browserRunner(browser, {
+		campaignId: "selftest-wide-continuity",
+		iterations: 1,
+		fixture: {
+			id: "fixture-selftest",
+			rawWitnessSha256: "c".repeat(64),
+			actualAuthoritativeInventorySha256: "a".repeat(64),
+			topologyCheckpointSha256: "d".repeat(64),
+			fixtureModuleSha256: "e".repeat(64),
+			topologyMaterializerSha256: "b".repeat(64),
+		},
+		artifactDir: "/tmp/unused",
+		server: { baseUrl: "http://127.0.0.1:1", token: "selftest" },
+	});
+	const waitArguments = [];
+	const timelineEvent = {
+		first() {
+			return this;
+		},
+		async getAttribute(name) {
+			return name === "data-event-id" ? "event-1" : null;
+		},
+		async click() {},
+	};
+	const page = {
+		on() {},
+		async goto() {},
+		async setViewportSize() {},
+		async waitForFunction(_predicate, argument) {
+			waitArguments.push(argument);
+		},
+		locator(selector) {
+			if (selector === "#timeline [data-event-id]") return timelineEvent;
+			if (selector === "#detail-back") return { async click() {} };
+			throw new Error(`unexpected locator: ${selector}`);
+		},
+		async screenshot() {},
+		url: () => "http://127.0.0.1:1/#/events/event-1?from=timeline",
+		viewportSize: () => ({ width: 1440, height: 1000 }),
+	};
+	const originalLog = console.log;
+	console.log = () => {};
+	try {
+		await runner(page);
+	} finally {
+		console.log = originalLog;
+	}
+	assert.ok(
+		waitArguments.some(
+			(argument) =>
+				argument?.expectedEventId === "event-1" &&
+				argument?.expectedRoute === "#/events/event-1?from=timeline",
+		),
+		"wide settlement did not bind the narrow exact event and route",
+	);
+});
+
 test("a rejected authenticated bootstrap is aggregated and skips only transitions", async () => {
 	const browser = await source("derived-change-diagnostic-browser.mjs");
 	const runner = browserRunner(browser, {
@@ -372,7 +448,8 @@ test("a rejected authenticated bootstrap is aggregated and skips only transition
 	assert.match(result.cases[1].skipReason, /browser-bootstrap/);
 	assert.ok(
 		result.cases.every(
-			({ fixtureCheckpoint }) => fixtureCheckpoint.fixture === "fixture-selftest",
+			({ fixtureCheckpoint }) =>
+				fixtureCheckpoint.fixture === "fixture-selftest",
 		),
 	);
 });

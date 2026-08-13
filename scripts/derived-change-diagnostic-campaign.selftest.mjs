@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+	appendFile,
+	chmod,
+	copyFile,
 	mkdir,
 	mkdtemp,
 	readFile,
@@ -13,6 +16,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	executeDerivedChangeDiagnosticCases,
+	sha256DerivedChangeDiagnosticTree,
 	verifyDerivedChangeDiagnosticBindings,
 } from "./derived-change-diagnostic.mjs";
 import {
@@ -25,6 +29,7 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_UNAVAILABLE_HOST_CONFIG_SCHEMA_V1,
 	mergeDerivedChangeDiagnosticCampaign,
+	runDerivedChangeDiagnosticScriptToolPreflight,
 	runDerivedChangeDiagnosticHost,
 	writeUnavailableDerivedChangeDiagnosticHost,
 } from "./derived-change-diagnostic-campaign.mjs";
@@ -44,6 +49,14 @@ const commit = (digit) => digit.repeat(40);
 const binarySha256 = createHash("sha256")
 	.update(await readFile(process.execPath))
 	.digest("hex");
+const executableTreeRoot = await mkdtemp(
+	join(await realpath(tmpdir()), "pointbreak-diagnostic-bound-tools-"),
+);
+const executableProgram = join(executableTreeRoot, "node");
+await copyFile(process.execPath, executableProgram);
+await chmod(executableProgram, 0o755);
+const executableTreeSha256 =
+	await sha256DerivedChangeDiagnosticTree(executableTreeRoot);
 const controlBuildCommandSha256 = (arguments_) =>
 	createHash("sha256")
 		.update(JSON.stringify({ arguments: arguments_, program: "cargo" }))
@@ -165,6 +178,69 @@ const platforms = () => [
 	},
 ];
 
+const commonProgramNames = [
+	"awk",
+	"bash",
+	"cargo",
+	"cargoNextest",
+	"cp",
+	"dirname",
+	"filesystemProbe",
+	"find",
+	"git",
+	"hash",
+	"head",
+	"jq",
+	"mkdir",
+	"node",
+	"rm",
+	"rustc",
+	"sort",
+	"tr",
+	"wc",
+];
+const programNames = {
+	macos_apfs: [
+		...commonProgramNames,
+		"browserExecutable",
+		"chmod",
+		"playwrightCli",
+		"shasum",
+		"sleep",
+		"vitestCli",
+	].sort(),
+	windows_ntfs: [...commonProgramNames, "cygpath"].sort(),
+};
+const treeBoundProgramNames = new Set([
+	"browserExecutable",
+	"playwrightCli",
+	"vitestCli",
+]);
+const programIdentities = () =>
+	platforms()
+		.flatMap((platform) =>
+			programNames[platform.id].map((name) => ({
+				platformId: platform.id,
+				name,
+				program:
+					platform.operatingSystem === "windows"
+						? `C:\\tools\\${name}.exe`
+						: executableProgram,
+				binarySha256,
+				...(treeBoundProgramNames.has(name)
+					? {
+							treeRoot: executableTreeRoot,
+							treeSha256: executableTreeSha256,
+						}
+					: {}),
+			})),
+		)
+		.sort((left, right) =>
+			`${left.platformId}\0${left.name}`.localeCompare(
+				`${right.platformId}\0${right.name}`,
+			),
+		);
+
 const campaign = () =>
 	createDerivedChangeDiagnosticCampaign({
 		schema: DERIVED_CHANGE_DIAGNOSTIC_AUTHORITY_SEED_SCHEMA_V1,
@@ -201,6 +277,7 @@ const campaign = () =>
 				})),
 			),
 		},
+		programs: programIdentities(),
 		browserIterationsByPlatform: { macos_apfs: 2 },
 	});
 
@@ -261,29 +338,31 @@ const hostConfig = async () => ({
 		fixtureAuthority: fixtureAuthorityPath,
 	},
 	programs: {
-		node: process.execPath,
-		cargo: process.execPath,
-		cargoNextest: process.execPath,
-		rustc: process.execPath,
-		git: process.execPath,
-		filesystemProbe: process.execPath,
-		bash: process.execPath,
-		npm: process.execPath,
-		playwrightCli: process.execPath,
-		jq: process.execPath,
-		shasum: process.execPath,
-		find: process.execPath,
-		sort: process.execPath,
-		wc: process.execPath,
-		tr: process.execPath,
-		cp: process.execPath,
-		head: process.execPath,
-		dirname: process.execPath,
-		mkdir: process.execPath,
-		rm: process.execPath,
-		chmod: process.execPath,
-		awk: process.execPath,
-		hash: process.execPath,
+		node: executableProgram,
+		cargo: executableProgram,
+		cargoNextest: executableProgram,
+		rustc: executableProgram,
+		git: executableProgram,
+		filesystemProbe: executableProgram,
+		bash: executableProgram,
+		browserExecutable: executableProgram,
+		playwrightCli: executableProgram,
+		vitestCli: executableProgram,
+		jq: executableProgram,
+		shasum: executableProgram,
+		find: executableProgram,
+		sort: executableProgram,
+		wc: executableProgram,
+		tr: executableProgram,
+		cp: executableProgram,
+		head: executableProgram,
+		dirname: executableProgram,
+		mkdir: executableProgram,
+		rm: executableProgram,
+		chmod: executableProgram,
+		sleep: executableProgram,
+		awk: executableProgram,
+		hash: executableProgram,
 	},
 	changeRead: {
 		execution: { cargoLockSha256: digest("9") },
@@ -298,24 +377,6 @@ const hostConfig = async () => ({
 			libraryBuildCommandSha256: libraryControlBuildCommandSha256,
 			cliBuildCommandSha256: cliControlBuildCommandSha256,
 		},
-		programSha256: Object.fromEntries(
-			[
-				"bash",
-				"git",
-				"jq",
-				"find",
-				"sort",
-				"wc",
-				"tr",
-				"awk",
-				"cp",
-				"head",
-				"dirname",
-				"mkdir",
-				"rm",
-				"hash",
-			].map((name) => [name, binarySha256]),
-		),
 		hashMode: "shasum",
 		summaryQuery: "matrix",
 	},
@@ -386,6 +447,149 @@ test("campaign authority freezes complete platform, native, and browser inventor
 		new Set(authority.requiredCaseIds).size,
 		authority.requiredCaseIds.length,
 	);
+	assert.deepEqual(
+		authority.programs,
+		programIdentities(),
+		"campaign authority must retain the complete sorted platform program inventory",
+	);
+});
+
+test("campaign authority rejects incomplete or substituted program identities", async () => {
+	const missing = campaign();
+	missing.programs = missing.programs.filter(
+		({ platformId, name }) => platformId !== "macos_apfs" || name !== "cargo",
+	);
+	const incomplete = await hostConfig();
+	incomplete.campaign = missing;
+	assert.throws(
+		() => createDerivedChangeDiagnosticHostRequest(incomplete),
+		/program inventory/i,
+	);
+
+	const substituted = await hostConfig();
+	substituted.programs.cargo = "/definitely/not/the-bound-cargo";
+	assert.throws(
+		() => createDerivedChangeDiagnosticHostRequest(substituted),
+		/program identity differs from campaign authority/i,
+	);
+	const missingHostProgram = await hostConfig();
+	delete missingHostProgram.programs.sleep;
+	assert.throws(
+		() => createDerivedChangeDiagnosticHostRequest(missingHostProgram),
+		/host program inventory differs from campaign authority/i,
+	);
+	const extraHostProgram = await hostConfig();
+	extraHostProgram.programs.unbound = executableProgram;
+	assert.throws(
+		() => createDerivedChangeDiagnosticHostRequest(extraHostProgram),
+		/host program inventory differs from campaign authority/i,
+	);
+});
+
+test("program bytes are rechecked by serialized preflight and postflight bindings", async () => {
+	const config = await hostConfig();
+	const root = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-program-"),
+	);
+	const cargo = join(root, "cargo");
+	await copyFile(process.execPath, cargo);
+	await chmod(cargo, 0o755);
+	const cargoSha256 = createHash("sha256")
+		.update(await readFile(cargo))
+		.digest("hex");
+	const identity = config.campaign.programs.find(
+		({ platformId, name }) =>
+			platformId === config.platformId && name === "cargo",
+	);
+	identity.program = cargo;
+	identity.binarySha256 = cargoSha256;
+	config.programs.cargo = cargo;
+	const request = createDerivedChangeDiagnosticHostRequest(config);
+	const before = await verifyDerivedChangeDiagnosticBindings(request);
+	assert.equal(before?.programIdentityFailures, undefined);
+
+	await appendFile(cargo, "drift");
+	const after = await verifyDerivedChangeDiagnosticBindings(request);
+	assert.deepEqual(
+		after.programIdentityFailures.map(({ name }) => name),
+		["cargo"],
+	);
+});
+
+test("program dependency trees are rechecked by serialized bindings", async () => {
+	const config = await hostConfig();
+	const root = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-program-tree-"),
+	);
+	const playwrightCli = join(root, "playwright-cli");
+	const dependency = join(root, "dependency.js");
+	await copyFile(process.execPath, playwrightCli);
+	await chmod(playwrightCli, 0o755);
+	await writeFile(dependency, "export const identity = 1;\n");
+	const identity = config.campaign.programs.find(
+		({ platformId, name }) =>
+			platformId === config.platformId && name === "playwrightCli",
+	);
+	identity.program = playwrightCli;
+	identity.binarySha256 = createHash("sha256")
+		.update(await readFile(playwrightCli))
+		.digest("hex");
+	identity.treeRoot = root;
+	identity.treeSha256 = await sha256DerivedChangeDiagnosticTree(root);
+	config.programs.playwrightCli = playwrightCli;
+	const request = createDerivedChangeDiagnosticHostRequest(config);
+	const before = await verifyDerivedChangeDiagnosticBindings(request);
+	assert.equal(before?.programIdentityFailures, undefined);
+
+	await appendFile(dependency, "export const drift = 2;\n");
+	const after = await verifyDerivedChangeDiagnosticBindings(request);
+	assert.deepEqual(
+		after.programIdentityFailures.map(({ name }) => name),
+		["playwrightCli"],
+	);
+});
+
+test("program dependency tree authority rejects escaping symlinks", async () => {
+	const parent = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-tree-symlink-"),
+	);
+	const root = join(parent, "tree");
+	const outside = join(parent, "outside.js");
+	await mkdir(root);
+	await writeFile(outside, "export const outside = true;\n");
+	await symlink(outside, join(root, "escape.js"));
+	await assert.rejects(
+		sha256DerivedChangeDiagnosticTree(root),
+		/program tree symlink escapes its root/,
+	);
+});
+
+test("script tool preflight rejects a hash-valid non-Node Playwright wrapper", async () => {
+	const root = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-script-tools-"),
+	);
+	const validCli = join(root, "valid-cli.mjs");
+	const shellWrapper = join(root, "playwright-wrapper.sh");
+	await writeFile(validCli, 'process.stdout.write("1.0.0\\n");\n');
+	await writeFile(shellWrapper, "#!/bin/sh\nexit 0\n");
+	await chmod(shellWrapper, 0o755);
+	await assert.rejects(
+		runDerivedChangeDiagnosticScriptToolPreflight({
+			node: process.execPath,
+			vitestCli: validCli,
+			playwrightCli: shellWrapper,
+			browserExecutable: process.execPath,
+			sourceCheckout: process.cwd(),
+		}),
+		/Playwright must be loadable through its exact bound launcher/,
+	);
+	await runDerivedChangeDiagnosticScriptToolPreflight({
+		node: process.execPath,
+		vitestCli: validCli,
+		playwrightCli: validCli,
+		browserExecutable: process.execPath,
+		sourceCheckout: process.cwd(),
+	});
 });
 
 test("host requests use explicit dependencies and disjoint destructive roots", async () => {
@@ -419,6 +623,13 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(policy.program, config.programs.cargoNextest);
 	assert.deepEqual(policy.args.slice(0, 3), ["nextest", "run", "--locked"]);
 	assert.ok(policy.args.includes("--no-fail-fast"));
+	const webPolicy = request.cases.find(({ id }) => id.endsWith("policy-web"));
+	assert.equal(webPolicy.program, config.programs.node);
+	assert.deepEqual(webPolicy.args.slice(0, 3), [
+		config.programs.vitestCli,
+		"run",
+		"--no-cache",
+	]);
 	for (const entry of [compile, policy]) {
 		assert.equal(entry.env.CARGO_TARGET_DIR, undefined);
 		assert.equal(entry.env.CARGO, config.programs.cargo);
@@ -438,6 +649,13 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(preflightConfig.cargo, config.programs.cargo);
 	assert.equal(preflightConfig.cargoNextest, config.programs.cargoNextest);
 	assert.equal(preflightConfig.rustc, config.programs.rustc);
+	assert.equal(preflightConfig.node, config.programs.node);
+	assert.equal(preflightConfig.vitestCli, config.programs.vitestCli);
+	assert.equal(preflightConfig.playwrightCli, config.programs.playwrightCli);
+	assert.equal(
+		preflightConfig.browserExecutable,
+		config.programs.browserExecutable,
+	);
 	assert.deepEqual(
 		request.cases
 			.filter(
@@ -494,7 +712,7 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 			"harness/scripts/derived-change-diagnostic-fixture.mjs",
 		),
 	);
-	assert.ok(request.requiredExecutables.includes(process.execPath));
+	assert.ok(request.requiredExecutables.includes(executableProgram));
 	assert.equal(request.temporaryRoot, config.temporaryRoot);
 	assert.ok(
 		request.cases.every(
@@ -591,6 +809,8 @@ test("host requests execute only the configured candidate checkout and retained 
 		join(config.outputRoot, "authority", "allowed-signers"),
 	);
 	for (const [name, environmentName] of [
+		["bash", "POINTBREAK_BASH_PROGRAM"],
+		["browserExecutable", "POINTBREAK_BROWSER_EXECUTABLE"],
 		["git", "POINTBREAK_GIT_PROGRAM"],
 		["jq", "POINTBREAK_JQ_PROGRAM"],
 		["node", "POINTBREAK_NODE_PROGRAM"],
@@ -604,11 +824,15 @@ test("host requests execute only the configured candidate checkout and retained 
 		["dirname", "POINTBREAK_DIRNAME_PROGRAM"],
 		["mkdir", "POINTBREAK_MKDIR_PROGRAM"],
 		["rm", "POINTBREAK_RM_PROGRAM"],
+		["sleep", "POINTBREAK_SLEEP_PROGRAM"],
 		["chmod", "POINTBREAK_CHMOD_PROGRAM"],
 		["awk", "POINTBREAK_AWK_PROGRAM"],
 	]) {
 		assert.equal(browser.env[environmentName], config.programs[name]);
 	}
+	assert.equal(browser.env.PLAYWRIGHT_CLI, config.programs.playwrightCli);
+	assert.equal(browser.env.CI, "1");
+	assert.equal(browser.env.NO_UPDATE_NOTIFIER, "1");
 	const topologyAuthority = config.campaign.fixture.document.topologyCheckpoint;
 	const materializerAuthority =
 		config.campaign.fixture.document.sourceFiles.find(
@@ -679,10 +903,11 @@ test("Windows host requests retain the complete native Change-read collection", 
 	config.platformId = "windows_ntfs";
 	config.browserIterations = 0;
 	config.changeRead.hashMode = "sha256sum";
-	config.programs.cygpath = process.execPath;
-	config.changeRead.programSha256.cygpath = binarySha256;
-	for (const name of ["npm", "playwrightCli", "shasum", "chmod"])
-		delete config.programs[name];
+	config.programs = Object.fromEntries(
+		config.campaign.programs
+			.filter(({ platformId }) => platformId === "windows_ntfs")
+			.map(({ name, program }) => [name, program]),
+	);
 
 	const request = createDerivedChangeDiagnosticHostRequest(config);
 	const changeRead = request.cases.find(({ id }) =>
