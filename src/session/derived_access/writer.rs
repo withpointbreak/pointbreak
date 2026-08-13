@@ -17,10 +17,16 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use std::thread;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use std::time::Duration;
 
 use super::cursor::AppendResolution;
 use super::interaction::{RECOVERY_ACTION, claim_unavailable_hint};
 use super::lifecycle::DerivedAccessLifecycle;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use super::product_contract::DerivedAccessAvailability;
 use super::sqlite::{AppendCrashPoint, StoreWriterLock};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
@@ -32,6 +38,10 @@ use crate::session::event::ShoreEvent;
 
 const MAX_DIAGNOSTICS: usize = 8;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+const QUALIFICATION_WRITER_ATTEMPTS: usize = 32;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+const QUALIFICATION_WRITER_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 static ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_DIAGNOSTICS: OnceLock<Mutex<VecDeque<DerivedWriteDiagnostic>>> = OnceLock::new();
 
@@ -98,6 +108,37 @@ impl DerivedWriteCoordinator {
         Ok(coordinator)
     }
 
+    /// Require a current generation for a qualification append. Product writes
+    /// deliberately degrade immediately when disposable derived state is busy;
+    /// the evidence route admits that generation under the writer lock at the
+    /// publication boundary instead.
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(crate) fn new_for_qualification(lifecycle: DerivedAccessLifecycle) -> Result<Self> {
+        let status = lifecycle
+            .status_read_only()
+            .map_err(|error| ShoreError::Message(error.to_string()))?;
+        if status.availability != DerivedAccessAvailability::Current {
+            return Err(qualification_writer_error(
+                "admission",
+                status
+                    .detail
+                    .as_deref()
+                    .unwrap_or("no usable derived generation is current"),
+                status.availability,
+            ));
+        }
+        let store_root = lifecycle.store_root().to_path_buf();
+        Ok(Self {
+            store_root,
+            lifecycle: Some(lifecycle),
+            mode: AtomicU8::new(DerivedWriteMode::Governed as u8),
+            process_hint: Mutex::new(unavailable_diagnostic(
+                "no usable derived generation is current",
+            )),
+            diagnostics: Mutex::new(VecDeque::new()),
+        })
+    }
+
     pub(crate) fn degraded(store_root: impl Into<PathBuf>, detail: &str) -> Self {
         let process_hint = unavailable_diagnostic(detail);
         let coordinator = Self {
@@ -120,6 +161,50 @@ impl DerivedWriteCoordinator {
             return self.publish_degraded(publish);
         }
         self.record_event_once_with_hook(event, |_| {}, publish, catch_up_after_publication)
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(crate) fn record_event_once_for_qualification(
+        &self,
+        event: &ShoreEvent,
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+    ) -> Result<EventWriteOutcome> {
+        if DerivedWriteMode::load(&self.mode) == DerivedWriteMode::DegradedLoose {
+            return Err(ShoreError::Message(format!(
+                "qualification governed write refused before authoritative publication: {}",
+                self.process_hint
+                    .lock()
+                    .expect("derived process hint lock poisoned")
+                    .message
+            )));
+        }
+        let lifecycle = self
+            .lifecycle
+            .as_ref()
+            .expect("governed derived writes retain their admitted lifecycle");
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let admission_phase = enter_derived_access_phase_v1(Phase::GovernedWriteAdmission);
+        let (writer_lock, current) = self.qualification_current_with_retry(lifecycle)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(admission_phase);
+        let outcome = self.record_admitted_event_once_with_hook(
+            event,
+            |_| {},
+            publish,
+            catch_up_after_publication,
+            writer_lock,
+            current,
+        )?;
+        if DerivedWriteMode::load(&self.mode) == DerivedWriteMode::DegradedLoose {
+            return Err(ShoreError::Message(format!(
+                "qualification governed write failed after authoritative publication: {}",
+                self.process_hint
+                    .lock()
+                    .expect("derived process hint lock poisoned")
+                    .message
+            )));
+        }
+        Ok(outcome)
     }
 
     fn record_event_once_with_hook(
@@ -157,6 +242,25 @@ impl DerivedWriteCoordinator {
         };
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(admission_phase);
+        self.record_admitted_event_once_with_hook(
+            event,
+            hook,
+            publish,
+            catch_up,
+            writer_lock,
+            current,
+        )
+    }
+
+    fn record_admitted_event_once_with_hook(
+        &self,
+        event: &ShoreEvent,
+        hook: impl FnMut(AppendCrashPoint),
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+        catch_up: impl FnOnce(&super::service::DerivedAccessService) -> std::result::Result<(), String>,
+        writer_lock: StoreWriterLock,
+        current: super::lifecycle::CurrentGeneration,
+    ) -> Result<EventWriteOutcome> {
         let publication = Cell::new(None);
         let attempt_token = next_attempt_token(event);
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -245,6 +349,49 @@ impl DerivedWriteCoordinator {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(response_phase);
         Ok(outcome)
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    fn qualification_current_with_retry(
+        &self,
+        lifecycle: &DerivedAccessLifecycle,
+    ) -> Result<(StoreWriterLock, super::lifecycle::CurrentGeneration)> {
+        let mut last_detail = "no usable derived generation is current".to_owned();
+        let mut last_availability = DerivedAccessAvailability::Unavailable;
+        for attempt in 0..QUALIFICATION_WRITER_ATTEMPTS {
+            match StoreWriterLock::try_acquire(&self.store_root) {
+                Ok(writer_lock) => match lifecycle.open_current_for_write_locked(&writer_lock) {
+                    Ok(Some(current)) => return Ok((writer_lock, current)),
+                    Ok(None) => {
+                        last_detail = "no usable derived generation is current".to_owned();
+                    }
+                    Err(error) => last_detail = error.to_string(),
+                },
+                Err(error) => last_detail = error.to_string(),
+            }
+            let status = lifecycle
+                .status_read_only()
+                .map_err(|error| ShoreError::Message(error.to_string()))?;
+            last_availability = status.availability;
+            if !matches!(
+                status.availability,
+                DerivedAccessAvailability::Current | DerivedAccessAvailability::CatchingUp
+            ) {
+                return Err(qualification_writer_error(
+                    "pre-publication generation open",
+                    &last_detail,
+                    status.availability,
+                ));
+            }
+            if attempt + 1 < QUALIFICATION_WRITER_ATTEMPTS {
+                thread::sleep(QUALIFICATION_WRITER_RETRY_INTERVAL);
+            }
+        }
+        Err(qualification_writer_error(
+            "pre-publication generation open",
+            &last_detail,
+            last_availability,
+        ))
     }
 
     #[cfg(test)]
@@ -428,6 +575,18 @@ fn catch_up_after_publication(
     Err(last_error.unwrap_or_else(|| "derived catch-up did not run".to_owned()))
 }
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn qualification_writer_error(
+    boundary: &str,
+    detail: &str,
+    availability: DerivedAccessAvailability,
+) -> ShoreError {
+    ShoreError::Message(format!(
+        "qualification governed writer {boundary} failed before authoritative publication: \
+         {detail}; derived generation is {availability:?}"
+    ))
+}
+
 fn next_attempt_token(event: &ShoreEvent) -> String {
     format!(
         "product:{}:{}:{}",
@@ -473,12 +632,16 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, mpsc};
+    use std::thread;
+    use std::time::Duration;
 
     use rusqlite::{Connection, OpenFlags};
     use tempfile::TempDir;
 
-    use super::{AppendCrashPoint, DerivedWriteCoordinator, catch_up_after_publication};
+    use super::{
+        AppendCrashPoint, DerivedWriteCoordinator, StoreWriterLock, catch_up_after_publication,
+    };
     use crate::bench_support::longitudinal::{
         LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseOwnershipV1,
         LongitudinalDerivedAccessPhaseV1,
@@ -572,6 +735,80 @@ mod tests {
             active_lifecycle(&root).open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn qualification_write_waits_for_a_busy_writer_before_publishing_truth() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(0)).unwrap();
+        let lifecycle = active_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new_for_qualification(lifecycle.clone())
+            .expect("qualification writer admission");
+        let store = EventStore::open(root.path()).with_coordinator(coordinator);
+        let appended = event(1);
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let store_root = root.path().to_path_buf();
+        let idempotency_key = appended.idempotency_key.clone();
+        let holder = thread::spawn(move || {
+            let writer_lock = StoreWriterLock::acquire(&store_root).unwrap();
+            locked_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(40));
+            observed_tx
+                .send(
+                    EventStore::open(&store_root)
+                        .event_exists(&idempotency_key)
+                        .unwrap(),
+                )
+                .unwrap();
+            drop(writer_lock);
+        });
+        locked_rx.recv().unwrap();
+
+        assert_eq!(
+            store
+                .record_event_once_for_qualification(&appended)
+                .unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert!(
+            !observed_rx.recv().unwrap(),
+            "qualification must not fall through to loose truth while the derived writer is busy"
+        );
+        holder.join().unwrap();
+        assert_eq!(
+            store
+                .record_event_once_for_qualification(&appended)
+                .unwrap(),
+            EventWriteOutcome::Existing
+        );
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+    }
+
+    #[test]
+    fn qualification_write_does_not_mask_rebuild_required_before_publication() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(0)).unwrap();
+        let lifecycle = active_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new_for_qualification(lifecycle.clone())
+            .expect("qualification writer admission");
+        let store = EventStore::open(root.path()).with_coordinator(coordinator);
+        truth.record_event_once(&event(1)).unwrap();
+
+        let error = store
+            .record_event_once_for_qualification(&event(2))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("RebuildRequired"));
+        assert!(!truth.event_exists(&event(2).idempotency_key).unwrap());
     }
 
     #[test]

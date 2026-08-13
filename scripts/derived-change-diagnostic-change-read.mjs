@@ -796,7 +796,10 @@ function typedWitness(value, label) {
 }
 function failureWitness(value) {
 	object(value, "change read diagnostic failure witness");
-	if (value.oracle === "strict_parity") {
+	if (
+		value.oracle === "strict_parity" ||
+		value.oracle === "ready_profile_parity"
+	) {
 		exactKeys(
 			value,
 			[
@@ -806,13 +809,13 @@ function failureWitness(value) {
 				"expectedHttpStatus",
 				"expectedCode",
 			],
-			"strict-parity diagnostic witness",
+			"semantic-parity diagnostic witness",
 		);
 		semanticWitness(value.derived, "derived semantic witness");
 		semanticWitness(value.strict, "strict semantic witness");
 		if (!Number.isInteger(value.expectedHttpStatus))
-			throw new Error("strict-parity expected HTTP status is invalid");
-		nullableText(value.expectedCode, "strict-parity expected code");
+			throw new Error("semantic-parity expected HTTP status is invalid");
+		nullableText(value.expectedCode, "semantic-parity expected code");
 	} else if (value.oracle === "typed_failure") {
 		exactKeys(
 			value,

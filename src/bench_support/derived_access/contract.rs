@@ -1447,6 +1447,7 @@ fn required_change_read_rows_v1() -> impl Iterator<
 #[serde(rename_all = "snake_case")]
 pub enum QualificationDerivedChangeReadOracleV1 {
     StrictParity,
+    ReadyProfileParity,
     TypedFailure,
 }
 
@@ -1479,7 +1480,14 @@ pub(crate) fn qualification_derived_change_expected_outcome_v1(
             QualificationDerivedChangeFixtureV1::MutatedCarrierV1
                 | QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1
         );
-    if profile_remains_ready || apfs_existing_carrier_profile_remains_ready {
+    if apfs_existing_carrier_profile_remains_ready {
+        return (
+            QualificationDerivedChangeReadOracleV1::ReadyProfileParity,
+            200,
+            None,
+        );
+    }
+    if profile_remains_ready {
         return (
             QualificationDerivedChangeReadOracleV1::StrictParity,
             200,
@@ -3021,7 +3029,8 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         .saturating_add(counters.change_proposal_carriers_opened)
         .saturating_add(counters.change_support_carriers_opened);
     let oracle_failed = match row.oracle {
-        QualificationDerivedChangeReadOracleV1::StrictParity => {
+        QualificationDerivedChangeReadOracleV1::StrictParity
+        | QualificationDerivedChangeReadOracleV1::ReadyProfileParity => {
             row.expected_typed_document.is_some()
                 || row.observed_typed_document.is_some()
                 || row.strict_semantic_sha256.as_deref().is_none_or(|strict| {
@@ -3083,7 +3092,7 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         _ => false,
     };
     let direct_work_expected = row.case != QualificationDerivedChangeReadCaseV1::Profile
-        && (row.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+        && (row.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure
             || row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1);
     let direct_work_failed = direct_work_expected
         && (counters.change_candidates == 0
@@ -3196,7 +3205,7 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
         || counters.carrier_opens != classified_opens
         || !matches!(counters.change_capability_carriers_opened, 0 | 2)
         || counters.change_proposal_carriers_validated > counters.change_proposal_carriers_opened
-        || row.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+        || row.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure
             && counters.change_proposal_carriers_opened
                 != counters.change_proposal_carriers_validated
         || counters.change_matches > counters.change_candidates

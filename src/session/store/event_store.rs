@@ -141,6 +141,33 @@ impl EventStore {
         self.publish_validated_event(event, &bytes)
     }
 
+    /// Record an evidence-only append only through an admitted governed writer.
+    /// Unlike the product route, this refuses to publish loose truth while the
+    /// disposable writer is transiently busy, because the diagnostic must prove
+    /// that the exact current generation advanced.
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(crate) fn record_event_once_for_qualification(
+        &self,
+        event: &ShoreEvent,
+    ) -> Result<EventWriteOutcome> {
+        let _authority = self
+            .files
+            .as_ref()
+            .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
+            .transpose()?;
+        preflight_current_product(self.journal.as_ref())?;
+        validate_event(event, None)?;
+        let bytes = serde_json::to_vec(event)?;
+        let coordinator = self.coordinator.as_ref().ok_or_else(|| {
+            ShoreError::Message(
+                "qualification governed write requires an admitted coordinator".to_owned(),
+            )
+        })?;
+        coordinator.record_event_once_for_qualification(event, || {
+            self.publish_validated_event(event, &bytes)
+        })
+    }
+
     /// Record one event only after the complete Change capability is ready.
     ///
     /// This is deliberately separate from [`Self::record_event_once`]. The

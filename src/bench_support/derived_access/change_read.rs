@@ -61,7 +61,9 @@ use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 #[cfg(feature = "longitudinal-counting")]
 use crate::session::derived_access::lifecycle::DerivedAccessLifecycle;
 #[cfg(feature = "longitudinal-counting")]
-use crate::session::derived_access::product_contract::DerivedAccessProfile;
+use crate::session::derived_access::product_contract::{
+    DerivedAccessAvailability, DerivedAccessProfile,
+};
 #[cfg(feature = "longitudinal-counting")]
 use crate::session::derived_access::writer::DerivedWriteCoordinator;
 #[cfg(feature = "longitudinal-counting")]
@@ -727,7 +729,7 @@ mod instrumented {
                     request.fixture,
                     case,
                 )
-                .0 == QualificationDerivedChangeReadOracleV1::StrictParity
+                .0 != QualificationDerivedChangeReadOracleV1::TypedFailure
             });
         let fixture_semantics_are_ready = qualification_derived_change_expected_outcome_v1(
             request.execution.platform,
@@ -735,7 +737,7 @@ mod instrumented {
             QualificationDerivedChangeReadCaseV1::ChangesBounded,
         )
         .0
-            == QualificationDerivedChangeReadOracleV1::StrictParity;
+            != QualificationDerivedChangeReadOracleV1::TypedFailure;
         let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
         if has_strict_cases {
             derived.ensure_ready()?;
@@ -791,7 +793,7 @@ mod instrumented {
             let expected =
                 expected_fixture_outcome(request.execution.platform, request.fixture, case);
             let authoritative_endpoint =
-                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity {
+                if expected.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure {
                     authoritative.as_ref().map(|child| &child.endpoint)
                 } else {
                     None
@@ -1349,11 +1351,15 @@ mod instrumented {
         let request = diagnostic_clone_request(template, &root)?;
         validate_diagnostic_clone(&request)?;
         let expected = expected_fixture_outcome(request.execution.platform, request.fixture, case);
-        let mut pre_mutation_measurement = if requires_pre_mutation_measurement(case) {
-            Some(measure_diagnostic_read_case(&request, case, &expected)?)
-        } else {
-            None
-        };
+        let mut prepared_derived = None;
+        let mut pre_mutation_measurement = None;
+        if requires_pre_mutation_measurement(case) {
+            let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
+            derived.ensure_ready()?;
+            pre_mutation_measurement =
+                Some(measure_diagnostic_read_case(&request, case, &expected)?);
+            prepared_derived = Some(derived);
+        }
 
         let semantic = match case {
             QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite => {
@@ -1372,15 +1378,18 @@ mod instrumented {
                 post_append_semantic_pair(&request, &derived.endpoint, &authoritative.endpoint)?.0
             }
             _ => {
-                let derived = InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?;
-                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity {
+                let derived = match prepared_derived.take() {
+                    Some(derived) => derived,
+                    None => InspectorChild::spawn(&request, "sqlite-wal-bodyless-v1")?,
+                };
+                if expected.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure {
                     derived.ensure_ready()?;
                 }
                 let authoritative = (expected.oracle
-                    == QualificationDerivedChangeReadOracleV1::StrictParity)
+                    != QualificationDerivedChangeReadOracleV1::TypedFailure)
                     .then(|| InspectorChild::spawn(&request, "off"))
                     .transpose()?;
-                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+                if expected.oracle != QualificationDerivedChangeReadOracleV1::TypedFailure
                     && requires_semantic_fixture_preflight(case)
                 {
                     validate_fixture_semantics(&request, &derived.endpoint)?;
@@ -1441,7 +1450,8 @@ mod instrumented {
             || measured.expected_typed_document != semantic.typed_document
         {
             let witness = match expected.oracle {
-                QualificationDerivedChangeReadOracleV1::StrictParity => {
+                QualificationDerivedChangeReadOracleV1::StrictParity
+                | QualificationDerivedChangeReadOracleV1::ReadyProfileParity => {
                     strict_diagnostic_witness(&semantic, &expected)?
                 }
                 QualificationDerivedChangeReadOracleV1::TypedFailure => {
@@ -2392,19 +2402,26 @@ mod instrumented {
             } else {
                 None
             };
-        let derived_normalized = normalize_change_semantic(derived_value);
+        let normalize = |value| match expected.oracle {
+            QualificationDerivedChangeReadOracleV1::ReadyProfileParity => {
+                normalize_ready_profile_semantic(value)
+            }
+            _ => Ok(normalize_change_semantic(value)),
+        };
+        let derived_normalized = normalize(derived_value)?;
         let derived_bytes =
             canonical_json_bytes(&derived_normalized).map_err(|error| error.to_string())?;
         let derived_sha256 = sha256_bytes_hex(&derived_bytes);
         let (strict_sha256, strict_http_status, strict_code, wire_contract_matches) =
             match expected.oracle {
-                QualificationDerivedChangeReadOracleV1::StrictParity => {
+                QualificationDerivedChangeReadOracleV1::StrictParity
+                | QualificationDerivedChangeReadOracleV1::ReadyProfileParity => {
                     let authoritative = authoritative.ok_or_else(|| {
-                        "strict-parity Change fixture omitted its authoritative child".to_owned()
+                        "authoritative Change oracle omitted its strict child".to_owned()
                     })?;
                     let (strict_status, strict_value, strict_consistent) =
                         semantic_case(request, case, summary_query, authoritative)?;
-                    let strict_normalized = normalize_change_semantic(strict_value);
+                    let strict_normalized = normalize(strict_value)?;
                     let strict_code = strict_normalized
                         .get("code")
                         .and_then(Value::as_str)
@@ -2717,23 +2734,11 @@ mod instrumented {
         case: QualificationDerivedChangeReadCaseV1,
     ) -> Result<String, String> {
         let (journal_id, occurred_at, label) = governed_qualification_event_identity(case)?;
-        let store_root =
-            store_dir_for_repo(&request.repository).map_err(|error| error.to_string())?;
-        let store_identity =
-            opaque_path_identity("store", &store_root).map_err(|error| error.to_string())?;
-        let lifecycle = DerivedAccessLifecycle::new(
-            DerivedAccessProfile::SqliteWalBodylessV1,
-            &store_root,
-            store_identity,
-        )
-        .map_err(|error| error.to_string())?;
+        let lifecycle = qualification_change_lifecycle(request)?;
         let before_generation = lifecycle
             .published_generation_id()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "post-append Change suite has no published generation".to_owned())?;
-        let coordinator =
-            DerivedWriteCoordinator::new(lifecycle.clone()).map_err(|error| error.to_string())?;
-        let store = EventStore::open(&store_root).with_coordinator(coordinator);
         let journal_id = crate::model::JournalId::new(journal_id);
         let event = ShoreEvent::new(
             EventType::ReviewInitialized,
@@ -2744,20 +2749,17 @@ mod instrumented {
             occurred_at,
         )
         .map_err(|error| error.to_string())?;
+        let coordinator = DerivedWriteCoordinator::new_for_qualification(lifecycle.clone())
+            .map_err(|error| error.to_string())?;
+        let store = EventStore::open(lifecycle.store_root()).with_coordinator(coordinator);
         if store
-            .record_event_once(&event)
+            .record_event_once_for_qualification(&event)
             .map_err(|error| error.to_string())?
             != EventWriteOutcome::Created
         {
             return Err(format!("{label} Change event was not newly admitted"));
         }
-        if store
-            .record_event_once(&event)
-            .map_err(|error| error.to_string())?
-            != EventWriteOutcome::Existing
-        {
-            return Err(format!("repeated {label} Change event was not idempotent"));
-        }
+        repeat_governed_qualification_event_until_current(&store, &lifecycle, &event, label)?;
         let after_generation = lifecycle
             .published_generation_id()
             .map_err(|error| error.to_string())?
@@ -2766,6 +2768,52 @@ mod instrumented {
             return Err("governed Change append replaced its immutable generation".to_owned());
         }
         Ok(sha256_bytes_hex(before_generation.as_bytes()))
+    }
+
+    fn qualification_change_lifecycle(
+        request: &QualificationDerivedChangeReadRunRequestV1,
+    ) -> Result<DerivedAccessLifecycle, String> {
+        let store_root =
+            store_dir_for_repo(&request.repository).map_err(|error| error.to_string())?;
+        let store_identity =
+            opaque_path_identity("store", &store_root).map_err(|error| error.to_string())?;
+        DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            &store_root,
+            store_identity,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn repeat_governed_qualification_event_until_current(
+        store: &EventStore,
+        lifecycle: &DerivedAccessLifecycle,
+        event: &ShoreEvent,
+        label: &str,
+    ) -> Result<(), String> {
+        const RECOVERY_ATTEMPTS: usize = 32;
+        let mut last_availability = None;
+        for attempt in 0..RECOVERY_ATTEMPTS {
+            if store
+                .record_event_once_for_qualification(event)
+                .map_err(|error| error.to_string())?
+                != EventWriteOutcome::Existing
+            {
+                return Err(format!("repeated {label} Change event was not idempotent"));
+            }
+            let status = lifecycle.status().map_err(|error| error.to_string())?;
+            if status.availability == DerivedAccessAvailability::Current {
+                return Ok(());
+            }
+            last_availability = Some(status.availability);
+            if attempt + 1 < RECOVERY_ATTEMPTS {
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+        Err(format!(
+            "repeated {label} Change event left its generation {:?}",
+            last_availability.unwrap_or(DerivedAccessAvailability::Unavailable)
+        ))
     }
 
     fn governed_qualification_event_identity(
@@ -3139,6 +3187,24 @@ mod instrumented {
         }
         visit(&mut value);
         value
+    }
+
+    pub(super) fn normalize_ready_profile_semantic(value: Value) -> Result<Value, String> {
+        let mut value = normalize_change_semantic(value);
+        let cursor = value
+            .get_mut("authorityCursor")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "ready Profile omitted its authority cursor".to_owned())?;
+        for field in ["eventSetHash", "journalRecordSetHash"] {
+            if !cursor.get(field).is_some_and(Value::is_string) {
+                return Err(format!("ready Profile authority cursor omitted {field}"));
+            }
+            cursor.insert(
+                field.to_owned(),
+                Value::String("<live-set-hash>".to_owned()),
+            );
+        }
+        Ok(value)
     }
 
     struct MeasuredCase {
@@ -3906,10 +3972,10 @@ mod tests {
     #[cfg(feature = "longitudinal-counting")]
     use super::instrumented::{
         copy_public_fixture_tree, diagnostic_template_postflight,
-        materialize_diagnostic_fixture_at_root, normalize_change_semantic, percent_encode,
-        post_append_has_advanced, requires_pre_mutation_measurement,
-        requires_semantic_fixture_preflight, validate_fixture_authoritative_inventory,
-        validate_topology_fixture_semantics,
+        materialize_diagnostic_fixture_at_root, normalize_change_semantic,
+        normalize_ready_profile_semantic, percent_encode, post_append_has_advanced,
+        requires_pre_mutation_measurement, requires_semantic_fixture_preflight,
+        validate_fixture_authoritative_inventory, validate_topology_fixture_semantics,
     };
     use super::*;
 
@@ -3953,6 +4019,55 @@ mod tests {
         let mut drifted = normalized.clone();
         drifted["changes"][0]["titleAssertions"] = json!(["changed"]);
         assert_ne!(normalized, drifted);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn ready_profile_parity_masks_only_live_authority_set_hashes() {
+        let profile = json!({
+            "schema": "pointbreak.inspect-reader-profile",
+            "version": 1,
+            "availability": "ready",
+            "authorityCursor": {
+                "schema": "pointbreak.authority-cursor.v2",
+                "journalRecordCount": 98,
+                "eventCount": 96,
+                "journalRecordSetHash": "sha256:one",
+                "eventSetHash": "sha256:two",
+                "capabilitySetHash": "sha256:three"
+            }
+        });
+        let mut live = profile.clone();
+        live["authorityCursor"]["journalRecordSetHash"] = json!("sha256:four");
+        live["authorityCursor"]["eventSetHash"] = json!("sha256:five");
+
+        assert_ne!(
+            normalize_change_semantic(profile.clone()),
+            normalize_change_semantic(live.clone())
+        );
+        assert_eq!(
+            normalize_ready_profile_semantic(profile).expect("receipt-backed Profile"),
+            normalize_ready_profile_semantic(live.clone()).expect("live strict Profile")
+        );
+
+        live["authorityCursor"]["eventCount"] = json!(97);
+        assert_ne!(
+            normalize_ready_profile_semantic(live).expect("drifted Profile"),
+            normalize_ready_profile_semantic(json!({
+                "schema": "pointbreak.inspect-reader-profile",
+                "version": 1,
+                "availability": "ready",
+                "authorityCursor": {
+                    "schema": "pointbreak.authority-cursor.v2",
+                    "journalRecordCount": 98,
+                    "eventCount": 96,
+                    "journalRecordSetHash": "sha256:any",
+                    "eventSetHash": "sha256:any",
+                    "capabilitySetHash": "sha256:three"
+                }
+            }))
+            .expect("stable Profile")
+        );
     }
 
     #[cfg(feature = "longitudinal-counting")]
@@ -4130,6 +4245,47 @@ mod tests {
 
     #[cfg(feature = "longitudinal-counting")]
     #[test]
+    fn stale_token_measurement_waits_for_a_ready_derived_generation() {
+        let source = include_str!("change_read.rs");
+        let diagnostic = source
+            .split("fn run_diagnostic_read_case(")
+            .nth(1)
+            .and_then(|source| source.split("fn establish_diagnostic_post_append(").next())
+            .expect("diagnostic read-case helper");
+        let ready = diagnostic
+            .find("derived.ensure_ready()?")
+            .expect("stale-token derived readiness");
+        let measurement = diagnostic
+            .find("measure_diagnostic_read_case(&request, case, &expected)?")
+            .expect("stale-token pre-mutation measurement");
+
+        assert!(ready < measurement);
+        assert!(diagnostic.contains("prepared_derived.take()"));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn apfs_existing_carrier_profiles_use_a_distinct_ready_profile_oracle() {
+        for fixture in [
+            QualificationDerivedChangeFixtureV1::MutatedCarrierV1,
+            QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1,
+        ] {
+            let (oracle, status, code) = qualification_derived_change_expected_outcome_v1(
+                QualificationDerivedAccessPlatformV1::MacosApfs,
+                fixture,
+                QualificationDerivedChangeReadCaseV1::Profile,
+            );
+            assert_eq!(
+                oracle,
+                QualificationDerivedChangeReadOracleV1::ReadyProfileParity
+            );
+            assert_eq!(status, 200);
+            assert_eq!(code, None);
+        }
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
     fn post_append_advancement_requires_both_stamp_and_cursor() {
         let advanced = json!({
             "changes": {"projectionStamp": "sha256:after"},
@@ -4148,6 +4304,22 @@ mod tests {
             "profile": {"authorityCursor": {"eventCount": 7}}
         });
         assert!(!post_append_has_advanced(&stale_cursor, "sha256:before", 7));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn governed_append_keeps_one_qualified_coordinator_through_idempotent_recovery() {
+        let source = include_str!("change_read.rs");
+        let append = source
+            .split("fn append_governed_qualification_event(")
+            .nth(1)
+            .and_then(|source| source.split("fn qualification_change_lifecycle(").next())
+            .expect("governed qualification append helper");
+
+        assert!(append.contains("new_for_qualification"));
+        assert!(append.contains("with_coordinator(coordinator)"));
+        assert!(append.contains("record_event_once_for_qualification"));
+        assert!(append.contains("repeat_governed_qualification_event_until_current"));
     }
 
     #[cfg(feature = "longitudinal-counting")]

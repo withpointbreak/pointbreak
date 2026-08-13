@@ -1159,7 +1159,7 @@ fn bound_change_read_receipt_crosses_the_fragment_boundary() {
                 status: QualificationDerivedAccessStatusV1::Passed,
                 oracle,
                 strict_semantic_sha256: (oracle
-                    == QualificationDerivedChangeReadOracleV1::StrictParity)
+                    != QualificationDerivedChangeReadOracleV1::TypedFailure)
                     .then(|| digest(21)),
                 derived_semantic_sha256: digest(21),
                 wire_contract_matches: true,
