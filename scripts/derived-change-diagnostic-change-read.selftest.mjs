@@ -196,7 +196,10 @@ const topologyWitness = ({ dynamic = "a", inventory = "f" } = {}) => {
 	};
 };
 
-async function fixture({ topologyActual = topologyWitness() } = {}) {
+async function fixture({
+	topologyActual = topologyWitness(),
+	requireIsolatedTopologyEnvironment = false,
+} = {}) {
 	const root = await mkdtemp(
 		join(tmpdir(), "pointbreak-change-read-diagnostic-"),
 	);
@@ -265,9 +268,22 @@ console.log(JSON.stringify({mode:"--derived-change-read-diagnostic",sourceUnchan
 `,
 	);
 	const topologyWitnessBytes = JSON.stringify(topologyActual);
+	const isolatedTopologyEnvironmentGuard = requireIsolatedTopologyEnvironment
+		? `if [ -n "$POINTBREAK_HOME" ]; then exit 19; fi
+for root in "$HOME" "$USERPROFILE" "$TMPDIR" "$TMP" "$TEMP"; do
+	[ -d "$root" ] || exit 20
+	[ "$root" != "$1" ] || exit 21
+done
+[ "$HOME" = "$USERPROFILE" ] || exit 22
+[ "$HOME" = "$TMPDIR" ] || exit 23
+[ "$HOME" = "$TMP" ] || exit 24
+[ "$HOME" = "$TEMP" ] || exit 25
+mkdir -p "$1/.git/pointbreak-home"
+`
+		: "";
 	await writeFile(
 		materializer,
-		`#!/bin/sh\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\nmkdir -p "$1"\nprintf '%s\\n' '${topologyWitnessBytes}'\n`,
+		`#!/bin/sh\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\n${isolatedTopologyEnvironmentGuard}mkdir -p "$1"\nprintf '%s\\n' '${topologyWitnessBytes}'\n`,
 	);
 	await writeFile(
 		fixtureModule,
@@ -799,6 +815,29 @@ test("passes an exact optional cygpath binding to topology materialization", asy
 	assert.equal(
 		result.cases.find(({ id }) => id === "topology-v1.template").status,
 		"passed",
+	);
+});
+
+test("isolates topology materialization from its destination environment", async () => {
+	const input = await fixture({ requireIsolatedTopologyEnvironment: true });
+	const result = await runDerivedChangeChangeReadDiagnostic(input.config);
+	assert.equal(
+		result.cases.find(({ id }) => id === "topology-v1.template").status,
+		"passed",
+	);
+	assert.equal(
+		(
+			await lstat(
+				join(
+					input.workRoot,
+					"templates",
+					"topology-v1",
+					".git",
+					"pointbreak-home",
+				),
+			)
+		).isDirectory(),
+		true,
 	);
 });
 

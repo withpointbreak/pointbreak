@@ -955,18 +955,17 @@ function verifyWitness(bytes, fixture, expected) {
 	}
 	return witness;
 }
-function materializerEnv(config, template) {
+function materializerEnv(config, environmentRoot) {
 	const additions = {
 		POINTBREAK_BINARY: config.product.program,
 		POINTBREAK_CHANGE_READY_FIXTURE_DIR: config.fixtureAuthority.readyStore,
-		POINTBREAK_HOME: join(template, ".git", "pointbreak-home"),
 		POINTBREAK_HASH_PROGRAM: config.programs.hash.program,
 		POINTBREAK_HASH_PROGRAM_MODE: config.programs.hash.mode,
 		POINTBREAK_CYGPATH_PROGRAM: config.programs.cygpath?.program ?? "absent",
 	};
 	for (const [name, envName] of Object.entries(TOOL_ENV))
 		if (name !== "hash") additions[envName] = config.programs[name].program;
-	return cleanEnv(config, template, additions);
+	return cleanEnv(config, environmentRoot, additions);
 }
 async function readRequest(
 	config,
@@ -1179,7 +1178,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 						config.programs.bash.program,
 						[config.programs.topologyMaterializer.program, template],
 						config.sourceCheckout,
-						materializerEnv(config, template),
+						materializerEnv(config, environmentRoot),
 					)
 				: await command(
 						config.harness.program,
