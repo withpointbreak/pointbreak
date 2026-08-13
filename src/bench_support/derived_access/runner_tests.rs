@@ -1108,6 +1108,42 @@ fn package_manifest_is_completion_last_and_rejects_unlisted_or_corrupt_files() {
 
     std::fs::write(root.path().join("package.json"), b"{}").expect("corrupt package");
     assert!(verify_qualification_derived_access_package_v1(root.path()).is_err());
+
+    let renamed_root = tempfile::tempdir().expect("renamed diagnostic package root");
+    publish_qualification_derived_access_package_v1(renamed_root.path(), &package, &[])
+        .expect("publish renamed diagnostic package");
+    let renamed_relative = "extras/renamed.json";
+    let renamed_bytes = serde_json::to_vec(&serde_json::json!({
+        "mode": DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,
+        "sourceUnchanged": true,
+    }))
+    .expect("serialize renamed diagnostic child");
+    std::fs::create_dir(renamed_root.path().join("extras")).expect("create extras directory");
+    std::fs::write(renamed_root.path().join(renamed_relative), &renamed_bytes)
+        .expect("write renamed diagnostic child");
+    let manifest_path = renamed_root.path().join("manifest.json");
+    let mut manifest: QualificationDerivedAccessPackageManifestV1 =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read package manifest"))
+            .expect("parse package manifest");
+    manifest
+        .entries
+        .push(QualificationDerivedAccessPackageEntryV1 {
+            relative_path: renamed_relative.to_owned(),
+            byte_count: renamed_bytes.len() as u64,
+            sha256: crate::canonical_hash::sha256_bytes_hex(&renamed_bytes),
+        });
+    manifest
+        .entries
+        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("serialize tampered package manifest"),
+    )
+    .expect("write tampered package manifest");
+    assert_eq!(
+        verify_qualification_derived_access_package_v1(renamed_root.path()).unwrap_err(),
+        "derived-access package inventory is outside its closed schema",
+    );
 }
 
 #[test]

@@ -639,20 +639,30 @@ async function empty(root) {
 	}
 }
 function cleanEnv(config, root, additions = {}) {
-	const exactPrograms = [
-		config.product.program,
-		config.harness.program,
-		config.controls.library.program,
-		config.controls.cli.program,
-		...Object.values(config.programs).map(({ program }) => program),
-	];
 	return {
-		PATH: [...new Set(exactPrograms.map(dirname))].join(
-			sep === "\\" ? ";" : ":",
-		),
+		PATH: dirname(config.programs.git.program),
+		...(process.env.GIT_CONFIG_GLOBAL
+			? { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL }
+			: {}),
+		...(process.env.GIT_CONFIG_NOSYSTEM
+			? { GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
+			: {}),
+		...(process.env.GIT_EXEC_PATH
+			? { GIT_EXEC_PATH: process.env.GIT_EXEC_PATH }
+			: {}),
+		...(process.env.GIT_TEMPLATE_DIR
+			? { GIT_TEMPLATE_DIR: process.env.GIT_TEMPLATE_DIR }
+			: {}),
+		GIT_TERMINAL_PROMPT: "0",
 		HOME: root,
 		USERPROFILE: root,
 		POINTBREAK_GIT_PROGRAM: config.programs.git.program,
+		...(process.env.POINTBREAK_SSH_KEYGEN_PROGRAM
+			? {
+					POINTBREAK_SSH_KEYGEN_PROGRAM:
+						process.env.POINTBREAK_SSH_KEYGEN_PROGRAM,
+				}
+			: {}),
 		POINTBREAK_DIAGNOSTIC_CASE_ROOT: root,
 		TMPDIR: root,
 		TMP: root,

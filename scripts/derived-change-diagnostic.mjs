@@ -19,9 +19,11 @@ import {
 	isAbsolute,
 	join,
 	parse,
+	posix,
 	relative,
 	resolve,
 	sep,
+	win32,
 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
@@ -151,11 +153,20 @@ function validateSourcePreflight(value) {
 	requireObject(value, "diagnostic source preflight");
 	if (!isAbsolute(value.sourceRoot))
 		throw new Error("diagnostic source preflight root must be absolute");
-	if (
-		value.gitProgram !== undefined &&
-		!isPortableAbsolutePath(value.gitProgram)
-	)
+	if (!isPortableAbsolutePath(value.gitProgram))
 		throw new Error("diagnostic source preflight Git program must be absolute");
+	if (!isPortableAbsolutePath(value.gitExecPath))
+		throw new Error(
+			"diagnostic source preflight Git exec path must be absolute",
+		);
+	if (!isPortableAbsolutePath(value.sshKeygenProgram))
+		throw new Error(
+			"diagnostic source preflight ssh-keygen program must be absolute",
+		);
+	if (!/^[0-9a-f]{64}$/u.test(value.allowedSignersSha256 ?? ""))
+		throw new Error(
+			"diagnostic source preflight allowed signers SHA-256 is invalid",
+		);
 	if (
 		value.allowedSignersPath !== undefined &&
 		!isAbsolute(value.allowedSignersPath)
@@ -434,6 +445,38 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 			.map(({ program }) => program),
 	);
 	if (request.sourcePreflight) {
+		const platform = platformFor(request);
+		const pathModule =
+			platform.operatingSystem === "windows" ? win32 : posix;
+		const programByName = new Map(
+			request.campaign.programs
+				.filter(({ platformId }) => platformId === request.platformId)
+				.map((identity) => [identity.name, identity]),
+		);
+		const git = programByName.get("git");
+		const expectedGitExecPath =
+			platform.operatingSystem === "windows"
+				? pathModule.join(
+						git.treeRoot,
+						platform.architecture === "aarch64"
+							? "clangarm64"
+							: "mingw64",
+						"libexec",
+						"git-core",
+					)
+				: pathModule.join(git.treeRoot, "libexec", "git-core");
+		if (
+			request.sourcePreflight.gitProgram !== git.program ||
+			request.sourcePreflight.gitExecPath !== expectedGitExecPath ||
+			request.sourcePreflight.sshKeygenProgram !==
+				programByName.get("sshKeygen").program ||
+			request.sourcePreflight.allowedSignersSha256 !==
+				request.campaign.signatureAuthoritySha256
+		) {
+			throw new Error(
+				"diagnostic source preflight tools differ from campaign authority",
+			);
+		}
 		const outputRelation = relative(
 			resolve(request.sourcePreflight.sourceRoot),
 			resolve(request.outputRoot),
@@ -481,7 +524,8 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 		if (caseRequest.unavailableReason || caseRequest.unknownReason) {
 			if (
 				caseRequest.program !== undefined ||
-				caseRequest.failureClass !== undefined
+				caseRequest.failureClass !== undefined ||
+				caseRequest.alwaysAttempt !== undefined
 			)
 				throw new Error(
 					`unattempted diagnostic case ${caseRequest.id} cannot name a command or failure class`,
@@ -493,6 +537,23 @@ export function validateDerivedChangeDiagnosticRequest(request) {
 				`diagnostic case ${caseRequest.id} has an invalid failure class`,
 			);
 		requireText(caseRequest.phase, `diagnostic case ${caseRequest.id} phase`);
+		if (
+			caseRequest.alwaysAttempt !== undefined &&
+			typeof caseRequest.alwaysAttempt !== "boolean"
+		) {
+			throw new Error(
+				`diagnostic case ${caseRequest.id} always-attempt flag must be boolean`,
+			);
+		}
+		if (
+			caseRequest.alwaysAttempt &&
+			(caseRequest.failureClass !== "global_invalid" ||
+				index !== request.cases.length - 1)
+		) {
+			throw new Error(
+				"diagnostic always-attempt case must be the final global-invalid case",
+			);
+		}
 		validateFixtureCheckpoint(
 			caseRequest.fixtureCheckpoint,
 			`diagnostic case ${caseRequest.id}`,
@@ -713,6 +774,69 @@ function isIsolatedRustEnvironmentName(normalizedKey) {
 	);
 }
 
+function isAmbientToolEnvironmentName(normalizedKey) {
+	const exactNames = new Set([
+		"AR",
+		"BASH",
+		"CC",
+		"CFLAGS",
+		"CL",
+		"COMSPEC",
+		"CPATH",
+		"CPPFLAGS",
+		"CXX",
+		"CXXFLAGS",
+		"C_INCLUDE_PATH",
+		"CPLUS_INCLUDE_PATH",
+		"DEVELOPER_DIR",
+		"DYLD_LIBRARY_PATH",
+		"INCLUDE",
+		"LD",
+		"LDFLAGS",
+		"LD_LIBRARY_PATH",
+		"LD_PRELOAD",
+		"LIB",
+		"LIBPATH",
+		"LIBRARY_PATH",
+		"LINK",
+		"LLVM_CONFIG_PATH",
+		"MACOSX_DEPLOYMENT_TARGET",
+		"NODE_OPTIONS",
+		"NODE_PATH",
+		"PATH",
+		"RANLIB",
+		"SDKROOT",
+		"SHELL",
+		"UNIVERSALCRTSDKDIR",
+		"UCRTVERSION",
+		"VCINSTALLDIR",
+		"VCTOOLSINSTALLDIR",
+		"VSINSTALLDIR",
+		"WINDOWSSDKDIR",
+		"WINDOWSSDKVERSION",
+		"_CL_",
+	]);
+	return (
+		exactNames.has(normalizedKey) ||
+		/^(HOST|TARGET)_(AR|CC|CXX|RANLIB)$/u.test(normalizedKey) ||
+		normalizedKey.startsWith("AR_") ||
+		normalizedKey.startsWith("BINDGEN_") ||
+		normalizedKey.startsWith("CC_") ||
+		normalizedKey.startsWith("CMAKE_") ||
+		normalizedKey.startsWith("CXX_") ||
+		normalizedKey.startsWith("DYLD_") ||
+		normalizedKey.startsWith("GIT_") ||
+		normalizedKey.startsWith("MAKE_") ||
+		normalizedKey.startsWith("MESON_") ||
+		normalizedKey.startsWith("NINJA_") ||
+		normalizedKey.startsWith("NPM_CONFIG_") ||
+		normalizedKey.startsWith("OPENSSL_") ||
+		normalizedKey.startsWith("PKG_CONFIG_") ||
+		normalizedKey.startsWith("PLAYWRIGHT_") ||
+		normalizedKey.startsWith("RANLIB_")
+	);
+}
+
 function sanitizedEnvironment(caseRequest, caseRoot, workRoot) {
 	const environment = {};
 	const isolatedNames = new Set([
@@ -736,24 +860,20 @@ function sanitizedEnvironment(caseRequest, caseRoot, workRoot) {
 		if (
 			normalizedKey.startsWith("POINTBREAK_") ||
 			isolatedNames.has(normalizedKey) ||
-			isIsolatedRustEnvironmentName(normalizedKey)
+			isIsolatedRustEnvironmentName(normalizedKey) ||
+			isAmbientToolEnvironmentName(normalizedKey)
 		)
 			continue;
 		environment[key] = value;
 	}
-	const explicitProgramNames = new Set(["CARGO", "RUSTC"]);
 	for (const [key, value] of Object.entries(caseRequest.env ?? {})) {
 		const normalizedKey = key.toUpperCase();
-		if (
-			OWNER_STORE_ENV.has(normalizedKey) ||
-			((isolatedNames.has(normalizedKey) ||
-				isIsolatedRustEnvironmentName(normalizedKey)) &&
-				!explicitProgramNames.has(normalizedKey))
-		)
+		if (OWNER_STORE_ENV.has(normalizedKey) || isolatedNames.has(normalizedKey))
 			continue;
 		environment[key] = value;
 	}
 	return Object.assign(environment, {
+		PATH: environment.PATH ?? "",
 		HOME: workRoot,
 		USERPROFILE: workRoot,
 		APPDATA: join(workRoot, "app-data"),
@@ -841,51 +961,85 @@ async function commandResult(program, args, options) {
 async function verifySourcePreflight(request) {
 	const preflight = request.sourcePreflight;
 	if (!preflight) return null;
-	const git = preflight.gitProgram ?? "/usr/bin/git";
+	const git = preflight.gitProgram;
 	const source = request.campaign.source;
 	try {
 		if (preflight.allowedSignersPath !== undefined) {
 			const stat = await lstat(preflight.allowedSignersPath);
 			if (stat.isSymbolicLink() || !stat.isFile())
 				throw new Error("allowed signers authority is not a regular file");
+			if (
+				(await sha256File(preflight.allowedSignersPath)) !==
+				preflight.allowedSignersSha256
+			) {
+				throw new Error("allowed signers authority differs from campaign");
+			}
 		}
+		const platform = platformFor(request);
+		const environment = {
+			GIT_CONFIG_GLOBAL:
+				platform.operatingSystem === "windows" ? "NUL" : "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_EXEC_PATH: preflight.gitExecPath,
+			GIT_TERMINAL_PROMPT: "0",
+			HOME: request.temporaryRoot,
+			LANG: "C",
+			LC_ALL: "C",
+			PATH: "",
+			USERPROFILE: request.temporaryRoot,
+			...(process.env.SystemRoot
+				? { SystemRoot: process.env.SystemRoot }
+				: {}),
+			...(process.env.SYSTEMROOT
+				? { SYSTEMROOT: process.env.SYSTEMROOT }
+				: {}),
+		};
+		const options = { env: environment };
 		const common = ["-C", preflight.sourceRoot];
 		const headAtStart = await commandResult(
 			git,
 			[...common, "rev-parse", "HEAD"],
-			{},
+			options,
 		);
 		const porcelain = await commandResult(
 			git,
 			[...common, "status", "--porcelain=v1", "--untracked-files=all"],
-			{},
+			options,
 		);
 		const head = await commandResult(
 			git,
 			[...common, "rev-parse", `${source.commit}^{commit}`],
-			{},
+			options,
 		);
 		const tree = await commandResult(
 			git,
 			[...common, "rev-parse", `${source.commit}^{tree}`],
-			{},
+			options,
 		);
 		const range = await commandResult(
 			git,
 			[...common, "diff", "--binary", source.rangeBaseCommit, source.commit],
-			{},
+			options,
 		);
 		const verifyArgs =
 			preflight.allowedSignersPath === undefined
-				? [...common, "verify-commit", source.commit]
+				? [
+						"-c",
+						`gpg.ssh.program=${preflight.sshKeygenProgram}`,
+						...common,
+						"verify-commit",
+						source.commit,
+					]
 				: [
 						"-c",
 						`gpg.ssh.allowedSignersFile=${preflight.allowedSignersPath}`,
+						"-c",
+						`gpg.ssh.program=${preflight.sshKeygenProgram}`,
 						...common,
 						"verify-commit",
 						source.commit,
 					];
-		const signature = await commandResult(git, verifyArgs, {});
+		const signature = await commandResult(git, verifyArgs, options);
 		const fixtureSourceResults = await Promise.all(
 			request.campaign.fixture.document.sourceFiles.map(async (entry) => ({
 				...entry,
@@ -986,6 +1140,7 @@ async function verifyBoundIdentities(request) {
 
 async function verifyBoundPrograms(request) {
 	const failures = [];
+	const treeHashes = new Map();
 	for (const identity of request.campaign.programs.filter(
 		({ platformId }) => platformId === request.platformId,
 	)) {
@@ -998,12 +1153,38 @@ async function verifyBoundPrograms(request) {
 			) {
 				throw new Error("not an exact regular-file program identity");
 			}
-			if (
-				identity.treeRoot !== undefined &&
-				(await sha256DerivedChangeDiagnosticTree(identity.treeRoot)) !==
-					identity.treeSha256
-			) {
-				throw new Error("program dependency tree identity differs");
+			if (identity.treeRoot !== undefined) {
+				await Promise.all([
+					assertNoSymlinkTraversal(
+						identity.treeRoot,
+						"diagnostic program dependency tree",
+					),
+					assertNoSymlinkTraversal(
+						identity.program,
+						"diagnostic program path",
+					),
+				]);
+				const [canonicalTree, canonicalProgram] = await Promise.all([
+					realpath(identity.treeRoot),
+					realpath(identity.program),
+				]);
+				if (!isWithin(canonicalProgram, canonicalTree)) {
+					throw new Error("tree-bound program escapes its dependency tree");
+				}
+				const prior = treeHashes.get(canonicalTree);
+				if (prior && prior.expected !== identity.treeSha256) {
+					throw new Error("shared program dependency tree authority differs");
+				}
+				const observed =
+					prior?.observed ??
+					(await sha256DerivedChangeDiagnosticTree(identity.treeRoot));
+				treeHashes.set(canonicalTree, {
+					expected: identity.treeSha256,
+					observed,
+				});
+				if (observed !== identity.treeSha256) {
+					throw new Error("program dependency tree identity differs");
+				}
 			}
 		} catch (error) {
 			failures.push({
@@ -1017,7 +1198,10 @@ async function verifyBoundPrograms(request) {
 }
 
 export async function verifyDerivedChangeDiagnosticBindings(request) {
-	const sourcePreflightFailure = await verifySourcePreflight(request);
+	const programIdentityFailures = await verifyBoundPrograms(request);
+	const sourcePreflightFailure = programIdentityFailures.length
+		? null
+		: await verifySourcePreflight(request);
 	let temporaryRootFailure = null;
 	try {
 		await assertDerivedChangeDiagnosticTemporaryRootIdentity(
@@ -1029,7 +1213,6 @@ export async function verifyDerivedChangeDiagnosticBindings(request) {
 		temporaryRootFailure = String(error);
 	}
 	const identityFailures = await verifyBoundIdentities(request);
-	const programIdentityFailures = await verifyBoundPrograms(request);
 	const requiredPrograms = [
 		...new Set([
 			...request.requiredExecutables,
@@ -1295,7 +1478,7 @@ export async function executeDerivedChangeDiagnosticCases(request) {
 	for (const [caseIndex, caseRequest] of request.cases.entries()) {
 		const dependencies = caseRequest.dependsOn.map((id) => rowById.get(id));
 		const invalid = dependencies.find((record) => record.status !== "passed");
-		if (globalInvalidCase || invalid) {
+		if (!caseRequest.alwaysAttempt && (globalInvalidCase || invalid)) {
 			const row = skippedRow(caseRequest, globalInvalidCase ?? invalid.id);
 			rows.push(row);
 			rowById.set(row.id, row);

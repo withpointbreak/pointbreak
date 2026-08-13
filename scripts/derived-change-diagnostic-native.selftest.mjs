@@ -31,7 +31,7 @@ test("native diagnostic continues independent tiers and skips only a failed tier
 	const fakeHarness = join(root, "fake-harness.mjs");
 	await writeFile(
 		fakeHarness,
-		`#!/usr/bin/env node
+		`#!${process.execPath}
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 const requestArgument = process.argv.find((value) => value.startsWith("--derived-access-request="));
 if (process.argv.includes("--derived-access-contract")) {

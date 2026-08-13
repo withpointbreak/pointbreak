@@ -6,6 +6,22 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+function testProgram(name, fallback) {
+	const program = process.env[name];
+	if (process.env.POINTBREAK_DERIVED_CHANGE_BOUND_POLICY === "1" && !program) {
+		throw new Error(`${name} is required by bound diagnostic policy`);
+	}
+	return program ?? fallback;
+}
+const testBashProgram = testProgram(
+	"POINTBREAK_TEST_BASH_PROGRAM",
+	process.env.BASH ?? "/bin/bash",
+);
+const testShProgram = testProgram("POINTBREAK_TEST_SH_PROGRAM", "/bin/sh");
+const testSleepProgram = testProgram(
+	"POINTBREAK_TEST_SLEEP_PROGRAM",
+	"/bin/sleep",
+);
 const execFileAsync = promisify(execFile);
 
 const source = async (name) =>
@@ -67,6 +83,8 @@ test("derived Change diagnostic browser runner is isolated and non-terminal", as
 	assert.match(shell, /--campaign-id <nonempty>/);
 	assert.match(shell, /--iterations <positive bounded count>/);
 	assert.match(shell, /verify-commit/);
+	assert.match(shell, /POINTBREAK_SSH_KEYGEN_PROGRAM/);
+	assert.match(shell, /gpg\.ssh\.program=\$ssh_keygen_program/);
 	assert.match(shell, /source worktree must be clean/);
 	assert.match(shell, /materialize-inspector-decision-matrix\.sh/);
 	assert.match(shell, /store derived build/);
@@ -250,7 +268,7 @@ test("browser rejects a signed-source snapshot before it can drift from authorit
 	const caseRoot = join(root, "case-root");
 	await writeFile(
 		fakeGit,
-		`#!/bin/sh
+		`#!${testShProgram}
 case "$*" in
   *"status --porcelain --untracked-files=all"*) exit 0 ;;
   *"rev-parse HEAD"*) printf '%s\\n' '${"a".repeat(40)}' ;;
@@ -263,7 +281,7 @@ exit 0
 		let error;
 		try {
 			await execFileAsync(
-				process.env.BASH ?? "/bin/bash",
+				testBashProgram,
 				[
 					new URL("./derived-change-diagnostic-browser.sh", import.meta.url)
 						.pathname,
@@ -278,11 +296,12 @@ exit 0
 					env: {
 						...process.env,
 						PLAYWRIGHT_CLI: process.execPath,
-						POINTBREAK_BASH_PROGRAM: process.env.BASH ?? "/bin/bash",
+						POINTBREAK_BASH_PROGRAM: testBashProgram,
 						POINTBREAK_BINARY: process.execPath,
 						POINTBREAK_BROWSER_EXECUTABLE: process.execPath,
 						POINTBREAK_GIT_PROGRAM: fakeGit,
-						POINTBREAK_SLEEP_PROGRAM: "/bin/sleep",
+						POINTBREAK_SSH_KEYGEN_PROGRAM: testShProgram,
+						POINTBREAK_SLEEP_PROGRAM: testSleepProgram,
 						POINTBREAK_EXPECTED_FIXTURE_ID: "fixture-selftest",
 						POINTBREAK_EXPECTED_TOPOLOGY_CHECKPOINT_SHA256: "a".repeat(64),
 						POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256: "c".repeat(64),
@@ -360,6 +379,11 @@ test("wide settlement retains the narrow exact event and route", async () => {
 		server: { baseUrl: "http://127.0.0.1:1", token: "selftest" },
 	});
 	const waitArguments = [];
+	let currentUrl = "http://127.0.0.1:1/#/";
+	const timelineUrl =
+		"http://127.0.0.1:1/#/timeline?limit=100&order=desc";
+	const exactEventUrl =
+		"http://127.0.0.1:1/#/timeline/events/event-1?limit=100&order=desc";
 	const timelineEvent = {
 		first() {
 			return this;
@@ -367,22 +391,32 @@ test("wide settlement retains the narrow exact event and route", async () => {
 		async getAttribute(name) {
 			return name === "data-event-id" ? "event-1" : null;
 		},
-		async click() {},
+		async click() {
+			currentUrl = exactEventUrl;
+		},
 	};
 	const page = {
 		on() {},
-		async goto() {},
+		async goto(url) {
+			currentUrl = url;
+		},
 		async setViewportSize() {},
 		async waitForFunction(_predicate, argument) {
 			waitArguments.push(argument);
 		},
 		locator(selector) {
 			if (selector === "#timeline [data-event-id]") return timelineEvent;
-			if (selector === "#detail-back") return { async click() {} };
+			if (selector === "#detail-back") {
+				return {
+					async click() {
+						currentUrl = timelineUrl;
+					},
+				};
+			}
 			throw new Error(`unexpected locator: ${selector}`);
 		},
 		async screenshot() {},
-		url: () => "http://127.0.0.1:1/#/events/event-1?from=timeline",
+		url: () => currentUrl,
 		viewportSize: () => ({ width: 1440, height: 1000 }),
 	};
 	const originalLog = console.log;
@@ -396,9 +430,89 @@ test("wide settlement retains the narrow exact event and route", async () => {
 		waitArguments.some(
 			(argument) =>
 				argument?.expectedEventId === "event-1" &&
-				argument?.expectedRoute === "#/events/event-1?from=timeline",
+				argument?.expectedRoute ===
+					"#/timeline/events/event-1?limit=100&order=desc",
 		),
 		"wide settlement did not bind the narrow exact event and route",
+	);
+});
+
+test("a retained Timeline route is Red and retains the derived exact-event evidence", async () => {
+	const browser = await source("derived-change-diagnostic-browser.mjs");
+	const runner = browserRunner(browser, {
+		campaignId: "selftest-retained-timeline-route",
+		iterations: 1,
+		fixture: {
+			id: "fixture-selftest",
+			rawWitnessSha256: "c".repeat(64),
+			actualAuthoritativeInventorySha256: "a".repeat(64),
+			topologyCheckpointSha256: "d".repeat(64),
+			fixtureModuleSha256: "e".repeat(64),
+			topologyMaterializerSha256: "b".repeat(64),
+		},
+		artifactDir: "/tmp/unused",
+		server: { baseUrl: "http://127.0.0.1:1", token: "selftest" },
+	});
+	const timelineUrl =
+		"http://127.0.0.1:1/#/timeline?limit=100&order=desc";
+	let currentUrl = "http://127.0.0.1:1/#/";
+	const timelineEvent = {
+		first() {
+			return this;
+		},
+		async getAttribute(name) {
+			return name === "data-event-id" ? "event-1" : null;
+		},
+		async click() {
+			// Deliberately preserve the Timeline route: the runner must reject it.
+		},
+	};
+	const page = {
+		on() {},
+		async goto(url) {
+			currentUrl = url;
+		},
+		async setViewportSize() {},
+		async waitForFunction(_predicate, argument) {
+			if (argument?.expectedRoute && currentUrl === timelineUrl) {
+				throw new Error("exact event navigation retained the Timeline route");
+			}
+		},
+		locator(selector) {
+			if (selector === "#timeline [data-event-id]") return timelineEvent;
+			if (selector === "#detail-back") {
+				return {
+					async click() {
+						currentUrl = timelineUrl;
+					},
+				};
+			}
+			throw new Error(`unexpected locator: ${selector}`);
+		},
+		async screenshot() {},
+		url: () => currentUrl,
+		viewportSize: () => ({ width: 390, height: 844 }),
+	};
+	const originalLog = console.log;
+	console.log = () => {};
+	let result;
+	try {
+		result = await runner(page);
+	} finally {
+		console.log = originalLog;
+	}
+	const transition = result.cases.find(
+		(caseResult) => caseResult.id === "browser-widen-1",
+	);
+	assert.equal(transition.status, "failed");
+	assert.equal(transition.failureClass, "case_failure");
+	assert.deepEqual(transition.expected.exactEvent, {
+		eventId: "event-1",
+		route: "#/timeline/events/event-1?limit=100&order=desc",
+	});
+	assert.match(
+		transition.actual.observations[0].detail,
+		/exact event navigation retained the Timeline route/,
 	);
 });
 
@@ -462,7 +576,7 @@ test("materializer requires an explicit hash mode for an explicit hash program",
 	let error;
 	try {
 		await execFileAsync(
-			process.env.BASH ?? "/bin/bash",
+			testBashProgram,
 			[materializer.pathname],
 			{
 				env: {

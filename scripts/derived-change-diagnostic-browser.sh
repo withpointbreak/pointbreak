@@ -29,6 +29,9 @@ resolve_program() {
 }
 
 git_program="$(resolve_program "${POINTBREAK_GIT_PROGRAM:-git}" "${POINTBREAK_GIT_PROGRAM:-}")"
+[ -n "${POINTBREAK_SSH_KEYGEN_PROGRAM:-}" ] \
+  || die "POINTBREAK_SSH_KEYGEN_PROGRAM must be an absolute program path"
+ssh_keygen_program="$(resolve_program "$POINTBREAK_SSH_KEYGEN_PROGRAM" "$POINTBREAK_SSH_KEYGEN_PROGRAM")"
 jq_program="$(resolve_program "${POINTBREAK_JQ_PROGRAM:-jq}" "${POINTBREAK_JQ_PROGRAM:-}")"
 node_program="$(resolve_program "${POINTBREAK_NODE_PROGRAM:-node}" "${POINTBREAK_NODE_PROGRAM:-}")"
 shasum_program="$(resolve_program "${POINTBREAK_SHASUM_PROGRAM:-shasum}" "${POINTBREAK_SHASUM_PROGRAM:-}")"
@@ -144,10 +147,10 @@ verify_source_state() {
 
 verify_source_state "before snapshot"
 if [ -n "$allowed_signers_path" ]; then
-  "$git_program" -c "gpg.ssh.allowedSignersFile=$allowed_signers_path" -C "$repo_root" verify-commit "$source_commit" >/dev/null \
+  "$git_program" -c "gpg.ssh.allowedSignersFile=$allowed_signers_path" -c "gpg.ssh.program=$ssh_keygen_program" -C "$repo_root" verify-commit "$source_commit" >/dev/null \
     || die "source commit must have a valid signature"
 else
-  "$git_program" -C "$repo_root" verify-commit "$source_commit" >/dev/null \
+  "$git_program" -c "gpg.ssh.program=$ssh_keygen_program" -C "$repo_root" verify-commit "$source_commit" >/dev/null \
     || die "source commit must have a valid signature"
 fi
 

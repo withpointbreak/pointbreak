@@ -37,7 +37,18 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	validateDerivedChangeDiagnosticCampaign,
 } from "./derived-change-diagnostic-report.mjs";
+
+const testShProgram = (() => {
+	const program = process.env.POINTBREAK_TEST_SH_PROGRAM;
+	if (process.env.POINTBREAK_DERIVED_CHANGE_BOUND_POLICY === "1" && !program) {
+		throw new Error(
+			"POINTBREAK_TEST_SH_PROGRAM is required by bound diagnostic policy",
+		);
+	}
+	return program ?? "/bin/sh";
+})();
 
 const campaignSource = () =>
 	readFile(
@@ -160,6 +171,8 @@ const fixtureAuthorityPath = join(
 	"fixture-authority.json",
 );
 await writeFile(fixtureAuthorityPath, fixtureAuthorityBytes);
+const allowedSignersPath = join(fixtureAuthorityRoot, "allowed-signers");
+await writeFile(allowedSignersPath, fixtureAuthorityBytes);
 
 const platforms = () => [
 	{
@@ -172,50 +185,121 @@ const platforms = () => [
 	{
 		id: "windows_ntfs",
 		operatingSystem: "windows",
-		architecture: "x86_64",
+		architecture: "aarch64",
 		filesystem: "ntfs",
 		hostIdentitySha256: digest("b"),
+		systemRoot: "c:\\windows",
 	},
 ];
 
-const commonProgramNames = [
-	"awk",
-	"bash",
-	"cargo",
-	"cargoNextest",
-	"cp",
-	"dirname",
-	"filesystemProbe",
-	"find",
-	"git",
-	"hash",
-	"head",
-	"jq",
-	"mkdir",
-	"node",
-	"rm",
-	"rustc",
-	"sort",
-	"tr",
-	"wc",
-];
 const programNames = {
 	macos_apfs: [
-		...commonProgramNames,
+		"ar",
+		"awk",
+		"bash",
 		"browserExecutable",
+		"cargo",
+		"cargoNextest",
+		"cc",
 		"chmod",
+		"cp",
+		"cxx",
+		"debugInfoTool",
+		"dirname",
+		"filesystemProbe",
+		"find",
+		"git",
+		"hash",
+		"head",
+		"jq",
+		"linkEditor",
+		"linker",
+		"mkdir",
+		"node",
 		"playwrightCli",
+		"ranlib",
+		"rm",
+		"rustc",
+		"sh",
 		"shasum",
 		"sleep",
+		"sort",
+		"sshKeygen",
+		"tr",
 		"vitestCli",
-	].sort(),
-	windows_ntfs: [...commonProgramNames, "cygpath"].sort(),
+		"wc",
+	],
+	windows_ntfs: [
+		"ar",
+		"awk",
+		"bash",
+		"cargo",
+		"cargoNextest",
+		"cc",
+		"cp",
+		"cxx",
+		"cygpath",
+		"dirname",
+		"filesystemProbe",
+		"find",
+		"git",
+		"hash",
+		"head",
+		"jq",
+		"linker",
+		"mkdir",
+		"node",
+		"ranlib",
+		"rm",
+		"rustc",
+		"sort",
+		"sshKeygen",
+		"tr",
+		"wc",
+	],
 };
-const treeBoundProgramNames = new Set([
-	"browserExecutable",
-	"playwrightCli",
-	"vitestCli",
-]);
+const treeBoundProgramNames = {
+	macos_apfs: new Set([
+		"ar",
+		"browserExecutable",
+		"cargo",
+		"cc",
+		"cxx",
+		"debugInfoTool",
+		"git",
+		"jq",
+		"linkEditor",
+		"linker",
+		"playwrightCli",
+		"ranlib",
+		"rustc",
+		"vitestCli",
+	]),
+	windows_ntfs: new Set([
+		"ar",
+		"awk",
+		"bash",
+		"cargo",
+		"cc",
+		"cp",
+		"cxx",
+		"cygpath",
+		"dirname",
+		"find",
+		"git",
+		"hash",
+		"head",
+		"linker",
+		"mkdir",
+		"ranlib",
+		"rm",
+		"rustc",
+		"sort",
+		"sshKeygen",
+		"tr",
+		"wc",
+	]),
+};
 const programIdentities = () =>
 	platforms()
 		.flatMap((platform) =>
@@ -227,11 +311,13 @@ const programIdentities = () =>
 						? `C:\\tools\\${name}.exe`
 						: executableProgram,
 				binarySha256,
-				...(treeBoundProgramNames.has(name)
-					? {
-							treeRoot: executableTreeRoot,
-							treeSha256: executableTreeSha256,
-						}
+				...(treeBoundProgramNames[platform.id].has(name)
+					? platform.operatingSystem === "windows"
+						? { treeRoot: "C:\\tools", treeSha256: digest("8") }
+						: {
+								treeRoot: executableTreeRoot,
+								treeSha256: executableTreeSha256,
+							}
 					: {}),
 			})),
 		)
@@ -251,6 +337,7 @@ const campaign = () =>
 			rangeBaseCommit: commit("3"),
 			rangeSha256: digest("4"),
 		},
+		signatureAuthoritySha256: fixtureAuthoritySha256,
 		fixture: {
 			authoritySha256: fixtureAuthoritySha256,
 			document: structuredClone(fixtureAuthorityDocument),
@@ -337,33 +424,10 @@ const hostConfig = async () => ({
 		controlCli: join(fixtureAuthorityRoot, "cli-control"),
 		fixtureAuthority: fixtureAuthorityPath,
 	},
-	programs: {
-		node: executableProgram,
-		cargo: executableProgram,
-		cargoNextest: executableProgram,
-		rustc: executableProgram,
-		git: executableProgram,
-		filesystemProbe: executableProgram,
-		bash: executableProgram,
-		browserExecutable: executableProgram,
-		playwrightCli: executableProgram,
-		vitestCli: executableProgram,
-		jq: executableProgram,
-		shasum: executableProgram,
-		find: executableProgram,
-		sort: executableProgram,
-		wc: executableProgram,
-		tr: executableProgram,
-		cp: executableProgram,
-		head: executableProgram,
-		dirname: executableProgram,
-		mkdir: executableProgram,
-		rm: executableProgram,
-		chmod: executableProgram,
-		sleep: executableProgram,
-		awk: executableProgram,
-		hash: executableProgram,
-	},
+	allowedSignersPath,
+	programs: Object.fromEntries(
+		programNames.macos_apfs.map((name) => [name, executableProgram]),
+	),
 	changeRead: {
 		execution: { cargoLockSha256: digest("9") },
 		product: {
@@ -400,6 +464,9 @@ test("the supported derived Change campaign retains every diagnostic lane", asyn
 		"derived-change-diagnostic-fixture.selftest.mjs",
 		"cargoNextest",
 		"rustc",
+		"POINTBREAK_GIT_PROGRAM",
+		"POINTBREAK_SSH_KEYGEN_PROGRAM",
+		"native-toolchain-preflight",
 		"actual preinstalled executable",
 	]) {
 		assert.match(source, new RegExp(required.replaceAll("-", "\\-")));
@@ -423,6 +490,18 @@ test("campaign authority freezes complete platform, native, and browser inventor
 		"macos_apfs",
 		"windows_ntfs",
 	]);
+	assert.equal(
+		authority.platforms.find(({ id }) => id === "windows_ntfs").systemRoot,
+		"c:\\windows",
+	);
+	const mixedCaseSystemRoot = structuredClone(authority);
+	mixedCaseSystemRoot.platforms.find(
+		({ id }) => id === "windows_ntfs",
+	).systemRoot = "C:\\Windows";
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(mixedCaseSystemRoot),
+		/system root must be normalized lowercase/i,
+	);
 	for (const id of [
 		"macos_apfs.compile-all-targets",
 		"macos_apfs.topology-v1.read.stale_page_token",
@@ -486,33 +565,46 @@ test("campaign authority rejects incomplete or substituted program identities", 
 	);
 });
 
+test("host setup rejects a substituted allowed-signers authority", async () => {
+	const config = await hostConfig();
+	const substituted = join(fixtureAuthorityRoot, "substituted-allowed-signers");
+	await writeFile(substituted, "unbound signer authority\n");
+	config.allowedSignersPath = substituted;
+	const request = createDerivedChangeDiagnosticHostRequest(config);
+	const failure = await verifyDerivedChangeDiagnosticBindings(request);
+	assert.match(
+		failure.sourcePreflightFailure,
+		/allowed signers authority differs from campaign/,
+	);
+});
+
 test("program bytes are rechecked by serialized preflight and postflight bindings", async () => {
 	const config = await hostConfig();
 	const root = await mkdtemp(
 		join(await realpath(tmpdir()), "pointbreak-diagnostic-program-"),
 	);
-	const cargo = join(root, "cargo");
-	await copyFile(process.execPath, cargo);
-	await chmod(cargo, 0o755);
-	const cargoSha256 = createHash("sha256")
-		.update(await readFile(cargo))
+	const cargoNextest = join(root, "cargo-nextest");
+	await copyFile(process.execPath, cargoNextest);
+	await chmod(cargoNextest, 0o755);
+	const cargoNextestSha256 = createHash("sha256")
+		.update(await readFile(cargoNextest))
 		.digest("hex");
 	const identity = config.campaign.programs.find(
 		({ platformId, name }) =>
-			platformId === config.platformId && name === "cargo",
+			platformId === config.platformId && name === "cargoNextest",
 	);
-	identity.program = cargo;
-	identity.binarySha256 = cargoSha256;
-	config.programs.cargo = cargo;
+	identity.program = cargoNextest;
+	identity.binarySha256 = cargoNextestSha256;
+	config.programs.cargoNextest = cargoNextest;
 	const request = createDerivedChangeDiagnosticHostRequest(config);
 	const before = await verifyDerivedChangeDiagnosticBindings(request);
 	assert.equal(before?.programIdentityFailures, undefined);
 
-	await appendFile(cargo, "drift");
+	await appendFile(cargoNextest, "drift");
 	const after = await verifyDerivedChangeDiagnosticBindings(request);
 	assert.deepEqual(
 		after.programIdentityFailures.map(({ name }) => name),
-		["cargo"],
+		["cargoNextest"],
 	);
 });
 
@@ -571,7 +663,7 @@ test("script tool preflight rejects a hash-valid non-Node Playwright wrapper", a
 	const validCli = join(root, "valid-cli.mjs");
 	const shellWrapper = join(root, "playwright-wrapper.sh");
 	await writeFile(validCli, 'process.stdout.write("1.0.0\\n");\n');
-	await writeFile(shellWrapper, "#!/bin/sh\nexit 0\n");
+	await writeFile(shellWrapper, `#!${testShProgram}\nexit 0\n`);
 	await chmod(shellWrapper, 0o755);
 	await assert.rejects(
 		runDerivedChangeDiagnosticScriptToolPreflight({
@@ -601,10 +693,8 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(new Set(mutableRoots).size, mutableRoots.length);
 	assert.equal(request.cases.at(0).id, "macos_apfs.preflight");
 	assert.equal(request.cases.at(-1).id, "macos_apfs.postflight");
-	assert.deepEqual(request.cases.at(-1).dependsOn, [
-		"macos_apfs.preflight",
-		"macos_apfs.product-version",
-	]);
+	assert.deepEqual(request.cases.at(-1).dependsOn, []);
+	assert.equal(request.cases.at(-1).alwaysAttempt, true);
 
 	const compile = request.cases.find(({ id }) =>
 		id.endsWith("compile-all-targets"),
@@ -630,6 +720,19 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 		"run",
 		"--no-cache",
 	]);
+	assert.equal(webPolicy.env.PATH, "");
+	const scriptPolicy = request.cases.find(({ id }) =>
+		id.endsWith("policy-scripts"),
+	);
+	assert.equal(scriptPolicy.env.PATH, "");
+	assert.equal(
+		scriptPolicy.env.POINTBREAK_TEST_BASH_PROGRAM,
+		config.programs.bash,
+	);
+	assert.equal(
+		scriptPolicy.env.POINTBREAK_TEST_SH_PROGRAM,
+		config.programs.sh,
+	);
 	for (const entry of [compile, policy]) {
 		assert.equal(entry.env.CARGO_TARGET_DIR, undefined);
 		assert.equal(entry.env.CARGO, config.programs.cargo);
@@ -637,6 +740,16 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 		assert.equal(entry.env.RUSTUP_AUTO_INSTALL, undefined);
 		assert.equal(entry.env.RUSTUP_DIST_SERVER, undefined);
 		assert.equal(entry.env.RUSTUP_UPDATE_ROOT, undefined);
+		assert.equal(entry.env.POINTBREAK_GIT_PROGRAM, config.programs.git);
+		assert.equal(
+			entry.env.POINTBREAK_SSH_KEYGEN_PROGRAM,
+			config.programs.sshKeygen,
+		);
+		assert.equal(entry.env.CC, config.programs.cc);
+		assert.equal(entry.env.CXX, config.programs.cxx);
+		assert.equal(entry.env.AR, config.programs.ar);
+		assert.equal(entry.env.RANLIB, config.programs.ranlib);
+		assert.equal(entry.env.SDKROOT.endsWith("/sdk"), true);
 	}
 	assert.ok(request.requiredExecutables.includes(config.programs.cargo));
 	assert.ok(request.requiredExecutables.includes(config.programs.cargoNextest));
@@ -650,6 +763,9 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(preflightConfig.cargoNextest, config.programs.cargoNextest);
 	assert.equal(preflightConfig.rustc, config.programs.rustc);
 	assert.equal(preflightConfig.node, config.programs.node);
+	assert.equal(preflightConfig.nativeSmoke.cc, config.programs.cc);
+	assert.equal(preflightConfig.nativeSmoke.linker, config.programs.linker);
+	assert.equal(preflightConfig.nativeSmoke.ar, config.programs.ar);
 	assert.equal(preflightConfig.vitestCli, config.programs.vitestCli);
 	assert.equal(preflightConfig.playwrightCli, config.programs.playwrightCli);
 	assert.equal(
@@ -729,7 +845,27 @@ test("host requests execute only the configured candidate checkout and retained 
 		"pointbreak-public-allowed-signers",
 	);
 	const request = createDerivedChangeDiagnosticHostRequest(config);
+	assert.equal(request.sourcePreflight.allowedSignersPath, config.allowedSignersPath);
+	const postflight = request.cases.find(({ id }) => id.endsWith("postflight"));
+	assert.equal(
+		JSON.parse(postflight.env.POINTBREAK_DERIVED_CHANGE_BOUND_REQUEST)
+			.sourcePreflight.allowedSignersPath,
+		join(config.outputRoot, "authority", "allowed-signers"),
+	);
 	const sourceScript = (name) => join(config.sourceCheckout, "scripts", name);
+	assert.equal(request.sourcePreflight.gitProgram, config.programs.git);
+	assert.equal(
+		request.sourcePreflight.allowedSignersSha256,
+		config.campaign.signatureAuthoritySha256,
+	);
+	assert.equal(
+		request.sourcePreflight.sshKeygenProgram,
+		config.programs.sshKeygen,
+	);
+	assert.equal(
+		request.sourcePreflight.gitExecPath,
+		join(executableTreeRoot, "libexec", "git-core"),
+	);
 
 	for (const suffix of [
 		"preflight",
@@ -831,6 +967,14 @@ test("host requests execute only the configured candidate checkout and retained 
 		assert.equal(browser.env[environmentName], config.programs[name]);
 	}
 	assert.equal(browser.env.PLAYWRIGHT_CLI, config.programs.playwrightCli);
+	assert.equal(
+		browser.env.POINTBREAK_SSH_KEYGEN_PROGRAM,
+		config.programs.sshKeygen,
+	);
+	assert.equal(
+		browser.env.GIT_EXEC_PATH,
+		join(executableTreeRoot, "libexec", "git-core"),
+	);
 	assert.equal(browser.env.CI, "1");
 	assert.equal(browser.env.NO_UPDATE_NOTIFIER, "1");
 	const topologyAuthority = config.campaign.fixture.document.topologyCheckpoint;
@@ -855,7 +999,6 @@ test("host requests execute only the configured candidate checkout and retained 
 		browser.env.POINTBREAK_EXPECTED_TOPOLOGY_MATERIALIZER_SHA256,
 		materializerAuthority.sha256,
 	);
-	const postflight = request.cases.find(({ id }) => id.endsWith("postflight"));
 	const boundRequest = JSON.parse(Object.values(postflight.env)[0]);
 	assert.equal(boundRequest.cases.length, request.cases.length);
 	assert.equal(boundRequest.outputRoot, config.outputRoot);
@@ -910,6 +1053,26 @@ test("Windows host requests retain the complete native Change-read collection", 
 	);
 
 	const request = createDerivedChangeDiagnosticHostRequest(config);
+	const compile = request.cases.find(({ id }) =>
+		id.endsWith("compile-all-targets"),
+	);
+	assert.equal(
+		compile.env.CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER,
+		config.programs.linker,
+	);
+	assert.equal(compile.env.CC_aarch64_pc_windows_msvc, config.programs.cc);
+	assert.equal(compile.env.AR_aarch64_pc_windows_msvc, config.programs.ar);
+	assert.equal(compile.env.LIBPATH, "");
+	assert.match(compile.env.INCLUDE, /include\\msvc/iu);
+	assert.match(compile.env.INCLUDE, /include\\sdk\\ucrt/iu);
+	assert.match(compile.env.LIB, /lib\\msvc/iu);
+	assert.match(compile.env.LIB, /lib\\sdk\\um/iu);
+	assert.equal(compile.env.PATH.includes("Windows Kits"), false);
+	assert.equal(compile.env.SystemRoot, "c:\\windows");
+	assert.equal(compile.env.SYSTEMROOT, "c:\\windows");
+	assert.equal(compile.env.WINDIR, "c:\\windows");
+	assert.equal(compile.env.ComSpec, "c:\\windows\\System32\\cmd.exe");
+	assert.equal(compile.env.PATH.endsWith("c:\\windows\\System32"), true);
 	const changeRead = request.cases.find(({ id }) =>
 		id.endsWith("change-read-stateful"),
 	);

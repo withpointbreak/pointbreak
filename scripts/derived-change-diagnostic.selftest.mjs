@@ -24,6 +24,10 @@ import {
 	validateDerivedChangeDiagnosticRequest,
 	verifyDerivedChangeDiagnosticBindings,
 } from "./derived-change-diagnostic.mjs";
+import {
+	derivedChangeDiagnosticProgramNamesForOperatingSystem,
+	derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem,
+} from "./derived-change-diagnostic-report.mjs";
 
 const digest = (digit) => digit.repeat(64);
 const commit = (digit) => digit.repeat(40);
@@ -100,27 +104,16 @@ const fixtureAuthorityPath = join(
 );
 await writeFile(fixtureAuthorityPath, fixtureAuthorityBytes);
 
-const commonProgramNames = [
-	"awk",
-	"bash",
-	"cargo",
-	"cargoNextest",
-	"cp",
-	"dirname",
-	"filesystemProbe",
-	"find",
-	"git",
-	"hash",
-	"head",
-	"jq",
-	"mkdir",
-	"node",
-	"rm",
-	"rustc",
-	"sort",
-	"tr",
-	"wc",
-];
+const macosProgramNames =
+	derivedChangeDiagnosticProgramNamesForOperatingSystem("macos");
+const windowsProgramNames =
+	derivedChangeDiagnosticProgramNamesForOperatingSystem("windows");
+const macosTreeBoundProgramNames = new Set(
+	derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem("macos"),
+);
+const windowsTreeBoundProgramNames = new Set(
+	derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem("windows"),
+);
 
 const campaign = () => ({
 	id: "derived-change-diagnostic-001",
@@ -140,6 +133,7 @@ const campaign = () => ({
 		rangeSha256: digest("c"),
 	},
 	rootComponent: DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	signatureAuthoritySha256: fixtureAuthoritySha256,
 	product: {
 		binaries: [
 			{ platformId: "macos_apfs", binarySha256: executableSha256 },
@@ -177,37 +171,28 @@ const campaign = () => ({
 		],
 	},
 	programs: [
-		...[
-			...commonProgramNames,
-			"browserExecutable",
-			"chmod",
-			"playwrightCli",
-			"shasum",
-			"sleep",
-			"vitestCli",
-		]
-			.sort()
-			.map((name) => ({
+		...macosProgramNames.map((name) => ({
 				platformId: "macos_apfs",
 				name,
-				program: ["browserExecutable", "playwrightCli", "vitestCli"].includes(
-					name,
-				)
+				program: macosTreeBoundProgramNames.has(name)
 					? treeBoundExecutable
 					: process.execPath,
 				binarySha256: executableSha256,
-				...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+				...(macosTreeBoundProgramNames.has(name)
 					? {
 							treeRoot: executableTreeRoot,
 							treeSha256: executableTreeSha256,
 						}
 					: {}),
 			})),
-		...[...commonProgramNames, "cygpath"].sort().map((name) => ({
+		...windowsProgramNames.map((name) => ({
 			platformId: "windows_ntfs",
 			name,
 			program: `C:\\tools\\${name}.exe`,
 			binarySha256: executableSha256,
+			...(windowsTreeBoundProgramNames.has(name)
+				? { treeRoot: "C:\\tools", treeSha256: executableTreeSha256 }
+				: {}),
 		})),
 	],
 	fixture: {
@@ -228,6 +213,7 @@ const campaign = () => ({
 			architecture: "x86_64",
 			filesystem: "ntfs",
 			hostIdentitySha256: digest("3"),
+			systemRoot: "c:\\windows",
 		},
 	],
 });
@@ -329,6 +315,22 @@ const request = (root) => ({
 		},
 	],
 });
+
+function sourcePreflight(input, sourceRoot) {
+	const programs = new Map(
+		input.campaign.programs
+			.filter(({ platformId }) => platformId === input.platformId)
+			.map((identity) => [identity.name, identity]),
+	);
+	const git = programs.get("git");
+	return {
+		sourceRoot,
+		gitProgram: git.program,
+		gitExecPath: join(git.treeRoot, "libexec", "git-core"),
+		sshKeygenProgram: programs.get("sshKeygen").program,
+		allowedSignersSha256: input.campaign.signatureAuthoritySha256,
+	};
+}
 
 function retainOnlyMacosBinaryAuthority(input) {
 	for (const identity of [input.campaign.product, input.campaign.harness]) {
@@ -475,7 +477,7 @@ test("preflights every executable, records global invalidity, and does not start
 	input.cases[4].program = missingProgram;
 	const identity = input.campaign.programs.find(
 		({ platformId, name }) =>
-			platformId === input.platformId && name === "cargo",
+			platformId === input.platformId && name === "cargoNextest",
 	);
 	identity.program = missingProgram;
 	identity.binarySha256 = digest("f");
@@ -483,6 +485,114 @@ test("preflights every executable, records global invalidity, and does not start
 	assert.equal(result.cases[0].status, "failed");
 	assert.equal(result.cases[0].failureClass, "global_invalid");
 	assert.ok(result.cases.slice(1).every(({ status }) => status === "skipped"));
+});
+
+test("rejects a tree-bound program through an escaping symlink ancestor", async () => {
+	const root = await diagnosticRoot("pointbreak-diagnostic-tree-escape-");
+	const tree = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-tree-root-"),
+	);
+	const outside = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-tree-outside-"),
+	);
+	await copyFile(process.execPath, join(outside, "node"));
+	await chmod(join(outside, "node"), 0o755);
+	await symlink(
+		outside,
+		join(tree, "bin"),
+		process.platform === "win32" ? "junction" : "dir",
+	);
+	const input = request(root);
+	for (const identity of input.campaign.programs.filter(
+		({ platformId, name }) =>
+			platformId === "macos_apfs" && macosTreeBoundProgramNames.has(name),
+	)) {
+		identity.program = join(tree, "bin", "node");
+		identity.treeRoot = tree;
+		identity.treeSha256 = digest("f");
+	}
+	const failure = await verifyDerivedChangeDiagnosticBindings(input);
+	assert.ok(failure?.programIdentityFailures?.length);
+	assert.match(
+		JSON.stringify(failure.programIdentityFailures),
+		/must not traverse symbolic links/,
+	);
+});
+
+test("rejects conflicting authority hashes for a shared program dependency tree", async () => {
+	const root = await diagnosticRoot("pointbreak-diagnostic-tree-conflict-");
+	const input = request(root);
+	input.campaign.programs.find(
+		({ platformId, name }) => platformId === "macos_apfs" && name === "cargo",
+	).treeSha256 = digest("f");
+	const failure = await verifyDerivedChangeDiagnosticBindings(input);
+	assert.ok(failure?.programIdentityFailures?.length);
+	assert.match(
+		JSON.stringify(failure.programIdentityFailures),
+		/shared program dependency tree authority differs/,
+	);
+});
+
+test("source signature preflight uses the bound Git helper with no ambient PATH", async () => {
+	const root = await diagnosticRoot("pointbreak-diagnostic-bound-signature-");
+	const tools = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-bound-git-"),
+	);
+	const bin = join(tools, "bin");
+	const execPath = join(tools, "libexec", "git-core");
+	const marker = `${tools}-invocations.jsonl`;
+	await Promise.all([
+		mkdir(bin, { recursive: true }),
+		mkdir(execPath, { recursive: true }),
+	]);
+	const git = join(bin, "git");
+	const input = request(root);
+	const source = input.campaign.source;
+	source.rangeSha256 = createHash("sha256").update("").digest("hex");
+	await writeFile(
+		git,
+		`#!${process.execPath}
+import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ args: process.argv.slice(2), path: process.env.PATH, execPath: process.env.GIT_EXEC_PATH }) + "\\n");
+const args = process.argv.slice(2).join(" ");
+if (args.endsWith("rev-parse HEAD") || args.includes("^{commit}")) process.stdout.write(${JSON.stringify(`${source.commit}\n`)});
+else if (args.includes("^{tree}")) process.stdout.write(${JSON.stringify(`${source.tree}\n`)});
+`,
+	);
+	await chmod(git, 0o755);
+	const gitIdentity = input.campaign.programs.find(
+		({ platformId, name }) =>
+			platformId === input.platformId && name === "git",
+	);
+	gitIdentity.program = git;
+	gitIdentity.binarySha256 = createHash("sha256")
+		.update(await readFile(git))
+		.digest("hex");
+	gitIdentity.treeRoot = tools;
+	gitIdentity.treeSha256 = await sha256DerivedChangeDiagnosticTree(tools);
+	input.sourcePreflight = {
+		sourceRoot: process.cwd(),
+		gitProgram: git,
+		gitExecPath: execPath,
+		sshKeygenProgram: process.execPath,
+		allowedSignersPath: fixtureAuthorityPath,
+		allowedSignersSha256: fixtureAuthoritySha256,
+	};
+	const failure = await verifyDerivedChangeDiagnosticBindings(input);
+	assert.ok(failure?.sourcePreflightFailure);
+	const invocations = (await readFile(marker, "utf8"))
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	const signature = invocations.find(({ args }) =>
+		args.includes("verify-commit"),
+	);
+	assert.ok(signature);
+	assert.ok(
+		signature.args.includes(`gpg.ssh.program=${process.execPath}`),
+	);
+	assert.equal(signature.path, "");
+	assert.equal(signature.execPath, execPath);
 });
 
 test("sanitizes owner-store state and records missing declared artifacts without stopping peers", async () => {
@@ -546,10 +656,16 @@ test("routes each case's temporary environment through an isolated scratch direc
 	input.cases = [
 		{
 			...input.cases[0],
-			env: { CARGO_TARGET_DIR: "/must-be-overridden" },
+			env: {
+				CARGO_TARGET_DIR: "/must-be-overridden",
+				CC: "/bound/cc",
+				CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER: "/bound/linker",
+				GIT_EXEC_PATH: "/bound/git-core",
+				PATH: "/bound/bin",
+			},
 			args: [
 				"-e",
-				`require('node:fs').writeFileSync(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT+'/artifact.txt',JSON.stringify({caseRoot:process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT,workRoot:process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT,home:process.env.HOME,userprofile:process.env.USERPROFILE,npmCache:process.env.npm_config_cache,xdgCache:process.env.XDG_CACHE_HOME,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,xdgState:process.env.XDG_STATE_HOME,appData:process.env.APPDATA,localAppData:process.env.LOCALAPPDATA,tmpdir:process.env.TMPDIR,tmp:process.env.TMP,temp:process.env.TEMP,cargo:process.env.CARGO,cargoBuildRustc:process.env.CARGO_BUILD_RUSTC,cargoNetOffline:process.env.CARGO_NET_OFFLINE,cargoTargetRustc:process.env.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC,nextestProfile:process.env.NEXTEST_PROFILE,nextestUserConfig:process.env.NEXTEST_USER_CONFIG_FILE,rustc:process.env.RUSTC,rustcWrapper:process.env.RUSTC_WRAPPER,rustupToolchain:process.env.RUSTUP_TOOLCHAIN,cargoHome:process.env.CARGO_HOME,rustupHome:process.env.RUSTUP_HOME,target:process.env.CARGO_TARGET_DIR}))`,
+				`require('node:fs').writeFileSync(process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT+'/artifact.txt',JSON.stringify({caseRoot:process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT,workRoot:process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT,home:process.env.HOME,userprofile:process.env.USERPROFILE,npmCache:process.env.npm_config_cache,xdgCache:process.env.XDG_CACHE_HOME,xdgConfig:process.env.XDG_CONFIG_HOME,xdgData:process.env.XDG_DATA_HOME,xdgState:process.env.XDG_STATE_HOME,appData:process.env.APPDATA,localAppData:process.env.LOCALAPPDATA,tmpdir:process.env.TMPDIR,tmp:process.env.TMP,temp:process.env.TEMP,cargo:process.env.CARGO,cargoBuildRustc:process.env.CARGO_BUILD_RUSTC,cargoNetOffline:process.env.CARGO_NET_OFFLINE,cargoTargetRustc:process.env.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC,nextestProfile:process.env.NEXTEST_PROFILE,nextestUserConfig:process.env.NEXTEST_USER_CONFIG_FILE,rustc:process.env.RUSTC,rustcWrapper:process.env.RUSTC_WRAPPER,rustupToolchain:process.env.RUSTUP_TOOLCHAIN,cargoHome:process.env.CARGO_HOME,rustupHome:process.env.RUSTUP_HOME,target:process.env.CARGO_TARGET_DIR,path:process.env.PATH,cc:process.env.CC,hostCc:process.env.HOST_CC,targetCxx:process.env.TARGET_CXX,hostAr:process.env.HOST_AR,targetRanlib:process.env.TARGET_RANLIB,comSpec:process.env.ComSpec,linker:process.env.CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER,gitExecPath:process.env.GIT_EXEC_PATH}))`,
 			],
 		},
 	];
@@ -561,12 +677,20 @@ test("routes each case's temporary environment through an isolated scratch direc
 			"CARGO_HOME",
 			"CARGO_NET_OFFLINE",
 			"CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC",
+			"CC",
+			"ComSpec",
+			"GIT_EXEC_PATH",
+			"HOST_AR",
+			"HOST_CC",
 			"NEXTEST_PROFILE",
 			"NEXTEST_USER_CONFIG_FILE",
 			"RUSTC",
 			"RUSTC_WRAPPER",
 			"RUSTUP_HOME",
 			"RUSTUP_TOOLCHAIN",
+			"TARGET_CXX",
+			"TARGET_RANLIB",
+			"PATH",
 		].map((key) => [key, process.env[key]]),
 	);
 	Object.assign(process.env, {
@@ -575,12 +699,20 @@ test("routes each case's temporary environment through an isolated scratch direc
 		CARGO_HOME: "/ambient/cargo-home",
 		CARGO_NET_OFFLINE: "true",
 		CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTC: "/ambient/target-rustc",
+		CC: "/ambient/cc",
+		ComSpec: "/ambient/cmd",
+		GIT_EXEC_PATH: "/ambient/git-core",
+		HOST_AR: "/ambient/host-ar",
+		HOST_CC: "/ambient/host-cc",
 		NEXTEST_PROFILE: "ambient-profile",
 		NEXTEST_USER_CONFIG_FILE: "/ambient/nextest-config.toml",
 		RUSTC: "/ambient/rustc",
 		RUSTC_WRAPPER: "/ambient/rustc-wrapper",
 		RUSTUP_HOME: "/ambient/rustup-home",
 		RUSTUP_TOOLCHAIN: "ambient-toolchain",
+		TARGET_CXX: "/ambient/target-cxx",
+		TARGET_RANLIB: "/ambient/target-ranlib",
+		PATH: "/ambient/bin",
 	});
 	try {
 		await executeDerivedChangeDiagnosticCases(input);
@@ -628,6 +760,15 @@ test("routes each case's temporary environment through an isolated scratch direc
 		join(environment.workRoot, "rustup-home"),
 	);
 	assert.equal(environment.target, join(environment.workRoot, "target"));
+	assert.equal(environment.path, "/bound/bin");
+	assert.equal(environment.cc, "/bound/cc");
+	assert.equal(environment.hostCc, undefined);
+	assert.equal(environment.targetCxx, undefined);
+	assert.equal(environment.hostAr, undefined);
+	assert.equal(environment.targetRanlib, undefined);
+	assert.equal(environment.comSpec, undefined);
+	assert.equal(environment.linker, "/bound/linker");
+	assert.equal(environment.gitExecPath, "/bound/git-core");
 	assert.equal(
 		environment.workRoot.includes(DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1),
 		false,
@@ -849,10 +990,10 @@ test("expands a collected child failure without losing it to launcher aggregatio
 	assert.equal(result.cases[1].failureClass, "case_failure");
 });
 
-test("a collected global-invalid child stops later host observations", async () => {
+test("a collected global-invalid child still runs the final always-attempt postflight", async () => {
 	const root = await diagnosticRoot("pointbreak-diagnostic-collection-global-");
 	const input = request(root);
-	input.campaign.requiredCaseIds = ["collection-child", "peer"];
+	input.campaign.requiredCaseIds = ["collection-child", "peer", "postflight"];
 	input.campaign.requiredPlatformIds = ["macos_apfs"];
 	input.campaign.platforms = input.campaign.platforms.slice(0, 1);
 	retainOnlyMacosBinaryAuthority(input);
@@ -908,6 +1049,21 @@ test("a collected global-invalid child stops later host observations", async () 
 			dependsOn: [],
 			root: "peer",
 		},
+		{
+			id: "postflight",
+			lane: "preflight",
+			required: true,
+			dependsOn: [],
+			failureClass: "global_invalid",
+			alwaysAttempt: true,
+			phase: "postflight",
+			fixtureCheckpoint: {
+				fixture: "public-fixture",
+				checkpoint: "postflight",
+			},
+			mutatesRoot: false,
+			...command("postflight"),
+		},
 	];
 
 	const result = await executeDerivedChangeDiagnosticCases(input);
@@ -917,9 +1073,11 @@ test("a collected global-invalid child stops later host observations", async () 
 			{ id: "launcher", status: "passed" },
 			{ id: "collection-child", status: "failed" },
 			{ id: "peer", status: "skipped" },
+			{ id: "postflight", status: "passed" },
 		],
 	);
 	assert.match(result.cases[2].skipReason, /collection-child/);
+	assert.equal(result.cases[3].attempted, true);
 });
 
 test("deduplicates shared collection artifacts retained by the launcher and children", async () => {
@@ -1105,13 +1263,16 @@ test("retains an explicit public allowed-signers authority before signature pref
 	const authority = join(authorityDirectory, "allowed-signers");
 	await writeFile(authority, "public-authority-only\n");
 	const input = request(root);
+	input.campaign.signatureAuthoritySha256 = createHash("sha256")
+		.update(await readFile(authority))
+		.digest("hex");
 	input.cases = input.cases.slice(0, 1);
 	input.campaign.requiredCaseIds = ["global-preflight"];
 	input.campaign.requiredPlatformIds = ["macos_apfs"];
 	input.campaign.platforms = input.campaign.platforms.slice(0, 1);
 	retainOnlyMacosBinaryAuthority(input);
 	input.sourcePreflight = {
-		sourceRoot: process.cwd(),
+		...sourcePreflight(input, process.cwd()),
 		allowedSignersPath: authority,
 	};
 	const result = await executeDerivedChangeDiagnosticCases(input);
@@ -1177,7 +1338,7 @@ test("rejects source-local destructive roots and globalizes an exact identity mi
 	const sourceLocal = request(
 		join(process.cwd(), DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1),
 	);
-	sourceLocal.sourcePreflight = { sourceRoot: process.cwd() };
+	sourceLocal.sourcePreflight = sourcePreflight(sourceLocal, process.cwd());
 	assert.throws(
 		() => validateDerivedChangeDiagnosticRequest(sourceLocal),
 		/outside the source checkout/,

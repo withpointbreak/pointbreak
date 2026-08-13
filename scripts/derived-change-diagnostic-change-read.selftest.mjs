@@ -14,7 +14,6 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import {
 	DERIVED_CHANGE_CHANGE_READ_DIAGNOSTIC_CONFIG_SCHEMA_V1,
 	derivedChangeChangeReadChildDescriptors,
@@ -29,9 +28,21 @@ import {
 import {
 	DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	derivedChangeDiagnosticProgramNamesForOperatingSystem,
+	derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem,
 	finalizeDerivedChangeDiagnosticFragment,
 	mergeDerivedChangeDiagnosticReport,
 } from "./derived-change-diagnostic-report.mjs";
+
+const testShProgram = (() => {
+	const program = process.env.POINTBREAK_TEST_SH_PROGRAM;
+	if (process.env.POINTBREAK_DERIVED_CHANGE_BOUND_POLICY === "1" && !program) {
+		throw new Error(
+			"POINTBREAK_TEST_SH_PROGRAM is required by bound diagnostic policy",
+		);
+	}
+	return program ?? "/bin/sh";
+})();
 
 const digest = (digit) => digit.repeat(64);
 const commit = (digit) => digit.repeat(40);
@@ -283,7 +294,7 @@ mkdir -p "$1/.git/pointbreak-home"
 		: "";
 	await writeFile(
 		materializer,
-		`#!/bin/sh\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\n${isolatedTopologyEnvironmentGuard}mkdir -p "$1"\nprintf '%s\\n' '${topologyWitnessBytes}'\n`,
+		`#!${testShProgram}\ncase "$POINTBREAK_CYGPATH_PROGRAM" in absent|/*) ;; *) exit 18 ;; esac\n${isolatedTopologyEnvironmentGuard}mkdir -p "$1"\nprintf '%s\\n' '${topologyWitnessBytes}'\n`,
 	);
 	await writeFile(
 		fixtureModule,
@@ -317,7 +328,7 @@ mkdir -p "$1/.git/pointbreak-home"
 	await chmod(library, 0o755);
 	await chmod(cli, 0o755);
 	await chmod(materializer, 0o755);
-	const shell = "/bin/sh";
+	const shell = testShProgram;
 	const program = async (path) => ({
 		program: path,
 		binarySha256: await sha256(path),
@@ -1019,6 +1030,7 @@ test("source-preflight failure remains a mergeable global Red collection", async
 			rangeSha256: digest("4"),
 		},
 		rootComponent: DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+		signatureAuthoritySha256: digest("0"),
 		product: {
 			binaries: [
 				{
@@ -1049,38 +1061,14 @@ test("source-preflight failure remains a mergeable global Red collection", async
 				},
 			],
 		},
-		programs: [
-			"awk",
-			"bash",
-			"browserExecutable",
-			"cargo",
-			"cargoNextest",
-			"chmod",
-			"cp",
-			"dirname",
-			"filesystemProbe",
-			"find",
-			"git",
-			"hash",
-			"head",
-			"jq",
-			"mkdir",
-			"node",
-			"playwrightCli",
-			"rm",
-			"rustc",
-			"shasum",
-			"sleep",
-			"sort",
-			"tr",
-			"vitestCli",
-			"wc",
-		].map((name) => ({
+		programs: derivedChangeDiagnosticProgramNamesForOperatingSystem("macos").map((name) => ({
 			platformId: platform.id,
 			name,
 			program: `/tools/${name}`,
 			binarySha256: digest("8"),
-			...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+			...(derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem(
+				"macos",
+			).includes(name)
 				? { treeRoot: "/tools", treeSha256: digest("7") }
 				: {}),
 		})),

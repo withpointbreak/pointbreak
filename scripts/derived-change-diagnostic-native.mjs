@@ -10,7 +10,6 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import {
-	delimiter,
 	dirname,
 	isAbsolute,
 	join,
@@ -376,9 +375,8 @@ export async function runDerivedChangeNativeDiagnostic(input) {
 		TEMP: config.workRoot,
 		POINTBREAK_DIAGNOSTIC_CASE_ROOT: config.workRoot,
 		POINTBREAK_DIAGNOSTIC_WORK_ROOT: config.workRoot,
-		PATH: [dirname(config.gitProgram), process.env.PATH]
-			.filter(Boolean)
-			.join(delimiter),
+		POINTBREAK_GIT_PROGRAM: config.gitProgram,
+		PATH: dirname(config.gitProgram),
 	};
 
 	const contractOutcome = await runCommand(

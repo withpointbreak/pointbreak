@@ -4032,6 +4032,16 @@ pub fn verify_qualification_derived_access_package_v1(
     if expected_paths.len() != manifest.entries.len() {
         return Err("duplicate derived-access package entry".to_owned());
     }
+    if !expected_paths.contains(&manifest.package_path)
+        || !expected_paths.contains(&manifest.evaluation_path)
+        || expected_paths.iter().any(|path| {
+            path != &manifest.package_path
+                && path != &manifest.evaluation_path
+                && !path.starts_with("raw/")
+        })
+    {
+        return Err("derived-access package inventory is outside its closed schema".to_owned());
+    }
     for entry in &manifest.entries {
         let relative = Path::new(&entry.relative_path);
         validate_qualification_evidence_relative_path_v1(relative)?;

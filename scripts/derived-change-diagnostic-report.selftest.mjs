@@ -6,6 +6,8 @@ import {
 	DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	derivedChangeDiagnosticProgramNamesForOperatingSystem,
+	derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem,
 	finalizeDerivedChangeDiagnosticFragment,
 	mergeDerivedChangeDiagnosticReport,
 	validateDerivedChangeDiagnosticCampaign,
@@ -85,6 +87,7 @@ const campaign = () => ({
 		rangeSha256: digest("c"),
 	},
 	rootComponent: DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
+	signatureAuthoritySha256: digest("7"),
 	product: {
 		binaries: [{ platformId: "macos_apfs", binarySha256: digest("d") }],
 	},
@@ -105,41 +108,19 @@ const campaign = () => ({
 			},
 		],
 	},
-	programs: [
-		"awk",
-		"bash",
-		"browserExecutable",
-		"cargo",
-		"cargoNextest",
-		"chmod",
-		"cp",
-		"dirname",
-		"filesystemProbe",
-		"find",
-		"git",
-		"hash",
-		"head",
-		"jq",
-		"mkdir",
-		"node",
-		"playwrightCli",
-		"rm",
-		"rustc",
-		"shasum",
-		"sleep",
-		"sort",
-		"tr",
-		"vitestCli",
-		"wc",
-	].map((name) => ({
+	programs: derivedChangeDiagnosticProgramNamesForOperatingSystem("macos").map(
+		(name) => ({
 		platformId: "macos_apfs",
 		name,
 		program: `/tools/${name}`,
 		binarySha256: digest("9"),
-		...(["browserExecutable", "playwrightCli", "vitestCli"].includes(name)
+		...(derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem(
+			"macos",
+		).includes(name)
 			? { treeRoot: "/tools", treeSha256: digest("8") }
 			: {}),
-	})),
+		}),
+	),
 	fixture: fixtureAuthority(),
 	requiredCaseIds: ["compile-product"],
 	platforms: [
@@ -353,6 +334,43 @@ test("requires one exact program inventory per platform", () => {
 	assert.throws(
 		() => validateDerivedChangeDiagnosticCampaign(escapedTree),
 		/tree-bound program must be inside its bound tree root/i,
+	);
+
+	const lexicalEscape = campaign();
+	lexicalEscape.programs.find(({ name }) => name === "playwrightCli").program =
+		"/tools/../outside/playwrightCli";
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(lexicalEscape),
+		/tree-bound program must be inside its bound tree root/i,
+	);
+
+	const prefixEscape = campaign();
+	prefixEscape.programs.find(({ name }) => name === "playwrightCli").program =
+		"/tools-elsewhere/playwrightCli";
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(prefixEscape),
+		/tree-bound program must be inside its bound tree root/i,
+	);
+
+	const rootAsProgram = campaign();
+	rootAsProgram.programs.find(
+		({ name }) => name === "playwrightCli",
+	).program = "/tools";
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(rootAsProgram),
+		/tree-bound program must be inside its bound tree root/i,
+	);
+
+	const splitRustToolchain = campaign();
+	const cargo = splitRustToolchain.programs.find(
+		({ name }) => name === "cargo",
+	);
+	cargo.program = "/other-tools/cargo";
+	cargo.treeRoot = "/other-tools";
+	cargo.treeSha256 = digest("7");
+	assert.throws(
+		() => validateDerivedChangeDiagnosticCampaign(splitRustToolchain),
+		/Rust toolchain programs must share one dependency tree authority/i,
 	);
 
 	const substituted = campaign();

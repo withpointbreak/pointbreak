@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix, win32 } from "node:path";
 
 import {
 	DERIVED_CHANGE_DETERMINISTIC_FIXTURE_IDS_V2,
@@ -31,11 +32,14 @@ const FAILURE_CLASSES = new Set([
 const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const COMMON_PROGRAM_NAMES = Object.freeze([
+	"ar",
 	"awk",
 	"bash",
 	"cargo",
 	"cargoNextest",
+	"cc",
 	"cp",
+	"cxx",
 	"dirname",
 	"filesystemProbe",
 	"find",
@@ -43,10 +47,13 @@ const COMMON_PROGRAM_NAMES = Object.freeze([
 	"hash",
 	"head",
 	"jq",
+	"linker",
 	"mkdir",
 	"node",
+	"ranlib",
 	"rm",
 	"rustc",
+	"sshKeygen",
 	"sort",
 	"tr",
 	"wc",
@@ -133,7 +140,10 @@ export function derivedChangeDiagnosticProgramNamesForOperatingSystem(
 			...COMMON_PROGRAM_NAMES,
 			"browserExecutable",
 			"chmod",
+			"debugInfoTool",
+			"linkEditor",
 			"playwrightCli",
+			"sh",
 			"shasum",
 			"sleep",
 			"vitestCli",
@@ -149,10 +159,132 @@ export function derivedChangeDiagnosticTreeBoundProgramNamesForOperatingSystem(
 	operatingSystem,
 ) {
 	if (operatingSystem === "macos") {
-		return ["browserExecutable", "playwrightCli", "vitestCli"];
+		return [
+			"ar",
+			"browserExecutable",
+			"cargo",
+			"cc",
+			"cxx",
+			"debugInfoTool",
+			"git",
+			"jq",
+			"linkEditor",
+			"linker",
+			"playwrightCli",
+			"ranlib",
+			"rustc",
+			"vitestCli",
+		].sort();
 	}
-	if (operatingSystem === "windows") return [];
+	if (operatingSystem === "windows") {
+		return [
+			"ar",
+			"awk",
+			"bash",
+			"cargo",
+			"cc",
+			"cp",
+			"cygpath",
+			"cxx",
+			"dirname",
+			"find",
+			"git",
+			"hash",
+			"head",
+			"linker",
+			"mkdir",
+			"ranlib",
+			"rm",
+			"rustc",
+			"sshKeygen",
+			"sort",
+			"tr",
+			"wc",
+		].sort();
+	}
 	throw new Error("diagnostic platform operating system is unsupported");
+}
+
+export function derivedChangeDiagnosticSharedProgramTreeGroupsForOperatingSystem(
+	operatingSystem,
+) {
+	if (operatingSystem === "macos") {
+		return [
+			{
+				name: "native toolchain",
+				programs: [
+					"ar",
+					"cc",
+					"cxx",
+					"debugInfoTool",
+					"linkEditor",
+					"linker",
+					"ranlib",
+				],
+			},
+			{ name: "Rust toolchain", programs: ["cargo", "rustc"] },
+		];
+	}
+	if (operatingSystem === "windows") {
+		return [
+			{
+				name: "Git distribution",
+				programs: [
+					"awk",
+					"bash",
+					"cp",
+					"cygpath",
+					"dirname",
+					"find",
+					"git",
+					"hash",
+					"head",
+					"mkdir",
+					"rm",
+					"sort",
+					"sshKeygen",
+					"tr",
+					"wc",
+				],
+			},
+			{
+				name: "native toolchain",
+				programs: [
+					"ar",
+					"cc",
+					"cxx",
+					"linker",
+					"ranlib",
+				],
+			},
+			{ name: "Rust toolchain", programs: ["cargo", "rustc"] },
+		];
+	}
+	throw new Error("diagnostic platform operating system is unsupported");
+}
+
+function portablePathModule(path) {
+	return /^[A-Za-z]:[\\/]/u.test(path) || /^\\\\/u.test(path)
+		? win32
+		: posix;
+}
+
+function portablePathIsWithin(path, root) {
+	const pathModule = portablePathModule(root);
+	if (portablePathModule(path) !== pathModule) return false;
+	if (
+		pathModule.normalize(path) !== path ||
+		pathModule.normalize(root) !== root
+	) {
+		return false;
+	}
+	const relation = pathModule.relative(root, path);
+	return (
+		relation !== "" &&
+		!pathModule.isAbsolute(relation) &&
+			relation !== ".." &&
+			!relation.startsWith(`..${pathModule.sep}`)
+	);
 }
 
 function validateSource(source, label) {
@@ -267,6 +399,18 @@ function validatePlatform(platform, label) {
 	requireText(platform.operatingSystem, `${label} platform operating system`);
 	requireText(platform.architecture, `${label} platform architecture`);
 	requireText(platform.filesystem, `${label} platform filesystem`);
+	if (platform.operatingSystem === "windows") {
+		requireText(platform.systemRoot, `${label} platform system root`);
+		if (
+			!win32.isAbsolute(platform.systemRoot) ||
+			win32.normalize(platform.systemRoot) !== platform.systemRoot ||
+			platform.systemRoot !== platform.systemRoot.toLowerCase()
+		) {
+			throw new Error(
+				`${label} platform system root must be normalized lowercase`,
+			);
+		}
+	}
 	requireSha256(
 		platform.hostIdentitySha256,
 		`${label} platform host identity SHA-256`,
@@ -279,6 +423,7 @@ function validatePlatform(platform, label) {
 			"architecture",
 			"filesystem",
 			"hostIdentitySha256",
+			...(platform.operatingSystem === "windows" ? ["systemRoot"] : []),
 		],
 		`${label} platform`,
 	);
@@ -389,9 +534,7 @@ function validateProgramInventory(programs, platforms, label) {
 				`${label} program tree root`,
 			);
 			requireSha256(program.treeSha256, `${label} program tree SHA-256`);
-			const root = program.treeRoot.replaceAll("\\", "/").replace(/\/+$/u, "");
-			const leaf = program.program.replaceAll("\\", "/");
-			if (!leaf.startsWith(`${root}/`)) {
+			if (!portablePathIsWithin(program.program, program.treeRoot)) {
 				throw new Error(
 					`${label} tree-bound program must be inside its bound tree root`,
 				);
@@ -422,6 +565,29 @@ function validateProgramInventory(programs, platforms, label) {
 			`${label} program inventory must be sorted, unique, complete, and exactly platform-bound`,
 		);
 	}
+	for (const platform of platforms) {
+		const identities = new Map(
+			programs
+				.filter(({ platformId }) => platformId === platform.id)
+				.map((identity) => [identity.name, identity]),
+		);
+		for (const group of derivedChangeDiagnosticSharedProgramTreeGroupsForOperatingSystem(
+			platform.operatingSystem,
+		)) {
+			const members = group.programs.map((name) => identities.get(name));
+			const [{ treeRoot, treeSha256 }] = members;
+			if (
+				members.some(
+					(member) =>
+						member.treeRoot !== treeRoot || member.treeSha256 !== treeSha256,
+				)
+			) {
+				throw new Error(
+					`${label} ${platform.id} ${group.name} programs must share one dependency tree authority`,
+				);
+			}
+		}
+	}
 }
 
 export function validateDerivedChangeDiagnosticRootComponent(rootComponent) {
@@ -440,6 +606,10 @@ export function validateDerivedChangeDiagnosticCampaign(
 	requireText(campaign.id, `${label} id`);
 	validateDerivedChangeDiagnosticRootComponent(campaign.rootComponent);
 	validateSource(campaign.source, label);
+	requireSha256(
+		campaign.signatureAuthoritySha256,
+		`${label} signature authority SHA-256`,
+	);
 	validateFixture(campaign.fixture, label, campaign.source);
 	validateSortedInventory(campaign.requiredCaseIds, "case");
 	validateSortedInventory(campaign.requiredPlatformIds, "platform");

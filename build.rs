@@ -124,6 +124,7 @@ fn run() -> Result<(), String> {
     let identity = derive_identity(&manifest_dir, &package_version)?;
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=POINTBREAK_GIT_PROGRAM");
     if identity.source == "git" {
         emit_git_rerun_directives(&manifest_dir)?;
     }
@@ -200,7 +201,7 @@ fn git_stdout(manifest_dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_stdout_optional(manifest_dir: &Path, args: &[&str]) -> Result<Option<String>, String> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .arg("-C")
         .arg(manifest_dir)
         .args(args)
@@ -218,7 +219,7 @@ fn git_stdout_optional(manifest_dir: &Path, args: &[&str]) -> Result<Option<Stri
 }
 
 fn git_output(manifest_dir: &Path, args: &[&str]) -> Result<Output, String> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .arg("-C")
         .arg(manifest_dir)
         .args(args)
@@ -229,6 +230,12 @@ fn git_output(manifest_dir: &Path, args: &[&str]) -> Result<Output, String> {
     } else {
         Err(git_failure(manifest_dir, args, &output))
     }
+}
+
+fn git_program() -> PathBuf {
+    env::var_os("POINTBREAK_GIT_PROGRAM")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("git"))
 }
 
 fn git_failure(manifest_dir: &Path, args: &[&str], output: &Output) -> String {

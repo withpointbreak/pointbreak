@@ -33,13 +33,14 @@
 		url: page.url(),
 		viewport: page.viewportSize(),
 	});
-	const transitionExpectation = () => ({
+	const transitionExpectation = (exactEvent) => ({
 		wideCss: "#detail-back has display none",
 		exactActionFocus: "the exact action is document.activeElement",
 		ordinarySplitPaneSurfaces: ordinarySplitPaneSelectors.map((selector) => ({
 			selector,
 			inert: false,
 		})),
+		...(exactEvent ? { exactEvent } : {}),
 	});
 	const recordCaseFailure = (
 		caseResult,
@@ -63,6 +64,14 @@
 		caseResult.actual = { observations: [observation] };
 	};
 	const timelineUrl = `${config.server.baseUrl}/#/timeline?limit=100&order=desc`;
+	const hashFromUrl = (url) => {
+		const hashOffset = url.indexOf("#");
+		return hashOffset === -1 ? "" : url.slice(hashOffset);
+	};
+	const exactEventRouteFromTimelineRoute = (timelineRoute, eventId) => {
+		const [timelinePath, timelineSearch = ""] = timelineRoute.split("?", 2);
+		return `${timelinePath}/events/${encodeURIComponent(eventId)}${timelineSearch ? `?${timelineSearch}` : ""}`;
+	};
 	const waitForTimeline = () =>
 		page.waitForFunction(() => {
 			const rows = document.querySelectorAll("#timeline [data-event-id]");
@@ -72,9 +81,9 @@
 				document.querySelector("#master")?.inert === false
 			);
 		});
-	const waitForNarrowExactEvent = (eventId) =>
+	const waitForNarrowExactEvent = (eventId, route) =>
 		page.waitForFunction(
-			({ expectedEventId, selectors }) => {
+			({ expectedEventId, expectedRoute, selectors }) => {
 				const selected = document.querySelector(
 					'#timeline [aria-selected="true"]',
 				);
@@ -84,6 +93,7 @@
 				return (
 					getComputedStyle(document.querySelector("#detail-back")).display !==
 						"none" &&
+					location.hash === expectedRoute &&
 					document.querySelector("#detail")?.inert === false &&
 					detailEvent?.dataset.eventId === expectedEventId &&
 					selected?.dataset.eventId === expectedEventId &&
@@ -92,7 +102,11 @@
 					)
 				);
 			},
-			{ expectedEventId: eventId, selectors: ordinarySplitPaneSelectors },
+			{
+				expectedEventId: eventId,
+				expectedRoute: route,
+				selectors: ordinarySplitPaneSelectors,
+			},
 		);
 	const waitForWideExactEvent = (eventId, route) =>
 		page.waitForFunction(
@@ -197,21 +211,27 @@
 		};
 		let opened = false;
 		let screenshotCaptured = false;
+		let exactEvent;
 		try {
 			await page.setViewportSize(narrow);
 			await page.goto(timelineUrl, { waitUntil: "domcontentloaded" });
 			await waitForTimeline();
+			const timelineRoute = hashFromUrl(page.url());
+			if (timelineRoute !== hashFromUrl(timelineUrl)) {
+				throw new Error("Timeline navigation retained an unexpected route");
+			}
 			const event = page.locator("#timeline [data-event-id]").first();
 			const eventId = await event.getAttribute("data-event-id");
 			if (!eventId)
 				throw new Error("Timeline fixture did not expose an exact event ID");
+			const exactEventRoute = exactEventRouteFromTimelineRoute(
+				timelineRoute,
+				eventId,
+			);
+			exactEvent = { eventId, route: exactEventRoute };
 			await event.click();
 			opened = true;
-			await waitForNarrowExactEvent(eventId);
-			const exactEventUrl = page.url();
-			const hashOffset = exactEventUrl.indexOf("#");
-			const exactEventRoute =
-				hashOffset === -1 ? "" : exactEventUrl.slice(hashOffset);
+			await waitForNarrowExactEvent(eventId, exactEventRoute);
 			await page.setViewportSize(wide);
 			await waitForWideExactEvent(eventId, exactEventRoute);
 			await page.screenshot({
@@ -221,7 +241,12 @@
 			});
 			screenshotCaptured = true;
 		} catch (error) {
-			recordCaseFailure(caseResult, "narrow-open-or-wide-settle", error);
+			recordCaseFailure(
+				caseResult,
+				"narrow-open-or-wide-settle",
+				error,
+				transitionExpectation(exactEvent),
+			);
 		} finally {
 			if (!screenshotCaptured) {
 				try {

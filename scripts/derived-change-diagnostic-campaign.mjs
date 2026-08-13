@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, writeFile } from "node:fs/promises";
 import {
 	hostname,
 	arch as nodeArchitecture,
@@ -10,6 +10,7 @@ import {
 	basename,
 	isAbsolute,
 	join,
+	posix,
 	relative,
 	resolve,
 	sep,
@@ -427,6 +428,18 @@ export function createDerivedChangeDiagnosticCampaign(seed) {
 		if (!["macos", "windows"].includes(platform.operatingSystem)) {
 			throw new Error("diagnostic platform operating system is unsupported");
 		}
+		if (platform.operatingSystem === "windows") {
+			requireText(platform.systemRoot, "diagnostic Windows system root");
+			if (
+				!win32.isAbsolute(platform.systemRoot) ||
+				win32.normalize(platform.systemRoot) !== platform.systemRoot ||
+				platform.systemRoot !== platform.systemRoot.toLowerCase()
+			) {
+				throw new Error(
+					"diagnostic Windows system root must be normalized lowercase",
+				);
+			}
+		}
 		if (!["apfs", "ntfs"].includes(platform.filesystem)) {
 			throw new Error("diagnostic platform filesystem is unsupported");
 		}
@@ -435,6 +448,7 @@ export function createDerivedChangeDiagnosticCampaign(seed) {
 		id: seed.id,
 		rootComponent: DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1,
 		source: structuredClone(seed.source),
+		signatureAuthoritySha256: seed.signatureAuthoritySha256,
 		fixture: structuredClone(seed.fixture),
 		requiredPlatformIds: seed.platforms.map(({ id }) => id).sort(),
 		platforms: structuredClone(seed.platforms).sort((left, right) =>
@@ -489,6 +503,223 @@ function validateProgramInventory(programs, platform, campaign) {
 		}
 	}
 	return [...new Set(Object.values(programs))];
+}
+
+function programAuthority(config, name) {
+	const identity = config.campaign.programs.find(
+		({ platformId, name: candidate }) =>
+			platformId === config.platformId && candidate === name,
+	);
+	if (!identity) {
+		throw new Error(`diagnostic ${name} program authority is missing`);
+	}
+	return identity;
+}
+
+function platformPathModule(platform) {
+	return platform.operatingSystem === "windows" ? win32 : posix;
+}
+
+function platformPathDelimiter(platform) {
+	return platform.operatingSystem === "windows" ? ";" : ":";
+}
+
+function exactGitPaths(config, platform) {
+	const pathModule = platformPathModule(platform);
+	const treeRoot = programAuthority(config, "git").treeRoot;
+	if (treeRoot === undefined) {
+		throw new Error("diagnostic Git distribution tree authority is missing");
+	}
+	const windowsDistribution =
+		platform.architecture === "aarch64" ? "clangarm64" : "mingw64";
+	return {
+		bin: pathModule.dirname(config.programs.git),
+		exec:
+			platform.operatingSystem === "windows"
+				? pathModule.join(
+						treeRoot,
+						windowsDistribution,
+						"libexec",
+						"git-core",
+					)
+				: pathModule.join(treeRoot, "libexec", "git-core"),
+		templates:
+			platform.operatingSystem === "windows"
+				? pathModule.join(
+						treeRoot,
+						windowsDistribution,
+						"share",
+						"git-core",
+						"templates",
+					)
+				: pathModule.join(treeRoot, "share", "git-core", "templates"),
+	};
+}
+
+function exactGitEnvironment(config, platform) {
+	const paths = exactGitPaths(config, platform);
+	return {
+		GIT_CONFIG_GLOBAL:
+			platform.operatingSystem === "windows" ? "NUL" : "/dev/null",
+		GIT_CONFIG_NOSYSTEM: "1",
+		GIT_EXEC_PATH: paths.exec,
+		GIT_TEMPLATE_DIR: paths.templates,
+		GIT_TERMINAL_PROMPT: "0",
+		LANG: "C",
+		LC_ALL: "C",
+		PATH: paths.bin,
+		POINTBREAK_GIT_PROGRAM: config.programs.git,
+		POINTBREAK_SSH_KEYGEN_PROGRAM: config.programs.sshKeygen,
+	};
+}
+
+function rustTargetTriple(platform) {
+	const key = `${platform.operatingSystem}/${platform.architecture}`;
+	const triple = new Map([
+		["macos/aarch64", "aarch64_apple_darwin"],
+		["macos/x86_64", "x86_64_apple_darwin"],
+		["windows/aarch64", "aarch64_pc_windows_msvc"],
+		["windows/x86_64", "x86_64_pc_windows_msvc"],
+	]).get(key);
+	if (!triple) {
+		throw new Error("diagnostic native toolchain target is unsupported");
+	}
+	return triple;
+}
+
+function nativeLayout(config, platform) {
+	const pathModule = platformPathModule(platform);
+	const root = programAuthority(config, "cc").treeRoot;
+	if (root === undefined) {
+		throw new Error("diagnostic native toolchain tree authority is missing");
+	}
+	const binDirectories = [
+		...new Set(
+			[
+				"ar",
+				"cc",
+				"cxx",
+				"linker",
+				"ranlib",
+				...(platform.operatingSystem === "macos"
+					? ["debugInfoTool", "linkEditor"]
+					: []),
+			].map((name) => pathModule.dirname(config.programs[name])),
+		),
+	];
+	if (platform.operatingSystem === "macos") {
+		return {
+			root,
+			binDirectories,
+			sdk: pathModule.join(root, "sdk"),
+		};
+	}
+	return {
+		root,
+		binDirectories,
+		include: [
+			pathModule.join(root, "include", "msvc"),
+			...[
+				"ucrt",
+				"shared",
+				"um",
+				"winrt",
+				"cppwinrt",
+			].map((name) => pathModule.join(root, "include", "sdk", name)),
+		],
+		lib: [
+			pathModule.join(root, "lib", "msvc"),
+			pathModule.join(root, "lib", "sdk", "ucrt"),
+			pathModule.join(root, "lib", "sdk", "um"),
+		],
+	};
+}
+
+export function derivedChangeDiagnosticExactToolEnvironment(config, platform) {
+	const pathModule = platformPathModule(platform);
+	const native = nativeLayout(config, platform);
+	const git = exactGitPaths(config, platform);
+	const target = rustTargetTriple(platform);
+	const targetKey = target.toUpperCase();
+	const environment = {
+		...exactGitEnvironment(config, platform),
+		AR: config.programs.ar,
+		[`AR_${target}`]: config.programs.ar,
+		CARGO: config.programs.cargo,
+		CARGO_TERM_COLOR: "never",
+		[`CARGO_TARGET_${targetKey}_LINKER`]: config.programs.linker,
+		CC: config.programs.cc,
+		[`CC_${target}`]: config.programs.cc,
+		CXX: config.programs.cxx,
+		[`CXX_${target}`]: config.programs.cxx,
+		PATH: [...native.binDirectories, git.bin].join(
+			platformPathDelimiter(platform),
+		),
+		RANLIB: config.programs.ranlib,
+		[`RANLIB_${target}`]: config.programs.ranlib,
+		RUSTC: config.programs.rustc,
+	};
+	if (platform.operatingSystem === "macos") {
+		return {
+			...environment,
+			CARGO_ENCODED_RUSTFLAGS: `-Clink-arg=-fuse-ld=${config.programs.linkEditor}`,
+			SDKROOT: native.sdk,
+		};
+	}
+	const systemRoot = platform.systemRoot;
+	return {
+		...environment,
+		ComSpec: pathModule.join(systemRoot, "System32", "cmd.exe"),
+		INCLUDE: native.include.join(platformPathDelimiter(platform)),
+		LIB: native.lib.join(platformPathDelimiter(platform)),
+		LIBPATH: "",
+		PATH: [
+			...native.binDirectories,
+			git.bin,
+			pathModule.join(systemRoot, "System32"),
+		].join(platformPathDelimiter(platform)),
+		SYSTEMROOT: systemRoot,
+		SystemRoot: systemRoot,
+		WINDIR: systemRoot,
+	};
+}
+
+function exactRuntimeEnvironment(config, platform) {
+	return exactGitEnvironment(config, platform);
+}
+
+function exactScriptPolicyEnvironment(config, platform) {
+	return {
+		...exactRuntimeEnvironment(config, platform),
+		BASH: config.programs.bash,
+		CI: "1",
+		NO_UPDATE_NOTIFIER: "1",
+		PATH: "",
+		PLAYWRIGHT_CLI: config.programs.playwrightCli,
+		POINTBREAK_DERIVED_CHANGE_BOUND_POLICY: "1",
+		POINTBREAK_AWK_PROGRAM: config.programs.awk,
+		POINTBREAK_BASH_PROGRAM: config.programs.bash,
+		POINTBREAK_BROWSER_EXECUTABLE: config.programs.browserExecutable,
+		POINTBREAK_CHMOD_PROGRAM: config.programs.chmod,
+		POINTBREAK_CP_PROGRAM: config.programs.cp,
+		POINTBREAK_CYGPATH_PROGRAM: config.programs.cygpath ?? "absent",
+		POINTBREAK_DIRNAME_PROGRAM: config.programs.dirname,
+		POINTBREAK_FIND_PROGRAM: config.programs.find,
+		POINTBREAK_HASH_PROGRAM: config.programs.hash,
+		POINTBREAK_HEAD_PROGRAM: config.programs.head,
+		POINTBREAK_JQ_PROGRAM: config.programs.jq,
+		POINTBREAK_MKDIR_PROGRAM: config.programs.mkdir,
+		POINTBREAK_NODE_PROGRAM: config.programs.node,
+		POINTBREAK_RM_PROGRAM: config.programs.rm,
+		POINTBREAK_SHASUM_PROGRAM: config.programs.shasum,
+		POINTBREAK_SLEEP_PROGRAM: config.programs.sleep,
+		POINTBREAK_SORT_PROGRAM: config.programs.sort,
+		POINTBREAK_TEST_BASH_PROGRAM: config.programs.bash,
+		POINTBREAK_TEST_SH_PROGRAM: config.programs.sh,
+		POINTBREAK_TEST_SLEEP_PROGRAM: config.programs.sleep,
+		POINTBREAK_TR_PROGRAM: config.programs.tr,
+		POINTBREAK_WC_PROGRAM: config.programs.wc,
+	};
 }
 
 function campaignBinarySha256(campaign, identity, platformId, role) {
@@ -764,6 +995,8 @@ function validateHostConfig(config) {
 			config.allowedSignersPath,
 			"diagnostic allowed signers path",
 		);
+	} else {
+		throw new Error("diagnostic allowed signers path is required");
 	}
 	const requiredExecutables = validateProgramInventory(
 		config.programs,
@@ -813,6 +1046,7 @@ function executableCase({
 	cwd,
 	env,
 	mutatesRoot = true,
+	alwaysAttempt = false,
 	artifactPaths,
 	collection,
 }) {
@@ -830,6 +1064,7 @@ function executableCase({
 		...(cwd ? { cwd } : {}),
 		...(env ? { env } : {}),
 		mutatesRoot,
+		...(alwaysAttempt ? { alwaysAttempt: true } : {}),
 		...(artifactPaths ? { artifactPaths } : {}),
 		...(collection ? { collection } : {}),
 	};
@@ -887,13 +1122,13 @@ function browserArtifacts() {
 
 function bindingRequest(request) {
 	return {
-		campaign: request.campaign,
+		campaign: structuredClone(request.campaign),
 		platformId: request.platformId,
 		outputRoot: request.outputRoot,
 		temporaryRoot: request.temporaryRoot,
-		sourcePreflight: request.sourcePreflight,
-		identityPaths: request.identityPaths,
-		requiredExecutables: request.requiredExecutables,
+		sourcePreflight: structuredClone(request.sourcePreflight),
+		identityPaths: structuredClone(request.identityPaths),
+		requiredExecutables: [...request.requiredExecutables],
 		cases: request.cases.map(
 			({ program, unavailableReason, unknownReason }) => ({
 				program,
@@ -911,9 +1146,18 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 	const prefix = config.platformId;
 	const preflight = `${prefix}.preflight`;
 	const binaryPreflight = `${prefix}.product-version`;
+	const gitPaths = exactGitPaths(config, platform);
+	const runtimeEnvironment = exactRuntimeEnvironment(config, platform);
+	const toolEnvironment = derivedChangeDiagnosticExactToolEnvironment(
+		config,
+		platform,
+	);
 	const sourcePreflight = {
 		sourceRoot: config.sourceCheckout,
 		gitProgram: config.programs.git,
+		gitExecPath: gitPaths.exec,
+		sshKeygenProgram: config.programs.sshKeygen,
+		allowedSignersSha256: campaign.signatureAuthoritySha256,
 		...(config.allowedSignersPath
 			? { allowedSignersPath: config.allowedSignersPath }
 			: {}),
@@ -959,6 +1203,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			failureClass: "global_invalid",
 			phase: "product-self-identity",
 			env: {
+				...toolEnvironment,
 				[BINARY_PREFLIGHT_ENV]: JSON.stringify({
 					operatingSystem: platform.operatingSystem,
 					product: config.identityPaths.product,
@@ -969,6 +1214,20 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					cargoNextest: config.programs.cargoNextest,
 					rustc: config.programs.rustc,
 					node: config.programs.node,
+					nativeSmoke: {
+						ar: config.programs.ar,
+						cc: config.programs.cc,
+						cxx: config.programs.cxx,
+						linker: config.programs.linker,
+						ranlib: config.programs.ranlib,
+						...(platform.operatingSystem === "macos"
+							? {
+									debugInfoTool: config.programs.debugInfoTool,
+									linkEditor: config.programs.linkEditor,
+									sdk: nativeLayout(config, platform).sdk,
+								}
+							: {}),
+					},
 					...(platform.operatingSystem === "macos"
 						? {
 								browserExecutable: config.programs.browserExecutable,
@@ -1003,7 +1262,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			campaign,
 			phase: "compile-all-diagnostic-targets",
 			cwd: config.sourceCheckout,
-			env: { CARGO: config.programs.cargo, RUSTC: config.programs.rustc },
+			env: toolEnvironment,
 		}),
 	);
 	cases.push(
@@ -1025,7 +1284,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			campaign,
 			phase: "affected-policy-suite",
 			cwd: config.sourceCheckout,
-			env: { CARGO: config.programs.cargo, RUSTC: config.programs.rustc },
+			env: toolEnvironment,
 		}),
 	);
 	const changeReadRoot = "change-read-stateful";
@@ -1041,6 +1300,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			failureClass: "lane_invalid",
 			phase: "derived-change-read-stateful-collection",
 			env: {
+				...runtimeEnvironment,
 				POINTBREAK_DERIVED_CHANGE_CHANGE_READ_CONFIG:
 					JSON.stringify(changeReadConfig),
 			},
@@ -1068,6 +1328,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				phase: "platform-policy-case",
 				checkpoint: control.checkpoint,
 				env: {
+					...runtimeEnvironment,
 					[CONTROL_CASE_ENV]: JSON.stringify({
 						program: config.identityPaths.control,
 						testName: control.testName,
@@ -1090,6 +1351,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 			failureClass: "lane_invalid",
 			phase: "native-stateful-collection",
 			env: {
+				...runtimeEnvironment,
 				POINTBREAK_DERIVED_CHANGE_NATIVE_CONFIG: JSON.stringify({
 					schema: DERIVED_CHANGE_NATIVE_DIAGNOSTIC_CONFIG_SCHEMA_V1,
 					campaignId: campaign.id,
@@ -1123,6 +1385,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				campaign,
 				phase: "diagnostic-script-policy",
 				cwd: config.sourceCheckout,
+				env: exactScriptPolicyEnvironment(config, platform),
 			}),
 			executableCase({
 				id: `${prefix}.policy-web`,
@@ -1139,6 +1402,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				campaign,
 				phase: "browser-lifecycle-policy",
 				cwd: join(config.sourceCheckout, "src/cli/inspect/web"),
+				env: { CI: "1", NO_UPDATE_NOTIFIER: "1", PATH: "" },
 			}),
 		);
 	}
@@ -1170,6 +1434,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				failureClass: "lane_invalid",
 				phase: "focused-real-browser-collection",
 				env: {
+					...runtimeEnvironment,
 					CI: "1",
 					NO_UPDATE_NOTIFIER: "1",
 					POINTBREAK_BINARY: config.identityPaths.product,
@@ -1179,6 +1444,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					POINTBREAK_EXPECTED_SOURCE_TREE: campaign.source.tree,
 					PLAYWRIGHT_CLI: config.programs.playwrightCli,
 					POINTBREAK_GIT_PROGRAM: config.programs.git,
+					POINTBREAK_SSH_KEYGEN_PROGRAM: config.programs.sshKeygen,
 					POINTBREAK_JQ_PROGRAM: config.programs.jq,
 					POINTBREAK_NODE_PROGRAM: config.programs.node,
 					POINTBREAK_SHASUM_PROGRAM: config.programs.shasum,
@@ -1244,7 +1510,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 	const postflight = executableCase({
 		id: `${prefix}.postflight`,
 		lane: "preflight",
-		dependsOn: [preflight, binaryPreflight],
+		dependsOn: [],
 		program: config.programs.node,
 		args: [campaignModule, "verify-bindings"],
 		root: "postflight",
@@ -1254,9 +1520,18 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 		checkpoint: "exact-bound-state-after-cases",
 		env: {},
 		mutatesRoot: false,
+		alwaysAttempt: true,
 	});
 	cases.push(postflight);
-	postflight.env[BOUND_REQUEST_ENV] = JSON.stringify(bindingRequest(request));
+	const postflightRequest = bindingRequest(request);
+	if (config.allowedSignersPath) {
+		postflightRequest.sourcePreflight.allowedSignersPath = join(
+			config.outputRoot,
+			"authority",
+			"allowed-signers",
+		);
+	}
+	postflight.env[BOUND_REQUEST_ENV] = JSON.stringify(postflightRequest);
 	return validateDerivedChangeDiagnosticRequest(request);
 }
 
@@ -1518,6 +1793,148 @@ export async function runDerivedChangeDiagnosticScriptToolPreflight(
 	}
 }
 
+async function requireSuccessfulToolInvocation(name, program, args, options) {
+	const outcome = await runCommand(program, args, options);
+	if (outcome.code !== 0 || outcome.signal !== null) {
+		throw new Error(
+			`diagnostic ${name} invocation failed: ${outcome.stderr.toString("utf8")}`,
+		);
+	}
+	return outcome;
+}
+
+export async function runDerivedChangeDiagnosticNativeToolchainPreflight(
+	config,
+	environment = process.env,
+) {
+	requireObject(config, "diagnostic native toolchain preflight");
+	for (const name of [
+		"ar",
+		"cc",
+		"cxx",
+		"linker",
+		"ranlib",
+		"workRoot",
+	]) {
+		requireAbsolutePath(config[name], `diagnostic native ${name} path`);
+	}
+	const root = join(config.workRoot, "native-toolchain-preflight");
+	await mkdir(root);
+	const source = join(root, "main.c");
+	const cxxSource = join(root, "main.cc");
+	await Promise.all([
+		writeFile(source, "int main(void) { return 0; }\n"),
+		writeFile(cxxSource, "int pointbreak_smoke(void) { return 0; }\n"),
+	]);
+	if (config.operatingSystem === "macos") {
+		for (const name of ["debugInfoTool", "linkEditor", "sdk"]) {
+			requireAbsolutePath(config[name], `diagnostic native ${name} path`);
+		}
+		const object = join(root, "main.o");
+		const cxxObject = join(root, "main-cxx.o");
+		const archive = join(root, "libpointbreak-smoke.a");
+		const executable = join(root, "pointbreak-smoke");
+		const options = { cwd: root, env: environment };
+		await requireSuccessfulToolInvocation(
+			"native C compiler smoke",
+			config.cc,
+			["-g", "-isysroot", config.sdk, "-c", source, "-o", object],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native C++ compiler smoke",
+			config.cxx,
+			["-isysroot", config.sdk, "-c", cxxSource, "-o", cxxObject],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native archiver smoke",
+			config.ar,
+			["rcs", archive, object, cxxObject],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native archive index smoke",
+			config.ranlib,
+			[archive],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native linker smoke",
+			config.linker,
+			[
+				"-isysroot",
+				config.sdk,
+				`-fuse-ld=${config.linkEditor}`,
+				object,
+				"-o",
+				executable,
+			],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native debug-info smoke",
+			config.debugInfoTool,
+			[executable, "-o", `${executable}.dSYM`],
+			options,
+		);
+		await requireSuccessfulToolInvocation(
+			"native executable smoke",
+			executable,
+			[],
+			options,
+		);
+		return;
+	}
+	if (config.operatingSystem !== "windows") {
+		throw new Error(
+			"diagnostic native toolchain preflight operating system is unsupported",
+		);
+	}
+	const object = join(root, "main.obj");
+	const cxxObject = join(root, "main-cxx.obj");
+	const archive = join(root, "pointbreak-smoke.lib");
+	const executable = join(root, "pointbreak-smoke.exe");
+	const subsystem = "/subsystem:console";
+	const options = { cwd: root, env: environment };
+	await requireSuccessfulToolInvocation(
+		"native C compiler smoke",
+		config.cc,
+		["/nologo", "/c", source, `/Fo${object}`],
+		options,
+	);
+	await requireSuccessfulToolInvocation(
+		"native C++ compiler smoke",
+		config.cxx,
+		["/nologo", "/c", cxxSource, `/Fo${cxxObject}`],
+		options,
+	);
+	await requireSuccessfulToolInvocation(
+		"native archiver smoke",
+		config.ar,
+		["/nologo", `/OUT:${archive}`, object, cxxObject],
+		options,
+	);
+	await requireSuccessfulToolInvocation(
+		"native archive index smoke",
+		config.ranlib,
+		["/nologo", "/list", archive],
+		options,
+	);
+	await requireSuccessfulToolInvocation(
+		"native linker smoke",
+		config.linker,
+		["/nologo", subsystem, `/OUT:${executable}`, object],
+		options,
+	);
+	await requireSuccessfulToolInvocation(
+		"native executable smoke",
+		executable,
+		[],
+		options,
+	);
+}
+
 async function runBinaryPreflight() {
 	const config = JSON.parse(process.env[BINARY_PREFLIGHT_ENV] ?? "");
 	requireObject(config, "diagnostic binary preflight");
@@ -1539,6 +1956,12 @@ async function runBinaryPreflight() {
 		"diagnostic binary preflight operating system",
 	);
 	requireObject(config.source, "diagnostic binary preflight source");
+	requireObject(config.nativeSmoke, "diagnostic native toolchain preflight");
+	await runDerivedChangeDiagnosticNativeToolchainPreflight({
+		...config.nativeSmoke,
+		operatingSystem: config.operatingSystem,
+		workRoot: process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT,
+	});
 	for (const [name, program] of [
 		["cargo", config.cargo],
 		["cargo-nextest", config.cargoNextest],
@@ -1730,12 +2153,20 @@ async function probeHost() {
 			process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT,
 		),
 		hostIdentitySha256: observedHostIdentitySha256(),
+		...(config.platform.operatingSystem === "windows"
+			? {
+					systemRoot: win32
+						.normalize(process.env.SystemRoot ?? "")
+						.toLowerCase(),
+				}
+			: {}),
 	};
 	for (const field of [
 		"operatingSystem",
 		"architecture",
 		"filesystem",
 		"hostIdentitySha256",
+		...(config.platform.operatingSystem === "windows" ? ["systemRoot"] : []),
 	]) {
 		if (observed[field] !== config.platform[field]) {
 			throw new Error(
