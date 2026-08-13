@@ -734,6 +734,7 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 		config.programs.sh,
 	);
 	for (const entry of [compile, policy]) {
+		assert.equal(entry.env.GIT_CONFIG_GLOBAL, "/dev/null");
 		assert.equal(entry.env.CARGO_TARGET_DIR, undefined);
 		assert.equal(entry.env.CARGO, config.programs.cargo);
 		assert.equal(entry.env.RUSTC, config.programs.rustc);
@@ -1072,6 +1073,7 @@ test("Windows host requests retain the complete native Change-read collection", 
 	assert.equal(compile.env.SYSTEMROOT, "c:\\windows");
 	assert.equal(compile.env.WINDIR, "c:\\windows");
 	assert.equal(compile.env.ComSpec, "c:\\windows\\System32\\cmd.exe");
+	assert.equal(compile.env.GIT_CONFIG_GLOBAL, "/dev/null");
 	assert.equal(compile.env.PATH.endsWith("c:\\windows\\System32"), true);
 	const changeRead = request.cases.find(({ id }) =>
 		id.endsWith("change-read-stateful"),

@@ -975,10 +975,8 @@ async function verifySourcePreflight(request) {
 				throw new Error("allowed signers authority differs from campaign");
 			}
 		}
-		const platform = platformFor(request);
 		const environment = {
-			GIT_CONFIG_GLOBAL:
-				platform.operatingSystem === "windows" ? "NUL" : "/dev/null",
+			GIT_CONFIG_GLOBAL: "/dev/null",
 			GIT_CONFIG_NOSYSTEM: "1",
 			GIT_EXEC_PATH: preflight.gitExecPath,
 			GIT_TERMINAL_PROMPT: "0",

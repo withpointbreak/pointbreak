@@ -553,7 +553,7 @@ test("source signature preflight uses the bound Git helper with no ambient PATH"
 		git,
 		`#!${process.execPath}
 import { appendFileSync } from "node:fs";
-appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ args: process.argv.slice(2), path: process.env.PATH, execPath: process.env.GIT_EXEC_PATH }) + "\\n");
+appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ args: process.argv.slice(2), path: process.env.PATH, execPath: process.env.GIT_EXEC_PATH, globalConfig: process.env.GIT_CONFIG_GLOBAL }) + "\\n");
 const args = process.argv.slice(2).join(" ");
 if (args.endsWith("rev-parse HEAD") || args.includes("^{commit}")) process.stdout.write(${JSON.stringify(`${source.commit}\n`)});
 else if (args.includes("^{tree}")) process.stdout.write(${JSON.stringify(`${source.tree}\n`)});
@@ -593,6 +593,7 @@ else if (args.includes("^{tree}")) process.stdout.write(${JSON.stringify(`${sour
 	);
 	assert.equal(signature.path, "");
 	assert.equal(signature.execPath, execPath);
+	assert.equal(signature.globalConfig, "/dev/null");
 });
 
 test("sanitizes owner-store state and records missing declared artifacts without stopping peers", async () => {

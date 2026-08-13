@@ -559,8 +559,7 @@ function exactGitPaths(config, platform) {
 function exactGitEnvironment(config, platform) {
 	const paths = exactGitPaths(config, platform);
 	return {
-		GIT_CONFIG_GLOBAL:
-			platform.operatingSystem === "windows" ? "NUL" : "/dev/null",
+		GIT_CONFIG_GLOBAL: "/dev/null",
 		GIT_CONFIG_NOSYSTEM: "1",
 		GIT_EXEC_PATH: paths.exec,
 		GIT_TEMPLATE_DIR: paths.templates,
