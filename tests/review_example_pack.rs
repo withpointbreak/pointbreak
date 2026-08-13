@@ -56,7 +56,7 @@ fn synthetic_decision_matrix_materializer_uses_only_isolated_pointbreak_surfaces
     );
     assert!(script.contains("POINTBREAK_HOME=\"$pointbreak_home\""));
     assert!(script.contains("--format json"));
-    assert!(script.contains("cygpath -u \"$native_path\""));
+    assert!(script.contains("\"$cygpath_program\" -u \"$native_path\""));
     assert!(!script.contains("~/.pointbreak"));
     assert!(!script.contains("shore"));
     assert!(!script.contains("rev:sha256:"));

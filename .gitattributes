@@ -48,4 +48,8 @@ tests/fixtures/store-foundation/generated-workloads-v1.json text eol=lf
 tests/fixtures/store-foundation/codec/golden.json text eol=lf
 tests/fixtures/store-foundation/longitudinal-runner-contract-v1.json text eol=lf
 tests/fixtures/store-foundation/longitudinal-capacity-sentinel-v1.json text eol=lf
+
+# Change-ready store records are copied and verified by SHA-256 when public
+# diagnostic fixtures are materialized. Keep their checkout bytes canonical.
+tests/support/assets/change-ready-store/*.json text eol=lf
 docs/benchmarking.md text eol=lf

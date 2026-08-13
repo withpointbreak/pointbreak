@@ -205,6 +205,32 @@ impl DerivedAccessRuntime {
         lock(current).as_ref().map(Arc::clone)
     }
 
+    /// Perform the cached reader's bounded native authority recheck without
+    /// opening, installing, rebuilding, or maintaining a generation.
+    pub(super) fn cached_current_authority_is_stable(
+        &self,
+        current: &CurrentGeneration,
+    ) -> Result<bool, String> {
+        let DerivedAccessMode::Active {
+            lifecycle: configured_lifecycle,
+            ..
+        } = &self.mode
+        else {
+            return Err("derived history is disabled".to_owned());
+        };
+        let refreshed_lifecycle;
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => {
+                refreshed_lifecycle = maintenance.lifecycle()?;
+                &refreshed_lifecycle
+            }
+            None => configured_lifecycle,
+        };
+        lifecycle
+            .cached_current_authority_is_stable(current)
+            .map_err(|error| error.to_string())
+    }
+
     pub(super) fn rebuild_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) == BackgroundWorkState::Rebuild as u8
     }

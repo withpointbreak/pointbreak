@@ -3,10 +3,10 @@
 //! behavior is testable off Windows; native I/O stays behind `cfg(windows)`.
 
 const USN_V2_MINIMUM_RECORD_LENGTH: usize = 60;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
-#[cfg(windows)]
-const DEFAULT_MAX_RECORDS: u64 = 8192;
+#[cfg(any(windows, test))]
+const DEFAULT_MAX_RECORDS: u64 = DEFAULT_MAX_BYTES / USN_V2_MINIMUM_RECORD_LENGTH as u64;
 
 #[derive(Debug, Eq, PartialEq)]
 struct ParsedPage {
@@ -661,6 +661,14 @@ pub(super) use native::{capture, changes_since, created_transition};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_record_budget_cannot_preempt_the_byte_budget() {
+        assert_eq!(
+            DEFAULT_MAX_RECORDS,
+            DEFAULT_MAX_BYTES / USN_V2_MINIMUM_RECORD_LENGTH as u64
+        );
+    }
 
     fn cursor(journal_id: u64, next_usn: i64) -> super::super::JournalNativeCursor {
         super::super::JournalNativeCursor {

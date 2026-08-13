@@ -887,6 +887,11 @@ fn bind_strict_change_stamp_with_hook(
     {
         return Ok(StrictChangeStampBindingV1::Moving);
     }
+    match runtime.cached_current_authority_is_stable(&final_current) {
+        Ok(true) => {}
+        Ok(false) => return Ok(StrictChangeStampBindingV1::Moving),
+        Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
+    }
     Ok(StrictChangeStampBindingV1::Bound(stamp))
 }
 
@@ -1560,6 +1565,7 @@ mod tests {
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::derived_access::runtime::{DerivedAccessMaintenance, DerivedAccessMode};
     use crate::session::derived_access::semantic::change::CHANGE_READER_PROFILE_RESOURCE_V3;
+    use crate::session::derived_access::sqlite::StoreWriterLock;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventSignatureRecordedPayload, EventTarget,
@@ -3141,6 +3147,47 @@ mod tests {
                 })
                 .expect("classify a moving live checkpoint"),
             StrictChangeStampBindingV1::Moving
+        );
+    }
+
+    #[test]
+    fn strict_stamp_binder_rejects_a_loose_append_while_the_derived_writer_is_busy() {
+        let fixture =
+            ActiveChangeFixture::new(&[&[Some("busy writer state"), Some("busy writer state")]]);
+        fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("warm the cached Change generation");
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection = crate::session::project_changes(&events).expect("project Changes");
+        let strict_documents =
+            crate::session::project_change_documents(&events).expect("project Change documents");
+        let authority = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict authority")
+        .cursor;
+        let _writer_lock =
+            StoreWriterLock::acquire(fixture._temp.path()).expect("hold the derived writer lock");
+
+        let binding = fixture
+            .access
+            .strict_stamp_binder()
+            .bind_with_hook(&authority, &strict_projection, &strict_documents, || {
+                fixture.append_unrelated("busy-writer-strict-stamp-movement");
+            })
+            .expect("classify a loose append during stamp binding");
+
+        assert_eq!(
+            binding,
+            StrictChangeStampBindingV1::Moving,
+            "a loose authoritative append must invalidate the cached strict stamp"
+        );
+        assert_eq!(
+            fixture.store.take_write_diagnostics()[0].code,
+            "derived_access_generation_unavailable"
         );
     }
 

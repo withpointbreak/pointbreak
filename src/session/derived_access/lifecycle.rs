@@ -1450,6 +1450,21 @@ impl DerivedAccessLifecycle {
         })
     }
 
+    /// Recheck only the bounded native authority interval behind one cached
+    /// generation. This does not persist a stable cursor successor or acquire
+    /// the derived writer lock; response paths use it to reject loose truth
+    /// publication that could not advance the live SQLite checkpoint.
+    pub(crate) fn cached_current_authority_is_stable(
+        &self,
+        current: &CurrentGeneration,
+    ) -> Result<bool, LifecycleError> {
+        let snapshot = current.service.truth_authority_snapshot()?;
+        let check = QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&snapshot.change_stamp)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+        Ok(check.verdict == JournalChangeVerdict::Stable)
+    }
+
     fn observe_current_authority_snapshot(
         &self,
         snapshot: TruthAuthoritySnapshot,

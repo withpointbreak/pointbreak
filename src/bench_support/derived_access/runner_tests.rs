@@ -411,7 +411,7 @@ fn change_read_diagnostic_collection_continues_rows_controls_and_stays_schema_le
             ),
         ],
         |case| {
-            attempted_controls.push(case);
+            attempted_controls.push(qualification_derived_change_control_test_v1(case));
             if case == QualificationDerivedChangeControlCaseV1::L0NoGeneration {
                 Err("library control diagnostic".to_owned())
             } else {
@@ -419,16 +419,26 @@ fn change_read_diagnostic_collection_continues_rows_controls_and_stays_schema_le
             }
         },
     );
-    assert!(attempted_controls.contains(&QualificationDerivedChangeControlCaseV1::L0NoGeneration));
+    assert!(
+        attempted_controls.contains(&qualification_derived_change_control_test_v1(
+            QualificationDerivedChangeControlCaseV1::L0NoGeneration
+        ))
+    );
+    let expected_library_tests = QualificationDerivedChangeControlCaseV1::ALL
+        .into_iter()
+        .map(qualification_derived_change_control_test_v1)
+        .filter(|(kind, _)| *kind == QualificationDerivedChangeControlBinaryKindV1::Library)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(attempted_controls.len(), expected_library_tests.len());
+    let shared_checkpoint_test = qualification_derived_change_control_test_v1(
+        QualificationDerivedChangeControlCaseV1::CheckpointAuthorityMismatch,
+    );
     assert_eq!(
-        attempted_controls.len(),
-        QualificationDerivedChangeControlCaseV1::ALL
-            .into_iter()
-            .filter(|case| {
-                qualification_derived_change_control_test_v1(*case).0
-                    == QualificationDerivedChangeControlBinaryKindV1::Library
-            })
-            .count()
+        attempted_controls
+            .iter()
+            .filter(|attempt| **attempt == shared_checkpoint_test)
+            .count(),
+        1
     );
     assert!(controls.iter().any(|control| {
         control.case == QualificationDerivedChangeControlCaseV1::L0NoGeneration
@@ -618,6 +628,18 @@ fn bounded_bootstrap_smoke_reports_two_pass_work_and_completed_phases() {
             "finalizing",
         ]
     );
+}
+
+#[cfg(all(feature = "longitudinal-counting", target_os = "windows"))]
+#[test]
+fn native_l1_bootstrap_stays_within_the_ntfs_journal_work_budget() {
+    let receipt =
+        run_qualification_derived_access_bootstrap_smoke_v1(QualificationDerivedAccessTierV1::L1)
+            .expect("bounded native L1 bootstrap smoke");
+
+    receipt.validate().expect("valid L1 bootstrap receipt");
+    assert_eq!(receipt.event_count, 1_024);
+    assert_eq!(receipt.head_sequence, 1_024);
 }
 
 #[test]

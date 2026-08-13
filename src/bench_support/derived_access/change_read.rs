@@ -31,11 +31,13 @@ use super::{
     QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1, QualificationDerivedAccessPlatformV1,
     QualificationDerivedAccessProcessScopeV1, QualificationDerivedAccessStatusV1,
     QualificationDerivedChangeControlBinaryIdentityV1, QualificationDerivedChangeControlEvidenceV1,
-    QualificationDerivedChangeFixtureWitnessV1, QualificationDerivedChangeReadCaseV1,
-    QualificationDerivedChangeReadEvidenceV1, QualificationDerivedChangeReadOracleV1,
-    QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
-    QualificationDerivedChangeTypedDocumentV1, QualificationDerivedStorageForbiddenProbeHashesV1,
+    QualificationDerivedChangeFixtureKindV1, QualificationDerivedChangeFixtureRequestV1,
+    QualificationDerivedChangeFixtureWitnessV1, QualificationDerivedChangeReadEvidenceV1,
+    QualificationDerivedChangeReadOracleV1, QualificationDerivedChangeStorageEvidenceV1,
+    QualificationDerivedChangeStoragePhaseV1, QualificationDerivedChangeTypedDocumentV1,
+    QualificationDerivedStorageForbiddenProbeHashesV1,
     capture_qualification_derived_storage_witness_v1,
+    materialize_qualification_derived_change_fixture_v1,
     qualification_derived_change_control_attestation_test_v1,
     qualification_derived_change_control_command_sha256_v1,
     qualification_derived_change_expected_outcome_v1,
@@ -45,7 +47,7 @@ use super::{
     QualificationDerivedAccessExecutionIdentityV1, QualificationDerivedAccessProductIdentityV1,
     QualificationDerivedChangeControlBinaryKindV1, QualificationDerivedChangeControlCaseV1,
     QualificationDerivedChangeEvidencePurposeV1, QualificationDerivedChangeFixtureV1,
-    QualificationDerivedStorageForbiddenProbeInputV1,
+    QualificationDerivedChangeReadCaseV1, QualificationDerivedStorageForbiddenProbeInputV1,
     qualification_derived_change_control_build_command_sha256_v1,
     qualification_derived_change_control_test_v1,
 };
@@ -228,7 +230,7 @@ pub struct DerivedChangeReadDiagnosticTypedWitnessV1 {
 
 struct DiagnosticReadFailure {
     detail: String,
-    witness: Option<DerivedChangeReadDiagnosticFailureWitnessV1>,
+    witness: Option<Box<DerivedChangeReadDiagnosticFailureWitnessV1>>,
 }
 
 impl From<String> for DiagnosticReadFailure {
@@ -327,7 +329,7 @@ where
                     case,
                     status: DerivedChangeReadDiagnosticStatusV1::Failed,
                     failure_detail: Some(failure.detail),
-                    failure_witness: failure.witness,
+                    failure_witness: failure.witness.map(|witness| *witness),
                 }
             }
         })
@@ -380,10 +382,15 @@ pub fn collect_derived_change_read_diagnostic_controls_v1<F>(
 where
     F: FnMut(QualificationDerivedChangeControlCaseV1) -> Result<(), String>,
 {
+    let mut outcomes: std::collections::BTreeMap<
+        (QualificationDerivedChangeControlBinaryKindV1, &'static str),
+        Result<(), String>,
+    > = std::collections::BTreeMap::new();
     QualificationDerivedChangeControlCaseV1::ALL
         .into_iter()
         .map(|case| {
-            let kind = qualification_derived_change_control_test_v1(case).0;
+            let control = qualification_derived_change_control_test_v1(case);
+            let kind = control.0;
             let prerequisite = preflight.iter().find(|candidate| {
                 candidate.kind
                     == match kind {
@@ -399,7 +406,14 @@ where
                 Some(candidate)
                     if candidate.status == DerivedChangeReadDiagnosticStatusV1::Passed =>
                 {
-                    match run(case) {
+                    let outcome = if let Some(outcome) = outcomes.get(&control) {
+                        outcome.clone()
+                    } else {
+                        let outcome = run(case);
+                        outcomes.insert(control, outcome.clone());
+                        outcome
+                    };
+                    match outcome {
                         Ok(()) => DerivedChangeReadDiagnosticControlV1 {
                             case,
                             status: DerivedChangeReadDiagnosticStatusV1::Passed,
@@ -1288,11 +1302,23 @@ mod instrumented {
                 .ok_or_else(|| "Change CLI control test binary is absent".to_owned())?,
         };
         let output = run_exact_control_test(binary, test_name, None)
-            .map_err(|error| format!("run Change control {case:?}: {error}"))?;
+            .map_err(|error| format!("run exact Change control {test_name}: {error}"))?;
         if !output.status.success() || !exact_libtest_passed(&output.stdout, test_name)? {
-            return Err(format!("Change control {case:?} failed"));
+            return Err(format!("exact Change control {test_name} failed"));
         }
         Ok(())
+    }
+
+    pub(super) fn requires_pre_mutation_measurement(
+        case: QualificationDerivedChangeReadCaseV1,
+    ) -> bool {
+        case == QualificationDerivedChangeReadCaseV1::StalePageToken
+    }
+
+    pub(super) fn requires_semantic_fixture_preflight(
+        case: QualificationDerivedChangeReadCaseV1,
+    ) -> bool {
+        case != QualificationDerivedChangeReadCaseV1::Profile
     }
 
     fn measure_diagnostic_read_case(
@@ -1323,6 +1349,11 @@ mod instrumented {
         let request = diagnostic_clone_request(template, &root)?;
         validate_diagnostic_clone(&request)?;
         let expected = expected_fixture_outcome(request.execution.platform, request.fixture, case);
+        let mut pre_mutation_measurement = if requires_pre_mutation_measurement(case) {
+            Some(measure_diagnostic_read_case(&request, case, &expected)?)
+        } else {
+            None
+        };
 
         let semantic = match case {
             QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite => {
@@ -1349,7 +1380,9 @@ mod instrumented {
                     == QualificationDerivedChangeReadOracleV1::StrictParity)
                     .then(|| InspectorChild::spawn(&request, "off"))
                     .transpose()?;
-                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity {
+                if expected.oracle == QualificationDerivedChangeReadOracleV1::StrictParity
+                    && requires_semantic_fixture_preflight(case)
+                {
                     validate_fixture_semantics(&request, &derived.endpoint)?;
                     validate_fixture_semantics(
                         &request,
@@ -1375,29 +1408,35 @@ mod instrumented {
                         if expected.oracle
                             == QualificationDerivedChangeReadOracleV1::TypedFailure =>
                     {
-                        let measured = measure_diagnostic_read_case(&request, case, &expected)?;
+                        let measured = match pre_mutation_measurement.take() {
+                            Some(measured) => measured,
+                            None => measure_diagnostic_read_case(&request, case, &expected)?,
+                        };
                         let expected_document =
                             measured.expected_typed_document.as_ref().ok_or_else(|| {
                                 "typed diagnostic witness omitted its expected document".to_owned()
                             })?;
                         return Err(DiagnosticReadFailure {
                             detail: failure.detail,
-                            witness: Some(
+                            witness: Some(Box::new(
                                 DerivedChangeReadDiagnosticFailureWitnessV1::TypedFailure {
-                                    observed: failure.typed_witness.ok_or_else(|| {
+                                    observed: *failure.typed_witness.ok_or_else(|| {
                                         "typed diagnostic failure omitted its observed witness"
                                             .to_owned()
                                     })?,
                                     expected: diagnostic_expected_typed_witness(expected_document),
                                 },
-                            ),
+                            )),
                         });
                     }
                     Err(failure) => return Err(failure.detail.into()),
                 }
             }
         };
-        let measured = measure_diagnostic_read_case(&request, case, &expected)?;
+        let measured = match pre_mutation_measurement {
+            Some(measured) => measured,
+            None => measure_diagnostic_read_case(&request, case, &expected)?,
+        };
         if !semantic.wire_contract_matches
             || measured.expected_typed_document != semantic.typed_document
         {
@@ -1423,7 +1462,7 @@ mod instrumented {
                 detail: format!(
                     "derived Change diagnostic case {case:?} did not satisfy its oracle"
                 ),
-                witness: Some(witness),
+                witness: Some(Box::new(witness)),
             });
         }
         Ok(())
@@ -1474,8 +1513,21 @@ mod instrumented {
         template: &QualificationDerivedChangeReadRunRequestV1,
         root: &Path,
     ) -> Result<QualificationDerivedChangeReadRunRequestV1, String> {
-        copy_public_fixture_tree(&template.repository, root)?;
         let mut request = template.clone();
+        if template.fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+            copy_public_fixture_tree(&template.repository, root)?;
+        } else {
+            let witness = materialize_diagnostic_fixture_at_root(
+                &template.source_checkout,
+                root,
+                template.fixture,
+            )?;
+            let witness_path = root.with_extension("fixture-witness.json");
+            let witness_bytes = serde_json::to_vec(&witness).map_err(|error| error.to_string())?;
+            std::fs::write(&witness_path, &witness_bytes).map_err(|error| error.to_string())?;
+            request.fixture_witness = witness_path;
+            request.fixture_witness_sha256 = sha256_bytes_hex(&witness_bytes);
+        }
         request.repository = root.to_path_buf();
         request.pointbreak_home = root.join(".git/pointbreak-home");
         if let Some(probes) = request.storage_forbidden_probes.as_mut() {
@@ -1486,6 +1538,46 @@ mod instrumented {
         }
         request.validate()?;
         Ok(request)
+    }
+
+    pub(super) fn materialize_diagnostic_fixture_at_root(
+        source_checkout: &Path,
+        root: &Path,
+        fixture: QualificationDerivedChangeFixtureV1,
+    ) -> Result<QualificationDerivedChangeFixtureWitnessV1, String> {
+        let kind = match fixture {
+            QualificationDerivedChangeFixtureV1::TopologyV1 => {
+                return Err("topology diagnostic fixture uses its public materializer".to_owned());
+            }
+            QualificationDerivedChangeFixtureV1::DuplicateEqualV1 => {
+                QualificationDerivedChangeFixtureKindV1::DuplicateEqual
+            }
+            QualificationDerivedChangeFixtureV1::DuplicateConflictV1 => {
+                QualificationDerivedChangeFixtureKindV1::DuplicateConflicting
+            }
+            QualificationDerivedChangeFixtureV1::RemovalV1 => {
+                QualificationDerivedChangeFixtureKindV1::OperativeRemoval
+            }
+            QualificationDerivedChangeFixtureV1::MissingCarrierV1 => {
+                QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier
+            }
+            QualificationDerivedChangeFixtureV1::MutatedCarrierV1 => {
+                QualificationDerivedChangeFixtureKindV1::MutatedSelectedCarrier
+            }
+            QualificationDerivedChangeFixtureV1::WrongFamilyCarrierV1 => {
+                QualificationDerivedChangeFixtureKindV1::WrongFamilySelectedCarrier
+            }
+            QualificationDerivedChangeFixtureV1::IncompleteV1 => {
+                QualificationDerivedChangeFixtureKindV1::IncompleteChange
+            }
+            QualificationDerivedChangeFixtureV1::CycleConflictedV1 => {
+                QualificationDerivedChangeFixtureKindV1::CycleConflictedChange
+            }
+        };
+        materialize_qualification_derived_change_fixture_v1(
+            QualificationDerivedChangeFixtureRequestV1::new(root, kind)
+                .with_source_checkout(source_checkout),
+        )
     }
 
     fn validate_diagnostic_clone(
@@ -2234,7 +2326,7 @@ mod instrumented {
 
     struct SemanticPairFailure {
         detail: String,
-        typed_witness: Option<DerivedChangeReadDiagnosticTypedWitnessV1>,
+        typed_witness: Option<Box<DerivedChangeReadDiagnosticTypedWitnessV1>>,
     }
 
     impl From<String> for SemanticPairFailure {
@@ -2286,12 +2378,14 @@ mod instrumented {
                     Err(detail) => {
                         return Err(SemanticPairFailure {
                             detail,
-                            typed_witness: Some(diagnostic_typed_witness(&derived_value).map_err(
-                                |detail| SemanticPairFailure {
-                                    detail,
-                                    typed_witness: None,
-                                },
-                            )?),
+                            typed_witness: Some(Box::new(
+                                diagnostic_typed_witness(&derived_value).map_err(|detail| {
+                                    SemanticPairFailure {
+                                        detail,
+                                        typed_witness: None,
+                                    }
+                                })?,
+                            )),
                         });
                     }
                 }
@@ -2529,7 +2623,21 @@ mod instrumented {
             request,
             QualificationDerivedChangeReadCaseV1::PostAppendSuite,
         )?;
-        let (_, derived_after, derived_consistent) = process_suite_semantic(derived, false)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (derived_after, derived_consistent) = loop {
+            let (_, candidate, consistent) = process_suite_semantic(derived, false)?;
+            if consistent && post_append_has_advanced(&candidate, &before_stamp, before_event_count)
+            {
+                break (candidate, consistent);
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "post-append Change suite did not publish its advanced stamp and cursor"
+                        .to_owned(),
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
         let (_, strict_after, strict_consistent) = process_suite_semantic(authoritative, false)?;
         let after_stamp = derived_after
             .pointer("/changes/projectionStamp")
@@ -2587,6 +2695,21 @@ mod instrumented {
             },
             generation_sha256,
         ))
+    }
+
+    pub(super) fn post_append_has_advanced(
+        value: &Value,
+        before_stamp: &str,
+        before_event_count: u64,
+    ) -> bool {
+        value
+            .pointer("/changes/projectionStamp")
+            .and_then(Value::as_str)
+            .is_some_and(|stamp| stamp != before_stamp)
+            && value
+                .pointer("/profile/authorityCursor/eventCount")
+                .and_then(Value::as_u64)
+                == Some(before_event_count.saturating_add(1))
     }
 
     fn append_governed_qualification_event(
@@ -3782,8 +3905,10 @@ mod instrumented {
 mod tests {
     #[cfg(feature = "longitudinal-counting")]
     use super::instrumented::{
-        copy_public_fixture_tree, diagnostic_template_postflight, normalize_change_semantic,
-        percent_encode, validate_fixture_authoritative_inventory,
+        copy_public_fixture_tree, diagnostic_template_postflight,
+        materialize_diagnostic_fixture_at_root, normalize_change_semantic, percent_encode,
+        post_append_has_advanced, requires_pre_mutation_measurement,
+        requires_semantic_fixture_preflight, validate_fixture_authoritative_inventory,
         validate_topology_fixture_semantics,
     };
     use super::*;
@@ -3958,6 +4083,75 @@ mod tests {
 
     #[cfg(feature = "longitudinal-counting")]
     #[test]
+    fn diagnostic_fault_fixture_is_materialized_at_its_case_root() {
+        let parent = tempfile::tempdir().expect("diagnostic fixture parent");
+        let root = parent.path().join("missing-carrier-case");
+        let witness = materialize_diagnostic_fixture_at_root(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            &root,
+            QualificationDerivedChangeFixtureV1::MissingCarrierV1,
+        )
+        .expect("materialize diagnostic fixture at final case root");
+
+        assert_eq!(
+            witness.kind,
+            QualificationDerivedChangeFixtureKindV1::MissingSelectedCarrier
+        );
+        let access = DerivedChangeAccess::resolve_for_inspector(&root)
+            .expect("resolve final-root diagnostic fixture");
+        let outcome = access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("read final-root diagnostic fixture");
+        let DerivedChangeOutcomeV1::ProjectionUnavailable(document) = outcome else {
+            panic!("missing-carrier diagnostic fixture unexpectedly became ready")
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionRebuildRequired
+        );
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_case_ordering_is_explicitly_bounded() {
+        for case in QualificationDerivedChangeReadCaseV1::ALL {
+            assert_eq!(
+                requires_pre_mutation_measurement(case),
+                case == QualificationDerivedChangeReadCaseV1::StalePageToken
+            );
+        }
+        assert!(!requires_semantic_fixture_preflight(
+            QualificationDerivedChangeReadCaseV1::Profile
+        ));
+        assert!(requires_semantic_fixture_preflight(
+            QualificationDerivedChangeReadCaseV1::ChangesBare
+        ));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn post_append_advancement_requires_both_stamp_and_cursor() {
+        let advanced = json!({
+            "changes": {"projectionStamp": "sha256:after"},
+            "profile": {"authorityCursor": {"eventCount": 8}}
+        });
+        assert!(post_append_has_advanced(&advanced, "sha256:before", 7));
+
+        let same_stamp = json!({
+            "changes": {"projectionStamp": "sha256:before"},
+            "profile": {"authorityCursor": {"eventCount": 8}}
+        });
+        assert!(!post_append_has_advanced(&same_stamp, "sha256:before", 7));
+
+        let stale_cursor = json!({
+            "changes": {"projectionStamp": "sha256:after"},
+            "profile": {"authorityCursor": {"eventCount": 7}}
+        });
+        assert!(!post_append_has_advanced(&stale_cursor, "sha256:before", 7));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
     fn diagnostic_template_postflight_records_inventory_failure() {
         let (source_unchanged, postflight) =
             diagnostic_template_postflight(Err("template inventory diagnostic".to_owned()));
@@ -3998,7 +4192,7 @@ mod tests {
             |_| {
                 Err(DiagnosticReadFailure {
                     detail: "generic mismatch".to_owned(),
-                    witness: Some(witness.clone()),
+                    witness: Some(Box::new(witness.clone())),
                 })
             },
         );

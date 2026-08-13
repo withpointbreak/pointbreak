@@ -336,11 +336,18 @@ pub(super) fn apply_signed(
         .iter()
         .filter_map(|c| c["changeId"].as_str())
         .collect();
-    if let Some(map) = document
+    let presentations_empty = document
         .get_mut("presentations")
         .and_then(Value::as_object_mut)
-    {
-        map.retain(|id, _| emitted.contains(id.as_str()));
+        .is_some_and(|map| {
+            map.retain(|id, _| emitted.contains(id.as_str()));
+            map.is_empty()
+        });
+    if presentations_empty {
+        document
+            .as_object_mut()
+            .expect("validated Change page document is an object")
+            .remove("presentations");
     }
     // The client treats every page capability as opaque. Signing makes that
     // boundary enforceable: callers cannot alter a target boundary to skip or
@@ -856,6 +863,20 @@ mod tests {
         let third = apply(doc(), *q).unwrap();
         assert_eq!(third["changes"][0]["changeId"], "change:03");
         assert!(third["next"].is_null());
+    }
+
+    #[test]
+    fn strict_filter_omits_an_empty_presentation_map() {
+        let Request::Bounded(query) =
+            parse(Lens::Changes, Some("limit=100&topology=consolidation")).unwrap()
+        else {
+            panic!()
+        };
+
+        let page = apply(doc(), *query).unwrap();
+
+        assert_eq!(page["changes"], serde_json::json!([]));
+        assert!(!page.as_object().unwrap().contains_key("presentations"));
     }
 
     #[test]
