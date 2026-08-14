@@ -776,6 +776,10 @@ just derived-change-fixture /absolute/path/to/change-fixture-request.json
 just derived-change-read /absolute/path/to/change-read-request.json
 ```
 
+The Change-read recipe exports the request's exact `pointbreakHome` as `POINTBREAK_HOME` before invoking the
+harness. Direct harness callers must export that same request-bound value; leaving it unset or binding a
+different home fails before evidence collection.
+
 The fixture mode accepts one absolute disposable root and one typed public fixture kind. Its bodyless witness
 binds the complete authoritative inventory, expected Change topology/lifecycle, exact Revision-ref hashes,
 duplicate proposal states, and removal plus detached-signature support without copying proposal prose, event

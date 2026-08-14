@@ -70,3 +70,22 @@ fn derived_change_contract_is_visible_without_storage_types() {
     }
     let _ = page_contract;
 }
+
+#[test]
+fn derived_change_recipe_binds_pointbreak_home_from_its_request() {
+    let justfile = std::fs::read_to_string("Justfile").expect("read Justfile");
+    let recipe = justfile
+        .split("derived-change-read request:")
+        .nth(1)
+        .and_then(|suffix| {
+            suffix
+                .split("derived-change-read-diagnostic request:")
+                .next()
+        })
+        .expect("derived Change read recipe");
+
+    assert!(
+        recipe.contains(r#"POINTBREAK_HOME="$$(jq -er '.pointbreakHome' "{{ request }}")" \"#,)
+    );
+    assert!(recipe.contains("POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1"));
+}
