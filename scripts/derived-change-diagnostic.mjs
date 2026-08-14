@@ -958,6 +958,25 @@ async function commandResult(program, args, options) {
 	});
 }
 
+export async function executeDerivedChangeDiagnosticReadinessCase(
+	caseRequest,
+	caseRoot,
+	workRoot,
+) {
+	await Promise.all([
+		assertRootEmptyOrAbsent(caseRoot, "diagnostic readiness case root"),
+		assertRootEmptyOrAbsent(workRoot, "diagnostic readiness work root"),
+	]);
+	await Promise.all([
+		mkdir(caseRoot, { recursive: true }),
+		mkdir(workRoot, { recursive: true }),
+	]);
+	return await commandResult(caseRequest.program, caseRequest.args, {
+		cwd: caseRequest.cwd,
+		env: sanitizedEnvironment(caseRequest, caseRoot, workRoot),
+	});
+}
+
 async function verifySourcePreflight(request) {
 	const preflight = request.sourcePreflight;
 	if (!preflight) return null;

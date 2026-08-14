@@ -14,13 +14,21 @@ fn digest(value: u8) -> String {
 
 #[test]
 fn diagnostic_harness_identity_is_schema_less_and_build_bound() {
-    let identity = derived_change_diagnostic_harness_identity_v1();
+    let identity = derived_change_diagnostic_harness_identity_v1()
+        .expect("diagnostic harness observes its host identity in process");
     let value = serde_json::to_value(identity).expect("diagnostic harness identity serializes");
 
     assert_eq!(value["mode"], DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1);
     assert!(value.get("schema").is_none());
     assert_eq!(value["buildSource"], env!("POINTBREAK_BUILD_SOURCE"));
     assert_eq!(value["sourceCommit"], env!("POINTBREAK_BUILD_COMMIT"));
+    assert_eq!(
+        value["hostIdentitySha256"]
+            .as_str()
+            .expect("host identity hash"),
+        crate::bench_support::foundation::qualification_host_identity_sha256()
+            .expect("live host identity")
+    );
 }
 
 fn product_identity(

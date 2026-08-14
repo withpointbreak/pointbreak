@@ -10,6 +10,8 @@ use super::{
     DerivedStorageLayout, reject_derived_change_diagnostic_evidence_document_v1,
     reject_derived_change_diagnostic_evidence_path_v1,
 };
+#[cfg(feature = "longitudinal-counting")]
+use crate::bench_support::foundation::qualification_host_identity_sha256;
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::JournalId;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
@@ -1070,12 +1072,6 @@ fn observe_execution(
     let command = std::env::args_os()
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    let hostname = Command::new("hostname")
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !hostname.status.success() {
-        return Err("hostname failed".to_owned());
-    }
     let canonical_root = fs::canonicalize(probe_root).map_err(|error| error.to_string())?;
     Ok(AuthorityStampExecutionIdentityV1 {
         platform,
@@ -1086,7 +1082,7 @@ fn observe_execution(
         operating_system: std::env::consts::OS.to_owned(),
         architecture: std::env::consts::ARCH.to_owned(),
         filesystem,
-        host_identity_sha256: sha256_bytes_hex(&hostname.stdout),
+        host_identity_sha256: qualification_host_identity_sha256()?,
         command_sha256: sha256_bytes_hex(
             &serde_json::to_vec(&command).map_err(|error| error.to_string())?,
         ),

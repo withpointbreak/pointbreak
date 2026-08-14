@@ -22,15 +22,20 @@ import {
 import {
 	createDerivedChangeDiagnosticCampaign,
 	createDerivedChangeDiagnosticHostRequest,
+	derivedChangeDiagnosticReadinessCaseIds,
 	derivedChangeDiagnosticToolchainPreflightEnvironment,
 	derivedChangeDiagnosticFilesystemProbeArguments,
 	DERIVED_CHANGE_DIAGNOSTIC_AUTHORITY_SEED_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1,
+	DERIVED_CHANGE_DIAGNOSTIC_READINESS_BASENAME_V1,
+	DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_UNAVAILABLE_HOST_CONFIG_SCHEMA_V1,
 	mergeDerivedChangeDiagnosticCampaign,
 	runDerivedChangeDiagnosticScriptToolPreflight,
 	runDerivedChangeDiagnosticHost,
+	runDerivedChangeDiagnosticHostReadiness,
+	validateDerivedChangeDiagnosticHostSubstratePrograms,
 	writeUnavailableDerivedChangeDiagnosticHost,
 } from "./derived-change-diagnostic-campaign.mjs";
 import {
@@ -48,6 +53,15 @@ const testShProgram = (() => {
 		);
 	}
 	return program ?? "/bin/sh";
+})();
+const testBashProgram = (() => {
+	const program = process.env.POINTBREAK_TEST_BASH_PROGRAM;
+	if (process.env.POINTBREAK_DERIVED_CHANGE_BOUND_POLICY === "1" && !program) {
+		throw new Error(
+			"POINTBREAK_TEST_BASH_PROGRAM is required by bound diagnostic policy",
+		);
+	}
+	return program ?? process.env.BASH ?? "/bin/bash";
 })();
 
 const campaignSource = () =>
@@ -667,6 +681,8 @@ test("script tool preflight rejects a hash-valid non-Node Playwright wrapper", a
 	await chmod(shellWrapper, 0o755);
 	await assert.rejects(
 		runDerivedChangeDiagnosticScriptToolPreflight({
+			bash: testBashProgram,
+			sh: testShProgram,
 			node: process.execPath,
 			vitestCli: validCli,
 			playwrightCli: shellWrapper,
@@ -676,12 +692,58 @@ test("script tool preflight rejects a hash-valid non-Node Playwright wrapper", a
 		/Playwright must be loadable through its exact bound launcher/,
 	);
 	await runDerivedChangeDiagnosticScriptToolPreflight({
+		bash: testBashProgram,
+		sh: testShProgram,
 		node: process.execPath,
 		vitestCli: validCli,
 		playwrightCli: validCli,
 		browserExecutable: process.execPath,
 		sourceCheckout: process.cwd(),
 	});
+});
+
+test("script tool preflight directly launches the final Bash path", async () => {
+	const root = await mkdtemp(
+		join(await realpath(tmpdir()), "pointbreak-diagnostic-bash-launch-"),
+	);
+	const failingBash = join(root, "bash");
+	const validCli = join(root, "valid-cli.mjs");
+	await writeFile(failingBash, `#!${testShProgram}\nexit 7\n`);
+	await chmod(failingBash, 0o755);
+	await writeFile(validCli, 'process.stdout.write("1.0.0\\n");\n');
+	await assert.rejects(
+		runDerivedChangeDiagnosticScriptToolPreflight({
+			bash: failingBash,
+			sh: testShProgram,
+			node: process.execPath,
+			vitestCli: validCli,
+			playwrightCli: validCli,
+			browserExecutable: process.execPath,
+			sourceCheckout: process.cwd(),
+		}),
+		/Bash must be loadable through its exact bound launcher/,
+	);
+});
+
+test("host substrate validation refuses relocated OS programs", () => {
+	assert.throws(
+		() =>
+			validateDerivedChangeDiagnosticHostSubstratePrograms(
+				{ operatingSystem: "macos" },
+				{ bash: "/tmp/copied-bash", sh: "/bin/sh" },
+				"darwin",
+			),
+		/macOS Bash must run in place at \/bin\/bash/,
+	);
+	assert.throws(
+		() =>
+			validateDerivedChangeDiagnosticHostSubstratePrograms(
+				{ operatingSystem: "windows", systemRoot: "c:\\windows" },
+				{ filesystemProbe: "C:\\tools\\fsutil.exe" },
+				"win32",
+			),
+		/Windows filesystem probe must run in place/i,
+	);
 });
 
 test("host requests use explicit dependencies and disjoint destructive roots", async () => {
@@ -764,6 +826,13 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(preflightConfig.cargoNextest, config.programs.cargoNextest);
 	assert.equal(preflightConfig.rustc, config.programs.rustc);
 	assert.equal(preflightConfig.node, config.programs.node);
+	assert.equal(
+		preflightConfig.hostIdentitySha256,
+		config.campaign.platforms.find(({ id }) => id === config.platformId)
+			.hostIdentitySha256,
+	);
+	assert.equal(preflightConfig.bash, config.programs.bash);
+	assert.equal(preflightConfig.sh, config.programs.sh);
 	assert.equal(preflightConfig.nativeSmoke.cc, config.programs.cc);
 	assert.equal(preflightConfig.nativeSmoke.linker, config.programs.linker);
 	assert.equal(preflightConfig.nativeSmoke.ar, config.programs.ar);
@@ -772,6 +841,17 @@ test("host requests use explicit dependencies and disjoint destructive roots", a
 	assert.equal(
 		preflightConfig.browserExecutable,
 		config.programs.browserExecutable,
+	);
+	const hostProbeConfig = JSON.parse(
+		request.cases.find(({ id }) => id.endsWith(".preflight")).env[
+			"POINTBREAK_DERIVED_CHANGE_HOST_PROBE"
+		],
+	);
+	assert.equal(hostProbeConfig.programs.bash, config.programs.bash);
+	assert.equal(hostProbeConfig.programs.sh, config.programs.sh);
+	assert.equal(
+		hostProbeConfig.programs.filesystemProbe,
+		config.programs.filesystemProbe,
 	);
 	assert.deepEqual(
 		request.cases
@@ -1117,6 +1197,36 @@ test("run-host creates a nested absent output root after safety validation", asy
 	assert.equal(
 		JSON.parse(await readFile(fragmentPath, "utf8")).fragmentSha256,
 		fragment.fragmentSha256,
+	);
+});
+
+test("shakedown-host retains a bounded non-admissible readiness receipt", async () => {
+	const config = await hostConfig();
+	config.outputRoot = await nestedDiagnosticRoot(
+		"pointbreak-diagnostic-readiness-",
+	);
+	const expectedIds = derivedChangeDiagnosticReadinessCaseIds(config.platformId);
+	assert.deepEqual(expectedIds, [
+		"macos_apfs.preflight",
+		"macos_apfs.product-version",
+		"macos_apfs.change-read-stateful",
+	]);
+
+	const { receipt, receiptPath } =
+		await runDerivedChangeDiagnosticHostReadiness(config);
+
+	assert.equal(receipt.schema, DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1);
+	assert.equal(receipt.admissible, false);
+	assert.equal(receipt.ready, false);
+	assert.deepEqual(receipt.readinessCaseIds, expectedIds);
+	assert.equal(
+		receiptPath,
+		join(config.outputRoot, DERIVED_CHANGE_DIAGNOSTIC_READINESS_BASENAME_V1),
+	);
+	assert.deepEqual(JSON.parse(await readFile(receiptPath, "utf8")), receipt);
+	await assert.rejects(
+		readFile(join(config.outputRoot, "host-fragment.json")),
+		/ENOENT/,
 	);
 });
 

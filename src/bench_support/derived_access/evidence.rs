@@ -29,6 +29,7 @@ use super::{
     QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
     evaluate_qualification_derived_access_v1,
 };
+use crate::bench_support::foundation::qualification_host_identity_sha256;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalCountersV1, LongitudinalDerivedAccessPhaseSampleV1,
@@ -4384,7 +4385,7 @@ pub(super) fn observe_current_execution_identity_v1(
             nearest_existing_ancestor(evidence_root)?,
         )
         .to_ascii_lowercase(),
-        host_identity_sha256: current_host_identity_sha256()?,
+        host_identity_sha256: qualification_host_identity_sha256()?,
         source_dirty,
         private_corpus_configured: std::env::var_os("POINTBREAK_QUALIFICATION_CORPUS").is_some(),
     })
@@ -4400,26 +4401,6 @@ fn nearest_existing_ancestor(path: &Path) -> Result<&Path, String> {
             .parent()
             .ok_or_else(|| "derived-access evidence path has no existing ancestor".to_owned())?;
     }
-}
-
-fn current_host_identity_sha256() -> Result<String, String> {
-    let hostname = Command::new("hostname")
-        .output()
-        .map_err(|error| format!("hostname failed: {error}"))?;
-    if !hostname.status.success() {
-        return Err(format!(
-            "hostname failed: {}",
-            String::from_utf8_lossy(&hostname.stderr)
-        ));
-    }
-    let hostname = String::from_utf8(hostname.stdout)
-        .map_err(|error| error.to_string())?
-        .trim()
-        .to_ascii_lowercase();
-    if hostname.is_empty() {
-        return Err("hostname returned an empty identity".to_owned());
-    }
-    Ok(sha256_bytes_hex(hostname.as_bytes()))
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Result<String, String> {

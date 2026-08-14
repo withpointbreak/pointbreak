@@ -668,7 +668,13 @@ fn main() -> ExitCode {
         .iter()
         .any(|argument| argument == DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1)
     {
-        let identity = derived_change_diagnostic_harness_identity_v1();
+        let identity = match derived_change_diagnostic_harness_identity_v1() {
+            Ok(identity) => identity,
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::FAILURE;
+            }
+        };
         println!(
             "{}",
             serde_json::to_string(&identity)

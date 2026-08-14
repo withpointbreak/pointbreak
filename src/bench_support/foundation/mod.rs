@@ -42,12 +42,74 @@ pub use receipt::*;
 pub use segments::*;
 pub use sqlite::*;
 
+use crate::canonical_hash::sha256_bytes_hex;
+
 /// Report the filesystem type containing a qualification workload.
 ///
 /// The platform commands are metadata-only: they inspect the supplied path
 /// without reading any corpus files.
 pub fn qualification_filesystem_name(path: &Path) -> String {
     platform_filesystem_name(path).unwrap_or_else(|| "unavailable".to_owned())
+}
+
+/// Observe the current host name without ambient command resolution and bind
+/// its normalized value to the same SHA-256 form used by the diagnostic host
+/// probe.
+pub fn qualification_host_identity_sha256() -> Result<String, String> {
+    normalized_host_identity_sha256(&platform_host_name()?)
+}
+
+fn normalized_host_identity_sha256(host_name: &str) -> Result<String, String> {
+    let host_name = host_name.trim().to_ascii_lowercase();
+    if host_name.is_empty() {
+        return Err("host identity is empty".to_owned());
+    }
+    Ok(sha256_bytes_hex(host_name.as_bytes()))
+}
+
+#[cfg(unix)]
+fn platform_host_name() -> Result<String, String> {
+    let mut bytes = [0_u8; 256];
+    // SAFETY: `bytes` is writable for the exact length supplied to libc. A
+    // nonzero result, including truncation, is returned as an OS error.
+    if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+        return Err(format!(
+            "host identity observation failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8(bytes[..length].to_vec())
+        .map_err(|error| format!("host identity is not UTF-8: {error}"))
+}
+
+#[cfg(windows)]
+fn platform_host_name() -> Result<String, String> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
+    }
+
+    let mut buffer = [0_u16; 256];
+    let mut length = buffer.len() as u32;
+    // SAFETY: `buffer` is writable for `length` UTF-16 code units and Windows
+    // updates `length` to the number of initialized code units on success.
+    if unsafe { GetComputerNameW(buffer.as_mut_ptr(), &mut length) } == 0 {
+        return Err(format!(
+            "host identity observation failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    String::from_utf16(&buffer[..length as usize])
+        .map_err(|error| format!("host identity is not valid UTF-16: {error}"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_host_name() -> Result<String, String> {
+    Err("host identity observation is unsupported on this platform".to_owned())
 }
 
 #[cfg(target_os = "macos")]
@@ -169,6 +231,27 @@ mod windows_filesystem_fallback_tests {
             .as_deref(),
             Some("refs")
         );
+    }
+}
+
+#[cfg(test)]
+mod host_identity_tests {
+    use super::*;
+
+    #[test]
+    fn host_identity_normalizes_case_and_surrounding_whitespace() {
+        assert_eq!(
+            normalized_host_identity_sha256("  Example-Host\n").unwrap(),
+            sha256_bytes_hex(b"example-host")
+        );
+        assert!(normalized_host_identity_sha256(" \r\n").is_err());
+    }
+
+    #[test]
+    fn live_host_identity_is_observed_without_a_child_process() {
+        let identity = qualification_host_identity_sha256().expect("live host identity");
+        assert_eq!(identity.len(), 64);
+        assert!(identity.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 }
 

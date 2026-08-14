@@ -1057,8 +1057,21 @@ async function readRequest(
 	};
 }
 
-export async function runDerivedChangeChangeReadDiagnostic(input) {
+export async function runDerivedChangeChangeReadDiagnostic(
+	input,
+	{ readinessFixtureId } = {},
+) {
 	const config = validateDerivedChangeChangeReadDiagnosticConfig(input);
+	const fixtures =
+		readinessFixtureId === undefined
+			? FIXTURES
+			: readinessFixtureId === "topology-v1"
+				? [FIXTURES[0]]
+				: (() => {
+						throw new Error(
+							"unsupported derived Change readiness fixture",
+						);
+					})();
 	await Promise.all([empty(config.caseRoot), empty(config.workRoot)]);
 	const artifacts = [];
 	const cases = [];
@@ -1089,7 +1102,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 				"global_invalid",
 			),
 		);
-		for (const [fixture, , rows, controls, storage] of FIXTURES) {
+		for (const [fixture, , rows, controls, storage] of fixtures) {
 			const setupId = `${fixture}.template`;
 			cases.push(
 				statusRow(
@@ -1140,7 +1153,7 @@ export async function runDerivedChangeChangeReadDiagnostic(input) {
 	await cp(config.fixtureAuthority.path, authority);
 	artifacts.push(pathInside(config.caseRoot, authority));
 	let globalInvalidDependency = null;
-	for (const [fixture, kind, rows, controls, storage] of FIXTURES) {
+	for (const [fixture, kind, rows, controls, storage] of fixtures) {
 		const setupId = `${fixture}.template`;
 		if (globalInvalidDependency) {
 			cases.push(
@@ -1477,8 +1490,14 @@ async function main() {
 		config.caseRoot = process.env.POINTBREAK_DIAGNOSTIC_CASE_ROOT;
 	if (process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT)
 		config.workRoot = process.env.POINTBREAK_DIAGNOSTIC_WORK_ROOT;
+	const readinessFixtureId =
+		process.env.POINTBREAK_DERIVED_CHANGE_READINESS_FIXTURE;
 	process.stdout.write(
-		`${JSON.stringify(await runDerivedChangeChangeReadDiagnostic(config))}\n`,
+		`${JSON.stringify(
+			await runDerivedChangeChangeReadDiagnostic(config, {
+				...(readinessFixtureId ? { readinessFixtureId } : {}),
+			}),
+		)}\n`,
 	);
 }
 

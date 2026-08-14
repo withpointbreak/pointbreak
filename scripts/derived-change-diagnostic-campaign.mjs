@@ -22,6 +22,7 @@ import {
 	assertDerivedChangeDiagnosticOutputRootSafety,
 	DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_REQUEST_SCHEMA_V1,
+	executeDerivedChangeDiagnosticReadinessCase,
 	executeDerivedChangeDiagnosticCases,
 	validateDerivedChangeDiagnosticRequest,
 	verifyDerivedChangeDiagnosticBindings,
@@ -56,6 +57,9 @@ export const DERIVED_CHANGE_DIAGNOSTIC_MERGE_CONFIG_SCHEMA_V1 =
 	"pointbreak.derived-change-diagnostic-merge-config.v1";
 export const DERIVED_CHANGE_DIAGNOSTIC_HOST_FRAGMENT_BASENAME_V1 =
 	"host-fragment.json";
+export const DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1 =
+	"pointbreak.derived-change-diagnostic-readiness.v1";
+export const DERIVED_CHANGE_DIAGNOSTIC_READINESS_BASENAME_V1 = "readiness.json";
 
 const CAMPAIGN_MODULE = fileURLToPath(import.meta.url);
 const HOST_PROBE_ENV = "POINTBREAK_DERIVED_CHANGE_HOST_PROBE";
@@ -1185,6 +1189,11 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				[HOST_PROBE_ENV]: JSON.stringify({
 					platform,
 					filesystemProbeProgram: config.programs.filesystemProbe,
+					programs: {
+						bash: config.programs.bash,
+						filesystemProbe: config.programs.filesystemProbe,
+						sh: config.programs.sh,
+					},
 				}),
 			},
 			mutatesRoot: false,
@@ -1205,6 +1214,7 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 				...toolEnvironment,
 				[BINARY_PREFLIGHT_ENV]: JSON.stringify({
 					operatingSystem: platform.operatingSystem,
+					hostIdentitySha256: platform.hostIdentitySha256,
 					product: config.identityPaths.product,
 					harness: config.identityPaths.harness,
 					control: config.identityPaths.control,
@@ -1229,8 +1239,10 @@ export function createDerivedChangeDiagnosticHostRequest(config) {
 					},
 					...(platform.operatingSystem === "macos"
 						? {
+								bash: config.programs.bash,
 								browserExecutable: config.programs.browserExecutable,
 								playwrightCli: config.programs.playwrightCli,
+								sh: config.programs.sh,
 								vitestCli: config.programs.vitestCli,
 							}
 						: {}),
@@ -1569,6 +1581,152 @@ export async function runDerivedChangeDiagnosticHost(config) {
 	return { fragment, fragmentPath };
 }
 
+export function derivedChangeDiagnosticReadinessCaseIds(platformId) {
+	return [
+		`${platformId}.preflight`,
+		`${platformId}.product-version`,
+		`${platformId}.change-read-stateful`,
+	];
+}
+
+function readinessLog(path, bytes) {
+	return {
+		path,
+		sha256: createHash("sha256").update(bytes).digest("hex"),
+	};
+}
+
+export async function runDerivedChangeDiagnosticHostReadiness(config) {
+	const request = createDerivedChangeDiagnosticHostRequest(config);
+	await assertDerivedChangeDiagnosticOutputRootSafety(
+		config.outputRoot,
+		config.sourceCheckout,
+	);
+	await Promise.all([
+		requireEmptyRoot(config.outputRoot),
+		requireEmptyRoot(config.temporaryRoot),
+	]);
+	const readinessIds = derivedChangeDiagnosticReadinessCaseIds(
+		config.platformId,
+	);
+	const casesById = new Map(request.cases.map((entry) => [entry.id, entry]));
+	if (readinessIds.some((id) => !casesById.has(id))) {
+		throw new Error("diagnostic readiness case inventory is incomplete");
+	}
+	const bindingPreflight = await verifyDerivedChangeDiagnosticBindings(request);
+	const logsRoot = join(config.outputRoot, "logs");
+	await mkdir(logsRoot);
+	const cases = [];
+	let blocker = bindingPreflight ? "readiness.bindings-preflight" : null;
+	for (const [index, id] of readinessIds.entries()) {
+		if (blocker) {
+			cases.push({
+				id,
+				status: "skipped",
+				skipReason: `dependency ${blocker} did not pass`,
+			});
+			continue;
+		}
+		const caseRequest = structuredClone(casesById.get(id));
+		if (id.endsWith(".change-read-stateful")) {
+			caseRequest.env.POINTBREAK_DERIVED_CHANGE_READINESS_FIXTURE =
+				"topology-v1";
+		}
+		let outcome;
+		try {
+			outcome = await executeDerivedChangeDiagnosticReadinessCase(
+				caseRequest,
+				join(config.outputRoot, "cases", id),
+				join(
+					config.temporaryRoot,
+					"w",
+					index.toString().padStart(3, "0"),
+				),
+			);
+		} catch (error) {
+			outcome = {
+				code: null,
+				signal: null,
+				stdout: Buffer.alloc(0),
+				stderr: Buffer.from(`${String(error)}\n`),
+				spawnError: String(error),
+			};
+		}
+		const stdoutPath = join(logsRoot, `${id}.stdout.log`);
+		const stderrPath = join(logsRoot, `${id}.stderr.log`);
+		await Promise.all([
+			writeFile(stdoutPath, outcome.stdout, { flag: "wx" }),
+			writeFile(stderrPath, outcome.stderr, { flag: "wx" }),
+		]);
+		let failureDetail;
+		if (
+			outcome.code !== 0 ||
+			outcome.signal !== null ||
+			outcome.spawnError
+		) {
+			failureDetail =
+				outcome.stderr.toString("utf8").trim() ||
+				`exit ${outcome.code ?? "null"}; signal ${outcome.signal ?? "none"}`;
+		} else if (id.endsWith(".change-read-stateful")) {
+			try {
+				const collection = JSON.parse(outcome.stdout.toString("utf8"));
+				if (
+					collection.schema !== DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1 ||
+					collection.campaignId !== config.campaign.id ||
+					!Array.isArray(collection.cases)
+				) {
+					throw new Error("representative Change-read collection is invalid");
+				}
+				const failed = collection.cases
+					.filter(({ status }) => status !== "passed")
+					.map(({ id: childId, status }) => `${childId}:${status}`);
+				if (failed.length) {
+					throw new Error(
+						`representative Change-read cases did not pass: ${failed.join(", ")}`,
+					);
+				}
+			} catch (error) {
+				failureDetail = String(error);
+			}
+		}
+		const status = failureDetail ? "failed" : "passed";
+		cases.push({
+			id,
+			status,
+			code: outcome.code,
+			signal: outcome.signal,
+			stdout: readinessLog(`logs/${id}.stdout.log`, outcome.stdout),
+			stderr: readinessLog(`logs/${id}.stderr.log`, outcome.stderr),
+			...(failureDetail ? { failureDetail } : {}),
+		});
+		if (status === "failed") blocker = id;
+	}
+	const bindingPostflight = await verifyDerivedChangeDiagnosticBindings(request);
+	const ready =
+		bindingPreflight === null &&
+		bindingPostflight === null &&
+		cases.every(({ status }) => status === "passed");
+	const receipt = {
+		schema: DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1,
+		admissible: false,
+		campaignId: config.campaign.id,
+		platformId: config.platformId,
+		readinessCaseIds: readinessIds,
+		bindings: {
+			preflight: bindingPreflight ?? "passed",
+			postflight: bindingPostflight ?? "passed",
+		},
+		cases,
+		ready,
+	};
+	const receiptPath = join(
+		config.outputRoot,
+		DERIVED_CHANGE_DIAGNOSTIC_READINESS_BASENAME_V1,
+	);
+	await writeExclusiveJson(receiptPath, receipt);
+	return { receipt, receiptPath };
+}
+
 function unavailableRecord(descriptor, reason) {
 	return {
 		id: descriptor.id,
@@ -1761,6 +1919,8 @@ export async function runDerivedChangeDiagnosticScriptToolPreflight(
 ) {
 	requireObject(config, "diagnostic script tool preflight");
 	for (const name of [
+		"bash",
+		"sh",
 		"node",
 		"vitestCli",
 		"playwrightCli",
@@ -1774,6 +1934,20 @@ export async function runDerivedChangeDiagnosticScriptToolPreflight(
 		CI: "1",
 		NO_UPDATE_NOTIFIER: "1",
 	};
+	for (const [name, program, args] of [
+		["Bash", config.bash, ["--noprofile", "--norc", "-c", "exit 0"]],
+		["POSIX shell", config.sh, ["-c", "exit 0"]],
+	]) {
+		const outcome = await runCommand(program, args, {
+			cwd: config.sourceCheckout,
+			env: isolatedEnvironment,
+		});
+		if (outcome.code !== 0 || outcome.signal !== null) {
+			throw new Error(
+				`diagnostic ${name} must be loadable through its exact bound launcher`,
+			);
+		}
+	}
 	for (const [name, program, args] of [
 		["node", config.node, ["--version"]],
 		["Vitest", config.node, [config.vitestCli, "--version"]],
@@ -1954,7 +2128,16 @@ async function runBinaryPreflight() {
 		config.operatingSystem,
 		"diagnostic binary preflight operating system",
 	);
+	if (config.operatingSystem === "macos") {
+		for (const name of ["bash", "sh"]) {
+			requireAbsolutePath(config[name], `diagnostic ${name} path`);
+		}
+	}
 	requireObject(config.source, "diagnostic binary preflight source");
+	requireText(
+		config.hostIdentitySha256,
+		"diagnostic binary preflight host identity",
+	);
 	requireObject(config.nativeSmoke, "diagnostic native toolchain preflight");
 	await runDerivedChangeDiagnosticNativeToolchainPreflight({
 		...config.nativeSmoke,
@@ -2017,6 +2200,7 @@ async function runBinaryPreflight() {
 	const harnessKeys = [
 		"benchEnabled",
 		"buildSource",
+		"hostIdentitySha256",
 		"longitudinalCountingEnabled",
 		"mode",
 		"privateCorpusConfigured",
@@ -2030,6 +2214,7 @@ async function runBinaryPreflight() {
 		harness.buildSource !== "git" ||
 		harness.sourceCommit !== config.source.commit ||
 		harness.sourceDirty !== false ||
+		harness.hostIdentitySha256 !== config.hostIdentitySha256 ||
 		harness.benchEnabled !== true ||
 		harness.longitudinalCountingEnabled !== true ||
 		harness.privateCorpusConfigured !== false
@@ -2103,6 +2288,40 @@ function observedHostIdentitySha256() {
 		.digest("hex");
 }
 
+export function validateDerivedChangeDiagnosticHostSubstratePrograms(
+	platform,
+	programs,
+	actualPlatform = nodePlatform(),
+) {
+	requireObject(platform, "diagnostic host substrate platform");
+	requireObject(programs, "diagnostic host substrate programs");
+	if (actualPlatform === "darwin") {
+		if (platform.operatingSystem !== "macos") {
+			throw new Error("diagnostic host substrate operating system differs");
+		}
+		if (programs.bash !== "/bin/bash") {
+			throw new Error("macOS Bash must run in place at /bin/bash");
+		}
+		if (programs.sh !== "/bin/sh") {
+			throw new Error("macOS POSIX shell must run in place at /bin/sh");
+		}
+		return;
+	}
+	if (actualPlatform === "win32") {
+		if (platform.operatingSystem !== "windows") {
+			throw new Error("diagnostic host substrate operating system differs");
+		}
+		const expected = win32
+			.join(platform.systemRoot, "System32", "fsutil.exe")
+			.toLowerCase();
+		if (win32.normalize(programs.filesystemProbe).toLowerCase() !== expected) {
+			throw new Error(
+				"Windows filesystem probe must run in place under systemRoot",
+			);
+		}
+	}
+}
+
 export function derivedChangeDiagnosticFilesystemProbeArguments(
 	operatingSystem,
 	root,
@@ -2142,6 +2361,10 @@ async function probeHost() {
 	requireAbsolutePath(
 		config.filesystemProbeProgram,
 		"diagnostic filesystem probe program",
+	);
+	validateDerivedChangeDiagnosticHostSubstratePrograms(
+		config.platform,
+		config.programs,
 	);
 	const observed = {
 		operatingSystem: observedOperatingSystem(),
@@ -2250,6 +2473,16 @@ async function cli() {
 		if (!allRequiredPassed(fragment)) process.exitCode = 1;
 		return;
 	}
+	if (mode === "shakedown-host") {
+		const config = await readConfig(
+			configPath,
+			DERIVED_CHANGE_DIAGNOSTIC_HOST_CONFIG_SCHEMA_V1,
+		);
+		const { receipt } = await runDerivedChangeDiagnosticHostReadiness(config);
+		process.stdout.write(`${JSON.stringify(receipt)}\n`);
+		if (!receipt.ready) process.exitCode = 1;
+		return;
+	}
 	if (mode === "unavailable-host") {
 		const config = await readConfig(
 			configPath,
@@ -2269,7 +2502,7 @@ async function cli() {
 		return;
 	}
 	throw new Error(
-		"usage: derived-change-diagnostic-campaign.mjs <create-authority|run-host|unavailable-host|merge> <absolute-config.json>",
+		"usage: derived-change-diagnostic-campaign.mjs <create-authority|shakedown-host|run-host|unavailable-host|merge> <absolute-config.json>",
 	);
 }
 
