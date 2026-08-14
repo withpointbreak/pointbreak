@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use pointbreak::documents::{
     ChangeAttentionPresentationDocumentV2, ChangeListPresentationDocumentV1,
@@ -85,7 +86,66 @@ fn derived_change_recipe_binds_pointbreak_home_from_its_request() {
         .expect("derived Change read recipe");
 
     assert!(
-        recipe.contains(r#"POINTBREAK_HOME="$$(jq -er '.pointbreakHome' "{{ request }}")" \"#,)
+        recipe.contains(r#"POINTBREAK_HOME="$(jq -ejr '.pointbreakHome' "{{ request }}")" \"#,)
     );
+    assert!(!recipe.contains("POINTBREAK_HOME=\"$$("));
     assert!(recipe.contains("POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1"));
+}
+
+#[test]
+fn derived_change_recipe_executes_with_the_request_bound_home() {
+    let temporary = tempfile::tempdir().expect("create recipe test root");
+    let request = temporary.path().join("request.json");
+    let pointbreak_home = temporary.path().join("request-bound-home");
+    std::fs::write(
+        &request,
+        serde_json::to_vec(&serde_json::json!({ "pointbreakHome": pointbreak_home }))
+            .expect("serialize request"),
+    )
+    .expect("write request");
+
+    let bin = temporary.path().join("bin");
+    std::fs::create_dir(&bin).expect("create fake binary directory");
+    let fake_cargo = bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        r#"#!/bin/sh
+set -eu
+test "$POINTBREAK_HOME" = "$POINTBREAK_EXPECTED_HOME"
+test "$POINTBREAK_DERIVED_ACCESS" = "sqlite-wal-bodyless-v1"
+printf '%s\n' 'pointbreak-change-read-environment-ok'
+"#,
+    )
+    .expect("write fake cargo");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake cargo executable");
+    }
+
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path =
+        std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited_path)))
+            .expect("construct test PATH");
+    let output = Command::new("just")
+        .args([
+            "derived-change-read",
+            request.to_str().expect("UTF-8 request path"),
+        ])
+        .env("PATH", path)
+        .env("POINTBREAK_EXPECTED_HOME", &pointbreak_home)
+        .output()
+        .expect("run derived Change-read recipe");
+
+    assert!(
+        output.status.success(),
+        "recipe failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("pointbreak-change-read-environment-ok"),
+        "fake cargo did not observe the bound environment"
+    );
 }
