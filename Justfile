@@ -373,29 +373,6 @@ derived-access-lifecycle-diagnostic request:
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-access-lifecycle-diagnostic --derived-access-request="{{ request }}"
 
-# Run one disposable native tier and expose only its admitted root to diagnostics.
-[group('quality')]
-derived-change-diagnostic-native request:
-    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
-        --derived-change-diagnostic-native --derived-access-request="{{ request }}"
-
-# Exercise the aggregate diagnostic policy without running native or real-browser cases.
-[group('quality')]
-derived-change-diagnostic-selftest:
-    node --test \
-        scripts/derived-change-diagnostic-report.selftest.mjs \
-        scripts/derived-change-diagnostic.selftest.mjs \
-        scripts/derived-change-diagnostic-fixture.selftest.mjs \
-        scripts/derived-change-diagnostic-native.selftest.mjs \
-        scripts/derived-change-diagnostic-change-read.selftest.mjs \
-        scripts/derived-change-diagnostic-browser.selftest.mjs \
-        scripts/derived-change-diagnostic-campaign.selftest.mjs
-
-# Create authority, run one host, record an unavailable host, or merge one diagnostic campaign.
-[group('quality')]
-derived-change-diagnostic mode config:
-    node scripts/derived-change-diagnostic-campaign.mjs "{{ mode }}" "{{ config }}"
-
 # Verify a retained L7/L100/C262 input and separately created qualification clone.
 [group('quality')]
 derived-access-retained-preflight request:
