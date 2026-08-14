@@ -2213,6 +2213,7 @@ dependencies = [
  "tracing-subscriber",
  "two-face",
  "unicode-width",
+ "windows-sys",
  "zstd",
 ]
 

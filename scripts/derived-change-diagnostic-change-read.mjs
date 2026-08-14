@@ -212,11 +212,11 @@ function preflightFailureClass(kind) {
 	return kind === "source" ? "global_invalid" : "lane_invalid";
 }
 
-export function derivedChangeChangeReadChildDescriptors() {
+function changeReadChildDescriptors(fixtures) {
 	const children = [
 		{ id: CHANGE_READ_GLOBAL_PREFLIGHT_ID, lane: "preflight", dependsOn: [] },
 	];
-	for (const [fixture, , rows, controls, storage] of FIXTURES) {
+	for (const [fixture, , rows, controls, storage] of fixtures) {
 		const template = `${fixture}.template`;
 		children.push({
 			id: template,
@@ -263,6 +263,20 @@ export function derivedChangeChangeReadChildDescriptors() {
 		dependsOn: [],
 	});
 	return children.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export function derivedChangeChangeReadChildDescriptors() {
+	return changeReadChildDescriptors(FIXTURES);
+}
+
+export function derivedChangeChangeReadReadinessChildDescriptors() {
+	return changeReadChildDescriptors([FIXTURES[0]]);
+}
+
+function selectedFixtures(readinessFixtureId) {
+	if (readinessFixtureId === undefined) return FIXTURES;
+	if (readinessFixtureId === "topology-v1") return [FIXTURES[0]];
+	throw new Error("unsupported derived Change readiness fixture");
 }
 
 function validateBinary(entry, label, buildCommand = false) {
@@ -1062,16 +1076,7 @@ export async function runDerivedChangeChangeReadDiagnostic(
 	{ readinessFixtureId } = {},
 ) {
 	const config = validateDerivedChangeChangeReadDiagnosticConfig(input);
-	const fixtures =
-		readinessFixtureId === undefined
-			? FIXTURES
-			: readinessFixtureId === "topology-v1"
-				? [FIXTURES[0]]
-				: (() => {
-						throw new Error(
-							"unsupported derived Change readiness fixture",
-						);
-					})();
+	const fixtures = selectedFixtures(readinessFixtureId);
 	await Promise.all([empty(config.caseRoot), empty(config.workRoot)]);
 	const artifacts = [];
 	const cases = [];

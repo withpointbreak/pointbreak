@@ -60,7 +60,7 @@ pub fn qualification_host_identity_sha256() -> Result<String, String> {
 }
 
 fn normalized_host_identity_sha256(host_name: &str) -> Result<String, String> {
-    let host_name = host_name.trim().to_ascii_lowercase();
+    let host_name = host_name.trim();
     if host_name.is_empty() {
         return Err("host identity is empty".to_owned());
     }
@@ -88,21 +88,44 @@ fn platform_host_name() -> Result<String, String> {
 
 #[cfg(windows)]
 fn platform_host_name() -> Result<String, String> {
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetComputerNameW(buffer: *mut u16, size: *mut u32) -> i32;
+    use windows_sys::Win32::Networking::WinSock::{
+        GetHostNameW, WSACleanup, WSADATA, WSAGetLastError, WSAStartup,
+    };
+
+    struct WinsockCleanup;
+    impl Drop for WinsockCleanup {
+        fn drop(&mut self) {
+            // SAFETY: this guard is constructed only after one successful
+            // WSAStartup call in this process.
+            let _ = unsafe { WSACleanup() };
+        }
     }
 
-    let mut buffer = [0_u16; 256];
-    let mut length = buffer.len() as u32;
-    // SAFETY: `buffer` is writable for `length` UTF-16 code units and Windows
-    // updates `length` to the number of initialized code units on success.
-    if unsafe { GetComputerNameW(buffer.as_mut_ptr(), &mut length) } == 0 {
+    let mut winsock = WSADATA::default();
+    // SAFETY: `winsock` is writable and remains alive for the call. Version
+    // 2.2 is the same Winsock contract used by libuv on supported Windows.
+    let startup = unsafe { WSAStartup(0x0202, &mut winsock) };
+    if startup != 0 {
         return Err(format!(
-            "host identity observation failed: {}",
-            std::io::Error::last_os_error()
+            "host identity observation failed: Winsock startup error {startup}"
         ));
     }
+    let _cleanup = WinsockCleanup;
+    let mut buffer = [0_u16; 256];
+    // SAFETY: `buffer` is writable for the exact number of UTF-16 code units
+    // passed to Winsock and remains alive for the call.
+    if unsafe { GetHostNameW(buffer.as_mut_ptr(), buffer.len() as i32) } != 0 {
+        // SAFETY: this immediately follows the failed Winsock call on the same
+        // thread, before any other Winsock operation can replace the error.
+        let error = unsafe { WSAGetLastError() };
+        return Err(format!(
+            "host identity observation failed: Winsock error {error}"
+        ));
+    }
+    let length = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .ok_or_else(|| "host identity observation was not terminated".to_owned())?;
     String::from_utf16(&buffer[..length as usize])
         .map_err(|error| format!("host identity is not valid UTF-16: {error}"))
 }
@@ -239,10 +262,10 @@ mod host_identity_tests {
     use super::*;
 
     #[test]
-    fn host_identity_normalizes_case_and_surrounding_whitespace() {
+    fn host_identity_preserves_observed_case_and_trims_surrounding_whitespace() {
         assert_eq!(
             normalized_host_identity_sha256("  Example-Host\n").unwrap(),
-            sha256_bytes_hex(b"example-host")
+            sha256_bytes_hex(b"Example-Host")
         );
         assert!(normalized_host_identity_sha256(" \r\n").is_err());
     }

@@ -158,6 +158,14 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
             }),
         ),
         (
+            "readiness",
+            serde_json::json!({
+                "schema": DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1,
+                "admissible": false,
+                "ready": false,
+            }),
+        ),
+        (
             "change-read-child",
             serde_json::json!({
                 "mode": DERIVED_CHANGE_READ_DIAGNOSTIC_MODE_V1,

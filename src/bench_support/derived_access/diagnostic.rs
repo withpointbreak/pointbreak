@@ -14,6 +14,8 @@ pub const DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1: &str =
     "pointbreak.derived-change-diagnostic-fragment.v1";
 pub const DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1: &str =
     "pointbreak.derived-change-diagnostic-collection.v1";
+pub const DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1: &str =
+    "pointbreak.derived-change-diagnostic-readiness.v1";
 pub const DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1: &str =
     "derived-change-diagnostic-report.json";
 pub const DERIVED_CHANGE_DIAGNOSTIC_ROOT_COMPONENT_V1: &str = "derived-change-diagnostic";
@@ -73,6 +75,7 @@ pub fn reject_derived_change_diagnostic_evidence_document_v1(
         Some(DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1)
             | Some(DERIVED_CHANGE_DIAGNOSTIC_FRAGMENT_SCHEMA_V1)
             | Some(DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1)
+            | Some(DERIVED_CHANGE_DIAGNOSTIC_READINESS_SCHEMA_V1)
     );
     let diagnostic_mode = matches!(
         document.get("mode").and_then(serde_json::Value::as_str),

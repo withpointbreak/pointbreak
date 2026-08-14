@@ -22,6 +22,7 @@ import {
 import {
 	createDerivedChangeDiagnosticCampaign,
 	createDerivedChangeDiagnosticHostRequest,
+	derivedChangeDiagnosticHostIdentitySha256,
 	derivedChangeDiagnosticReadinessCaseIds,
 	derivedChangeDiagnosticToolchainPreflightEnvironment,
 	derivedChangeDiagnosticFilesystemProbeArguments,
@@ -36,8 +37,10 @@ import {
 	runDerivedChangeDiagnosticHost,
 	runDerivedChangeDiagnosticHostReadiness,
 	validateDerivedChangeDiagnosticHostSubstratePrograms,
+	validateDerivedChangeDiagnosticReadinessCollection,
 	writeUnavailableDerivedChangeDiagnosticHost,
 } from "./derived-change-diagnostic-campaign.mjs";
+import { derivedChangeChangeReadReadinessChildDescriptors } from "./derived-change-diagnostic-change-read.mjs";
 import {
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_BASENAME_V1,
 	DERIVED_CHANGE_DIAGNOSTIC_REPORT_SCHEMA_V1,
@@ -86,6 +89,13 @@ const controlBuildCommandSha256 = (arguments_) =>
 	createHash("sha256")
 		.update(JSON.stringify({ arguments: arguments_, program: "cargo" }))
 		.digest("hex");
+
+test("host identity preserves the observed spelling and trims its boundary", () => {
+	assert.equal(
+		derivedChangeDiagnosticHostIdentitySha256("  Example-Host\n"),
+		createHash("sha256").update("Example-Host").digest("hex"),
+	);
+});
 const libraryControlBuildCommandSha256 = controlBuildCommandSha256([
 	"+stable",
 	"test",
@@ -1227,6 +1237,39 @@ test("shakedown-host retains a bounded non-admissible readiness receipt", async 
 	await assert.rejects(
 		readFile(join(config.outputRoot, "host-fragment.json")),
 		/ENOENT/,
+	);
+});
+
+test("readiness accepts only the exact complete successful topology inventory", () => {
+	const campaignId = "derived-change-readiness-inventory";
+	const expectedIds = derivedChangeChangeReadReadinessChildDescriptors().map(
+		({ id }) => id,
+	);
+	const collection = {
+		schema: "pointbreak.derived-change-diagnostic-collection.v1",
+		campaignId,
+		cases: expectedIds.map((id) => ({ id, status: "passed" })),
+	};
+
+	assert.deepEqual(
+		validateDerivedChangeDiagnosticReadinessCollection(collection, campaignId),
+		expectedIds,
+	);
+	assert.throws(
+		() =>
+			validateDerivedChangeDiagnosticReadinessCollection(
+				{ ...collection, cases: collection.cases.slice(1) },
+				campaignId,
+			),
+		/readiness child inventory differs/u,
+	);
+	assert.throws(
+		() =>
+			validateDerivedChangeDiagnosticReadinessCollection(
+				{ ...collection, cases: [...collection.cases, collection.cases[0]] },
+				campaignId,
+			),
+		/readiness child inventory differs/u,
 	);
 });
 

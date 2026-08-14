@@ -102,6 +102,9 @@ two-face = { version = "0.5.1", default-features = false, features = ["syntect-f
 unicode-width = "0.2"
 zstd = { version = "0.13.3", default-features = false, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 base64 = "0.22"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

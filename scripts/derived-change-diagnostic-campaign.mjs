@@ -34,6 +34,7 @@ import {
 import {
 	DERIVED_CHANGE_CHANGE_READ_DIAGNOSTIC_CONFIG_SCHEMA_V1,
 	derivedChangeChangeReadChildDescriptors,
+	derivedChangeChangeReadReadinessChildDescriptors,
 	validateDerivedChangeChangeReadDiagnosticConfig,
 } from "./derived-change-diagnostic-change-read.mjs";
 import {
@@ -1596,6 +1597,41 @@ function readinessLog(path, bytes) {
 	};
 }
 
+export function validateDerivedChangeDiagnosticReadinessCollection(
+	collection,
+	campaignId,
+) {
+	requireObject(collection, "representative Change-read collection");
+	requireText(campaignId, "representative Change-read campaign id");
+	if (
+		collection.schema !== DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1 ||
+		collection.campaignId !== campaignId ||
+		!Array.isArray(collection.cases)
+	) {
+		throw new Error("representative Change-read collection is invalid");
+	}
+	const expectedIds = derivedChangeChangeReadReadinessChildDescriptors().map(
+		({ id }) => id,
+	);
+	const observedIds = collection.cases.map((record) => {
+		requireObject(record, "representative Change-read case");
+		requireText(record.id, "representative Change-read case id");
+		return record.id;
+	});
+	if (JSON.stringify(observedIds.sort()) !== JSON.stringify(expectedIds)) {
+		throw new Error("representative Change-read readiness child inventory differs");
+	}
+	const failed = collection.cases
+		.filter(({ status }) => status !== "passed")
+		.map(({ id, status }) => `${id}:${status}`);
+	if (failed.length) {
+		throw new Error(
+			`representative Change-read cases did not pass: ${failed.join(", ")}`,
+		);
+	}
+	return expectedIds;
+}
+
 export async function runDerivedChangeDiagnosticHostReadiness(config) {
 	const request = createDerivedChangeDiagnosticHostRequest(config);
 	await assertDerivedChangeDiagnosticOutputRootSafety(
@@ -1670,21 +1706,10 @@ export async function runDerivedChangeDiagnosticHostReadiness(config) {
 		} else if (id.endsWith(".change-read-stateful")) {
 			try {
 				const collection = JSON.parse(outcome.stdout.toString("utf8"));
-				if (
-					collection.schema !== DERIVED_CHANGE_DIAGNOSTIC_COLLECTION_SCHEMA_V1 ||
-					collection.campaignId !== config.campaign.id ||
-					!Array.isArray(collection.cases)
-				) {
-					throw new Error("representative Change-read collection is invalid");
-				}
-				const failed = collection.cases
-					.filter(({ status }) => status !== "passed")
-					.map(({ id: childId, status }) => `${childId}:${status}`);
-				if (failed.length) {
-					throw new Error(
-						`representative Change-read cases did not pass: ${failed.join(", ")}`,
-					);
-				}
+				validateDerivedChangeDiagnosticReadinessCollection(
+					collection,
+					config.campaign.id,
+				);
 			} catch (error) {
 				failureDetail = String(error);
 			}
@@ -2282,10 +2307,15 @@ function observedOperatingSystem() {
 	);
 }
 
-function observedHostIdentitySha256() {
+export function derivedChangeDiagnosticHostIdentitySha256(hostName) {
+	requireText(hostName, "diagnostic host name");
 	return createHash("sha256")
-		.update(hostname().trim().toLowerCase())
+		.update(hostName.trim())
 		.digest("hex");
+}
+
+function observedHostIdentitySha256() {
+	return derivedChangeDiagnosticHostIdentitySha256(hostname());
 }
 
 export function validateDerivedChangeDiagnosticHostSubstratePrograms(
