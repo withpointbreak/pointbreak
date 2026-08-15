@@ -699,6 +699,8 @@ pub struct QualificationDerivedAccessExecutionIdentityV1 {
     pub operating_system: String,
     pub architecture: String,
     pub filesystem: String,
+    /// SHA-256 of the explicit logical campaign-host label. This is not a
+    /// hardware identifier or a hash of an ambient network hostname.
     pub host_identity_sha256: String,
     pub source_dirty: bool,
     pub private_corpus_configured: bool,
@@ -1946,6 +1948,24 @@ fn validate_execution_identities(
                     "derived-access execution identities mix native platform authority".to_owned(),
                 );
             }
+        }
+        let apfs_host_identity = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == QualificationDerivedAccessPlatformV1::MacosApfs)
+            .map(|identity| &identity.host_identity_sha256);
+        let ntfs_host_identity = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == QualificationDerivedAccessPlatformV1::WindowsNtfs)
+            .map(|identity| &identity.host_identity_sha256);
+        if let (Some(apfs_host_identity), Some(ntfs_host_identity)) =
+            (apfs_host_identity, ntfs_host_identity)
+            && apfs_host_identity == ntfs_host_identity
+        {
+            return Err(
+                "derived-access execution identities reuse one campaign-host authority".to_owned(),
+            );
         }
         for product in &package.product_identities {
             let Some(execution) = package
@@ -4314,6 +4334,16 @@ mod tests {
         let mut mixed_source = complete_package();
         mixed_source.execution_identities[1].source_tree = "a".repeat(40);
         assert!(evaluate_qualification_derived_access_v1(&mixed_source).is_err());
+
+        let mut reused_host_authority = complete_package();
+        reused_host_authority.execution_identities[1].host_identity_sha256 = reused_host_authority
+            .execution_identities[0]
+            .host_identity_sha256
+            .clone();
+        assert_eq!(
+            validate_execution_identities(&reused_host_authority).unwrap_err(),
+            "derived-access execution identities reuse one campaign-host authority"
+        );
 
         let mut duplicate_identity = complete_package();
         duplicate_identity

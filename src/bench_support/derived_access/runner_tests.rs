@@ -14,8 +14,10 @@ fn digest(value: u8) -> String {
 
 #[test]
 fn diagnostic_harness_identity_is_schema_less_and_build_bound() {
-    let identity = derived_change_diagnostic_harness_identity_v1()
-        .expect("diagnostic harness observes its host identity in process");
+    let host_identity_sha256 = digest(31);
+    let identity = super::diagnostic::derived_change_diagnostic_harness_identity_for_test_v1(
+        host_identity_sha256.clone(),
+    );
     let value = serde_json::to_value(identity).expect("diagnostic harness identity serializes");
 
     assert_eq!(value["mode"], DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1);
@@ -26,8 +28,7 @@ fn diagnostic_harness_identity_is_schema_less_and_build_bound() {
         value["hostIdentitySha256"]
             .as_str()
             .expect("host identity hash"),
-        crate::bench_support::foundation::qualification_host_identity_sha256()
-            .expect("live host identity")
+        host_identity_sha256
     );
 }
 
@@ -90,6 +91,18 @@ fn execution_identity_diagnostic_names_every_drifted_field() {
     assert_eq!(
         super::evidence::execution_identity_mismatches(&expected, &observed),
         ["platform", "binary_sha256", "architecture"]
+    );
+}
+
+#[test]
+fn execution_identity_reports_only_campaign_host_authority_drift() {
+    let expected = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let mut observed = expected.clone();
+    observed.host_identity_sha256 = digest(35);
+
+    assert_eq!(
+        super::evidence::execution_identity_mismatches(&expected, &observed),
+        ["host_identity_sha256"]
     );
 }
 
@@ -421,11 +434,12 @@ fn native_diagnostic_bridge_admits_post_smoke_authoritative_roots_for_each_tier(
         QualificationDerivedAccessTierV1::L7,
     ] {
         let tier_root = workspace.path().join(format!("native-{tier:?}"));
-        let execution = super::evidence::observe_current_execution_identity_v1(
+        let execution = super::evidence::observe_current_execution_identity_for_test_v1(
             native_test_platform(),
             digest(54),
             &source_checkout,
             &tier_root,
+            digest(31),
         )
         .expect("observe exact diagnostic execution");
         let request = QualificationDerivedAccessNativeSmokeRunRequestV1 {
@@ -442,8 +456,11 @@ fn native_diagnostic_bridge_admits_post_smoke_authoritative_roots_for_each_tier(
         )
         .expect("write native diagnostic request");
 
-        let result = run_derived_change_diagnostic_native_v1(&request_path)
-            .expect("diagnostic bridge retains the post-smoke admitted root");
+        let result = super::evidence::run_derived_change_diagnostic_native_for_test_v1(
+            &request_path,
+            digest(31),
+        )
+        .expect("diagnostic bridge retains the post-smoke admitted root");
         let observed =
             crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
                 &result.admitted_root_path,
@@ -1579,11 +1596,12 @@ fn retained_bootstrap_runner_preserves_authoritative_inventory() {
             .expect("materialize deterministic roots");
     let source_checkout = workspace.path().join("source");
     initialize_clean_test_source_checkout(&source_checkout);
-    let execution = super::evidence::observe_current_execution_identity_v1(
+    let execution = super::evidence::observe_current_execution_identity_for_test_v1(
         native_test_platform(),
         digest(21),
         &source_checkout,
         &qualification_clone,
+        digest(31),
     )
     .expect("observe exact test execution");
     let request = QualificationDerivedAccessRetainedRootRequestV1::new(
@@ -1601,7 +1619,11 @@ fn retained_bootstrap_runner_preserves_authoritative_inventory() {
     )
     .expect("write retained request");
 
-    let receipt = bootstrap_qualification_derived_access_retained_root_v1(&request_path)
+    let receipt =
+        super::evidence::bootstrap_qualification_derived_access_retained_root_for_test_v1(
+            &request_path,
+            digest(31),
+        )
         .expect("governed derived publication preserves authoritative truth");
     assert_eq!(receipt.tier, QualificationDerivedAccessTierV1::L7);
     assert_eq!(receipt.immutable_before, receipt.immutable_after);

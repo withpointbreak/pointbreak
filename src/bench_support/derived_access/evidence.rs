@@ -1505,6 +1505,20 @@ pub struct DerivedChangeDiagnosticNativeResultV1 {
 pub fn run_qualification_derived_access_native_smoke_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedAccessNativeSmokeRunReceiptV1, String> {
+    run_qualification_derived_access_native_smoke_with_validator_v1(
+        request_path,
+        validate_current_execution_identity_v1,
+    )
+}
+
+fn run_qualification_derived_access_native_smoke_with_validator_v1(
+    request_path: &Path,
+    validate_execution: impl FnOnce(
+        &QualificationDerivedAccessExecutionIdentityV1,
+        &Path,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<QualificationDerivedAccessNativeSmokeRunReceiptV1, String> {
     let request: QualificationDerivedAccessNativeSmokeRunRequestV1 = read_json(request_path)?;
     if request.schema != QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1
         || !matches!(
@@ -1516,7 +1530,7 @@ pub fn run_qualification_derived_access_native_smoke_v1(
     {
         return Err("invalid derived-access native smoke request".to_owned());
     }
-    validate_current_execution_identity_v1(
+    validate_execution(
         &request.execution,
         &request.source_checkout,
         &request.workspace_root,
@@ -1551,6 +1565,20 @@ pub fn run_qualification_derived_access_native_smoke_v1(
 pub fn run_derived_change_diagnostic_native_v1(
     request_path: &Path,
 ) -> Result<DerivedChangeDiagnosticNativeResultV1, String> {
+    run_derived_change_diagnostic_native_with_validator_v1(
+        request_path,
+        validate_current_execution_identity_v1,
+    )
+}
+
+fn run_derived_change_diagnostic_native_with_validator_v1(
+    request_path: &Path,
+    validate_execution: impl FnOnce(
+        &QualificationDerivedAccessExecutionIdentityV1,
+        &Path,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<DerivedChangeDiagnosticNativeResultV1, String> {
     let request: QualificationDerivedAccessNativeSmokeRunRequestV1 = read_json(request_path)?;
     if request.schema != QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1
         || !matches!(
@@ -1562,7 +1590,10 @@ pub fn run_derived_change_diagnostic_native_v1(
     {
         return Err("invalid derived-Change diagnostic native request".to_owned());
     }
-    run_qualification_derived_access_native_smoke_v1(request_path)?;
+    run_qualification_derived_access_native_smoke_with_validator_v1(
+        request_path,
+        validate_execution,
+    )?;
     let admitted_root_path = request.workspace_root.join("root-a");
     let source_before = longitudinal_authoritative_store_data_inventory_v1(&admitted_root_path)
         .map_err(|error| error.to_string())?;
@@ -1582,6 +1613,24 @@ pub fn run_derived_change_diagnostic_native_v1(
         admitted_root_sha256,
         source_unchanged,
     })
+}
+
+#[cfg(test)]
+pub(super) fn run_derived_change_diagnostic_native_for_test_v1(
+    request_path: &Path,
+    host_identity_sha256: String,
+) -> Result<DerivedChangeDiagnosticNativeResultV1, String> {
+    run_derived_change_diagnostic_native_with_validator_v1(
+        request_path,
+        move |expected, source_checkout, evidence_root| {
+            validate_current_execution_identity_with_host_authority_v1(
+                expected,
+                source_checkout,
+                evidence_root,
+                &host_identity_sha256,
+            )
+        },
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -3061,9 +3110,23 @@ fn max_counters(
 pub fn preflight_qualification_derived_access_retained_root_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedAccessRetainedPreflightReceiptV1, String> {
+    preflight_qualification_derived_access_retained_root_with_validator_v1(
+        request_path,
+        &validate_current_execution_identity_v1,
+    )
+}
+
+fn preflight_qualification_derived_access_retained_root_with_validator_v1(
+    request_path: &Path,
+    validate_execution: &impl Fn(
+        &QualificationDerivedAccessExecutionIdentityV1,
+        &Path,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<QualificationDerivedAccessRetainedPreflightReceiptV1, String> {
     let request: QualificationDerivedAccessRetainedRootRequestV1 = read_json(request_path)?;
     request.validate()?;
-    validate_current_execution_identity_v1(
+    validate_execution(
         &request.execution,
         &request.source_checkout,
         &request.immutable_input_root,
@@ -3105,13 +3168,30 @@ pub fn preflight_qualification_derived_access_retained_root_v1(
 pub fn bootstrap_qualification_derived_access_retained_root_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedAccessRetainedBootstrapReceiptV1, String> {
+    bootstrap_qualification_derived_access_retained_root_with_validator_v1(
+        request_path,
+        &validate_current_execution_identity_v1,
+    )
+}
+
+fn bootstrap_qualification_derived_access_retained_root_with_validator_v1(
+    request_path: &Path,
+    validate_execution: &impl Fn(
+        &QualificationDerivedAccessExecutionIdentityV1,
+        &Path,
+        &Path,
+    ) -> Result<(), String>,
+) -> Result<QualificationDerivedAccessRetainedBootstrapReceiptV1, String> {
     let request: QualificationDerivedAccessRetainedRootRequestV1 = read_json(request_path)?;
     request.validate()?;
     if !request.qualification_clone_root.exists() {
         return Err("retained bootstrap requires a separately created clone".to_owned());
     }
-    let preflight = preflight_qualification_derived_access_retained_root_v1(request_path)?;
-    validate_current_execution_identity_v1(
+    let preflight = preflight_qualification_derived_access_retained_root_with_validator_v1(
+        request_path,
+        validate_execution,
+    )?;
+    validate_execution(
         &request.execution,
         &request.source_checkout,
         &request.qualification_clone_root,
@@ -3207,6 +3287,27 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
         semantic_receipt_sha256,
         full_replay_matches_incremental,
     })
+}
+
+#[cfg(test)]
+pub(super) fn bootstrap_qualification_derived_access_retained_root_for_test_v1(
+    request_path: &Path,
+    host_identity_sha256: String,
+) -> Result<QualificationDerivedAccessRetainedBootstrapReceiptV1, String> {
+    let validate_execution = move |expected: &QualificationDerivedAccessExecutionIdentityV1,
+                                   source_checkout: &Path,
+                                   evidence_root: &Path| {
+        validate_current_execution_identity_with_host_authority_v1(
+            expected,
+            source_checkout,
+            evidence_root,
+            &host_identity_sha256,
+        )
+    };
+    bootstrap_qualification_derived_access_retained_root_with_validator_v1(
+        request_path,
+        &validate_execution,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -4284,12 +4385,28 @@ pub(super) fn validate_current_execution_identity_v1(
     source_checkout: &Path,
     evidence_root: &Path,
 ) -> Result<(), String> {
+    let host_identity_sha256 = qualification_host_identity_sha256()?;
+    validate_current_execution_identity_with_host_authority_v1(
+        expected,
+        source_checkout,
+        evidence_root,
+        &host_identity_sha256,
+    )
+}
+
+fn validate_current_execution_identity_with_host_authority_v1(
+    expected: &QualificationDerivedAccessExecutionIdentityV1,
+    source_checkout: &Path,
+    evidence_root: &Path,
+    host_identity_sha256: &str,
+) -> Result<(), String> {
     expected.validate()?;
-    let observed = observe_current_execution_identity_v1(
+    let observed = observe_current_execution_identity_with_host_authority_v1(
         expected.platform,
         expected.root_provenance_sha256.clone(),
         source_checkout,
         evidence_root,
+        host_identity_sha256.to_owned(),
     )?;
     if &observed != expected {
         return Err(format!(
@@ -4347,11 +4464,12 @@ pub(super) fn execution_identity_mismatches(
     fields
 }
 
-pub(super) fn observe_current_execution_identity_v1(
+fn observe_current_execution_identity_with_host_authority_v1(
     platform: super::QualificationDerivedAccessPlatformV1,
     root_provenance_sha256: String,
     source_checkout: &Path,
     evidence_root: &Path,
+    host_identity_sha256: String,
 ) -> Result<QualificationDerivedAccessExecutionIdentityV1, String> {
     if !source_checkout.is_dir() {
         return Err("derived-access source checkout is absent".to_owned());
@@ -4385,10 +4503,27 @@ pub(super) fn observe_current_execution_identity_v1(
             nearest_existing_ancestor(evidence_root)?,
         )
         .to_ascii_lowercase(),
-        host_identity_sha256: qualification_host_identity_sha256()?,
+        host_identity_sha256,
         source_dirty,
         private_corpus_configured: std::env::var_os("POINTBREAK_QUALIFICATION_CORPUS").is_some(),
     })
+}
+
+#[cfg(test)]
+pub(super) fn observe_current_execution_identity_for_test_v1(
+    platform: super::QualificationDerivedAccessPlatformV1,
+    root_provenance_sha256: String,
+    source_checkout: &Path,
+    evidence_root: &Path,
+    host_identity_sha256: String,
+) -> Result<QualificationDerivedAccessExecutionIdentityV1, String> {
+    observe_current_execution_identity_with_host_authority_v1(
+        platform,
+        root_provenance_sha256,
+        source_checkout,
+        evidence_root,
+        host_identity_sha256,
+    )
 }
 
 fn nearest_existing_ancestor(path: &Path) -> Result<&Path, String> {

@@ -129,6 +129,7 @@ Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--gener
        --derived-access-authority-stamp-verify --derived-access-input=<apfs.json> --derived-access-input=<ntfs.json>\n\
        (authority-stamp modes require --features longitudinal-counting)\n\
        --derived-access-verify-package --derived-access-package-root=<path>\n\
+       execution-identity modes require POINTBREAK_QUALIFICATION_HOST_IDENTITY=<campaign-host-label>\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
        --lmdb-prospective-package --lmdb-prospective-input=<path> [--lmdb-prospective-input=<path> ...]\n\

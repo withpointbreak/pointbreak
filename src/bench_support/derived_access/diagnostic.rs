@@ -37,16 +37,30 @@ pub struct DerivedChangeDiagnosticHarnessIdentityV1 {
 
 pub fn derived_change_diagnostic_harness_identity_v1()
 -> Result<DerivedChangeDiagnosticHarnessIdentityV1, String> {
-    Ok(DerivedChangeDiagnosticHarnessIdentityV1 {
+    let host_identity_sha256 = qualification_host_identity_sha256()?;
+    Ok(derived_change_diagnostic_harness_identity_from_observation_v1(host_identity_sha256))
+}
+
+fn derived_change_diagnostic_harness_identity_from_observation_v1(
+    host_identity_sha256: String,
+) -> DerivedChangeDiagnosticHarnessIdentityV1 {
+    DerivedChangeDiagnosticHarnessIdentityV1 {
         mode: DERIVED_CHANGE_DIAGNOSTIC_IDENTITY_MODE_V1,
         build_source: env!("POINTBREAK_BUILD_SOURCE"),
         source_commit: env!("POINTBREAK_BUILD_COMMIT"),
         source_dirty: env!("POINTBREAK_BUILD_DIRTY") == "true",
-        host_identity_sha256: qualification_host_identity_sha256()?,
+        host_identity_sha256,
         bench_enabled: cfg!(feature = "bench"),
         longitudinal_counting_enabled: cfg!(feature = "longitudinal-counting"),
         private_corpus_configured: std::env::var_os("POINTBREAK_QUALIFICATION_CORPUS").is_some(),
-    })
+    }
+}
+
+#[cfg(test)]
+pub(super) fn derived_change_diagnostic_harness_identity_for_test_v1(
+    host_identity_sha256: String,
+) -> DerivedChangeDiagnosticHarnessIdentityV1 {
+    derived_change_diagnostic_harness_identity_from_observation_v1(host_identity_sha256)
 }
 
 pub fn reject_derived_change_diagnostic_evidence_path_v1(path: &Path) -> Result<(), String> {

@@ -162,6 +162,8 @@ pub struct AuthorityStampExecutionIdentityV1 {
     pub operating_system: String,
     pub architecture: String,
     pub filesystem: String,
+    /// SHA-256 of the explicit logical campaign-host label. This is not a
+    /// hardware identifier or a hash of an ambient network hostname.
     pub host_identity_sha256: String,
     pub command_sha256: String,
     pub probe_root_identity_sha256: String,
@@ -392,6 +394,9 @@ fn validate_native_pair(
         || apfs.execution.cargo_lock_sha256 != ntfs.execution.cargo_lock_sha256
     {
         return Err("authority-stamp native receipts do not share source authority".to_owned());
+    }
+    if apfs.execution.host_identity_sha256 == ntfs.execution.host_identity_sha256 {
+        return Err("authority-stamp native receipts reuse one campaign-host authority".to_owned());
     }
     if !apfs.all_scenarios_accepted || !ntfs.all_scenarios_accepted {
         return Err("authority-stamp native evidence contains a qualifying falsifier".to_owned());
@@ -1298,7 +1303,10 @@ mod tests {
                     operating_system: operating_system.to_owned(),
                     architecture: "test".to_owned(),
                     filesystem: filesystem.to_owned(),
-                    host_identity_sha256: "4".repeat(64),
+                    host_identity_sha256: match platform {
+                        AuthorityStampPlatformV1::MacosApfs => "4".repeat(64),
+                        AuthorityStampPlatformV1::WindowsNtfs => "7".repeat(64),
+                    },
                     command_sha256: "5".repeat(64),
                     probe_root_identity_sha256: "6".repeat(64),
                 },
@@ -1322,6 +1330,14 @@ mod tests {
         assert_eq!(
             validate_native_pair(&apfs, &rejected_ntfs).unwrap_err(),
             "authority-stamp native evidence contains a qualifying falsifier"
+        );
+
+        let mut reused_host_ntfs = receipt("a", AuthorityStampPlatformV1::WindowsNtfs, true);
+        reused_host_ntfs.execution.host_identity_sha256 =
+            apfs.execution.host_identity_sha256.clone();
+        assert_eq!(
+            validate_native_pair(&apfs, &reused_host_ntfs).unwrap_err(),
+            "authority-stamp native receipts reuse one campaign-host authority"
         );
     }
 }

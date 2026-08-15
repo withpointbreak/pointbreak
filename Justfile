@@ -17,6 +17,11 @@ set windows-shell := ["C:/Program Files/Git/bin/sh.exe", "-cu"]
 # it in `build-all` actually exists on disk.
 bin_ext := if os_family() == "windows" { ".exe" } else { "" }
 
+# Non-terminal CI/developer qualification probes use an explicit host-lane
+# label. Admissible operators invoke the harness directly and must provide a
+# distinct campaign-authorized value for each real host lane.
+qualification_test_host_identity := "pointbreak-test-" + os() + "-v1"
+
 # List available recipes.
 [group('help')]
 default:
@@ -258,7 +263,8 @@ check: commit-check build lint test
 # uses only disposable roots and records raw samples without timing thresholds.
 [group('quality')]
 store-foundation-qualification-smoke:
-    cargo +stable bench --features bench --bench store_foundation -- --qualification-smoke
+    POINTBREAK_QUALIFICATION_HOST_IDENTITY={{ qualification_test_host_identity }} \
+        cargo +stable bench --features bench --bench store_foundation -- --qualification-smoke
 
 # Execute the feature-gated derived-access accounting and package regression lane.
 [group('quality')]
@@ -270,7 +276,8 @@ derived-access-tests:
 # remains environment evidence rather than a default-test timing gate.
 [group('quality')]
 store-foundation-qualification:
-    cargo +stable bench --features bench --bench store_foundation -- --qualification-evidence
+    POINTBREAK_QUALIFICATION_HOST_IDENTITY={{ qualification_test_host_identity }} \
+        cargo +stable bench --features bench --bench store_foundation -- --qualification-evidence
 
 # Print and validate the public longitudinal workload and capacity contracts.
 [group('quality')]

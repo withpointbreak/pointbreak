@@ -671,7 +671,8 @@ Run each native receipt from the same exact clean commit. The probe root must be
 output must be outside source control:
 
 ```sh
-cargo bench --locked --features longitudinal-counting --bench store_foundation -- \
+POINTBREAK_QUALIFICATION_HOST_IDENTITY=qualification-campaign-macos-apfs-a \
+  cargo bench --locked --features longitudinal-counting --bench store_foundation -- \
   --derived-access-authority-stamp \
   --derived-access-source=/absolute/path/to/clean-pointbreak \
   --derived-access-root=/absolute/path/to/empty-native-probe \
@@ -759,7 +760,16 @@ bundle manifest without opening or mutating either root.
 
 Native smoke, lifecycle, retained-root, scale, resource, and fragment modes consume typed JSON requests:
 
+Every mode that observes a current execution identity requires
+`POINTBREAK_QUALIFICATION_HOST_IDENTITY`. The operator must create one visible-ASCII label for each host
+lane, record it in the campaign authority, keep it unchanged for every process in that lane, and use distinct
+labels for macOS/APFS and Windows/NTFS. Receipts bind only the label's SHA-256. The label identifies the
+operator-authorized campaign lane; it is not a hardware credential and must never be derived from
+`hostname`, DNS, DHCP, `ComputerName`, or another network-controlled name. Those ambient names may be
+recorded separately as non-gating diagnostics.
+
 ```sh
+export POINTBREAK_QUALIFICATION_HOST_IDENTITY=qualification-campaign-macos-apfs-a
 just derived-access-lifecycle /absolute/path/to/lifecycle-request.json
 just derived-access-retained-preflight /absolute/path/to/retained-root-request.json
 just derived-access-retained-bootstrap /absolute/path/to/retained-root-request.json
@@ -778,8 +788,8 @@ just derived-change-read /absolute/path/to/change-read-request.json
 
 The Change-read recipe exports the request's exact `pointbreakHome` as `POINTBREAK_HOME` before invoking the
 harness. Its `jq` read is newline-free so Git Bash cannot retain a trailing carriage return. Direct harness
-callers must export that same request-bound value; leaving it unset or binding a different home fails before
-evidence collection.
+callers must export that same request-bound value and the campaign-authorized host identity; leaving either
+unset or binding a different value fails before evidence collection.
 
 The fixture mode accepts one absolute disposable root and one typed public fixture kind. Its bodyless witness
 binds the complete authoritative inventory, expected Change topology/lifecycle, exact Revision-ref hashes,

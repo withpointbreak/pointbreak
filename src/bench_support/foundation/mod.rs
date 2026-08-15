@@ -44,6 +44,8 @@ pub use sqlite::*;
 
 use crate::canonical_hash::sha256_bytes_hex;
 
+pub const QUALIFICATION_HOST_IDENTITY_ENV_V1: &str = "POINTBREAK_QUALIFICATION_HOST_IDENTITY";
+
 /// Report the filesystem type containing a qualification workload.
 ///
 /// The platform commands are metadata-only: they inspect the supplied path
@@ -52,87 +54,31 @@ pub fn qualification_filesystem_name(path: &Path) -> String {
     platform_filesystem_name(path).unwrap_or_else(|| "unavailable".to_owned())
 }
 
-/// Observe the current host name without ambient command resolution and bind
-/// its normalized value to the same SHA-256 form used by the diagnostic host
-/// probe.
+/// Bind the explicit campaign-authorized host label supplied by the operator.
+///
+/// This value identifies one host within a qualification campaign. It is not
+/// derived from a network-controlled host name and does not claim to
+/// authenticate physical hardware.
 pub fn qualification_host_identity_sha256() -> Result<String, String> {
-    normalized_host_identity_sha256(&platform_host_name()?)
-}
-
-fn normalized_host_identity_sha256(host_name: &str) -> Result<String, String> {
-    let host_name = host_name.trim();
-    if host_name.is_empty() {
-        return Err("host identity is empty".to_owned());
+    match std::env::var(QUALIFICATION_HOST_IDENTITY_ENV_V1) {
+        Ok(value) => qualification_host_identity_sha256_from_value(Some(&value)),
+        Err(std::env::VarError::NotPresent) => qualification_host_identity_sha256_from_value(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
+            "{QUALIFICATION_HOST_IDENTITY_ENV_V1} must be valid UTF-8"
+        )),
     }
-    Ok(sha256_bytes_hex(host_name.as_bytes()))
 }
 
-#[cfg(unix)]
-fn platform_host_name() -> Result<String, String> {
-    let mut bytes = [0_u8; 256];
-    // SAFETY: `bytes` is writable for the exact length supplied to libc. A
-    // nonzero result, including truncation, is returned as an OS error.
-    if unsafe { libc::gethostname(bytes.as_mut_ptr().cast(), bytes.len()) } != 0 {
+fn qualification_host_identity_sha256_from_value(value: Option<&str>) -> Result<String, String> {
+    let value = value.ok_or_else(|| {
+        format!("{QUALIFICATION_HOST_IDENTITY_ENV_V1} must be explicitly supplied")
+    })?;
+    if value.is_empty() || value.len() > 256 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
         return Err(format!(
-            "host identity observation failed: {}",
-            std::io::Error::last_os_error()
+            "{QUALIFICATION_HOST_IDENTITY_ENV_V1} must be 1 to 256 visible ASCII bytes"
         ));
     }
-    let length = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    String::from_utf8(bytes[..length].to_vec())
-        .map_err(|error| format!("host identity is not UTF-8: {error}"))
-}
-
-#[cfg(windows)]
-fn platform_host_name() -> Result<String, String> {
-    use windows_sys::Win32::Networking::WinSock::{
-        GetHostNameW, WSACleanup, WSADATA, WSAGetLastError, WSAStartup,
-    };
-
-    struct WinsockCleanup;
-    impl Drop for WinsockCleanup {
-        fn drop(&mut self) {
-            // SAFETY: this guard is constructed only after one successful
-            // WSAStartup call in this process.
-            let _ = unsafe { WSACleanup() };
-        }
-    }
-
-    let mut winsock = WSADATA::default();
-    // SAFETY: `winsock` is writable and remains alive for the call. Version
-    // 2.2 is the same Winsock contract used by libuv on supported Windows.
-    let startup = unsafe { WSAStartup(0x0202, &mut winsock) };
-    if startup != 0 {
-        return Err(format!(
-            "host identity observation failed: Winsock startup error {startup}"
-        ));
-    }
-    let _cleanup = WinsockCleanup;
-    let mut buffer = [0_u16; 256];
-    // SAFETY: `buffer` is writable for the exact number of UTF-16 code units
-    // passed to Winsock and remains alive for the call.
-    if unsafe { GetHostNameW(buffer.as_mut_ptr(), buffer.len() as i32) } != 0 {
-        // SAFETY: this immediately follows the failed Winsock call on the same
-        // thread, before any other Winsock operation can replace the error.
-        let error = unsafe { WSAGetLastError() };
-        return Err(format!(
-            "host identity observation failed: Winsock error {error}"
-        ));
-    }
-    let length = buffer
-        .iter()
-        .position(|unit| *unit == 0)
-        .ok_or_else(|| "host identity observation was not terminated".to_owned())?;
-    String::from_utf16(&buffer[..length as usize])
-        .map_err(|error| format!("host identity is not valid UTF-16: {error}"))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_host_name() -> Result<String, String> {
-    Err("host identity observation is unsupported on this platform".to_owned())
+    Ok(sha256_bytes_hex(value.as_bytes()))
 }
 
 #[cfg(target_os = "macos")]
@@ -262,19 +208,23 @@ mod host_identity_tests {
     use super::*;
 
     #[test]
-    fn host_identity_preserves_observed_case_and_trims_surrounding_whitespace() {
+    fn campaign_host_identity_requires_explicit_exact_authority() {
+        let uppercase =
+            qualification_host_identity_sha256_from_value(Some("campaign-macos-apfs-A")).unwrap();
         assert_eq!(
-            normalized_host_identity_sha256("  Example-Host\n").unwrap(),
-            sha256_bytes_hex(b"Example-Host")
+            qualification_host_identity_sha256_from_value(Some("campaign-macos-apfs-01")).unwrap(),
+            sha256_bytes_hex(b"campaign-macos-apfs-01")
         );
-        assert!(normalized_host_identity_sha256(" \r\n").is_err());
-    }
-
-    #[test]
-    fn live_host_identity_is_observed_without_a_child_process() {
-        let identity = qualification_host_identity_sha256().expect("live host identity");
-        assert_eq!(identity.len(), 64);
-        assert!(identity.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(
+            uppercase,
+            qualification_host_identity_sha256_from_value(Some("campaign-macos-apfs-a")).unwrap()
+        );
+        assert!(qualification_host_identity_sha256_from_value(None).is_err());
+        assert!(qualification_host_identity_sha256_from_value(Some("")).is_err());
+        assert!(qualification_host_identity_sha256_from_value(Some(" padded")).is_err());
+        assert!(qualification_host_identity_sha256_from_value(Some("line\nbreak")).is_err());
+        assert!(qualification_host_identity_sha256_from_value(Some("café")).is_err());
+        assert!(qualification_host_identity_sha256_from_value(Some(&"a".repeat(257))).is_err());
     }
 }
 
