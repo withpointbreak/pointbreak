@@ -252,7 +252,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
       const detail = summary.details;
       return {
         label: "Git ref withdrawn",
-        title: "Withdrew a Git ref association",
+        title: `Withdrew Git ref association ${detail.refAssociationId}`,
         fields: fields(
           field("withdrawal", detail.refWithdrawalId),
           field("association", detail.refAssociationId),
@@ -282,7 +282,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
       const detail = summary.details;
       return {
         label: "commit withdrawn",
-        title: "Withdrew a commit association",
+        title: `Withdrew commit association ${detail.commitAssociationId}`,
         fields: fields(
           field("withdrawal", detail.commitWithdrawalId),
           field("association", detail.commitAssociationId),
@@ -340,7 +340,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
       const detail = summary.details;
       return {
         label: "membership withdrawn",
-        title: "Withdrew a Change membership claim",
+        title: `Withdrew Change membership claim ${detail.membershipClaimId}`,
         fields: fields(
           field("claim", detail.membershipClaimId),
           field("withdrawal", detail.membershipWithdrawalId),
@@ -377,7 +377,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
       const detail = summary.details;
       return {
         label: "relation withdrawn",
-        title: "Withdrew a Revision-relation claim",
+        title: `Withdrew Revision-relation claim ${detail.relationClaimId}`,
         fields: fields(
           field("claim", detail.relationClaimId),
           field("withdrawal", detail.relationWithdrawalId),

@@ -147,6 +147,20 @@ test("narrow Attention cards keep their headline, reason, and exact Revision art
   expect(css).toMatch(/\.change-card-current \{[^}]*overflow-wrap: anywhere;/s);
 });
 
+test("Attention reason groups style their server-owned headings", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(
+    /\.attention-group-heading \{[^}]*font-size: var\(--fs-base\);/s,
+  );
+});
+
+test("the card heading wrapper resets heading typography so the headline styling stays put", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(
+    /\.unit-card > h3\.change-card-heading \{[^}]*margin: 0;[^}]*font-size: inherit;[^}]*font-weight: inherit;[^}]*font-family: inherit;/s,
+  );
+});
+
 test("parallel exact Revision choices retain a visible at-rest action affordance", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
   const peerActionRule =

@@ -118,6 +118,90 @@ const attention: AttentionPage = {
   },
 };
 
+const unresolvedRequestsPresentation = {
+  cause: {
+    kind: "unresolved_operative_requests" as const,
+    requestIds: ["request:sha256:one"],
+  },
+  ask: "Respond to every operative request.",
+  reason: "Operative requests remain unresolved.",
+  evidence: "Open requests: request:sha256:one.",
+  nextAction: "Open the Change and respond to each request.",
+};
+const needsAssessmentPresentation = {
+  cause: {
+    kind: "current_revisions_need_assessment" as const,
+    revisions: [revision],
+  },
+  ask: "Assess every current Revision.",
+  reason: "Current Revision assessment coverage is incomplete.",
+  evidence:
+    "Unassessed exact Revisions: revision:sha256:one; artifact sha256:artifact.",
+  nextAction: "Open the Change and assess each listed Revision.",
+};
+
+function groupedAttentionFixture(): {
+  changes: ChangesPage;
+  attention: AttentionPage;
+} {
+  const summaries = ["one", "two", "three", "four"].map((name) => ({
+    changeId: `change:sha256:${name}`,
+    declarationState: "authoritative" as const,
+    titleAssertions: [],
+    memberCount: 1,
+    topology: "parallel_current" as const,
+    lifecycle: "in_progress" as const,
+    attentionSummary: "conflicted" as const,
+    availabilitySummary: "incomplete" as const,
+    currentRevisionRefs: [revision],
+    projectionStamp: "sha256:generation",
+  }));
+  const currentRevisions = [
+    {
+      revision,
+      revisionProposalSummary: "Server proposal",
+      summarySource: "revision_proposal_summary" as const,
+    },
+  ];
+  const attentionFor = (
+    presentation:
+      | typeof unresolvedRequestsPresentation
+      | typeof needsAssessmentPresentation,
+  ) => ({
+    currentRevisions,
+    attention: {
+      primaryReason: presentation.cause,
+      reasons: [presentation.cause],
+      reasonPresentations: [presentation],
+    },
+  });
+  const groupedChanges: ChangesPage = {
+    schema: "pointbreak.inspect-changes-page",
+    version: 1,
+    projectionStamp: "sha256:generation",
+    next: null,
+    changes: summaries,
+    presentations: {
+      "change:sha256:one": { currentRevisions },
+      "change:sha256:two": { currentRevisions },
+      "change:sha256:three": { currentRevisions },
+      "change:sha256:four": { currentRevisions },
+    },
+  };
+  const groupedAttention: AttentionPage = {
+    ...groupedChanges,
+    schema: "pointbreak.inspect-attention",
+    version: 2,
+    // change four deliberately has NO presentation entry: the ungrouped tail.
+    presentations: {
+      "change:sha256:one": attentionFor(unresolvedRequestsPresentation),
+      "change:sha256:two": attentionFor(needsAssessmentPresentation),
+      "change:sha256:three": attentionFor(unresolvedRequestsPresentation),
+    },
+  };
+  return { changes: groupedChanges, attention: groupedAttention };
+}
+
 function eventHistory(): EventHistoryDocument {
   return {
     schema: "pointbreak.inspect-event-history",
@@ -440,7 +524,7 @@ describe("Change inspector render", () => {
         },
         current: "attention",
         heading: "Attention",
-        meta: "1 Change on this page · Change ID order",
+        meta: "1 Change on this page · grouped by attention reason · Change ID order within groups",
       },
     ];
 
@@ -765,9 +849,12 @@ describe("Change inspector render", () => {
     );
     renderChangeInspector(state.snapshot(), { navigate });
 
-    expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "Event",
+    expect(document.querySelector("#detail-body > h2")?.textContent).toBe(
+      "Web checks: passed",
     );
+    expect(
+      document.querySelector("#detail-body .event-detail-summary h3"),
+    ).toBeNull();
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "validation check recorded",
     );
@@ -908,8 +995,21 @@ describe("Change inspector render", () => {
 
     const card = document.querySelector(".unit-card[data-change-id]");
     expect(
-      card?.querySelector(".change-card-attention-reason")?.textContent,
+      card?.querySelector(
+        ":scope > h3.change-card-heading > button.change-card-primary",
+      ),
+    ).not.toBeNull();
+    expect(card?.querySelector("h3 .change-card-headline")?.textContent).toBe(
+      "Server proposal",
+    );
+    // The card sits under a reason-type group whose heading carries the shared
+    // reason copy, so the per-card reason line is suppressed as a duplicate.
+    expect(
+      card
+        ?.closest(".attention-group")
+        ?.querySelector("h2.attention-group-heading")?.textContent,
     ).toBe("REASON SENTINEL");
+    expect(card?.querySelector(".change-card-attention-reason")).toBeNull();
     expect(card?.querySelector(".change-card-attention-ask")?.textContent).toBe(
       "ASK SENTINEL",
     );
@@ -931,6 +1031,104 @@ describe("Change inspector render", () => {
     expect(primaryName).toContain("EVIDENCE SENTINEL");
     expect(primaryName).toContain("NEXT ACTION SENTINEL");
     expect(primaryName).toContain("Change change:sha256:one");
+  });
+
+  it("groups Attention cards by primary reason type under server-owned headings", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const grouped = groupedAttentionFixture();
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "attention",
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, grouped.changes, grouped.attention, profile),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const groups = document.querySelectorAll("#master .attention-group");
+    expect(groups).toHaveLength(2);
+    expect(
+      groups[0]?.querySelector("h2.attention-group-heading")?.textContent,
+    ).toBe("Operative requests remain unresolved.");
+    expect(groups[0]?.querySelectorAll(".unit-card")).toHaveLength(2);
+    expect(
+      [...(groups[0]?.querySelectorAll<HTMLElement>(".unit-card") ?? [])].map(
+        (card) => card.dataset.changeId,
+      ),
+    ).toEqual(["change:sha256:one", "change:sha256:three"]);
+    expect(
+      groups[1]?.querySelector("h2.attention-group-heading")?.textContent,
+    ).toBe("Current Revision assessment coverage is incomplete.");
+    expect(groups[1]?.querySelectorAll(".unit-card")).toHaveLength(1);
+    // per-card reason line suppressed when it equals its group heading:
+    expect(
+      groups[0]?.querySelector(".change-card-attention-reason"),
+    ).toBeNull();
+    expect(
+      groups[1]?.querySelector(".change-card-attention-reason"),
+    ).toBeNull();
+    // lens metadata describes the grouped order:
+    expect(
+      document.querySelector("#master .lens-heading + p")?.textContent,
+    ).toContain("grouped by attention reason");
+  });
+
+  it("renders missing-payload cards after the reason groups without fabricating a heading", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const grouped = groupedAttentionFixture();
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "attention",
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, grouped.changes, grouped.attention, profile),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const master = document.querySelector("#master");
+    const tail = master?.querySelector<HTMLElement>(
+      '.unit-card[data-change-id="change:sha256:four"]',
+    );
+    expect(tail).not.toBeNull();
+    expect(tail?.closest(".attention-group")).toBeNull();
+    // no heading was fabricated for the ungrouped tail: only the two reason
+    // groups contribute headings, and the tail renders after both of them.
+    expect(master?.querySelectorAll("h2.attention-group-heading")).toHaveLength(
+      2,
+    );
+    const cards = [
+      ...(master?.querySelectorAll<HTMLElement>(".unit-card[data-change-id]") ??
+        []),
+    ];
+    expect(cards.at(-1)?.dataset.changeId).toBe("change:sha256:four");
+  });
+
+  it("keeps the Changes lens flat and in Change ID order", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const grouped = groupedAttentionFixture();
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, grouped.changes, grouped.attention, profile),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    expect(document.querySelectorAll("#master .attention-group")).toHaveLength(
+      0,
+    );
+    const metadata = document.querySelector(
+      "#master .lens-heading + p",
+    )?.textContent;
+    expect(metadata).toContain("Change ID order");
+    expect(metadata).not.toContain("grouped");
   });
 
   it("rebinds a retained Change pager when the server rotates its opaque capability", () => {
@@ -1150,6 +1348,29 @@ describe("Change inspector render", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Copy link",
     );
+  });
+
+  it("exposes each card's headline as a real heading wrapping the primary control", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(state.snapshot(), { navigate });
+
+    const card = document.querySelector(".unit-card[data-change-id]");
+    expect(
+      card?.querySelector(
+        ":scope > h3.change-card-heading > button.change-card-primary",
+      ),
+    ).not.toBeNull();
+    expect(card?.querySelector("h3 .change-card-headline")?.textContent).toBe(
+      "Server proposal",
+    );
+    expect(card?.querySelectorAll("button")).toHaveLength(1);
   });
 
   it("renders one exact current Revision as a native secondary anchor without changing the card primary", () => {

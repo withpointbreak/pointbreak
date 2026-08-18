@@ -231,7 +231,7 @@ function setSelected(changeId: string | null): void {
     card.classList.toggle("change-card-selected", selected);
     card.setAttribute("aria-current", selected ? "true" : "false");
     const primary = card.querySelector<HTMLButtonElement>(
-      ":scope > .change-card-primary",
+      ".change-card-primary",
     );
     if (primary) primary.tabIndex = card === roving ? 0 : -1;
   }
@@ -926,7 +926,7 @@ export function installChangeInspectorInteraction(
     card.scrollIntoView({ block: "nearest", behavior: "auto" });
     if (focus) {
       card
-        .querySelector<HTMLElement>(":scope > .change-card-primary")
+        .querySelector<HTMLElement>(".change-card-primary")
         ?.focus({ preventScroll: true });
     }
     return true;
@@ -1393,9 +1393,7 @@ export function installChangeInspectorInteraction(
       setTimelineSelected(selectedTimelineEventId);
       return;
     }
-    const primary = target?.closest<HTMLElement>(
-      ".unit-card[data-change-id] > .change-card-primary",
-    );
+    const primary = target?.closest<HTMLElement>(".change-card-primary");
     const card = primary?.closest<HTMLElement>(".unit-card[data-change-id]");
     const lens = activeChangeLens();
     if (card?.dataset.changeId && lens !== null) {

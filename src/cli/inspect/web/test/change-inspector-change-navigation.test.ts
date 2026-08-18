@@ -59,7 +59,10 @@ function mountCards(changeIds: readonly string[]) {
     peer.type = "button";
     peer.textContent = `Open explicit peer for ${changeId}`;
     peer.addEventListener("click", peers);
-    card.append(button, peer);
+    const heading = document.createElement("h3");
+    heading.className = "change-card-heading";
+    heading.append(button);
+    card.append(heading, peer);
     list.append(card);
     return button;
   });

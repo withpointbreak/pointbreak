@@ -1085,7 +1085,6 @@ main {
 .event-detail-record {
   margin: 0 0 14px;
 }
-.event-detail-summary h3,
 .event-detail-attribution h3,
 .event-detail-record h3 {
   margin: 0 0 5px;
@@ -1297,6 +1296,16 @@ main {
   align-content: start;
   gap: 10px;
 }
+.attention-group {
+  display: grid;
+  gap: 10px;
+}
+.attention-group-heading {
+  margin: 6px 0 0;
+  font-size: var(--fs-base);
+  font-weight: 650;
+  color: var(--fg-dim);
+}
 .unit-card {
   min-width: 0;
   background: var(--bg-elev);
@@ -1339,6 +1348,17 @@ html.compact .unit-card {
   margin: 0 0 6px;
   font-size: var(--fs-md);
   font-family: var(--mono);
+}
+/* The Change-card heading is a structural wrapper around the card's primary
+   control, not a visual heading: typography lives on .change-card-headline and
+   .change-card-id inside it. Reset the UA heading box and out-specify the
+   `.unit-card h3` card-title rule above, which still serves the peer chooser
+   and the retained lens cards. */
+.unit-card > h3.change-card-heading {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  font-family: inherit;
 }
 .unit-card .kv {
   display: grid;

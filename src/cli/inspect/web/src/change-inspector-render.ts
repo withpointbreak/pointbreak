@@ -827,14 +827,13 @@ function renderEventDetail(
   actions: ChangeInspectorRenderActions,
 ): Node[] {
   const presentation = presentEvent(event);
-  const heading = detailHeading("Event");
+  const heading = detailHeading(presentation.title);
   const identity = detailLine(event.eventId, "mono");
   identity.title = event.eventId;
   identity.setAttribute("aria-label", `event ${event.eventId}`);
   identity.dataset.eventId = event.eventId;
   const summary = document.createElement("section");
   summary.className = "event-detail-summary";
-  summary.append(detailHeading(presentation.title, 3));
   if (presentation.body) summary.append(detailLine(presentation.body));
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
@@ -2126,9 +2125,21 @@ export function renderChangeInspector(
     const count = page.changes.length;
     const [heading, metadata] = createLensHeading(
       lens === "changes" ? "Changes" : "Attention",
-      `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`,
+      lens === "changes"
+        ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`
+        : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · Change ID order within groups`,
     );
     list.append(heading, metadata);
+    // Attention cards group under one visible heading per primary reason type,
+    // carrying the server-owned reason copy once per group. Groups are computed
+    // within the loaded page only: same-type cards on another page render under
+    // that page's own heading (the metadata line frames the view as
+    // page-scoped).
+    const attentionGroups =
+      lens === "attention"
+        ? new Map<string, { section: HTMLElement; reason: string }>()
+        : null;
+    const ungroupedCards: HTMLElement[] = [];
     // The protocol caps individual responses lower than this guard. Keep the
     // render-side bound as a second line of defence against an over-full server
     // page: a large store must never create an unbounded live DOM.
@@ -2137,6 +2148,23 @@ export function renderChangeInspector(
         summary,
         page.presentations?.[summary.changeId],
       );
+      let attentionGroup: { section: HTMLElement; reason: string } | null =
+        null;
+      if (attentionGroups !== null && card.attention !== undefined) {
+        attentionGroup =
+          attentionGroups.get(card.attention.primary.kind) ?? null;
+        if (attentionGroup === null) {
+          const section = document.createElement("section");
+          section.className = "attention-group";
+          const groupHeading = document.createElement("h2");
+          groupHeading.className = "attention-group-heading";
+          groupHeading.textContent = card.attention.reason;
+          section.append(groupHeading);
+          list.append(section);
+          attentionGroup = { section, reason: card.attention.reason };
+          attentionGroups.set(card.attention.primary.kind, attentionGroup);
+        }
+      }
       const element = document.createElement("article");
       element.className = "unit-card";
       element.dataset.changeId = summary.changeId;
@@ -2165,7 +2193,10 @@ export function renderChangeInspector(
           query: queryForExactNavigation(route),
         }),
       );
-      element.append(primary);
+      const cardHeading = document.createElement("h3");
+      cardHeading.className = "change-card-heading";
+      cardHeading.append(primary);
+      element.append(cardHeading);
 
       if (card.attention) {
         const attention = document.createElement("section");
@@ -2174,10 +2205,18 @@ export function renderChangeInspector(
           "aria-label",
           card.attention.primary.accessibleName,
         );
-        const reason = document.createElement("strong");
-        reason.className = "change-card-attention-reason";
-        reason.textContent = card.attention.reason;
-        reason.title = card.attention.primary.title;
+        // The group heading already states the shared reason copy, so a
+        // per-card reason line is emitted only when it would add information.
+        if (
+          attentionGroup === null ||
+          attentionGroup.reason !== card.attention.reason
+        ) {
+          const reason = document.createElement("strong");
+          reason.className = "change-card-attention-reason";
+          reason.textContent = card.attention.reason;
+          reason.title = card.attention.primary.title;
+          attention.append(reason);
+        }
         const ask = document.createElement("p");
         ask.className = "change-card-attention-ask";
         ask.textContent = card.attention.ask;
@@ -2187,7 +2226,7 @@ export function renderChangeInspector(
         const action = document.createElement("p");
         action.className = "change-card-attention-action";
         action.textContent = `Next: ${card.attention.nextAction}`;
-        attention.append(reason, ask, evidence, action);
+        attention.append(ask, evidence, action);
         if (card.attention.additionalReasons.length > 0) {
           const additional = document.createElement("ul");
           additional.className = "change-card-attention-additional";
@@ -2290,8 +2329,15 @@ export function renderChangeInspector(
         }
         element.append(peers);
       }
-      list.append(element);
+      if (attentionGroup !== null) attentionGroup.section.append(element);
+      else if (attentionGroups !== null) ungroupedCards.push(element);
+      else list.append(element);
     }
+    // Cards without server Attention presentation have no server-owned reason
+    // copy to head a group, so they render flat after every reason group: an
+    // honest h1 → h3 outline (no group h2 above these cards) beats a
+    // client-invented heading.
+    for (const ungrouped of ungroupedCards) list.append(ungrouped);
     if (page.changes.length === 0)
       list.append(
         message(
