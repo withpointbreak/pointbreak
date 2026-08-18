@@ -3229,6 +3229,59 @@ describe("Change-first composition", () => {
     expect(refetched).toContain("q=other");
   });
 
+  it("polls the history page as loaded while an exact event is read", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+
+    routeTo("#/timeline/events/evt%3Atwo?q=review&limit=20");
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    const beforePoll = requests.length;
+    pollTick();
+
+    await vi.waitFor(() =>
+      expect(
+        requests
+          .slice(beforePoll)
+          .filter((path) => path.startsWith("/api/v2/history?")),
+      ).toHaveLength(1),
+    );
+    const polled = requests.filter((path) =>
+      path.startsWith("/api/v2/history?"),
+    );
+    expect(polled.every((path) => path.includes("at=evt%3Aone"))).toBe(true);
+    expect(polled.some((path) => path.includes("at=evt%3Atwo"))).toBe(false);
+    // The pinned Timeline window deliberately does not advance while an exact
+    // event is read: a follow never leaves the event route, and the monitor
+    // only observes timeline routes. That is existing behavior, not a
+    // consequence of reading from the loaded page.
+    expect(
+      Array.from(
+        document.querySelectorAll("#timeline li.event[data-event-id]"),
+      ).map((row) => row.getAttribute("data-event-id")),
+    ).toEqual(["evt:one", "evt:two", "evt:three"]);
+    expect(
+      document
+        .querySelector('#timeline [aria-selected="true"]')
+        ?.getAttribute("data-event-id"),
+    ).toBe("evt:two");
+  });
+
   it("rehydrates the same exact route when polling publishes a newer projection", async () => {
     history.replaceState(
       null,
