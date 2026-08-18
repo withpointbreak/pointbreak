@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
-use crate::model::{ActorId, EventId, RevisionId, RevisionRefV1, TrackId};
+use crate::model::{ActorId, EventId, ReviewTargetRef, RevisionId, RevisionRefV1, TrackId};
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
@@ -28,8 +28,12 @@ use crate::session::derived_access::sqlite::cursor::{
     insert_authority_event_identity, recompute_authority_cursor_from_identities,
 };
 use crate::session::event::{
-    EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
-    WorkObjectProposal, WorkObjectProposedPayload,
+    ChangeDeclaredPayload, ChangeLinkAssertedPayload, ChangeMembershipAssertedPayload,
+    ChangeMembershipWithdrawnPayload, ChangeRevisionRelationAssertedPayload,
+    ChangeRevisionRelationWithdrawnPayload, EventSignatureRecordedPayload, EventType,
+    InputRequestRespondedPayload, ReviewFactPortedPayload, ReviewObservationRecordedPayload,
+    RevisionRelationAttestedPayload, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
+    decode_input_request_opened_payload,
 };
 use crate::session::projection::change::{
     ChangeDocumentProjectionFact, ChangeProjectionFact, project_change_documents_from_facts,
@@ -41,7 +45,7 @@ use crate::session::{EventStore, parse_event_instant};
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION: i64 = 8;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
-const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 3;
+const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -65,6 +69,12 @@ pub(crate) struct SemanticInventory {
     pub(crate) proposal_carrier_count: u64,
     pub(crate) proposal_carrier_columns: Vec<String>,
     pub(crate) proposal_carrier_indexes: Vec<String>,
+    pub(crate) product_history_profile_id: String,
+    pub(crate) product_history_schema_version: u32,
+    pub(crate) product_history_event_count: u64,
+    pub(crate) product_history_tables: Vec<String>,
+    pub(crate) product_history_columns: Vec<String>,
+    pub(crate) product_history_indexes: Vec<String>,
     pub(crate) retained_body_object_bytes: u64,
 }
 
@@ -96,8 +106,14 @@ pub(crate) struct MaterializedChangeProjection {
 pub(crate) struct ProductHistoryFact {
     sequence: u64,
     tag_keys: Vec<String>,
+    tag_values: Vec<String>,
     signature_target_event_id: Option<String>,
     revision: Option<ProductRevisionFact>,
+    timeline: Option<ProductTimelineFact>,
+    membership_claim: Option<ProductMembershipClaimFact>,
+    membership_withdrawal_claim_id: Option<String>,
+    relation_claim: Option<ProductRelationClaimFact>,
+    relation_withdrawal_claim_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,20 +124,123 @@ struct ProductRevisionFact {
     supersedes: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductTimelineFact {
+    request_state: Option<&'static str>,
+    revision_references: Vec<ProductRevisionReferenceFact>,
+    direct_changes: Vec<ProductDirectChangeFact>,
+}
+
+impl ProductTimelineFact {
+    fn new() -> Self {
+        Self {
+            request_state: None,
+            revision_references: Vec::new(),
+            direct_changes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductRevisionReferenceFact {
+    source_kind: &'static str,
+    reference_role: &'static str,
+    revision_id: String,
+    object_artifact_content_hash: Option<String>,
+    historical_change_eligible: bool,
+}
+
+impl ProductRevisionReferenceFact {
+    fn candidate(
+        source_kind: &'static str,
+        revision_id: &RevisionId,
+        historical_change_eligible: bool,
+    ) -> Self {
+        Self {
+            source_kind,
+            reference_role: "candidate",
+            revision_id: revision_id.as_str().to_owned(),
+            object_artifact_content_hash: None,
+            historical_change_eligible,
+        }
+    }
+
+    fn direct(
+        source_kind: &'static str,
+        reference: &RevisionRefV1,
+        historical_change_eligible: bool,
+    ) -> Self {
+        Self {
+            source_kind,
+            reference_role: "direct",
+            revision_id: reference.revision_id.as_str().to_owned(),
+            object_artifact_content_hash: Some(reference.object_artifact_content_hash.clone()),
+            historical_change_eligible,
+        }
+    }
+
+    fn direct_parts(
+        source_kind: &'static str,
+        revision_id: &RevisionId,
+        object_artifact_content_hash: &str,
+        historical_change_eligible: bool,
+    ) -> Self {
+        let exact =
+            RevisionRefV1::new(revision_id.clone(), object_artifact_content_hash.to_owned()).ok();
+        Self {
+            source_kind,
+            reference_role: "direct",
+            revision_id: revision_id.as_str().to_owned(),
+            object_artifact_content_hash: exact
+                .map(|reference| reference.object_artifact_content_hash),
+            historical_change_eligible,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductDirectChangeFact {
+    change_id: String,
+    source_kind: &'static str,
+    source_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductMembershipClaimFact {
+    claim_id: String,
+    change_id: String,
+    revision_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductRelationClaimFact {
+    claim_id: String,
+    change_id: String,
+    successor: RevisionRefV1,
+    predecessor: RevisionRefV1,
+}
+
 impl ProductHistoryFact {
     pub(crate) fn from_event(
         sequence: u64,
         event: &ShoreEvent,
     ) -> Result<Self, SemanticModelError> {
         let mut tag_keys = Vec::new();
+        let mut tag_values = Vec::new();
         let mut signature_target_event_id = None;
         let mut revision = None;
+        let mut timeline = None;
+        let mut membership_claim = None;
+        let mut membership_withdrawal_claim_id = None;
+        let mut relation_claim = None;
+        let mut relation_withdrawal_claim_id = None;
         match event.event_type {
             EventType::WorkObjectProposed => {
                 let payload: WorkObjectProposedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 if let WorkObjectProposal::Revision {
                     revision: proposed,
+                    object_artifact_content_hash,
                     supersedes,
                     ..
                 } = payload.work_object
@@ -139,6 +258,21 @@ impl ProductHistoryFact {
                             .map(|revision| revision.as_str().to_owned())
                             .collect(),
                     });
+                    let mut event = ProductTimelineFact::new();
+                    event
+                        .revision_references
+                        .push(ProductRevisionReferenceFact::direct_parts(
+                            "proposal",
+                            &proposed.id,
+                            &object_artifact_content_hash,
+                            true,
+                        ));
+                    event
+                        .revision_references
+                        .extend(supersedes.iter().map(|revision| {
+                            ProductRevisionReferenceFact::candidate("supersedes", revision, true)
+                        }));
+                    timeline = Some(event);
                 }
             }
             EventType::ReviewObservationRecorded => {
@@ -152,20 +286,251 @@ impl ProductHistoryFact {
                 );
                 tag_keys.sort();
                 tag_keys.dedup();
+                tag_values = payload
+                    .tags
+                    .into_iter()
+                    .map(|tag| tag.to_lowercase())
+                    .collect();
+                tag_values.sort();
+                tag_values.dedup();
+                timeline = Some(timeline_for_review_target(&payload.target));
             }
             EventType::EventSignatureRecorded => {
                 let payload: EventSignatureRecordedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 signature_target_event_id = Some(payload.target_event_id.as_str().to_owned());
             }
-            _ => {}
+            EventType::ReviewAssessmentRecorded
+            | EventType::RevisionRefAssociated
+            | EventType::RevisionRefWithdrawn
+            | EventType::RevisionCommitAssociated
+            | EventType::RevisionCommitWithdrawn
+            | EventType::ValidationCheckRecorded => {
+                if let Some(revision_id) = event.subject_revision_id()? {
+                    timeline = Some(timeline_for_revision_candidate(&revision_id, true));
+                }
+            }
+            EventType::InputRequestOpened => {
+                let payload = decode_input_request_opened_payload(event.payload.clone())?;
+                if payload.task_target.is_none() {
+                    let mut event = timeline_for_review_target(&payload.target);
+                    event.request_state = Some("open");
+                    timeline = Some(event);
+                }
+            }
+            EventType::InputRequestResponded => {
+                let payload: InputRequestRespondedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                if let Some(revision_id) = payload.revision_id {
+                    let mut event = timeline_for_revision_candidate(&revision_id, true);
+                    event.request_state = Some("answered");
+                    timeline = Some(event);
+                }
+            }
+            EventType::ChangeDeclared => {
+                let payload: ChangeDeclaredPayload = serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let mut product_event = ProductTimelineFact::new();
+                if let crate::model::ChangeIdentityDescriptorV1::RootRevision {
+                    revision_id, ..
+                } = &payload.identity_descriptor
+                {
+                    product_event.revision_references.push(
+                        ProductRevisionReferenceFact::candidate(
+                            "declaration_root",
+                            revision_id,
+                            false,
+                        ),
+                    );
+                }
+                product_event.direct_changes.push(ProductDirectChangeFact {
+                    change_id: payload.change_id.as_str().to_owned(),
+                    source_kind: "declaration",
+                    source_id: payload.declaration_claim_id.as_str().to_owned(),
+                });
+                timeline = Some(product_event);
+            }
+            EventType::ChangeMembershipAsserted => {
+                let payload: ChangeMembershipAssertedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let claim_id = payload.membership_claim_id.as_str().to_owned();
+                let mut product_event = ProductTimelineFact::new();
+                product_event
+                    .revision_references
+                    .push(ProductRevisionReferenceFact::candidate(
+                        "membership_claim",
+                        &payload.revision_id,
+                        false,
+                    ));
+                product_event.direct_changes.push(ProductDirectChangeFact {
+                    change_id: payload.change_id.as_str().to_owned(),
+                    source_kind: "membership_claim",
+                    source_id: claim_id.clone(),
+                });
+                membership_claim = Some(ProductMembershipClaimFact {
+                    claim_id,
+                    change_id: payload.change_id.as_str().to_owned(),
+                    revision_id: payload.revision_id.as_str().to_owned(),
+                });
+                timeline = Some(product_event);
+            }
+            EventType::ChangeMembershipWithdrawn => {
+                let payload: ChangeMembershipWithdrawnPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                membership_withdrawal_claim_id =
+                    Some(payload.membership_claim_id.as_str().to_owned());
+                timeline = Some(ProductTimelineFact::new());
+            }
+            EventType::ChangeLinkAsserted => {
+                let payload: ChangeLinkAssertedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let source_id = payload.link_claim_id.as_str().to_owned();
+                let mut product_event = ProductTimelineFact::new();
+                for change_id in [&payload.left_change_id, &payload.right_change_id] {
+                    product_event.direct_changes.push(ProductDirectChangeFact {
+                        change_id: change_id.as_str().to_owned(),
+                        source_kind: "link_claim",
+                        source_id: source_id.clone(),
+                    });
+                }
+                timeline = Some(product_event);
+            }
+            EventType::ChangeRevisionRelationAsserted => {
+                let payload: ChangeRevisionRelationAssertedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let claim_id = payload.relation_claim_id.as_str().to_owned();
+                let mut product_event = ProductTimelineFact::new();
+                product_event.revision_references.extend([
+                    ProductRevisionReferenceFact::direct(
+                        "relation_successor",
+                        &payload.successor,
+                        false,
+                    ),
+                    ProductRevisionReferenceFact::direct(
+                        "relation_predecessor",
+                        &payload.predecessor,
+                        false,
+                    ),
+                ]);
+                product_event.direct_changes.push(ProductDirectChangeFact {
+                    change_id: payload.change_id.as_str().to_owned(),
+                    source_kind: "relation_claim",
+                    source_id: claim_id.clone(),
+                });
+                relation_claim = Some(ProductRelationClaimFact {
+                    claim_id,
+                    change_id: payload.change_id.as_str().to_owned(),
+                    successor: payload.successor,
+                    predecessor: payload.predecessor,
+                });
+                timeline = Some(product_event);
+            }
+            EventType::ChangeRevisionRelationWithdrawn => {
+                let payload: ChangeRevisionRelationWithdrawnPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                relation_withdrawal_claim_id = Some(payload.relation_claim_id.as_str().to_owned());
+                timeline = Some(ProductTimelineFact::new());
+            }
+            EventType::RevisionRelationAttested => {
+                let payload: RevisionRelationAttestedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let mut product_event = ProductTimelineFact::new();
+                product_event
+                    .revision_references
+                    .push(ProductRevisionReferenceFact::direct(
+                        "attestation",
+                        &payload.revision,
+                        true,
+                    ));
+                timeline = Some(product_event);
+            }
+            EventType::ReviewFactPorted => {
+                let payload: ReviewFactPortedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                let track_id = event
+                    .target
+                    .track_id
+                    .as_ref()
+                    .ok_or(SemanticModelError::MissingField("review fact port track"))?;
+                payload.validate_attribution(&event.writer.actor_id, track_id)?;
+                let mut product_event = ProductTimelineFact::new();
+                product_event.revision_references.extend([
+                    ProductRevisionReferenceFact::direct(
+                        "fact_port_origin",
+                        &payload.origin_revision,
+                        true,
+                    ),
+                    ProductRevisionReferenceFact::direct(
+                        "fact_port_target",
+                        &payload.target_revision,
+                        true,
+                    ),
+                ]);
+                if let Some(change_id) = &payload.context_change_id {
+                    product_event.direct_changes.push(ProductDirectChangeFact {
+                        change_id: change_id.as_str().to_owned(),
+                        source_kind: "fact_port_context",
+                        source_id: payload.port_id.as_str().to_owned(),
+                    });
+                }
+                timeline = Some(product_event);
+            }
+            EventType::ReviewInitialized | EventType::ReviewNoteImported => {
+                timeline = Some(ProductTimelineFact::new());
+            }
+            EventType::TaskCheckpointCaptured
+            | EventType::TaskObservationRecorded
+            | EventType::ArtifactRemoved => {}
         }
         Ok(Self {
             sequence,
             tag_keys,
+            tag_values,
             signature_target_event_id,
             revision,
+            timeline,
+            membership_claim,
+            membership_withdrawal_claim_id,
+            relation_claim,
+            relation_withdrawal_claim_id,
         })
+    }
+}
+
+fn timeline_for_review_target(target: &ReviewTargetRef) -> ProductTimelineFact {
+    timeline_for_revision_candidate(review_target_revision(target), true)
+}
+
+fn timeline_for_revision_candidate(
+    revision_id: &RevisionId,
+    historical_change_eligible: bool,
+) -> ProductTimelineFact {
+    let mut event = ProductTimelineFact::new();
+    event
+        .revision_references
+        .push(ProductRevisionReferenceFact::candidate(
+            "review_target",
+            revision_id,
+            historical_change_eligible,
+        ));
+    event
+}
+
+fn review_target_revision(target: &ReviewTargetRef) -> &RevisionId {
+    match target {
+        ReviewTargetRef::Revision { revision_id }
+        | ReviewTargetRef::File { revision_id, .. }
+        | ReviewTargetRef::Range { revision_id, .. }
+        | ReviewTargetRef::Observation { revision_id, .. }
+        | ReviewTargetRef::InputRequest { revision_id, .. }
+        | ReviewTargetRef::Assessment { revision_id, .. }
+        | ReviewTargetRef::Event { revision_id, .. } => revision_id,
     }
 }
 
@@ -258,7 +623,7 @@ impl SqliteSemantic {
                 locator_checkpoint.applied
             )));
         }
-        if product_history_exists && locator_checkpoint.applied.sequence != 0 {
+        if product_history_exists {
             let schema_version = connection
                 .query_row(
                     "SELECT schema_version FROM product_history_meta WHERE singleton = 1",
@@ -269,6 +634,12 @@ impl SqliteSemantic {
             if schema_version < PRODUCT_HISTORY_SCHEMA_VERSION {
                 return Err(SqliteSemanticError::ProductHistoryUpgradeRequired(format!(
                     "existing product history schema {schema_version} predates version \
+                     {PRODUCT_HISTORY_SCHEMA_VERSION}"
+                )));
+            }
+            if schema_version > PRODUCT_HISTORY_SCHEMA_VERSION {
+                return Err(SqliteSemanticError::Metadata(format!(
+                    "existing product history schema {schema_version} is newer than version \
                      {PRODUCT_HISTORY_SCHEMA_VERSION}"
                 )));
             }
@@ -521,7 +892,7 @@ impl SqliteSemantic {
                  CREATE TABLE IF NOT EXISTS product_history_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 3),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 4),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -532,6 +903,13 @@ impl SqliteSemantic {
                  ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS product_history_tag_key
                      ON product_history_tag(tag_key, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_tag_value (
+                     sequence INTEGER NOT NULL REFERENCES semantic_event_fact(sequence),
+                     tag_value TEXT NOT NULL,
+                     PRIMARY KEY (sequence, tag_value)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_history_tag_value_lookup
+                     ON product_history_tag_value(tag_value, sequence);
                  CREATE TABLE IF NOT EXISTS product_history_signature (
                      sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
                      target_event_id TEXT NOT NULL
@@ -555,6 +933,128 @@ impl SqliteSemantic {
                  ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS product_revision_edge_target
                      ON product_revision_edge(superseded_revision_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_event (
+                     sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
+                     request_state TEXT CHECK (
+                         request_state IS NULL OR request_state IN ('open', 'answered')
+                     )
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_event_request_state
+                     ON product_history_event(request_state, sequence)
+                     WHERE request_state IS NOT NULL;
+                 CREATE TABLE IF NOT EXISTS product_history_revision_reference (
+                     sequence INTEGER NOT NULL REFERENCES product_history_event(sequence),
+                     source_kind TEXT NOT NULL CHECK (source_kind IN (
+                         'proposal',
+                         'supersedes',
+                         'review_target',
+                         'declaration_root',
+                         'membership_claim',
+                         'relation_successor',
+                         'relation_predecessor',
+                         'attestation',
+                         'fact_port_origin',
+                         'fact_port_target'
+                     )),
+                     reference_role TEXT NOT NULL CHECK (
+                         reference_role IN ('direct', 'candidate')
+                     ),
+                     resolution TEXT NOT NULL CHECK (resolution IN ('exact', 'unresolved')),
+                     revision_id TEXT NOT NULL,
+                     object_artifact_content_hash TEXT,
+                     historical_change_eligible INTEGER NOT NULL CHECK (
+                         historical_change_eligible IN (0, 1)
+                     ),
+                     CHECK (
+                         (resolution = 'exact' AND object_artifact_content_hash IS NOT NULL)
+                         OR
+                         (resolution = 'unresolved' AND object_artifact_content_hash IS NULL)
+                     ),
+                     PRIMARY KEY (sequence, source_kind, revision_id)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_history_revision_reference_exact
+                     ON product_history_revision_reference(
+                         revision_id, object_artifact_content_hash, sequence
+                     ) WHERE resolution = 'exact';
+                 CREATE INDEX IF NOT EXISTS product_history_revision_reference_unresolved
+                     ON product_history_revision_reference(revision_id, sequence)
+                     WHERE resolution = 'unresolved';
+                 CREATE INDEX IF NOT EXISTS product_history_revision_reference_candidate
+                     ON product_history_revision_reference(
+                         revision_id, reference_role, sequence
+                     ) WHERE reference_role = 'candidate';
+                 CREATE INDEX IF NOT EXISTS product_history_revision_reference_historical
+                     ON product_history_revision_reference(
+                         revision_id, historical_change_eligible, sequence
+                     ) WHERE historical_change_eligible = 1;
+                 CREATE TABLE IF NOT EXISTS product_history_membership_claim (
+                     sequence INTEGER PRIMARY KEY REFERENCES product_history_event(sequence),
+                     claim_id TEXT NOT NULL,
+                     change_id TEXT NOT NULL,
+                     revision_id TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_membership_claim_identity
+                     ON product_history_membership_claim(claim_id, sequence);
+                 CREATE INDEX IF NOT EXISTS product_history_membership_claim_revision
+                     ON product_history_membership_claim(revision_id, claim_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_membership_withdrawal (
+                     sequence INTEGER PRIMARY KEY REFERENCES product_history_event(sequence),
+                     claim_id TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_membership_withdrawal_claim
+                     ON product_history_membership_withdrawal(claim_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_relation_claim (
+                     sequence INTEGER PRIMARY KEY REFERENCES product_history_event(sequence),
+                     claim_id TEXT NOT NULL,
+                     change_id TEXT NOT NULL,
+                     successor_revision_id TEXT NOT NULL,
+                     successor_object_artifact_content_hash TEXT NOT NULL,
+                     predecessor_revision_id TEXT NOT NULL,
+                     predecessor_object_artifact_content_hash TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_relation_claim_identity
+                     ON product_history_relation_claim(claim_id, sequence);
+                 CREATE INDEX IF NOT EXISTS product_history_relation_claim_successor
+                     ON product_history_relation_claim(
+                         successor_revision_id, claim_id, sequence
+                     );
+                 CREATE INDEX IF NOT EXISTS product_history_relation_claim_predecessor
+                     ON product_history_relation_claim(
+                         predecessor_revision_id, claim_id, sequence
+                     );
+                 CREATE TABLE IF NOT EXISTS product_history_relation_withdrawal (
+                     sequence INTEGER PRIMARY KEY REFERENCES product_history_event(sequence),
+                     claim_id TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_relation_withdrawal_claim
+                     ON product_history_relation_withdrawal(claim_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_change_correlation (
+                     sequence INTEGER NOT NULL REFERENCES product_history_event(sequence),
+                     change_id TEXT NOT NULL,
+                     correlation_role TEXT NOT NULL CHECK (
+                         correlation_role IN ('direct', 'historical')
+                     ),
+                     source_kind TEXT NOT NULL CHECK (source_kind IN (
+                         'declaration',
+                         'membership_claim',
+                         'relation_claim',
+                         'link_claim',
+                         'fact_port_context'
+                     )),
+                     source_id TEXT NOT NULL,
+                     support_sequence INTEGER NOT NULL
+                         REFERENCES semantic_event_fact(sequence),
+                     PRIMARY KEY (
+                         sequence, change_id, correlation_role,
+                         source_kind, source_id, support_sequence
+                     )
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_history_change_correlation_change
+                     ON product_history_change_correlation(change_id, sequence);
+                 CREATE INDEX IF NOT EXISTS product_history_change_correlation_support
+                     ON product_history_change_correlation(
+                         source_kind, source_id, support_sequence, sequence
+                     );
                  CREATE TABLE IF NOT EXISTS reader_projection_checkpoint (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      checkpoint_json TEXT NOT NULL
@@ -1267,6 +1767,29 @@ impl SqliteSemantic {
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|error| sqlite_error("count proposal carriers", error))?;
+        let (product_history_profile_id, product_history_schema_version) = connection
+            .query_row(
+                "SELECT profile_id, schema_version
+                 FROM product_history_meta WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map_err(|error| sqlite_error("read product history inventory identity", error))?;
+        let product_history_event_count = connection
+            .query_row("SELECT count(*) FROM product_history_event", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| sqlite_error("count product history events", error))?;
+        let product_history_tables = query_names(
+            &connection,
+            "SELECT name FROM sqlite_schema
+             WHERE type = 'table'
+               AND (name LIKE 'product_history_%'
+                    OR name IN ('product_revision', 'product_revision_edge'))
+             ORDER BY name",
+            0,
+        )?;
+        let product_history_columns = query_table_columns(&connection, &product_history_tables)?;
         let retained_body_object_bytes = retained_body_object_bytes(&connection)?;
         Ok(SemanticInventory {
             profile_id,
@@ -1296,9 +1819,54 @@ impl SqliteSemantic {
                 "PRAGMA index_list(semantic_revision_proposal_carrier)",
                 1,
             )?,
+            product_history_profile_id,
+            product_history_schema_version: u32::try_from(product_history_schema_version).map_err(
+                |_| {
+                    SqliteSemanticError::Metadata(
+                        "negative product history schema version".to_owned(),
+                    )
+                },
+            )?,
+            product_history_event_count: u64::try_from(product_history_event_count).map_err(
+                |_| {
+                    SqliteSemanticError::Metadata("negative product history event count".to_owned())
+                },
+            )?,
+            product_history_tables,
+            product_history_columns,
+            product_history_indexes: query_names(
+                &connection,
+                "SELECT name FROM sqlite_schema
+                 WHERE type = 'index' AND sql IS NOT NULL
+                   AND (name LIKE 'product_history_%'
+                        OR tbl_name IN ('product_revision', 'product_revision_edge'))
+                 ORDER BY name",
+                0,
+            )?,
             retained_body_object_bytes,
         })
     }
+}
+
+fn query_table_columns(
+    connection: &rusqlite::Connection,
+    tables: &[String],
+) -> Result<Vec<String>, SqliteSemanticError> {
+    let mut columns = Vec::new();
+    for table in tables {
+        let pragma = format!("PRAGMA table_info({})", quote_identifier(table));
+        let mut statement = connection
+            .prepare(&pragma)
+            .map_err(|error| sqlite_error("prepare product history columns", error))?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| sqlite_error("query product history columns", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read product history columns", error))?;
+        columns.extend(names.into_iter().map(|name| format!("{table}.{name}")));
+    }
+    columns.sort();
+    Ok(columns)
 }
 
 fn retained_body_object_bytes(
@@ -1416,6 +1984,10 @@ fn insert_product_history_facts(
     transaction: &Transaction<'_>,
     facts: &[ProductHistoryFact],
 ) -> Result<(), SqliteLocatorError> {
+    let mut candidate_revision_ids = BTreeSet::new();
+    let mut new_historical_references = BTreeSet::new();
+    let mut affected_membership_claims = BTreeSet::new();
+    let mut affected_relation_claims = BTreeSet::new();
     for fact in facts {
         let sequence = to_i64_locator(fact.sequence, "product history sequence")?;
         for tag_key in &fact.tag_keys {
@@ -1425,6 +1997,15 @@ fn insert_product_history_facts(
                     params![sequence, tag_key],
                 )
                 .map_err(|error| locator_sqlite_error("insert product history tag", error))?;
+        }
+        for tag_value in &fact.tag_values {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_tag_value (sequence, tag_value)
+                     VALUES (?1, ?2)",
+                    params![sequence, tag_value],
+                )
+                .map_err(|error| locator_sqlite_error("insert product history tag value", error))?;
         }
         if let Some(target_event_id) = &fact.signature_target_event_id {
             transaction
@@ -1436,6 +2017,7 @@ fn insert_product_history_facts(
                 .map_err(|error| locator_sqlite_error("insert product history signature", error))?;
         }
         if let Some(revision) = &fact.revision {
+            candidate_revision_ids.insert(revision.revision_id.clone());
             transaction
                 .execute(
                     "INSERT INTO product_revision
@@ -1459,7 +2041,496 @@ fn insert_product_history_facts(
                     .map_err(|error| locator_sqlite_error("insert product revision edge", error))?;
             }
         }
+        if let Some(timeline) = &fact.timeline {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_event (sequence, request_state)
+                     VALUES (?1, ?2)",
+                    params![sequence, timeline.request_state],
+                )
+                .map_err(|error| locator_sqlite_error("insert product history event", error))?;
+            for reference in &timeline.revision_references {
+                let resolution = if reference.object_artifact_content_hash.is_some() {
+                    "exact"
+                } else {
+                    "unresolved"
+                };
+                transaction
+                    .execute(
+                        "INSERT INTO product_history_revision_reference
+                         (sequence, source_kind, reference_role, resolution, revision_id,
+                          object_artifact_content_hash, historical_change_eligible)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            sequence,
+                            reference.source_kind,
+                            reference.reference_role,
+                            resolution,
+                            reference.revision_id,
+                            reference.object_artifact_content_hash,
+                            i64::from(reference.historical_change_eligible),
+                        ],
+                    )
+                    .map_err(|error| {
+                        locator_sqlite_error("insert product history Revision reference", error)
+                    })?;
+                if reference.reference_role == "candidate" {
+                    candidate_revision_ids.insert(reference.revision_id.clone());
+                }
+                if reference.historical_change_eligible {
+                    new_historical_references.insert((sequence, reference.revision_id.clone()));
+                }
+            }
+            for direct in &timeline.direct_changes {
+                insert_direct_change_correlation(transaction, sequence, direct)?;
+            }
+        }
+        if let Some(claim) = &fact.membership_claim {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_membership_claim
+                     (sequence, claim_id, change_id, revision_id)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![sequence, claim.claim_id, claim.change_id, claim.revision_id],
+                )
+                .map_err(|error| {
+                    locator_sqlite_error("insert product history membership claim", error)
+                })?;
+            affected_membership_claims.insert(claim.claim_id.clone());
+        }
+        if let Some(claim_id) = &fact.membership_withdrawal_claim_id {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_membership_withdrawal (sequence, claim_id)
+                     VALUES (?1, ?2)",
+                    params![sequence, claim_id],
+                )
+                .map_err(|error| {
+                    locator_sqlite_error("insert product history membership withdrawal", error)
+                })?;
+            affected_membership_claims.insert(claim_id.clone());
+        }
+        if let Some(claim) = &fact.relation_claim {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_relation_claim
+                     (sequence, claim_id, change_id,
+                      successor_revision_id, successor_object_artifact_content_hash,
+                      predecessor_revision_id, predecessor_object_artifact_content_hash)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        sequence,
+                        claim.claim_id,
+                        claim.change_id,
+                        claim.successor.revision_id.as_str(),
+                        claim.successor.object_artifact_content_hash,
+                        claim.predecessor.revision_id.as_str(),
+                        claim.predecessor.object_artifact_content_hash,
+                    ],
+                )
+                .map_err(|error| {
+                    locator_sqlite_error("insert product history relation claim", error)
+                })?;
+            affected_relation_claims.insert(claim.claim_id.clone());
+        }
+        if let Some(claim_id) = &fact.relation_withdrawal_claim_id {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_relation_withdrawal (sequence, claim_id)
+                     VALUES (?1, ?2)",
+                    params![sequence, claim_id],
+                )
+                .map_err(|error| {
+                    locator_sqlite_error("insert product history relation withdrawal", error)
+                })?;
+            affected_relation_claims.insert(claim_id.clone());
+        }
     }
+
+    for claim_id in &affected_membership_claims {
+        if let Some(revision_id) = refresh_membership_withdrawals(transaction, claim_id)? {
+            candidate_revision_ids.insert(revision_id);
+        }
+        refresh_membership_history(transaction, claim_id)?;
+    }
+    for claim_id in &affected_relation_claims {
+        refresh_relation_withdrawals(transaction, claim_id)?;
+        refresh_relation_history(transaction, claim_id)?;
+    }
+    for revision_id in candidate_revision_ids {
+        refresh_candidate_revision_resolution(transaction, &revision_id)?;
+    }
+    for (sequence, revision_id) in new_historical_references {
+        insert_historical_correlations_for_reference(transaction, sequence, &revision_id)?;
+    }
+    Ok(())
+}
+
+fn insert_direct_change_correlation(
+    transaction: &Transaction<'_>,
+    sequence: i64,
+    direct: &ProductDirectChangeFact,
+) -> Result<(), SqliteLocatorError> {
+    transaction
+        .execute(
+            "INSERT INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             VALUES (?1, ?2, 'direct', ?3, ?4, ?1)",
+            params![
+                sequence,
+                direct.change_id,
+                direct.source_kind,
+                direct.source_id
+            ],
+        )
+        .map_err(|error| locator_sqlite_error("insert direct Change correlation", error))?;
+    Ok(())
+}
+
+fn refresh_candidate_revision_resolution(
+    transaction: &Transaction<'_>,
+    revision_id: &str,
+) -> Result<(), SqliteLocatorError> {
+    let hashes = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT object_artifact_content_hash
+                 FROM semantic_revision_proposal_carrier
+                 WHERE revision_id = ?1
+                 ORDER BY object_artifact_content_hash, sequence",
+            )
+            .map_err(|error| locator_sqlite_error("prepare candidate Revision bindings", error))?;
+        statement
+            .query_map([revision_id], |row| row.get::<_, String>(0))
+            .map_err(|error| locator_sqlite_error("query candidate Revision bindings", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| locator_sqlite_error("read candidate Revision bindings", error))?
+    };
+    let revision = RevisionId::new(revision_id);
+    let mut exact_hashes = BTreeSet::new();
+    let mut all_valid = !hashes.is_empty();
+    for hash in hashes {
+        match RevisionRefV1::new(revision.clone(), hash) {
+            Ok(reference) => {
+                exact_hashes.insert(reference.object_artifact_content_hash);
+            }
+            Err(_) => all_valid = false,
+        }
+    }
+    let exact = (all_valid && exact_hashes.len() == 1)
+        .then(|| exact_hashes.into_iter().next())
+        .flatten();
+    transaction
+        .execute(
+            "UPDATE product_history_revision_reference
+             SET resolution = CASE WHEN ?2 IS NULL THEN 'unresolved' ELSE 'exact' END,
+                 object_artifact_content_hash = ?2
+             WHERE revision_id = ?1 AND reference_role = 'candidate'",
+            params![revision_id, exact],
+        )
+        .map_err(|error| locator_sqlite_error("refresh candidate Revision resolution", error))?;
+    Ok(())
+}
+
+fn refresh_membership_withdrawals(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+) -> Result<Option<String>, SqliteLocatorError> {
+    transaction
+        .execute(
+            "DELETE FROM product_history_change_correlation
+             WHERE correlation_role = 'direct'
+               AND source_kind = 'membership_claim'
+               AND source_id = ?1
+               AND sequence IN (
+                   SELECT sequence FROM product_history_membership_withdrawal
+                   WHERE claim_id = ?1
+               )",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear membership withdrawal correlation", error))?;
+    transaction
+        .execute(
+            "DELETE FROM product_history_revision_reference
+             WHERE source_kind = 'membership_claim'
+               AND sequence IN (
+                   SELECT sequence FROM product_history_membership_withdrawal
+                   WHERE claim_id = ?1
+               )",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear membership withdrawal reference", error))?;
+    let canonical = transaction
+        .query_row(
+            "SELECT change_id, revision_id
+             FROM product_history_membership_claim
+             WHERE claim_id = ?1
+             ORDER BY sequence
+             LIMIT 1",
+            [claim_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| locator_sqlite_error("read membership claim", error))?;
+    let Some((change_id, revision_id)) = canonical else {
+        return Ok(None);
+    };
+    transaction
+        .execute(
+            "INSERT INTO product_history_revision_reference
+             (sequence, source_kind, reference_role, resolution, revision_id,
+              object_artifact_content_hash, historical_change_eligible)
+             SELECT sequence, 'membership_claim', 'candidate', 'unresolved', ?2, NULL, 0
+             FROM product_history_membership_withdrawal
+             WHERE claim_id = ?1",
+            params![claim_id, revision_id],
+        )
+        .map_err(|error| locator_sqlite_error("refresh membership withdrawal reference", error))?;
+    transaction
+        .execute(
+            "INSERT INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT withdrawal.sequence, ?2, 'direct', 'membership_claim', ?1,
+                    support.sequence
+             FROM product_history_membership_withdrawal AS withdrawal
+             JOIN product_history_membership_claim AS support
+               ON support.claim_id = withdrawal.claim_id
+             WHERE withdrawal.claim_id = ?1",
+            params![claim_id, change_id],
+        )
+        .map_err(|error| {
+            locator_sqlite_error("refresh membership withdrawal correlation", error)
+        })?;
+    Ok(Some(revision_id))
+}
+
+fn refresh_relation_withdrawals(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+) -> Result<(), SqliteLocatorError> {
+    transaction
+        .execute(
+            "DELETE FROM product_history_change_correlation
+             WHERE correlation_role = 'direct'
+               AND source_kind = 'relation_claim'
+               AND source_id = ?1
+               AND sequence IN (
+                   SELECT sequence FROM product_history_relation_withdrawal
+                   WHERE claim_id = ?1
+               )",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear relation withdrawal correlation", error))?;
+    transaction
+        .execute(
+            "DELETE FROM product_history_revision_reference
+             WHERE source_kind IN ('relation_successor', 'relation_predecessor')
+               AND sequence IN (
+                   SELECT sequence FROM product_history_relation_withdrawal
+                   WHERE claim_id = ?1
+               )",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear relation withdrawal references", error))?;
+    let canonical = transaction
+        .query_row(
+            "SELECT change_id,
+                    successor_revision_id, successor_object_artifact_content_hash,
+                    predecessor_revision_id, predecessor_object_artifact_content_hash
+             FROM product_history_relation_claim
+             WHERE claim_id = ?1
+             ORDER BY sequence
+             LIMIT 1",
+            [claim_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| locator_sqlite_error("read relation claim", error))?;
+    let Some((change_id, successor_id, successor_hash, predecessor_id, predecessor_hash)) =
+        canonical
+    else {
+        return Ok(());
+    };
+    for (source_kind, revision_id, object_hash) in [
+        ("relation_successor", successor_id, successor_hash),
+        ("relation_predecessor", predecessor_id, predecessor_hash),
+    ] {
+        transaction
+            .execute(
+                "INSERT INTO product_history_revision_reference
+                 (sequence, source_kind, reference_role, resolution, revision_id,
+                  object_artifact_content_hash, historical_change_eligible)
+                 SELECT sequence, ?2, 'direct', 'exact', ?3, ?4, 0
+                 FROM product_history_relation_withdrawal
+                 WHERE claim_id = ?1",
+                params![claim_id, source_kind, revision_id, object_hash],
+            )
+            .map_err(|error| {
+                locator_sqlite_error("refresh relation withdrawal reference", error)
+            })?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT withdrawal.sequence, ?2, 'direct', 'relation_claim', ?1,
+                    support.sequence
+             FROM product_history_relation_withdrawal AS withdrawal
+             JOIN product_history_relation_claim AS support
+               ON support.claim_id = withdrawal.claim_id
+             WHERE withdrawal.claim_id = ?1",
+            params![claim_id, change_id],
+        )
+        .map_err(|error| locator_sqlite_error("refresh relation withdrawal correlation", error))?;
+    Ok(())
+}
+
+fn refresh_membership_history(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+) -> Result<(), SqliteLocatorError> {
+    transaction
+        .execute(
+            "DELETE FROM product_history_change_correlation
+             WHERE correlation_role = 'historical'
+               AND source_kind = 'membership_claim'
+               AND source_id = ?1",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear membership history", error))?;
+    let canonical = transaction
+        .query_row(
+            "SELECT change_id, revision_id
+             FROM product_history_membership_claim
+             WHERE claim_id = ?1
+             ORDER BY sequence
+             LIMIT 1",
+            [claim_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|error| locator_sqlite_error("read membership history claim", error))?;
+    let Some((change_id, revision_id)) = canonical else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT reference.sequence, ?2, 'historical', 'membership_claim', ?1,
+                    support.sequence
+             FROM product_history_revision_reference AS reference
+             JOIN product_history_membership_claim AS support
+               ON support.claim_id = ?1
+             WHERE reference.revision_id = ?3
+               AND reference.historical_change_eligible = 1",
+            params![claim_id, change_id, revision_id],
+        )
+        .map_err(|error| locator_sqlite_error("refresh membership history", error))?;
+    Ok(())
+}
+
+fn refresh_relation_history(
+    transaction: &Transaction<'_>,
+    claim_id: &str,
+) -> Result<(), SqliteLocatorError> {
+    transaction
+        .execute(
+            "DELETE FROM product_history_change_correlation
+             WHERE correlation_role = 'historical'
+               AND source_kind = 'relation_claim'
+               AND source_id = ?1",
+            [claim_id],
+        )
+        .map_err(|error| locator_sqlite_error("clear relation history", error))?;
+    let canonical = transaction
+        .query_row(
+            "SELECT change_id, successor_revision_id, predecessor_revision_id
+             FROM product_history_relation_claim
+             WHERE claim_id = ?1
+             ORDER BY sequence
+             LIMIT 1",
+            [claim_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| locator_sqlite_error("read relation history claim", error))?;
+    let Some((change_id, successor_id, predecessor_id)) = canonical else {
+        return Ok(());
+    };
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT reference.sequence, ?2, 'historical', 'relation_claim', ?1,
+                    support.sequence
+             FROM product_history_revision_reference AS reference
+             JOIN product_history_relation_claim AS support
+               ON support.claim_id = ?1
+             WHERE reference.revision_id IN (?3, ?4)
+               AND reference.historical_change_eligible = 1",
+            params![claim_id, change_id, successor_id, predecessor_id],
+        )
+        .map_err(|error| locator_sqlite_error("refresh relation history", error))?;
+    Ok(())
+}
+
+fn insert_historical_correlations_for_reference(
+    transaction: &Transaction<'_>,
+    sequence: i64,
+    revision_id: &str,
+) -> Result<(), SqliteLocatorError> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT ?1, canonical.change_id, 'historical', 'membership_claim',
+                    canonical.claim_id, support.sequence
+             FROM product_history_membership_claim AS canonical
+             JOIN product_history_membership_claim AS support
+               ON support.claim_id = canonical.claim_id
+             WHERE canonical.revision_id = ?2
+               AND canonical.sequence = (
+                   SELECT min(first.sequence)
+                   FROM product_history_membership_claim AS first
+                   WHERE first.claim_id = canonical.claim_id
+               )",
+            params![sequence, revision_id],
+        )
+        .map_err(|error| locator_sqlite_error("insert membership history for reference", error))?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO product_history_change_correlation
+             (sequence, change_id, correlation_role, source_kind, source_id, support_sequence)
+             SELECT ?1, canonical.change_id, 'historical', 'relation_claim',
+                    canonical.claim_id, support.sequence
+             FROM product_history_relation_claim AS canonical
+             JOIN product_history_relation_claim AS support
+               ON support.claim_id = canonical.claim_id
+             WHERE (?2 = canonical.successor_revision_id
+                    OR ?2 = canonical.predecessor_revision_id)
+               AND canonical.sequence = (
+                   SELECT min(first.sequence)
+                   FROM product_history_relation_claim AS first
+                   WHERE first.claim_id = canonical.claim_id
+               )",
+            params![sequence, revision_id],
+        )
+        .map_err(|error| locator_sqlite_error("insert relation history for reference", error))?;
     Ok(())
 }
 
@@ -1630,7 +2701,6 @@ fn insert_family_fact(
         revision_id,
         object_artifact_content_hash,
     }) = &fact.change
-        && RevisionRefV1::new(revision_id.clone(), object_artifact_content_hash.clone()).is_ok()
     {
         transaction
             .execute(

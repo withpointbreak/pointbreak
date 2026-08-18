@@ -3555,9 +3555,17 @@ mod tests {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE product_revision_edge;
+                "DROP TABLE product_history_change_correlation;
+                 DROP TABLE product_history_relation_withdrawal;
+                 DROP TABLE product_history_relation_claim;
+                 DROP TABLE product_history_membership_withdrawal;
+                 DROP TABLE product_history_membership_claim;
+                 DROP TABLE product_history_revision_reference;
+                 DROP TABLE product_history_event;
+                 DROP TABLE product_revision_edge;
                  DROP TABLE product_revision;
                  DROP TABLE product_history_signature;
+                 DROP TABLE product_history_tag_value;
                  DROP TABLE product_history_tag;
                  DROP TABLE product_history_meta;
                  PRAGMA wal_checkpoint(TRUNCATE);",
@@ -3596,7 +3604,7 @@ mod tests {
         connection
             .execute_batch(
                 "PRAGMA ignore_check_constraints = ON;
-                 UPDATE product_history_meta SET schema_version = 1 WHERE singleton = 1;
+                 UPDATE product_history_meta SET schema_version = 3 WHERE singleton = 1;
                  PRAGMA wal_checkpoint(TRUNCATE);",
             )
             .unwrap();

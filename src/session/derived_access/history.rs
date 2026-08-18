@@ -39,9 +39,14 @@ use crate::session::workflow::{
     QueryDiagnostic, ReviewHistoryEntry, history_entries_from_selected_events,
 };
 
-const PRODUCT_HISTORY_SCHEMA_V3: &str = "pointbreak.sqlite-derived-access-history.v3";
+const PRODUCT_HISTORY_SCHEMA_V4: &str = "pointbreak.sqlite-derived-access-history.v4";
 const PROJECTION_STAMP_SCHEMA_V1: &str = "pointbreak.derived-access-projection-stamp.v1";
 const ACTIVE_PROFILE: &str = "sqlite-wal-bodyless-v1";
+
+#[cfg(test)]
+pub(crate) fn product_history_stamp_schema() -> &'static str {
+    PRODUCT_HISTORY_SCHEMA_V4
+}
 const REVIEW_EVENT_CTE: &str = "
 WITH revision_object_ranked AS (
     SELECT event.revision_id, revision.object_id,
@@ -1331,7 +1336,7 @@ pub(super) fn projection_stamp(
         schema: PROJECTION_STAMP_SCHEMA_V1,
         store_identity,
         profile: ACTIVE_PROFILE,
-        schema_version: PRODUCT_HISTORY_SCHEMA_V3,
+        schema_version: PRODUCT_HISTORY_SCHEMA_V4,
         epoch: cursor.epoch,
         applied_sequence: cursor.sequence,
     })
@@ -1980,7 +1985,7 @@ mod tests {
 
         assert_eq!(
             base,
-            "sha256:ddca3c8f113829ad5465604156ca561bce0f2147b06e665dd65ac236c41760d6"
+            "sha256:90b206dbd96dcee480a21f228a83032a089e311496b73c1b9660a7dc52a2d55b"
         );
         assert_eq!(
             base,

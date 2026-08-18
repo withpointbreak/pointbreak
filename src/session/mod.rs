@@ -77,6 +77,8 @@ pub(crate) use identity::{IngestClock, SystemIngestClock, current_timestamp, wri
 pub use projection::cosignature::{
     EndorsementClassification, EndorsementReadback, EndorserAttributesView,
 };
+#[cfg(test)]
+pub(crate) use projection::event_history::project_event_history;
 pub(crate) use projection::state;
 pub use projection::{
     ArtifactRemovalProjection, BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1,

@@ -7,13 +7,12 @@ use crate::bench_support::derived_access::sqlite_locator::ProposalCarrierLocator
 use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
 use crate::crypto::SignerId;
 use crate::model::{
-    AssessmentId, ChangeIdentityDescriptorV1, CheckpointId, EngagementId, InputRequestId,
-    InputRequestResponseId, JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef,
-    RevisionId, RevisionRefV1, RevisionSource, TargetRef, TaskTargetRef, TrackId,
+    AssessmentId, ChangeIdentityDescriptorV1, CheckpointId, CommitAssociationId, EngagementId,
+    InputRequestId, InputRequestResponseId, JournalId, ObjectId, ObservationId, ReviewEndpoint,
+    ReviewTargetRef, RevisionId, RevisionRefV1, RevisionSource, TargetRef, TaskTargetRef, TrackId,
     ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger, WorkObjectId,
     WorkObjectType, WorktreeCaptureMode,
 };
-use crate::session::EventStore;
 use crate::session::derived_access::cursor::{AppendResolution, TruthCursor};
 use crate::session::derived_access::locator::LocatorRead;
 use crate::session::derived_access::oracle::{
@@ -22,16 +21,20 @@ use crate::session::derived_access::oracle::{
 };
 use crate::session::event::{
     ArtifactRemovedPayload, BodyContentType, EventPayload, EventSignature,
-    EventSignatureRecordedPayload, EventTarget, EventType, GitProvenance,
-    InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
-    InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
-    ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision,
-    RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload,
-    RevisionRefWithdrawnPayload, ShoreEvent, TaskCheckpointCapturedPayload,
-    TaskObservationRecordedPayload, ValidationCheckRecordedPayload, WorkObjectProposal,
-    WorkObjectProposedPayload, Writer, build_change_declared, build_membership_asserted,
-    build_membership_withdrawn,
+    EventSignatureRecordedPayload, EventTarget, EventType, FactPortRelationV1, FactRefV1,
+    GitProvenance, InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
+    InputRequestResponseOutcome, RelationProofStatusV1, ReviewAssessment,
+    ReviewAssessmentRecordedPayload, ReviewFactPortDraftV1, ReviewInitializedPayload,
+    ReviewObservationRecordedPayload, Revision, RevisionCommitAssociatedPayload,
+    RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload, RevisionRefWithdrawnPayload,
+    RevisionRelationAttestationDraftV1, SemanticRevisionRelationV1, ShoreEvent,
+    TaskCheckpointCapturedPayload, TaskObservationRecordedPayload, ValidationCheckRecordedPayload,
+    WorkObjectProposal, WorkObjectProposedPayload, Writer, build_change_declared,
+    build_change_link_asserted, build_membership_asserted, build_membership_withdrawn,
+    build_review_fact_ported, build_revision_relation_asserted, build_revision_relation_attested,
+    build_revision_relation_withdrawn,
 };
+use crate::session::{AuthorityCursorV2, EventStore, TrustSet, project_change_documents};
 
 const STORE_ID: &str = "store:semantic-test";
 const JOURNAL: &str = "journal:sha256:semantic-test";
@@ -47,6 +50,10 @@ fn derived_database(root: &std::path::Path) -> std::path::PathBuf {
 
 fn revision_id(suffix: &str) -> RevisionId {
     RevisionId::new(format!("rev:sha256:{suffix}"))
+}
+
+fn valid_hash(byte: char) -> String {
+    format!("sha256:{}", byte.to_string().repeat(64))
 }
 
 fn open_adapter(root: &std::path::Path) -> QualificationDerivedAccessAdapter {
@@ -145,6 +152,16 @@ fn proposal_carrier_event(
     idempotency_key: &str,
     occurred_at: &str,
 ) -> ShoreEvent {
+    proposal_carrier_event_with_supersedes(exact, summary, idempotency_key, occurred_at, Vec::new())
+}
+
+fn proposal_carrier_event_with_supersedes(
+    exact: &RevisionRefV1,
+    summary: Option<&str>,
+    idempotency_key: &str,
+    occurred_at: &str,
+    supersedes: Vec<RevisionId>,
+) -> ShoreEvent {
     ShoreEvent::new(
         EventType::WorkObjectProposed,
         idempotency_key,
@@ -165,7 +182,7 @@ fn proposal_carrier_event(
                 },
                 summary: summary.map(str::to_owned),
                 object_artifact_content_hash: exact.object_artifact_content_hash.clone(),
-                supersedes: Vec::new(),
+                supersedes,
             },
         },
         occurred_at,
@@ -405,13 +422,21 @@ fn ref_events(revision_id: &RevisionId) -> [ShoreEvent; 2] {
 }
 
 fn observation_event(revision_id: &RevisionId) -> ShoreEvent {
+    keyed_observation_event(revision_id, "semantic-test", "2026-07-27T16:00:11Z")
+}
+
+fn keyed_observation_event(
+    revision_id: &RevisionId,
+    source_key: &str,
+    occurred_at: &str,
+) -> ShoreEvent {
     ShoreEvent::new(
         EventType::ReviewObservationRecorded,
-        "review_observation_recorded:semantic-test",
+        format!("review_observation_recorded:{source_key}"),
         revision_target(revision_id),
         Writer::shore_local("0.8.0"),
         ReviewObservationRecordedPayload {
-            observation_id: ObservationId::new("obs:sha256:semantic-test"),
+            observation_id: ObservationId::new(format!("obs:sha256:{source_key}")),
             target: ReviewTargetRef::Revision {
                 revision_id: revision_id.clone(),
             },
@@ -421,12 +446,12 @@ fn observation_event(revision_id: &RevisionId) -> ShoreEvent {
             body_artifact_path: None,
             body_byte_size: Some(24),
             body_content_hash: None,
-            tags: Vec::new(),
+            tags: vec!["Issue:Semantic-History".to_owned()],
             confidence: None,
             supersedes_observation_ids: Vec::new(),
             responds_to_observation_ids: Vec::new(),
         },
-        "2026-07-27T16:00:11Z",
+        occurred_at,
     )
     .expect("observation")
 }
@@ -607,6 +632,990 @@ fn required_schedule() -> Vec<ShoreEvent> {
     events.extend(ref_events(&b));
     events.extend(task_events());
     events
+}
+
+#[test]
+fn product_history_v3_relations_preserve_bodyless_selection_and_checkpoint_behavior() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let schedule = required_schedule();
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    drop(adapter);
+
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open(&database).expect("open sidecar");
+    let (profile, schema_version, product_applied, semantic_applied, locator_applied) = connection
+        .query_row(
+            "SELECT product.profile_id, product.schema_version, product.applied_sequence,
+                    semantic.applied_sequence, locator.applied_sequence
+             FROM product_history_meta AS product
+             CROSS JOIN semantic_meta AS semantic
+             CROSS JOIN locator_checkpoint AS locator
+             WHERE product.singleton = 1
+               AND semantic.singleton = 1
+               AND locator.singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .expect("read shared checkpoint");
+    assert_eq!(profile, "pointbreak.sqlite-derived-access-history.v1");
+    assert!(schema_version >= 3);
+    assert_eq!(product_applied, schedule.len() as i64);
+    assert_eq!(semantic_applied, product_applied);
+    assert_eq!(locator_applied, product_applied);
+
+    let chronology = connection
+        .prepare(
+            "SELECT normalized_occurred_at, event_id
+             FROM locator_event_text
+             ORDER BY normalized_occurred_at, event_id",
+        )
+        .expect("prepare chronology")
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query chronology")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read chronology");
+    assert_eq!(chronology.len(), schedule.len());
+    assert!(chronology.windows(2).all(|pair| pair[0] <= pair[1]));
+
+    let selected = connection
+        .query_row(
+            "SELECT locator.event_type, locator.track_id, event.actor_id, event.revision_id
+             FROM semantic_event_fact_text AS event
+             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+             WHERE locator.event_type = 'review_assessment_recorded'
+             ORDER BY locator.sequence
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("read bodyless selection fields");
+    assert_eq!(selected.0, "review_assessment_recorded");
+    assert_eq!(selected.1, TRACK);
+    assert!(!selected.2.is_empty());
+    assert_eq!(selected.3, revision_id("b").as_str());
+
+    assert_eq!(
+        connection
+            .query_row("SELECT tag_key FROM product_history_tag", [], |row| row
+                .get::<_, String>(
+                0
+            ),)
+            .expect("read tag facet"),
+        "issue"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT target_event_id FROM product_history_signature",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read detached signature target"),
+        "evt:sha256:semantic-target"
+    );
+    let revision = connection
+        .query_row(
+            "SELECT revision.revision_id, revision.captured_at,
+                    edge.superseded_revision_id
+             FROM product_revision AS revision
+             JOIN product_revision_edge AS edge ON edge.sequence = revision.sequence
+             WHERE revision.revision_id = ?1",
+            [revision_id("b").as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .expect("read captured Revision edge");
+    assert_eq!(revision.0, revision_id("b").as_str());
+    assert_eq!(revision.1, "2026-07-27T16:00:01Z");
+    assert_eq!(revision.2, revision_id("a").as_str());
+    drop(connection);
+
+    let reopened =
+        QualificationDerivedAccessAdapter::open(root.path(), CursorLedgerIdentity::new(STORE_ID))
+            .expect("reopen adapter");
+    assert_eq!(
+        reopened.locator_checkpoint().expect("restarted checkpoint"),
+        TruthCursor::new(1, schedule.len() as u64)
+    );
+}
+
+#[test]
+fn timeline_revision_references_keep_direct_bindings_and_recompute_ambiguous_candidates() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let candidate_id = revision_id("timeline-candidate");
+    let first = RevisionRefV1::new(candidate_id.clone(), valid_hash('a')).expect("first exact");
+    let second = RevisionRefV1::new(candidate_id.clone(), valid_hash('b')).expect("second exact");
+    let first_proposal = proposal_carrier_event(
+        &first,
+        None,
+        "work_object_proposed:timeline-candidate:first",
+        "2026-08-18T12:00:00Z",
+    );
+    let observed = observation_event(&candidate_id);
+    let missing_id = revision_id("timeline-missing");
+    let missing =
+        keyed_observation_event(&missing_id, "timeline-missing", "2026-08-18T12:00:00.500Z");
+    append(&adapter, &first_proposal, 0);
+    append(&adapter, &observed, 1);
+    append(&adapter, &missing, 2);
+
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open(&database).expect("open sidecar");
+    let resolved = connection
+        .query_row(
+            "SELECT reference_role, resolution, object_artifact_content_hash
+             FROM product_history_revision_reference AS reference
+             JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+             WHERE locator.event_id = ?1 AND reference.source_kind = 'review_target'",
+            [observed.event_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .expect("read singleton candidate");
+    assert_eq!(
+        resolved,
+        (
+            "candidate".to_owned(),
+            "exact".to_owned(),
+            Some(valid_hash('a'))
+        )
+    );
+    let unresolved = connection
+        .query_row(
+            "SELECT reference_role, resolution, object_artifact_content_hash
+             FROM product_history_revision_reference AS reference
+             JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+             WHERE locator.event_id = ?1 AND reference.source_kind = 'review_target'",
+            [missing.event_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .expect("read missing candidate");
+    assert_eq!(
+        unresolved,
+        ("candidate".to_owned(), "unresolved".to_owned(), None)
+    );
+    drop(connection);
+
+    let conflicting_proposal = proposal_carrier_event(
+        &second,
+        None,
+        "work_object_proposed:timeline-candidate:second",
+        "2026-08-18T12:00:01Z",
+    );
+    append(&adapter, &conflicting_proposal, 3);
+    let connection = rusqlite::Connection::open(database).expect("reopen sidecar");
+    let ambiguous = connection
+        .query_row(
+            "SELECT resolution, object_artifact_content_hash
+             FROM product_history_revision_reference AS reference
+             JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+             WHERE locator.event_id = ?1 AND reference.source_kind = 'review_target'",
+            [observed.event_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .expect("read ambiguous candidate");
+    assert_eq!(ambiguous, ("unresolved".to_owned(), None));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM semantic_revision_proposal_carrier
+                 WHERE revision_id = ?1",
+                [candidate_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count all proposal bindings"),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_revision_reference
+                 WHERE source_kind = 'proposal'
+                   AND reference_role = 'direct'
+                   AND resolution = 'exact'
+                   AND revision_id = ?1",
+                [candidate_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count direct proposal references"),
+        2,
+        "a later conflict must not rewrite either event's direct exact reference"
+    );
+}
+
+#[test]
+fn overlapping_revision_roles_deduplicate_one_membership_correlation() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_id("timeline-overlap");
+    let exact = RevisionRefV1::new(revision.clone(), valid_hash('9')).expect("exact Revision");
+    let proposal = proposal_carrier_event_with_supersedes(
+        &exact,
+        None,
+        "work_object_proposed:timeline-overlap",
+        "2026-08-18T12:00:10Z",
+        vec![revision.clone()],
+    );
+    let declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([49; 32]), [50; 32])
+            .expect("declaration");
+    let membership =
+        build_membership_asserted(&declaration.change_id, &revision, [51; 32]).expect("membership");
+    append(&adapter, &proposal, 0);
+    append(&adapter, &change_event(1, declaration), 1);
+    append(&adapter, &change_event(2, membership.clone()), 2);
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_change_correlation AS correlation
+                 JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+                 WHERE locator.event_id = ?1
+                   AND correlation.change_id = ?2
+                   AND correlation.correlation_role = 'historical'
+                   AND correlation.source_kind = 'membership_claim'
+                   AND correlation.source_id = ?3",
+                rusqlite::params![
+                    proposal.event_id.as_str(),
+                    membership.change_id.as_str(),
+                    membership.membership_claim_id.as_str(),
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("overlapping-role correlation count"),
+        1,
+        "one event/revision pair must produce one correlation per membership claim"
+    );
+}
+
+#[test]
+fn later_membership_and_withdrawal_materialize_historical_change_support() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let member_id = revision_id("timeline-member");
+    let exact = RevisionRefV1::new(member_id.clone(), valid_hash('c')).expect("exact Revision");
+    let proposal = proposal_carrier_event(
+        &exact,
+        None,
+        "work_object_proposed:timeline-member",
+        "2026-08-18T12:01:00Z",
+    );
+    let observed = observation_event(&member_id);
+    let declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([51; 32]), [52; 32])
+            .expect("declaration");
+    let membership = build_membership_asserted(&declaration.change_id, &member_id, [53; 32])
+        .expect("membership");
+    let withdrawal =
+        build_membership_withdrawn(&membership.membership_claim_id, [54; 32]).expect("withdrawal");
+    let declaration_event = change_event(2, declaration.clone());
+    let membership_event = change_event(3, membership.clone());
+    let withdrawal_event = change_event(4, withdrawal);
+    for (attempt, event) in [&proposal, &observed, &declaration_event]
+        .into_iter()
+        .enumerate()
+    {
+        append(&adapter, event, attempt);
+    }
+
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open(&database).expect("open pre-claim sidecar");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_change_correlation AS correlation
+                 JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+                 WHERE locator.event_id = ?1",
+                [observed.event_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("pre-claim correlation count"),
+        0,
+        "a declaration alone is not historical Revision membership"
+    );
+    drop(connection);
+
+    append(&adapter, &withdrawal_event, 3);
+    append(&adapter, &membership_event, 4);
+    let relation = build_revision_relation_asserted(
+        &declaration.change_id,
+        exact.clone(),
+        RevisionRefV1::new(revision_id("timeline-member-predecessor"), valid_hash('d'))
+            .expect("relation predecessor"),
+        [55; 32],
+    )
+    .expect("relation");
+    let relation_withdrawal =
+        build_revision_relation_withdrawn(&relation.relation_claim_id, [56; 32])
+            .expect("relation withdrawal");
+    let relation_event = change_event(5, relation.clone());
+    let relation_withdrawal_event = change_event(6, relation_withdrawal);
+    append(&adapter, &relation_withdrawal_event, 5);
+    append(&adapter, &relation_event, 6);
+
+    let connection = rusqlite::Connection::open(database).expect("open sidecar");
+    let membership_sequence = connection
+        .query_row(
+            "SELECT sequence FROM locator_event_text WHERE event_id = ?1",
+            [membership_event.event_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("membership sequence");
+    let historical = connection
+        .query_row(
+            "SELECT correlation_role, source_kind, source_id, support_sequence
+             FROM product_history_change_correlation AS correlation
+             JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+             WHERE locator.event_id = ?1 AND correlation.change_id = ?2",
+            [observed.event_id.as_str(), declaration.change_id.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("historical Change correlation");
+    assert_eq!(historical.0, "historical");
+    assert_eq!(historical.1, "membership_claim");
+    assert_eq!(historical.2, membership.membership_claim_id.as_str());
+    assert_eq!(historical.3, membership_sequence);
+
+    let withdrawal_support = connection
+        .query_row(
+            "SELECT correlation_role, source_id, support_sequence
+             FROM product_history_change_correlation AS correlation
+             JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+             WHERE locator.event_id = ?1 AND correlation.change_id = ?2",
+            [
+                withdrawal_event.event_id.as_str(),
+                declaration.change_id.as_str(),
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("withdrawal Change support");
+    assert_eq!(withdrawal_support.0, "direct");
+    assert_eq!(
+        withdrawal_support.1,
+        membership.membership_claim_id.as_str()
+    );
+    assert_eq!(withdrawal_support.2, membership_sequence);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM product_history_membership_withdrawal
+                 WHERE claim_id = ?1",
+                [membership.membership_claim_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("withdrawal claim identity"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM product_history_change_correlation
+                 WHERE sequence = (
+                     SELECT sequence FROM locator_event_text WHERE event_id = ?1
+                 ) AND change_id = ?2
+                   AND correlation_role = 'historical'
+                   AND source_kind = 'membership_claim'",
+                [observed.event_id.as_str(), declaration.change_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("withdrawn history remains correlated"),
+        1
+    );
+    let relation_sequence = connection
+        .query_row(
+            "SELECT sequence FROM locator_event_text WHERE event_id = ?1",
+            [relation_event.event_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("relation sequence");
+    let relation_history = connection
+        .query_row(
+            "SELECT source_id, support_sequence
+             FROM product_history_change_correlation AS correlation
+             JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+             WHERE locator.event_id = ?1
+               AND correlation.change_id = ?2
+               AND correlation.correlation_role = 'historical'
+               AND correlation.source_kind = 'relation_claim'",
+            [observed.event_id.as_str(), declaration.change_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .expect("historical relation correlation");
+    assert_eq!(relation_history.0, relation.relation_claim_id.as_str());
+    assert_eq!(relation_history.1, relation_sequence);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_change_correlation AS correlation
+                 JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+                 WHERE locator.event_id = ?1
+                   AND correlation.source_id = ?2
+                   AND correlation.correlation_role = 'direct'
+                   AND correlation.support_sequence = ?3",
+                rusqlite::params![
+                    relation_withdrawal_event.event_id.as_str(),
+                    relation.relation_claim_id.as_str(),
+                    relation_sequence,
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("relation withdrawal support"),
+        1
+    );
+}
+
+#[test]
+fn change_capable_timeline_families_and_structured_facets_are_bodyless_and_indexed() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let first = build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([61; 32]), [62; 32])
+        .expect("first declaration");
+    let second =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([63; 32]), [64; 32])
+            .expect("second declaration");
+    let revision = revision_id("timeline-family");
+    let exact = RevisionRefV1::new(revision.clone(), valid_hash('d')).expect("exact Revision");
+    let predecessor = RevisionRefV1::new(revision_id("timeline-predecessor"), valid_hash('e'))
+        .expect("predecessor");
+    let membership =
+        build_membership_asserted(&first.change_id, &revision, [65; 32]).expect("membership");
+    let membership_withdrawal =
+        build_membership_withdrawn(&membership.membership_claim_id, [66; 32])
+            .expect("membership withdrawal");
+    let link = build_change_link_asserted(
+        &first.change_id,
+        &second.change_id,
+        crate::session::event::ChangeLinkRelationV1::RelatedWork,
+        [67; 32],
+    )
+    .expect("link");
+    let relation =
+        build_revision_relation_asserted(&first.change_id, exact.clone(), predecessor, [68; 32])
+            .expect("relation");
+    let relation_withdrawal =
+        build_revision_relation_withdrawn(&relation.relation_claim_id, [69; 32])
+            .expect("relation withdrawal");
+    let attestation = build_revision_relation_attested(RevisionRelationAttestationDraftV1 {
+        revision: exact.clone(),
+        commit_association_id: CommitAssociationId::new(
+            "commit-association:sha256:timeline-family",
+        ),
+        semantic_relation: SemanticRevisionRelationV1::Unknown,
+        proof_status: RelationProofStatusV1::Unverified,
+        proof_method: "manual".to_owned(),
+        proof_algorithm_version: "v1".to_owned(),
+        capture_scope: vec!["worktree".to_owned()],
+        comparison_base_or_parent: None,
+        endpoint_oids: vec!["abc".to_owned()],
+        evidence_content_hash: None,
+        result_digest: valid_hash('f'),
+    })
+    .expect("attestation");
+    let track_id = TrackId::new(TRACK);
+    let writer = Writer::shore_local("0.9.0");
+    let fact_port = build_review_fact_ported(
+        ReviewFactPortDraftV1 {
+            origin_revision: exact.clone(),
+            origin_fact: FactRefV1::Observation {
+                observation_id: ObservationId::new("obs:sha256:timeline-origin"),
+            },
+            target_revision: RevisionRefV1::new(revision_id("timeline-target"), valid_hash('0'))
+                .expect("target Revision"),
+            relation: FactPortRelationV1::ContextOnly,
+            target_fact: None,
+            rationale_content_hash: None,
+            context_change_id: Some(first.change_id.clone()),
+        },
+        &writer.actor_id,
+        &track_id,
+    )
+    .expect("fact port");
+    let fact_port_event = ShoreEvent::new(
+        EventType::ReviewFactPorted,
+        "review_fact_ported:timeline-family",
+        EventTarget::for_revision(JournalId::new(JOURNAL), revision.clone(), Some(track_id))
+            .expect("fact port target"),
+        writer,
+        fact_port,
+        "2026-08-18T12:02:09Z",
+    )
+    .expect("fact port event");
+    let request_id = InputRequestId::new("input-request:sha256:timeline-family");
+    let proposal = proposal_carrier_event(
+        &exact,
+        None,
+        "work_object_proposed:timeline-family",
+        "2026-08-18T12:02:00Z",
+    );
+    let assessment = assessment_event(
+        &revision,
+        "timeline-family",
+        "assess:sha256:timeline-family",
+        ReviewAssessment::NeedsChanges,
+        Vec::new(),
+        Some("BODYLESS TIMELINE ASSESSMENT SENTINEL"),
+        "2026-08-18T12:02:12Z",
+    );
+    let mut events = vec![
+        proposal,
+        change_event(10, first.clone()),
+        change_event(11, second),
+        change_event(12, membership),
+        change_event(13, membership_withdrawal),
+        change_event(14, link),
+        change_event(15, relation),
+        change_event(16, relation_withdrawal),
+        change_event(17, attestation),
+        fact_port_event,
+        observation_event(&revision),
+        assessment,
+        request_opened(&revision, &request_id),
+        request_responded(&revision, &request_id),
+        validation_event(&revision),
+        task_checkpoint_event(),
+        signature_event(),
+        removal_event("sha256:timeline-family-removed"),
+    ];
+    events.extend(task_events());
+    for (attempt, event) in events.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let strict_changes = project_change_documents(&events).expect("strict Change documents");
+    let strict = crate::session::project_event_history(
+        &events,
+        &strict_changes,
+        AuthorityCursorV2 {
+            schema: "pointbreak.authority-cursor.v2".to_owned(),
+            journal_record_count: events.len() as u64,
+            event_count: events.len() as u64,
+            journal_record_set_hash: valid_hash('1'),
+            event_set_hash: valid_hash('2'),
+            capability_set_hash: valid_hash('3'),
+        },
+        valid_hash('4'),
+        &TrustSet::default(),
+    )
+    .expect("strict Timeline");
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    let product_types = connection
+        .prepare(
+            "SELECT DISTINCT locator.event_type
+             FROM product_history_event AS product
+             JOIN locator_event_text AS locator ON locator.sequence = product.sequence
+             ORDER BY locator.event_type",
+        )
+        .expect("prepare Timeline types")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query Timeline types")
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .expect("read Timeline types");
+    let product_event_ids = connection
+        .prepare(
+            "SELECT locator.event_id
+             FROM product_history_event AS product
+             JOIN locator_event_text AS locator ON locator.sequence = product.sequence",
+        )
+        .expect("prepare Timeline event ids")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query Timeline event ids")
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .expect("read Timeline event ids");
+    assert_eq!(
+        product_event_ids,
+        strict
+            .entries()
+            .iter()
+            .map(|entry| entry.event_id.as_str().to_owned())
+            .collect(),
+        "the bodyless product event set must equal the strict Timeline event set"
+    );
+    for entry in strict.entries() {
+        let exact = connection
+            .prepare(
+                "SELECT reference.revision_id, reference.object_artifact_content_hash
+                 FROM product_history_revision_reference AS reference
+                 JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+                 WHERE locator.event_id = ?1 AND reference.resolution = 'exact'",
+            )
+            .expect("prepare exact Timeline references")
+            .query_map([entry.event_id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query exact Timeline references")
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .expect("read exact Timeline references");
+        assert_eq!(
+            exact,
+            entry
+                .revision_refs
+                .iter()
+                .map(|reference| {
+                    (
+                        reference.revision_id.as_str().to_owned(),
+                        reference.object_artifact_content_hash.clone(),
+                    )
+                })
+                .collect(),
+            "exact Revision parity for {}",
+            entry.event_id.as_str()
+        );
+        let unresolved = connection
+            .prepare(
+                "SELECT reference.revision_id
+                 FROM product_history_revision_reference AS reference
+                 JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+                 WHERE locator.event_id = ?1 AND reference.resolution = 'unresolved'",
+            )
+            .expect("prepare unresolved Timeline references")
+            .query_map([entry.event_id.as_str()], |row| row.get::<_, String>(0))
+            .expect("query unresolved Timeline references")
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .expect("read unresolved Timeline references");
+        assert_eq!(
+            unresolved,
+            entry
+                .unresolved_revision_ids
+                .iter()
+                .map(|revision| revision.as_str().to_owned())
+                .collect(),
+            "unresolved Revision parity for {}",
+            entry.event_id.as_str()
+        );
+        let changes = connection
+            .prepare(
+                "SELECT DISTINCT correlation.change_id
+                 FROM product_history_change_correlation AS correlation
+                 JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+                 WHERE locator.event_id = ?1",
+            )
+            .expect("prepare Timeline Change correlations")
+            .query_map([entry.event_id.as_str()], |row| row.get::<_, String>(0))
+            .expect("query Timeline Change correlations")
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .expect("read Timeline Change correlations");
+        assert_eq!(
+            changes,
+            entry
+                .change_ids
+                .iter()
+                .map(|change| change.as_str().to_owned())
+                .collect(),
+            "Change correlation parity for {}",
+            entry.event_id.as_str()
+        );
+    }
+    for required in [
+        "change_declared",
+        "change_membership_asserted",
+        "change_membership_withdrawn",
+        "change_link_asserted",
+        "change_revision_relation_asserted",
+        "change_revision_relation_withdrawn",
+        "revision_relation_attested",
+        "review_fact_ported",
+    ] {
+        assert!(
+            product_types.contains(required),
+            "missing Change-capable Timeline family {required}"
+        );
+    }
+    for excluded in [
+        "task_checkpoint_captured",
+        "task_observation_recorded",
+        "event_signature_recorded",
+        "artifact_removed",
+    ] {
+        assert!(!product_types.contains(excluded));
+    }
+    let request_states = connection
+        .prepare(
+            "SELECT request_state FROM product_history_event
+             WHERE request_state IS NOT NULL ORDER BY request_state",
+        )
+        .expect("prepare request states")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query request states")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read request states");
+    assert_eq!(request_states, vec!["answered", "open"]);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT tag_value FROM product_history_tag_value",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("observation tag value"),
+        "issue:semantic-history"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT assessment FROM semantic_assessment_fact
+                 WHERE sequence = (
+                     SELECT sequence FROM locator_event_text
+                     WHERE event_type = 'review_assessment_recorded'
+                 )",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("assessment facet"),
+        "needs_changes"
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT status FROM semantic_validation_fact", [], |row| row
+                .get::<_, String>(0),)
+            .expect("check-status facet"),
+        "failed"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_revision_reference AS reference
+                 JOIN locator_event_text AS locator ON locator.sequence = reference.sequence
+                 WHERE locator.event_type = 'change_revision_relation_withdrawn'
+                   AND reference.reference_role = 'direct'
+                   AND reference.resolution = 'exact'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("withdrawn relation exact references"),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*)
+                 FROM product_history_change_correlation AS correlation
+                 JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+                 WHERE locator.event_type = 'change_link_asserted'
+                   AND correlation.source_kind = 'link_claim'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("link Change references"),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM product_history_relation_claim",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .expect("relation claims"),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM product_history_relation_withdrawal",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("relation withdrawals"),
+        1
+    );
+
+    let plan = |sql: &str| {
+        connection
+            .prepare(sql)
+            .expect("prepare query plan")
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read query plan")
+    };
+    assert!(plan(
+        "EXPLAIN QUERY PLAN
+         SELECT sequence FROM product_history_revision_reference
+         WHERE revision_id = 'rev:sha256:timeline-family'
+           AND object_artifact_content_hash = 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+           AND resolution = 'exact'"
+    )
+    .iter()
+    .any(|detail| detail.contains("product_history_revision_reference_exact")));
+    assert!(
+        plan(
+            "EXPLAIN QUERY PLAN
+         SELECT sequence FROM product_history_change_correlation
+         WHERE change_id = 'change:sha256:timeline'"
+        )
+        .iter()
+        .any(|detail| detail.contains("product_history_change_correlation_change"))
+    );
+    assert!(
+        plan(
+            "EXPLAIN QUERY PLAN
+         SELECT support_sequence, sequence
+         FROM product_history_change_correlation
+         WHERE source_kind = 'membership_claim'
+           AND source_id = 'change-membership:sha256:timeline'
+         ORDER BY support_sequence, sequence"
+        )
+        .iter()
+        .any(|detail| detail.contains("product_history_change_correlation_support"))
+    );
+    assert!(
+        plan(
+            "EXPLAIN QUERY PLAN
+         SELECT sequence FROM product_history_tag_value
+         WHERE tag_value = 'issue:semantic-history'"
+        )
+        .iter()
+        .any(|detail| detail.contains("product_history_tag_value_lookup"))
+    );
+    assert!(
+        plan(
+            "EXPLAIN QUERY PLAN
+         SELECT sequence FROM locator_event
+         WHERE epoch = 1
+         ORDER BY normalized_occurred_at, event_hash, sequence"
+        )
+        .iter()
+        .any(|detail| detail.contains("locator_event_display"))
+    );
+    drop(connection);
+
+    let inventory = adapter.semantic_inventory().expect("semantic inventory");
+    assert_eq!(
+        inventory.product_history_profile_id,
+        "pointbreak.sqlite-derived-access-history.v1"
+    );
+    assert_eq!(inventory.product_history_schema_version, 4);
+    let (frozen_profile_id, frozen_schema_version) =
+        crate::session::derived_access::semantic::change::frozen_product_history_identity();
+    assert_eq!(frozen_profile_id, inventory.product_history_profile_id);
+    assert_eq!(
+        frozen_schema_version,
+        inventory.product_history_schema_version
+    );
+    assert_eq!(
+        crate::session::derived_access::history::product_history_stamp_schema(),
+        format!(
+            "{}.v{}",
+            inventory
+                .product_history_profile_id
+                .strip_suffix(".v1")
+                .expect("versioned product-history profile"),
+            inventory.product_history_schema_version
+        )
+    );
+    assert!(inventory.product_history_event_count > 0);
+    for required in [
+        "product_history_event",
+        "product_history_revision_reference",
+        "product_history_change_correlation",
+        "product_history_membership_claim",
+        "product_history_membership_withdrawal",
+        "product_history_relation_claim",
+        "product_history_relation_withdrawal",
+        "product_history_tag_value",
+        "product_history_tag",
+        "product_history_signature",
+        "product_revision",
+        "product_revision_edge",
+    ] {
+        assert!(
+            inventory
+                .product_history_tables
+                .iter()
+                .any(|name| name == required)
+        );
+    }
+    for name in inventory
+        .product_history_tables
+        .iter()
+        .chain(&inventory.product_history_columns)
+        .chain(&inventory.product_history_indexes)
+    {
+        let name = name.to_ascii_lowercase();
+        for forbidden in [
+            "payload",
+            "summary",
+            "reason",
+            "snippet",
+            "prose",
+            "document",
+            "trust",
+            "token",
+            "embedding",
+            "fts",
+        ] {
+            assert!(
+                !name.contains(forbidden),
+                "product schema contains {forbidden}: {name}"
+            );
+        }
+    }
+    assert_eq!(inventory.retained_body_object_bytes, 0);
+    let bytes = std::fs::read(derived_database(root.path())).expect("read sidecar");
+    assert!(
+        !bytes
+            .windows(b"BODYLESS TIMELINE ASSESSMENT SENTINEL".len())
+            .any(|window| window == b"BODYLESS TIMELINE ASSESSMENT SENTINEL")
+    );
 }
 
 fn change_schedule() -> Vec<ShoreEvent> {
@@ -1498,13 +2507,14 @@ fn semantic_delta_and_locator_checkpoint_commit_atomically() {
             observed: TruthCursor { sequence: 1, .. }
         }
     ));
+    let rolled_back = adapter.semantic_inventory().expect("rolled-back inventory");
     assert_eq!(
-        adapter
-            .semantic_inventory()
-            .expect("rolled-back inventory")
-            .proposal_carrier_count,
-        0,
+        rolled_back.proposal_carrier_count, 0,
         "the proposal relation must roll back with its locator checkpoint"
+    );
+    assert_eq!(
+        rolled_back.product_history_event_count, 0,
+        "the Timeline relation must roll back with its locator checkpoint"
     );
 
     adapter.catch_up_to_head(32).expect("retry complete");
@@ -1518,13 +2528,9 @@ fn semantic_delta_and_locator_checkpoint_commit_atomically() {
             .event_count,
         1
     );
-    assert_eq!(
-        adapter
-            .semantic_inventory()
-            .expect("committed inventory")
-            .proposal_carrier_count,
-        1
-    );
+    let committed = adapter.semantic_inventory().expect("committed inventory");
+    assert_eq!(committed.proposal_carrier_count, 1);
+    assert_eq!(committed.product_history_event_count, 1);
     assert_eq!(
         ready(
             adapter
