@@ -1315,18 +1315,14 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(document.activeElement).toBe(tailList);
   });
 
-  it("keeps an exact-event Timeline keyboard-active without changing its detail until Enter", () => {
-    const { controller, navigate } = install();
+  it("follows an exact-event detail with the local cursor and descends on Enter", () => {
+    const { controller, navigate, replace } = install();
     const snapshot = eventSnapshot();
     if (snapshot.route.kind !== "event") throw new Error("missing event route");
-    const companion = {
-      kind: "timeline" as const,
-      historyQuery: snapshot.route.historyQuery,
-    };
-    const list = mountTimelineRows(
-      [snapshot.route.eventId, "evt:sha256:next"],
-      companion,
-    );
+    const originQuery = snapshot.route.historyQuery;
+    const companion = { kind: "timeline" as const, historyQuery: originQuery };
+    const eventIds = [snapshot.route.eventId, "evt:sha256:next"];
+    const list = mountTimelineRows(eventIds, companion);
     const nextPage = vi.fn();
     const next = document.createElement("button");
     next.dataset.timelinePage = "next";
@@ -1338,28 +1334,50 @@ describe("Change Inspector interaction lifecycle", () => {
     previous.dataset.timelineTargetRoute = "#/timeline?after=previous-page";
     previous.addEventListener("click", previousPage);
     document.querySelector("#master")?.append(previous, next);
+    // The followed event is the only one resolvable to an annotated diff; its
+    // sibling keeps the empty context that must keep refusing.
+    const page = timelineDocument(eventIds);
+    const followed = page.entries[1];
+    if (!followed) throw new Error("missing followed entry");
+    followed.changeIds = ["change:sha256:one"];
+    followed.revisionRefs = [
+      {
+        revisionId: "revision:sha256:one",
+        objectArtifactContentHash: "sha256:artifact",
+      },
+    ];
+    const followedRoute = {
+      kind: "event",
+      eventId: "evt:sha256:next",
+      historyQuery: { q: "assessment", track: "reviewer" },
+      query: {},
+    } as const;
     list.focus();
-    controller.sync(
-      snapshot,
-      timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
-    );
+    controller.sync(snapshot, page);
     expect(list.getAttribute("aria-activedescendant")).toContain(
       "evt_3Asha256_3Adeep-link",
     );
 
+    // g and G reach the loaded page's boundaries and take the detail with them.
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "G", bubbles: true }),
     );
     expect(list.getAttribute("aria-activedescendant")).toContain(
-      "evt_3Asha256_3Adeep-link",
+      "evt_3Asha256_3Anext",
     );
-    expect(navigate).not.toHaveBeenCalled();
+    expect(replace).toHaveBeenLastCalledWith(followedRoute);
+    controller.sync({ ...snapshot, route: followedRoute }, page);
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "g", bubbles: true }),
     );
     expect(list.getAttribute("aria-activedescendant")).toContain(
       "evt_3Asha256_3Adeep-link",
     );
+    expect(replace).toHaveBeenLastCalledWith({
+      ...followedRoute,
+      eventId: snapshot.route.eventId,
+    });
+    controller.sync(snapshot, page);
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "j", bubbles: true }),
@@ -1367,8 +1385,12 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(list.getAttribute("aria-activedescendant")).toContain(
       "evt_3Asha256_3Anext",
     );
+    expect(replace).toHaveBeenLastCalledWith(followedRoute);
     expect(navigate).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(list);
+    controller.sync({ ...snapshot, route: followedRoute }, page);
+
+    // Page edges refuse audibly rather than crossing a signed continuation.
     for (const key of ["j", "f", "d"]) {
       document.dispatchEvent(
         new KeyboardEvent("keydown", { key, bubbles: true }),
@@ -1378,42 +1400,41 @@ describe("Change Inspector interaction lifecycle", () => {
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "k", bubbles: true }),
     );
+    controller.sync(snapshot, page);
     for (const key of ["k", "b", "u"]) {
       document.dispatchEvent(
         new KeyboardEvent("keydown", { key, bubbles: true }),
       );
     }
     expect(previousPage).not.toHaveBeenCalled();
+
+    // Escape from a followed event returns to the originating Timeline with
+    // its opaque continuation intact. Asserted before the descent, so the
+    // return is not confused with the diff's own one-step exit.
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "j", bubbles: true }),
     );
-
-    document.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
-    const opened = {
-      kind: "event",
-      eventId: "evt:sha256:next",
-      historyQuery: { q: "assessment", track: "reviewer" },
-      query: {},
-    } as const;
-    expect(navigate).toHaveBeenCalledWith(opened);
-
-    controller.sync(
-      {
-        generation: null,
-        route: opened,
-        selected: null,
-        diagnostic: null,
-      },
-      timelineDocument(["evt:sha256:deep-link", opened.eventId]),
-    );
+    controller.sync({ ...snapshot, route: followedRoute }, page);
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
     );
     expect(navigate).toHaveBeenLastCalledWith({
       kind: "timeline",
-      historyQuery: snapshot.route.historyQuery,
+      historyQuery: originQuery,
+    });
+
+    // Enter on a followed event descends into its annotated diff.
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "diff",
+      changeId: "change:sha256:one",
+      revision: {
+        revisionId: "revision:sha256:one",
+        objectArtifactContentHash: "sha256:artifact",
+      },
+      query: {},
     });
   });
 
@@ -1489,6 +1510,120 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(list.getAttribute("aria-activedescendant")).toContain(
       "evt_3Asha256_3Anext",
     );
+  });
+
+  it("follows to the loaded page boundaries with g and G on an exact event", () => {
+    const { replace, list } = followFixture();
+
+    pressKey("G");
+
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+    expect(replace).toHaveBeenLastCalledWith({
+      kind: "event",
+      eventId: "evt:sha256:next",
+      historyQuery: { q: "assessment", track: "reviewer" },
+      query: {},
+    });
+
+    pressKey("g");
+
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+    expect(replace).toHaveBeenLastCalledWith({
+      kind: "event",
+      eventId: "evt:sha256:deep-link",
+      historyQuery: { q: "assessment", track: "reviewer" },
+      query: {},
+    });
+  });
+
+  it("refuses audibly at the page edges of an exact event instead of paging", () => {
+    const { list } = followFixture();
+    const nextPage = vi.fn();
+    const next = document.createElement("button");
+    next.dataset.timelinePage = "next";
+    next.dataset.timelineTargetRoute = "#/timeline?after=next-page";
+    next.addEventListener("click", nextPage);
+    const previousPage = vi.fn();
+    const previous = document.createElement("button");
+    previous.dataset.timelinePage = "previous";
+    previous.dataset.timelineTargetRoute = "#/timeline?after=previous-page";
+    previous.addEventListener("click", previousPage);
+    document.querySelector("#master")?.append(previous, next);
+    const feedback = document.querySelector<HTMLElement>("#command-feedback");
+    pressKey("G");
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+
+    for (const key of ["j", "f", "d"]) {
+      const edge = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(edge);
+      expect(edge.defaultPrevented).toBe(true);
+      expect(feedback?.textContent).not.toBe("");
+      expect(feedback?.classList.contains("hidden")).toBe(false);
+    }
+    expect(nextPage).not.toHaveBeenCalled();
+
+    pressKey("g");
+    for (const key of ["k", "b", "u"]) {
+      const edge = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(edge);
+      expect(edge.defaultPrevented).toBe(true);
+      expect(feedback?.textContent).not.toBe("");
+    }
+    expect(previousPage).not.toHaveBeenCalled();
+  });
+
+  it("keeps bare arrows off the background Change cursor while a detail is read", () => {
+    const { controller } = install();
+    controller.sync({
+      generation: null,
+      route: { kind: "lens", lens: "changes", query: {} },
+      selected: null,
+      diagnostic: null,
+    });
+    mountChangeCards(["change:sha256:one", "change:sha256:two"]);
+    controller.sync(exactSnapshot("change:sha256:one"));
+    const selectedCard = () =>
+      document.querySelector<HTMLElement>(".change-card-selected")?.dataset
+        .changeId;
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(selectedCard()).toBe("change:sha256:one");
+
+    const close = document.querySelector<HTMLButtonElement>("#detail-close");
+    close?.focus();
+    close?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(selectedCard()).toBe("change:sha256:one");
+
+    close?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(selectedCard()).toBe("change:sha256:two");
+
+    document
+      .querySelector<HTMLElement>(
+        '.unit-card[data-change-id="change:sha256:two"]',
+      )
+      ?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+      );
+    expect(selectedCard()).toBe("change:sha256:one");
   });
 
   it("leaves native detail arrows alone on an exact-event route", () => {
@@ -1575,7 +1710,7 @@ describe("Change Inspector interaction lifecycle", () => {
           dispatchEvent: vi.fn(() => true),
         }) as unknown as MediaQueryList,
     );
-    const { controller, navigate } = install();
+    const { controller, navigate, replace } = install();
     const snapshot = eventSnapshot();
     if (snapshot.route.kind !== "event") throw new Error("missing event route");
     const list = mountTimelineRows(
@@ -1629,6 +1764,7 @@ describe("Change Inspector interaction lifecycle", () => {
       ).toBe(splitBefore);
     }
     expect(navigate).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
 
     narrow = false;
     window.dispatchEvent(new Event("resize"));

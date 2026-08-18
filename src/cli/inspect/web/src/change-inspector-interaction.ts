@@ -89,6 +89,13 @@ function isTimelineListTarget(target: EventTarget | null): boolean {
   );
 }
 
+function isChangeListTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(".unit-card[data-change-id]") !== null
+  );
+}
+
 function narrowDetailOwnsFocus(target: EventTarget | null): boolean {
   return (
     target instanceof Element &&
@@ -1603,7 +1610,15 @@ export function installChangeInspectorInteraction(
         // cursor never disagree, and Back still returns to the Timeline.
         // Crossing a signed continuation remains a Timeline-lens operation.
         if (route.kind === "event" && intent?.kind === "adjacent-page") {
-          return false;
+          // Crossing a signed continuation replaces the page identity beneath
+          // an open detail, which stays a Timeline-lens operation. Say so
+          // rather than swallowing the key.
+          announceCommandFeedback(
+            intent.direction === "next"
+              ? "Last event on this page — Esc returns to the Timeline"
+              : "First event on this page — Esc returns to the Timeline",
+          );
+          return true;
         }
         return applyTimelineIntent(
           intent,
@@ -1622,25 +1637,21 @@ export function installChangeInspectorInteraction(
         }
         return;
       }
+      // On the Timeline lens g/G traverse the whole filtered set. An exact
+      // event owns no global page state, but it does own the page its cursor
+      // moves through, so there they reach that page's first and last event.
+      const applyBoundary = (boundary: "first" | "last"): boolean =>
+        route.kind === "timeline"
+          ? applyGlobalTimelineBoundary(boundary, timelineRoute)
+          : applyScopedTimelineIntent(
+              boundaryTimelineSelection(timeline, boundary),
+            );
       if (event.key === "g") {
-        // g/G retain their global Timeline meaning. An exact-event detail does
-        // not own the companion-page state needed to traverse globally without
-        // replacing that detail, so it deliberately leaves them unhandled.
-        if (
-          route.kind === "timeline" &&
-          applyGlobalTimelineBoundary("first", timelineRoute)
-        ) {
-          event.preventDefault();
-        }
+        if (applyBoundary("first")) event.preventDefault();
         return;
       }
       if (event.key === "G") {
-        if (
-          route.kind === "timeline" &&
-          applyGlobalTimelineBoundary("last", timelineRoute)
-        ) {
-          event.preventDefault();
-        }
+        if (applyBoundary("last")) event.preventDefault();
         return;
       }
       if (event.key === "f") {
@@ -1741,6 +1752,15 @@ export function installChangeInspectorInteraction(
         query: route.query,
         ...(route.focus ? { focus: route.focus } : {}),
       });
+      return;
+    }
+    // Bare arrows belong to whatever the reader is focused on. j/k stay global
+    // so the cursor is reachable from an open detail, but an arrow pressed on
+    // detail chrome must not move the Change cursor behind it.
+    if (
+      (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+      !isChangeListTarget(event.target)
+    ) {
       return;
     }
     if (event.key === "j" || event.key === "ArrowDown") {
