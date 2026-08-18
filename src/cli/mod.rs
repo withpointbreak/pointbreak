@@ -148,12 +148,16 @@ enum Command {
 }
 
 pub(crate) fn run_main() -> ExitCode {
+    with_process_io(|stdout, stderr| run_with_io(std::env::args_os(), stdout, stderr))
+}
+
+fn with_process_io<T>(run: impl FnOnce(&mut dyn Write, &mut dyn Write) -> T) -> T {
     let mut stdout = std::io::stdout().lock();
     // Derived-access workers may emit diagnostics while command-local runtime
     // handles are being dropped. Let stderr lock per write so a worker can
     // finish before the main thread joins it during shutdown.
     let mut stderr = std::io::stderr();
-    run_with_io(std::env::args_os(), &mut stdout, &mut stderr)
+    run(&mut stdout, &mut stderr)
 }
 
 fn run_with_io<I, S>(args: I, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode
@@ -201,6 +205,34 @@ where
             let _ = writeln!(stderr, "{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod process_io_tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn command_lifetime_does_not_hold_the_process_stderr_lock() {
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (worker, acquired_while_command_io_was_live) = with_process_io(|_, _| {
+            let worker = std::thread::spawn(move || {
+                let stderr = std::io::stderr();
+                let _lock = stderr.lock();
+                acquired_tx.send(()).expect("report acquired stderr lock");
+            });
+            let acquired = acquired_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            (worker, acquired)
+        });
+
+        worker.join().expect("stderr-lock worker completes");
+        assert!(
+            acquired_while_command_io_was_live,
+            "the command I/O lifetime must not hold stderr across a worker join"
+        );
     }
 }
 

@@ -372,7 +372,7 @@ fn unavailable_active_reads_fall_back_once_with_an_actionable_hint() {
 }
 
 #[test]
-fn stale_product_history_schema_falls_back_without_shutdown_deadlock() {
+fn stale_product_history_schema_falls_back_with_one_actionable_hint() {
     let (repo, _, _) = superseded_dump_repo();
     build(&repo);
     let store = common_dir_store(repo.path());
