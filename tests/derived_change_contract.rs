@@ -94,6 +94,18 @@ fn derived_change_recipe_binds_pointbreak_home_from_its_request() {
 
 #[test]
 fn derived_change_recipe_executes_with_the_request_bound_home() {
+    let missing_prerequisites = ["just", "jq"]
+        .into_iter()
+        .filter(|command| Command::new(command).arg("--version").output().is_err())
+        .collect::<Vec<_>>();
+    if !missing_prerequisites.is_empty() {
+        eprintln!(
+            "skipping derived Change recipe execution; missing prerequisite(s): {}",
+            missing_prerequisites.join(", ")
+        );
+        return;
+    }
+
     let temporary = tempfile::tempdir().expect("create recipe test root");
     let request = temporary.path().join("request.json");
     let pointbreak_home = temporary.path().join("request-bound-home");
