@@ -1417,6 +1417,80 @@ describe("Change Inspector interaction lifecycle", () => {
     });
   });
 
+  const followFixture = () => {
+    const installed = install();
+    const snapshot = eventSnapshot();
+    if (snapshot.route.kind !== "event") throw new Error("missing event route");
+    const eventRoute = snapshot.route;
+    const list = mountTimelineRows([eventRoute.eventId, "evt:sha256:next"], {
+      kind: "timeline",
+      historyQuery: eventRoute.historyQuery,
+    });
+    installed.controller.sync(
+      snapshot,
+      timelineDocument([eventRoute.eventId, "evt:sha256:next"]),
+    );
+    return { ...installed, eventRoute, list };
+  };
+  const pressKey = (key: string) => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key, bubbles: true }),
+    );
+  };
+
+  it("replaces the exact-event route when the cursor moves across the loaded page", () => {
+    const { navigate, replace, list } = followFixture();
+
+    pressKey("j");
+
+    expect(replace).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: "evt:sha256:next",
+      historyQuery: { q: "assessment", track: "reviewer" },
+      query: {},
+    });
+    expect(navigate).not.toHaveBeenCalled();
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+  });
+
+  it("keeps Timeline focus on the list while the cursor drives the detail", () => {
+    const { list } = followFixture();
+    list.focus();
+
+    pressKey("j");
+
+    expect(document.activeElement).toBe(list);
+  });
+
+  it("leaves detail chrome focused while the cursor drives the detail", () => {
+    const { list } = followFixture();
+    const close = document.querySelector<HTMLButtonElement>("#detail-close");
+    close?.focus();
+
+    pressKey("j");
+
+    expect(document.activeElement).toBe(close);
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+  });
+
+  it("moves the cursor in reading mode without reaching for the hidden master", () => {
+    const { list } = followFixture();
+    document.querySelector(".split")?.classList.add("reading");
+    const read = document.querySelector<HTMLButtonElement>("#detail-read");
+    read?.focus();
+
+    pressKey("j");
+
+    expect(document.activeElement).toBe(read);
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+  });
+
   it("leaves native detail arrows alone on an exact-event route", () => {
     const { controller } = install();
     const snapshot = eventSnapshot();

@@ -3229,6 +3229,102 @@ describe("Change-first composition", () => {
     expect(refetched).toContain("q=other");
   });
 
+  const stagedActivationPage = (): EventHistoryDocument => {
+    const base = stagedPage();
+    return {
+      ...base,
+      completion: {
+        ...base.completion,
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [revision],
+      },
+      entries: base.entries.map((entry) => ({
+        ...entry,
+        changeIds: ["change:sha256:one"],
+        revisionRefs: [revision],
+      })),
+    };
+  };
+  const pressKey = (key: string) => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key, bubbles: true }),
+    );
+  };
+
+  it("leaves reader-held detail chrome focused while the cursor drives the detail", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    serveComposition(stagedActivationPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+    const close = document.querySelector<HTMLButtonElement>("#detail-close");
+    close?.focus();
+
+    pressKey("j");
+
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    expect(document.activeElement).toBe(close);
+  });
+
+  it("repairs focus onto the followed detail's own activation when the repaint destroys it", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    serveComposition(stagedActivationPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const activation = await vi.waitFor(() => {
+      const control = document.querySelector<HTMLButtonElement>(
+        "#detail-body [data-exact-diff-activation]",
+      );
+      expect(control).not.toBeNull();
+      return control;
+    });
+    activation?.focus();
+    expect(document.activeElement).toBe(activation);
+
+    pressKey("j");
+
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    const followed = document.querySelector<HTMLButtonElement>(
+      "#detail-body [data-exact-diff-activation]",
+    );
+    expect(followed).not.toBe(activation);
+    expect(document.activeElement).toBe(followed);
+  });
+
+  it("focuses the exact activation when Enter opens an event from the Timeline", async () => {
+    history.replaceState(null, "", "/#/timeline?q=review&limit=20");
+    serveComposition(stagedActivationPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const list = await vi.waitFor(() => {
+      const timeline = document.querySelector<HTMLOListElement>("#timeline");
+      expect(timeline?.querySelectorAll("li.event").length).toBe(3);
+      return timeline;
+    });
+    list?.focus();
+    pressKey("j");
+    pressKey("Enter");
+
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+    expect(document.activeElement).toBe(
+      document.querySelector("#detail-body [data-exact-diff-activation]"),
+    );
+  });
+
   it("polls the history page as loaded while an exact event is read", async () => {
     history.replaceState(
       null,

@@ -282,9 +282,13 @@ function setTimelineSelected(eventId: string | null): void {
   else list.removeAttribute("aria-activedescendant");
 }
 
-function focusTimelineSelection(eventId: string): void {
+function scrollTimelineSelectionIntoView(eventId: string): void {
   const row = timelineRows().find((item) => item.dataset.eventId === eventId);
   row?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+}
+
+function focusTimelineSelection(eventId: string): void {
+  scrollTimelineSelectionIntoView(eventId);
   document
     .querySelector<HTMLElement>("#timeline")
     ?.focus({ preventScroll: true });
@@ -354,6 +358,11 @@ export function installChangeInspectorInteraction(
     attention: null as string | null,
   };
   let selectedTimelineEventId: string | null = null;
+  // Set by a cursor-driven follow and read by the next sync, which must not
+  // mistake the resulting repaint for an activation. Every sync clears it, so
+  // a marker that is never consumed costs one focus move rather than leaving
+  // the activation repair permanently suppressed.
+  let followedEventId: string | null = null;
   let currentTimelineEventIds: string[] = [];
   let currentTimelineEntries = new Map<string, EventHistoryEntry>();
   let pendingTimelineSelection: PendingTimelineSelection | null = null;
@@ -416,32 +425,50 @@ export function installChangeInspectorInteraction(
     (actions as TimelineParkActions).parkTimelineMonitoring?.();
   };
 
-  const navigateToTimelineEvent = (
-    eventId: string,
-    historyQuery: TimelineRoute["historyQuery"],
-  ) => {
+  // An event route carries no opaque continuation, so the Timeline the reader
+  // came from is retained here before any route change leaves it. Escape,
+  // Back, and Close all return to that exact page.
+  const captureTimelineOrigin = () => {
     const origin = companionTimelineRoute(currentRoute);
     if (currentRoute?.kind === "timeline") {
       timelineOriginRoute = currentRoute;
     } else if (timelineOriginRoute === null && origin !== null) {
       timelineOriginRoute = origin;
     }
+  };
+
+  const navigateToTimelineEvent = (
+    eventId: string,
+    historyQuery: TimelineRoute["historyQuery"],
+  ) => {
+    captureTimelineOrigin();
     actions.navigate(timelineEventRoute(eventId, historyQuery));
   };
 
-  const selectTimelineEvent = (eventId: string) => {
+  const selectTimelineEvent = (eventId: string, follow = false) => {
     selectedTimelineEventId = eventId;
     actions.revealTimelineEvent?.(eventId);
     setTimelineSelected(eventId);
-    focusTimelineSelection(eventId);
+    // A follow leaves focus exactly where the reader put it — in the detail,
+    // on its chrome, or on a master the reading layout has hidden.
+    if (follow) scrollTimelineSelectionIntoView(eventId);
+    else focusTimelineSelection(eventId);
   };
 
-  const applyTimelineIntent = (intent: TimelineSelectionIntent | null) => {
+  const applyTimelineIntent = (
+    intent: TimelineSelectionIntent | null,
+    follow: TimelineRoute["historyQuery"] | null = null,
+  ) => {
     if (intent === null) return false;
     parkTimelineForReaderActivity();
     if (intent.kind === "select") {
       pendingTimelineSelection = null;
-      selectTimelineEvent(intent.eventId);
+      selectTimelineEvent(intent.eventId, follow !== null);
+      if (follow !== null) {
+        followedEventId = intent.eventId;
+        captureTimelineOrigin();
+        actions.replace(timelineEventRoute(intent.eventId, follow));
+      }
       return true;
     }
     const pager = timelinePager(intent.direction);
@@ -1571,13 +1598,17 @@ export function installChangeInspectorInteraction(
       const applyScopedTimelineIntent = (
         intent: TimelineSelectionIntent | null,
       ): boolean => {
-        // An exact event is a stable detail route. Its local cursor can move
-        // across the loaded page, but only Enter deliberately replaces the
-        // detail. Page-edge navigation remains a Timeline-lens operation.
+        // On an exact event the cursor drives its own detail route: moving it
+        // replaces the route, so the open detail, the address bar, and the
+        // cursor never disagree, and Back still returns to the Timeline.
+        // Crossing a signed continuation remains a Timeline-lens operation.
         if (route.kind === "event" && intent?.kind === "adjacent-page") {
           return false;
         }
-        return applyTimelineIntent(intent);
+        return applyTimelineIntent(
+          intent,
+          route.kind === "event" ? route.historyQuery : null,
+        );
       };
       if (event.key === "j" || event.key === "ArrowDown") {
         if (applyScopedTimelineIntent(moveTimelineSelection(timeline, 1))) {
@@ -1944,6 +1975,7 @@ export function installChangeInspectorInteraction(
     selectedChangeId.changes = null;
     selectedChangeId.attention = null;
     selectedTimelineEventId = null;
+    followedEventId = null;
     currentTimelineEventIds = [];
     currentTimelineEntries = new Map();
     pendingTimelineSelection = null;
@@ -2107,6 +2139,12 @@ export function installChangeInspectorInteraction(
         document.activeElement instanceof HTMLElement
           ? document.activeElement
           : null;
+      const focusWasDisplaced =
+        active === null || active === document.body || !active.isConnected;
+      const followsCursor =
+        followedEventId !== null &&
+        nextRoute?.kind === "event" &&
+        nextRoute.eventId === followedEventId;
       const detailRouteChanged =
         currentRoute !== null &&
         currentRoute.kind !== "lens" &&
@@ -2128,16 +2166,19 @@ export function installChangeInspectorInteraction(
         focusedExactActivationIdentity = null;
       } else if (
         currentRoute?.kind !== "diff" &&
-        (nextExactActivationIdentity !== currentExactActivationIdentity ||
-          (nextExactActivationIdentity === focusedExactActivationIdentity &&
-            detailDomChanged &&
-            (active === null ||
-              active === document.body ||
-              !active.isConnected)))
+        (followsCursor
+          ? detailDomChanged && focusWasDisplaced
+          : nextExactActivationIdentity !== currentExactActivationIdentity ||
+            (nextExactActivationIdentity === focusedExactActivationIdentity &&
+              detailDomChanged &&
+              focusWasDisplaced))
       ) {
         // Event details are projected again on refresh. If that replacement
         // displaced the focused primary exact action, restore its new DOM
         // instance without stealing focus after the user moved elsewhere.
+        // A followed detail is not an activation: the reader asked for the
+        // next record, not for focus, so the repair only reclaims focus the
+        // repaint itself destroyed.
         pendingExactActivationFocus = nextExactActivationIdentity;
       }
       const exactActivationTarget =
@@ -2280,6 +2321,7 @@ export function installChangeInspectorInteraction(
       detailWasOpen = detailOpen;
       currentRoute = nextRoute;
       detailDomIdentity = nextDetailDomIdentity;
+      followedEventId = null;
     },
     stop,
   };
