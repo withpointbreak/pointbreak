@@ -1823,67 +1823,175 @@
 				},
 				exactDetailArrowState,
 			);
-			await exactEventList.focus();
-			const exactEventActive = await exactEventList.getAttribute(
-				"aria-activedescendant",
+			// The rendered Timeline is virtualized, so its rows are only the window
+			// around the cursor. The follow cursor and g/G move across the whole
+			// staged page, so read that page back from the same authenticated
+			// endpoint the reader loaded rather than from what is on screen.
+			const stagedPageQuery = timelineHashBeforeEvent.split("?", 2)[1] ?? "";
+			const stagedPageResponse = await page.request.get(
+				`${config.server.baseUrl}/api/v2/history?${stagedPageQuery}`,
+				{ headers: { Authorization: `Bearer ${config.server.token}` } },
 			);
+			requireCondition(
+				stagedPageResponse.ok(),
+				"Timeline exact event staged page",
+				"the loaded Timeline page could not be read back",
+				200,
+				stagedPageResponse.status(),
+			);
+			const fullPageIds = (await stagedPageResponse.json()).entries.map(
+				(entry) => entry.eventId,
+			);
+			const startIndex = fullPageIds.indexOf(selectedEventId);
+			requireCondition(
+				startIndex >= 0 && fullPageIds.length - startIndex >= 3,
+				"Timeline exact event staged page",
+				"the fixture needs at least two staged events after the opened one",
+				{ startIndex: ">= 0", stagedAfterStart: ">= 2" },
+				{
+					startIndex,
+					stagedAfterStart: fullPageIds.length - 1 - Math.max(startIndex, 0),
+				},
+			);
+			const renderedTimelineIds = () =>
+				page
+					.locator("#timeline [data-event-id]")
+					.evaluateAll((rows) => rows.map((row) => row.dataset.eventId));
+			const followTo = async (eventId, label, detail) => {
+				try {
+					await waitForExactTimelineEvent(eventId);
+				} catch (error) {
+					compare(
+						false,
+						label,
+						detail,
+						eventId,
+						await page
+							.locator("#detail-body [data-event-id]")
+							.getAttribute("data-event-id")
+							.catch(() => null),
+					);
+					throw error;
+				}
+			};
+
+			// The reader keeps their place: j moves the open detail without taking
+			// focus off the chrome the reader is holding.
+			await exactDetailClose.focus();
 			await page.keyboard.press("j");
-			const exactEventMoved = await exactEventList.getAttribute(
-				"aria-activedescendant",
+			await followTo(
+				fullPageIds[startIndex + 1],
+				"Timeline exact event detail follow",
+				"j did not move the open exact-event detail, or it stole focus from the detail",
 			);
-			const exactEventRouteAfterJ = await hash();
-			expect(
-				exactEventMoved !== exactEventActive,
-				"Timeline exact event keyboard",
-				"j did not move the exact-event Timeline cursor locally",
+			const followedActiveElement = await page.evaluate(
+				() => document.activeElement?.id,
 			);
 			compare(
-				exactEventRouteAfterJ === settledExactEventRoute,
-				"Timeline exact event keyboard",
-				"j changed the stable exact-event detail route",
-				settledExactEventRoute,
-				exactEventRouteAfterJ,
+				followedActiveElement === "detail-close",
+				"Timeline exact event detail follow",
+				"j did not move the open exact-event detail, or it stole focus from the detail",
+				"detail-close",
+				followedActiveElement,
 			);
+
+			await exactEventList.focus();
+			await page.keyboard.press("j");
+			const drivenEventId = fullPageIds[startIndex + 2];
+			await followTo(
+				drivenEventId,
+				"Timeline exact event route drive",
+				"j did not drive the exact-event detail route",
+			);
+			const drivenExactEventRoute = await hash();
+			compare(
+				drivenExactEventRoute !== settledExactEventRoute,
+				"Timeline exact event route drive",
+				"j did not drive the exact-event detail route",
+				{ differsFrom: settledExactEventRoute },
+				drivenExactEventRoute,
+			);
+
+			// The poll re-requests the page as loaded, so the window under a reader
+			// cannot silently re-center on whatever the cursor reached.
+			const renderedWindowIds = await renderedTimelineIds();
 			await page.waitForTimeout(3500);
-			const exactEventRepaintState = {
-				activeEvent: await exactEventList.getAttribute("aria-activedescendant"),
+			const followedPollState = {
+				cursorEventId: await page
+					.locator('#timeline [aria-selected="true"]')
+					.getAttribute("data-event-id"),
+				detailEventId: await page
+					.locator("#detail-body [data-event-id]")
+					.getAttribute("data-event-id"),
 				route: await hash(),
+				renderedWindowIds: await renderedTimelineIds(),
 			};
 			compare(
-				exactEventRepaintState.activeEvent === exactEventMoved &&
-					exactEventRepaintState.route === settledExactEventRoute,
-				"Timeline exact event repaint",
-				"an unchanged exact-event poll reset the page-local Timeline cursor",
-				{ activeEvent: exactEventMoved, route: settledExactEventRoute },
-				exactEventRepaintState,
+				followedPollState.cursorEventId === drivenEventId &&
+					followedPollState.detailEventId === drivenEventId &&
+					followedPollState.route === drivenExactEventRoute &&
+					JSON.stringify(followedPollState.renderedWindowIds) ===
+						JSON.stringify(renderedWindowIds),
+				"Timeline exact event poll anchor",
+				"a poll re-centered the loaded Timeline window under a followed exact-event detail",
+				{
+					cursorEventId: drivenEventId,
+					detailEventId: drivenEventId,
+					route: drivenExactEventRoute,
+					renderedWindowIds,
+				},
+				followedPollState,
+			);
+
+			await page.keyboard.press("k");
+			await followTo(
+				fullPageIds[startIndex + 1],
+				"Timeline exact event keyboard",
+				"k did not return the followed exact-event detail",
 			);
 			await page.keyboard.press("k");
-			const exactEventAfterKState = {
-				activeEvent: await exactEventList.getAttribute("aria-activedescendant"),
-				route: await hash(),
-			};
-			compare(
-				exactEventAfterKState.activeEvent === exactEventActive &&
-					exactEventAfterKState.route === settledExactEventRoute,
+			await followTo(
+				selectedEventId,
 				"Timeline exact event keyboard",
-				"k did not restore the exact-event Timeline cursor without changing detail",
-				{ activeEvent: exactEventActive, route: settledExactEventRoute },
-				exactEventAfterKState,
+				"k did not return the followed exact-event detail",
 			);
-			await page.keyboard.press("g");
+
+			const boundaryFollowDetail =
+				"g/G did not move the followed exact-event detail across the loaded page";
 			await page.keyboard.press("G");
-			const exactEventBoundaryState = {
-				activeEvent: await exactEventList.getAttribute("aria-activedescendant"),
+			await followTo(
+				fullPageIds[fullPageIds.length - 1],
+				"Timeline exact event page boundaries",
+				boundaryFollowDetail,
+			);
+			const lastStagedEventRoute = await hash();
+
+			// A step past the loaded page's edge is refused out loud rather than
+			// silently swallowed or smuggled into a page crossing.
+			await page.keyboard.press("j");
+			await page.waitForSelector("#command-feedback:not(.hidden)");
+			const pageEdgeRefusalState = {
+				feedback: (
+					await page.locator("#command-feedback").textContent()
+				)?.trim(),
 				route: await hash(),
 			};
 			compare(
-				exactEventBoundaryState.activeEvent === exactEventActive &&
-					exactEventBoundaryState.route === settledExactEventRoute,
-				"Timeline exact event global boundaries",
-				"g/G replaced or reinterpreted the stable exact-event detail route",
-				{ activeEvent: exactEventActive, route: settledExactEventRoute },
-				exactEventBoundaryState,
+				Boolean(pageEdgeRefusalState.feedback) &&
+					pageEdgeRefusalState.route === lastStagedEventRoute,
+				"Timeline exact event page edge",
+				"j past the last staged event did not refuse audibly on an unchanged route",
+				{ feedback: "nonempty", route: lastStagedEventRoute },
+				pageEdgeRefusalState,
 			);
+
+			await page.keyboard.press("g");
+			await followTo(
+				fullPageIds[0],
+				"Timeline exact event page boundaries",
+				boundaryFollowDetail,
+			);
+
 			await page.locator("#detail-read").click();
 			expect(
 				await page
@@ -1891,6 +1999,20 @@
 					.evaluate((node) => node.classList.contains("reading")),
 				"Timeline event reading mode",
 				"exact event did not enter reading mode",
+			);
+			// Reading mode hides the master entirely. The keys that move the detail
+			// have to keep working with nothing of the list on screen.
+			await page.keyboard.press("j");
+			await followTo(
+				fullPageIds[1],
+				"Timeline event reading mode follow",
+				"j did not move the detail while the master pane was hidden",
+			);
+			await page.keyboard.press("k");
+			await followTo(
+				fullPageIds[0],
+				"Timeline event reading mode follow",
+				"k did not move the detail while the master pane was hidden",
 			);
 			await screenshot("wide-timeline-event-detail");
 			await page.locator("#master-rail").click();
@@ -1900,6 +2022,23 @@
 					.evaluate((node) => node.classList.contains("reading"))),
 				"Timeline event reading return",
 				"master rail did not leave event reading mode",
+			);
+
+			// Back must still reach the Timeline in one step: every follow above
+			// replaced the current entry rather than pushing a new one. Re-establish
+			// the opened event first so the history assertions name a known route.
+			for (let index = 1; index <= startIndex; index += 1) {
+				await page.keyboard.press("j");
+				await followTo(
+					fullPageIds[index],
+					"Timeline exact event history re-establish",
+					"the followed cursor did not return to the opened exact event",
+				);
+			}
+			await followTo(
+				selectedEventId,
+				"Timeline exact event history re-establish",
+				"the followed cursor did not return to the opened exact event",
 			);
 			await page.goBack();
 			await waitForTimelineRoute(timelineHashBeforeEvent);
