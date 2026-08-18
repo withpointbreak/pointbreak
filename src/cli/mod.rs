@@ -149,7 +149,10 @@ enum Command {
 
 pub(crate) fn run_main() -> ExitCode {
     let mut stdout = std::io::stdout().lock();
-    let mut stderr = std::io::stderr().lock();
+    // Derived-access workers may emit diagnostics while command-local runtime
+    // handles are being dropped. Let stderr lock per write so a worker can
+    // finish before the main thread joins it during shutdown.
+    let mut stderr = std::io::stderr();
     run_with_io(std::env::args_os(), &mut stdout, &mut stderr)
 }
 

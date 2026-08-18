@@ -1,10 +1,15 @@
 mod support;
 
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rusqlite::Connection;
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::{pointbreak_env, superseded_dump_repo};
+use support::{common_dir_store, pointbreak_env, superseded_dump_repo};
 
 const ACTIVE: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")];
 const OFF: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "off")];
@@ -366,6 +371,52 @@ fn unavailable_active_reads_fall_back_once_with_an_actionable_hint() {
     }
 }
 
+#[test]
+fn stale_product_history_schema_falls_back_without_shutdown_deadlock() {
+    let (repo, _, _) = superseded_dump_repo();
+    build(&repo);
+    let store = common_dir_store(repo.path());
+    let generations = std::fs::read_dir(store.join("derived/generations"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 1, "expected one published generation");
+    let connection = Connection::open(generations[0].join("cursor.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE product_history_meta SET schema_version = 3 WHERE singleton = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+    drop(connection);
+
+    let output = pointbreak_env_with_timeout(
+        [
+            "revision",
+            "list",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--limit",
+            "1",
+        ],
+        ACTIVE,
+        Duration::from_secs(10),
+    );
+
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert!(json["eventSetHash"].is_string(), "{json:#}");
+    assert!(json.get("projectionStamp").is_none(), "{json:#}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("pointbreak store derived build").count(),
+        1,
+        "{stderr}"
+    );
+}
+
 #[cfg(feature = "longitudinal-counting")]
 #[test]
 fn eligible_active_cli_routes_never_walk_event_directory_entries() {
@@ -424,6 +475,42 @@ fn build(repo: &GitRepo) {
         ACTIVE,
     );
     assert_success(&output);
+}
+
+fn pointbreak_env_with_timeout<I, S>(args: I, env: &[(&str, &str)], timeout: Duration) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+    command
+        .args(args)
+        .env_remove("POINTBREAK_LOG")
+        .env_remove("RUST_LOG")
+        .env_remove("POINTBREAK_FORMAT")
+        .env_remove("POINTBREAK_THEME")
+        .env_remove("BAT_THEME")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("spawn pointbreak binary");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait().expect("poll pointbreak child").is_some() {
+            return child.wait_with_output().expect("collect pointbreak output");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill timed-out pointbreak child");
+            let output = child.wait_with_output().expect("collect timed-out output");
+            panic!(
+                "pointbreak command did not exit within {timeout:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn run_revision_page(repo: &str, env: &[(&str, &str)], cursor: Option<&str>) -> Value {
