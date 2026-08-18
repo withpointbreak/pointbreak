@@ -2384,6 +2384,10 @@
     return target instanceof Element && (target.matches("#timeline") || target.closest("#timeline") !== null);
   }
   __name(isTimelineListTarget, "isTimelineListTarget");
+  function isChangeListTarget(target) {
+    return target instanceof Element && target.closest(".unit-card[data-change-id]") !== null;
+  }
+  __name(isChangeListTarget, "isChangeListTarget");
   function narrowDetailOwnsFocus(target) {
     return target instanceof Element && target.closest("#detail") !== null && window.matchMedia("(max-width: 760px)").matches;
   }
@@ -2499,9 +2503,13 @@
     else list.removeAttribute("aria-activedescendant");
   }
   __name(setTimelineSelected, "setTimelineSelected");
-  function focusTimelineSelection(eventId) {
+  function scrollTimelineSelectionIntoView(eventId) {
     const row = timelineRows().find((item) => item.dataset.eventId === eventId);
     row?.scrollIntoView?.({ block: "nearest", behavior: "auto" });
+  }
+  __name(scrollTimelineSelectionIntoView, "scrollTimelineSelectionIntoView");
+  function focusTimelineSelection(eventId) {
+    scrollTimelineSelectionIntoView(eventId);
     document.querySelector("#timeline")?.focus({ preventScroll: true });
   }
   __name(focusTimelineSelection, "focusTimelineSelection");
@@ -2551,6 +2559,7 @@
       attention: null
     };
     let selectedTimelineEventId = null;
+    let followedEventId = null;
     let currentTimelineEventIds = [];
     let currentTimelineEntries = /* @__PURE__ */ new Map();
     let pendingTimelineSelection = null;
@@ -2604,27 +2613,36 @@
     const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
       actions2.parkTimelineMonitoring?.();
     }, "parkTimelineForReaderActivity");
-    const navigateToTimelineEvent = /* @__PURE__ */ __name((eventId, historyQuery) => {
+    const captureTimelineOrigin = /* @__PURE__ */ __name(() => {
       const origin = companionTimelineRoute(currentRoute2);
       if (currentRoute2?.kind === "timeline") {
         timelineOriginRoute = currentRoute2;
       } else if (timelineOriginRoute === null && origin !== null) {
         timelineOriginRoute = origin;
       }
+    }, "captureTimelineOrigin");
+    const navigateToTimelineEvent = /* @__PURE__ */ __name((eventId, historyQuery) => {
+      captureTimelineOrigin();
       actions2.navigate(timelineEventRoute(eventId, historyQuery));
     }, "navigateToTimelineEvent");
-    const selectTimelineEvent = /* @__PURE__ */ __name((eventId) => {
+    const selectTimelineEvent = /* @__PURE__ */ __name((eventId, follow = false) => {
       selectedTimelineEventId = eventId;
       actions2.revealTimelineEvent?.(eventId);
       setTimelineSelected(eventId);
-      focusTimelineSelection(eventId);
+      if (follow) scrollTimelineSelectionIntoView(eventId);
+      else focusTimelineSelection(eventId);
     }, "selectTimelineEvent");
-    const applyTimelineIntent = /* @__PURE__ */ __name((intent) => {
+    const applyTimelineIntent = /* @__PURE__ */ __name((intent, follow = null) => {
       if (intent === null) return false;
       parkTimelineForReaderActivity();
       if (intent.kind === "select") {
         pendingTimelineSelection = null;
-        selectTimelineEvent(intent.eventId);
+        selectTimelineEvent(intent.eventId, follow !== null);
+        if (follow !== null) {
+          followedEventId = intent.eventId;
+          captureTimelineOrigin();
+          actions2.replace(timelineEventRoute(intent.eventId, follow));
+        }
         return true;
       }
       const pager = timelinePager(intent.direction);
@@ -3476,9 +3494,15 @@
         }
         const applyScopedTimelineIntent = /* @__PURE__ */ __name((intent) => {
           if (route.kind === "event" && intent?.kind === "adjacent-page") {
-            return false;
+            announceCommandFeedback(
+              intent.direction === "next" ? "Last event on this page — Esc returns to the Timeline" : "First event on this page — Esc returns to the Timeline"
+            );
+            return true;
           }
-          return applyTimelineIntent(intent);
+          return applyTimelineIntent(
+            intent,
+            route.kind === "event" ? route.historyQuery : null
+          );
         }, "applyScopedTimelineIntent");
         if (event.key === "j" || event.key === "ArrowDown") {
           if (applyScopedTimelineIntent(moveTimelineSelection(timeline, 1))) {
@@ -3492,16 +3516,15 @@
           }
           return;
         }
+        const applyBoundary = /* @__PURE__ */ __name((boundary) => route.kind === "timeline" ? applyGlobalTimelineBoundary(boundary, timelineRoute) : applyScopedTimelineIntent(
+          boundaryTimelineSelection(timeline, boundary)
+        ), "applyBoundary");
         if (event.key === "g") {
-          if (route.kind === "timeline" && applyGlobalTimelineBoundary("first", timelineRoute)) {
-            event.preventDefault();
-          }
+          if (applyBoundary("first")) event.preventDefault();
           return;
         }
         if (event.key === "G") {
-          if (route.kind === "timeline" && applyGlobalTimelineBoundary("last", timelineRoute)) {
-            event.preventDefault();
-          }
+          if (applyBoundary("last")) event.preventDefault();
           return;
         }
         if (event.key === "f") {
@@ -3580,6 +3603,9 @@
           query: route.query,
           ...route.focus ? { focus: route.focus } : {}
         });
+        return;
+      }
+      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !isChangeListTarget(event.target)) {
         return;
       }
       if (event.key === "j" || event.key === "ArrowDown") {
@@ -3781,6 +3807,7 @@
       selectedChangeId.changes = null;
       selectedChangeId.attention = null;
       selectedTimelineEventId = null;
+      followedEventId = null;
       currentTimelineEventIds = [];
       currentTimelineEntries = /* @__PURE__ */ new Map();
       pendingTimelineSelection = null;
@@ -3887,6 +3914,8 @@
         const routeSurface = nextRoute?.kind === "diff" ? document.querySelector("#diff-page") : detail;
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
         const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const focusWasDisplaced = active3 === null || active3 === document.body || !active3.isConnected;
+        const followsCursor = followedEventId !== null && nextRoute?.kind === "event" && nextRoute.eventId === followedEventId;
         const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
         const nextDiffIdentity = nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
         const currentDiffIdentity = currentRoute2?.kind === "diff" ? diffIdentity(currentRoute2) : null;
@@ -3895,7 +3924,7 @@
         if (nextExactActivationIdentity === null) {
           pendingExactActivationFocus = null;
           focusedExactActivationIdentity = null;
-        } else if (currentRoute2?.kind !== "diff" && (nextExactActivationIdentity !== currentExactActivationIdentity || nextExactActivationIdentity === focusedExactActivationIdentity && detailDomChanged && (active3 === null || active3 === document.body || !active3.isConnected))) {
+        } else if (currentRoute2?.kind !== "diff" && (followsCursor ? detailDomChanged && focusWasDisplaced : nextExactActivationIdentity !== currentExactActivationIdentity || nextExactActivationIdentity === focusedExactActivationIdentity && detailDomChanged && focusWasDisplaced)) {
           pendingExactActivationFocus = nextExactActivationIdentity;
         }
         const exactActivationTarget = pendingExactActivationFocus === nextExactActivationIdentity ? document.querySelector(
@@ -3964,6 +3993,7 @@
         detailWasOpen = detailOpen;
         currentRoute2 = nextRoute;
         detailDomIdentity = nextDetailDomIdentity;
+        followedEventId = null;
       },
       stop
     };
@@ -10397,10 +10427,28 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
     }, "paint");
     let interaction = null;
-    const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? buildEventHistoryUrl(
-      route.kind === "event" ? { ...route.historyQuery, after: void 0, at: route.eventId } : route.historyQuery
-    ) : buildChangePageUrl("changes", route.query), "requestKey");
+    const eventHistoryFilters = /* @__PURE__ */ __name((query) => buildEventHistoryUrl({ ...query, after: void 0, at: void 0 }), "eventHistoryFilters");
+    const historyPageUrl = /* @__PURE__ */ __name((route) => {
+      if (route.kind === "timeline") {
+        return buildEventHistoryUrl(route.historyQuery);
+      }
+      const staged = state.snapshot().generation?.history ?? null;
+      if (visibleRequest !== "" && staged !== null && visibleHistoryFilters === eventHistoryFilters(route.historyQuery) && staged.entries.some((entry) => entry.eventId === route.eventId)) {
+        return visibleRequest;
+      }
+      return buildEventHistoryUrl({
+        ...route.historyQuery,
+        after: void 0,
+        at: route.eventId
+      });
+    }, "historyPageUrl");
+    const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? historyPageUrl(route) : buildChangePageUrl("changes", route.query), "requestKey");
     let visibleRequest = "";
+    let visibleHistoryFilters = "";
+    const clearVisibleRequest = /* @__PURE__ */ __name(() => {
+      visibleRequest = "";
+      visibleHistoryFilters = "";
+    }, "clearVisibleRequest");
     let pendingReading = null;
     let releaseQueuedPoll = /* @__PURE__ */ __name(() => {
     }, "releaseQueuedPoll");
@@ -10474,6 +10522,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const credentialVersion2 = sessionCredentialVersion();
       const epoch = ++requestEpoch;
       try {
+        const request = requestKey(route);
         const profile = decodeReaderProfile(
           await fetchChangeInspectorJSON("/api/v2/profile")
         );
@@ -10484,7 +10533,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             return;
           }
           pendingTimelineSearchFocus = false;
-          visibleRequest = "";
+          clearVisibleRequest();
           clearReading();
           state.clearGeneration();
           renderChangeInspectorUnavailable(profile.availability);
@@ -10494,15 +10543,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const activeLens = lensForRoute(route);
         const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
         const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
-        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(
-          buildEventHistoryUrl(
-            route.kind === "event" ? {
-              ...route.historyQuery,
-              after: void 0,
-              at: route.eventId
-            } : route.historyQuery
-          )
-        ).then(decodeEventHistory) : Promise.resolve(null);
+        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(request).then(decodeEventHistory) : Promise.resolve(null);
         const [changes, attention, history2] = await Promise.all([
           fetchChangeInspectorJSON(
             buildChangePageUrl("changes", changesQuery)
@@ -10576,7 +10617,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (route.kind === "timeline" && history2 !== null) {
           timelineMonitor.observe(route, history2);
         }
-        visibleRequest = requestKey(route);
+        visibleRequest = request;
+        visibleHistoryFilters = (route.kind === "timeline" || route.kind === "event") && history2 !== null ? eventHistoryFilters(route.historyQuery) : "";
         paint(pollDraft);
         if (!refreshesExactReading) {
           await loadReading(
@@ -10601,7 +10643,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           showPollFailure();
           return;
         }
-        visibleRequest = "";
+        clearVisibleRequest();
         pendingTimelineSearchFocus = false;
         clearReading();
         state.clearGeneration();
@@ -10618,7 +10660,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       requestEpoch += 1;
       state.setRoute(route);
       if (route.kind === "invalid") {
-        visibleRequest = "";
+        clearVisibleRequest();
         clearReading();
         state.clearGeneration();
         paint();
@@ -10646,7 +10688,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           paint();
         }
       } else {
-        visibleRequest = "";
+        clearVisibleRequest();
         clearReading();
         state.clearGeneration();
         paint();
@@ -10722,7 +10764,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const continuesSession = prior.identity !== null && prior.identity !== void 0 && prior.identity.storeIdentity === identity.storeIdentity && prior.identity.contextIdentity === identity.contextIdentity;
       const mustRetireGeneration = prior.generation !== null && !continuesSession;
       if (mustRetireGeneration) {
-        visibleRequest = "";
+        clearVisibleRequest();
         pendingTimelineSearchFocus = false;
         clearReading();
         state.clearGeneration();
@@ -10805,7 +10847,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             }
             continue;
           }
-          visibleRequest = "";
+          clearVisibleRequest();
           clearReading();
           state.clearGeneration();
           renderChangeInspectorRefusal(error);
