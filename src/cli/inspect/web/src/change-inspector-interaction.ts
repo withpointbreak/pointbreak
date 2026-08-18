@@ -2,6 +2,13 @@
  * Interaction policy for the Change-first reader.  This module deliberately
  * keeps selection (a local reading cursor) separate from navigation (a routed,
  * exact request).  In particular, moving with j/k never chooses a Revision.
+ *
+ * The two cursors differ in what selection is allowed to reach.  The Change
+ * cursor stays purely local: a Change holds parallel current Revisions, so
+ * stepping it must never resolve one.  The exact-event cursor drives its own
+ * event route through `replace`, which chooses an event and never a Revision;
+ * descending from that event into an annotated diff remains an explicit
+ * activation through the usual exactly-one-Change, exactly-one-Revision gate.
  */
 
 import type { ChangeInspectorRenderActions } from "./change-inspector-render";
