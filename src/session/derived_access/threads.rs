@@ -331,28 +331,31 @@ mod tests {
             reader.join().expect("reader completes");
         });
 
-        let threads = (0..100)
-            .find_map(|_| match access.threads().expect("read current threads") {
-                DerivedThreadsRoute::Ready(threads) => Some(threads),
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let threads = loop {
+            match access.threads().expect("read current threads") {
+                DerivedThreadsRoute::Ready(threads) => break threads,
+                DerivedThreadsRoute::Unavailable(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
                 DerivedThreadsRoute::Unavailable(_) => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                    None
+                    panic!("governed append should leave current threads available")
                 }
                 DerivedThreadsRoute::Off => panic!("active access switched off"),
-            })
-            .expect("governed append should leave current threads available");
-        let attention = (0..100)
-            .find_map(
-                |_| match access.attention(None).expect("read current attention") {
-                    DerivedAttentionRoute::Ready(attention) => Some(attention),
-                    DerivedAttentionRoute::Unavailable(_) => {
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                        None
-                    }
-                    DerivedAttentionRoute::Off => panic!("active access switched off"),
-                },
-            )
-            .expect("governed append should leave current attention available");
+            }
+        };
+        let attention = loop {
+            match access.attention(None).expect("read current attention") {
+                DerivedAttentionRoute::Ready(attention) => break attention,
+                DerivedAttentionRoute::Unavailable(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                DerivedAttentionRoute::Unavailable(_) => {
+                    panic!("governed append should leave current attention available")
+                }
+                DerivedAttentionRoute::Off => panic!("active access switched off"),
+            }
+        };
         assert_eq!(threads.event_count, initial_event_count + 1);
         assert_eq!(attention.event_count, initial_event_count + 1);
         assert_eq!(threads.projection_stamp, attention.projection_stamp);

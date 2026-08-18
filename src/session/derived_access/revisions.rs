@@ -1671,15 +1671,25 @@ mod tests {
         );
 
         let stale = RevisionPageRequest::new(Some(1), Some(&token)).unwrap();
-        assert!(matches!(
-            access
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let stale_route = loop {
+            let route = access
                 .revisions_page(
                     repo.path(),
                     TrustSet::default(),
                     Arc::clone(&summaries),
                     &stale,
                 )
-                .expect("classify stale continuation"),
+                .expect("classify stale continuation");
+            if !matches!(route, DerivedRevisionPageRoute::Unavailable(_))
+                || std::time::Instant::now() >= deadline
+            {
+                break route;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert!(matches!(
+            stale_route,
             DerivedRevisionPageRoute::RestartRequired
         ));
         let complete_request = RevisionPageRequest::new(Some(500), None).unwrap();

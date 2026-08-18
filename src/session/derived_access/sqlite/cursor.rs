@@ -752,7 +752,7 @@ impl SqliteCursorLedger {
         Ok((journal_mode, synchronous))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn read_integrity_policy_for_test(&self) -> Result<(bool, bool), CursorLedgerError> {
         let connection = self.validated_connection()?;
         Ok((

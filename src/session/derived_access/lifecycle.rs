@@ -2551,9 +2551,13 @@ mod tests {
             .open_current_for_write_locked(&writer_lock)
             .unwrap()
             .unwrap();
+        // A writable open may first persist a proven-stable native successor
+        // (notably the volume-wide NTFS USN cursor). The synthetic continuation
+        // below must start from that current persisted stamp.
+        let writable_initial = writable.service().truth_authority_snapshot().unwrap();
         let persisted = lifecycle
             .persist_current_authority_with(writable.service(), &writer_lock, |before| {
-                assert_eq!(before, &initial.change_stamp);
+                assert_eq!(before, &writable_initial.change_stamp);
                 Ok(stable_change_check(successor_one.clone()))
             })
             .unwrap();

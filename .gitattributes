@@ -53,3 +53,7 @@ tests/fixtures/store-foundation/longitudinal-capacity-sentinel-v1.json text eol=
 # diagnostic fixtures are materialized. Keep their checkout bytes canonical.
 tests/support/assets/change-ready-store/*.json text eol=lf
 docs/benchmarking.md text eol=lf
+
+# Source-structure contract tests inspect Rust files with LF-delimited markers.
+# Keep those markers stable on Windows checkouts instead of inheriting autocrlf.
+*.rs text eol=lf

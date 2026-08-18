@@ -96,6 +96,7 @@ pub struct DerivedChangeReadDiagnosticRunRequestV1 {
 }
 
 impl DerivedChangeReadDiagnosticRunRequestV1 {
+    #[cfg(feature = "longitudinal-counting")]
     fn validate(&self) -> Result<(), String> {
         self.read_request.validate()?;
         if self.schema != DERIVED_CHANGE_READ_DIAGNOSTIC_REQUEST_SCHEMA_V1

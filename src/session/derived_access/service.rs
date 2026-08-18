@@ -848,13 +848,17 @@ impl DerivedAccessService {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
 
     use tempfile::TempDir;
 
     use super::*;
+    #[cfg(unix)]
     use crate::canonical_hash::sha256_bytes_hex;
     use crate::model::JournalId;
     use crate::session::derived_access::generation::GenerationLayout;
@@ -949,7 +953,6 @@ mod tests {
             CursorLedgerIdentity::new("store:test"),
         )
         .unwrap();
-        let before = service.publication_validation_snapshot().unwrap();
 
         let lifecycle = DerivedAccessLifecycle::new(
             DerivedAccessProfile::SqliteWalBodylessV1,
@@ -959,6 +962,10 @@ mod tests {
         .unwrap();
         let coordinator = DerivedWriteCoordinator::new(lifecycle).unwrap();
         let governed = EventStore::from_backend(&backend).with_coordinator(coordinator);
+        // Opening the governed coordinator may persist a proven-stable NTFS
+        // volume-journal successor without advancing authoritative truth. Take
+        // the comparison baseline after that maintenance has completed.
+        let before = service.publication_validation_snapshot().unwrap();
         let journal_id = JournalId::new("journal:publication-snapshot-concurrent");
         let event = ShoreEvent::new(
             EventType::ReviewInitialized,
@@ -1013,6 +1020,7 @@ mod tests {
         temp
     }
 
+    #[cfg(unix)]
     fn generation_contents(root: &Path) -> BTreeMap<PathBuf, String> {
         let mut contents = BTreeMap::new();
         let mut pending = vec![root.to_path_buf()];
