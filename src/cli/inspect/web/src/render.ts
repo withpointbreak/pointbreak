@@ -180,7 +180,7 @@ function renderStats(): void {
   if (events) events.textContent = `${h?.eventCount ?? "—"} events`;
   const units = $("#stat-units");
   if (units) units.textContent = `${r?.revisionCount ?? "—"} units`;
-  const threads = $("#stat-threads");
+  const threads = $("#stat-attention");
   if (threads) threads.textContent = `${o?.threadCount ?? "—"} threads`;
   const hash = $("#stat-hash");
   if (hash) hash.textContent = shortId(h?.projectionStamp ?? h?.eventSetHash);

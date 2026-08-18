@@ -1,55 +1,63 @@
 <div class="ds-page">
   <div class="ds-group">
-    <p class="ds-label">Attention lens · Change card reason, ask, evidence, and next action</p>
+    <p class="ds-label">Attention lens · Change card reason groups with per-card ask, evidence, and next action</p>
     <section class="units" aria-label="Attention">
       <h1 class="lens-heading">Attention</h1>
-      <p class="lens-meta">2 Changes on this page · Change ID order</p>
+      <p class="lens-meta">2 Changes on this page · grouped by attention reason · Change ID order within groups</p>
 
-      <article class="unit-card" data-change-id="change:sha256:cc14db7a2d81702a" aria-label="Multiple current Revisions need assessment. Change change:sha256:cc14db7a2d81702a">
-        <button class="change-card-primary" aria-label="Review current Revisions. Multiple current Revisions need assessment. Change change:sha256:cc14db7a2d81702a">
-          <span class="change-card-headline">Multiple current Revisions need selection</span>
-          <code class="change-card-id">change:cc14db7a</code>
-        </button>
-        <section class="change-card-attention" aria-label="Current Revision assessment coverage is incomplete. Assess every current Revision. Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222 lack current assessment. Next: Open an exact Revision and record its assessment.">
-          <strong class="change-card-attention-reason" title="Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222 lack current assessment.">Current Revision assessment coverage is incomplete.</strong>
-          <p class="change-card-attention-ask">Assess every current Revision.</p>
-          <p class="change-card-attention-evidence">Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222 lack current assessment.</p>
-          <p class="change-card-attention-action">Next: Open an exact Revision and record its assessment.</p>
-        </section>
-        <dl class="change-card-state">
-          <dt>Lifecycle</dt><dd>ready</dd>
-          <dt>Qualification</dt><dd>unassessed</dd>
-          <dt>Attention</dt><dd>current Revisions need assessment</dd>
-        </dl>
-        <section class="change-card-peers" aria-label="Explicit current Revision choices">
-          <h3>Choose an exact current Revision</h3>
-          <button class="ghost change-card-peer-open">Open current Revision · Parser cleanup · rev:aaaa1111 · sha256:11111111</button>
-          <button class="ghost change-card-peer-open">Open current Revision · Renderer cleanup · rev:cccc2222 · sha256:22222222</button>
-        </section>
-      </article>
-
-      <article class="unit-card" data-change-id="change:sha256:d008e5a07701f90c" aria-label="Operative requests remain unresolved. Change change:sha256:d008e5a07701f90c">
-        <button class="change-card-primary" aria-label="Open Change. Answer the open reviewer request. Change change:sha256:d008e5a07701f90c">
-          <span class="change-card-headline">Answer the open reviewer request</span>
-          <code class="change-card-id">change:d008e5a0</code>
-        </button>
-        <section class="change-card-attention" aria-label="Operative requests remain unresolved. Respond to every operative request. Open request input-request:sha256:4f67c810. Next: Open the Change and respond to each request.">
-          <strong class="change-card-attention-reason" title="Open request input-request:sha256:4f67c810.">Operative requests remain unresolved.</strong>
-          <p class="change-card-attention-ask">Respond to every operative request.</p>
-          <p class="change-card-attention-evidence">Open request input-request:sha256:4f67c810.</p>
-          <p class="change-card-attention-action">Next: Open the Change and respond to each request.</p>
-          <section class="change-card-attention-diagnostics" aria-label="Attention details">
-            <strong>Details</strong>
-            <ul><li>request remains operative in the accepted generation</li></ul>
+      <section class="attention-group">
+        <h2 class="attention-group-heading">Current Revision assessment coverage is incomplete.</h2>
+        <article class="unit-card" data-change-id="change:sha256:cc14db7a2d81702a" aria-label="Multiple current Revisions need assessment. Change change:sha256:cc14db7a2d81702a">
+          <h3 class="change-card-heading">
+            <button class="change-card-primary" aria-label="Review current Revisions. Multiple current Revisions need assessment. Change change:sha256:cc14db7a2d81702a">
+              <span class="change-card-headline">Multiple current Revisions need selection</span>
+              <code class="change-card-id">change:cc14db7a</code>
+            </button>
+          </h3>
+          <section class="change-card-attention" aria-label="Current Revision assessment coverage is incomplete. Assess every current Revision. Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222 lack current assessment. Next: Open an exact Revision and record its assessment.">
+            <p class="change-card-attention-ask">Assess every current Revision.</p>
+            <p class="change-card-attention-evidence">Exact Revisions rev:sha256:aaaa1111 and rev:sha256:cccc2222 lack current assessment.</p>
+            <p class="change-card-attention-action">Next: Open an exact Revision and record its assessment.</p>
           </section>
-        </section>
-        <dl class="change-card-state">
-          <dt>Lifecycle</dt><dd>ready</dd>
-          <dt>Qualification</dt><dd>accepted with follow-up</dd>
-          <dt>Attention</dt><dd>unresolved operative request</dd>
-        </dl>
-        <p class="change-card-current">Current Revision · <a href="#/changes/change%3Asha256%3Ad008e5a07701f90c/revisions/rev%3Asha256%3A1234abcd?artifactHash=sha256%3A5678efab">rev:1234abcd · sha256:5678efab</a></p>
-      </article>
+          <dl class="change-card-state">
+            <dt>Lifecycle</dt><dd>ready</dd>
+            <dt>Qualification</dt><dd>unassessed</dd>
+            <dt>Attention</dt><dd>current Revisions need assessment</dd>
+          </dl>
+          <section class="change-card-peers" aria-label="Explicit current Revision choices">
+            <h3>Choose an exact current Revision</h3>
+            <button class="ghost change-card-peer-open">Open current Revision · Parser cleanup · rev:aaaa1111 · sha256:11111111</button>
+            <button class="ghost change-card-peer-open">Open current Revision · Renderer cleanup · rev:cccc2222 · sha256:22222222</button>
+          </section>
+        </article>
+      </section>
+
+      <section class="attention-group">
+        <h2 class="attention-group-heading">Operative requests remain unresolved.</h2>
+        <article class="unit-card" data-change-id="change:sha256:d008e5a07701f90c" aria-label="Operative requests remain unresolved. Change change:sha256:d008e5a07701f90c">
+          <h3 class="change-card-heading">
+            <button class="change-card-primary" aria-label="Open Change. Answer the open reviewer request. Change change:sha256:d008e5a07701f90c">
+              <span class="change-card-headline">Answer the open reviewer request</span>
+              <code class="change-card-id">change:d008e5a0</code>
+            </button>
+          </h3>
+          <section class="change-card-attention" aria-label="Operative requests remain unresolved. Respond to every operative request. Open request input-request:sha256:4f67c810. Next: Open the Change and respond to each request.">
+            <p class="change-card-attention-ask">Respond to every operative request.</p>
+            <p class="change-card-attention-evidence">Open request input-request:sha256:4f67c810.</p>
+            <p class="change-card-attention-action">Next: Open the Change and respond to each request.</p>
+            <section class="change-card-attention-diagnostics" aria-label="Attention details">
+              <strong>Details</strong>
+              <ul><li>request remains operative in the accepted generation</li></ul>
+            </section>
+          </section>
+          <dl class="change-card-state">
+            <dt>Lifecycle</dt><dd>ready</dd>
+            <dt>Qualification</dt><dd>accepted with follow-up</dd>
+            <dt>Attention</dt><dd>unresolved operative request</dd>
+          </dl>
+          <p class="change-card-current">Current Revision · <a href="#/changes/change%3Asha256%3Ad008e5a07701f90c/revisions/rev%3Asha256%3A1234abcd?artifactHash=sha256%3A5678efab">rev:1234abcd · sha256:5678efab</a></p>
+        </article>
+      </section>
     </section>
   </div>
 </div>

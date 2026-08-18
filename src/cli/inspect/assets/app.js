@@ -1140,7 +1140,7 @@
         const detail = summary.details;
         return {
           label: "Git ref withdrawn",
-          title: "Withdrew a Git ref association",
+          title: `Withdrew Git ref association ${detail.refAssociationId}`,
           fields: fields(
             field("withdrawal", detail.refWithdrawalId),
             field("association", detail.refAssociationId),
@@ -1165,7 +1165,7 @@
         const detail = summary.details;
         return {
           label: "commit withdrawn",
-          title: "Withdrew a commit association",
+          title: `Withdrew commit association ${detail.commitAssociationId}`,
           fields: fields(
             field("withdrawal", detail.commitWithdrawalId),
             field("association", detail.commitAssociationId),
@@ -1220,7 +1220,7 @@
         const detail = summary.details;
         return {
           label: "membership withdrawn",
-          title: "Withdrew a Change membership claim",
+          title: `Withdrew Change membership claim ${detail.membershipClaimId}`,
           fields: fields(
             field("claim", detail.membershipClaimId),
             field("withdrawal", detail.membershipWithdrawalId)
@@ -1257,7 +1257,7 @@
         const detail = summary.details;
         return {
           label: "relation withdrawn",
-          title: "Withdrew a Revision-relation claim",
+          title: `Withdrew Revision-relation claim ${detail.relationClaimId}`,
           fields: fields(
             field("claim", detail.relationClaimId),
             field("withdrawal", detail.relationWithdrawalId)
@@ -2453,7 +2453,7 @@
       card.classList.toggle("change-card-selected", selected);
       card.setAttribute("aria-current", selected ? "true" : "false");
       const primary = card.querySelector(
-        ":scope > .change-card-primary"
+        ".change-card-primary"
       );
       if (primary) primary.tabIndex = card === roving ? 0 : -1;
     }
@@ -2925,7 +2925,7 @@
       setSelected(changeId);
       card.scrollIntoView({ block: "nearest", behavior: "auto" });
       if (focus) {
-        card.querySelector(":scope > .change-card-primary")?.focus({ preventScroll: true });
+        card.querySelector(".change-card-primary")?.focus({ preventScroll: true });
       }
       return true;
     }, "selectChangeCard");
@@ -3332,9 +3332,7 @@
         setTimelineSelected(selectedTimelineEventId);
         return;
       }
-      const primary = target?.closest(
-        ".unit-card[data-change-id] > .change-card-primary"
-      );
+      const primary = target?.closest(".change-card-primary");
       const card = primary?.closest(".unit-card[data-change-id]");
       const lens = activeChangeLens();
       if (card?.dataset.changeId && lens !== null) {
@@ -8076,14 +8074,13 @@
   __name(appendDefinition, "appendDefinition");
   function renderEventDetail(event, actions2) {
     const presentation = presentEvent(event);
-    const heading = detailHeading("Event");
+    const heading = detailHeading(presentation.title);
     const identity = detailLine(event.eventId, "mono");
     identity.title = event.eventId;
     identity.setAttribute("aria-label", `event ${event.eventId}`);
     identity.dataset.eventId = event.eventId;
     const summary = document.createElement("section");
     summary.className = "event-detail-summary";
-    summary.append(detailHeading(presentation.title, 3));
     if (presentation.body) summary.append(detailLine(presentation.body));
     const summaryFacts = document.createElement("dl");
     summaryFacts.className = "kv";
@@ -9043,7 +9040,7 @@
       return;
     }
     const heading = document.createElement("h2");
-    heading.textContent = snapshot2.route.kind === "change" ? "Change" : snapshot2.route.kind === "resource" ? "Captured resource" : snapshot2.route.kind === "association" ? "Association comparison" : snapshot2.route.kind === "interdiff" ? "Revision interdiff" : "Exact Revision";
+    heading.textContent = snapshot2.route.kind === "change" ? "Loading Change…" : snapshot2.route.kind === "resource" ? "Loading captured resource…" : snapshot2.route.kind === "association" ? "Loading association comparison…" : snapshot2.route.kind === "interdiff" ? "Loading Revision interdiff…" : "Loading exact Revision…";
     const identity = document.createElement("p");
     identity.className = "mono";
     const identityText = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : snapshot2.route.kind === "interdiff" ? `From: ${snapshot2.route.from.revisionId} · ${snapshot2.route.from.objectArtifactContentHash}
@@ -9153,7 +9150,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         `${snapshot2.generation.changes.changes.length} Changes`
       );
       setText(
-        "#stat-threads",
+        "#stat-attention",
         `${snapshot2.generation.attention.changes.length} shown on this page`
       );
       setText("#stat-hash", history2.timelineProjectionStamp);
@@ -9177,14 +9174,31 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const count = page.changes.length;
       const [heading, metadata] = createLensHeading(
         lens === "changes" ? "Changes" : "Attention",
-        `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`
+        lens === "changes" ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order` : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · Change ID order within groups`
       );
       list.append(heading, metadata);
+      const attentionGroups = lens === "attention" ? /* @__PURE__ */ new Map() : null;
+      const ungroupedCards = [];
       for (const summary of page.changes.slice(0, 150)) {
         const card = changeCardPresentation(
           summary,
           page.presentations?.[summary.changeId]
         );
+        let attentionGroup = null;
+        if (attentionGroups !== null && card.attention !== void 0) {
+          attentionGroup = attentionGroups.get(card.attention.primary.kind) ?? null;
+          if (attentionGroup === null) {
+            const section = document.createElement("section");
+            section.className = "attention-group";
+            const groupHeading = document.createElement("h2");
+            groupHeading.className = "attention-group-heading";
+            groupHeading.textContent = card.attention.reason;
+            section.append(groupHeading);
+            list.append(section);
+            attentionGroup = { section, reason: card.attention.reason };
+            attentionGroups.set(card.attention.primary.kind, attentionGroup);
+          }
+        }
         const element = document.createElement("article");
         element.className = "unit-card";
         element.dataset.changeId = summary.changeId;
@@ -9213,7 +9227,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             query: queryForExactNavigation(route)
           })
         );
-        element.append(primary);
+        const cardHeading = document.createElement("h3");
+        cardHeading.className = "change-card-heading";
+        cardHeading.append(primary);
+        element.append(cardHeading);
         if (card.attention) {
           const attention = document.createElement("section");
           attention.className = "change-card-attention";
@@ -9221,10 +9238,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             "aria-label",
             card.attention.primary.accessibleName
           );
-          const reason = document.createElement("strong");
-          reason.className = "change-card-attention-reason";
-          reason.textContent = card.attention.reason;
-          reason.title = card.attention.primary.title;
+          if (attentionGroup === null || attentionGroup.reason !== card.attention.reason) {
+            const reason = document.createElement("strong");
+            reason.className = "change-card-attention-reason";
+            reason.textContent = card.attention.reason;
+            reason.title = card.attention.primary.title;
+            attention.append(reason);
+          }
           const ask = document.createElement("p");
           ask.className = "change-card-attention-ask";
           ask.textContent = card.attention.ask;
@@ -9234,7 +9254,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           const action = document.createElement("p");
           action.className = "change-card-attention-action";
           action.textContent = `Next: ${card.attention.nextAction}`;
-          attention.append(reason, ask, evidence, action);
+          attention.append(ask, evidence, action);
           if (card.attention.additionalReasons.length > 0) {
             const additional = document.createElement("ul");
             additional.className = "change-card-attention-additional";
@@ -9336,8 +9356,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           }
           element.append(peers);
         }
-        list.append(element);
+        if (attentionGroup !== null) attentionGroup.section.append(element);
+        else if (attentionGroups !== null) ungroupedCards.push(element);
+        else list.append(element);
       }
+      for (const ungrouped of ungroupedCards) list.append(ungrouped);
       if (page.changes.length === 0)
         list.append(
           message(
@@ -9380,7 +9403,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       `${snapshot2.generation.changes.changes.length} Changes`
     );
     setText(
-      "#stat-threads",
+      "#stat-attention",
       `${snapshot2.generation.attention.changes.length} shown on this page`
     );
     setText("#stat-hash", snapshot2.generation.changes.projectionStamp);

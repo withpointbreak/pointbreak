@@ -519,6 +519,25 @@ body {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .unit-card h3 { margin: 0 0 6px; font-size: 13px; font-family: var(--mono); }
+/* Structural wrapper around the card's primary control; typography lives on
+   .change-card-headline/.change-card-id inside it. Out-specifies the card-title
+   rule above, which still serves the peer chooser. */
+.unit-card > h3.change-card-heading {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  font-family: inherit;
+}
+.attention-group {
+  display: grid;
+  gap: 10px;
+}
+.attention-group-heading {
+  margin: 6px 0 0;
+  font-size: var(--fs-base);
+  font-weight: 650;
+  color: var(--fg-dim);
+}
 .unit-card .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 10px; font-size: 12px; font-family: var(--mono); color: var(--fg-dim); }
 .unit-card .kv b { color: var(--fg); font-weight: 500; }
 .change-card-primary {

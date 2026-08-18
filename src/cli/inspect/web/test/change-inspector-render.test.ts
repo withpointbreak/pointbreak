@@ -643,12 +643,12 @@ describe("Change inspector render", () => {
         .querySelector('[data-lens="attention"]')
         ?.getAttribute("aria-label"),
     ).toMatch(/on this page/i);
-    expect(document.querySelector("#stat-threads")?.textContent).toBe(
+    expect(document.querySelector("#stat-attention")?.textContent).toBe(
       "1 shown on this page",
     );
-    expect(document.querySelector("#stat-threads")?.getAttribute("title")).toBe(
-      "Changes shown on this Attention page",
-    );
+    expect(
+      document.querySelector("#stat-attention")?.getAttribute("title"),
+    ).toBe("Changes shown on this Attention page");
   });
 
   it("offers completion-backed Timeline filters and removable applied filters", () => {
@@ -964,7 +964,7 @@ describe("Change inspector render", () => {
     expect(
       firstCard?.querySelector(".change-card-state")?.textContent,
     ).toContain("conflicted");
-    expect(document.querySelector("#stat-threads")?.textContent).toBe(
+    expect(document.querySelector("#stat-attention")?.textContent).toBe(
       "1 shown on this page",
     );
     const createElement = vi.spyOn(document, "createElement");
@@ -1339,6 +1339,9 @@ describe("Change inspector render", () => {
     );
     expect(currentRevision?.dataset.revisionId).toBe("revision:sha256:one");
     expect(currentRevision?.dataset.artifactHash).toBe("sha256:artifact");
+    expect(document.querySelector("#detail-body > h2")?.textContent).toBe(
+      "Loading exact Revision…",
+    );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );

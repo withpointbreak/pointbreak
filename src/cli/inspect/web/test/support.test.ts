@@ -24,7 +24,7 @@ const FIXED_IDS = [
   "lens-switcher",
   "stat-events",
   "stat-units",
-  "stat-threads",
+  "stat-attention",
   "stat-hash",
   "stat-live",
   "connection-status",

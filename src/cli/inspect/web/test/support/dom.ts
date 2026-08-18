@@ -33,7 +33,7 @@ const INDEX_BODY = `
         <div class="store-identity-stats">
           <span id="stat-events" class="stat" title="durable events in the store">— events</span>
           <span id="stat-units" class="stat" title="Changes in the current page">— Changes</span>
-          <span id="stat-threads" class="stat" title="Changes shown on this Attention page">— shown on this page</span>
+          <span id="stat-attention" class="stat" title="Changes shown on this Attention page">— shown on this page</span>
           <span id="stat-hash" class="stat mono" title="Change projection stamp">—</span>
         </div>
         <dl class="connection-status-rows">

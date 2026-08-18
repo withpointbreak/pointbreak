@@ -2000,6 +2000,33 @@ fn design_system_gallery_covers_the_shipped_attention_lens() {
 }
 
 #[test]
+fn design_system_gallery_wraps_card_primaries_in_the_shipped_heading() {
+    let cards = include_str!("../src/cli/inspect/design-system/_bodies/data-cards.body.html");
+    let attention =
+        include_str!("../src/cli/inspect/design-system/_bodies/data-attention.body.html");
+    let styles = include_str!("../src/cli/inspect/design-system/styles.css");
+
+    for body in [cards, attention] {
+        assert!(
+            body.contains("<h3 class=\"change-card-heading\">"),
+            "gallery Change cards expose the card headline through a real heading"
+        );
+    }
+    assert!(
+        styles.contains(".unit-card > h3.change-card-heading"),
+        "gallery styles must reset the card heading wrapper typography"
+    );
+    assert!(
+        attention.contains("<h2 class=\"attention-group-heading\">"),
+        "gallery Attention lens shows the served reason-type group headings"
+    );
+    assert!(
+        styles.contains(".attention-group-heading"),
+        "gallery styles must style the Attention group heading"
+    );
+}
+
+#[test]
 fn design_system_promotes_selected_review_treatments_and_soft_operational_dark() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let tokens = std::fs::read_to_string(root.join("src/cli/inspect/assets/tokens.css"))
@@ -2114,7 +2141,7 @@ fn design_system_final_state_has_no_temporary_visual_system() {
     let attention =
         include_str!("../src/cli/inspect/design-system/_bodies/data-attention.body.html");
     for marker in [
-        "change-card-attention-reason",
+        "attention-group-heading",
         "change-card-attention-evidence",
         "change-card-attention-action",
         "accepted with follow-up",

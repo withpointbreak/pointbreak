@@ -3121,7 +3121,7 @@ describe("Change-first composition", () => {
 
     expect(requests).toHaveLength(6);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "Exact Revision",
+      "Loading exact Revision…",
     );
   });
 

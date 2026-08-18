@@ -1956,14 +1956,14 @@ function renderDetail(
   const heading = document.createElement("h2");
   heading.textContent =
     snapshot.route.kind === "change"
-      ? "Change"
+      ? "Loading Change…"
       : snapshot.route.kind === "resource"
-        ? "Captured resource"
+        ? "Loading captured resource…"
         : snapshot.route.kind === "association"
-          ? "Association comparison"
+          ? "Loading association comparison…"
           : snapshot.route.kind === "interdiff"
-            ? "Revision interdiff"
-            : "Exact Revision";
+            ? "Loading Revision interdiff…"
+            : "Loading exact Revision…";
   const identity = document.createElement("p");
   identity.className = "mono";
   const identityText =
@@ -2095,7 +2095,7 @@ export function renderChangeInspector(
       `${snapshot.generation.changes.changes.length} Changes`,
     );
     setText(
-      "#stat-threads",
+      "#stat-attention",
       `${snapshot.generation.attention.changes.length} shown on this page`,
     );
     setText("#stat-hash", history.timelineProjectionStamp);
@@ -2383,7 +2383,7 @@ export function renderChangeInspector(
     `${snapshot.generation.changes.changes.length} Changes`,
   );
   setText(
-    "#stat-threads",
+    "#stat-attention",
     `${snapshot.generation.attention.changes.length} shown on this page`,
   );
   setText("#stat-hash", snapshot.generation.changes.projectionStamp);

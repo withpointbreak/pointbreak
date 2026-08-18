@@ -73,7 +73,7 @@ describe("render is a no-arg projection of getState()", () => {
     render.render();
     expect($("#stat-events")?.textContent).toBe("8 events");
     expect($("#stat-units")?.textContent).toBe("1 units");
-    expect($("#stat-threads")?.textContent).toBe("1 threads");
+    expect($("#stat-attention")?.textContent).toBe("1 threads");
     // The freshness hash is the short form of the event-set hash.
     expect($("#stat-hash")?.textContent).toBe(
       historyJson.projectionStamp.split(":").at(-1)?.slice(0, 12),
