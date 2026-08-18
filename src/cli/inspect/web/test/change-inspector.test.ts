@@ -3325,6 +3325,84 @@ describe("Change-first composition", () => {
     );
   });
 
+  const bootstrapStagedEvent = async (
+    eventId: string,
+    historyDocument = stagedActivationPage(),
+  ) => {
+    history.replaceState(
+      null,
+      "",
+      `/#/timeline/events/${encodeURIComponent(eventId)}?q=review&limit=20`,
+    );
+    serveComposition(historyDocument, stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(detailEventId()).toBe(eventId));
+  };
+
+  it("descends into the annotated diff from a followed exact event", async () => {
+    await bootstrapStagedEvent("evt:one");
+
+    pressKey("j");
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    pressKey("Enter");
+
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "diff",
+        changeId: "change:sha256:one",
+        revision,
+        query: {},
+      }),
+    );
+  });
+
+  it("refuses to descend from a followed event with plural Changes", async () => {
+    const plural = stagedActivationPage();
+    await bootstrapStagedEvent("evt:one", {
+      ...plural,
+      completion: {
+        ...plural.completion,
+        changeIds: ["change:sha256:one", "change:sha256:two"],
+      },
+      entries: plural.entries.map((entry) => ({
+        ...entry,
+        changeIds: ["change:sha256:one", "change:sha256:two"],
+      })),
+    });
+
+    pressKey("j");
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    const followed = parseChangeInspectorRoute(location.hash);
+    pressKey("Enter");
+
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(
+        document.querySelector("[data-event-diff-refusal]"),
+      ),
+    );
+    expect(parseChangeInspectorRoute(location.hash)).toEqual(followed);
+  });
+
+  it("descends from the last staged event when the cursor cannot move further", async () => {
+    await bootstrapStagedEvent("evt:three");
+
+    pressKey("j");
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:three"));
+    pressKey("Enter");
+
+    await vi.waitFor(() =>
+      expect(parseChangeInspectorRoute(location.hash)).toEqual({
+        kind: "diff",
+        changeId: "change:sha256:one",
+        revision,
+        query: {},
+      }),
+    );
+  });
+
   it("polls the history page as loaded while an exact event is read", async () => {
     history.replaceState(
       null,
