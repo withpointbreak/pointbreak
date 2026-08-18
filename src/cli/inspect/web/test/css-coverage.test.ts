@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import { ALL_EMITTABLE_CLASSES } from "../src/classNames";
 
 // The served stylesheet, resolved from the web package root (vitest's working
@@ -83,6 +83,274 @@ test("the CSS-less allowlist stays honest (every entry is still emittable and st
     emittableButCovered: [],
     notEmittable: [],
   });
+});
+
+// ── Cluster-wide literal-class drift guard ──────────────────────────────────
+// The registry test above covers only ALL_EMITTABLE_CLASSES tokens; raw class
+// literals written at imperative emission sites used to have no guard at all.
+// This scan closes that blind spot: every literal class token emitted by the
+// active cluster must have an app.css selector or an explicit allowlist entry.
+//
+// Scope boundary: imperative sites only (`className = …`, `classList.*`,
+// `setAttribute("class", …)`, including template literals in each). Inline
+// `class="…"` attributes are deliberately out of scope — the cluster emits
+// none, and HTML-template modules route their classes through `CLASS`, which
+// the registry guard above already covers.
+
+interface BoundaryModule {
+  path: string;
+  activeImport: boolean;
+}
+
+// Enumerate governed modules from the architecture inventory, not a glob: a
+// newly-reachable module is scanned the moment the inventory records it.
+const ACTIVE_MODULES = (
+  JSON.parse(
+    readFileSync(
+      resolve(process.cwd(), "src/change-inspector-architecture.json"),
+      "utf8",
+    ),
+  ) as { modules: BoundaryModule[] }
+).modules
+  .filter((module) => module.activeImport)
+  .map((module) => resolve(process.cwd(), "src", module.path));
+
+const CLASS_NAME_STRING = /\.className\s*=\s*"([^"]*)"/g;
+const CLASS_NAME_TEMPLATE = /\.className\s*=\s*`([^`]*)`/g;
+// The argument group consumes complete quoted and backtick literals before it
+// can meet a bare `)`, so a call whose interpolation itself contains
+// parentheses — classList.add(`status-${normalize(status)}`) — is captured
+// whole instead of truncating at the inner `)`.
+const CLASS_LIST_CALL =
+  /\.classList\.(?:add|remove|toggle|replace|contains)\(\s*((?:"[^"]*"|`[^`]*`|[^)"`])*)\)/g;
+const SET_CLASS_ATTRIBUTE =
+  /setAttribute\(\s*"class"\s*,\s*("[^"]*"|`[^`]*`)\s*\)/g;
+const INTERPOLATION = /\$\{[^}]*\}/g;
+
+// Splits a template-literal body into complete class tokens and dynamic family
+// prefixes. A token abutting an interpolation boundary with no intervening
+// whitespace is incomplete: it is dropped from the token set and recorded as a
+// family prefix that must be declared in DYNAMIC_CLASS_FAMILIES. Limitations
+// (deliberate): an interpolation with nested braces, or a nested template
+// inside an interpolation, leaks garbage fragments — those then fail loudly
+// against app.css, which is the desired behavior.
+function splitTemplateBody(body: string): {
+  tokens: string[];
+  families: string[];
+} {
+  const tokens: string[] = [];
+  const families: string[] = [];
+  const segments = body.split(INTERPOLATION);
+  segments.forEach((segment, index) => {
+    const parts = segment.split(/\s+/).filter((part) => part.length > 0);
+    if (parts.length === 0) return;
+    const abutsPrevious = index > 0 && !/^\s/.test(segment);
+    const abutsNext = index < segments.length - 1 && !/\s$/.test(segment);
+    let first = 0;
+    let last = parts.length - 1;
+    if (abutsPrevious) {
+      families.push(parts[first]);
+      first += 1;
+    }
+    if (abutsNext && last >= first) {
+      families.push(parts[last]);
+      last -= 1;
+    }
+    for (let i = first; i <= last; i += 1) tokens.push(parts[i]);
+  });
+  return { tokens, families };
+}
+
+function splitPlainValue(value: string): string[] {
+  return value.split(/\s+/).filter((token) => token.length > 0);
+}
+
+function scanLiteralClassTokens(sources: readonly string[]): {
+  tokens: Set<string>;
+  families: Set<string>;
+} {
+  const tokens = new Set<string>();
+  const families = new Set<string>();
+  const addPlain = (value: string) => {
+    for (const token of splitPlainValue(value)) tokens.add(token);
+  };
+  const addTemplate = (body: string) => {
+    const split = splitTemplateBody(body);
+    for (const token of split.tokens) tokens.add(token);
+    for (const family of split.families) families.add(family);
+  };
+  for (const source of sources) {
+    for (const match of source.matchAll(CLASS_NAME_STRING)) addPlain(match[1]);
+    for (const match of source.matchAll(CLASS_NAME_TEMPLATE))
+      addTemplate(match[1]);
+    for (const match of source.matchAll(CLASS_LIST_CALL)) {
+      const args = match[1];
+      for (const quoted of args.matchAll(/"([^"]*)"/g)) addPlain(quoted[1]);
+      for (const template of args.matchAll(/`([^`]*)`/g))
+        addTemplate(template[1]);
+    }
+    for (const match of source.matchAll(SET_CLASS_ATTRIBUTE)) {
+      const value = match[1];
+      if (value.startsWith('"')) addPlain(value.slice(1, -1));
+      else addTemplate(value.slice(1, -1));
+    }
+  }
+  return { tokens, families };
+}
+
+function scanActiveModules(): { tokens: Set<string>; families: Set<string> } {
+  return scanLiteralClassTokens(
+    ACTIVE_MODULES.map((path) => readFileSync(path, "utf8")),
+  );
+}
+
+// The raw cssClassSelectors regex also matches `.token` mentions inside CSS
+// comments, so a deleted rule whose name survives in a comment would still
+// look covered. The literal guard therefore strips comments first. (The
+// registry test above keeps the raw set; tightening it is out of scope.)
+function commentStrippedCssClassSelectors(css: string): Set<string> {
+  return cssClassSelectors(css.replace(/\/\*[\s\S]*?\*\//g, ""));
+}
+
+// Literal-emitted classes with deliberately no app.css rule, each with a
+// one-line reason. Same contract as CSS_LESS_ALLOWLIST above: an entry that
+// gains a rule or stops being emitted fails the honesty test below.
+const LITERAL_CSS_LESS_ALLOWLIST: Record<string, string> = {
+  "change-filter":
+    "Change-lens facet visibility hook (change-inspector-render.ts:346,359); queried at :718/:776 only to toggle `.hidden` — a behavior marker, never styled",
+  "timeline-filter":
+    "Timeline-lens facet visibility hook (change-inspector-render.ts:350,354,400); same behavior-marker contract as change-filter",
+};
+
+// Dynamic template families whose members cannot be read from the literal
+// alone. Each family's members must be enumerated in ALL_EMITTABLE_CLASSES so
+// the registry test covers them; this declaration only pins that the family
+// exists and is accounted for.
+const DYNAMIC_CLASS_FAMILIES: Record<string, string> = {
+  "verify-":
+    "`verify verify-${status}` (change-inspector-timeline.ts) — members enumerated by VERIFY_STATUSES/verifyClass in ALL_EMITTABLE_CLASSES",
+  "type-facet-row":
+    '`type-facet-row${… " type-facet-row-off"}` (change-inspector-render.ts) — members enumerated by typeFacetRowClass in ALL_EMITTABLE_CLASSES',
+};
+
+describe("literal class extraction", () => {
+  test("splits plain className strings into complete tokens", () => {
+    const scan = scanLiteralClassTokens([
+      'element.className = "unit-card selected";',
+    ]);
+    expect([...scan.tokens].sort()).toEqual(["selected", "unit-card"]);
+    expect([...scan.families]).toEqual([]);
+  });
+
+  test("keeps whitespace-separated template tokens and drops abutting fragments as families", () => {
+    const scan = scanLiteralClassTokens([
+      "element.className = `verify verify-${status}`;",
+    ]);
+    expect([...scan.tokens]).toEqual(["verify"]);
+    expect([...scan.families]).toEqual(["verify-"]);
+  });
+
+  test("records a leading interpolation's abutting fragment as a family", () => {
+    const scan = scanLiteralClassTokens([
+      "element.className = `${kind}-chip plain`;",
+    ]);
+    expect([...scan.tokens]).toEqual(["plain"]);
+    expect([...scan.families]).toEqual(["-chip"]);
+  });
+
+  test("treats a whole-segment template token followed by an interpolation as a family", () => {
+    const scan = scanLiteralClassTokens([
+      'element.className = `type-facet-row${off ? " type-facet-row-off" : ""}`;',
+    ]);
+    expect([...scan.tokens]).toEqual([]);
+    expect([...scan.families]).toEqual(["type-facet-row"]);
+  });
+
+  test("captures quoted and template classList arguments, surviving interpolated parentheses", () => {
+    const scan = scanLiteralClassTokens([
+      'element.classList.add("hidden", `status-${normalize(status)}`);',
+    ]);
+    expect([...scan.tokens]).toEqual(["hidden"]);
+    expect([...scan.families]).toEqual(["status-"]);
+  });
+
+  test("captures quoted and template setAttribute class values", () => {
+    const scan = scanLiteralClassTokens([
+      'element.setAttribute("class", "badge mono");',
+      'element.setAttribute("class", `badge badge-${tone}`);',
+    ]);
+    expect([...scan.tokens].sort()).toEqual(["badge", "mono"]);
+    expect([...scan.families]).toEqual(["badge-"]);
+  });
+
+  test("a class named only inside a CSS comment counts as missing", () => {
+    const selectors = commentStrippedCssClassSelectors(
+      "/* .ghost-token was retired */ .real-token { color: red; }",
+    );
+    expect(selectors.has("real-token")).toBe(true);
+    expect(selectors.has("ghost-token")).toBe(false);
+  });
+});
+
+test("every raw class literal in the active cluster has an app.css selector (or an allowlist entry)", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  const selectors = commentStrippedCssClassSelectors(css);
+  const scan = scanActiveModules();
+  const missing = [...scan.tokens]
+    .filter((token) => !selectors.has(token))
+    .filter((token) => !(token in LITERAL_CSS_LESS_ALLOWLIST))
+    .sort();
+  expect(missing).toEqual([]);
+});
+
+test("the literal allowlist stays honest (every entry is still emitted and still rule-less)", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  const selectors = commentStrippedCssClassSelectors(css);
+  const scan = scanActiveModules();
+  const emittedButCovered = Object.keys(LITERAL_CSS_LESS_ALLOWLIST).filter(
+    (cls) => selectors.has(cls),
+  );
+  const notEmitted = Object.keys(LITERAL_CSS_LESS_ALLOWLIST).filter(
+    (cls) => !scan.tokens.has(cls),
+  );
+  expect({ emittedButCovered, notEmitted }).toEqual({
+    emittedButCovered: [],
+    notEmitted: [],
+  });
+});
+
+test("every unresolved dynamic class family is declared", () => {
+  const scan = scanActiveModules();
+  expect([...scan.families].sort()).toEqual(
+    Object.keys(DYNAMIC_CLASS_FAMILIES).sort(),
+  );
+});
+
+test("de-emphasized and notice prose classes carry their theme-flipping colors", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.dim \{[^}]*color: var\(--fg-dim\);/s);
+  expect(css).toMatch(/\.info \{[^}]*color: var\(--info\);/s);
+  expect(css).toMatch(/\.warning \{[^}]*color: var\(--warning\);/s);
+});
+
+test("detail-pane section wrappers share the governed section rhythm", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(
+    /\.detail-facts,\s*\.detail-current-revisions,\s*\.captured-diff \{[^}]*margin: 0 0 14px;/s,
+  );
+});
+
+test("dynamic detail headings get zero-specificity typography that section rules out-rank", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(
+    /:where\(\.detail\) h3 \{[^}]*margin: 0 0 6px;[^}]*font-size: var\(--fs-base\);/s,
+  );
+  expect(css).toMatch(
+    /:where\(\.detail\) h4 \{[^}]*margin: 10px 0 4px;[^}]*font-size: var\(--fs-md\);/s,
+  );
+  expect(css).toMatch(
+    /:where\(\.detail\) h5 \{[^}]*margin: 0 0 4px;[^}]*font-size: var\(--fs-md\);/s,
+  );
 });
 
 test("detail key/value rows reserve a content-sized label track", () => {

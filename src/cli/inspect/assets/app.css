@@ -279,6 +279,15 @@ body {
   margin: 3px 0 0;
   font-size: var(--fs-xs);
 }
+/* A benign query notice and a Timeline diagnostic must not read alike. Both
+   route through theme-flipping tokens (--warning-soft/-strong are fixed-dark,
+   for the .diagnostics banner only). */
+.info {
+  color: var(--info);
+}
+.warning {
+  color: var(--warning);
+}
 .timeline-shell > .actions {
   flex: 0 0 auto;
   display: flex;
@@ -439,6 +448,12 @@ main {
 }
 .hidden {
   display: none !important;
+}
+/* Secondary, de-emphasized prose: empty-facet rows, page-metadata notices,
+   empty-state text, and refusal explanations all opt in by name. --fg-dim is
+   the AA-pinned dim foreground. */
+.dim {
+  color: var(--fg-dim);
 }
 
 .toolbar {
@@ -993,6 +1008,23 @@ main {
   font-size: var(--fs-lg);
   margin: 0 0 4px;
 }
+/* Every dynamically created detail heading below the pane's h2. :where() keeps
+   this at element-only specificity so the more specific section rules
+   (.event-detail-* h3, .unit-card h3) and the zero-specificity
+   .markdown-body :where(h1..h6) rule for server-supplied fact prose all keep
+   winning without !important. */
+:where(.detail) h3 {
+  margin: 0 0 6px;
+  font-size: var(--fs-base);
+}
+:where(.detail) h4 {
+  margin: 10px 0 4px;
+  font-size: var(--fs-md);
+}
+:where(.detail) h5 {
+  margin: 0 0 4px;
+  font-size: var(--fs-md);
+}
 .detail .kv {
   display: grid;
   grid-template-columns: minmax(130px, max-content) minmax(0, 1fr);
@@ -1089,6 +1121,11 @@ main {
 .event-detail-record h3 {
   margin: 0 0 5px;
   font-size: var(--fs-base);
+}
+.detail-facts,
+.detail-current-revisions,
+.captured-diff {
+  margin: 0 0 14px;
 }
 .event-detail-summary p {
   margin: 0 0 8px;
