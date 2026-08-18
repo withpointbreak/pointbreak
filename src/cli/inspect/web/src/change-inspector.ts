@@ -59,6 +59,7 @@ import {
   decodeChangePage,
   decodeEventHistory,
   decodeReaderProfile,
+  type EventHistoryQuery,
   sameProfileGeneration,
 } from "./change-protocol";
 import {
@@ -362,17 +363,52 @@ export async function bootstrapChangeInspector(
   };
   let interaction: ReturnType<typeof installChangeInspectorInteraction> | null =
     null;
+  // The filter identity of a history request: its query without either
+  // positional anchor, so two pages of the same filtered stream compare equal
+  // no matter where each one starts.
+  const eventHistoryFilters = (query: EventHistoryQuery): string =>
+    buildEventHistoryUrl({ ...query, after: undefined, at: undefined });
+  // One function owns the history-page URL for every timeline and event route.
+  // An exact event the loaded page already carries under the same filters
+  // reads from that page; a deep link, an off-page event, or a filter change
+  // re-centers honestly on the requested event.
+  const historyPageUrl = (
+    route: Extract<
+      ChangeInspectorRoute,
+      { kind: "timeline" } | { kind: "event" }
+    >,
+  ): string => {
+    if (route.kind === "timeline") {
+      return buildEventHistoryUrl(route.historyQuery);
+    }
+    const staged = state.snapshot().generation?.history ?? null;
+    if (
+      visibleRequest !== "" &&
+      staged !== null &&
+      visibleHistoryFilters === eventHistoryFilters(route.historyQuery) &&
+      staged.entries.some((entry) => entry.eventId === route.eventId)
+    ) {
+      return visibleRequest;
+    }
+    return buildEventHistoryUrl({
+      ...route.historyQuery,
+      after: undefined,
+      at: route.eventId,
+    });
+  };
   const requestKey = (
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
   ): string =>
     route.kind === "timeline" || route.kind === "event"
-      ? buildEventHistoryUrl(
-          route.kind === "event"
-            ? { ...route.historyQuery, after: undefined, at: route.eventId }
-            : route.historyQuery,
-        )
+      ? historyPageUrl(route)
       : buildChangePageUrl("changes", route.query);
   let visibleRequest = "";
+  /** The filter identity of the history page `visibleRequest` loaded. */
+  let visibleHistoryFilters = "";
+  const clearVisibleRequest = (): void => {
+    visibleRequest = "";
+    visibleHistoryFilters = "";
+  };
   let pendingReading: { key: string; token: symbol } | null = null;
   let releaseQueuedPoll: () => void = () => {};
   let revalidateIdentityForCurrentSession: () => void = () => {};
@@ -483,6 +519,10 @@ export async function bootstrapChangeInspector(
     const credentialVersion = sessionCredentialVersion();
     const epoch = ++requestEpoch;
     try {
+      // The page this load will publish is decided once, before any staged
+      // state can shift beneath it: the same URL is fetched and then recorded
+      // as the visible request.
+      const request = requestKey(route);
       const profile = decodeReaderProfile(
         await fetchChangeInspectorJSON("/api/v2/profile"),
       );
@@ -493,7 +533,7 @@ export async function bootstrapChangeInspector(
           return;
         }
         pendingTimelineSearchFocus = false;
-        visibleRequest = "";
+        clearVisibleRequest();
         clearReading();
         state.clearGeneration();
         renderChangeInspectorUnavailable(profile.availability);
@@ -512,17 +552,7 @@ export async function bootstrapChangeInspector(
         activeLens === "attention" ? query : firstPageQuery(query);
       const historyRequest =
         route.kind === "timeline" || route.kind === "event"
-          ? fetchChangeInspectorJSON(
-              buildEventHistoryUrl(
-                route.kind === "event"
-                  ? {
-                      ...route.historyQuery,
-                      after: undefined,
-                      at: route.eventId,
-                    }
-                  : route.historyQuery,
-              ),
-            ).then(decodeEventHistory)
+          ? fetchChangeInspectorJSON(request).then(decodeEventHistory)
           : Promise.resolve(null);
       const [changes, attention, history] = await Promise.all([
         fetchChangeInspectorJSON(
@@ -614,7 +644,12 @@ export async function bootstrapChangeInspector(
       if (route.kind === "timeline" && history !== null) {
         timelineMonitor.observe(route, history);
       }
-      visibleRequest = requestKey(route);
+      visibleRequest = request;
+      visibleHistoryFilters =
+        (route.kind === "timeline" || route.kind === "event") &&
+        history !== null
+          ? eventHistoryFilters(route.historyQuery)
+          : "";
       paint(pollDraft);
       if (!refreshesExactReading) {
         await loadReading(
@@ -647,7 +682,7 @@ export async function bootstrapChangeInspector(
         showPollFailure();
         return;
       }
-      visibleRequest = "";
+      clearVisibleRequest();
       pendingTimelineSearchFocus = false;
       clearReading();
       state.clearGeneration();
@@ -676,7 +711,7 @@ export async function bootstrapChangeInspector(
     requestEpoch += 1;
     state.setRoute(route);
     if (route.kind === "invalid") {
-      visibleRequest = "";
+      clearVisibleRequest();
       clearReading();
       state.clearGeneration();
       paint();
@@ -707,7 +742,7 @@ export async function bootstrapChangeInspector(
         paint();
       }
     } else {
-      visibleRequest = "";
+      clearVisibleRequest();
       clearReading();
       state.clearGeneration();
       paint();
@@ -792,7 +827,7 @@ export async function bootstrapChangeInspector(
       prior.identity.contextIdentity === identity.contextIdentity;
     const mustRetireGeneration = prior.generation !== null && !continuesSession;
     if (mustRetireGeneration) {
-      visibleRequest = "";
+      clearVisibleRequest();
       pendingTimelineSearchFocus = false;
       clearReading();
       state.clearGeneration();
@@ -905,7 +940,7 @@ export async function bootstrapChangeInspector(
           }
           continue;
         }
-        visibleRequest = "";
+        clearVisibleRequest();
         clearReading();
         state.clearGeneration();
         renderChangeInspectorRefusal(error);

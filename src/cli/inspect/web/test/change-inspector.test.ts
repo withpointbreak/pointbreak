@@ -152,8 +152,10 @@ function boundaryHistoryPage(options: {
     authorityCursor: authorityCursor(authoritySequence),
     timelineProjectionStamp:
       options.timelineProjectionStamp ?? "sha256:timeline-current",
-    eventCount: 2,
-    matchCount: 2,
+    // The decoder requires the document totals to agree with the authority
+    // cursor it was minted against, so both counts follow that sequence.
+    eventCount: authoritySequence,
+    matchCount: authoritySequence,
     offset: options.offset,
     next: options.next,
     entries: options.eventIds.map((eventId) => ({
@@ -280,13 +282,16 @@ function isExactResourcePath(path: string): boolean {
   );
 }
 
-function serveComposition(historyDocument: EventHistoryDocument): string[] {
+function serveComposition(
+  historyDocument: EventHistoryDocument,
+  readerProfile: typeof profile = profile,
+): string[] {
   const requests: string[] = [];
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input);
     requests.push(path);
     if (path === "/api/v2/profile")
-      return new Response(JSON.stringify(profile));
+      return new Response(JSON.stringify(readerProfile));
     if (path.startsWith("/api/v2/changes?"))
       return new Response(JSON.stringify(page("changes")));
     if (path.startsWith("/api/v2/attention?"))
@@ -3123,6 +3128,105 @@ describe("Change-first composition", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Loading exact Revision…",
     );
+  });
+
+  const stagedPageProfile = { ...profile, authorityCursor: authorityCursor(3) };
+  const stagedPage = (): EventHistoryDocument =>
+    boundaryHistoryPage({
+      authoritySequence: 3,
+      eventIds: ["evt:one", "evt:two", "evt:three"],
+      offset: 0,
+    });
+  const routeTo = (hash: string): void => {
+    location.hash = hash;
+    window.dispatchEvent(new Event("hashchange"));
+  };
+  const detailEventId = (): string | null | undefined =>
+    document.querySelector("#detail-body [data-event-id]")?.textContent;
+
+  it("reuses the loaded history page for an exact event already on it", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+    const loaded = requests.length;
+
+    routeTo("#/timeline/events/evt%3Atwo?q=review&limit=20");
+
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
+    expect(requests.slice(loaded)).toEqual([]);
+    expect(
+      document
+        .querySelector('#timeline [aria-selected="true"]')
+        ?.getAttribute("data-event-id"),
+    ).toBe("evt:two");
+  });
+
+  it("re-centers the history page on an exact event the loaded page does not carry", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+    const loaded = requests.length;
+
+    routeTo("#/timeline/events/evt%3Afour?q=review&limit=20");
+
+    await vi.waitFor(() =>
+      expect(
+        requests
+          .slice(loaded)
+          .filter((path) => path.startsWith("/api/v2/history?")),
+      ).toHaveLength(1),
+    );
+    expect(
+      requests
+        .slice(loaded)
+        .find((path) => path.startsWith("/api/v2/history?")),
+    ).toContain("at=evt%3Afour");
+  });
+
+  it("re-centers the history page when an exact event arrives under different filters", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/timeline/events/evt%3Aone?q=review&limit=20",
+    );
+    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(detailEventId()).toBe("evt:one"));
+    const loaded = requests.length;
+
+    routeTo("#/timeline/events/evt%3Atwo?q=other&limit=20");
+
+    await vi.waitFor(() =>
+      expect(
+        requests
+          .slice(loaded)
+          .filter((path) => path.startsWith("/api/v2/history?")),
+      ).toHaveLength(1),
+    );
+    const refetched = requests
+      .slice(loaded)
+      .find((path) => path.startsWith("/api/v2/history?"));
+    expect(refetched).toContain("at=evt%3Atwo");
+    expect(refetched).toContain("q=other");
   });
 
   it("rehydrates the same exact route when polling publishes a newer projection", async () => {
