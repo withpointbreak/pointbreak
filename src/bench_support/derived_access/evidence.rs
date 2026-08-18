@@ -1615,7 +1615,7 @@ fn run_derived_change_diagnostic_native_with_validator_v1(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 pub(super) fn run_derived_change_diagnostic_native_for_test_v1(
     request_path: &Path,
     host_identity_sha256: String,
@@ -3289,7 +3289,7 @@ fn bootstrap_qualification_derived_access_retained_root_with_validator_v1(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 pub(super) fn bootstrap_qualification_derived_access_retained_root_for_test_v1(
     request_path: &Path,
     host_identity_sha256: String,
@@ -4509,7 +4509,7 @@ fn observe_current_execution_identity_with_host_authority_v1(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 pub(super) fn observe_current_execution_identity_for_test_v1(
     platform: super::QualificationDerivedAccessPlatformV1,
     root_provenance_sha256: String,
