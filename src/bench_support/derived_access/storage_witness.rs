@@ -491,6 +491,85 @@ pub fn capture_qualification_derived_storage_witness_v1(
         .unwrap_or_else(|| "derived storage changed throughout witness capture".to_owned()))
 }
 
+/// One sentinel's carrier-classified scan result. Unlike the fail-closed
+/// witness capture, a scan reports hits as data: it belongs to evidence rows
+/// whose evaluator judges the recorded counts, never to fixture preconditions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QualificationDerivedStorageScanMatchV1 {
+    pub kind: QualificationDerivedStorageForbiddenProbeKindV1,
+    pub sqlite_carrier_matches: u64,
+    pub file_carrier_matches: u64,
+    pub matched_relative_paths: Vec<String>,
+}
+
+/// Scan the stable current generation for the probe sentinels and report each
+/// hit as data, classified into SQLite-body carriers (database, WAL, shared
+/// memory, temporary) versus every other carrier file. The triple-read
+/// stability window and read lease are the same as the witness capture; only
+/// the found-probe outcome differs, because this caller records rather than
+/// forbids.
+pub fn scan_qualification_derived_storage_v1(
+    store_root: &Path,
+    forbidden: &QualificationDerivedStorageForbiddenProbeInputV1,
+) -> Result<(u64, Vec<QualificationDerivedStorageScanMatchV1>), String> {
+    let mut last_attempt_error = None;
+    for _ in 0..3 {
+        let selected = match stable_selected_generation(store_root) {
+            Ok(selected) => selected,
+            Err(error) => {
+                last_attempt_error = Some(error);
+                continue;
+            }
+        };
+        let snapshot = match stable_storage_snapshot(store_root, &selected, forbidden) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                last_attempt_error = Some(format!(
+                    "derived storage snapshot was unstable at generation sequence {}",
+                    selected.publication.sequence
+                ));
+                continue;
+            }
+            Err(error) => {
+                last_attempt_error = Some(error);
+                continue;
+            }
+        };
+        let mut matches = snapshot
+            .forbidden_probes
+            .iter()
+            .map(|probe| QualificationDerivedStorageScanMatchV1 {
+                kind: probe.kind,
+                sqlite_carrier_matches: 0,
+                file_carrier_matches: 0,
+                matched_relative_paths: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        for (kind, relative_path) in &snapshot.probe_hits {
+            let Some(entry) = matches.iter_mut().find(|entry| entry.kind == *kind) else {
+                return Err(format!(
+                    "derived storage scan recorded a hit for unknown probe kind {kind:?}"
+                ));
+            };
+            match carrier_role(relative_path) {
+                QualificationDerivedStorageCarrierRoleV1::Database
+                | QualificationDerivedStorageCarrierRoleV1::Wal
+                | QualificationDerivedStorageCarrierRoleV1::SharedMemory
+                | QualificationDerivedStorageCarrierRoleV1::Temporary => {
+                    entry.sqlite_carrier_matches += 1;
+                }
+                _ => {
+                    entry.file_carrier_matches += 1;
+                }
+            }
+            entry.matched_relative_paths.push(relative_path.clone());
+        }
+        return Ok((selected.publication.sequence, matches));
+    }
+    Err(last_attempt_error
+        .unwrap_or_else(|| "derived storage changed throughout witness capture".to_owned()))
+}
+
 struct StableStorageSnapshot {
     reader_receipt: Option<QualificationDerivedStorageReaderReceiptV1>,
     live_checkpoint: Option<QualificationDerivedStorageLiveCheckpointV1>,
@@ -1227,6 +1306,67 @@ mod tests {
             .collect::<Vec<_>>();
         fingerprints.sort();
         fingerprints
+    }
+
+    #[test]
+    fn storage_scan_reports_hits_as_classified_data() {
+        let root = published_empty_generation();
+        let layout = GenerationLayout::new(root.path()).expect("layout");
+        let publication = layout
+            .current_publication()
+            .expect("read publication")
+            .expect("published generation");
+        let generation_root = layout.generation(&publication.generation_id);
+
+        let (sequence, matches) =
+            scan_qualification_derived_storage_v1(root.path(), &probe_input()).expect("clean scan");
+        assert!(sequence >= 1);
+        assert_eq!(
+            matches.len(),
+            QualificationDerivedStorageForbiddenProbeKindV1::ALL.len()
+        );
+        assert!(matches.iter().all(|entry| {
+            entry.sqlite_carrier_matches == 0
+                && entry.file_carrier_matches == 0
+                && entry.matched_relative_paths.is_empty()
+        }));
+
+        std::fs::write(
+            generation_root.join("scan-probe-notes.txt"),
+            "PRIVATE PROSE SENTINEL",
+        )
+        .expect("plant file-carrier sentinel");
+        let (_, matches) = scan_qualification_derived_storage_v1(root.path(), &probe_input())
+            .expect("a recorded hit must not fail the scan");
+        let prose = matches
+            .iter()
+            .find(|entry| entry.kind == QualificationDerivedStorageForbiddenProbeKindV1::Prose)
+            .expect("prose entry");
+        assert_eq!(prose.sqlite_carrier_matches, 0);
+        assert_eq!(prose.file_carrier_matches, 1);
+        assert_eq!(prose.matched_relative_paths, ["scan-probe-notes.txt"]);
+
+        // The fixture-probe capture must keep failing closed on the same
+        // state, naming the probe kind and the carrier path.
+        let error = capture_qualification_derived_storage_witness_v1(root.path(), &probe_input())
+            .expect_err("the witness capture stays fail-closed");
+        assert!(
+            error.contains("Prose in scan-probe-notes.txt"),
+            "unexpected error: {error}"
+        );
+
+        let database = generation_root.join("cursor.sqlite3");
+        let mut bytes = std::fs::read(&database).expect("read database");
+        bytes.extend_from_slice(b"PRIVATE PROSE SENTINEL");
+        std::fs::write(&database, bytes).expect("plant sqlite-carrier sentinel");
+        let (_, matches) = scan_qualification_derived_storage_v1(root.path(), &probe_input())
+            .expect("sqlite hit scan records data");
+        let prose = matches
+            .iter()
+            .find(|entry| entry.kind == QualificationDerivedStorageForbiddenProbeKindV1::Prose)
+            .expect("prose entry");
+        assert_eq!(prose.sqlite_carrier_matches, 1);
+        assert_eq!(prose.file_carrier_matches, 1);
     }
 
     #[test]

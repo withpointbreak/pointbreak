@@ -69,8 +69,8 @@ use super::{
     qualification_derived_change_control_command_sha256_v1,
     qualification_derived_change_expected_outcome_v1,
     qualification_derived_change_storage_probe_hashes_v1, required_timeline_cases_v1,
-    timeline_invalid_signature_run_identity_v1, timeline_request_schedule_sha256_v1,
-    timeline_request_schedule_v1,
+    scan_qualification_derived_storage_v1, timeline_invalid_signature_run_identity_v1,
+    timeline_request_schedule_sha256_v1, timeline_request_schedule_v1,
 };
 use super::{
     QualificationDerivedAccessExecutionIdentityV1, QualificationDerivedAccessProductIdentityV1,
@@ -6283,17 +6283,18 @@ mod instrumented {
                     })
                 })
                 .ok_or_else(|| {
-                    "Timeline storage probe response omitted a prose entry".to_owned()
+                    format!("{phase:?} Timeline storage probe response omitted a prose entry")
                 })?;
-            let summary = entry
-                .get("summary")
-                .ok_or_else(|| "Timeline storage probe response omitted a summary".to_owned())?;
+            let summary = entry.get("summary").ok_or_else(|| {
+                format!("{phase:?} Timeline storage probe response omitted a summary")
+            })?;
             let payload_document = String::from_utf8(
                 canonical_json_bytes(summary).map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
-            let prose = first_timeline_prose(summary)
-                .ok_or_else(|| "Timeline storage probe response omitted prose".to_owned())?;
+            let prose = first_timeline_prose(summary).ok_or_else(|| {
+                format!("{phase:?} Timeline storage probe response omitted prose")
+            })?;
             let trust_result = String::from_utf8(
                 canonical_json_bytes(&json!({
                     "eventId": entry.get("eventId"),
@@ -6305,7 +6306,9 @@ mod instrumented {
             let continuation_token = response
                 .get("next")
                 .and_then(Value::as_str)
-                .ok_or_else(|| "Timeline storage probe response omitted continuation".to_owned())?
+                .ok_or_else(|| {
+                    format!("{phase:?} Timeline storage probe response omitted continuation")
+                })?
                 .to_owned();
             (
                 prose,
@@ -6317,12 +6320,12 @@ mod instrumented {
             let prose = response
                 .get("message")
                 .and_then(Value::as_str)
-                .ok_or_else(|| "Timeline fault storage probe omitted prose".to_owned())?
+                .ok_or_else(|| format!("{phase:?} Timeline fault storage probe omitted prose"))?
                 .to_owned();
             let trust_result = response
                 .get("code")
                 .and_then(Value::as_str)
-                .ok_or_else(|| "Timeline fault storage probe omitted code".to_owned())?
+                .ok_or_else(|| format!("{phase:?} Timeline fault storage probe omitted code"))?
                 .to_owned();
             (prose, response_document.clone(), trust_result, None)
         };
@@ -6335,51 +6338,87 @@ mod instrumented {
         )?;
         let store_root =
             store_dir_for_repo(&request.repository).map_err(|error| error.to_string())?;
-        let first_witness = capture_qualification_derived_storage_witness_v1(&store_root, &first)?;
-        let first_found = first_witness
-            .forbidden_probes
+        // This row RECORDS retention as evidence for the evaluator to judge;
+        // it must never reuse the fail-closed fixture-probe capture, whose
+        // found-probe rejection makes a recorded hit unrepresentable. The
+        // scan classifies hits into SQLite-body versus file carriers and the
+        // error path names this row's phase, which the shared capture cannot.
+        let (generation_sequence, first_matches) =
+            scan_qualification_derived_storage_v1(&store_root, &first)
+                .map_err(|error| format!("{phase:?} timeline storage scan: {error}"))?;
+        // Non-evidence diagnostic: a recorded hit costs an evaluator rejection
+        // later, so surface the carrier paths and generation now rather than
+        // spending another invocation to recover them. Never receipt data.
+        for entry in &first_matches {
+            if entry.sqlite_carrier_matches > 0 || entry.file_carrier_matches > 0 {
+                eprintln!(
+                    "{phase:?} timeline storage scan diagnostic at generation sequence \
+                     {generation_sequence}: {:?} matched sqlite={} file={} in {:?}",
+                    entry.kind,
+                    entry.sqlite_carrier_matches,
+                    entry.file_carrier_matches,
+                    entry.matched_relative_paths,
+                );
+            }
+        }
+        let first_counts = first_matches
             .iter()
             .take(4)
-            .map(|probe| probe.found)
+            .map(|entry| (entry.sqlite_carrier_matches, entry.file_carrier_matches))
             .collect::<Vec<_>>();
-        let continuation_found = continuation_token
+        let continuation_counts = continuation_token
             .as_ref()
             .map(|token| {
                 let continuation = QualificationDerivedStorageForbiddenProbeInputV1::new(
                     token, token, token, token,
                 )?;
-                let witness =
-                    capture_qualification_derived_storage_witness_v1(&store_root, &continuation)?;
-                Ok::<_, String>(
-                    witness
-                        .forbidden_probes
-                        .first()
-                        .is_some_and(|probe| probe.found),
-                )
+                let (continuation_sequence, matches) =
+                    scan_qualification_derived_storage_v1(&store_root, &continuation).map_err(
+                        |error| format!("{phase:?} timeline continuation scan: {error}"),
+                    )?;
+                for entry in &matches {
+                    if entry.sqlite_carrier_matches > 0 || entry.file_carrier_matches > 0 {
+                        eprintln!(
+                            "{phase:?} timeline continuation scan diagnostic at generation \
+                             sequence {continuation_sequence}: {:?} matched sqlite={} file={} \
+                             in {:?}",
+                            entry.kind,
+                            entry.sqlite_carrier_matches,
+                            entry.file_carrier_matches,
+                            entry.matched_relative_paths,
+                        );
+                    }
+                }
+                matches
+                    .first()
+                    .map(|entry| (entry.sqlite_carrier_matches, entry.file_carrier_matches))
+                    .ok_or_else(|| {
+                        format!("{phase:?} timeline continuation scan returned no probe entries")
+                    })
             })
             .transpose()?;
         let forbidden_probes = QualificationDerivedTimelineForbiddenProbeKindV1::ALL
             .into_iter()
             .enumerate()
             .map(|(index, kind)| {
-                let (sentinel_sha256, found) = if index == 4 {
+                let (sentinel_sha256, (sqlite_match_count, file_match_count)) = if index == 4 {
                     (
                         continuation_token
                             .as_ref()
                             .map(|token| sha256_bytes_hex(token.as_bytes())),
-                        continuation_found.unwrap_or(false),
+                        continuation_counts.unwrap_or((0, 0)),
                     )
                 } else {
                     (
                         Some(sha256_bytes_hex(sentinels[index].as_bytes())),
-                        first_found.get(index).copied().unwrap_or(true),
+                        first_counts.get(index).copied().unwrap_or((1, 1)),
                     )
                 };
                 QualificationDerivedTimelineForbiddenProbeEvidenceV1 {
                     kind,
                     sentinel_sha256,
-                    sqlite_match_count: u64::from(found),
-                    file_match_count: u64::from(found),
+                    sqlite_match_count,
+                    file_match_count,
                 }
             })
             .collect();
