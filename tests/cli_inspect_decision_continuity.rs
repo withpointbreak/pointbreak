@@ -405,7 +405,7 @@ fn generated_matrix_preserves_decision_continuity_without_selecting_uncertain_wi
 
     let continuity = &primary["validationContinuity"]["summary"];
     assert_eq!(continuity["recoveredCount"], 2);
-    assert_eq!(continuity["passedCount"], 1);
+    assert_eq!(continuity["passedCount"], 2);
     assert_eq!(continuity["skippedOnlyCount"], 1);
     assert_eq!(continuity["outstandingFailedCount"], 4);
     assert_eq!(continuity["outstandingErroredCount"], 1);

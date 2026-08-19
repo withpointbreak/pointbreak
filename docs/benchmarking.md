@@ -821,6 +821,18 @@ the already-admitted checkpoint, while real NTFS may first observe the carrier r
 rebuild. Exact-source typed failures compare the product's complete canonical error document with the direct
 harness outcome; the stale-page document is independently frozen at the signed-token boundary.
 
+The successor `pointbreak.qualification-derived-change-read-receipt.v2` embeds that complete V1 Change-read
+receipt unchanged and adds `/api/v2/history` Timeline evidence. Ready topology evidence covers structured and
+exhaustive queries, signed continuation paging, request-local trust transitions, cold/restarted/warm service
+children, two counted readers racing one atomic trust-set transition, and post-append stale-token plus fresh-
+process recovery. Typed Timeline expectations are derived from the fixture, platform, case, and operation
+rather than copied from the observed document. Each Timeline request returns a service-child counter receipt;
+the evaluator bounds SQLite windows, selected and support carrier opens, validated bytes, trust binding, emitted
+entries, and exhaustive hydration to the request shape while requiring zero fallback, fold, or rebuild work.
+The trust suite also flips exactly one bit in an already-valid inline signature, requires strict/derived typed
+failure parity, restores the original carrier bytes, and proves strict and derived recovery to the clean
+semantic response.
+
 Exact-source topology evidence also binds separately hashed library and CLI test executables and retains one result for
 each reader-V3, authority, checkpoint, publication, catch-up, lease/reclamation, call-graph, explicit-off, and
 writer/concurrency control. Storage rows retain the selected publication and descriptor identities, reader
@@ -829,6 +841,12 @@ temporary carrier's byte count and content hash. Hash-only fixture sentinels pro
 prose, payload documents, and private paths are absent from those bytes. Capture holds a generation read lease,
 uses a read-only SQLite snapshot, rechecks publication stability, and rejects symbolic links or non-file
 carriers.
+
+V2 adds Timeline storage rows for response prose, compact payloads, canonical response documents, trust results,
+and opaque continuation tokens. Only a typed-failure fixture may record the token sentinel as unavailable; the
+runner never substitutes a fabricated token. All available values are scanned with the existing stable storage
+witness and only their SHA-256 identities plus zero-hit counts enter evidence. Opaque token identities remain
+request-local and therefore are not compared across hosts.
 
 `execution.rootProvenanceSha256` remains the campaign-level authority shared by every native fragment; it is
 not any one fixture's inventory. Each Change receipt separately binds its exact fixture-before inventory,
@@ -879,14 +897,16 @@ mutated immutable roots, ambiguous CPU units, semantic mismatches, and corrupt o
 fail closed. Missing native evidence remains an explicit `insufficient_evidence` result rather than a
 package error.
 
-Historical evaluator-v2 packages remain verifiable as recorded. The frozen v1 parameter document and table
-retain their v2 identity, while the current publication envelope and every newly assembled fragment bind the
-additive `pointbreak.qualification-derived-access-evaluator-v3-procedure.v1` procedure at
-`7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1`. Evaluator v3 requires separate exact
-product and harness identities, the raw-bound Change-read matrix, complete canonical typed-error documents, the
-control matrix, and storage witnesses from both macOS/APFS and real Windows/NTFS. Missing rows remain
-`insufficient_evidence`; semantic, wire, counter-classification, lifecycle, storage, or authority drift rejects
-the package.
+Historical evaluator-v2 packages remain verifiable as recorded. V1 Change-read receipts and evaluator-v3 remain
+frozen at `7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1`. A newly assembled V2 successor
+receipt selects `pointbreak.qualification-derived-access-evaluator.v4` and the additive
+`pointbreak.qualification-derived-access-evaluator-v4-procedure.v1` procedure at
+`c17a3e949bbf2ccee78864db22793e947d10efb34c9c2d9028644f99c95b8524`. Evaluator v4 retains every v3
+requirement and additionally requires the raw-bound Timeline matrix, independently derived typed-error
+expectations, request-bounded service-child work, concurrent trust-snapshot evidence, one-bit invalid-signature
+failure and two-sided recovery, and Timeline storage witnesses from both macOS/APFS and real Windows/NTFS.
+Missing rows remain `insufficient_evidence`; semantic, wire, counter-classification, lifecycle, storage, or
+authority drift rejects the package.
 
 ## Prospective feasibility contract
 

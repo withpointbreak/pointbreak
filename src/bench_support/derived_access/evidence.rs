@@ -495,6 +495,9 @@ impl QualificationDerivedChangeReadReceiptV2 {
             if let Some(strict) = &row.strict_semantic_sha256 {
                 validate_digest(strict, "strict Timeline semantic receipt")?;
             }
+            if !timeline_typed_documents_valid_v1(row) {
+                return Err("derived Timeline typed-document receipt drifted".to_owned());
+            }
             if row.counter_receipts.len() != schedule.len() {
                 return Err("derived Timeline counter receipt schedule is incomplete".to_owned());
             }
@@ -529,6 +532,7 @@ impl QualificationDerivedChangeReadReceiptV2 {
                     &product_identity_sha256,
                     &execution_identity_sha256,
                 )
+                || !timeline_concurrent_trust_valid_v1(row)
             {
                 return Err("derived Timeline invalid-signature receipt drifted".to_owned());
             }
@@ -577,7 +581,30 @@ impl QualificationDerivedChangeReadReceiptV2 {
                             .into_iter()
                             .collect()
                     || row.forbidden_probes.iter().any(|probe| {
-                        validate_digest(&probe.sentinel_sha256, "Timeline storage probe").is_err()
+                        let token_sentinel_expected = super::qualification_derived_change_expected_outcome_v1(
+                            row.platform,
+                            row.fixture,
+                            super::QualificationDerivedChangeReadCaseV1::ChangesBare,
+                        )
+                        .0 != super::QualificationDerivedChangeReadOracleV1::TypedFailure;
+                        let sentinel_valid = match (&probe.kind, &probe.sentinel_sha256) {
+                            (
+                                super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
+                                None,
+                            ) => !token_sentinel_expected,
+                            (
+                                super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
+                                Some(sentinel),
+                            ) => {
+                                token_sentinel_expected
+                                    && validate_digest(sentinel, "Timeline storage probe").is_ok()
+                            }
+                            (_, Some(sentinel)) => {
+                                validate_digest(sentinel, "Timeline storage probe").is_ok()
+                            }
+                            (_, None) => false,
+                        };
+                        !sentinel_valid
                             || probe.sqlite_match_count != 0
                             || probe.file_match_count != 0
                     })
@@ -622,6 +649,67 @@ fn timeline_authority_digests_valid(
             .continuation_token_set_sha256
             .as_ref()
             .is_none_or(|digest| validate_digest(digest, "Timeline continuation-token set").is_ok())
+}
+
+fn timeline_typed_documents_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+    let expected = super::expected_timeline_typed_documents_v1(row.platform, row.fixture, row.case);
+    row.expected_typed_documents == expected
+        && row.observed_typed_documents.len() == expected.len()
+        && row
+            .observed_typed_documents
+            .iter()
+            .zip(&expected)
+            .all(|(observed, expected)| {
+                observed.operation == expected.operation
+                    && observed.http_status == expected.http_status
+                    && observed.document.schema == expected.schema
+                    && observed.document.version == expected.version
+                    && observed.document.code == expected.code
+                    && observed.document.retryable == expected.retryable
+                    && validate_digest(
+                        &observed.document.canonical_sha256,
+                        "Timeline typed failure document",
+                    )
+                    .is_ok()
+            })
+}
+
+fn timeline_concurrent_trust_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+    let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case == super::QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite;
+    let Some(transition) = &row.concurrent_trust_transition else {
+        return !expected;
+    };
+    let expected_operations = BTreeSet::from([
+        "timeline_concurrent_asc".to_owned(),
+        "timeline_concurrent_desc".to_owned(),
+    ]);
+    expected
+        && !transition.signed_event_id.trim().is_empty()
+        && !transition.signer_identity.trim().is_empty()
+        && transition.signer_identity.trim() == transition.signer_identity
+        && [
+            &transition.trust_identity_before_sha256,
+            &transition.trust_identity_during_sha256,
+            &transition.trust_identity_restored_sha256,
+        ]
+        .into_iter()
+        .all(|identity| validate_digest(identity, "concurrent Timeline trust identity").is_ok())
+        && transition.trust_identity_before_sha256 == transition.trust_identity_restored_sha256
+        && transition.trust_identity_before_sha256 != transition.trust_identity_during_sha256
+        && transition.status_before == "untrusted_key"
+        && transition.status_during == "valid"
+        && transition.status_restored == "untrusted_key"
+        && transition
+            .observed_status_by_operation
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            == expected_operations
+        && transition
+            .observed_status_by_operation
+            .values()
+            .all(|status| matches!(status.as_str(), "untrusted_key" | "valid"))
 }
 
 fn timeline_invalid_signature_failure_valid_v1(
@@ -692,11 +780,17 @@ fn timeline_invalid_signature_failure_valid_v1(
         )
         .is_ok()
         && validate_digest(
-            &failure.recovery_semantic_sha256,
-            "invalid-signature recovery semantic receipt",
+            &failure.strict_recovery_semantic_sha256,
+            "invalid-signature strict recovery semantic receipt",
         )
         .is_ok()
-        && failure.clean_semantic_sha256 == failure.recovery_semantic_sha256
+        && validate_digest(
+            &failure.derived_recovery_semantic_sha256,
+            "invalid-signature derived recovery semantic receipt",
+        )
+        .is_ok()
+        && failure.clean_semantic_sha256 == failure.strict_recovery_semantic_sha256
+        && failure.clean_semantic_sha256 == failure.derived_recovery_semantic_sha256
         && failure.clean_semantic_sha256 != failure.derived_semantic_sha256
         && failure.strict_semantic_sha256 == failure.derived_semantic_sha256
         && counter.validate().is_ok()
@@ -722,6 +816,7 @@ fn timeline_invalid_signature_failure_valid_v1(
         && counters.object_artifact_reads == 0
         && counters.timeline_trust_support_carriers == 0
         && counters.timeline_entries_emitted == 0
+        && failure.recovery_signature_status == "valid"
         && failure.trust_bindings_observed == 0
 }
 
