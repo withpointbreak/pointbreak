@@ -3863,6 +3863,12 @@ mod instrumented {
 
     fn timeline_exact_revision_target(endpoint: &InspectorEndpoint) -> Result<String, String> {
         let value = endpoint.json("/api/v2/history?limit=100&order=asc")?.1;
+        timeline_exact_revision_target_from_document(&value)
+    }
+
+    pub(super) fn timeline_exact_revision_target_from_document(
+        value: &Value,
+    ) -> Result<String, String> {
         let reference = value
             .get("entries")
             .and_then(Value::as_array)
@@ -3882,9 +3888,11 @@ mod instrumented {
             .and_then(Value::as_str)
             .ok_or_else(|| "Timeline Revision witness omitted revisionId".to_owned())?;
         let artifact = reference
-            .get("artifactHash")
+            .get("objectArtifactContentHash")
             .and_then(Value::as_str)
-            .ok_or_else(|| "Timeline Revision witness omitted artifactHash".to_owned())?;
+            .ok_or_else(|| {
+                "Timeline Revision witness omitted objectArtifactContentHash".to_owned()
+            })?;
         Ok(format!(
             "/api/v2/history?limit=100&order=asc&revision={}&artifactHash={}",
             percent_encode(revision),
@@ -6199,8 +6207,8 @@ mod tests {
         materialize_diagnostic_fixture_at_root, normalize_change_semantic,
         normalize_ready_profile_semantic, percent_encode, post_append_has_advanced,
         replace_unique_bytes, requires_pre_mutation_measurement,
-        requires_semantic_fixture_preflight, validate_fixture_authoritative_inventory,
-        validate_topology_fixture_semantics,
+        requires_semantic_fixture_preflight, timeline_exact_revision_target_from_document,
+        validate_fixture_authoritative_inventory, validate_topology_fixture_semantics,
     };
     use super::*;
 
@@ -6299,6 +6307,32 @@ mod tests {
     #[test]
     fn percent_encoding_is_query_component_strict() {
         assert_eq!(percent_encode("matrix / ä"), "matrix%20%2F%20%C3%A4");
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn timeline_exact_revision_target_maps_the_wire_ref_to_query_names() {
+        let document = json!({
+            "entries": [{
+                "revisionRefs": [{
+                    "revisionId": "rev:sha256:one",
+                    "objectArtifactContentHash": "sha256:two",
+                    "artifactHash": "sha256:query-alias-decoy",
+                }]
+            }]
+        });
+
+        assert_eq!(
+            timeline_exact_revision_target_from_document(&document).expect("exact Revision target"),
+            "/api/v2/history?limit=100&order=asc&revision=rev%3Asha256%3Aone&artifactHash=sha256%3Atwo"
+        );
+
+        let mut drifted = document;
+        drifted["entries"][0]["revisionRefs"][0]
+            .as_object_mut()
+            .expect("Revision ref object")
+            .remove("objectArtifactContentHash");
+        assert!(timeline_exact_revision_target_from_document(&drifted).is_err());
     }
 
     #[cfg(feature = "longitudinal-counting")]
