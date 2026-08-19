@@ -47,6 +47,13 @@ pub use derived_access::revisions::{
 };
 #[doc(hidden)]
 pub use derived_access::threads::{DerivedThreads, DerivedThreadsRoute};
+#[doc(hidden)]
+pub use derived_access::timeline::{
+    DerivedTimelineAdjacentWindowV1, DerivedTimelineExactRevisionV1, DerivedTimelineOrderV1,
+    DerivedTimelinePageBoundaryV1, DerivedTimelinePageKeyV1, DerivedTimelinePagePositionV1,
+    DerivedTimelinePageRequestError, DerivedTimelinePageRequestV1, DerivedTimelinePageV1,
+    DerivedTimelineTraversalV1,
+};
 
 /// Drain process-local, user-actionable diagnostics produced while coordinating
 /// disposable derived state around authoritative writes.
@@ -194,21 +201,22 @@ pub use workflow::{
     classify_validation_continuity, commit_graph_stamp, compact_store, count_new_since,
     create_change, current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, diffstat_from_files, dry_run_bulk_adoption, effective_integration_ref,
-    enrich_liveness, explain_store_sensitivity, export_artifact, fetch_input_request,
-    forget_family_store, history_base_projection, import_artifact, import_event, ingest_events,
-    join_revision_to_change, land_commit, link_changes, link_store_to_family, list_associations,
-    list_attention, list_family_stores, list_input_requests, list_observations, list_revisions,
-    list_units_for_ref, list_validation_checks, matches_query, migrate_bulk_adoption,
-    migrate_store_to_common_dir, open_input_request, parse_search_query, parse_search_query_for,
-    port_review_fact, preview_link_to_family, record_assessment, record_event_signature,
-    record_observation, record_validation_check, redact_history_bodies, referenced_artifacts,
-    remove_content, resolve_default_integration_ref, respond_input_request,
-    restore_bulk_adoption_backup, review_history, review_source_binding, select_review_cursor,
-    show_assessments, show_revision, show_revision_for_change_reader,
-    show_revision_for_change_reader_ready, show_revision_for_inspector, show_revision_overviews,
-    stale_review_fact_count, store_identity, store_status, unlink_store_from_family,
-    validate_review_cursor_for_write, validated_track_id, withdraw_change_revision_relation,
-    withdraw_commit, withdraw_ref, withdraw_revision_from_change,
+    enrich_liveness, event_history_search_record, explain_store_sensitivity, export_artifact,
+    fetch_input_request, forget_family_store, history_base_projection, import_artifact,
+    import_event, ingest_events, join_revision_to_change, land_commit, link_changes,
+    link_store_to_family, list_associations, list_attention, list_family_stores,
+    list_input_requests, list_observations, list_revisions, list_units_for_ref,
+    list_validation_checks, matches_query, migrate_bulk_adoption, migrate_store_to_common_dir,
+    open_input_request, parse_search_query, parse_search_query_for, port_review_fact,
+    preview_link_to_family, record_assessment, record_event_signature, record_observation,
+    record_validation_check, redact_history_bodies, referenced_artifacts, remove_content,
+    resolve_default_integration_ref, respond_input_request, restore_bulk_adoption_backup,
+    review_history, review_source_binding, select_review_cursor, show_assessments, show_revision,
+    show_revision_for_change_reader, show_revision_for_change_reader_ready,
+    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
+    store_status, unlink_store_from_family, validate_review_cursor_for_write, validated_track_id,
+    withdraw_change_revision_relation, withdraw_commit, withdraw_ref,
+    withdraw_revision_from_change,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 #[cfg(any(test, feature = "bench"))]

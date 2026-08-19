@@ -13,6 +13,16 @@ pub struct TrustSet {
 }
 
 impl TrustSet {
+    /// Canonical runtime identity for response stamps that depend on this
+    /// exact allow-list. Trust decisions remain request-local; only this
+    /// deterministic identity may cross into a projection stamp.
+    pub(crate) fn identity_sha256(&self) -> Result<String> {
+        crate::canonical_hash::sha256_json_prefixed(&serde_json::json!({
+            "schema": "pointbreak.runtime-trust-set-identity.v1",
+            "allowedSigners": self.allowed_signers,
+        }))
+    }
+
     pub fn from_allowed_signers_file(path: impl AsRef<Path>) -> Result<Self> {
         let bytes =
             std::fs::read(path.as_ref()).map_err(|error| ShoreError::WorkflowInputInvalid {
@@ -185,5 +195,36 @@ mod tests {
         let signer = SignerId::parse(KEY_A).unwrap();
         assert!(trust.authorizes(&ActorId::new(KEY_A), &signer, "2026-06-18T00:00:00Z"));
         assert!(trust.reverse_resolve(&signer).is_empty());
+    }
+
+    #[test]
+    fn runtime_identity_is_stable_and_changes_with_explicit_enrollment() {
+        let first = event_signature_trust_set(json!({
+            "allowedSigners": {
+                "actor:agent:bot": [KEY_B, KEY_A],
+                "actor:git-email:alice@example.com": [KEY_A]
+            }
+        }))
+        .unwrap();
+        let reordered = event_signature_trust_set(json!({
+            "allowedSigners": {
+                "actor:git-email:alice@example.com": [KEY_A],
+                "actor:agent:bot": [KEY_A, KEY_B]
+            }
+        }))
+        .unwrap();
+        let changed = event_signature_trust_set(json!({
+            "allowedSigners": { "actor:agent:bot": [KEY_A] }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            first.identity_sha256().unwrap(),
+            reordered.identity_sha256().unwrap()
+        );
+        assert_ne!(
+            first.identity_sha256().unwrap(),
+            changed.identity_sha256().unwrap()
+        );
     }
 }

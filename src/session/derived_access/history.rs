@@ -897,16 +897,13 @@ fn query_count(
     predicate: &str,
     parameters: &[Value],
 ) -> Result<usize, String> {
-    let sql = format!(
-        "{REVIEW_EVENT_CTE}
-         SELECT count(*) FROM review_event WHERE {predicate}"
-    );
-    let count = connection
-        .query_row(&sql, rusqlite::params_from_iter(parameters.iter()), |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|error| error.to_string())?;
-    usize::try_from(count).map_err(|_| "negative history count".to_owned())
+    query_selected_count(
+        connection,
+        REVIEW_EVENT_CTE,
+        "review_event",
+        predicate,
+        parameters,
+    )
 }
 
 fn query_facets(
@@ -914,10 +911,42 @@ fn query_facets(
     predicate: &str,
     parameters: &[Value],
 ) -> Result<BTreeMap<String, usize>, String> {
+    query_selected_facets(
+        connection,
+        REVIEW_EVENT_CTE,
+        "review_event",
+        predicate,
+        parameters,
+    )
+}
+
+/// Shared count primitive for the legacy and Change-aware product-history
+/// selectors. Callers own predicate compilation; this function owns the one
+/// count shape and checked integer conversion.
+pub(super) fn query_selected_count(
+    connection: &rusqlite::Connection,
+    cte: &str,
+    relation: &str,
+    predicate: &str,
+    parameters: &[Value],
+) -> Result<usize, String> {
+    let sql = format!("{cte} SELECT count(*) FROM {relation} WHERE {predicate}");
+    query_count_sql(connection, &sql, parameters)
+}
+
+/// Shared event-type facet primitive. The caller supplies the predicate with
+/// only the URL event-type set removed, preserving the public facet contract.
+pub(super) fn query_selected_facets(
+    connection: &rusqlite::Connection,
+    cte: &str,
+    relation: &str,
+    predicate: &str,
+    parameters: &[Value],
+) -> Result<BTreeMap<String, usize>, String> {
     let sql = format!(
-        "{REVIEW_EVENT_CTE}
+        "{cte}
          SELECT event_type, count(*)
-         FROM review_event
+         FROM {relation}
          WHERE {predicate}
          GROUP BY event_type
          ORDER BY event_type"
@@ -939,6 +968,121 @@ fn query_facets(
         );
     }
     Ok(facets)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SelectedHistoryKey {
+    pub(super) occurred_at: String,
+    pub(super) event_id: String,
+}
+
+/// Resolve one selected event key from the same predicate snapshot.
+pub(super) fn query_selected_key(
+    connection: &rusqlite::Connection,
+    cte: &str,
+    relation: &str,
+    predicate: &str,
+    parameters: &[Value],
+    event_id: &str,
+) -> Result<Option<SelectedHistoryKey>, String> {
+    let sql = format!(
+        "{cte}
+         SELECT normalized_occurred_at, event_id
+         FROM {relation}
+         WHERE {predicate} AND event_id = ?"
+    );
+    let mut values = parameters.to_vec();
+    values.push(event_id.to_owned().into());
+    connection
+        .query_row(&sql, rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(SelectedHistoryKey {
+                occurred_at: row.get(0)?,
+                event_id: row.get(1)?,
+            })
+        })
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+/// Count rows that precede `key` in one normalized selected order.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn query_selected_index(
+    connection: &rusqlite::Connection,
+    cte: &str,
+    relation: &str,
+    predicate: &str,
+    parameters: &[Value],
+    key: &SelectedHistoryKey,
+    descending: bool,
+    inclusive: bool,
+) -> Result<usize, String> {
+    let (occurred_comparison, event_comparison) = match (descending, inclusive) {
+        (false, false) => ("<", "<"),
+        (false, true) => ("<", "<="),
+        (true, false) => (">", ">"),
+        (true, true) => (">", ">="),
+    };
+    let sql = format!(
+        "{cte}
+         SELECT count(*) FROM {relation}
+         WHERE {predicate}
+           AND (
+               normalized_occurred_at {occurred_comparison} ?
+               OR (
+                   normalized_occurred_at = ?
+                   AND event_id {event_comparison} ?
+               )
+           )"
+    );
+    let mut values = parameters.to_vec();
+    values.extend([
+        key.occurred_at.clone().into(),
+        key.occurred_at.clone().into(),
+        key.event_id.clone().into(),
+    ]);
+    query_count_sql(connection, &sql, &values)
+}
+
+/// Select one normalized window from a caller-supplied predicate. The same
+/// primitive backs both product History and Change-aware Timeline paging.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn query_selected_window(
+    connection: &rusqlite::Connection,
+    cte: &str,
+    relation: &str,
+    predicate: &str,
+    parameters: &[Value],
+    descending: bool,
+    limit: usize,
+    offset: usize,
+) -> Result<Vec<SelectedHistoryKey>, String> {
+    let direction = if descending { "DESC" } else { "ASC" };
+    let sql = format!(
+        "{cte}
+         SELECT normalized_occurred_at, event_id
+         FROM {relation}
+         WHERE {predicate}
+         ORDER BY normalized_occurred_at {direction}, event_id {direction}
+         LIMIT ? OFFSET ?"
+    );
+    let mut values = parameters.to_vec();
+    values.extend([
+        to_sql_integer(limit)?.into(),
+        to_sql_integer(offset)?.into(),
+    ]);
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            Ok(SelectedHistoryKey {
+                occurred_at: row.get(0)?,
+                event_id: row.get(1)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn query_distinct_values(connection: &rusqlite::Connection) -> Result<DistinctValues, String> {
@@ -1086,10 +1230,6 @@ fn query_page_ids(
     offset: usize,
     match_count: usize,
 ) -> Result<Vec<String>, String> {
-    let direction = match query.order {
-        HistoryOrder::Asc => "ASC",
-        HistoryOrder::Desc => "DESC",
-    };
     let mut page_predicate = predicate.to_owned();
     let mut page_parameters = parameters.to_vec();
     if let Some(after) = &page.after {
@@ -1107,37 +1247,22 @@ fn query_page_ids(
             after.event_id.as_str().to_owned().into(),
         ]);
     }
-    let mut sql = format!(
-        "{REVIEW_EVENT_CTE}
-         SELECT event_id
-         FROM review_event
-         WHERE {page_predicate}
-         ORDER BY normalized_occurred_at {direction}, event_id {direction}"
-    );
-    match page.limit {
-        Some(limit) => {
-            let effective_limit = limit.min(match_count);
-            sql.push_str(" LIMIT ? OFFSET ?");
-            page_parameters.push(to_sql_integer(effective_limit)?.into());
-            page_parameters
-                .push(to_sql_integer(if page.after.is_some() { 0 } else { offset })?.into());
-        }
-        None if offset > 0 && page.after.is_none() => {
-            sql.push_str(" LIMIT -1 OFFSET ?");
-            page_parameters.push(to_sql_integer(offset)?.into());
-        }
-        None => {}
-    }
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| error.to_string())?;
-    let rows = statement
-        .query_map(rusqlite::params_from_iter(page_parameters.iter()), |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
+    let selected_offset = if page.after.is_some() { 0 } else { offset };
+    let limit = page
+        .limit
+        .unwrap_or_else(|| match_count.saturating_sub(selected_offset))
+        .min(match_count);
+    query_selected_window(
+        connection,
+        REVIEW_EVENT_CTE,
+        "review_event",
+        &page_predicate,
+        &page_parameters,
+        query.order == HistoryOrder::Desc,
+        limit,
+        selected_offset,
+    )
+    .map(|rows| rows.into_iter().map(|row| row.event_id).collect())
 }
 
 fn count_new_rows(

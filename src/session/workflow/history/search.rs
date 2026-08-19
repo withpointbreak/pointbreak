@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
+use crate::documents::{EventHistoryEntryV1, EventHistorySummaryV1};
 use crate::model::{ReviewEndpoint, ReviewTargetRef};
 use crate::session::event::EventType;
 use crate::session::identity::instant::normalize_instant_to_iso_millis;
@@ -61,6 +62,131 @@ impl SearchRecord {
             .map(|(key, value)| key.len().saturating_add(value.len()))
             .sum();
         (1_usize.saturating_add(field_string_count), field_bytes)
+    }
+}
+
+/// Build the canonical Change-aware Timeline search record from one fully
+/// projected event-history entry. Strict and derived Timeline paths share this
+/// exact body-dependent representation; neither path persists it.
+pub fn event_history_search_record(entry: &EventHistoryEntryV1) -> SearchRecord {
+    let mut fields = BTreeMap::new();
+    fields.insert("type".to_owned(), entry.event_type.as_str().to_owned());
+    fields.insert(
+        "track".to_owned(),
+        timeline_token_set(entry.track_id.iter().map(|track| track.as_str())),
+    );
+    fields.insert(
+        "actor".to_owned(),
+        timeline_token_set(std::iter::once(entry.writer.actor_id.as_str())),
+    );
+    fields.insert(
+        "revision".to_owned(),
+        entry
+            .revision_refs
+            .iter()
+            .map(|reference| reference.revision_id.as_str())
+            .chain(
+                entry
+                    .unresolved_revision_ids
+                    .iter()
+                    .map(|revision| revision.as_str()),
+            )
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    fields.insert(
+        "change".to_owned(),
+        entry
+            .change_ids
+            .iter()
+            .map(|change| change.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    fields.insert(
+        "snapshot".to_owned(),
+        entry
+            .revision_refs
+            .iter()
+            .map(|reference| reference.object_artifact_content_hash.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let (check, assessment, state, tags) = timeline_summary_search_fields(&entry.summary);
+    fields.insert("check".to_owned(), check);
+    fields.insert("assessment".to_owned(), assessment);
+    fields.insert("is".to_owned(), timeline_token_set(state));
+    fields.insert(
+        "tag".to_owned(),
+        timeline_token_set(tags.iter().map(String::as_str)),
+    );
+    fields.insert(
+        RANGE_ANCHOR_FIELD.to_owned(),
+        normalize_instant_to_iso_millis(&entry.occurred_at).unwrap_or_default(),
+    );
+    SearchRecord {
+        text: serde_json::to_string(entry)
+            .expect("typed Timeline entry must serialize")
+            .to_lowercase(),
+        fields,
+    }
+}
+
+fn timeline_summary_search_fields(
+    summary: &EventHistorySummaryV1,
+) -> (String, String, Option<&'static str>, Vec<String>) {
+    let mut check = String::new();
+    let mut assessment = String::new();
+    let mut state = None;
+    let mut tags = Vec::new();
+    match summary {
+        EventHistorySummaryV1::ReviewObservationRecorded(payload) => {
+            tags = payload.tags.clone();
+        }
+        EventHistorySummaryV1::ReviewAssessmentRecorded(payload) => {
+            assessment = timeline_wire(&payload.assessment);
+        }
+        EventHistorySummaryV1::InputRequestOpened(_) => state = Some("open"),
+        EventHistorySummaryV1::InputRequestResponded(_) => state = Some("answered"),
+        EventHistorySummaryV1::ValidationCheckRecorded(payload) => {
+            check = timeline_wire(&payload.status);
+        }
+        EventHistorySummaryV1::ReviewInitialized
+        | EventHistorySummaryV1::WorkObjectProposed { .. }
+        | EventHistorySummaryV1::ReviewNoteImported
+        | EventHistorySummaryV1::RevisionRefAssociated(_)
+        | EventHistorySummaryV1::RevisionRefWithdrawn(_)
+        | EventHistorySummaryV1::RevisionCommitAssociated(_)
+        | EventHistorySummaryV1::RevisionCommitWithdrawn(_)
+        | EventHistorySummaryV1::ChangeDeclared(_)
+        | EventHistorySummaryV1::ChangeMembershipAsserted(_)
+        | EventHistorySummaryV1::ChangeMembershipWithdrawn(_)
+        | EventHistorySummaryV1::ChangeLinkAsserted(_)
+        | EventHistorySummaryV1::ChangeRevisionRelationAsserted(_)
+        | EventHistorySummaryV1::ChangeRevisionRelationWithdrawn(_)
+        | EventHistorySummaryV1::RevisionRelationAttested(_)
+        | EventHistorySummaryV1::ReviewFactPorted(_) => {}
+    }
+    (check, assessment, state, tags)
+}
+
+fn timeline_wire(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn timeline_token_set<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
+    let values = tokens
+        .into_iter()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if values.is_empty() {
+        String::new()
+    } else {
+        format!(" {values} ")
     }
 }
 
@@ -459,7 +585,7 @@ const TYPE_LABELS: &[(&str, &str)] = &[
 
 /// How a resolved qualifier compares its value against a record field, resolved
 /// per key by [`match_kind_for`]; [`field_matches`] dispatches on it.
-enum MatchKind {
+pub(crate) enum MatchKind {
     Exact,
     Substring,
     SetMember,
@@ -467,7 +593,7 @@ enum MatchKind {
     RangeAfter,
 }
 
-fn match_kind_for(field: &str) -> MatchKind {
+pub(crate) fn match_kind_for(field: &str) -> MatchKind {
     match field {
         "type" | "check" | "assessment" => MatchKind::Exact,
         "revision" | "snapshot" => MatchKind::Substring,
@@ -522,7 +648,7 @@ fn field_matches(record: &SearchRecord, field: &str, value: &str) -> bool {
 /// `.` sorts before `z`); a date/datetime prefix passes through and keeps raw
 /// lexical prefix-compare semantics. The parser lowercased the value, so restore
 /// ASCII case for the strict instant parse and re-lowercase the result.
-fn range_bound(value: &str) -> String {
+pub(crate) fn range_bound(value: &str) -> String {
     let upper = value.to_ascii_uppercase();
     normalize_instant_to_iso_millis(&upper)
         // Round-trip guard: only a bound the normalizer re-emits verbatim
@@ -551,7 +677,7 @@ fn exact_matches(record: &SearchRecord, field: &str, value: &str) -> bool {
 
 /// Resolve an `assessment:` value to its wire form (display label or wire → wire),
 /// mirroring `resolve_type_value`; passes unknowns through.
-fn resolve_assessment_value(value: &str) -> &str {
+pub(crate) fn resolve_assessment_value(value: &str) -> &str {
     for (wire, label) in ASSESSMENT_LABEL_TABLE {
         if *wire == value || *label == value {
             return wire;
@@ -572,7 +698,7 @@ const ASSESSMENT_LABEL_TABLE: &[(&str, &str)] = &[
 /// Resolve a `type:` clause value: the wire id when the value names a known label
 /// or wire id, else the raw value (mirrors `TYPES.find(t => t.label === value ||
 /// t.id === value)`).
-fn resolve_type_value(value: &str) -> &str {
+pub(crate) fn resolve_type_value(value: &str) -> &str {
     for (label, wire_id) in TYPE_LABELS {
         if *label == value || *wire_id == value {
             return wire_id;

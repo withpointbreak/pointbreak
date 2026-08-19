@@ -129,10 +129,13 @@ pub use history::{
     REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, ReviewHistoryEntry, ReviewHistoryFilters,
     ReviewHistoryOptions, ReviewHistoryResult, ReviewHistorySummary, SearchRecord,
     apply_history_query, build_haystack, count_new_since, default_history_page_projection,
-    history_base_projection, matches_query, parse_search_query, parse_search_query_for,
-    redact_history_bodies, review_history,
+    event_history_search_record, history_base_projection, matches_query, parse_search_query,
+    parse_search_query_for, redact_history_bodies, review_history,
 };
-pub(crate) use history::{history_entries_from_selected_events, tag_completion_key};
+pub(crate) use history::{
+    MatchKind, history_entries_from_selected_events, match_kind_for, range_bound,
+    resolve_assessment_value, resolve_type_value, tag_completion_key,
+};
 #[cfg(any(test, feature = "bench"))]
 pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{

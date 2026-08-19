@@ -3098,6 +3098,28 @@ pub struct LongitudinalCountersV1 {
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_rows_emitted: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_sqlite_candidates: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_sqlite_window_rows: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_sqlite_facet_rows: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_selected_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_revision_candidate_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_removal_support_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_signature_support_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_correlation_support_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_trust_support_carriers: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_exhaustive_candidates: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub timeline_entries_emitted: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub authoritative_fallbacks: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub full_history_fallbacks: u64,
@@ -5971,6 +5993,17 @@ mod contract_tests {
             change_support_carriers_opened: 8,
             change_matches: 9,
             change_rows_emitted: 10,
+            timeline_sqlite_candidates: 11,
+            timeline_sqlite_window_rows: 12,
+            timeline_sqlite_facet_rows: 13,
+            timeline_selected_carriers: 14,
+            timeline_revision_candidate_carriers: 21,
+            timeline_removal_support_carriers: 15,
+            timeline_signature_support_carriers: 16,
+            timeline_correlation_support_carriers: 17,
+            timeline_trust_support_carriers: 18,
+            timeline_exhaustive_candidates: 19,
+            timeline_entries_emitted: 20,
             ..LongitudinalCountersV1::default()
         };
         let nonzero = serde_json::to_value(nonzero).expect("nonzero fallback counter JSON");
@@ -5984,6 +6017,17 @@ mod contract_tests {
         assert_eq!(nonzero["changeSupportCarriersOpened"], 8);
         assert_eq!(nonzero["changeMatches"], 9);
         assert_eq!(nonzero["changeRowsEmitted"], 10);
+        assert_eq!(nonzero["timelineSqliteCandidates"], 11);
+        assert_eq!(nonzero["timelineSqliteWindowRows"], 12);
+        assert_eq!(nonzero["timelineSqliteFacetRows"], 13);
+        assert_eq!(nonzero["timelineSelectedCarriers"], 14);
+        assert_eq!(nonzero["timelineRevisionCandidateCarriers"], 21);
+        assert_eq!(nonzero["timelineRemovalSupportCarriers"], 15);
+        assert_eq!(nonzero["timelineSignatureSupportCarriers"], 16);
+        assert_eq!(nonzero["timelineCorrelationSupportCarriers"], 17);
+        assert_eq!(nonzero["timelineTrustSupportCarriers"], 18);
+        assert_eq!(nonzero["timelineExhaustiveCandidates"], 19);
+        assert_eq!(nonzero["timelineEntriesEmitted"], 20);
 
         let mut receipt = LongitudinalCounterReceiptV1 {
             schema: LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1.to_owned(),

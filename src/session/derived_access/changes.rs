@@ -267,6 +267,177 @@ impl DerivedChangeAccess {
             }))
     }
 
+    pub fn timeline(
+        &self,
+        request: &super::timeline::DerivedTimelinePageRequestV1,
+        trust_set: &crate::session::TrustSet,
+    ) -> Result<DerivedChangeOutcomeV1<super::timeline::DerivedTimelinePageV1>> {
+        self.timeline_with_hook(request, trust_set, |_| {})
+    }
+
+    fn timeline_with_hook(
+        &self,
+        request: &super::timeline::DerivedTimelinePageRequestV1,
+        trust_set: &crate::session::TrustSet,
+        mut hook: impl FnMut(super::timeline::TimelineReadBoundary),
+    ) -> Result<DerivedChangeOutcomeV1<super::timeline::DerivedTimelinePageV1>> {
+        let current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(status)) => {
+                return Ok(self.page_control_outcome(status));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error,
+                ));
+            }
+        };
+        let generation_id = current.generation_id().to_owned();
+        let checkpoint = match current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return Ok(self.page_receipt_failure_outcome(error)),
+        };
+        if let Err(error) = current.reader_profile_document(&checkpoint) {
+            return Ok(self.page_receipt_failure_outcome(error));
+        }
+        let as_of = checkpoint.truth_cursor;
+        let snapshot = match current.service().product_history_read_snapshot_at(as_of) {
+            Ok(LocatorRead::Ready(snapshot)) => snapshot,
+            Ok(LocatorRead::CatchUpRequired { .. }) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionStale,
+                    "derived Timeline product history moved while its checkpoint was pinned",
+                ));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error.to_string(),
+                ));
+            }
+        };
+        if snapshot.changes.as_of != as_of
+            || u64::try_from(snapshot.state.event_count).ok()
+                != Some(checkpoint.authority_cursor.event_count)
+        {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                "derived Timeline snapshot disagrees with its pinned authority cursor",
+            ));
+        }
+        let source_change_projection_stamp = match current.change_generation_stamp(
+            &checkpoint,
+            &snapshot.changes.projection,
+            &snapshot.changes.document_projection,
+        ) {
+            Ok(stamp) => stamp,
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        let trust_set_sha256 = match trust_set.identity_sha256() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error.to_string(),
+                ));
+            }
+        };
+        let timeline_projection_stamp =
+            match crate::session::projection::event_history::timeline_projection_stamp_v1(
+                &source_change_projection_stamp,
+                &trust_set_sha256,
+            ) {
+                Ok(stamp) => stamp,
+                Err(error) => {
+                    return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                        DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                        error.to_string(),
+                    ));
+                }
+            };
+        if request
+            .position()
+            .expected_projection_stamp()
+            .is_some_and(|expected| expected != timeline_projection_stamp)
+        {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionStale,
+                "derived Timeline continuation belongs to a different live checkpoint or TrustSet",
+            ));
+        }
+        hook(super::timeline::TimelineReadBoundary::SnapshotPinned);
+        let prepared = super::timeline::prepare_timeline_page(
+            current.service(),
+            &snapshot.connection,
+            &snapshot.changes.document_projection,
+            as_of,
+            checkpoint.authority_cursor.clone(),
+            source_change_projection_stamp,
+            timeline_projection_stamp,
+            request,
+            trust_set,
+            &mut hook,
+        );
+        if let Err(error) = snapshot.finish() {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+        let prepared = match prepared {
+            Ok(page) => page,
+            Err(super::timeline::TimelinePageError::RequestInvalid(message)) => {
+                return Err(ShoreError::WorkflowInputInvalid { reason: message });
+            }
+            Err(super::timeline::TimelinePageError::Stale(message)) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionStale,
+                    message,
+                ));
+            }
+            Err(super::timeline::TimelinePageError::Invalid(message)) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    message,
+                ));
+            }
+        };
+
+        let final_current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Timeline projection moved before response completion",
+                ));
+            }
+        };
+        if final_current.generation_id() != generation_id {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Timeline generation changed before response completion",
+            ));
+        }
+        let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(LifecycleError::TruthChanged) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Timeline checkpoint moved before response completion",
+                ));
+            }
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Timeline checkpoint changed before response completion",
+            ));
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(prepared))
+    }
+
     fn read_page(
         &self,
         lens: ChangePageLens,
@@ -1351,7 +1522,7 @@ fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChangeOutcomeV1
     }
 }
 
-fn exact_revision_from_proposal(event: &ShoreEvent) -> Result<RevisionRefV1> {
+pub(super) fn exact_revision_from_proposal(event: &ShoreEvent) -> Result<RevisionRefV1> {
     if event.event_type != EventType::WorkObjectProposed {
         return Err(ShoreError::Message(format!(
             "selected proposal carrier {} has family {}",
@@ -1570,7 +1741,8 @@ mod tests {
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventSignatureRecordedPayload, EventTarget,
         EventToBeSigned, ReviewInitializedPayload, Revision, Writer, build_change_declared,
-        build_membership_asserted, event_signature_pre_authentication_encoding,
+        build_membership_asserted, build_membership_withdrawn, build_revision_relation_asserted,
+        build_revision_relation_withdrawn, event_signature_pre_authentication_encoding,
     };
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::store::backend::StoreBackend;
@@ -1811,6 +1983,149 @@ mod tests {
             .expect("build detached removal signature");
             record_fixture_event(&self.store, carrier.clone());
             (removal, carrier)
+        }
+
+        fn append_historical_membership_then_withdraw(
+            &self,
+            change_id: &ChangeId,
+            revision: &RevisionRefV1,
+        ) -> (ShoreEvent, ShoreEvent) {
+            let membership = build_membership_asserted(change_id, &revision.revision_id, [121; 32])
+                .expect("build historical membership");
+            let membership_event = ShoreEvent::new(
+                EventType::ChangeMembershipAsserted,
+                "fixture:historical-membership",
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                membership.clone(),
+                "2026-08-10T02:02:00Z",
+            )
+            .expect("build historical membership event");
+            record_fixture_event(&self.store, membership_event.clone());
+
+            let withdrawal = build_membership_withdrawn(&membership.membership_claim_id, [122; 32])
+                .expect("build historical membership withdrawal");
+            let withdrawal_event = ShoreEvent::new(
+                EventType::ChangeMembershipWithdrawn,
+                "fixture:historical-membership-withdrawal",
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                withdrawal,
+                "2026-08-10T02:02:01Z",
+            )
+            .expect("build historical membership withdrawal event");
+            record_fixture_event(&self.store, withdrawal_event.clone());
+            (membership_event, withdrawal_event)
+        }
+
+        fn append_conflicting_proposal(&self, revision_id: &RevisionId) -> ShoreEvent {
+            let artifact_hash = format!("sha256:{}", "9".repeat(64));
+            let event = ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                "fixture:conflicting-proposal",
+                EventTarget::for_revision(
+                    JournalId::new("journal:change-endpoint"),
+                    revision_id.clone(),
+                    None,
+                )
+                .expect("build conflicting proposal target"),
+                Writer::shore_local("change-endpoint-test"),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new(format!(
+                        "engagement:sha256:{}",
+                        "9".repeat(64)
+                    )),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: Revision {
+                            id: revision_id.clone(),
+                            object_id: ObjectId::new(format!("obj:sha256:{}", "9".repeat(64))),
+                            git_provenance: None,
+                        },
+                        summary: Some("conflicting proposal".to_owned()),
+                        object_artifact_content_hash: artifact_hash,
+                        supersedes: Vec::new(),
+                    },
+                },
+                "2026-08-10T02:03:00Z",
+            )
+            .expect("build conflicting proposal event");
+            record_fixture_event(&self.store, event.clone());
+            event
+        }
+
+        fn append_inline_signed_review_initialized(
+            &self,
+            invalid_algorithm: bool,
+        ) -> (ShoreEvent, String) {
+            let signer = TestEd25519Signer::from_seed([92; 32]);
+            let mut event = ShoreEvent::new(
+                EventType::ReviewInitialized,
+                if invalid_algorithm {
+                    "fixture:inline-signed-invalid"
+                } else {
+                    "fixture:inline-signed-valid"
+                },
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                ReviewInitializedPayload {},
+                if invalid_algorithm {
+                    "2026-08-10T02:04:01Z"
+                } else {
+                    "2026-08-10T02:04:00Z"
+                },
+            )
+            .expect("build inline-signed Timeline event");
+            let to_be_signed = EventToBeSigned::from_event(&event, signer.signer_id())
+                .expect("build inline Timeline signature message");
+            let signature = signer
+                .sign_event_message(
+                    &event_signature_pre_authentication_encoding(&to_be_signed)
+                        .expect("encode inline Timeline signature message"),
+                )
+                .expect("sign inline Timeline event");
+            event.signer = Some(signer.signer_id().clone());
+            event.signature = Some(EventSignature::ed25519_v1(signature));
+            if invalid_algorithm {
+                event.signature.as_mut().expect("attached signature").alg = "invalid".to_owned();
+            }
+            let signer_id = signer.signer_id().as_str().to_owned();
+            record_fixture_event(&self.store, event.clone());
+            (event, signer_id)
+        }
+
+        fn append_relation_then_withdraw(
+            &self,
+            change_id: &ChangeId,
+            successor: RevisionRefV1,
+            predecessor: RevisionRefV1,
+        ) -> (ShoreEvent, ShoreEvent) {
+            let relation =
+                build_revision_relation_asserted(change_id, successor, predecessor, [123; 32])
+                    .expect("build historical Revision relation");
+            let relation_event = ShoreEvent::new(
+                EventType::ChangeRevisionRelationAsserted,
+                "fixture:historical-relation",
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                relation.clone(),
+                "2026-08-10T02:05:00Z",
+            )
+            .expect("build historical Revision relation event");
+            record_fixture_event(&self.store, relation_event.clone());
+            let withdrawal =
+                build_revision_relation_withdrawn(&relation.relation_claim_id, [124; 32])
+                    .expect("build historical Revision relation withdrawal");
+            let withdrawal_event = ShoreEvent::new(
+                EventType::ChangeRevisionRelationWithdrawn,
+                "fixture:historical-relation-withdrawal",
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                withdrawal,
+                "2026-08-10T02:05:01Z",
+            )
+            .expect("build historical Revision relation withdrawal event");
+            record_fixture_event(&self.store, withdrawal_event.clone());
+            (relation_event, withdrawal_event)
         }
 
         fn database_path(&self) -> PathBuf {
@@ -4052,6 +4367,963 @@ mod tests {
                 .changes(&bounded_search_request("target state", 1, None))
                 .expect("search across a conflicting candidate"),
             "conflicting proposal summaries for exact Revision",
+        );
+    }
+
+    #[test]
+    fn derived_timeline_projects_validated_change_aware_entries() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("first proposal")], &[None]]);
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .expect("build Timeline request");
+
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .expect("read derived Timeline")
+        else {
+            panic!("derived Timeline fixture must be ready");
+        };
+        assert_eq!(page.document().match_count, 6);
+        assert_eq!(page.document().entries.len(), 6);
+        assert!(page.document().previous.is_none());
+        assert!(page.document().next.is_none());
+        for change in &fixture.changes {
+            assert!(page.document().entries.iter().any(|entry| {
+                entry.change_ids.contains(&change.change_id)
+                    && entry.revision_refs.contains(&change.revision)
+            }));
+        }
+    }
+
+    #[test]
+    fn derived_timeline_preserves_historical_withdrawn_change_correlation() {
+        let fixture =
+            ActiveChangeFixture::new(&[&[Some("first proposal")], &[Some("second proposal")]]);
+        let first_change = fixture.changes[0].clone();
+        let second_change = fixture.changes[1].clone();
+        let (membership, withdrawal) = fixture.append_historical_membership_then_withdraw(
+            &first_change.change_id,
+            &second_change.revision,
+        );
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            Some(first_change.change_id),
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .expect("build historical-correlation request");
+
+        let outcome = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .expect("read historical-correlation Timeline");
+        let DerivedChangeOutcomeV1::Ready(page) = outcome else {
+            panic!("historical-correlation Timeline must be ready: {outcome:?}");
+        };
+        let event_ids = page
+            .document()
+            .entries
+            .iter()
+            .map(|entry| &entry.event_id)
+            .collect::<Vec<_>>();
+        assert!(event_ids.contains(&&second_change.proposal_events[0].event_id));
+        assert!(event_ids.contains(&&membership.event_id));
+        assert!(event_ids.contains(&&withdrawal.event_id));
+    }
+
+    #[test]
+    fn derived_timeline_entries_match_the_strict_projector_with_support_and_history() {
+        let fixture = ActiveChangeFixture::new(&[
+            &[Some("strict parity first")],
+            &[Some("strict parity second")],
+        ]);
+        let first = fixture.changes[0].clone();
+        let second = fixture.changes[1].clone();
+        fixture.append_historical_membership_then_withdraw(&first.change_id, &second.revision);
+        fixture.append_relation_then_withdraw(
+            &first.change_id,
+            second.revision.clone(),
+            first.revision.clone(),
+        );
+        fixture.append_removal_support(&first.revision);
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(derived) = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("derived parity Timeline must be ready");
+        };
+        let source_change_projection_stamp =
+            derived.document().source_change_projection_stamp.clone();
+
+        let events = fixture
+            .store
+            .list_events()
+            .expect("read strict parity events");
+        let change_projection =
+            crate::session::project_change_documents(&events).expect("project strict Changes");
+        let authority_cursor = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect strict parity authority")
+        .cursor;
+        let strict = crate::session::project_event_history(
+            &events,
+            &change_projection,
+            authority_cursor,
+            source_change_projection_stamp,
+            &crate::session::TrustSet::default(),
+        )
+        .expect("project strict parity Timeline")
+        .document();
+        let derived = derived.document();
+
+        assert_eq!(derived, &strict);
+    }
+
+    #[test]
+    fn derived_timeline_recomputes_ambiguous_revision_candidates_from_all_carriers() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("original proposal")]]);
+        let change = fixture.changes[0].clone();
+        fixture.append_conflicting_proposal(&change.revision.revision_id);
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(derived) = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("ambiguous derived Timeline must be ready");
+        };
+        let membership = derived
+            .document()
+            .entries
+            .iter()
+            .find(|entry| entry.event_type == EventType::ChangeMembershipAsserted)
+            .cloned()
+            .expect("ambiguous membership entry");
+        assert!(membership.revision_refs.is_empty());
+        assert_eq!(
+            membership.unresolved_revision_ids,
+            vec![change.revision.revision_id.clone()]
+        );
+
+        let events = fixture
+            .store
+            .list_events()
+            .expect("read ambiguous strict events");
+        let change_projection =
+            crate::session::project_change_documents(&events).expect("project ambiguous Changes");
+        let authority_cursor = inspect_journal_records(
+            StoreBackend::Local(fixture._temp.path().to_path_buf())
+                .journal()
+                .as_ref(),
+        )
+        .expect("inspect ambiguous authority")
+        .cursor;
+        let strict = crate::session::project_event_history(
+            &events,
+            &change_projection,
+            authority_cursor,
+            "strict-ambiguous-source-stamp".to_owned(),
+            &crate::session::TrustSet::default(),
+        )
+        .expect("project ambiguous strict Timeline")
+        .document();
+        assert_eq!(derived.document().entries, strict.entries);
+
+        let exact_request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Some(crate::session::DerivedTimelineExactRevisionV1::new(
+                change.revision.clone(),
+            )),
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(exact) = fixture
+            .access
+            .timeline(&exact_request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("exact ambiguous Timeline filter must be ready");
+        };
+        assert_eq!(exact.document().entries.len(), 1);
+        assert_eq!(
+            exact.document().entries[0].event_id,
+            change.proposal_events[0].event_id
+        );
+    }
+
+    #[test]
+    fn derived_timeline_selected_and_signature_support_fail_closed() {
+        use crate::session::derived_access::timeline::TimelineReadBoundary;
+
+        let request_for = |revision: RevisionRefV1| {
+            crate::session::DerivedTimelinePageRequestV1::new(
+                100,
+                crate::session::DerivedTimelineOrderV1::Asc,
+                None,
+                vec![EventType::WorkObjectProposed],
+                None,
+                None,
+                Some(crate::session::DerivedTimelineExactRevisionV1::new(
+                    revision,
+                )),
+                crate::session::DerivedTimelinePagePositionV1::Initial,
+            )
+            .unwrap()
+        };
+
+        let absent_selected = ActiveChangeFixture::new(&[&[Some("selected carrier")]]);
+        let selected_event = absent_selected.changes[0].proposal_events[0].clone();
+        let mut removed = false;
+        let outcome = absent_selected
+            .access
+            .timeline_with_hook(
+                &request_for(absent_selected.changes[0].revision.clone()),
+                &crate::session::TrustSet::default(),
+                |boundary| {
+                    if boundary == TimelineReadBoundary::CarrierLocatorsSelected && !removed {
+                        fs::remove_file(
+                            absent_selected
+                                .store
+                                .event_path_for_idempotency_key(&selected_event.idempotency_key),
+                        )
+                        .expect("remove selected Timeline carrier");
+                        removed = true;
+                    }
+                },
+            )
+            .expect("read a removed selected Timeline carrier");
+        assert!(removed);
+        assert_projection_invalid(outcome, "absent");
+
+        let absent_signature = ActiveChangeFixture::new(&[&[Some("signature support")]]);
+        let (_, signature) =
+            absent_signature.append_removal_support(&absent_signature.changes[0].revision);
+        let mut removed = false;
+        let outcome = absent_signature
+            .access
+            .timeline_with_hook(
+                &request_for(absent_signature.changes[0].revision.clone()),
+                &crate::session::TrustSet::default(),
+                |boundary| {
+                    if boundary == TimelineReadBoundary::CarrierHydrationMidpoint && !removed {
+                        fs::remove_file(
+                            absent_signature
+                                .store
+                                .event_path_for_idempotency_key(&signature.idempotency_key),
+                        )
+                        .expect("remove Timeline signature support carrier");
+                        removed = true;
+                    }
+                },
+            )
+            .expect("read a removed Timeline signature support carrier");
+        assert!(removed);
+        assert_projection_invalid(outcome, "absent");
+
+        let changed_signature = ActiveChangeFixture::new(&[&[Some("changed signature support")]]);
+        let (_, signature) =
+            changed_signature.append_removal_support(&changed_signature.changes[0].revision);
+        changed_signature.mutate_database(|connection| {
+            connection
+                .execute(
+                    "UPDATE product_history_signature
+                     SET target_event_id = ?1
+                     WHERE sequence = ?2",
+                    params![
+                        changed_signature.changes[0].proposal_events[0]
+                            .event_id
+                            .as_str(),
+                        changed_signature.proposal_sequence(&signature),
+                    ],
+                )
+                .expect("change normalized Timeline signature target");
+        });
+        assert_projection_invalid(
+            changed_signature
+                .access
+                .timeline(
+                    &request_for(changed_signature.changes[0].revision.clone()),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read changed Timeline signature support"),
+            "wrong target",
+        );
+
+        let wrong_family = ActiveChangeFixture::new(&[&[Some("wrong signature family")]]);
+        let (_, signature) = wrong_family.append_removal_support(&wrong_family.changes[0].revision);
+        let signature_sequence = wrong_family.proposal_sequence(&signature);
+        wrong_family.mutate_database(|connection| {
+            connection
+                .execute(
+                    "UPDATE locator_event_type SET value = 'review_initialized'
+                     WHERE id = (
+                         SELECT event_type_id FROM locator_event WHERE sequence = ?1
+                     )",
+                    [signature_sequence],
+                )
+                .expect("change compact Timeline signature family");
+        });
+        assert_projection_invalid(
+            wrong_family
+                .access
+                .timeline(
+                    &request_for(wrong_family.changes[0].revision.clone()),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read wrong-family Timeline signature support"),
+            "does not match persisted row",
+        );
+    }
+
+    #[test]
+    fn derived_timeline_applies_runtime_trust_only_after_carrier_validation() {
+        use crate::crypto::EventVerificationStatus;
+
+        let fixture = ActiveChangeFixture::new(&[&[Some("trust fixture")]]);
+        let (signed, signer_id) = fixture.append_inline_signed_review_initialized(false);
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            vec![EventType::ReviewInitialized],
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(untrusted) = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("untrusted Timeline must be ready");
+        };
+        assert_eq!(untrusted.document().entries.len(), 1);
+        assert_eq!(
+            untrusted.document().entries[0].verification_status,
+            EventVerificationStatus::UntrustedKey
+        );
+
+        let trusted = crate::session::event_signature_trust_set(serde_json::json!({
+            "allowedSigners": {
+                signed.writer.actor_id.as_str(): [signer_id]
+            }
+        }))
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(valid) =
+            fixture.access.timeline(&request, &trusted).unwrap()
+        else {
+            panic!("trusted Timeline must be ready");
+        };
+        assert_eq!(
+            valid.document().entries[0].verification_status,
+            EventVerificationStatus::Valid
+        );
+        assert_ne!(
+            valid.document().timeline_projection_stamp,
+            untrusted.document().timeline_projection_stamp
+        );
+
+        let invalid = ActiveChangeFixture::new(&[&[Some("invalid trust fixture")]]);
+        invalid.append_inline_signed_review_initialized(true);
+        let DerivedChangeOutcomeV1::Ready(invalid_page) = invalid
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("invalid-signature Timeline must be ready");
+        };
+        assert_eq!(
+            invalid_page.document().entries[0].verification_status,
+            EventVerificationStatus::Invalid
+        );
+
+        let unsigned_request = crate::session::DerivedTimelinePageRequestV1::new(
+            100,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            vec![EventType::ChangeDeclared],
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(unsigned) = fixture
+            .access
+            .timeline(&unsigned_request, &trusted)
+            .unwrap()
+        else {
+            panic!("unsigned Timeline must be ready");
+        };
+        assert_eq!(
+            unsigned.document().entries[0].verification_status,
+            EventVerificationStatus::Unsigned
+        );
+    }
+
+    #[test]
+    fn derived_timeline_preserves_filters_exhaustive_search_and_bidirectional_windows() {
+        let fixture = ActiveChangeFixture::new(&[
+            &[Some("alpha proposal prose")],
+            &[Some("beta proposal prose")],
+            &[Some("gamma proposal prose")],
+        ]);
+        let first_change = fixture.changes[0].clone();
+        let request =
+            |query: Option<String>,
+             change: Option<ChangeId>,
+             revision: Option<RevisionRefV1>,
+             position: crate::session::DerivedTimelinePagePositionV1| {
+                crate::session::DerivedTimelinePageRequestV1::new(
+                    2,
+                    crate::session::DerivedTimelineOrderV1::Asc,
+                    query,
+                    Vec::new(),
+                    None,
+                    change,
+                    revision.map(crate::session::DerivedTimelineExactRevisionV1::new),
+                    position,
+                )
+                .expect("build Timeline request")
+            };
+
+        let DerivedChangeOutcomeV1::Ready(first) = fixture
+            .access
+            .timeline(
+                &request(
+                    None,
+                    Some(first_change.change_id.clone()),
+                    Some(first_change.revision.clone()),
+                    crate::session::DerivedTimelinePagePositionV1::Initial,
+                ),
+                &crate::session::TrustSet::default(),
+            )
+            .unwrap()
+        else {
+            panic!("filtered Timeline must be ready");
+        };
+        assert_eq!(first.document().match_count, 2);
+        assert_eq!(first.document().entries.len(), 2);
+        assert!(first.document().entries.iter().all(|entry| {
+            entry.change_ids.contains(&first_change.change_id)
+                && entry.revision_refs.contains(&first_change.revision)
+        }));
+
+        let DerivedChangeOutcomeV1::Ready(search) = fixture
+            .access
+            .timeline(
+                &request(
+                    Some("alpha proposal prose".to_owned()),
+                    None,
+                    None,
+                    crate::session::DerivedTimelinePagePositionV1::Initial,
+                ),
+                &crate::session::TrustSet::default(),
+            )
+            .unwrap()
+        else {
+            panic!("exhaustive Timeline search must be ready");
+        };
+        assert_eq!(search.document().match_count, 1);
+        assert_eq!(
+            search.document().entries[0].event_type,
+            EventType::WorkObjectProposed
+        );
+
+        let DerivedChangeOutcomeV1::Ready(after) = fixture
+            .access
+            .timeline(
+                &request(
+                    Some("after:2026-08-10T01:00:30Z".to_owned()),
+                    None,
+                    None,
+                    crate::session::DerivedTimelinePagePositionV1::Initial,
+                ),
+                &crate::session::TrustSet::default(),
+            )
+            .unwrap()
+        else {
+            panic!("structured after Timeline must be ready");
+        };
+        assert_eq!(after.document().match_count, 7);
+        let DerivedChangeOutcomeV1::Ready(before) = fixture
+            .access
+            .timeline(
+                &request(
+                    Some("before:2026-08-10T01:00:30Z".to_owned()),
+                    None,
+                    None,
+                    crate::session::DerivedTimelinePagePositionV1::Initial,
+                ),
+                &crate::session::TrustSet::default(),
+            )
+            .unwrap()
+        else {
+            panic!("structured before Timeline must be ready");
+        };
+        assert_eq!(before.document().match_count, 2);
+
+        let unfiltered = request(
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        );
+        let DerivedChangeOutcomeV1::Ready(page_one) = fixture
+            .access
+            .timeline(&unfiltered, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("first Timeline page must be ready");
+        };
+        let next = page_one
+            .adjacent()
+            .next()
+            .cloned()
+            .expect("first Timeline page has a next boundary");
+        let page_two_request = request(
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::continuation(
+                crate::session::DerivedTimelineTraversalV1::Next,
+                next,
+                page_one.document().timeline_projection_stamp.clone(),
+            )
+            .unwrap(),
+        );
+        let DerivedChangeOutcomeV1::Ready(page_two) = fixture
+            .access
+            .timeline(&page_two_request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("second Timeline page must be ready");
+        };
+        assert_eq!(page_two.document().offset, 2);
+        assert!(page_one.document().entries.iter().all(|left| {
+            page_two
+                .document()
+                .entries
+                .iter()
+                .all(|right| left.event_id != right.event_id)
+        }));
+        let previous = page_two
+            .adjacent()
+            .previous()
+            .cloned()
+            .expect("second Timeline page has a previous boundary");
+        let back_request = request(
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::continuation(
+                crate::session::DerivedTimelineTraversalV1::Previous,
+                previous,
+                page_two.document().timeline_projection_stamp.clone(),
+            )
+            .unwrap(),
+        );
+        let DerivedChangeOutcomeV1::Ready(back) = fixture
+            .access
+            .timeline(&back_request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("previous Timeline page must be ready");
+        };
+        assert_eq!(back.document().entries, page_one.document().entries);
+    }
+
+    #[test]
+    fn timeline_continuation_stamp_is_bound_to_runtime_trust() {
+        let fixture = ActiveChangeFixture::new(&[&[None], &[None]]);
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            2,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(first) = fixture
+            .access
+            .timeline(&request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("first Timeline page must be ready");
+        };
+        let changed_trust = crate::session::event_signature_trust_set(serde_json::json!({
+            "allowedSigners": {
+                "actor:agent:changed": [
+                    "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"
+                ]
+            }
+        }))
+        .unwrap();
+        let continuation = crate::session::DerivedTimelinePageRequestV1::new(
+            2,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::continuation(
+                crate::session::DerivedTimelineTraversalV1::Next,
+                first.adjacent().next().cloned().unwrap(),
+                first.document().timeline_projection_stamp.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let outcome = fixture
+            .access
+            .timeline(&continuation, &changed_trust)
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            DerivedChangeOutcomeV1::ProjectionUnavailable(ref document)
+                if document.code() == DerivedProjectionFailureCodeV1::ProjectionStale
+        ));
+    }
+
+    #[test]
+    fn derived_timeline_reports_absent_locators_and_boundaries_as_request_errors() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("request error")]]);
+        let absent = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::At(crate::model::EventId::new(
+                "evt:sha256:absent",
+            )),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .access
+                .timeline(&absent, &crate::session::TrustSet::default()),
+            Err(ShoreError::WorkflowInputInvalid { ref reason })
+                if reason.contains("does not match")
+        ));
+
+        let initial = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(first) = fixture
+            .access
+            .timeline(&initial, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("initial request-error Timeline must be ready");
+        };
+        let next = first
+            .adjacent()
+            .next()
+            .expect("first page has a next boundary");
+        let crate::session::DerivedTimelinePageBoundaryV1::Key(next) = next else {
+            panic!("next boundary must be keyed");
+        };
+        let mismatched = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::continuation(
+                crate::session::DerivedTimelineTraversalV1::Next,
+                crate::session::DerivedTimelinePageBoundaryV1::Key(
+                    crate::session::DerivedTimelinePageKeyV1::new(
+                        "2099-01-01T00:00:00.000Z",
+                        next.event_id().clone(),
+                    )
+                    .unwrap(),
+                ),
+                first.document().timeline_projection_stamp.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixture
+                .access
+                .timeline(&mismatched, &crate::session::TrustSet::default()),
+            Err(ShoreError::WorkflowInputInvalid { ref reason })
+                if reason.contains("absent")
+        ));
+    }
+
+    #[test]
+    fn derived_timeline_refuses_generation_movement_at_every_read_boundary() {
+        use crate::session::derived_access::timeline::TimelineReadBoundary;
+
+        for (index, boundary) in [
+            TimelineReadBoundary::SnapshotPinned,
+            TimelineReadBoundary::SupportExpansionStarted,
+            TimelineReadBoundary::CarrierHydrationMidpoint,
+            TimelineReadBoundary::TrustBindingComplete,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = ActiveChangeFixture::new(&[&[Some("moving Timeline")]]);
+            let request = crate::session::DerivedTimelinePageRequestV1::initial();
+            let mut moved = false;
+            let outcome = fixture
+                .access
+                .timeline_with_hook(&request, &crate::session::TrustSet::default(), |observed| {
+                    if observed == boundary && !moved {
+                        fixture.append_unrelated(&format!("timeline-boundary-{index}"));
+                        moved = true;
+                    }
+                })
+                .expect("classify a moving Timeline read");
+            assert!(moved, "the requested Timeline boundary must be observed");
+            assert!(matches!(
+                outcome,
+                DerivedChangeOutcomeV1::Retryable(ref document)
+                    if document.code() == DerivedProjectionFailureCodeV1::ProjectionUnstable
+            ));
+        }
+    }
+
+    #[test]
+    fn derived_timeline_does_not_mix_retained_n_with_published_n_plus_one() {
+        use crate::session::derived_access::timeline::TimelineReadBoundary;
+
+        let fixture = ActiveChangeFixture::new(&[&[Some("replacement generation")]]);
+        let original_generation = fixture
+            .lifecycle
+            .published_generation_id()
+            .unwrap()
+            .unwrap();
+        let mut rebuilt = false;
+        let outcome = fixture
+            .access
+            .timeline_with_hook(
+                &crate::session::DerivedTimelinePageRequestV1::initial(),
+                &crate::session::TrustSet::default(),
+                |boundary| {
+                    if boundary == TimelineReadBoundary::SnapshotPinned && !rebuilt {
+                        fixture
+                            .lifecycle
+                            .rebuild(|_| LifecycleControl::Continue)
+                            .expect("publish N+1 during retained N Timeline read");
+                        rebuilt = true;
+                    }
+                },
+            )
+            .expect("classify N/N+1 Timeline overlap");
+        assert!(rebuilt);
+        assert_ne!(
+            fixture
+                .lifecycle
+                .published_generation_id()
+                .unwrap()
+                .unwrap(),
+            original_generation
+        );
+        assert!(matches!(
+            outcome,
+            DerivedChangeOutcomeV1::Retryable(ref document)
+                if document.code() == DerivedProjectionFailureCodeV1::ProjectionUnstable
+        ));
+    }
+
+    #[test]
+    fn derived_timeline_counters_separate_bounded_and_exhaustive_work() {
+        let structured = ActiveChangeFixture::new(&[&[Some("bounded proposal prose")]]);
+        structured
+            .runtime
+            .current()
+            .expect("warm the structured fixture before counting");
+        let structured_scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        let structured_guard = structured_scope.enter();
+        let structured_request = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Desc,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(structured_page) = structured
+            .access
+            .timeline(&structured_request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("structured Timeline must be ready");
+        };
+        drop(structured_guard);
+        assert_eq!(structured_page.document().entries.len(), 1);
+        let structured_counters = structured_scope.snapshot().counters;
+        assert_eq!(structured_counters.timeline_sqlite_candidates, 3);
+        assert_eq!(structured_counters.timeline_sqlite_window_rows, 1);
+        assert_eq!(structured_counters.timeline_sqlite_facet_rows, 3);
+        assert_eq!(structured_counters.timeline_selected_carriers, 1);
+        assert_eq!(structured_counters.timeline_revision_candidate_carriers, 1);
+        assert_eq!(structured_counters.timeline_correlation_support_carriers, 0);
+        assert_eq!(structured_counters.timeline_removal_support_carriers, 0);
+        assert_eq!(structured_counters.timeline_signature_support_carriers, 0);
+        assert_eq!(structured_counters.timeline_trust_support_carriers, 1);
+        assert_eq!(structured_counters.timeline_exhaustive_candidates, 0);
+        assert_eq!(structured_counters.timeline_entries_emitted, 1);
+        assert_eq!(structured_counters.carrier_opens, 2);
+        assert_eq!(structured_counters.directory_entries_walked, 0);
+        assert_eq!(structured_counters.event_folds, 0);
+        assert_eq!(structured_counters.authoritative_fallbacks, 0);
+        assert_eq!(structured_counters.full_history_fallbacks, 0);
+
+        let exhaustive = ActiveChangeFixture::new(&[&[Some("exhaustive proposal prose")]]);
+        exhaustive
+            .runtime
+            .current()
+            .expect("warm the exhaustive fixture before counting");
+        let exhaustive_scope = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
+        let exhaustive_guard = exhaustive_scope.enter();
+        let exhaustive_request = crate::session::DerivedTimelinePageRequestV1::new(
+            1,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            Some("exhaustive proposal prose".to_owned()),
+            Vec::new(),
+            None,
+            None,
+            None,
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Ready(exhaustive_page) = exhaustive
+            .access
+            .timeline(&exhaustive_request, &crate::session::TrustSet::default())
+            .unwrap()
+        else {
+            panic!("exhaustive Timeline must be ready");
+        };
+        drop(exhaustive_guard);
+        assert_eq!(exhaustive_page.document().entries.len(), 1);
+        let exhaustive_counters = exhaustive_scope.snapshot().counters;
+        assert_eq!(exhaustive_counters.timeline_sqlite_candidates, 3);
+        assert_eq!(exhaustive_counters.timeline_sqlite_window_rows, 3);
+        assert_eq!(exhaustive_counters.timeline_sqlite_facet_rows, 0);
+        assert_eq!(exhaustive_counters.timeline_selected_carriers, 3);
+        assert_eq!(exhaustive_counters.timeline_exhaustive_candidates, 3);
+        assert_eq!(exhaustive_counters.timeline_trust_support_carriers, 3);
+        assert_eq!(exhaustive_counters.timeline_entries_emitted, 1);
+        assert_eq!(exhaustive_counters.carrier_opens, 3);
+        assert_eq!(exhaustive_counters.directory_entries_walked, 0);
+        assert_eq!(exhaustive_counters.event_folds, 0);
+        assert_eq!(exhaustive_counters.authoritative_fallbacks, 0);
+        assert_eq!(exhaustive_counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn derived_timeline_window_plan_uses_change_revision_and_tag_indexes() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("query plan")]]);
+        let change = fixture.changes[0].clone();
+        let request = crate::session::DerivedTimelinePageRequestV1::new(
+            10,
+            crate::session::DerivedTimelineOrderV1::Asc,
+            Some("tag:correctness revision:sha256".to_owned()),
+            vec![EventType::WorkObjectProposed],
+            None,
+            Some(change.change_id),
+            Some(crate::session::DerivedTimelineExactRevisionV1::new(
+                change.revision,
+            )),
+            crate::session::DerivedTimelinePagePositionV1::Initial,
+        )
+        .unwrap();
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("query-plan generation must be current");
+        };
+        let checkpoint = current
+            .pin_change_reader_checkpoint()
+            .expect("pin query-plan checkpoint");
+        let connection =
+            rusqlite::Connection::open(fixture.database_path()).expect("open query-plan sidecar");
+        let plan = crate::session::derived_access::timeline::timeline_window_query_plan_for_test(
+            &connection,
+            checkpoint.truth_cursor,
+            &request,
+        )
+        .expect("explain Timeline window query");
+        for index in [
+            "product_history_change_correlation_change",
+            "product_history_revision_reference_exact",
+        ] {
+            assert!(
+                plan.iter().any(|detail| detail.contains(index)),
+                "Timeline query plan must use {index}: {plan:#?}"
+            );
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("SEARCH tag USING PRIMARY KEY")),
+            "Timeline tag predicate must use the sequence/tag primary key: {plan:#?}"
         );
     }
 

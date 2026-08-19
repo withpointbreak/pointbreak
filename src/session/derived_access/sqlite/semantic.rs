@@ -102,33 +102,51 @@ pub(crate) struct MaterializedChangeProjection {
     pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
 }
 
+/// One exact, connection-local product-history read snapshot. The main
+/// database transaction remains open while selection metadata and TEMP support
+/// closure are read, preventing a K response from observing retroactive K+1
+/// candidate/correlation rewrites.
+pub(crate) struct ProductHistoryReadSnapshot {
+    pub(crate) connection: rusqlite::Connection,
+    pub(crate) state: SemanticStateSnapshot,
+    pub(crate) changes: MaterializedChangeProjection,
+}
+
+impl ProductHistoryReadSnapshot {
+    pub(crate) fn finish(self) -> Result<(), SqliteSemanticError> {
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| sqlite_error("close product history read snapshot", error))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProductHistoryFact {
-    sequence: u64,
-    tag_keys: Vec<String>,
-    tag_values: Vec<String>,
-    signature_target_event_id: Option<String>,
-    revision: Option<ProductRevisionFact>,
-    timeline: Option<ProductTimelineFact>,
-    membership_claim: Option<ProductMembershipClaimFact>,
-    membership_withdrawal_claim_id: Option<String>,
-    relation_claim: Option<ProductRelationClaimFact>,
-    relation_withdrawal_claim_id: Option<String>,
+    pub(crate) sequence: u64,
+    pub(crate) tag_keys: Vec<String>,
+    pub(crate) tag_values: Vec<String>,
+    pub(crate) signature_target_event_id: Option<String>,
+    pub(crate) revision: Option<ProductRevisionFact>,
+    pub(crate) timeline: Option<ProductTimelineFact>,
+    pub(crate) membership_claim: Option<ProductMembershipClaimFact>,
+    pub(crate) membership_withdrawal_claim_id: Option<String>,
+    pub(crate) relation_claim: Option<ProductRelationClaimFact>,
+    pub(crate) relation_withdrawal_claim_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductRevisionFact {
-    revision_id: String,
-    captured_at: String,
-    captured_at_millis: i64,
-    supersedes: Vec<String>,
+pub(crate) struct ProductRevisionFact {
+    pub(crate) revision_id: String,
+    pub(crate) captured_at: String,
+    pub(crate) captured_at_millis: i64,
+    pub(crate) supersedes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductTimelineFact {
-    request_state: Option<&'static str>,
-    revision_references: Vec<ProductRevisionReferenceFact>,
-    direct_changes: Vec<ProductDirectChangeFact>,
+pub(crate) struct ProductTimelineFact {
+    pub(crate) request_state: Option<&'static str>,
+    pub(crate) revision_references: Vec<ProductRevisionReferenceFact>,
+    pub(crate) direct_changes: Vec<ProductDirectChangeFact>,
 }
 
 impl ProductTimelineFact {
@@ -142,12 +160,12 @@ impl ProductTimelineFact {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductRevisionReferenceFact {
-    source_kind: &'static str,
-    reference_role: &'static str,
-    revision_id: String,
-    object_artifact_content_hash: Option<String>,
-    historical_change_eligible: bool,
+pub(crate) struct ProductRevisionReferenceFact {
+    pub(crate) source_kind: &'static str,
+    pub(crate) reference_role: &'static str,
+    pub(crate) revision_id: String,
+    pub(crate) object_artifact_content_hash: Option<String>,
+    pub(crate) historical_change_eligible: bool,
 }
 
 impl ProductRevisionReferenceFact {
@@ -199,25 +217,25 @@ impl ProductRevisionReferenceFact {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductDirectChangeFact {
-    change_id: String,
-    source_kind: &'static str,
-    source_id: String,
+pub(crate) struct ProductDirectChangeFact {
+    pub(crate) change_id: String,
+    pub(crate) source_kind: &'static str,
+    pub(crate) source_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductMembershipClaimFact {
-    claim_id: String,
-    change_id: String,
-    revision_id: String,
+pub(crate) struct ProductMembershipClaimFact {
+    pub(crate) claim_id: String,
+    pub(crate) change_id: String,
+    pub(crate) revision_id: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ProductRelationClaimFact {
-    claim_id: String,
-    change_id: String,
-    successor: RevisionRefV1,
-    predecessor: RevisionRefV1,
+pub(crate) struct ProductRelationClaimFact {
+    pub(crate) claim_id: String,
+    pub(crate) change_id: String,
+    pub(crate) successor: RevisionRefV1,
+    pub(crate) predecessor: RevisionRefV1,
 }
 
 impl ProductHistoryFact {
@@ -1744,6 +1762,44 @@ impl SqliteSemantic {
         }
         let state = query_materialized_state(&connection)?;
         Ok(LocatorRead::Ready((connection, state)))
+    }
+
+    /// Open the exact Timeline snapshot selected by an already-pinned reader
+    /// checkpoint. Unlike the legacy History connection, coverage beyond the
+    /// requested cursor is not accepted because v4 correlation and candidate
+    /// rows can be rewritten by a later governed append.
+    pub(crate) fn product_history_read_snapshot(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<ProductHistoryReadSnapshot>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        connection
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(|error| sqlite_error("begin product history read snapshot", error))?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        validate_product_history_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied != observed {
+            connection
+                .execute_batch("ROLLBACK")
+                .map_err(|error| sqlite_error("close moved product history snapshot", error))?;
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state(&connection)?;
+        let (projection, document_projection) =
+            query_materialized_change_projections(&connection, observed.epoch, observed.sequence)?;
+        Ok(LocatorRead::Ready(ProductHistoryReadSnapshot {
+            connection,
+            state,
+            changes: MaterializedChangeProjection {
+                as_of: observed,
+                projection,
+                document_projection,
+            },
+        }))
     }
 
     pub(crate) fn inventory(&self) -> Result<SemanticInventory, SqliteSemanticError> {

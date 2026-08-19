@@ -34,17 +34,50 @@ pub(super) fn support_event_ids(
     selected: &[ShoreEvent],
     as_of: TruthCursor,
 ) -> Result<Vec<String>, String> {
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let plan = support_event_plan(&transaction, selected, as_of)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(plan.all_event_ids())
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct SupportEventPlan {
+    pub(super) removal_event_ids: Vec<String>,
+    pub(super) signature_event_ids: Vec<String>,
+}
+
+impl SupportEventPlan {
+    fn all_event_ids(&self) -> Vec<String> {
+        self.removal_event_ids
+            .iter()
+            .chain(&self.signature_event_ids)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+/// Expand removal/signature support inside a caller-owned exact read
+/// snapshot. Timeline uses this after hydrating its selected and first-level
+/// correlation/proposal carriers; legacy History wraps it in its own short
+/// transaction through [`support_event_ids`].
+pub(super) fn support_event_plan(
+    connection: &rusqlite::Connection,
+    selected: &[ShoreEvent],
+    as_of: TruthCursor,
+) -> Result<SupportEventPlan, String> {
     let mut targets = selected
         .iter()
         .map(|event| event.event_id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     let mut content_hashes = crate::session::workflow::selected_support_content_hashes(selected)
         .map_err(|error| error.to_string())?;
-    let mut support = BTreeSet::new();
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| error.to_string())?;
-    transaction
+    let mut removal_event_ids = BTreeSet::new();
+    let mut signature_event_ids = BTreeSet::new();
+    connection
         .execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS pointbreak_product_support_lookup (
                  value TEXT PRIMARY KEY
@@ -52,7 +85,7 @@ pub(super) fn support_event_ids(
         )
         .map_err(|error| error.to_string())?;
     if !targets.is_empty() {
-        replace_support_lookup_values(&transaction, targets.iter())?;
+        replace_support_lookup_values(connection, targets.iter())?;
         let sql = "SELECT DISTINCT event.content_hash
                    FROM semantic_event_fact_text AS event
                    JOIN locator_event_text AS locator ON locator.sequence = event.sequence
@@ -66,10 +99,10 @@ pub(super) fn support_event_ids(
             Value::from(to_sql_integer(as_of.epoch)?),
             Value::from(to_sql_integer(as_of.sequence)?),
         ];
-        content_hashes.extend(query_string_rows(&transaction, sql, &parameters)?);
+        content_hashes.extend(query_string_rows(connection, sql, &parameters)?);
     }
     if !content_hashes.is_empty() {
-        replace_support_lookup_values(&transaction, content_hashes.iter())?;
+        replace_support_lookup_values(connection, content_hashes.iter())?;
         let sql = "SELECT locator.event_id
                    FROM semantic_event_fact_text AS event
                    JOIN locator_event_text AS locator ON locator.sequence = event.sequence
@@ -83,13 +116,13 @@ pub(super) fn support_event_ids(
             Value::from(to_sql_integer(as_of.epoch)?),
             Value::from(to_sql_integer(as_of.sequence)?),
         ];
-        for event_id in query_string_rows(&transaction, sql, &parameters)? {
+        for event_id in query_string_rows(connection, sql, &parameters)? {
             targets.insert(event_id.clone());
-            support.insert(event_id);
+            removal_event_ids.insert(event_id);
         }
     }
     if !targets.is_empty() {
-        replace_support_lookup_values(&transaction, targets.iter())?;
+        replace_support_lookup_values(connection, targets.iter())?;
         let sql = "SELECT locator.event_id
                    FROM product_history_signature AS signature
                    JOIN locator_event_text AS locator ON locator.sequence = signature.sequence
@@ -102,20 +135,22 @@ pub(super) fn support_event_ids(
             Value::from(to_sql_integer(as_of.epoch)?),
             Value::from(to_sql_integer(as_of.sequence)?),
         ];
-        support.extend(query_string_rows(&transaction, sql, &parameters)?);
+        signature_event_ids.extend(query_string_rows(connection, sql, &parameters)?);
     }
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(support.into_iter().collect())
+    Ok(SupportEventPlan {
+        removal_event_ids: removal_event_ids.into_iter().collect(),
+        signature_event_ids: signature_event_ids.into_iter().collect(),
+    })
 }
 
 fn replace_support_lookup_values<'a>(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &rusqlite::Connection,
     values: impl IntoIterator<Item = &'a String>,
 ) -> Result<(), String> {
-    transaction
+    connection
         .execute("DELETE FROM temp.pointbreak_product_support_lookup", [])
         .map_err(|error| error.to_string())?;
-    let mut insert = transaction
+    let mut insert = connection
         .prepare("INSERT INTO temp.pointbreak_product_support_lookup (value) VALUES (?1)")
         .map_err(|error| error.to_string())?;
     for value in values {

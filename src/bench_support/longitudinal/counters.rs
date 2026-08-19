@@ -429,6 +429,17 @@ fn counter_delta(
         change_support_carriers_opened: delta!(change_support_carriers_opened),
         change_matches: delta!(change_matches),
         change_rows_emitted: delta!(change_rows_emitted),
+        timeline_sqlite_candidates: delta!(timeline_sqlite_candidates),
+        timeline_sqlite_window_rows: delta!(timeline_sqlite_window_rows),
+        timeline_sqlite_facet_rows: delta!(timeline_sqlite_facet_rows),
+        timeline_selected_carriers: delta!(timeline_selected_carriers),
+        timeline_revision_candidate_carriers: delta!(timeline_revision_candidate_carriers),
+        timeline_removal_support_carriers: delta!(timeline_removal_support_carriers),
+        timeline_signature_support_carriers: delta!(timeline_signature_support_carriers),
+        timeline_correlation_support_carriers: delta!(timeline_correlation_support_carriers),
+        timeline_trust_support_carriers: delta!(timeline_trust_support_carriers),
+        timeline_exhaustive_candidates: delta!(timeline_exhaustive_candidates),
+        timeline_entries_emitted: delta!(timeline_entries_emitted),
         authoritative_fallbacks: delta!(authoritative_fallbacks),
         full_history_fallbacks: delta!(full_history_fallbacks),
         event_decodes: delta!(event_decodes),
@@ -536,6 +547,47 @@ change_counter!(
 );
 change_counter!(record_change_matches, change_matches);
 change_counter!(record_change_rows_emitted, change_rows_emitted);
+change_counter!(
+    record_timeline_sqlite_candidates,
+    timeline_sqlite_candidates
+);
+change_counter!(
+    record_timeline_sqlite_window_rows,
+    timeline_sqlite_window_rows
+);
+change_counter!(
+    record_timeline_sqlite_facet_rows,
+    timeline_sqlite_facet_rows
+);
+change_counter!(
+    record_timeline_selected_carriers,
+    timeline_selected_carriers
+);
+change_counter!(
+    record_timeline_revision_candidate_carriers,
+    timeline_revision_candidate_carriers
+);
+change_counter!(
+    record_timeline_removal_support_carriers,
+    timeline_removal_support_carriers
+);
+change_counter!(
+    record_timeline_signature_support_carriers,
+    timeline_signature_support_carriers
+);
+change_counter!(
+    record_timeline_correlation_support_carriers,
+    timeline_correlation_support_carriers
+);
+change_counter!(
+    record_timeline_trust_support_carriers,
+    timeline_trust_support_carriers
+);
+change_counter!(
+    record_timeline_exhaustive_candidates,
+    timeline_exhaustive_candidates
+);
+change_counter!(record_timeline_entries_emitted, timeline_entries_emitted);
 
 pub fn record_authoritative_fallback() {
     with_active(|state| {
@@ -892,6 +944,17 @@ mod tests {
         record_change_support_carriers_opened(97);
         record_change_matches(101);
         record_change_rows_emitted(103);
+        record_timeline_sqlite_candidates(107);
+        record_timeline_sqlite_window_rows(109);
+        record_timeline_sqlite_facet_rows(113);
+        record_timeline_selected_carriers(127);
+        record_timeline_revision_candidate_carriers(129);
+        record_timeline_removal_support_carriers(131);
+        record_timeline_signature_support_carriers(137);
+        record_timeline_correlation_support_carriers(139);
+        record_timeline_trust_support_carriers(149);
+        record_timeline_exhaustive_candidates(151);
+        record_timeline_entries_emitted(157);
         record_authoritative_fallback();
         record_full_history_fallback();
         record_event_decode();
@@ -931,6 +994,17 @@ mod tests {
                 change_support_carriers_opened: 97,
                 change_matches: 101,
                 change_rows_emitted: 103,
+                timeline_sqlite_candidates: 107,
+                timeline_sqlite_window_rows: 109,
+                timeline_sqlite_facet_rows: 113,
+                timeline_selected_carriers: 127,
+                timeline_revision_candidate_carriers: 129,
+                timeline_removal_support_carriers: 131,
+                timeline_signature_support_carriers: 137,
+                timeline_correlation_support_carriers: 139,
+                timeline_trust_support_carriers: 149,
+                timeline_exhaustive_candidates: 151,
+                timeline_entries_emitted: 157,
                 authoritative_fallbacks: 1,
                 full_history_fallbacks: 1,
                 event_decodes: 1,

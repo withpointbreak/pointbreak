@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::de::DeserializeOwned;
 
 use crate::canonical_hash::sha256_json_prefixed;
+use crate::crypto::EventVerificationStatus;
 use crate::documents::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
     EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,
@@ -42,17 +43,30 @@ pub(crate) enum EventHistoryTypeClassV1 {
 pub fn rebind_event_history_source_projection_stamp(
     mut document: EventHistoryDocumentV1,
     source_change_projection_stamp: String,
+    trust_set: &TrustSet,
 ) -> Result<EventHistoryDocumentV1> {
     document.source_change_projection_stamp = source_change_projection_stamp;
-    document.timeline_projection_stamp = sha256_json_prefixed(&serde_json::json!({
-        "schema": "pointbreak.inspect-event-history-projection.v1",
-        "authorityCursor": &document.authority_cursor,
-        "sourceChangeProjectionStamp": &document.source_change_projection_stamp,
-        "order": "normalized_occurred_at_event_id_asc.v1",
-        "entries": &document.entries,
-        "diagnostics": &document.diagnostics,
-    }))?;
+    document.timeline_projection_stamp = timeline_projection_stamp_v1(
+        &document.source_change_projection_stamp,
+        &trust_set.identity_sha256()?,
+    )?;
     Ok(document)
+}
+
+/// Mint the page-independent Timeline identity used by both strict and
+/// derived adapters. The source Change stamp already binds the exact live
+/// reader checkpoint; this layer adds the request-local TrustSet identity and
+/// the frozen normalized chronology contract without hashing page entries.
+pub(crate) fn timeline_projection_stamp_v1(
+    source_change_projection_stamp: &str,
+    trust_set_sha256: &str,
+) -> Result<String> {
+    sha256_json_prefixed(&serde_json::json!({
+        "schema": "pointbreak.inspect-event-history-generation.v1",
+        "sourceChangeProjectionStamp": source_change_projection_stamp,
+        "runtimeTrustSetSha256": trust_set_sha256,
+        "order": "normalized_occurred_at_event_id_asc.v1",
+    }))
 }
 
 pub(crate) fn event_history_type_class(event_type: EventType) -> EventHistoryTypeClassV1 {
@@ -139,21 +153,9 @@ pub(crate) fn project_event_history(
     source_change_projection_stamp: String,
     trust_set: &TrustSet,
 ) -> Result<EventHistoryFacadeV1> {
-    let history = HistoricalCorrelationV1::from_projection(change_projection);
-    let mut diagnostics = BTreeSet::new();
-    let mut entries = events
-        .iter()
-        .filter_map(|event| {
-            project_event(
-                event,
-                change_projection,
-                &history,
-                trust_set,
-                &mut diagnostics,
-            )
-            .transpose()
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let (drafts, diagnostics) =
+        project_selected_event_history_without_trust(events, change_projection)?;
+    let mut entries = bind_selected_event_history_trust(drafts, trust_set)?;
     entries.sort_by(|left, right| {
         compare_event_instants(&left.occurred_at, &right.occurred_at)
             .then_with(|| left.event_id.cmp(&right.event_id))
@@ -181,7 +183,6 @@ pub(crate) fn project_event_history(
             push_sorted_unique(&mut completion.unresolved_revision_ids, revision_id.clone());
         }
     }
-    let diagnostics = diagnostics.into_iter().collect::<Vec<_>>();
     let document = rebind_event_history_source_projection_stamp(
         EventHistoryDocumentV1 {
             schema: INSPECT_EVENT_HISTORY_SCHEMA.to_owned(),
@@ -203,15 +204,72 @@ pub(crate) fn project_event_history(
             next: None,
         },
         source_change_projection_stamp,
+        trust_set,
     )?;
     Ok(EventHistoryFacadeV1::new(document))
 }
 
-fn project_event(
+#[derive(Clone, Debug)]
+pub(crate) struct EventHistoryEntryDraftV1 {
+    event: ShoreEvent,
+    entry: EventHistoryEntryV1,
+}
+
+impl EventHistoryEntryDraftV1 {
+    pub(crate) fn event(&self) -> &ShoreEvent {
+        &self.event
+    }
+
+    pub(crate) fn entry(&self) -> &EventHistoryEntryV1 {
+        &self.entry
+    }
+}
+
+/// Decode and correlate selected Timeline events without consulting runtime
+/// trust. Callers validate every selected/support carrier and normalized
+/// relation against these drafts before invoking
+/// [`bind_selected_event_history_trust`].
+pub(crate) fn project_selected_event_history_without_trust(
+    events: &[ShoreEvent],
+    change_projection: &ChangeDocumentProjectionV1,
+) -> Result<(Vec<EventHistoryEntryDraftV1>, Vec<String>)> {
+    let history = HistoricalCorrelationV1::from_projection(change_projection);
+    let mut diagnostics = BTreeSet::new();
+    let drafts = events
+        .iter()
+        .filter_map(|event| {
+            project_event_without_trust(event, change_projection, &history, &mut diagnostics)
+                .transpose()
+                .map(|result| {
+                    result.map(|entry| EventHistoryEntryDraftV1 {
+                        event: event.clone(),
+                        entry,
+                    })
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((drafts, diagnostics.into_iter().collect()))
+}
+
+/// Apply runtime trust only after the caller's carrier/relation validation is
+/// complete. This is the sole selected-entry trust boundary.
+pub(crate) fn bind_selected_event_history_trust(
+    drafts: Vec<EventHistoryEntryDraftV1>,
+    trust_set: &TrustSet,
+) -> Result<Vec<EventHistoryEntryV1>> {
+    drafts
+        .into_iter()
+        .map(|mut draft| {
+            draft.entry.verification_status = verify_event_signature(&draft.event, trust_set)?;
+            Ok(draft.entry)
+        })
+        .collect()
+}
+
+fn project_event_without_trust(
     event: &ShoreEvent,
     change_projection: &ChangeDocumentProjectionV1,
     history: &HistoricalCorrelationV1,
-    trust_set: &TrustSet,
     diagnostics: &mut BTreeSet<String>,
 ) -> Result<Option<EventHistoryEntryV1>> {
     if matches!(
@@ -591,7 +649,7 @@ fn project_event(
         journal_id: event.target.journal_id.clone(),
         track_id: event.target.track_id.clone(),
         writer: event.writer.clone(),
-        verification_status: verify_event_signature(event, trust_set)?,
+        verification_status: EventVerificationStatus::Unsigned,
         assertion_mode: event.assertion_mode,
         signer: event.signer.clone(),
         source_ref: event.source_ref.clone(),
@@ -1215,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_order_typed_summaries_and_stamp_use_the_full_cursor() {
+    fn normalized_order_typed_summaries_and_stamp_follow_the_source_generation() {
         let a = observation("a", "rev:sha256:r", "1970-01-01T00:00:01Z");
         let b = observation("b", "rev:sha256:r", "unix-ms:1000");
         let early = observation("early", "rev:sha256:r", "unix-ms:1");
@@ -1235,7 +1293,7 @@ mod tests {
             &events,
             &documents,
             changed_cursor,
-            "change-stamp".into(),
+            "changed-change-stamp".into(),
             &TrustSet::default(),
         )
         .unwrap();
@@ -1283,6 +1341,7 @@ mod tests {
         let rebound = rebind_event_history_source_projection_stamp(
             original.clone(),
             "sha256:checkpoint".to_owned(),
+            &TrustSet::default(),
         )
         .unwrap();
 
@@ -1324,7 +1383,7 @@ mod tests {
             &next_events,
             &documents,
             cursor(&next_events),
-            "change-stamp".into(),
+            "next-change-stamp".into(),
             &TrustSet::default(),
         )
         .unwrap();

@@ -157,6 +157,7 @@ pub(super) fn event_history_v2_json(
         request,
         signer,
         Some(stamp_binder),
+        &trust_set,
         cache.load_timeline(repo, &trust_set),
     )
 }
@@ -170,6 +171,7 @@ pub(super) fn event_history_v2_from_loaded(
     request: super::event_history_page::Request,
     signer: &super::page_token::PageTokenSigner,
     stamp_binder: Option<&StrictChangeStampBinder>,
+    trust_set: &TrustSet,
     loaded: Result<super::server::ChangeReaderGeneration, super::server::ChangeReaderLoadError>,
 ) -> Result<ChangeV2Json, String> {
     let generation = match loaded {
@@ -203,7 +205,7 @@ pub(super) fn event_history_v2_from_loaded(
     match bind_strict_change_stamp(stamp_binder, &generation.state, ready)? {
         StrictChangeStampBindingV1::Unavailable => {}
         StrictChangeStampBindingV1::Bound(stamp) => {
-            document = rebind_event_history_source_projection_stamp(document, stamp)
+            document = rebind_event_history_source_projection_stamp(document, stamp, trust_set)
                 .map_err(|error| error.to_string())?;
         }
         StrictChangeStampBindingV1::Moving => {

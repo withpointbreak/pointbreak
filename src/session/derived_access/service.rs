@@ -569,6 +569,14 @@ impl DerivedAccessService {
         Ok(self.semantic.product_history_connection(observed)?)
     }
 
+    pub(crate) fn product_history_read_snapshot_at(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<super::sqlite::ProductHistoryReadSnapshot>, DerivedAccessServiceError>
+    {
+        Ok(self.semantic.product_history_read_snapshot(observed)?)
+    }
+
     pub(crate) fn chronological_window(
         &self,
         request: ChronologicalWindowRequest,

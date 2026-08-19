@@ -3375,9 +3375,15 @@ mod tests {
         let signer = super::super::page_token::PageTokenSigner::from_seed([7_u8; 32]);
         let request = super::super::event_history_page::parse_signed(None, &signer)
             .expect("bare Timeline request is valid");
-        let retryable =
-            api::event_history_v2_from_loaded(repo.path(), request, &signer, None, moving)
-                .expect("moving journal is a typed Timeline response");
+        let retryable = api::event_history_v2_from_loaded(
+            repo.path(),
+            request,
+            &signer,
+            None,
+            &pointbreak::session::TrustSet::default(),
+            moving,
+        )
+        .expect("moving journal is a typed Timeline response");
         let api::ChangeV2Json::Retryable(body) = retryable else {
             panic!("a real append race must remain retryable")
         };

@@ -2,12 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use pointbreak::documents::{
-    EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryOrderV1, EventHistorySummaryV1,
-};
+use pointbreak::documents::{EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryOrderV1};
 use pointbreak::session::{
-    QueryDiagnosticCode, QuerySurface, SearchRecord, format_rfc3339_utc_millis, matches_query,
-    parse_event_instant, parse_search_query_for,
+    QueryDiagnosticCode, QuerySurface, SearchRecord, event_history_search_record, matches_query,
+    parse_search_query_for,
 };
 
 use super::event_history_page::{
@@ -211,70 +209,7 @@ fn matches_non_type_filters(
 fn search_record(entry: &EventHistoryEntryV1) -> SearchRecord {
     #[cfg(test)]
     SEARCH_RECORD_BUILD_COUNT.with(|count| count.set(count.get() + 1));
-
-    let mut fields = BTreeMap::new();
-    fields.insert("type".to_owned(), entry.event_type.as_str().to_owned());
-    fields.insert(
-        "track".to_owned(),
-        token_set(entry.track_id.iter().map(|track| track.as_str())),
-    );
-    fields.insert(
-        "actor".to_owned(),
-        token_set(std::iter::once(entry.writer.actor_id.as_str())),
-    );
-    fields.insert(
-        "revision".to_owned(),
-        entry
-            .revision_refs
-            .iter()
-            .map(|reference| reference.revision_id.as_str())
-            .chain(
-                entry
-                    .unresolved_revision_ids
-                    .iter()
-                    .map(|revision| revision.as_str()),
-            )
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    // These are partial query sets only. Exact Change/Revision selection stays
-    // in the separately parsed outer request fields and is never derived here.
-    fields.insert(
-        "change".to_owned(),
-        entry
-            .change_ids
-            .iter()
-            .map(|change| change.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    fields.insert(
-        "snapshot".to_owned(),
-        entry
-            .revision_refs
-            .iter()
-            .map(|reference| reference.object_artifact_content_hash.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-
-    let (check, assessment, state, tags) = summary_search_fields(&entry.summary);
-    fields.insert("check".to_owned(), check);
-    fields.insert("assessment".to_owned(), assessment);
-    fields.insert("is".to_owned(), token_set(state));
-    fields.insert("tag".to_owned(), token_set(tags.iter().map(String::as_str)));
-    fields.insert(
-        "occurred_at".to_owned(),
-        parse_event_instant(&entry.occurred_at)
-            .map(format_rfc3339_utc_millis)
-            .unwrap_or_default(),
-    );
-    SearchRecord {
-        text: serde_json::to_string(entry)
-            .expect("typed Timeline entry must serialize")
-            .to_lowercase(),
-        fields,
-    }
+    event_history_search_record(entry)
 }
 
 #[cfg(test)]
@@ -285,64 +220,6 @@ fn reset_search_record_build_count() {
 #[cfg(test)]
 fn search_record_build_count() -> usize {
     SEARCH_RECORD_BUILD_COUNT.with(std::cell::Cell::get)
-}
-
-fn summary_search_fields(
-    summary: &EventHistorySummaryV1,
-) -> (String, String, Option<&'static str>, Vec<String>) {
-    let mut check = String::new();
-    let mut assessment = String::new();
-    let mut state = None;
-    let mut tags = Vec::new();
-    match summary {
-        EventHistorySummaryV1::ReviewObservationRecorded(payload) => {
-            tags = payload.tags.clone();
-        }
-        EventHistorySummaryV1::ReviewAssessmentRecorded(payload) => {
-            assessment = wire(&payload.assessment);
-        }
-        EventHistorySummaryV1::InputRequestOpened(_) => state = Some("open"),
-        EventHistorySummaryV1::InputRequestResponded(_) => state = Some("answered"),
-        EventHistorySummaryV1::ValidationCheckRecorded(payload) => {
-            check = wire(&payload.status);
-        }
-        EventHistorySummaryV1::ReviewInitialized
-        | EventHistorySummaryV1::WorkObjectProposed { .. }
-        | EventHistorySummaryV1::ReviewNoteImported
-        | EventHistorySummaryV1::RevisionRefAssociated(_)
-        | EventHistorySummaryV1::RevisionRefWithdrawn(_)
-        | EventHistorySummaryV1::RevisionCommitAssociated(_)
-        | EventHistorySummaryV1::RevisionCommitWithdrawn(_)
-        | EventHistorySummaryV1::ChangeDeclared(_)
-        | EventHistorySummaryV1::ChangeMembershipAsserted(_)
-        | EventHistorySummaryV1::ChangeMembershipWithdrawn(_)
-        | EventHistorySummaryV1::ChangeLinkAsserted(_)
-        | EventHistorySummaryV1::ChangeRevisionRelationAsserted(_)
-        | EventHistorySummaryV1::ChangeRevisionRelationWithdrawn(_)
-        | EventHistorySummaryV1::RevisionRelationAttested(_)
-        | EventHistorySummaryV1::ReviewFactPorted(_) => {}
-    }
-    (check, assessment, state, tags)
-}
-
-fn wire(value: &impl serde::Serialize) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .unwrap_or_default()
-}
-
-fn token_set<'a>(tokens: impl IntoIterator<Item = &'a str>) -> String {
-    let values = tokens
-        .into_iter()
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if values.is_empty() {
-        String::new()
-    } else {
-        format!(" {values} ")
-    }
 }
 
 fn key_for(entry: &EventHistoryEntryV1) -> TimelineKey {

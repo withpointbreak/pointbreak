@@ -25,9 +25,13 @@ pub use self::search::{
     CHANGE_TIMELINE_QUERY_FIELDS, EVENT_QUERY_FIELDS, EventRecordExtras, KNOWN_QUERY_KEYS,
     ParsedQuery, QueryClause, QueryDiagnostic, QueryDiagnosticCode, QuerySurface,
     RANGE_ANCHOR_FIELD, REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord,
-    build_haystack, matches_query, parse_search_query, parse_search_query_for,
+    build_haystack, event_history_search_record, matches_query, parse_search_query,
+    parse_search_query_for,
 };
-pub(crate) use self::search::{enum_wire, tag_completion_key, tag_index_tokens, wrap_set};
+pub(crate) use self::search::{
+    MatchKind, enum_wire, match_kind_for, range_bound, resolve_assessment_value,
+    resolve_type_value, tag_completion_key, tag_index_tokens, wrap_set,
+};
 pub use self::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
 use crate::session::EventStore;

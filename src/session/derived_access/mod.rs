@@ -22,6 +22,7 @@ pub(crate) mod service;
 pub(crate) mod sqlite;
 mod support;
 pub(crate) mod threads;
+pub(crate) mod timeline;
 pub(crate) mod verification;
 pub(crate) mod writer;
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
