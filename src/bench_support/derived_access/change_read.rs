@@ -1643,7 +1643,10 @@ mod instrumented {
             fixture_witness_sha256: request.fixture_witness_sha256.clone(),
             product_identity_sha256: product_identity_sha256.clone(),
             execution_identity_sha256: execution_identity_sha256.clone(),
-            witness: capture_qualification_derived_storage_witness_v1(&store_root, &probes)?,
+            witness: capture_qualification_derived_storage_witness_v1(&store_root, &probes)
+                .map_err(|error| {
+                    format!("lifecycle initial-publication storage witness: {error}")
+                })?,
         };
         run_timeline_case_with_fault(
             &request,
@@ -1812,7 +1815,8 @@ mod instrumented {
                 fixture_witness_sha256: request.fixture_witness_sha256.clone(),
                 product_identity_sha256: product_identity_sha256.clone(),
                 execution_identity_sha256: execution_identity_sha256.clone(),
-                witness: capture_qualification_derived_storage_witness_v1(&store_root, probes)?,
+                witness: capture_qualification_derived_storage_witness_v1(&store_root, probes)
+                    .map_err(|error| format!("initial-publication storage witness: {error}"))?,
             }]
         } else {
             Vec::new()
@@ -1966,7 +1970,8 @@ mod instrumented {
                 fixture_witness_sha256: request.fixture_witness_sha256.clone(),
                 product_identity_sha256: product_identity_sha256.clone(),
                 execution_identity_sha256: execution_identity_sha256.clone(),
-                witness: capture_qualification_derived_storage_witness_v1(&store_root, probes)?,
+                witness: capture_qualification_derived_storage_witness_v1(&store_root, probes)
+                    .map_err(|error| format!("post-append-checkpoint storage witness: {error}"))?,
             });
             timeline_storage_rows.push(capture_timeline_storage_row(
                 &request,
@@ -3972,7 +3977,9 @@ mod instrumented {
             let mut fresh = storage
                 .cloned()
                 .ok_or_else(|| "post-append Timeline omitted storage authority".to_owned())?;
-            fresh.witness = capture_qualification_derived_storage_witness_v1(&store_root, probes)?;
+            fresh.witness =
+                capture_qualification_derived_storage_witness_v1(&store_root, probes)
+                    .map_err(|error| format!("timeline post-append storage witness: {error}"))?;
             Some(fresh)
         } else {
             None

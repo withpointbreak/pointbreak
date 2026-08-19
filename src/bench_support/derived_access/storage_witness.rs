@@ -302,19 +302,37 @@ impl QualificationDerivedStorageWitnessV1 {
             || !is_sha256(&self.descriptor.semantic_receipt_sha256)
             || !is_sha256(&self.sqlite_catalog.catalog_sha256)
             || !is_sha256(&self.witness_sha256)
-            || self.witness_sha256 != self.canonical_sha256()?
-            || self.sqlite_catalog.catalog_sha256 != canonical_sha256(&self.sqlite_catalog.entries)?
-            || self.carriers.is_empty()
-            || self.forbidden_probes.len()
-                != QualificationDerivedStorageForbiddenProbeKindV1::ALL.len()
             || self
                 .forbidden_probes
                 .iter()
-                .any(|probe| !is_sha256(&probe.sentinel_sha256) || probe.found)
+                .any(|probe| !is_sha256(&probe.sentinel_sha256))
         {
-            return Err(
-                "derived storage witness drifted or found forbidden fixture bytes".to_owned(),
-            );
+            return Err("derived storage witness carries a malformed identity".to_owned());
+        }
+        if self.witness_sha256 != self.canonical_sha256()? {
+            return Err("derived storage witness self-hash drifted".to_owned());
+        }
+        if self.sqlite_catalog.catalog_sha256 != canonical_sha256(&self.sqlite_catalog.entries)? {
+            return Err("derived storage witness catalog hash drifted".to_owned());
+        }
+        if self.carriers.is_empty() {
+            return Err("derived storage witness selected no carriers".to_owned());
+        }
+        if self.forbidden_probes.len() != QualificationDerivedStorageForbiddenProbeKindV1::ALL.len()
+        {
+            return Err("derived storage witness omitted a forbidden probe".to_owned());
+        }
+        let found = self
+            .forbidden_probes
+            .iter()
+            .filter(|probe| probe.found)
+            .map(|probe| format!("{:?}", probe.kind))
+            .collect::<Vec<_>>();
+        if !found.is_empty() {
+            return Err(format!(
+                "derived storage witness found forbidden fixture bytes: {}",
+                found.join(", ")
+            ));
         }
         if self.reader_receipt.as_ref().is_some_and(|receipt| {
             !is_sha256(&receipt.receipt_sha256) || !is_sha256(&receipt.content_sha256)
@@ -391,7 +409,13 @@ pub fn capture_qualification_derived_storage_witness_v1(
         let snapshot = match stable_storage_snapshot(store_root, &selected, forbidden) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => {
-                last_attempt_error = None;
+                // Name the churn instead of clearing the accumulator, so an
+                // earlier attributable structural failure is never erased
+                // into the anonymous exhaustion fallback.
+                last_attempt_error = Some(format!(
+                    "derived storage snapshot was unstable at generation sequence {}",
+                    selected.publication.sequence
+                ));
                 continue;
             }
             Err(error) => {
@@ -399,6 +423,22 @@ pub fn capture_qualification_derived_storage_witness_v1(
                 continue;
             }
         };
+        // A forbidden probe that survived the triple-read stability window is
+        // a genuine finding: fail closed immediately and name every probe and
+        // carrier so the failure is attributable without another invocation.
+        if !snapshot.probe_hits.is_empty() {
+            let hits = snapshot
+                .probe_hits
+                .iter()
+                .map(|(kind, relative_path)| format!("{kind:?} in {relative_path}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "derived storage witness found forbidden fixture bytes at generation \
+                 sequence {}: {hits}",
+                selected.publication.sequence
+            ));
+        }
         let descriptor_value =
             serde_json::to_value(&selected.descriptor).map_err(|error| error.to_string())?;
         let descriptor_schema = descriptor_value
@@ -432,8 +472,20 @@ pub fn capture_qualification_derived_storage_witness_v1(
             witness_sha256: String::new(),
         };
         witness.refresh_sha256()?;
-        witness.validate()?;
-        return Ok(witness);
+        // With probe hits already excluded above, remaining validation
+        // failures are structural (empty carriers, catalog or hash drift) and
+        // are treated as capture instability: retry, then fail with the
+        // attributable condition rather than silently converging.
+        match witness.validate() {
+            Ok(()) => return Ok(witness),
+            Err(error) => {
+                last_attempt_error = Some(format!(
+                    "unstable derived storage witness at generation sequence {}: {error}",
+                    selected.publication.sequence
+                ));
+                continue;
+            }
+        }
     }
     Err(last_attempt_error
         .unwrap_or_else(|| "derived storage changed throughout witness capture".to_owned()))
@@ -446,6 +498,7 @@ struct StableStorageSnapshot {
     carriers: Vec<QualificationDerivedStorageCarrierV1>,
     bytes: QualificationDerivedStorageBytesV1,
     forbidden_probes: Vec<QualificationDerivedStorageForbiddenProbeV1>,
+    probe_hits: Vec<(QualificationDerivedStorageForbiddenProbeKindV1, String)>,
 }
 
 fn stable_storage_snapshot(
@@ -498,7 +551,12 @@ fn stable_storage_snapshot_with_hook(
     {
         return Ok(None);
     }
-    let (carriers, bytes, forbidden_probes) = after;
+    let CollectedCarriersV1 {
+        carriers,
+        bytes,
+        forbidden_probes,
+        probe_hits,
+    } = after;
     Ok(Some(StableStorageSnapshot {
         reader_receipt,
         live_checkpoint,
@@ -506,6 +564,7 @@ fn stable_storage_snapshot_with_hook(
         carriers,
         bytes,
         forbidden_probes,
+        probe_hits,
     }))
 }
 
@@ -854,19 +913,20 @@ fn table_indexes(
     Ok(indexes)
 }
 
+#[derive(Eq, PartialEq)]
+struct CollectedCarriersV1 {
+    carriers: Vec<QualificationDerivedStorageCarrierV1>,
+    bytes: QualificationDerivedStorageBytesV1,
+    forbidden_probes: Vec<QualificationDerivedStorageForbiddenProbeV1>,
+    probe_hits: Vec<(QualificationDerivedStorageForbiddenProbeKindV1, String)>,
+}
+
 fn collect_carriers(
     store_root: &Path,
     generation_root: &Path,
     publication_path: Option<&Path>,
     forbidden: &QualificationDerivedStorageForbiddenProbeInputV1,
-) -> Result<
-    (
-        Vec<QualificationDerivedStorageCarrierV1>,
-        QualificationDerivedStorageBytesV1,
-        Vec<QualificationDerivedStorageForbiddenProbeV1>,
-    ),
-    String,
-> {
+) -> Result<CollectedCarriersV1, String> {
     let mut files = Vec::new();
     collect_regular_files(generation_root, generation_root, &mut files)?;
     if let Some(publication) = publication_path {
@@ -883,6 +943,7 @@ fn collect_carriers(
         store_root.as_os_str().as_encoded_bytes().to_vec(),
     ));
     let mut found = vec![false; probes.len()];
+    let mut probe_hits = Vec::new();
     let mut carriers = Vec::new();
     let mut bytes = QualificationDerivedStorageBytesV1 {
         database: 0,
@@ -894,8 +955,11 @@ fn collect_carriers(
         let content = read_regular_file(&path)?.ok_or_else(|| {
             "derived storage selected carrier disappeared while reading".to_owned()
         })?;
-        for (index, (_, sentinel)) in probes.iter().enumerate() {
-            found[index] |= contains_bytes(&content, sentinel);
+        for (index, (kind, sentinel)) in probes.iter().enumerate() {
+            if contains_bytes(&content, sentinel) {
+                found[index] = true;
+                probe_hits.push((*kind, relative.clone()));
+            }
         }
         let role = carrier_role(&relative);
         let byte_count = content.len() as u64;
@@ -930,7 +994,13 @@ fn collect_carriers(
             },
         )
         .collect();
-    Ok((carriers, bytes, forbidden_probes))
+    probe_hits.sort();
+    Ok(CollectedCarriersV1 {
+        carriers,
+        bytes,
+        forbidden_probes,
+        probe_hits,
+    })
 }
 
 fn collect_regular_files(
@@ -1205,9 +1275,9 @@ mod tests {
             ),
         )
         .expect("write carrier");
-        let probes = collect_carriers(root.path(), root.path(), None, &probe_input())
-            .expect("collect carriers")
-            .2;
+        let collected = collect_carriers(root.path(), root.path(), None, &probe_input())
+            .expect("collect carriers");
+        let (probes, probe_hits) = (collected.forbidden_probes, collected.probe_hits);
         let prose = probes
             .iter()
             .find(|probe| probe.kind == QualificationDerivedStorageForbiddenProbeKindV1::Prose)
@@ -1220,6 +1290,95 @@ mod tests {
             })
             .expect("store-root probe");
         assert!(store_root.found);
+        assert!(probe_hits.contains(&(
+            QualificationDerivedStorageForbiddenProbeKindV1::Prose,
+            "carrier".to_owned()
+        )));
+        assert!(probe_hits.contains(&(
+            QualificationDerivedStorageForbiddenProbeKindV1::StoreRootPath,
+            "carrier".to_owned()
+        )));
+    }
+
+    #[test]
+    fn witness_validation_names_each_failing_condition() {
+        let mut witness = QualificationDerivedStorageWitnessV1 {
+            schema: QUALIFICATION_DERIVED_STORAGE_WITNESS_SCHEMA_V1.to_owned(),
+            publication: QualificationDerivedStoragePublicationV1 {
+                sequence: 1,
+                generation_id_sha256: "a".repeat(64),
+                descriptor_sha256: "b".repeat(64),
+            },
+            descriptor: QualificationDerivedStorageDescriptorV1 {
+                schema: "pointbreak.derived-generation-descriptor.v2".to_owned(),
+                profile: "sqlite-wal-bodyless-v1".to_owned(),
+                epoch: 1,
+                head_sequence: 1,
+                store_id_sha256: "c".repeat(64),
+                semantic_receipt_sha256: "d".repeat(64),
+            },
+            reader_receipt: None,
+            live_checkpoint: None,
+            sqlite_catalog: QualificationDerivedStorageCatalogV1 {
+                entries: Vec::new(),
+                catalog_sha256: canonical_sha256(
+                    &Vec::<QualificationDerivedStorageCatalogEntryV1>::new(),
+                )
+                .expect("empty catalog hash"),
+            },
+            carriers: vec![QualificationDerivedStorageCarrierV1 {
+                role: QualificationDerivedStorageCarrierRoleV1::Database,
+                relative_path_sha256: "e".repeat(64),
+                byte_count: 1,
+                content_sha256: "f".repeat(64),
+            }],
+            bytes: QualificationDerivedStorageBytesV1 {
+                database: 1,
+                wal: 0,
+                shared_memory: 0,
+                temporary: 0,
+            },
+            forbidden_probes: QualificationDerivedStorageForbiddenProbeKindV1::ALL
+                .iter()
+                .map(|kind| QualificationDerivedStorageForbiddenProbeV1 {
+                    kind: *kind,
+                    sentinel_sha256: "1".repeat(64),
+                    found: false,
+                })
+                .collect(),
+            witness_sha256: String::new(),
+        };
+        witness.refresh_sha256().expect("witness hash");
+        witness.validate().expect("well-formed witness validates");
+
+        let mut found_probe = witness.clone();
+        found_probe.forbidden_probes[0].found = true;
+        found_probe.refresh_sha256().expect("witness hash");
+        let error = found_probe.validate().expect_err("found probe rejects");
+        assert!(
+            error.contains("found forbidden fixture bytes")
+                && error.contains(&format!("{:?}", witness.forbidden_probes[0].kind)),
+            "unexpected error: {error}"
+        );
+
+        let mut empty_carriers = witness.clone();
+        empty_carriers.carriers.clear();
+        empty_carriers.refresh_sha256().expect("witness hash");
+        let error = empty_carriers
+            .validate()
+            .expect_err("empty carriers reject");
+        assert!(
+            error.contains("selected no carriers"),
+            "unexpected error: {error}"
+        );
+
+        let mut stale_hash = witness.clone();
+        stale_hash.bytes.database = 2;
+        let error = stale_hash.validate().expect_err("stale self-hash rejects");
+        assert!(
+            error.contains("self-hash drifted"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
