@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,7 +6,7 @@ use super::storage_witness::{
     QualificationDerivedStorageForbiddenProbeHashesV1,
     QualificationDerivedStorageForbiddenProbeKindV1, QualificationDerivedStorageWitnessV1,
 };
-use crate::bench_support::longitudinal::LongitudinalCountersV1;
+use crate::bench_support::longitudinal::{LongitudinalCounterReceiptV1, LongitudinalCountersV1};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SCHEMA_V1: &str =
@@ -28,10 +28,16 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2: &str =
     "pointbreak.qualification-derived-access-evaluator.v2";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3: &str =
     "pointbreak.qualification-derived-access-evaluator.v3";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4: &str =
+    "pointbreak.qualification-derived-access-evaluator.v4";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v3-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1: &str =
     "7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-evaluator-v4-procedure.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1: &str =
+    "a6046ebc08fcbfe488877ba0244f1fd827ec693e88be867ce5a4b926d83143c4";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -41,6 +47,19 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "immutable-schema-and-byte-inventory-v1",
     "completion-last-independent-package-verification-v1",
 ];
+
+const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 7] = [
+    "change-read-parity-and-bounds-v1",
+    "exact-product-and-harness-identity-v1",
+    "complete-typed-error-documents-v1",
+    "reader-v3-authority-lifecycle-concurrency-v1",
+    "immutable-schema-and-byte-inventory-v1",
+    "completion-last-independent-package-verification-v1",
+    "timeline-route-parity-authority-bounds-and-invalid-signature-recovery-v1",
+];
+
+pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
+    "c45ab599f36fcd8a3b8a44763eba38c35aa7a8293686e1abfe93b2f78e9b0113";
 
 pub fn qualification_derived_access_evaluator_v3_procedure_sha256() -> String {
     let procedure = serde_json::json!({
@@ -53,6 +72,21 @@ pub fn qualification_derived_access_evaluator_v3_procedure_sha256() -> String {
     assert_eq!(
         digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1,
         "compiled derived-access evaluator-v3 procedure drifted"
+    );
+    digest
+}
+
+pub fn qualification_derived_access_evaluator_v4_procedure_sha256() -> String {
+    let procedure = serde_json::json!({
+        "schema": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1,
+        "steps": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1,
+    });
+    let bytes = canonical_json_bytes(&procedure)
+        .expect("the derived-access evaluator-v4 procedure is canonical");
+    let digest = sha256_bytes_hex(&bytes);
+    assert_eq!(
+        digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1,
+        "compiled derived-access evaluator-v4 procedure drifted"
     );
     digest
 }
@@ -1144,7 +1178,7 @@ pub(crate) fn qualification_derived_change_control_test_v1(
         ),
         Case::ExplicitOffStrictReader => (
             Binary::Cli,
-            "cli::inspect::server::tests::routes_split_derived_collections_from_strict_timeline_and_exact_reads",
+            "cli::inspect::server::tests::routes_split_derived_collections_and_timeline_from_explicit_off_and_exact_reads",
         ),
         Case::ConcurrentWritersAndReaders => (
             Binary::Library,
@@ -1557,6 +1591,329 @@ pub struct QualificationDerivedChangeReadEvidenceV1 {
     pub counters: LongitudinalCountersV1,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedTimelineReadCaseV1 {
+    StructuredQuerySuite,
+    ExhaustiveQuerySuite,
+    PageTokenSuite,
+    TrustSuite,
+    ProcessLifecycleSuite,
+    PostAppendSuite,
+}
+
+impl QualificationDerivedTimelineReadCaseV1 {
+    pub const ALL: [Self; 6] = [
+        Self::StructuredQuerySuite,
+        Self::ExhaustiveQuerySuite,
+        Self::PageTokenSuite,
+        Self::TrustSuite,
+        Self::ProcessLifecycleSuite,
+        Self::PostAppendSuite,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StructuredQuerySuite => "structured_query_suite",
+            Self::ExhaustiveQuerySuite => "exhaustive_query_suite",
+            Self::PageTokenSuite => "page_token_suite",
+            Self::TrustSuite => "trust_suite",
+            Self::ProcessLifecycleSuite => "process_lifecycle_suite",
+            Self::PostAppendSuite => "post_append_suite",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedTimelineReadOracleV1 {
+    StrictParity,
+    TypedFailure,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineAuthorityEvidenceV1 {
+    pub request_schedule_sha256: String,
+    pub generation_identity_before_sha256: String,
+    pub generation_identity_after_sha256: String,
+    pub checkpoint_identity_before_sha256: String,
+    pub checkpoint_identity_after_sha256: String,
+    pub timeline_projection_stamp_before_sha256: String,
+    pub timeline_projection_stamp_after_sha256: String,
+    pub trust_identity_before_sha256: String,
+    pub trust_identity_after_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_token_set_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authoritative_event_family_counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub strict_event_family_counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub derived_event_family_counts: BTreeMap<String, u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub excluded_timeline_case_counts:
+        BTreeMap<String, QualificationDerivedTimelineExclusionCountsV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineExclusionCountsV1 {
+    pub source_count: u64,
+    pub strict_output_count: u64,
+    pub derived_output_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineReadEvidenceV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub fixture_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    pub case: QualificationDerivedTimelineReadCaseV1,
+    pub semantic_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub counter_process_scope: QualificationDerivedAccessProcessScopeV1,
+    pub product_identity_sha256: String,
+    pub counter_execution_identity_sha256: String,
+    pub status: QualificationDerivedAccessStatusV1,
+    pub oracle: QualificationDerivedTimelineReadOracleV1,
+    pub strict_semantic_sha256: Option<String>,
+    pub derived_semantic_sha256: String,
+    pub wire_contract_matches: bool,
+    pub expected_typed_documents: Vec<QualificationDerivedChangeTypedDocumentV1>,
+    pub observed_typed_documents: Vec<QualificationDerivedChangeTypedDocumentV1>,
+    pub authority: QualificationDerivedTimelineAuthorityEvidenceV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_transition: Option<QualificationDerivedTimelineTrustTransitionV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_signature_failure:
+        Option<QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1>,
+    pub counter_receipts: Vec<LongitudinalCounterReceiptV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineTrustTransitionV1 {
+    pub unsigned_event_id: String,
+    pub signed_event_id: String,
+    pub signer_identity: String,
+    pub status_before_by_event: BTreeMap<String, String>,
+    pub status_after_by_event: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1 {
+    pub carrier_event_id: String,
+    pub clean_inventory_sha256: String,
+    pub derivative_inventory_sha256: String,
+    pub restored_inventory_sha256: String,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+    pub clean_signature_status: String,
+    pub mutated_signature_status: String,
+    pub observed_http_status: u16,
+    pub observed_typed_document: QualificationDerivedChangeTypedDocumentV1,
+    pub clean_semantic_sha256: String,
+    pub strict_semantic_sha256: String,
+    pub derived_semantic_sha256: String,
+    pub recovery_semantic_sha256: String,
+    pub counter_receipt: LongitudinalCounterReceiptV1,
+    pub trust_bindings_observed: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedTimelineForbiddenProbeKindV1 {
+    TimelineProse,
+    TimelinePayload,
+    TimelineResponseDocument,
+    TimelineTrustResult,
+    TimelineContinuationToken,
+}
+
+impl QualificationDerivedTimelineForbiddenProbeKindV1 {
+    pub const ALL: [Self; 5] = [
+        Self::TimelineProse,
+        Self::TimelinePayload,
+        Self::TimelineResponseDocument,
+        Self::TimelineTrustResult,
+        Self::TimelineContinuationToken,
+    ];
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineForbiddenProbeEvidenceV1 {
+    pub kind: QualificationDerivedTimelineForbiddenProbeKindV1,
+    pub sentinel_sha256: String,
+    pub sqlite_match_count: u64,
+    pub file_match_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineStorageEvidenceV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub fixture: QualificationDerivedChangeFixtureV1,
+    pub phase: QualificationDerivedChangeStoragePhaseV1,
+    pub fixture_inventory_sha256: String,
+    pub fixture_witness_sha256: String,
+    pub product_identity_sha256: String,
+    pub execution_identity_sha256: String,
+    pub forbidden_probes: Vec<QualificationDerivedTimelineForbiddenProbeEvidenceV1>,
+}
+
+pub(crate) const QUALIFICATION_TIMELINE_SOURCE_EVENT_FAMILIES_V1: [&str; 24] = [
+    "review_initialized",
+    "work_object_proposed",
+    "review_observation_recorded",
+    "review_assessment_recorded",
+    "input_request_opened",
+    "input_request_responded",
+    "review_note_imported",
+    "revision_ref_associated",
+    "revision_ref_withdrawn",
+    "revision_commit_associated",
+    "revision_commit_withdrawn",
+    "validation_check_recorded",
+    "task_checkpoint_captured",
+    "task_observation_recorded",
+    "event_signature_recorded",
+    "artifact_removed",
+    "change_declared",
+    "change_membership_asserted",
+    "change_membership_withdrawn",
+    "change_link_asserted",
+    "change_revision_relation_asserted",
+    "change_revision_relation_withdrawn",
+    "revision_relation_attested",
+    "review_fact_ported",
+];
+
+pub(crate) const QUALIFICATION_TIMELINE_ADMITTED_EVENT_FAMILIES_V1: [&str; 20] = [
+    "review_initialized",
+    "work_object_proposed",
+    "review_observation_recorded",
+    "review_assessment_recorded",
+    "input_request_opened",
+    "input_request_responded",
+    "review_note_imported",
+    "revision_ref_associated",
+    "revision_ref_withdrawn",
+    "revision_commit_associated",
+    "revision_commit_withdrawn",
+    "validation_check_recorded",
+    "change_declared",
+    "change_membership_asserted",
+    "change_membership_withdrawn",
+    "change_link_asserted",
+    "change_revision_relation_asserted",
+    "change_revision_relation_withdrawn",
+    "revision_relation_attested",
+    "review_fact_ported",
+];
+
+pub(crate) const QUALIFICATION_TIMELINE_EXCLUDED_CASES_V1: [&str; 7] = [
+    "work_object_proposed_task_attempt",
+    "input_request_opened_task",
+    "input_request_responded_task",
+    "task_checkpoint_captured",
+    "task_observation_recorded",
+    "event_signature_recorded",
+    "artifact_removed",
+];
+
+const TIMELINE_NON_TOPOLOGY_CASES_V1: [QualificationDerivedTimelineReadCaseV1; 1] =
+    [QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite];
+
+pub(crate) fn required_timeline_cases_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+) -> &'static [QualificationDerivedTimelineReadCaseV1] {
+    if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+        &QualificationDerivedTimelineReadCaseV1::ALL
+    } else {
+        &TIMELINE_NON_TOPOLOGY_CASES_V1
+    }
+}
+
+const TIMELINE_STRUCTURED_TOPOLOGY_SCHEDULE_V1: [&str; 10] = [
+    "timeline_all_asc",
+    "timeline_all_desc",
+    "timeline_type_filter",
+    "timeline_track_filter",
+    "timeline_change_filter",
+    "timeline_exact_revision_filter",
+    "timeline_facets_count_at",
+    "timeline_revision_correlations",
+    "timeline_withdrawal_equal_time_ordering",
+    "timeline_invalid_query",
+];
+const TIMELINE_STRUCTURED_FAULT_SCHEDULE_V1: [&str; 1] = ["timeline_fault_outcome"];
+const TIMELINE_EXHAUSTIVE_SCHEDULE_V1: [&str; 2] = [
+    "timeline_exhaustive_body_search",
+    "timeline_exhaustive_facets_count_window",
+];
+const TIMELINE_PAGE_TOKEN_SCHEDULE_V1: [&str; 5] = [
+    "timeline_next",
+    "timeline_previous",
+    "timeline_token_query_mismatch",
+    "timeline_token_direction_limit_mismatch",
+    "timeline_at_token_exclusive",
+];
+const TIMELINE_TRUST_SCHEDULE_V1: [&str; 3] = [
+    "timeline_trust_before",
+    "timeline_trust_after",
+    "timeline_trust_stale_token",
+];
+const TIMELINE_PROCESS_LIFECYCLE_SCHEDULE_V1: [&str; 4] = [
+    "timeline_cold",
+    "timeline_restart",
+    "timeline_warm",
+    "timeline_concurrent",
+];
+const TIMELINE_POST_APPEND_SCHEDULE_V1: [&str; 4] = [
+    "timeline_k",
+    "timeline_k_plus_one",
+    "timeline_k_stale_token",
+    "timeline_k_plus_one_fresh_process",
+];
+
+pub(crate) fn timeline_request_schedule_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+    case: QualificationDerivedTimelineReadCaseV1,
+) -> &'static [&'static str] {
+    if fixture != QualificationDerivedChangeFixtureV1::TopologyV1 {
+        return &TIMELINE_STRUCTURED_FAULT_SCHEDULE_V1;
+    }
+    match case {
+        QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite => {
+            &TIMELINE_STRUCTURED_TOPOLOGY_SCHEDULE_V1
+        }
+        QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite => {
+            &TIMELINE_EXHAUSTIVE_SCHEDULE_V1
+        }
+        QualificationDerivedTimelineReadCaseV1::PageTokenSuite => &TIMELINE_PAGE_TOKEN_SCHEDULE_V1,
+        QualificationDerivedTimelineReadCaseV1::TrustSuite => &TIMELINE_TRUST_SCHEDULE_V1,
+        QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite => {
+            &TIMELINE_PROCESS_LIFECYCLE_SCHEDULE_V1
+        }
+        QualificationDerivedTimelineReadCaseV1::PostAppendSuite => {
+            &TIMELINE_POST_APPEND_SCHEDULE_V1
+        }
+    }
+}
+
+pub(crate) fn timeline_request_schedule_sha256_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+    case: QualificationDerivedTimelineReadCaseV1,
+) -> String {
+    canonical_sha256(&timeline_request_schedule_v1(fixture, case))
+        .expect("the Timeline request schedule is canonical")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualificationDerivedAccessPackageV1 {
@@ -1583,6 +1940,10 @@ pub struct QualificationDerivedAccessPackageV1 {
     pub change_control_rows: Vec<QualificationDerivedChangeControlEvidenceV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub change_storage_rows: Vec<QualificationDerivedChangeStorageEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline_read_rows: Vec<QualificationDerivedTimelineReadEvidenceV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline_storage_rows: Vec<QualificationDerivedTimelineStorageEvidenceV1>,
     pub complete: bool,
 }
 
@@ -1606,6 +1967,7 @@ pub fn evaluate_qualification_derived_access_v1(
             package.evaluator_revision.as_str(),
             QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+                | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
         )
         || package.proposed_profile_id.trim().is_empty()
     {
@@ -1615,6 +1977,8 @@ pub fn evaluate_qualification_derived_access_v1(
         && (!package.change_read_rows.is_empty()
             || !package.change_control_rows.is_empty()
             || !package.change_storage_rows.is_empty()
+            || !package.timeline_read_rows.is_empty()
+            || !package.timeline_storage_rows.is_empty()
             || !package.product_identities.is_empty()
             || !package.change_control_binary_identities.is_empty()
             || !package.evaluator_procedure_sha256.is_empty())
@@ -1626,6 +1990,17 @@ pub fn evaluate_qualification_derived_access_v1(
             != qualification_derived_access_evaluator_v3_procedure_sha256()
     {
         return Err("evaluator v3 procedure binding drifted".to_owned());
+    }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+        && (!package.timeline_read_rows.is_empty() || !package.timeline_storage_rows.is_empty())
+    {
+        return Err("evaluator v3 cannot carry Timeline successor evidence".to_owned());
+    }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+        && package.evaluator_procedure_sha256
+            != qualification_derived_access_evaluator_v4_procedure_sha256()
+    {
+        return Err("evaluator v4 procedure binding drifted".to_owned());
     }
     let missing_platforms = validate_execution_identities(package)?;
     reject_duplicate_rows(package)?;
@@ -1643,10 +2018,18 @@ pub fn evaluate_qualification_derived_access_v1(
     evaluate_resources(package, &contract, &mut failed, &mut missing);
     evaluate_allocation(package, &contract, &mut failed, &mut missing);
     evaluate_bootstrap(package, &contract, &mut failed, &mut missing);
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3 {
+    if matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+    ) {
         evaluate_change_reads(package, &mut failed, &mut missing);
         evaluate_change_controls(package, &mut failed, &mut missing);
         evaluate_change_storage(package, &mut failed, &mut missing);
+    }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4 {
+        evaluate_timeline_reads_v1(package, &mut failed, &mut missing);
+        evaluate_timeline_storage_v1(package, &mut failed, &mut missing);
     }
     if !package.complete {
         missing.push("completion-last package marker".to_owned());
@@ -1868,9 +2251,12 @@ fn validate_execution_identities(
         .iter()
         .map(|identity| identity.platform)
         .collect::<BTreeSet<_>>();
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
-        && (product_platforms.len() != package.product_identities.len()
-            || !product_platforms.is_subset(&required))
+    if matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+    ) && (product_platforms.len() != package.product_identities.len()
+        || !product_platforms.is_subset(&required))
     {
         return Err("derived-access product identities are duplicated or unsupported".to_owned());
     }
@@ -2155,6 +2541,42 @@ fn reject_duplicate_rows(package: &QualificationDerivedAccessPackageV1) -> Resul
         || !change_storage.is_subset(&expected_change_storage)
     {
         return Err("duplicate or unsupported Change storage row".to_owned());
+    }
+    let timeline_reads = package
+        .timeline_read_rows
+        .iter()
+        .map(|row| (row.platform, row.fixture, row.case))
+        .collect::<BTreeSet<_>>();
+    let expected_timeline_reads = [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ]
+    .into_iter()
+    .flat_map(|platform| {
+        QualificationDerivedChangeFixtureV1::ALL
+            .into_iter()
+            .flat_map(move |fixture| {
+                required_timeline_cases_v1(fixture)
+                    .iter()
+                    .copied()
+                    .map(move |case| (platform, fixture, case))
+            })
+    })
+    .collect::<BTreeSet<_>>();
+    if timeline_reads.len() != package.timeline_read_rows.len()
+        || !timeline_reads.is_subset(&expected_timeline_reads)
+    {
+        return Err("duplicate or unsupported Timeline read row".to_owned());
+    }
+    let timeline_storage = package
+        .timeline_storage_rows
+        .iter()
+        .map(|row| (row.platform, row.fixture, row.phase))
+        .collect::<BTreeSet<_>>();
+    if timeline_storage.len() != package.timeline_storage_rows.len()
+        || !timeline_storage.is_subset(&expected_change_storage)
+    {
+        return Err("duplicate or unsupported Timeline storage row".to_owned());
     }
     Ok(())
 }
@@ -2744,11 +3166,11 @@ fn evaluate_change_controls(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ] {
-        let product_identity_sha256 = package
+        let product = package
             .product_identities
             .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
+            .find(|identity| identity.platform == platform);
+        let product_identity_sha256 = product.and_then(|identity| identity.canonical_sha256().ok());
         let execution_identity_sha256 = package
             .execution_identities
             .iter()
@@ -2992,6 +3414,624 @@ fn evaluate_change_storage(
             failed.push(format!("{platform:?} same-generation checkpoint advance"));
         }
     }
+}
+
+fn evaluate_timeline_reads_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    failed: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    if package.timeline_read_rows.is_empty() {
+        missing.push("Timeline read matrix".to_owned());
+        return;
+    }
+
+    for fixture in QualificationDerivedChangeFixtureV1::ALL {
+        let authorities = package
+            .timeline_read_rows
+            .iter()
+            .filter(|row| row.fixture == fixture)
+            .map(|row| {
+                (
+                    row.fixture_inventory_sha256.as_str(),
+                    row.fixture_witness_sha256.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if authorities.len() > 1 {
+            failed.push(format!(
+                "{fixture:?} cross-platform Timeline fixture authority"
+            ));
+        }
+    }
+
+    let mut run_identities = BTreeSet::new();
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        let product = package
+            .product_identities
+            .iter()
+            .find(|identity| identity.platform == platform);
+        let product_identity_sha256 = product.and_then(|identity| identity.canonical_sha256().ok());
+        let execution = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == platform);
+        let execution_identity_sha256 =
+            execution.and_then(|identity| identity.canonical_sha256().ok());
+
+        for fixture in QualificationDerivedChangeFixtureV1::ALL {
+            for &case in required_timeline_cases_v1(fixture) {
+                let criterion = format!("{platform:?}/{fixture:?}/{case:?} Timeline read");
+                let Some(row) = package.timeline_read_rows.iter().find(|row| {
+                    row.platform == platform && row.fixture == fixture && row.case == case
+                }) else {
+                    missing.push(criterion);
+                    continue;
+                };
+
+                let source_authority_matches = package.change_read_rows.iter().any(|change| {
+                    change.platform == platform
+                        && change.fixture == fixture
+                        && change.case == QualificationDerivedChangeReadCaseV1::ChangesBare
+                        && change.fixture_inventory_sha256 == row.fixture_inventory_sha256
+                        && change.fixture_witness_sha256 == row.fixture_witness_sha256
+                });
+                if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
+                    || execution_identity_sha256.as_deref()
+                        != Some(row.counter_execution_identity_sha256.as_str())
+                    || product.is_none_or(|identity| {
+                        !identity
+                            .enabled_features
+                            .iter()
+                            .any(|feature| feature == "longitudinal-counting")
+                    })
+                    || !source_authority_matches
+                {
+                    failed.push(format!("{criterion} source authority"));
+                }
+
+                match row.status {
+                    QualificationDerivedAccessStatusV1::Unknown => {
+                        missing.push(criterion);
+                        continue;
+                    }
+                    QualificationDerivedAccessStatusV1::Failed => {
+                        failed.push(criterion);
+                        continue;
+                    }
+                    QualificationDerivedAccessStatusV1::Passed => {}
+                }
+
+                let schedule = timeline_request_schedule_v1(fixture, case);
+                let schedule_sha256 = timeline_request_schedule_sha256_v1(fixture, case);
+                let receipts_valid = row.counter_receipts.len() == schedule.len()
+                    && row
+                        .counter_receipts
+                        .iter()
+                        .zip(schedule)
+                        .all(|(receipt, operation)| {
+                            let expected_success = !timeline_operation_is_typed_failure_v1(
+                                operation,
+                            ) && !(operation == &"timeline_fault_outcome"
+                                && row.oracle
+                                    == QualificationDerivedTimelineReadOracleV1::TypedFailure);
+                            receipt.validate().is_ok()
+                                && run_identities.insert(receipt.run_identity.clone())
+                                && receipt.operation == *operation
+                                && receipt.phase == case.as_str()
+                                && receipt.success == expected_success
+                                && execution.is_some_and(|identity| {
+                                    receipt.root_identity == identity.root_provenance_sha256
+                                })
+                                && execution_identity_sha256.as_deref()
+                                    == Some(receipt.base_execution_identity_sha256.as_str())
+                                && product_identity_sha256.as_deref()
+                                    == Some(receipt.derivative_execution_identity_sha256.as_str())
+                                && receipt.manifest_sha256 == row.fixture_inventory_sha256
+                                && receipt.schedule_sha256 == schedule_sha256
+                                && timeline_counter_bounds_hold_v1(
+                                    case,
+                                    operation,
+                                    &receipt.counters,
+                                )
+                        });
+                let receipt_semantics = row
+                    .counter_receipts
+                    .iter()
+                    .map(|receipt| receipt.semantic_result_sha256.clone())
+                    .collect::<Vec<_>>();
+                let semantic_receipts_match = canonical_sha256(&receipt_semantics)
+                    .is_ok_and(|sha256| sha256 == row.derived_semantic_sha256);
+                let expected_oracle =
+                    qualification_derived_timeline_expected_oracle_v1(platform, fixture);
+                let semantic_parity = match row.oracle {
+                    QualificationDerivedTimelineReadOracleV1::StrictParity => {
+                        row.strict_semantic_sha256.as_deref().is_some_and(|strict| {
+                            validate_hex(strict, 64, "strict Timeline semantic receipt").is_ok()
+                                && strict == row.derived_semantic_sha256
+                        })
+                    }
+                    QualificationDerivedTimelineReadOracleV1::TypedFailure => {
+                        row.strict_semantic_sha256.is_none()
+                    }
+                };
+                let typed_documents_match = row.expected_typed_documents
+                    == row.observed_typed_documents
+                    && row.expected_typed_documents.len()
+                        == expected_timeline_typed_document_count_v1(
+                            fixture,
+                            case,
+                            expected_oracle,
+                        )
+                    && row
+                        .expected_typed_documents
+                        .iter()
+                        .all(timeline_typed_document_valid_v1);
+                if row.oracle != expected_oracle
+                    || !row.wire_contract_matches
+                    || !receipts_valid
+                    || !semantic_receipts_match
+                    || !semantic_parity
+                    || !typed_documents_match
+                    || !timeline_authority_valid_v1(row)
+                    || !timeline_trust_transition_valid_v1(row)
+                    || !timeline_invalid_signature_failure_valid_v1(row, execution)
+                {
+                    failed.push(criterion);
+                }
+            }
+        }
+    }
+}
+
+fn qualification_derived_timeline_expected_oracle_v1(
+    platform: QualificationDerivedAccessPlatformV1,
+    fixture: QualificationDerivedChangeFixtureV1,
+) -> QualificationDerivedTimelineReadOracleV1 {
+    let (oracle, _, _) = qualification_derived_change_expected_outcome_v1(
+        platform,
+        fixture,
+        QualificationDerivedChangeReadCaseV1::ChangesBare,
+    );
+    if oracle == QualificationDerivedChangeReadOracleV1::TypedFailure {
+        QualificationDerivedTimelineReadOracleV1::TypedFailure
+    } else {
+        QualificationDerivedTimelineReadOracleV1::StrictParity
+    }
+}
+
+fn timeline_operation_is_typed_failure_v1(operation: &str) -> bool {
+    matches!(
+        operation,
+        "timeline_invalid_query"
+            | "timeline_token_query_mismatch"
+            | "timeline_token_direction_limit_mismatch"
+            | "timeline_at_token_exclusive"
+            | "timeline_trust_stale_token"
+            | "timeline_k_stale_token"
+    )
+}
+
+fn expected_timeline_typed_document_count_v1(
+    fixture: QualificationDerivedChangeFixtureV1,
+    case: QualificationDerivedTimelineReadCaseV1,
+    oracle: QualificationDerivedTimelineReadOracleV1,
+) -> usize {
+    if oracle == QualificationDerivedTimelineReadOracleV1::TypedFailure {
+        return 1;
+    }
+    match case {
+        QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite => {
+            usize::from(fixture == QualificationDerivedChangeFixtureV1::TopologyV1)
+        }
+        QualificationDerivedTimelineReadCaseV1::TrustSuite
+        | QualificationDerivedTimelineReadCaseV1::PostAppendSuite => 1,
+        QualificationDerivedTimelineReadCaseV1::PageTokenSuite => 3,
+        QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite
+        | QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite => 0,
+    }
+}
+
+fn timeline_typed_document_valid_v1(document: &QualificationDerivedChangeTypedDocumentV1) -> bool {
+    if document.validate().is_err() || document.version != 1 {
+        return false;
+    }
+    match document.schema.as_str() {
+        "pointbreak.inspect-event-history-error" => match document.code.as_str() {
+            "invalid_query" | "stale_projection" => document.retryable == Some(false),
+            "moving_journal" => document.retryable == Some(true),
+            _ => false,
+        },
+        "pointbreak.inspect-change-projection-error" => document.retryable == Some(false),
+        _ => false,
+    }
+}
+
+fn timeline_authority_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+    let authority = &row.authority;
+    let hashes_valid = [
+        &authority.request_schedule_sha256,
+        &authority.generation_identity_before_sha256,
+        &authority.generation_identity_after_sha256,
+        &authority.checkpoint_identity_before_sha256,
+        &authority.checkpoint_identity_after_sha256,
+        &authority.timeline_projection_stamp_before_sha256,
+        &authority.timeline_projection_stamp_after_sha256,
+        &authority.trust_identity_before_sha256,
+        &authority.trust_identity_after_sha256,
+    ]
+    .into_iter()
+    .all(|value| validate_hex(value, 64, "Timeline authority witness").is_ok())
+        && authority
+            .continuation_token_set_sha256
+            .as_ref()
+            .is_none_or(|value| validate_hex(value, 64, "Timeline continuation-token set").is_ok());
+    let expects_token_set = matches!(
+        row.case,
+        QualificationDerivedTimelineReadCaseV1::PageTokenSuite
+            | QualificationDerivedTimelineReadCaseV1::TrustSuite
+            | QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+    );
+    let checkpoint_changes = row.case == QualificationDerivedTimelineReadCaseV1::PostAppendSuite;
+    let stamp_changes = matches!(
+        row.case,
+        QualificationDerivedTimelineReadCaseV1::TrustSuite
+            | QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+    );
+    let trust_changes = row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
+    let expects_family_counts = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite;
+
+    hashes_valid
+        && authority.request_schedule_sha256
+            == timeline_request_schedule_sha256_v1(row.fixture, row.case)
+        && authority.generation_identity_before_sha256 == authority.generation_identity_after_sha256
+        && (authority.checkpoint_identity_before_sha256
+            != authority.checkpoint_identity_after_sha256)
+            == checkpoint_changes
+        && (authority.timeline_projection_stamp_before_sha256
+            != authority.timeline_projection_stamp_after_sha256)
+            == stamp_changes
+        && (authority.trust_identity_before_sha256 != authority.trust_identity_after_sha256)
+            == trust_changes
+        && authority.continuation_token_set_sha256.is_some() == expects_token_set
+        && if expects_family_counts {
+            positive_counts_match_exact_keys_v1(
+                &authority.authoritative_event_family_counts,
+                &QUALIFICATION_TIMELINE_SOURCE_EVENT_FAMILIES_V1,
+            ) && positive_counts_match_exact_keys_v1(
+                &authority.strict_event_family_counts,
+                &QUALIFICATION_TIMELINE_ADMITTED_EVENT_FAMILIES_V1,
+            ) && authority.strict_event_family_counts == authority.derived_event_family_counts
+                && authority.excluded_timeline_case_counts.len()
+                    == QUALIFICATION_TIMELINE_EXCLUDED_CASES_V1.len()
+                && QUALIFICATION_TIMELINE_EXCLUDED_CASES_V1.iter().all(|case| {
+                    authority
+                        .excluded_timeline_case_counts
+                        .get(*case)
+                        .is_some_and(|counts| {
+                            counts.source_count > 0
+                                && counts.strict_output_count == 0
+                                && counts.derived_output_count == 0
+                        })
+                })
+        } else {
+            authority.authoritative_event_family_counts.is_empty()
+                && authority.strict_event_family_counts.is_empty()
+                && authority.derived_event_family_counts.is_empty()
+                && authority.excluded_timeline_case_counts.is_empty()
+        }
+}
+
+fn positive_counts_match_exact_keys_v1<const N: usize>(
+    counts: &BTreeMap<String, u64>,
+    expected: &[&str; N],
+) -> bool {
+    counts.len() == expected.len()
+        && expected
+            .iter()
+            .all(|event_type| counts.get(*event_type).is_some_and(|count| *count > 0))
+}
+
+fn timeline_trust_transition_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+    let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
+    let Some(transition) = &row.trust_transition else {
+        return !expected;
+    };
+    if !expected
+        || transition.unsigned_event_id.trim().is_empty()
+        || transition.signed_event_id.trim().is_empty()
+        || transition.unsigned_event_id == transition.signed_event_id
+        || transition.signer_identity.trim().is_empty()
+        || transition.signer_identity.trim() != transition.signer_identity
+    {
+        return false;
+    }
+    let expected_before = BTreeMap::from([
+        (
+            transition.signed_event_id.clone(),
+            "untrusted_key".to_owned(),
+        ),
+        (transition.unsigned_event_id.clone(), "unsigned".to_owned()),
+    ]);
+    let expected_after = BTreeMap::from([
+        (transition.signed_event_id.clone(), "valid".to_owned()),
+        (transition.unsigned_event_id.clone(), "unsigned".to_owned()),
+    ]);
+    transition.status_before_by_event == expected_before
+        && transition.status_after_by_event == expected_after
+}
+
+fn timeline_invalid_signature_failure_valid_v1(
+    row: &QualificationDerivedTimelineReadEvidenceV1,
+    execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
+) -> bool {
+    let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
+    let Some(failure) = &row.invalid_signature_failure else {
+        return !expected;
+    };
+    let counter = &failure.counter_receipt;
+    let inventory_restored = failure.clean_inventory_sha256 == failure.restored_inventory_sha256
+        && failure.clean_inventory_sha256 != failure.derivative_inventory_sha256
+        && failure.clean_inventory_sha256 == row.fixture_inventory_sha256;
+    let failure_document_valid = failure.observed_typed_document.schema
+        == "pointbreak.inspect-change-projection-error"
+        && failure.observed_typed_document.version == 1
+        && failure.observed_typed_document.code == "projection_invalid"
+        && failure.observed_typed_document.retryable == Some(false)
+        && validate_hex(
+            &failure.observed_typed_document.canonical_sha256,
+            64,
+            "invalid-signature typed failure document",
+        )
+        .is_ok();
+    let semantic_failure_valid = validate_hex(
+        &failure.clean_semantic_sha256,
+        64,
+        "invalid-signature clean semantic receipt",
+    )
+    .is_ok()
+        && validate_hex(
+            &failure.strict_semantic_sha256,
+            64,
+            "invalid-signature strict semantic receipt",
+        )
+        .is_ok()
+        && validate_hex(
+            &failure.derived_semantic_sha256,
+            64,
+            "invalid-signature derived semantic receipt",
+        )
+        .is_ok()
+        && validate_hex(
+            &failure.recovery_semantic_sha256,
+            64,
+            "invalid-signature recovery semantic receipt",
+        )
+        .is_ok()
+        && failure.clean_semantic_sha256 == failure.recovery_semantic_sha256
+        && failure.clean_semantic_sha256 != failure.derived_semantic_sha256
+        && failure.strict_semantic_sha256 == failure.derived_semantic_sha256;
+    let counters = &counter.counters;
+    let counter_valid = counter.validate().is_ok()
+        && !counter.success
+        && counter.operation == "timeline_invalid_signature_fault"
+        && counter.phase == QualificationDerivedTimelineReadCaseV1::TrustSuite.as_str()
+        && execution
+            .is_some_and(|identity| counter.root_identity == identity.root_provenance_sha256)
+        && counter.base_execution_identity_sha256 == row.counter_execution_identity_sha256
+        && counter.derivative_execution_identity_sha256 == row.product_identity_sha256
+        && counter.manifest_sha256 == failure.derivative_inventory_sha256
+        && counter.schedule_sha256
+            == timeline_request_schedule_sha256_v1(
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+                QualificationDerivedTimelineReadCaseV1::TrustSuite,
+            )
+        && counter.semantic_result_sha256 == failure.derived_semantic_sha256
+        && counters.authoritative_fallbacks == 0
+        && counters.full_history_fallbacks == 0
+        && counters.event_folds == 0
+        && counters.projection_rebuilds == 0
+        && counters.state_rebuilds == 0
+        && counters.body_artifact_reads == 0
+        && counters.object_artifact_reads == 0
+        && counters.timeline_trust_support_carriers == 0
+        && counters.timeline_entries_emitted == 0;
+    expected
+        && row.oracle == QualificationDerivedTimelineReadOracleV1::StrictParity
+        && !failure.carrier_event_id.trim().is_empty()
+        && inventory_restored
+        && validate_hex(
+            &failure.clean_inventory_sha256,
+            64,
+            "clean invalid-signature inventory",
+        )
+        .is_ok()
+        && validate_hex(
+            &failure.derivative_inventory_sha256,
+            64,
+            "derivative invalid-signature inventory",
+        )
+        .is_ok()
+        && validate_hex(
+            &failure.restored_inventory_sha256,
+            64,
+            "restored invalid-signature inventory",
+        )
+        .is_ok()
+        && validate_hex(&failure.clean_carrier_sha256, 64, "clean signature carrier").is_ok()
+        && validate_hex(
+            &failure.mutated_carrier_sha256,
+            64,
+            "mutated signature carrier",
+        )
+        .is_ok()
+        && failure.clean_carrier_sha256 != failure.mutated_carrier_sha256
+        && failure.mutation_recipe_sha256
+            == QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
+        && failure.clean_signature_status == "valid"
+        && failure.mutated_signature_status == "invalid"
+        && failure.observed_http_status == 503
+        && failure_document_valid
+        && semantic_failure_valid
+        && counter_valid
+        && failure.trust_bindings_observed == 0
+}
+
+fn timeline_counter_bounds_hold_v1(
+    case: QualificationDerivedTimelineReadCaseV1,
+    operation: &str,
+    counters: &LongitudinalCountersV1,
+) -> bool {
+    let common_bounds = counters.directory_entries_walked == 0
+        && counters.authoritative_fallbacks == 0
+        && counters.full_history_fallbacks == 0
+        && counters.event_folds == 0
+        && counters.projection_rebuilds == 0
+        && counters.state_rebuilds == 0
+        && counters.timeline_sqlite_window_rows <= counters.timeline_sqlite_candidates
+        && counters.timeline_selected_carriers <= counters.timeline_sqlite_window_rows
+        && counters.timeline_revision_candidate_carriers <= counters.timeline_sqlite_candidates
+        && counters.timeline_removal_support_carriers <= counters.carrier_opens
+        && counters.timeline_signature_support_carriers <= counters.carrier_opens
+        && counters.timeline_correlation_support_carriers <= counters.carrier_opens
+        && counters.timeline_trust_support_carriers <= counters.timeline_selected_carriers
+        && counters.timeline_entries_emitted <= counters.timeline_trust_support_carriers
+        && counters.event_validations == counters.carrier_opens;
+    let exhaustive_bounds = if case == QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite
+    {
+        counters.timeline_sqlite_facet_rows == 0
+            && counters.timeline_exhaustive_candidates > 0
+            && counters.timeline_exhaustive_candidates <= counters.timeline_sqlite_candidates
+            && counters.body_artifact_reads <= counters.timeline_exhaustive_candidates
+            && counters.object_artifact_reads <= counters.timeline_exhaustive_candidates
+    } else {
+        counters.timeline_exhaustive_candidates == 0
+            && counters.body_artifact_reads == 0
+            && counters.object_artifact_reads == 0
+    };
+    let work_present = timeline_operation_is_typed_failure_v1(operation)
+        || operation == "timeline_fault_outcome"
+        || counters.timeline_sqlite_candidates > 0
+            && counters.timeline_selected_carriers > 0
+            && counters.timeline_entries_emitted > 0;
+    common_bounds && exhaustive_bounds && work_present
+}
+
+fn evaluate_timeline_storage_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    failed: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    if package.timeline_storage_rows.is_empty() {
+        missing.push("Timeline storage matrix".to_owned());
+        return;
+    }
+    for platform in [
+        QualificationDerivedAccessPlatformV1::MacosApfs,
+        QualificationDerivedAccessPlatformV1::WindowsNtfs,
+    ] {
+        let product_identity_sha256 = package
+            .product_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        let execution_identity_sha256 = package
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == platform)
+            .and_then(|identity| identity.canonical_sha256().ok());
+        for fixture in QualificationDerivedChangeFixtureV1::ALL {
+            let phases: &[QualificationDerivedChangeStoragePhaseV1] =
+                if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
+                    &[
+                        QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                        QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+                    ]
+                } else {
+                    &[QualificationDerivedChangeStoragePhaseV1::InitialPublication]
+                };
+            for &phase in phases {
+                let criterion = format!("{platform:?}/{fixture:?}/{phase:?} Timeline storage");
+                let Some(row) = package.timeline_storage_rows.iter().find(|row| {
+                    row.platform == platform && row.fixture == fixture && row.phase == phase
+                }) else {
+                    missing.push(criterion);
+                    continue;
+                };
+                let change_row = package.change_storage_rows.iter().find(|change| {
+                    change.platform == platform
+                        && change.fixture == fixture
+                        && change.phase == phase
+                });
+                let probe_kinds = row
+                    .forbidden_probes
+                    .iter()
+                    .map(|probe| probe.kind)
+                    .collect::<BTreeSet<_>>();
+                let probes_valid = row.forbidden_probes.len()
+                    == QualificationDerivedTimelineForbiddenProbeKindV1::ALL.len()
+                    && probe_kinds
+                        == QualificationDerivedTimelineForbiddenProbeKindV1::ALL
+                            .into_iter()
+                            .collect()
+                    && row.forbidden_probes.iter().all(|probe| {
+                        validate_hex(&probe.sentinel_sha256, 64, "Timeline storage probe").is_ok()
+                            && probe.sqlite_match_count == 0
+                            && probe.file_match_count == 0
+                    });
+                let schema_valid = change_row.is_some_and(|change| {
+                    !change.witness.sqlite_catalog.entries.iter().any(|entry| {
+                        forbidden_timeline_storage_name_v1(&entry.name)
+                            || entry
+                                .columns
+                                .iter()
+                                .any(|column| forbidden_timeline_storage_name_v1(&column.name))
+                            || entry.indexes.iter().any(|index| {
+                                forbidden_timeline_storage_name_v1(&index.name)
+                                    || index.columns.iter().any(|column| {
+                                        column
+                                            .name
+                                            .as_deref()
+                                            .is_some_and(forbidden_timeline_storage_name_v1)
+                                    })
+                            })
+                    }) && change.fixture_inventory_sha256 == row.fixture_inventory_sha256
+                        && change.fixture_witness_sha256 == row.fixture_witness_sha256
+                });
+                if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
+                    || execution_identity_sha256.as_deref()
+                        != Some(row.execution_identity_sha256.as_str())
+                    || !probes_valid
+                    || !schema_valid
+                {
+                    failed.push(criterion);
+                }
+            }
+        }
+    }
+}
+
+fn forbidden_timeline_storage_name_v1(name: &str) -> bool {
+    if forbidden_bodyless_storage_name_v1(name) {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    let tokens = name
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .collect::<BTreeSet<_>>();
+    ["timeline", "trust", "token", "continuation"]
+        .into_iter()
+        .any(|subject| tokens.contains(subject))
+        || tokens.contains("response")
+            && ["body", "cache", "document", "payload"]
+                .into_iter()
+                .any(|material| tokens.contains(material))
 }
 
 fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
@@ -3264,6 +4304,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_off_strict_reader_control_names_one_existing_exact_test() {
+        let (kind, test_name) = qualification_derived_change_control_test_v1(
+            QualificationDerivedChangeControlCaseV1::ExplicitOffStrictReader,
+        );
+        assert_eq!(kind, QualificationDerivedChangeControlBinaryKindV1::Cli);
+        assert_eq!(
+            test_name,
+            "cli::inspect::server::tests::routes_split_derived_collections_and_timeline_from_explicit_off_and_exact_reads"
+        );
+        assert!(include_str!("../../cli/inspect/server.rs").contains(
+            "fn routes_split_derived_collections_and_timeline_from_explicit_off_and_exact_reads("
+        ));
+    }
+
+    #[test]
     fn qualification_library_control_binary_attests_clean_source() {
         if let Ok(expected_commit) =
             std::env::var("POINTBREAK_QUALIFICATION_EXPECTED_CONTROL_COMMIT")
@@ -3330,7 +4385,7 @@ mod tests {
             binary_sha256: digest(&format!("{:?} product binary", execution.platform)),
             version_sha256: digest(&format!("{:?} product version", execution.platform)),
             build_profile: "release".to_owned(),
-            enabled_features: vec!["default".to_owned()],
+            enabled_features: vec!["default".to_owned(), "longitudinal-counting".to_owned()],
             build_command_sha256: digest(&format!("{:?} product build", execution.platform)),
             operating_system: execution.operating_system.clone(),
             architecture: execution.architecture.clone(),
@@ -3397,6 +4452,481 @@ mod tests {
         }
         witness.refresh_sha256().expect("storage witness hash");
         witness
+    }
+
+    fn timeline_typed_document(
+        code: &str,
+        label: &str,
+    ) -> QualificationDerivedChangeTypedDocumentV1 {
+        QualificationDerivedChangeTypedDocumentV1 {
+            schema: if matches!(
+                code,
+                "invalid_query" | "stale_projection" | "moving_journal"
+            ) {
+                "pointbreak.inspect-event-history-error"
+            } else {
+                "pointbreak.inspect-change-projection-error"
+            }
+            .to_owned(),
+            version: 1,
+            code: code.to_owned(),
+            retryable: Some(code == "moving_journal"),
+            canonical_sha256: digest(label),
+        }
+    }
+
+    fn timeline_test_counters(
+        case: QualificationDerivedTimelineReadCaseV1,
+        operation: &str,
+    ) -> LongitudinalCountersV1 {
+        let mut counters = LongitudinalCountersV1 {
+            response_bytes: 1,
+            ..LongitudinalCountersV1::default()
+        };
+        if timeline_operation_is_typed_failure_v1(operation)
+            || operation == "timeline_fault_outcome"
+        {
+            return counters;
+        }
+        let selected = if case == QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite {
+            3
+        } else {
+            1
+        };
+        counters.timeline_sqlite_candidates = 3;
+        counters.timeline_sqlite_window_rows = selected;
+        counters.timeline_sqlite_facet_rows =
+            u64::from(case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite) * 3;
+        counters.timeline_selected_carriers = selected;
+        counters.timeline_revision_candidate_carriers = selected;
+        counters.timeline_trust_support_carriers = selected;
+        counters.timeline_exhaustive_candidates =
+            u64::from(case == QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite)
+                * selected;
+        counters.timeline_entries_emitted = 1;
+        counters.carrier_opens = selected;
+        counters.event_decodes = selected;
+        counters.event_validations = selected;
+        counters
+    }
+
+    fn timeline_test_receipt(
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+        product: &QualificationDerivedAccessProductIdentityV1,
+        fixture: QualificationDerivedChangeFixtureV1,
+        case: QualificationDerivedTimelineReadCaseV1,
+        operation: &str,
+        ordinal: usize,
+        oracle: QualificationDerivedTimelineReadOracleV1,
+    ) -> LongitudinalCounterReceiptV1 {
+        let mut receipt = LongitudinalCounterReceiptV1 {
+            schema: crate::bench_support::longitudinal::LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1
+                .to_owned(),
+            run_identity: digest(&format!(
+                "{:?}/{fixture:?}/{case:?}/{operation}/{ordinal}",
+                execution.platform
+            )),
+            root_identity: execution.root_provenance_sha256.clone(),
+            operation: operation.to_owned(),
+            phase: case.as_str().to_owned(),
+            base_execution_identity_sha256: execution
+                .canonical_sha256()
+                .expect("execution identity"),
+            derivative_execution_identity_sha256: product
+                .canonical_sha256()
+                .expect("product identity"),
+            manifest_sha256: digest("fixture inventory"),
+            schedule_sha256: timeline_request_schedule_sha256_v1(fixture, case),
+            success: !timeline_operation_is_typed_failure_v1(operation)
+                && !(operation == "timeline_fault_outcome"
+                    && oracle == QualificationDerivedTimelineReadOracleV1::TypedFailure),
+            semantic_result_sha256: digest(&format!(
+                "{:?}/{fixture:?}/{case:?}/{operation}/semantic",
+                execution.platform
+            )),
+            counters: timeline_test_counters(case, operation),
+            capacity_ownership: None,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("counter receipt hash");
+        receipt
+    }
+
+    fn timeline_invalid_signature_test_receipt(
+        execution: &QualificationDerivedAccessExecutionIdentityV1,
+        product: &QualificationDerivedAccessProductIdentityV1,
+        derivative_inventory_sha256: String,
+    ) -> LongitudinalCounterReceiptV1 {
+        let mut receipt = LongitudinalCounterReceiptV1 {
+            schema: crate::bench_support::longitudinal::LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1
+                .to_owned(),
+            run_identity: digest(&format!(
+                "{:?}/TopologyV1/TrustSuite/timeline_invalid_signature_fault",
+                execution.platform
+            )),
+            root_identity: execution.root_provenance_sha256.clone(),
+            operation: "timeline_invalid_signature_fault".to_owned(),
+            phase: QualificationDerivedTimelineReadCaseV1::TrustSuite
+                .as_str()
+                .to_owned(),
+            base_execution_identity_sha256: execution
+                .canonical_sha256()
+                .expect("invalid-signature execution identity"),
+            derivative_execution_identity_sha256: product
+                .canonical_sha256()
+                .expect("invalid-signature product identity"),
+            manifest_sha256: derivative_inventory_sha256,
+            schedule_sha256: timeline_request_schedule_sha256_v1(
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+                QualificationDerivedTimelineReadCaseV1::TrustSuite,
+            ),
+            success: false,
+            semantic_result_sha256: digest(&format!(
+                "{:?}/TopologyV1/TrustSuite/invalid-signature/semantic",
+                execution.platform
+            )),
+            counters: LongitudinalCountersV1 {
+                response_bytes: 1,
+                ..LongitudinalCountersV1::default()
+            },
+            capacity_ownership: None,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt
+            .canonical_sha256()
+            .expect("invalid-signature counter receipt hash");
+        receipt
+    }
+
+    fn add_complete_timeline_evidence(package: &mut QualificationDerivedAccessPackageV1) {
+        package.evaluator_revision = QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
+        package.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v4_procedure_sha256();
+        let products = package.product_identities.clone();
+        let executions = package.execution_identities.clone();
+        package.timeline_read_rows = [
+            QualificationDerivedAccessPlatformV1::MacosApfs,
+            QualificationDerivedAccessPlatformV1::WindowsNtfs,
+        ]
+        .into_iter()
+        .flat_map(|platform| {
+            let product = products
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("Timeline product identity")
+                .clone();
+            let execution = executions
+                .iter()
+                .find(|identity| identity.platform == platform)
+                .expect("Timeline execution identity")
+                .clone();
+            QualificationDerivedChangeFixtureV1::ALL
+                .into_iter()
+                .flat_map(move |fixture| {
+                    let product = product.clone();
+                    let execution = execution.clone();
+                    required_timeline_cases_v1(fixture)
+                        .iter()
+                        .copied()
+                        .map(move |case| {
+                            let oracle = qualification_derived_timeline_expected_oracle_v1(
+                                platform, fixture,
+                            );
+                            let receipts = timeline_request_schedule_v1(fixture, case)
+                                .iter()
+                                .enumerate()
+                                .map(|(ordinal, operation)| {
+                                    timeline_test_receipt(
+                                        &execution,
+                                        &product,
+                                        fixture,
+                                        case,
+                                        operation,
+                                        ordinal,
+                                        oracle,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let semantic_receipts = receipts
+                                .iter()
+                                .map(|receipt| receipt.semantic_result_sha256.clone())
+                                .collect::<Vec<_>>();
+                            let derived_semantic_sha256 = canonical_sha256(&semantic_receipts)
+                                .expect("Timeline semantic receipt");
+                            let fault_code = qualification_derived_change_expected_outcome_v1(
+                                platform,
+                                fixture,
+                                QualificationDerivedChangeReadCaseV1::ChangesBare,
+                            )
+                            .2;
+                            let typed_codes = if oracle
+                                == QualificationDerivedTimelineReadOracleV1::TypedFailure
+                            {
+                                vec![fault_code.expect("typed Timeline fault")]
+                            } else {
+                                match case {
+                                    QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite
+                                        if fixture
+                                            == QualificationDerivedChangeFixtureV1::TopologyV1 =>
+                                    {
+                                        vec!["invalid_query"]
+                                    }
+                                    QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite => {
+                                        Vec::new()
+                                    }
+                                    QualificationDerivedTimelineReadCaseV1::PageTokenSuite => {
+                                        vec!["invalid_query", "invalid_query", "invalid_query"]
+                                    }
+                                    QualificationDerivedTimelineReadCaseV1::TrustSuite
+                                    | QualificationDerivedTimelineReadCaseV1::PostAppendSuite => {
+                                        vec!["stale_projection"]
+                                    }
+                                    QualificationDerivedTimelineReadCaseV1::ExhaustiveQuerySuite
+                                    | QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite => {
+                                        Vec::new()
+                                    }
+                                }
+                            };
+                            let typed_documents = typed_codes
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, code)| {
+                                    timeline_typed_document(
+                                        code,
+                                        &format!(
+                                            "{platform:?}/{fixture:?}/{case:?}/{code}/{index}"
+                                        ),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let checkpoint_before = digest(&format!(
+                                "{platform:?}/{fixture:?}/{case:?}/checkpoint"
+                            ));
+                            let stamp_before =
+                                digest(&format!("{platform:?}/{fixture:?}/{case:?}/stamp"));
+                            let trust_before =
+                                digest(&format!("{platform:?}/{fixture:?}/{case:?}/trust"));
+                            let carries_family_counts = fixture
+                                == QualificationDerivedChangeFixtureV1::TopologyV1
+                                && case
+                                    == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite;
+                            let authoritative_event_family_counts: BTreeMap<String, u64> =
+                                carries_family_counts
+                                .then(|| {
+                                    QUALIFICATION_TIMELINE_SOURCE_EVENT_FAMILIES_V1
+                                        .into_iter()
+                                        .map(|event_type| (event_type.to_owned(), 1))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let strict_event_family_counts: BTreeMap<String, u64> = carries_family_counts
+                                .then(|| {
+                                    QUALIFICATION_TIMELINE_ADMITTED_EVENT_FAMILIES_V1
+                                        .into_iter()
+                                        .map(|event_type| (event_type.to_owned(), 1))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let excluded_timeline_case_counts: BTreeMap<
+                                String,
+                                QualificationDerivedTimelineExclusionCountsV1,
+                            > = carries_family_counts
+                                .then(|| {
+                                    QUALIFICATION_TIMELINE_EXCLUDED_CASES_V1
+                                        .into_iter()
+                                        .map(|excluded| {
+                                            (
+                                                excluded.to_owned(),
+                                                QualificationDerivedTimelineExclusionCountsV1 {
+                                                    source_count: 1,
+                                                    strict_output_count: 0,
+                                                    derived_output_count: 0,
+                                                },
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let trust_transition = (fixture
+                                == QualificationDerivedChangeFixtureV1::TopologyV1
+                                && case == QualificationDerivedTimelineReadCaseV1::TrustSuite)
+                                .then(|| QualificationDerivedTimelineTrustTransitionV1 {
+                                    unsigned_event_id: "event:unsigned".to_owned(),
+                                    signed_event_id: "event:signed".to_owned(),
+                                    signer_identity: "did:key:z6MkTimelineTest".to_owned(),
+                                    status_before_by_event: BTreeMap::from([
+                                        (
+                                            "event:signed".to_owned(),
+                                            "untrusted_key".to_owned(),
+                                        ),
+                                        ("event:unsigned".to_owned(), "unsigned".to_owned()),
+                                    ]),
+                                    status_after_by_event: BTreeMap::from([
+                                        ("event:signed".to_owned(), "valid".to_owned()),
+                                        ("event:unsigned".to_owned(), "unsigned".to_owned()),
+                                    ]),
+                                });
+                            let invalid_signature_failure = (fixture
+                                == QualificationDerivedChangeFixtureV1::TopologyV1
+                                && case == QualificationDerivedTimelineReadCaseV1::TrustSuite)
+                                .then(|| {
+                                    let clean_inventory_sha256 = digest("fixture inventory");
+                                    let derivative_inventory_sha256 = digest(&format!(
+                                        "{platform:?}/TopologyV1/invalid-signature/derivative"
+                                    ));
+                                    let counter_receipt = timeline_invalid_signature_test_receipt(
+                                        &execution,
+                                        &product,
+                                        derivative_inventory_sha256.clone(),
+                                    );
+                                    QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1 {
+                                        carrier_event_id: "event:invalid-inline-signature".to_owned(),
+                                        clean_inventory_sha256: clean_inventory_sha256.clone(),
+                                        derivative_inventory_sha256,
+                                        restored_inventory_sha256: clean_inventory_sha256,
+                                        clean_carrier_sha256: digest("clean inline signature carrier"),
+                                        mutated_carrier_sha256: digest("mutated inline signature carrier"),
+                                        mutation_recipe_sha256:
+                                            QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
+                                                .to_owned(),
+                                        clean_signature_status: "valid".to_owned(),
+                                        mutated_signature_status: "invalid".to_owned(),
+                                        observed_http_status: 503,
+                                        observed_typed_document: timeline_typed_document(
+                                            "projection_invalid",
+                                            &format!(
+                                                "{platform:?}/TopologyV1/TrustSuite/invalid-signature"
+                                            ),
+                                        ),
+                                        clean_semantic_sha256: digest(&format!(
+                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
+                                        )),
+                                        strict_semantic_sha256:
+                                            counter_receipt.semantic_result_sha256.clone(),
+                                        derived_semantic_sha256:
+                                            counter_receipt.semantic_result_sha256.clone(),
+                                        recovery_semantic_sha256: digest(&format!(
+                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
+                                        )),
+                                        counter_receipt,
+                                        trust_bindings_observed: 0,
+                                    }
+                                });
+                            QualificationDerivedTimelineReadEvidenceV1 {
+                                platform,
+                                fixture,
+                                fixture_inventory_sha256: digest("fixture inventory"),
+                                fixture_witness_sha256: digest("fixture witness"),
+                                case,
+                                semantic_process_scope:
+                                    QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+                                counter_process_scope:
+                                    QualificationDerivedAccessProcessScopeV1::InspectorServiceChild,
+                                product_identity_sha256: product
+                                    .canonical_sha256()
+                                    .expect("Timeline product identity"),
+                                counter_execution_identity_sha256: execution
+                                    .canonical_sha256()
+                                    .expect("Timeline execution identity"),
+                                status: QualificationDerivedAccessStatusV1::Passed,
+                                oracle,
+                                strict_semantic_sha256: (oracle
+                                    == QualificationDerivedTimelineReadOracleV1::StrictParity)
+                                    .then(|| derived_semantic_sha256.clone()),
+                                derived_semantic_sha256,
+                                wire_contract_matches: true,
+                                expected_typed_documents: typed_documents.clone(),
+                                observed_typed_documents: typed_documents,
+                                authority: QualificationDerivedTimelineAuthorityEvidenceV1 {
+                                    request_schedule_sha256:
+                                        timeline_request_schedule_sha256_v1(fixture, case),
+                                    generation_identity_before_sha256: digest(&format!(
+                                        "{platform:?}/{fixture:?}/generation"
+                                    )),
+                                    generation_identity_after_sha256: digest(&format!(
+                                        "{platform:?}/{fixture:?}/generation"
+                                    )),
+                                    checkpoint_identity_before_sha256: checkpoint_before.clone(),
+                                    checkpoint_identity_after_sha256: if case
+                                        == QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+                                    {
+                                        digest(&format!(
+                                            "{platform:?}/{fixture:?}/{case:?}/checkpoint-after"
+                                        ))
+                                    } else {
+                                        checkpoint_before
+                                    },
+                                    timeline_projection_stamp_before_sha256: stamp_before.clone(),
+                                    timeline_projection_stamp_after_sha256: if matches!(
+                                        case,
+                                        QualificationDerivedTimelineReadCaseV1::TrustSuite
+                                            | QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+                                    ) {
+                                        digest(&format!(
+                                            "{platform:?}/{fixture:?}/{case:?}/stamp-after"
+                                        ))
+                                    } else {
+                                        stamp_before
+                                    },
+                                    trust_identity_before_sha256: trust_before.clone(),
+                                    trust_identity_after_sha256: if case
+                                        == QualificationDerivedTimelineReadCaseV1::TrustSuite
+                                    {
+                                        digest(&format!(
+                                            "{platform:?}/{fixture:?}/{case:?}/trust-after"
+                                        ))
+                                    } else {
+                                        trust_before
+                                    },
+                                    continuation_token_set_sha256: matches!(
+                                        case,
+                                        QualificationDerivedTimelineReadCaseV1::PageTokenSuite
+                                            | QualificationDerivedTimelineReadCaseV1::TrustSuite
+                                            | QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+                                    )
+                                    .then(|| {
+                                        digest(&format!(
+                                            "{platform:?}/{fixture:?}/{case:?}/tokens"
+                                        ))
+                                    }),
+                                    authoritative_event_family_counts,
+                                    strict_event_family_counts: strict_event_family_counts.clone(),
+                                    derived_event_family_counts: strict_event_family_counts,
+                                    excluded_timeline_case_counts,
+                                },
+                                trust_transition,
+                                invalid_signature_failure,
+                                counter_receipts: receipts,
+                            }
+                        })
+                })
+        })
+        .collect();
+
+        package.timeline_storage_rows = package
+            .change_storage_rows
+            .iter()
+            .map(|change| QualificationDerivedTimelineStorageEvidenceV1 {
+                platform: change.platform,
+                fixture: change.fixture,
+                phase: change.phase,
+                fixture_inventory_sha256: change.fixture_inventory_sha256.clone(),
+                fixture_witness_sha256: change.fixture_witness_sha256.clone(),
+                product_identity_sha256: change.product_identity_sha256.clone(),
+                execution_identity_sha256: change.execution_identity_sha256.clone(),
+                forbidden_probes: QualificationDerivedTimelineForbiddenProbeKindV1::ALL
+                    .into_iter()
+                    .map(
+                        |kind| QualificationDerivedTimelineForbiddenProbeEvidenceV1 {
+                            kind,
+                            sentinel_sha256: digest(&format!("{:?}/{kind:?}", change.fixture)),
+                            sqlite_match_count: 0,
+                            file_match_count: 0,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect();
     }
 
     fn complete_package() -> QualificationDerivedAccessPackageV1 {
@@ -3611,6 +5141,8 @@ mod tests {
             change_read_rows: Vec::new(),
             change_control_rows: Vec::new(),
             change_storage_rows: Vec::new(),
+            timeline_read_rows: Vec::new(),
+            timeline_storage_rows: Vec::new(),
             complete: true,
         }
     }
@@ -3683,6 +5215,59 @@ mod tests {
     }
 
     #[test]
+    fn evaluator_v3_procedure_remains_frozen_after_timeline_v4() {
+        assert_eq!(
+            qualification_derived_access_evaluator_v3_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1
+        );
+        assert_eq!(
+            qualification_derived_access_evaluator_v4_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1
+        );
+        assert_eq!(
+            &QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1[..6],
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1
+        );
+        assert_ne!(
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1
+        );
+    }
+
+    #[test]
+    fn timeline_source_and_admitted_family_inventories_track_live_vocabulary() {
+        use crate::session::event::EventType;
+
+        let mut live_source = EventType::ALL
+            .into_iter()
+            .map(|event_type| event_type.as_str())
+            .collect::<Vec<_>>();
+        let mut frozen_source = QUALIFICATION_TIMELINE_SOURCE_EVENT_FAMILIES_V1.to_vec();
+        live_source.sort_unstable();
+        frozen_source.sort_unstable();
+        assert_eq!(live_source, frozen_source);
+
+        let mut live_admitted = EventType::ALL
+            .into_iter()
+            .filter(|event_type| {
+                !matches!(
+                    event_type,
+                    EventType::TaskCheckpointCaptured
+                        | EventType::TaskObservationRecorded
+                        | EventType::EventSignatureRecorded
+                        | EventType::ArtifactRemoved
+                )
+            })
+            .map(|event_type| event_type.as_str())
+            .collect::<Vec<_>>();
+        let mut frozen_admitted = QUALIFICATION_TIMELINE_ADMITTED_EVENT_FAMILIES_V1.to_vec();
+        live_admitted.sort_unstable();
+        frozen_admitted.sort_unstable();
+        assert_eq!(live_admitted, frozen_admitted);
+        assert_eq!(QUALIFICATION_TIMELINE_EXCLUDED_CASES_V1.len(), 7);
+    }
+
+    #[test]
     fn derived_access_decision_table_reads_thresholds_from_the_contract() {
         let mut contract = qualification_derived_access_contract_v1();
         contract.d0.stored_events = 129;
@@ -3726,6 +5311,13 @@ mod tests {
             "semantic_search",
         ] {
             assert!(forbidden_bodyless_storage_name_v1(forbidden), "{forbidden}");
+        }
+        for forbidden in [
+            "timeline_response_cache",
+            "continuation_token",
+            "runtime_trust_result",
+        ] {
+            assert!(forbidden_timeline_storage_name_v1(forbidden), "{forbidden}");
         }
     }
 
@@ -4070,6 +5662,214 @@ mod tests {
             complete_evaluation.outcome,
             QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier,
             "{complete_evaluation:?}"
+        );
+
+        let mut missing_timeline = complete_change_reads.clone();
+        missing_timeline.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
+        missing_timeline.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v4_procedure_sha256();
+        let missing_timeline_evaluation =
+            evaluate_qualification_derived_access_v1(&missing_timeline)
+                .expect("v4 classifies missing Timeline evidence");
+        assert_eq!(
+            missing_timeline_evaluation.outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+        );
+        assert!(
+            missing_timeline_evaluation
+                .missing_or_unknown_criteria
+                .iter()
+                .any(|criterion| criterion == "Timeline read matrix")
+        );
+
+        let mut complete_timeline = complete_change_reads.clone();
+        add_complete_timeline_evidence(&mut complete_timeline);
+        let complete_timeline_evaluation =
+            evaluate_qualification_derived_access_v1(&complete_timeline)
+                .expect("complete Timeline successor evaluation");
+        assert_eq!(
+            complete_timeline_evaluation.outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier,
+            "{complete_timeline_evaluation:?}"
+        );
+
+        let mut v3_with_timeline = complete_timeline.clone();
+        v3_with_timeline.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned();
+        v3_with_timeline.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v3_procedure_sha256();
+        assert!(evaluate_qualification_derived_access_v1(&v3_with_timeline).is_err());
+
+        let mut duplicate_timeline = complete_timeline.clone();
+        duplicate_timeline
+            .timeline_read_rows
+            .push(duplicate_timeline.timeline_read_rows[0].clone());
+        assert!(evaluate_qualification_derived_access_v1(&duplicate_timeline).is_err());
+
+        let mut fallback_timeline = complete_timeline.clone();
+        let fallback_receipt = fallback_timeline
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite
+            })
+            .expect("structured Timeline row")
+            .counter_receipts
+            .first_mut()
+            .expect("structured Timeline receipt");
+        fallback_receipt.counters.authoritative_fallbacks = 1;
+        fallback_receipt.receipt_sha256 = fallback_receipt
+            .canonical_sha256()
+            .expect("refreshed fallback receipt");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&fallback_timeline)
+                .expect("fallback Timeline evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut structured_as_exhaustive = complete_timeline.clone();
+        let structured_receipt = structured_as_exhaustive
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite
+            })
+            .expect("structured Timeline row")
+            .counter_receipts
+            .first_mut()
+            .expect("structured Timeline receipt");
+        structured_receipt.counters.timeline_exhaustive_candidates = 1;
+        structured_receipt.receipt_sha256 = structured_receipt
+            .canonical_sha256()
+            .expect("refreshed structured receipt");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&structured_as_exhaustive)
+                .expect("structured/exhaustive drift evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut mixed_authority = complete_timeline.clone();
+        let structured_authority = &mut mixed_authority
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite
+            })
+            .expect("structured Timeline row")
+            .authority;
+        structured_authority.checkpoint_identity_after_sha256 =
+            digest("mixed structured checkpoint");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&mixed_authority)
+                .expect("mixed Timeline authority evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut persisted_timeline = complete_timeline.clone();
+        persisted_timeline.timeline_storage_rows[0].forbidden_probes[0].sqlite_match_count = 1;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&persisted_timeline)
+                .expect("persisted Timeline evidence evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut request_local_storage_sentinels = complete_timeline.clone();
+        request_local_storage_sentinels
+            .timeline_storage_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::WindowsNtfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.phase == QualificationDerivedChangeStoragePhaseV1::InitialPublication
+            })
+            .expect("Windows Timeline storage row")
+            .forbidden_probes
+            .iter_mut()
+            .find(|probe| {
+                probe.kind
+                    == QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken
+            })
+            .expect("request-local continuation-token probe")
+            .sentinel_sha256 = digest("distinct request-local Windows Timeline token");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&request_local_storage_sentinels)
+                .expect("request-local Timeline storage sentinels evaluate")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+
+        let mut missing_source_family = complete_timeline.clone();
+        missing_source_family
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite
+            })
+            .expect("structured Timeline row")
+            .authority
+            .authoritative_event_family_counts
+            .remove("review_note_imported");
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&missing_source_family)
+                .expect("source-family omission evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut invalid_trust_transition = complete_timeline.clone();
+        invalid_trust_transition
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite
+            })
+            .expect("trust Timeline row")
+            .trust_transition
+            .as_mut()
+            .expect("trust transition")
+            .status_after_by_event
+            .insert("event:signed".to_owned(), "untrusted_key".to_owned());
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&invalid_trust_transition)
+                .expect("trust transition drift evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+
+        let mut trust_bound_invalid_signature = complete_timeline.clone();
+        trust_bound_invalid_signature
+            .timeline_read_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+                    && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite
+            })
+            .expect("invalid-signature Timeline row")
+            .invalid_signature_failure
+            .as_mut()
+            .expect("invalid-signature witness")
+            .trust_bindings_observed = 1;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&trust_bound_invalid_signature)
+                .expect("invalid-signature trust binding evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
         );
 
         let mut dead_bounded_instrumentation = complete_change_reads.clone();

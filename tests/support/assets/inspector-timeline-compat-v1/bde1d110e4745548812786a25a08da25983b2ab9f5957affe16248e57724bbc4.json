@@ -1,0 +1,28 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:bde1d110e4745548812786a25a08da25983b2ab9f5957affe16248e57724bbc4",
+  "eventType": "t:16",
+  "idempotencyKey": "t:16:sha256:4879fc19a12dd00a600200f174f42e6777cf9220d0b75f8975a9eb6a9f1c44ae",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-7",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2025-12-31T18:02:07.000Z",
+  "payloadHash": "sha256:6cfc22eaa8a867fa436094cf73fce980f322bf073e8ab9ae843419b26c2613e3",
+  "signer": "did:key:z6MkokLBeKLqtofeh6nSbeZXKE3sUf1PDmYTEkiFuYq9dfVZ",
+  "signature": {
+    "alg": "ed25519",
+    "sigVersion": 1,
+    "sig": "a/sJgyEqetwHzz+l8uXkw7OD82lHz4NjbSHPg0wYH163Jes3p4vQiU119CfrXG6CZmIqCPQdjiUAIsTVTBjsBw=="
+  },
+  "payload": {
+    "contentHash": "sha256:4879fc19a12dd00a600200f174f42e6777cf9220d0b75f8975a9eb6a9f1c44ae"
+  }
+}

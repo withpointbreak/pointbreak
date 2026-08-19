@@ -1,0 +1,30 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:06629c32f981569c6ceb42ce126b95898a052d6a3e3b63a9ef651eeea13406ba",
+  "eventType": "t:14",
+  "idempotencyKey": "t:14:task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00:obs:sha256:eabcbca717fb6596a9a283eb5408d0d9a6d6376a10ae8a6d4422556e66855967",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:3b21d5eea47fbf9f3881c8b04272da98ad45a8e54e395aa618c20901d8de25fd",
+    "trackId": "agent:longitudinal-3"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-5",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:01:57.000Z",
+  "payloadHash": "sha256:0009df48182580dd1794b7d176d7af6836887bf69577e797f6303e9c5ad3d38f",
+  "payload": {
+    "body": "lh1-needle-08|derived-access-d0|000000|000000000072|8fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a138b5023ab68c73d29f9ebe21a635539bf98911d2fd0f1d04a1798fb5834146a1",
+    "bodyByteSize": 512,
+    "bodyContentHash": "sha256:7463b889338e766d5dc5eae3110b95071ac0672c8ef4ce471b121a0e304b1edf",
+    "checkpointId": "checkpoint:sha256:1212d8487d74184e98c5913f77e6ae4c97ac46f7b65dae43cbc5c005d5e80eaa",
+    "observationId": "obs:sha256:eabcbca717fb6596a9a283eb5408d0d9a6d6376a10ae8a6d4422556e66855967",
+    "sourceSpeaker": "agent",
+    "title": "Longitudinal task observation 0000"
+  }
+}

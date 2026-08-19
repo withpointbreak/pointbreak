@@ -27,6 +27,7 @@ use super::{
     QualificationDerivedChangeEvidencePurposeV1, QualificationDerivedChangeFixtureV1,
     QualificationDerivedChangeReadCaseV1, QualificationDerivedChangeReadEvidenceV1,
     QualificationDerivedChangeStorageEvidenceV1, QualificationDerivedChangeStoragePhaseV1,
+    QualificationDerivedTimelineReadEvidenceV1, QualificationDerivedTimelineStorageEvidenceV1,
     evaluate_qualification_derived_access_v1,
 };
 use crate::bench_support::foundation::qualification_host_identity_sha256;
@@ -43,7 +44,7 @@ use crate::bench_support::longitudinal::{
     LongitudinalStoreDataInventoryV1, is_governed_derived_store_entry_v1,
     longitudinal_authoritative_store_data_inventory_v1,
 };
-use crate::canonical_hash::sha256_bytes_hex;
+use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 #[cfg(feature = "longitudinal-counting")]
 use crate::model::{JournalId, RevisionId};
 #[cfg(feature = "longitudinal-counting")]
@@ -97,6 +98,8 @@ pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-native-smoke-receipt.v1";
 pub const QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-change-read-receipt.v1";
+pub const QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2: &str =
+    "pointbreak.qualification-derived-change-read-receipt.v2";
 #[cfg(any(test, feature = "longitudinal-counting"))]
 pub const QUALIFICATION_DERIVED_ACCESS_PHASE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-phase-receipt.v1";
@@ -395,6 +398,331 @@ impl QualificationDerivedChangeReadReceiptV1 {
         }
         Ok(())
     }
+}
+
+/// Extends an immutable V1 Change-read receipt with Timeline successor
+/// evidence. The embedded receipt remains the authority for the frozen Change
+/// controls, rows, and storage witnesses.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedChangeReadReceiptV2 {
+    pub schema: String,
+    pub base: QualificationDerivedChangeReadReceiptV1,
+    pub timeline_read_rows: Vec<QualificationDerivedTimelineReadEvidenceV1>,
+    pub timeline_storage_rows: Vec<QualificationDerivedTimelineStorageEvidenceV1>,
+    pub complete: bool,
+    pub receipt_sha256: String,
+}
+
+impl QualificationDerivedChangeReadReceiptV2 {
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.receipt_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2
+            || !self.complete
+            || self.timeline_read_rows.is_empty()
+            || self.timeline_storage_rows.is_empty()
+        {
+            return Err("derived Change read successor receipt is incomplete".to_owned());
+        }
+        self.base.validate()?;
+        if self.base.purpose
+            != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
+            || !self.base.product.is_exact_source_for(&self.base.execution)
+            || !self
+                .base
+                .product
+                .enabled_features
+                .iter()
+                .any(|feature| feature == "longitudinal-counting")
+        {
+            return Err("Change read successor receipt is not exact-source evidence".to_owned());
+        }
+        validate_digest(&self.receipt_sha256, "Change read successor receipt")?;
+        if self.receipt_sha256 != self.canonical_sha256()? {
+            return Err("derived Change read successor receipt hash drifted".to_owned());
+        }
+
+        let product_identity_sha256 = self.base.product.canonical_sha256()?;
+        let execution_identity_sha256 = self.base.execution.canonical_sha256()?;
+        let mut run_identities = BTreeSet::new();
+        let expected_cases = super::required_timeline_cases_v1(self.base.fixture)
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let observed_cases = self
+            .timeline_read_rows
+            .iter()
+            .map(|row| row.case)
+            .collect::<BTreeSet<_>>();
+        if observed_cases != expected_cases || observed_cases.len() != self.timeline_read_rows.len()
+        {
+            return Err("derived Timeline receipt omitted required cases".to_owned());
+        }
+        for row in &self.timeline_read_rows {
+            let schedule = super::timeline_request_schedule_v1(self.base.fixture, row.case);
+            if row.platform != self.base.execution.platform
+                || row.fixture != self.base.fixture
+                || row.fixture_inventory_sha256 != self.base.fixture_inventory_sha256
+                || row.fixture_witness_sha256 != self.base.fixture_witness_sha256
+                || row.product_identity_sha256 != product_identity_sha256
+                || row.counter_execution_identity_sha256 != execution_identity_sha256
+                || row.semantic_process_scope
+                    != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
+                || row.counter_process_scope
+                    != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
+                || !timeline_authority_digests_valid(&row.authority)
+                || row.authority.request_schedule_sha256
+                    != super::timeline_request_schedule_sha256_v1(self.base.fixture, row.case)
+            {
+                return Err("derived Timeline read receipt authority drifted".to_owned());
+            }
+            validate_digest(
+                &row.derived_semantic_sha256,
+                "derived Timeline semantic receipt",
+            )?;
+            if let Some(strict) = &row.strict_semantic_sha256 {
+                validate_digest(strict, "strict Timeline semantic receipt")?;
+            }
+            if row.counter_receipts.len() != schedule.len() {
+                return Err("derived Timeline counter receipt schedule is incomplete".to_owned());
+            }
+            for (receipt, operation) in row.counter_receipts.iter().zip(schedule) {
+                receipt.validate().map_err(|error| error.to_string())?;
+                if !run_identities.insert(receipt.run_identity.clone())
+                    || receipt.operation != *operation
+                    || receipt.root_identity != self.base.execution.root_provenance_sha256
+                    || receipt.base_execution_identity_sha256 != execution_identity_sha256
+                    || receipt.derivative_execution_identity_sha256 != product_identity_sha256
+                    || receipt.manifest_sha256 != self.base.fixture_inventory_sha256
+                    || receipt.schedule_sha256 != row.authority.request_schedule_sha256
+                    || receipt.phase != row.case.as_str()
+                {
+                    return Err("derived Timeline counter receipt authority drifted".to_owned());
+                }
+            }
+            if timeline_semantic_receipt_sha256(&row.counter_receipts)?
+                != row.derived_semantic_sha256
+            {
+                return Err("derived Timeline semantic receipt aggregate drifted".to_owned());
+            }
+            if row
+                .invalid_signature_failure
+                .as_ref()
+                .is_some_and(|failure| {
+                    !run_identities.insert(failure.counter_receipt.run_identity.clone())
+                })
+                || !timeline_invalid_signature_failure_valid_v1(
+                    row,
+                    &self.base.execution,
+                    &product_identity_sha256,
+                    &execution_identity_sha256,
+                )
+            {
+                return Err("derived Timeline invalid-signature receipt drifted".to_owned());
+            }
+        }
+
+        let expected_phases = match self.base.fixture {
+            QualificationDerivedChangeFixtureV1::TopologyV1 => BTreeSet::from([
+                QualificationDerivedChangeStoragePhaseV1::InitialPublication,
+                QualificationDerivedChangeStoragePhaseV1::PostAppendCheckpoint,
+            ]),
+            _ => BTreeSet::from([QualificationDerivedChangeStoragePhaseV1::InitialPublication]),
+        };
+        let observed_phases = self
+            .timeline_storage_rows
+            .iter()
+            .map(|row| row.phase)
+            .collect::<BTreeSet<_>>();
+        if observed_phases != expected_phases
+            || observed_phases.len() != self.timeline_storage_rows.len()
+            || self.timeline_storage_rows.iter().any(|row| {
+                let base_storage_matches = self.base.storage_rows.iter().any(|base| {
+                    base.platform == row.platform
+                        && base.fixture == row.fixture
+                        && base.phase == row.phase
+                        && base.fixture_inventory_sha256 == row.fixture_inventory_sha256
+                        && base.fixture_witness_sha256 == row.fixture_witness_sha256
+                        && base.product_identity_sha256 == row.product_identity_sha256
+                        && base.execution_identity_sha256 == row.execution_identity_sha256
+                });
+                let probe_kinds = row
+                    .forbidden_probes
+                    .iter()
+                    .map(|probe| probe.kind)
+                    .collect::<BTreeSet<_>>();
+                row.platform != self.base.execution.platform
+                    || row.fixture != self.base.fixture
+                    || row.fixture_inventory_sha256 != self.base.fixture_inventory_sha256
+                    || row.fixture_witness_sha256 != self.base.fixture_witness_sha256
+                    || row.product_identity_sha256 != product_identity_sha256
+                    || row.execution_identity_sha256 != execution_identity_sha256
+                    || !base_storage_matches
+                    || row.forbidden_probes.len()
+                        != super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL.len()
+                    || probe_kinds
+                        != super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL
+                            .into_iter()
+                            .collect()
+                    || row.forbidden_probes.iter().any(|probe| {
+                        validate_digest(&probe.sentinel_sha256, "Timeline storage probe").is_err()
+                            || probe.sqlite_match_count != 0
+                            || probe.file_match_count != 0
+                    })
+            })
+        {
+            return Err("derived Timeline storage receipt is incomplete".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn timeline_semantic_receipt_sha256(
+    receipts: &[crate::bench_support::longitudinal::LongitudinalCounterReceiptV1],
+) -> Result<String, String> {
+    let semantic_receipts = receipts
+        .iter()
+        .map(|receipt| receipt.semantic_result_sha256.clone())
+        .collect::<Vec<_>>();
+    let value = serde_json::to_value(semantic_receipts).map_err(|error| error.to_string())?;
+    canonical_json_bytes(&value)
+        .map(|bytes| sha256_bytes_hex(&bytes))
+        .map_err(|error| error.to_string())
+}
+
+fn timeline_authority_digests_valid(
+    authority: &super::QualificationDerivedTimelineAuthorityEvidenceV1,
+) -> bool {
+    [
+        &authority.request_schedule_sha256,
+        &authority.generation_identity_before_sha256,
+        &authority.generation_identity_after_sha256,
+        &authority.checkpoint_identity_before_sha256,
+        &authority.checkpoint_identity_after_sha256,
+        &authority.timeline_projection_stamp_before_sha256,
+        &authority.timeline_projection_stamp_after_sha256,
+        &authority.trust_identity_before_sha256,
+        &authority.trust_identity_after_sha256,
+    ]
+    .into_iter()
+    .all(|digest| validate_digest(digest, "Timeline authority witness").is_ok())
+        && authority
+            .continuation_token_set_sha256
+            .as_ref()
+            .is_none_or(|digest| validate_digest(digest, "Timeline continuation-token set").is_ok())
+}
+
+fn timeline_invalid_signature_failure_valid_v1(
+    row: &QualificationDerivedTimelineReadEvidenceV1,
+    execution: &QualificationDerivedAccessExecutionIdentityV1,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> bool {
+    let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
+        && row.case == super::QualificationDerivedTimelineReadCaseV1::TrustSuite;
+    let Some(failure) = &row.invalid_signature_failure else {
+        return !expected;
+    };
+    let counter = &failure.counter_receipt;
+    let counters = &counter.counters;
+    expected
+        && row.status == QualificationDerivedAccessStatusV1::Passed
+        && row.oracle == super::QualificationDerivedTimelineReadOracleV1::StrictParity
+        && !failure.carrier_event_id.trim().is_empty()
+        && validate_digest(
+            &failure.clean_inventory_sha256,
+            "clean invalid-signature inventory",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.derivative_inventory_sha256,
+            "derivative invalid-signature inventory",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.restored_inventory_sha256,
+            "restored invalid-signature inventory",
+        )
+        .is_ok()
+        && failure.clean_inventory_sha256 == row.fixture_inventory_sha256
+        && failure.clean_inventory_sha256 == failure.restored_inventory_sha256
+        && failure.clean_inventory_sha256 != failure.derivative_inventory_sha256
+        && validate_digest(&failure.clean_carrier_sha256, "clean signature carrier").is_ok()
+        && validate_digest(&failure.mutated_carrier_sha256, "mutated signature carrier").is_ok()
+        && failure.clean_carrier_sha256 != failure.mutated_carrier_sha256
+        && failure.mutation_recipe_sha256
+            == super::QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
+        && failure.clean_signature_status == "valid"
+        && failure.mutated_signature_status == "invalid"
+        && failure.observed_http_status == 503
+        && failure.observed_typed_document.schema == "pointbreak.inspect-change-projection-error"
+        && failure.observed_typed_document.version == 1
+        && failure.observed_typed_document.code == "projection_invalid"
+        && failure.observed_typed_document.retryable == Some(false)
+        && validate_digest(
+            &failure.observed_typed_document.canonical_sha256,
+            "invalid-signature typed failure document",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.clean_semantic_sha256,
+            "invalid-signature clean semantic receipt",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.strict_semantic_sha256,
+            "invalid-signature strict semantic receipt",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.derived_semantic_sha256,
+            "invalid-signature derived semantic receipt",
+        )
+        .is_ok()
+        && validate_digest(
+            &failure.recovery_semantic_sha256,
+            "invalid-signature recovery semantic receipt",
+        )
+        .is_ok()
+        && failure.clean_semantic_sha256 == failure.recovery_semantic_sha256
+        && failure.clean_semantic_sha256 != failure.derived_semantic_sha256
+        && failure.strict_semantic_sha256 == failure.derived_semantic_sha256
+        && counter.validate().is_ok()
+        && !counter.success
+        && counter.operation == "timeline_invalid_signature_fault"
+        && counter.phase == super::QualificationDerivedTimelineReadCaseV1::TrustSuite.as_str()
+        && counter.root_identity == execution.root_provenance_sha256
+        && counter.base_execution_identity_sha256 == execution_identity_sha256
+        && counter.derivative_execution_identity_sha256 == product_identity_sha256
+        && counter.manifest_sha256 == failure.derivative_inventory_sha256
+        && counter.schedule_sha256
+            == super::timeline_request_schedule_sha256_v1(
+                QualificationDerivedChangeFixtureV1::TopologyV1,
+                super::QualificationDerivedTimelineReadCaseV1::TrustSuite,
+            )
+        && counter.semantic_result_sha256 == failure.derived_semantic_sha256
+        && counters.authoritative_fallbacks == 0
+        && counters.full_history_fallbacks == 0
+        && counters.event_folds == 0
+        && counters.projection_rebuilds == 0
+        && counters.state_rebuilds == 0
+        && counters.body_artifact_reads == 0
+        && counters.object_artifact_reads == 0
+        && counters.timeline_trust_support_carriers == 0
+        && counters.timeline_entries_emitted == 0
+        && failure.trust_bindings_observed == 0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -3381,12 +3709,16 @@ pub(super) fn validate_summaries_against_raw(
     let mut expected_change_reads = Vec::new();
     let mut expected_change_controls = Vec::new();
     let mut expected_change_storage = Vec::new();
+    let mut expected_timeline_reads = Vec::new();
+    let mut expected_timeline_storage = Vec::new();
     let mut expected_products = Vec::new();
     let mut expected_control_binaries = Vec::new();
+    let mut change_receipt_schema = None;
     for value in raw_receipts {
         reject_derived_change_diagnostic_evidence_document_v1(value)?;
         match value.get("schema").and_then(serde_json::Value::as_str) {
             Some(QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1) => {
+                record_change_receipt_schema(&mut change_receipt_schema, "v1")?;
                 let receipt: QualificationDerivedChangeReadReceiptV1 =
                     serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
                 receipt.validate()?;
@@ -3403,6 +3735,23 @@ pub(super) fn validate_summaries_against_raw(
                 expected_change_controls.extend(receipt.control_rows);
                 expected_change_storage.extend(receipt.storage_rows);
                 expected_change_reads.extend(receipt.rows);
+            }
+            Some(QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2) => {
+                record_change_receipt_schema(&mut change_receipt_schema, "v2")?;
+                let receipt: QualificationDerivedChangeReadReceiptV2 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                require_packaged_execution(package, &receipt.base.execution)?;
+                append_exact_source_change_read_receipt(
+                    &mut expected_products,
+                    &mut expected_control_binaries,
+                    &mut expected_change_controls,
+                    &mut expected_change_storage,
+                    &mut expected_change_reads,
+                    &receipt.base,
+                );
+                expected_timeline_reads.extend(receipt.timeline_read_rows);
+                expected_timeline_storage.extend(receipt.timeline_storage_rows);
             }
             Some(QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1) => {
                 let receipt: QualificationDerivedAccessNativeSmokeRunReceiptV1 =
@@ -3478,6 +3827,21 @@ pub(super) fn validate_summaries_against_raw(
             None => return Err("derived-access raw receipt omitted schema".to_owned()),
         }
     }
+    match change_receipt_schema {
+        Some("v1")
+            if package.evaluator_revision
+                != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3 =>
+        {
+            return Err("V1 Change receipt requires evaluator v3".to_owned());
+        }
+        Some("v2")
+            if package.evaluator_revision
+                != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4 =>
+        {
+            return Err("V2 Change receipt requires evaluator v4".to_owned());
+        }
+        _ => {}
+    }
     if package.operation_rows.len() != expected_operations.len()
         || package.allocation_rows.len() != expected_allocations.len()
         || package.d0_rows.len() != expected_d0.len()
@@ -3497,6 +3861,10 @@ pub(super) fn validate_summaries_against_raw(
             != unordered_json_rows(&expected_change_controls)?
         || unordered_json_rows(&package.change_storage_rows)?
             != unordered_json_rows(&expected_change_storage)?
+        || unordered_json_rows(&package.timeline_read_rows)?
+            != unordered_json_rows(&expected_timeline_reads)?
+        || unordered_json_rows(&package.timeline_storage_rows)?
+            != unordered_json_rows(&expected_timeline_storage)?
         || unordered_json_rows(&package.product_identities)?
             != unordered_json_rows(&expected_products)?
         || unordered_json_rows(&package.change_control_binary_identities)?
@@ -3505,6 +3873,34 @@ pub(super) fn validate_summaries_against_raw(
         return Err("derived-access package summaries differ from raw receipts".to_owned());
     }
     Ok(())
+}
+
+fn record_change_receipt_schema(
+    observed: &mut Option<&'static str>,
+    schema: &'static str,
+) -> Result<(), String> {
+    if observed.is_some_and(|existing| existing != schema) {
+        return Err("derived-access raw inputs mix V1 and V2 Change receipts".to_owned());
+    }
+    *observed = Some(schema);
+    Ok(())
+}
+
+fn append_exact_source_change_read_receipt(
+    products: &mut Vec<QualificationDerivedAccessProductIdentityV1>,
+    control_binaries: &mut Vec<QualificationDerivedChangeControlBinaryIdentityV1>,
+    controls: &mut Vec<QualificationDerivedChangeControlEvidenceV1>,
+    storage: &mut Vec<QualificationDerivedChangeStorageEvidenceV1>,
+    reads: &mut Vec<QualificationDerivedChangeReadEvidenceV1>,
+    receipt: &QualificationDerivedChangeReadReceiptV1,
+) {
+    if !products.contains(&receipt.product) {
+        products.push(receipt.product.clone());
+    }
+    control_binaries.extend(receipt.control_binary_identities.clone());
+    controls.extend(receipt.control_rows.clone());
+    storage.extend(receipt.storage_rows.clone());
+    reads.extend(receipt.rows.clone());
 }
 
 fn require_packaged_execution(
@@ -3585,9 +3981,12 @@ pub fn build_qualification_derived_access_fragment_v1(
         change_read_rows: Vec::new(),
         change_control_rows: Vec::new(),
         change_storage_rows: Vec::new(),
+        timeline_read_rows: Vec::new(),
+        timeline_storage_rows: Vec::new(),
         complete: false,
     };
     let mut raw_receipts = Vec::new();
+    let mut change_receipt_schema = None;
     for path in &request.receipt_paths {
         validate_receipt_input_path(path)?;
         let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
@@ -3600,6 +3999,7 @@ pub fn build_qualification_derived_access_fragment_v1(
             .ok_or_else(|| "derived-access receipt omitted schema".to_owned())?;
         match schema {
             QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V1 => {
+                record_change_receipt_schema(&mut change_receipt_schema, "v1")?;
                 let receipt: QualificationDerivedChangeReadReceiptV1 =
                     serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
                 receipt.validate()?;
@@ -3622,6 +4022,40 @@ pub fn build_qualification_derived_access_fragment_v1(
                 package.change_control_rows.extend(receipt.control_rows);
                 package.change_storage_rows.extend(receipt.storage_rows);
                 package.change_read_rows.extend(receipt.rows);
+            }
+            QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2 => {
+                record_change_receipt_schema(&mut change_receipt_schema, "v2")?;
+                let receipt: QualificationDerivedChangeReadReceiptV2 =
+                    serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                receipt.validate()?;
+                if receipt.base.execution != request.execution {
+                    return Err("Change read successor receipt authority drifted".to_owned());
+                }
+                package.evaluator_revision =
+                    super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
+                package.evaluator_procedure_sha256 =
+                    super::qualification_derived_access_evaluator_v4_procedure_sha256();
+                if !package.product_identities.contains(&receipt.base.product) {
+                    package
+                        .product_identities
+                        .push(receipt.base.product.clone());
+                }
+                package
+                    .change_control_binary_identities
+                    .extend(receipt.base.control_binary_identities.clone());
+                package
+                    .change_control_rows
+                    .extend(receipt.base.control_rows.clone());
+                package
+                    .change_storage_rows
+                    .extend(receipt.base.storage_rows.clone());
+                package.change_read_rows.extend(receipt.base.rows.clone());
+                package
+                    .timeline_read_rows
+                    .extend(receipt.timeline_read_rows);
+                package
+                    .timeline_storage_rows
+                    .extend(receipt.timeline_storage_rows);
             }
             QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1 => {
                 let receipt: QualificationDerivedAccessNativeSmokeRunReceiptV1 =
@@ -4088,6 +4522,14 @@ pub fn assemble_qualification_derived_access_package_v1(
         change_storage_rows: packages
             .iter_mut()
             .flat_map(|package| std::mem::take(&mut package.change_storage_rows))
+            .collect(),
+        timeline_read_rows: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.timeline_read_rows))
+            .collect(),
+        timeline_storage_rows: packages
+            .iter_mut()
+            .flat_map(|package| std::mem::take(&mut package.timeline_storage_rows))
             .collect(),
         complete: true,
     };
@@ -4614,6 +5056,8 @@ impl QualificationDerivedAccessPackageV1 {
             change_read_rows: Vec::new(),
             change_control_rows: Vec::new(),
             change_storage_rows: Vec::new(),
+            timeline_read_rows: Vec::new(),
+            timeline_storage_rows: Vec::new(),
             complete: false,
         }
     }

@@ -1,0 +1,39 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:86ebf28c96aadab641fcdfe130a8c550289d9e69e2b70aa49047b9396a148042",
+  "eventType": "t:02",
+  "idempotencyKey": "t:02:subject:sha256:9a69e07a9981bfc486cf2fd0a51176925106c1fb0ffdbea100d0f81eb7df56a9",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:9a69e07a9981bfc486cf2fd0a51176925106c1fb0ffdbea100d0f81eb7df56a9",
+    "trackId": "agent:longitudinal-1"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-1",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:00:00.000Z",
+  "payloadHash": "sha256:f0d5ebdcc1893d1a193799938fedfc699806bed695686b5f99ed8e4245b82eb2",
+  "signer": "did:key:z6Mkf9QfKqrPAdp3c86MEdtzKagc7iMASTbZ36Z9zpiKbkTV",
+  "signature": {
+    "alg": "ed25519",
+    "sigVersion": 1,
+    "sig": "hh2ySxiJt+iKkhVU4iFVaSY3To1wUTAtwpgzoWKeqBA+FRoXhiz0ZcOlhmYejQyI9S4P/oO14rKMEFlG5uWiBw=="
+  },
+  "payload": {
+    "engagementId": "engagement:sha256:d927c2b02552c67e32d95d1d97750e0423eac1e52e19f1748e9a0b34e3b10fad",
+    "workObject": {
+      "kind": "revision",
+      "objectArtifactContentHash": "sha256:4879fc19a12dd00a600200f174f42e6777cf9220d0b75f8975a9eb6a9f1c44ae",
+      "revision": {
+        "id": "rev:sha256:26cf67169bac9c44a38e9b7bfabe996d86416d94740b6a929513b6b52ac9340a",
+        "objectId": "obj:sha256:eb5a64fb51fb58e77818b950c2b6197e56164313e463614e6841b9bd044f9139"
+      },
+      "summary": "deterministic longitudinal revision"
+    }
+  }
+}

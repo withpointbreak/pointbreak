@@ -48,6 +48,10 @@ case "$pointbreak_binary" in
   /* | [A-Za-z]:/* | [A-Za-z]:\\* | \\\\*) ;;
   *) die "POINTBREAK_BINARY must be an absolute executable path" ;;
 esac
+case "${POINTBREAK_DERIVED_ACCESS:-}" in
+  "" | sqlite-wal-bodyless-v1) ;;
+  *) die "POINTBREAK_DERIVED_ACCESS must be unset or sqlite-wal-bodyless-v1" ;;
+esac
 [ -f "$browser_program_template" ] || die "browser program is missing: $browser_program_template"
 [ -f "$browser_diagnostics" ] || die "browser diagnostics are missing: $browser_diagnostics"
 [ -f "$browser_manifest_publisher" ] || die "browser manifest publisher is missing: $browser_manifest_publisher"
@@ -139,9 +143,12 @@ binary_sha256="$(shasum -a 256 "$pointbreak_binary" | awk '{print $1}')"
 snapshot_root="$root/harness"
 snapshot_scripts="$snapshot_root/scripts"
 snapshot_ready_store="$snapshot_root/tests/support/assets/change-ready-store"
+snapshot_timeline_compat_store="$snapshot_root/tests/support/assets/inspector-timeline-compat-v1"
+snapshot_legacy_note_store="$snapshot_root/tests/fixtures/legacy_stores/review_note_imported/store"
 activation_fixture="5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
 completion_fixture="f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
-mkdir -p "$snapshot_scripts" "$snapshot_ready_store"
+mkdir -p "$snapshot_scripts" "$snapshot_ready_store" \
+  "$snapshot_timeline_compat_store" "$snapshot_legacy_note_store"
 git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-verify.sh" \
   >"$snapshot_scripts/change-inspector-browser-verify.sh"
 git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-verify.mjs" \
@@ -156,12 +163,34 @@ git -C "$repo_root" show "$source_commit:tests/support/assets/change-ready-store
   >"$snapshot_ready_store/$activation_fixture"
 git -C "$repo_root" show "$source_commit:tests/support/assets/change-ready-store/$completion_fixture" \
   >"$snapshot_ready_store/$completion_fixture"
+
+snapshot_git_tree() {
+  local source_prefix="$1"
+  local destination_root="$2"
+  local source_path relative_path destination_path
+  while IFS= read -r source_path; do
+    relative_path="${source_path#"$source_prefix"/}"
+    destination_path="$destination_root/$relative_path"
+    mkdir -p "$(dirname "$destination_path")"
+    git -C "$repo_root" show "$source_commit:$source_path" >"$destination_path"
+  done < <(git -C "$repo_root" ls-tree -r --name-only "$source_commit" -- "$source_prefix")
+}
+
+snapshot_git_tree \
+  "tests/support/assets/inspector-timeline-compat-v1" \
+  "$snapshot_timeline_compat_store"
+snapshot_git_tree \
+  "tests/fixtures/legacy_stores/review_note_imported/store" \
+  "$snapshot_legacy_note_store"
+[ "$(find "$snapshot_timeline_compat_store" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -eq 9 ] \
+  || die "source-bound Timeline compatibility fixture event count drifted"
 chmod 0444 \
   "$snapshot_scripts/change-inspector-browser-verify.mjs" \
   "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" \
   "$snapshot_scripts/change-inspector-browser-manifest.mjs" \
   "$snapshot_ready_store/$activation_fixture" \
   "$snapshot_ready_store/$completion_fixture"
+find "$snapshot_timeline_compat_store" "$snapshot_legacy_note_store" -type f -exec chmod 0444 {} +
 chmod 0555 \
   "$snapshot_scripts/change-inspector-browser-verify.sh" \
   "$snapshot_scripts/materialize-inspector-decision-matrix.sh"
@@ -179,6 +208,17 @@ publisher_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-ma
 materializer_sha256="$(shasum -a 256 "$snapshot_scripts/materialize-inspector-decision-matrix.sh" | awk '{print $1}')"
 activation_fixture_sha256="$(shasum -a 256 "$snapshot_ready_store/$activation_fixture" | awk '{print $1}')"
 completion_fixture_sha256="$(shasum -a 256 "$snapshot_ready_store/$completion_fixture" | awk '{print $1}')"
+compatibility_fixture_inventory="$(
+  find "$snapshot_timeline_compat_store" "$snapshot_legacy_note_store" -type f -print \
+    | LC_ALL=C sort \
+    | while IFS= read -r fixture_file; do
+        relative_path="${fixture_file#"$snapshot_root"/}"
+        fixture_sha256="$(shasum -a 256 "$fixture_file" | awk '{print $1}')"
+        jq -cn --arg path "$relative_path" --arg sha256 "$fixture_sha256" \
+          '{path: $path, sha256: $sha256}'
+      done \
+    | jq -cs '.'
+)"
 [ "$(shasum -a 256 "$script_dir/change-inspector-browser-verify.sh" | awk '{print $1}')" = "$shell_sha256" ] \
   || die "running browser verifier did not match the exact source commit"
 jq -n \
@@ -195,6 +235,7 @@ jq -n \
   --arg activationFixtureSha256 "$activation_fixture_sha256" \
   --arg completionFixture "$completion_fixture" \
   --arg completionFixtureSha256 "$completion_fixture_sha256" \
+  --argjson compatibilityFixtureInventory "$compatibility_fixture_inventory" \
   '{schema: "pointbreak.change-inspector-browser-harness", version: 1,
     sourceCommit: $sourceCommit,
     binary: {requestedPath: $requestedBinary, executedPath: $executedBinary, sha256: $binarySha256},
@@ -206,7 +247,7 @@ jq -n \
       {path: "scripts/materialize-inspector-decision-matrix.sh", sha256: $materializerSha256},
       {path: ("tests/support/assets/change-ready-store/" + $activationFixture), sha256: $activationFixtureSha256},
       {path: ("tests/support/assets/change-ready-store/" + $completionFixture), sha256: $completionFixtureSha256}
-    ]}' >"$log_dir/harness-digests.json"
+    ] + $compatibilityFixtureInventory}' >"$log_dir/harness-digests.json"
 harness_record_sha256="$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')"
 
 pointbreak_binary="$binary_snapshot"
@@ -226,6 +267,8 @@ jq -e --arg source_commit "$source_commit" '
 # borrowing any owner records. Keep the scale input tracked and overwrite it
 # for every capture so each captured diff stays constant-sized.
 POINTBREAK_HOME="$pointbreak_home" POINTBREAK_BINARY="$pointbreak_binary" \
+  POINTBREAK_TIMELINE_COMPAT_FIXTURE_DIR="$snapshot_timeline_compat_store" \
+  POINTBREAK_LEGACY_NOTE_FIXTURE_DIR="$snapshot_legacy_note_store" \
   "$matrix_materializer" "$fixture_repo" \
   >"$log_dir/base-matrix.json" 2>"$log_dir/base-matrix.log"
 printf 'pub const BROWSER_SCALE: u32 = 0;\n' >"$fixture_repo/src/browser-scale.rs"
@@ -634,7 +677,8 @@ start_reader_state_server() {
   local repo="$2"
   local startup="$log_dir/reader-$state-startup.json"
   local server_log="$log_dir/reader-$state-server.log"
-  POINTBREAK_HOME="$reader_state_home" "$pointbreak_binary" inspect \
+  POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
+    POINTBREAK_HOME="$reader_state_home" "$pointbreak_binary" inspect \
     --repo "$repo" --port 0 --format json >"$startup" 2>"$server_log" &
   reader_state_started_pid=$!
   register_background_process "$reader_state_started_pid"
@@ -691,6 +735,34 @@ retry_empty_ready_l2() {
   die "empty-ready-l2 did not publish a current derived generation after explicit retry"
 }
 
+retain_primary_derived_access_status() {
+  local startup="$log_dir/inspect-startup.json"
+  local status_log="$log_dir/browser-primary-derived-access-status.json"
+  local status_tmp="$status_log.tmp"
+  local base_url
+  local token
+  local response_status
+
+  base_url="http://$(jq -r '.host' "$startup"):$(jq -r '.port' "$startup")"
+  token="$(jq -r '.token' "$startup")"
+  for _ in $(seq 1 200); do
+    response_status="$(curl -sS -o "$status_tmp" -w '%{http_code}' \
+      -H "Authorization: Bearer $token" \
+      "$base_url/api/derived-access/status")"
+    if [ "$response_status" = "200" ] && jq -e '
+      .schema == "pointbreak.inspect-derived-access-status" and .version == 1 and
+      .active == true and .servingCurrent == true and .availability == "current" and
+      .rebuildInFlight == false and .rebuildPaused == false
+    ' "$status_tmp" >/dev/null; then
+      mv "$status_tmp" "$status_log"
+      return 0
+    fi
+    sleep 0.05
+  done
+  [ -f "$status_tmp" ] && mv "$status_tmp" "$status_log"
+  die "primary Inspector did not publish an active current derived-access status"
+}
+
 start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
 retry_empty_ready_l2
 start_reader_state_server "l0" "$reader_l0_repo"
@@ -706,7 +778,8 @@ reader_servers="$(jq -cn \
     {emptyReadyL2: server($empty[0]), l0: server($l0[0]), m1: server($m1[0])}
   ')"
 
-POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json \
+POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
+  POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json \
   >"$log_dir/inspect-startup.json" 2>"$log_dir/inspect-server.log" &
 server_pid=$!
 register_background_process "$server_pid"
@@ -718,6 +791,7 @@ done
 jq -e '.schema == "pointbreak.inspect-startup" and .version == 1 and (.port > 0) and (.token | length > 0)' \
   "$log_dir/inspect-startup.json" >/dev/null || die "Inspector did not emit valid startup JSON"
 server="$(jq -c '{baseUrl: ("http://" + .host + ":" + (.port | tostring)), token}' "$log_dir/inspect-startup.json")"
+retain_primary_derived_access_status
 
 # L2 remains a deliberately Change-aware reader profile: the restored Timeline
 # must use `/api/v2/history`, never reactivate the retired aggregate endpoint.
@@ -899,6 +973,7 @@ manifest_tmp="$root/.manifest.json.tmp"
 for required_evidence_path in \
   logs/browser-empty-ready-l2-retry.json \
   logs/browser-empty-ready-l2-ready.json \
+  logs/browser-primary-derived-access-status.json \
   logs/browser-result.json \
   logs/browser-gate.log \
   logs/browser-program.mjs; do
@@ -932,6 +1007,7 @@ jq -n \
   --argjson timelineAppend "$(cat "$log_dir/timeline-append.json")" \
   --argjson toolVersions "$tool_versions" \
   --slurpfile harness "$log_dir/harness-digests.json" \
+  --slurpfile primaryDerivedAccess "$log_dir/browser-primary-derived-access-status.json" \
   --arg harnessSha256 "$harness_record_sha256" \
   --argjson assertionCount "$assertion_count" \
   --argjson screenshotCount "$screenshot_count" \
@@ -940,6 +1016,7 @@ jq -n \
     binary: $binary, executedBinary: $executedBinary, binarySha256: $binarySha256,
     harness: $harness[0], harnessSha256: $harnessSha256, root: $root, fixture: $fixture,
     fixtureData: $fixtureData, timelineAppend: $timelineAppend,
+    primaryDerivedAccessStatus: $primaryDerivedAccess[0],
     toolVersions: $toolVersions, assertionCount: $assertionCount,
     screenshotCount: $screenshotCount, evidenceInventory: $evidenceInventory}' \
   >"$manifest_tmp"

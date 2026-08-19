@@ -170,6 +170,10 @@ capture_revision() {
 }
 
 record_validation() {
+  record_validation_json "$@" >/dev/null
+}
+
+record_validation_json() {
   local revision="$1"
   local check_name="$2"
   local status="$3"
@@ -177,7 +181,7 @@ record_validation() {
   pointbreak_actor_json "actor:agent:pointbreak-matrix-validation-writer" \
     validation add --repo "$destination" --exact-revision "$revision" \
     --track "agent:matrix-validation" --check-name "$check_name" \
-    --status "$status" --completed-at "$completed_at" >/dev/null
+    --status "$status" --completed-at "$completed_at"
 }
 
 git -C "$destination" init --quiet
@@ -195,6 +199,33 @@ ready_store="${POINTBREAK_CHANGE_READY_FIXTURE_DIR:-$repo_root/tests/support/ass
   || die "public L2 completion fixture is missing"
 mkdir -p "$destination/.git/pointbreak/events"
 cp "$ready_store"/*.json "$destination/.git/pointbreak/events/"
+
+# Seed the public historical-reader compatibility records that have no current
+# review CLI writer. They are deterministic outputs of the checked-in D0
+# generator, while the retired imported-note pair comes from its existing
+# byte-faithful legacy-store fixture. These records remain visible inputs to the
+# public Inspector matrix rather than qualification-runner injections.
+timeline_compat_store="${POINTBREAK_TIMELINE_COMPAT_FIXTURE_DIR:-$repo_root/tests/support/assets/inspector-timeline-compat-v1}"
+legacy_note_store="${POINTBREAK_LEGACY_NOTE_FIXTURE_DIR:-$repo_root/tests/fixtures/legacy_stores/review_note_imported/store}"
+[ -d "$timeline_compat_store" ] || die "public Timeline compatibility fixture is missing"
+[ "$(find "$timeline_compat_store" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d '[:space:]')" -eq 9 ] \
+  || die "public Timeline compatibility fixture event count drifted"
+for legacy_record in \
+  "$legacy_note_store/events/82828b3ccf26612a9830837a3260291b95c5b4aa13451cad3c7dd271262ecd27.json" \
+  "$legacy_note_store/events/f8bf79cecc3306f874829afe7b684feffb3dd0ddce388fa8bbadbe1d88044bb0.json" \
+  "$legacy_note_store/artifacts/objects/d18e06368b6a96f788dc110e3628646847bc0a7367e7027e1530f6e30312afa0.json"; do
+  [ -f "$legacy_record" ] || die "public imported-note compatibility record is missing"
+done
+cp "$timeline_compat_store"/*.json "$destination/.git/pointbreak/events/"
+cp "$legacy_note_store/events/82828b3ccf26612a9830837a3260291b95c5b4aa13451cad3c7dd271262ecd27.json" \
+  "$legacy_note_store/events/f8bf79cecc3306f874829afe7b684feffb3dd0ddce388fa8bbadbe1d88044bb0.json" \
+  "$destination/.git/pointbreak/events/"
+mkdir -p "$destination/.git/pointbreak/artifacts/notes" \
+  "$destination/.git/pointbreak/artifacts/objects"
+cp "$timeline_compat_store/artifacts/notes"/*.json \
+  "$destination/.git/pointbreak/artifacts/notes/"
+cp "$legacy_note_store/artifacts/objects/d18e06368b6a96f788dc110e3628646847bc0a7367e7027e1530f6e30312afa0.json" \
+  "$destination/.git/pointbreak/artifacts/objects/"
 
 mkdir -p "$destination/src"
 printf 'pub fn matrix_value() -> u32 { 1 }\n' > "$destination/src/lib.rs"
@@ -253,7 +284,12 @@ pointbreak_actor_json "actor:agent:pointbreak-matrix-assessment-writer-two" \
   --summary "The matrix is complete with bounded follow-up." \
   --replaces "$replaced_assessment" >/dev/null
 
-record_validation "$primary_revision" "passed current" passed "2026-07-17T10:00:00Z"
+signed_validation_result="$(record_validation_json \
+  "$primary_revision" "passed current" passed "2026-07-17T10:00:00Z")"
+signed_validation_event="$(printf '%s\n' "$signed_validation_result" | jq -er '.eventId')"
+unsigned_validation_result="$(POINTBREAK_SIGNING=off record_validation_json \
+  "$primary_revision" "unsigned trust witness" passed "2026-07-17T10:00:00Z")"
+unsigned_validation_event="$(printf '%s\n' "$unsigned_validation_result" | jq -er '.eventId')"
 record_validation "$primary_revision" "failed current" failed "2026-07-17T10:00:00Z"
 record_validation "$primary_revision" "errored current" errored "2026-07-17T10:00:00Z"
 record_validation "$primary_revision" "skipped only" skipped "2026-07-17T10:00:00Z"
@@ -271,11 +307,17 @@ record_validation "$primary_revision" "failure followed by skip" skipped "2026-0
 git -C "$destination" add --all
 git -C "$destination" commit --quiet -m "first matrix landing"
 first_landing="$(git -C "$destination" rev-parse HEAD)"
-first_commit_association="$(pointbreak_actor_json \
+primary_landing_selection="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-association-writer" \
-  association record --repo "$destination" --revision "$primary_revision" \
-  --track "agent:matrix-associations" --commit "$first_landing" \
-  | jq -er '.commitAssociationId')"
+  change select "$primary_change" --revision "$primary_revision" \
+  --source "commit:$first_landing" --repo "$destination")"
+primary_landing_cursor="$(printf '%s\n' "$primary_landing_selection" | jq -er '.token')"
+first_land_result="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-association-writer" \
+  association land --repo "$destination" --review-cursor "$primary_landing_cursor" \
+  --track "agent:matrix-associations" --commit "$first_landing")"
+first_commit_association="$(printf '%s\n' "$first_land_result" | jq -er '.commitAssociationId')"
+relation_attestation_id="$(printf '%s\n' "$first_land_result" | jq -er '.relationAttestationId')"
 
 printf 'pub fn matrix_value() -> u32 { 3 }\n' > "$destination/src/lib.rs"
 git -C "$destination" add --all
@@ -442,6 +484,57 @@ pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
   change join "$topology_parallel_change" "$topology_right_revision" \
   --repo "$destination" \
   --operation-id "change-operation:decision-matrix-parallel-join-right" >/dev/null
+
+# Exercise a historical relation withdrawal without changing the final
+# parallel-current topology.
+temporary_relation_assertion="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change assert-relation "$topology_parallel_change" \
+  "$topology_right_revision" "$topology_left_revision" \
+  --successor-artifact-hash "$topology_right_artifact" \
+  --predecessor-artifact-hash "$topology_left_artifact" \
+  --operation-id "change-operation:decision-matrix-temporary-relation" \
+  --repo "$destination")"
+temporary_relation_assertion_event="$(printf '%s\n' "$temporary_relation_assertion" \
+  | jq -er '.events[0].eventId')"
+temporary_relation_claim="$(pointbreak_json change show "$topology_parallel_change" \
+  --repo "$destination" | jq -er '.relationClaims[] | select(.active == true) | .claimId')"
+temporary_relation_withdrawal="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change withdraw-relation "$temporary_relation_claim" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-temporary-relation-withdrawal")"
+temporary_relation_withdrawal_event="$(printf '%s\n' "$temporary_relation_withdrawal" \
+  | jq -er '.events[0].eventId')"
+
+# A disposable Change supplies one membership withdrawal and one Change link;
+# its empty final membership leaves the five browser topology rows untouched.
+historical_change="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change create --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-historical-create" \
+  --nonce "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  | jq -er '.changeId')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-topology-writer" \
+  change join "$historical_change" "$primary_revision" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-historical-join" >/dev/null
+historical_membership_claim="$(pointbreak_json change show "$historical_change" \
+  --repo "$destination" | jq -er '.membershipClaims[] | select(.active == true) | .claimId')"
+historical_membership_withdrawal="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change withdraw-membership "$historical_membership_claim" \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-historical-withdrawal")"
+historical_membership_withdrawal_event="$(printf '%s\n' "$historical_membership_withdrawal" \
+  | jq -er '.events[0].eventId')"
+historical_change_link="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-topology-writer" \
+  change link "$historical_change" "$primary_change" --relation related-work \
+  --repo "$destination" \
+  --operation-id "change-operation:decision-matrix-historical-link")"
+historical_change_link_event="$(printf '%s\n' "$historical_change_link" \
+  | jq -er '.events[0].eventId')"
 
 # A fourth Change starts with the same B/C current pair and captures one
 # Revision that atomically supersedes both exact predecessors.
@@ -691,6 +784,13 @@ jq -n \
   --arg topology_consolidation_change "$topology_consolidation_change" \
   --arg topology_consolidated_revision "$topology_consolidated_revision" \
   --arg topology_consolidated_artifact "$topology_consolidated_artifact" \
+  --arg signed_validation_event "$signed_validation_event" \
+  --arg unsigned_validation_event "$unsigned_validation_event" \
+  --arg relation_attestation_id "$relation_attestation_id" \
+  --arg historical_membership_withdrawal_event "$historical_membership_withdrawal_event" \
+  --arg historical_change_link_event "$historical_change_link_event" \
+  --arg temporary_relation_assertion_event "$temporary_relation_assertion_event" \
+  --arg temporary_relation_withdrawal_event "$temporary_relation_withdrawal_event" \
   --arg base_commit "$base_commit" \
   --arg first_landing "$first_landing" \
   --arg second_landing "$second_landing" \
@@ -703,6 +803,19 @@ jq -n \
       proposalSummarySha256: "21f749c5f166ae819a99a8ff0e303297a43685fd14cc7f1b86a90751989b167c",
       proseSha256: "da79cc8c9b04f41616275f4a6bd027acf6d0358f3605dac74ccadfeea92945a4",
       payloadDocumentSha256: "20dfd0d4e1ce81bfb753001a61c0394914d4711e84f90fb745a659dba1ff11bf"
+    },
+    timeline: {
+      trust: {
+        signedEvent: $signed_validation_event,
+        unsignedEvent: $unsigned_validation_event
+      },
+      historicalCompatibility: {
+        relationAttestation: $relation_attestation_id,
+        membershipWithdrawalEvent: $historical_membership_withdrawal_event,
+        changeLinkEvent: $historical_change_link_event,
+        relationAssertionEvent: $temporary_relation_assertion_event,
+        relationWithdrawalEvent: $temporary_relation_withdrawal_event
+      }
     },
     primary_revision: $primary_revision,
     fact_port: {

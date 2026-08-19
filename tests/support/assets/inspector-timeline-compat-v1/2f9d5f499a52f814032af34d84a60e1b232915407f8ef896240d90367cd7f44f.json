@@ -1,0 +1,38 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:2f9d5f499a52f814032af34d84a60e1b232915407f8ef896240d90367cd7f44f",
+  "eventType": "t:02",
+  "idempotencyKey": "t:02:subject:sha256:b68050dceab4f64e6ca213bf20fb8a13db3dc3787b7617ec173895e9192e38a3",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:b68050dceab4f64e6ca213bf20fb8a13db3dc3787b7617ec173895e9192e38a3",
+    "trackId": "agent:longitudinal-5"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-1",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:00:16.000Z",
+  "payloadHash": "sha256:c2aad59fbabb126449de5e7457dacc27306cf755ab30c1ca780e8570b19fa850",
+  "signer": "did:key:z6Mkf9QfKqrPAdp3c86MEdtzKagc7iMASTbZ36Z9zpiKbkTV",
+  "signature": {
+    "alg": "ed25519",
+    "sigVersion": 1,
+    "sig": "TjLBW3QtTZLy6TT2TuitxGmi/mED4sCKetucRf0Tpx7q4WkwFOasAFtIAIe55rQqAUc62RqlNxzC36F9nqddAw=="
+  },
+  "payload": {
+    "engagementId": "engagement:sha256:922a2b460a765ff00b30169535ddc7736f232c4057eaa59e693c2d554a39815d",
+    "workObject": {
+      "claudeSessionUuid": "longitudinal-derived-access-d0-000000-17",
+      "initialPromptHash": "sha256:c955814c8e65757f3e0f9d0df25b3266e414827e6176f190edeec16ee4e11357",
+      "kind": "task_attempt",
+      "projectPath": "pointbreak-longitudinal-fixture",
+      "sourceSpeaker": "user",
+      "taskAttemptId": "task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00"
+    }
+  }
+}

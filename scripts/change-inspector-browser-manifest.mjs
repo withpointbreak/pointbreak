@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { link, lstat, open, readdir, readFile, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const stableStatFields = ["dev", "ino", "size", "mtimeNs", "ctimeNs"];
 const derivedChangeDiagnosticSchemas = new Set([
@@ -278,6 +279,7 @@ export async function publishPassingManifest({
 	for (const requiredPath of [
 		"logs/browser-result.json",
 		"logs/browser-gate.log",
+		"logs/browser-primary-derived-access-status.json",
 		"logs/browser-program.mjs",
 	]) {
 		if (!requiredEvidencePaths.includes(requiredPath)) {
@@ -334,6 +336,42 @@ export async function publishPassingManifest({
 			if (actualSha256 !== entry.sha256) {
 				throw new Error(`browser evidence SHA-256 mismatch for ${entry.path}`);
 			}
+		}
+		const primaryStatusSnapshot = evidenceSnapshots.find(
+			(snapshot) =>
+				snapshot.path ===
+				join(
+					resolvedEvidenceRoot,
+					"logs/browser-primary-derived-access-status.json",
+				),
+		);
+		if (!primaryStatusSnapshot) {
+			throw new Error("primary derived-access status evidence is missing");
+		}
+		let primaryStatus;
+		try {
+			primaryStatus = JSON.parse(primaryStatusSnapshot.bytes.toString("utf8"));
+		} catch (error) {
+			throw new Error(`primary derived-access status is invalid JSON: ${error}`);
+		}
+		if (
+			primaryStatus?.schema !==
+				"pointbreak.inspect-derived-access-status" ||
+			primaryStatus?.version !== 1 ||
+			primaryStatus?.active !== true ||
+			primaryStatus?.servingCurrent !== true ||
+			primaryStatus?.availability !== "current" ||
+			primaryStatus?.rebuildInFlight !== false ||
+			primaryStatus?.rebuildPaused !== false
+		) {
+			throw new Error(
+				"primary derived-access status is not active/current",
+			);
+		}
+		if (!isDeepStrictEqual(candidate.primaryDerivedAccessStatus, primaryStatus)) {
+			throw new Error(
+				"browser manifest primary derived-access status did not match retained evidence",
+			);
 		}
 
 		await assertStablePath(candidateSnapshot);

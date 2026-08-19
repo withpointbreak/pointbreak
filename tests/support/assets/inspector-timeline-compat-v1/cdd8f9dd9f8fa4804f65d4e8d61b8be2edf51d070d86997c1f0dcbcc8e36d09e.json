@@ -1,0 +1,20 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:cdd8f9dd9f8fa4804f65d4e8d61b8be2edf51d070d86997c1f0dcbcc8e36d09e",
+  "eventType": "t:01",
+  "idempotencyKey": "t:01:journal:longitudinal:derived-access-d0:000000",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-0",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:00:00.000Z",
+  "payloadHash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "payload": {}
+}

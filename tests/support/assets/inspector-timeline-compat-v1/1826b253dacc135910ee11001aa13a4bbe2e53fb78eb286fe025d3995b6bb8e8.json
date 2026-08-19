@@ -1,0 +1,33 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:1826b253dacc135910ee11001aa13a4bbe2e53fb78eb286fe025d3995b6bb8e8",
+  "eventType": "t:06",
+  "idempotencyKey": "t:06:input-request:sha256:9c81e7d637d489c8aa92f8701e57e645fb984a10a4436ef89701cca49842411f:input-request-response:sha256:25c73e4b7a2612fb3f344c297198e18079bbbfb5f2adbce59b89cb4891d80728",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:b68050dceab4f64e6ca213bf20fb8a13db3dc3787b7617ec173895e9192e38a3",
+    "trackId": "agent:longitudinal-5"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-1",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:01:04.000Z",
+  "payloadHash": "sha256:4e8a1349638d0e27cf7f45a02cf1c6a5a3ab21c27bf7cb1e05214d437cf40cbe",
+  "payload": {
+    "inputRequestId": "input-request:sha256:9c81e7d637d489c8aa92f8701e57e645fb984a10a4436ef89701cca49842411f",
+    "inputRequestResponseId": "input-request-response:sha256:25c73e4b7a2612fb3f344c297198e18079bbbfb5f2adbce59b89cb4891d80728",
+    "outcome": "approved",
+    "reasonArtifactPath": "artifacts/notes/496cac5d29c0de6a585db504b454b390f131683cf0f81417cc9fbb4e3e8243b7.json",
+    "reasonByteSize": 8192,
+    "reasonContentHash": "sha256:496cac5d29c0de6a585db504b454b390f131683cf0f81417cc9fbb4e3e8243b7",
+    "taskTarget": {
+      "kind": "task_attempt",
+      "taskAttemptId": "task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00"
+    }
+  }
+}

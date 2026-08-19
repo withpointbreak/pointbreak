@@ -18,6 +18,16 @@ const context = () => ({
 	log: "logs/browser-gate.log",
 });
 
+const currentDerivedAccessStatus = {
+	schema: "pointbreak.inspect-derived-access-status",
+	version: 1,
+	active: true,
+	servingCurrent: true,
+	availability: "current",
+	rebuildInFlight: false,
+	rebuildPaused: false,
+};
+
 test("browser program remains one expression for the Playwright runner", async () => {
 	let source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
@@ -75,6 +85,45 @@ test("empty ready L2 recovery is explicit, authenticated, and retained before br
 		helper,
 		/servingCurrent == true[\s\S]*availability == "current"[\s\S]*rebuildInFlight == false/,
 		"the ready record must wait for the recovered derived generation",
+	);
+});
+
+test("browser servers force active derived access and retain the primary current-state witness", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const ambientGuard = source.indexOf(
+		'POINTBREAK_DERIVED_ACCESS must be unset or sqlite-wal-bodyless-v1',
+	);
+	const readerLaunch = source.indexOf(
+		'POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \\\n    POINTBREAK_HOME="$reader_state_home"',
+	);
+	const primaryLaunch = source.indexOf(
+		'POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \\\n  POINTBREAK_HOME="$pointbreak_home"',
+	);
+	const primaryStartup = source.indexOf('>"$log_dir/inspect-startup.json"');
+	const primaryStatus = source.indexOf(
+		"retain_primary_derived_access_status",
+		primaryStartup,
+	);
+	const browserConfig = source.indexOf('browser_config="$(jq -cn');
+	assert.ok(ambientGuard >= 0, "missing ambient derived-access guard");
+	assert.ok(readerLaunch > ambientGuard, "reader servers must force active access");
+	assert.ok(primaryLaunch > ambientGuard, "primary server must force active access");
+	assert.ok(
+		primaryStatus > primaryStartup && browserConfig > primaryStatus,
+		"the primary status witness must be retained before browser configuration",
+	);
+	assert.match(
+		source,
+		/logs\/browser-primary-derived-access-status\.json/,
+		"completion must require the retained primary status",
+	);
+	assert.match(
+		source,
+		/primaryDerivedAccessStatus: \$primaryDerivedAccess\[0\]/,
+		"the completion candidate must bind the typed status document",
 	);
 });
 
@@ -798,6 +847,7 @@ test("an aggregate failure cannot publish a passing completion manifest", async 
 		...candidate,
 		assertionCount: passingResult.assertionCount,
 		screenshotCount: passingResult.screenshotCount,
+		primaryDerivedAccessStatus: currentDerivedAccessStatus,
 		evidenceInventory: [],
 	};
 	await mkdir(join(root, "browser-artifacts"), { recursive: true });
@@ -805,6 +855,10 @@ test("an aggregate failure cannot publish a passing completion manifest", async 
 	const retainedFiles = new Map([
 		["browser-artifacts/wide-timeline.png", "wide PNG bytes"],
 		["logs/browser-gate.log", "browser gate log bytes"],
+		[
+			"logs/browser-primary-derived-access-status.json",
+			`${JSON.stringify(currentDerivedAccessStatus)}\n`,
+		],
 		["logs/browser-program.mjs", "browser program bytes"],
 		["logs/browser-result.json", '{"status":"passed"}\n'],
 	]);
@@ -961,6 +1015,10 @@ test("derived Change diagnostics are inadmissible to browser completion publicat
 	})}\n`;
 	const retainedFiles = new Map([
 		["logs/browser-gate.log", "browser gate log bytes"],
+		[
+			"logs/browser-primary-derived-access-status.json",
+			`${JSON.stringify(currentDerivedAccessStatus)}\n`,
+		],
 		["logs/browser-program.mjs", "browser program bytes"],
 		["logs/browser-result.json", diagnosticBytes],
 	]);
@@ -972,6 +1030,7 @@ test("derived Change diagnostics are inadmissible to browser completion publicat
 		status: "passed",
 		assertionCount: 0,
 		screenshotCount: 0,
+		primaryDerivedAccessStatus: currentDerivedAccessStatus,
 		evidenceInventory: [...retainedFiles.entries()]
 			.map(([path, bytes]) => ({
 				path,
@@ -1042,10 +1101,15 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 	await mkdir(artifactDir, { recursive: true });
 	await mkdir(logDir, { recursive: true });
 
+	const primaryDerivedAccessStatus = currentDerivedAccessStatus;
 	const retainedFiles = new Map([
 		["browser-artifacts/narrow-timeline.png", "narrow PNG bytes"],
 		["browser-artifacts/wide-timeline.png", "wide PNG bytes"],
 		["logs/browser-gate.log", "browser gate log bytes"],
+		[
+			"logs/browser-primary-derived-access-status.json",
+			`${JSON.stringify(primaryDerivedAccessStatus)}\n`,
+		],
 		["logs/browser-program.mjs", "browser program bytes"],
 		["logs/browser-result.json", '{"status":"passed"}\n'],
 	]);
@@ -1074,6 +1138,7 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		status: "passed",
 		assertionCount: browserResult.assertionCount,
 		screenshotCount: browserResult.screenshotCount,
+		primaryDerivedAccessStatus,
 		evidenceInventory,
 	};
 
@@ -1130,6 +1195,49 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		join(logDir, "browser-gate.log"),
 		retainedFiles.get("logs/browser-gate.log"),
 	);
+
+	const inactiveCandidatePath = join(root, ".inactive-manifest.json.tmp");
+	await writeFile(
+		inactiveCandidatePath,
+		`${JSON.stringify({
+			...candidate,
+			primaryDerivedAccessStatus: {
+				...primaryDerivedAccessStatus,
+				active: false,
+			},
+		})}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: inactiveCandidatePath,
+			manifestPath: join(root, "inactive-manifest.json"),
+			browserResult,
+			evidenceRoot,
+		}),
+		/primary derived-access status|active\/current/i,
+	);
+
+	const mismatchedStatusPath = join(root, ".mismatched-status-manifest.json.tmp");
+	await writeFile(
+		mismatchedStatusPath,
+		`${JSON.stringify({
+			...candidate,
+			primaryDerivedAccessStatus: {
+				...primaryDerivedAccessStatus,
+				availability: "stale",
+			},
+		})}\n`,
+	);
+	await assert.rejects(
+		publishPassingManifest({
+			candidatePath: mismatchedStatusPath,
+			manifestPath: join(root, "mismatched-status-manifest.json"),
+			browserResult,
+			evidenceRoot,
+		}),
+		/primary derived-access status|active\/current|match/i,
+	);
+
 	const validCandidatePath = join(root, ".valid-manifest.json.tmp");
 	const validManifestPath = join(root, "valid-manifest.json");
 	const validCandidateBytes = `${JSON.stringify(candidate)}\n`;

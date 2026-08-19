@@ -1,0 +1,39 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:d752f292a06584b6814ea90689aeac120e12dc29efd7badfa1c38a6c89fd7dbd",
+  "eventType": "t:05",
+  "idempotencyKey": "t:05:task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00:input-request:sha256:9c81e7d637d489c8aa92f8701e57e645fb984a10a4436ef89701cca49842411f",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:b68050dceab4f64e6ca213bf20fb8a13db3dc3787b7617ec173895e9192e38a3",
+    "trackId": "agent:longitudinal-5"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-5",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2026-01-01T00:00:53.000Z",
+  "payloadHash": "sha256:12df756aea2557ede912ee14415aaaf92afc32f7f59338a16a8db91b01864ef7",
+  "assertionMode": "operative",
+  "payload": {
+    "body": "lh1-needle-32|derived-access-d0|000000|000000000032|1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e1883925b273174134a8697168d14e2f69c84970eb5f32c773339ca12d1f5e93e18839",
+    "bodyByteSize": 512,
+    "bodyContentHash": "sha256:8edd10254547bc54c594e2709f3352c8834c21754c38aff4814c0ca0333f43c0",
+    "inputRequestId": "input-request:sha256:9c81e7d637d489c8aa92f8701e57e645fb984a10a4436ef89701cca49842411f",
+    "reasonCode": "ambiguous_state",
+    "target": {
+      "kind": "revision",
+      "revisionId": "rev:sha256:26cf67169bac9c44a38e9b7bfabe996d86416d94740b6a929513b6b52ac9340a"
+    },
+    "targetFingerprint": "sha256:a65d5088f5460376d534ac44bee27b3cdfff46a4b4081904a717d21787a0f1ad",
+    "taskTarget": {
+      "kind": "task_attempt",
+      "taskAttemptId": "task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00"
+    },
+    "title": "Longitudinal input request 0000"
+  }
+}

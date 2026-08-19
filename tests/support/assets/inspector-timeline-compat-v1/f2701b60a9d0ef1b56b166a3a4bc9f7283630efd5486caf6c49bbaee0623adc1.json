@@ -1,0 +1,31 @@
+{
+  "schema": "shore.event",
+  "version": 1,
+  "eventId": "evt:sha256:f2701b60a9d0ef1b56b166a3a4bc9f7283630efd5486caf6c49bbaee0623adc1",
+  "eventType": "t:13",
+  "idempotencyKey": "t:13:task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00:checkpoint:sha256:1212d8487d74184e98c5913f77e6ae4c97ac46f7b65dae43cbc5c005d5e80eaa",
+  "target": {
+    "journalId": "journal:longitudinal:derived-access-d0:000000",
+    "subjectId": "subject:sha256:3b21d5eea47fbf9f3881c8b04272da98ad45a8e54e395aa618c20901d8de25fd",
+    "trackId": "agent:longitudinal-3"
+  },
+  "writer": {
+    "actorId": "actor:agent:longitudinal-7",
+    "producer": {
+      "name": "pointbreak",
+      "version": "0.10.0"
+    }
+  },
+  "occurredAt": "2025-12-31T18:01:51.000Z",
+  "payloadHash": "sha256:58488129d335752d994798dcccf332fd16a47e11decec6f72a2888cc3b0d3d59",
+  "payload": {
+    "assistantMessageId": "assistant-0000",
+    "checkpointFingerprint": "sha256:8d0fa95d67eb883be820922c71fefd61fdd1ab33a0619927ca788ef229844168",
+    "checkpointId": "checkpoint:sha256:1212d8487d74184e98c5913f77e6ae4c97ac46f7b65dae43cbc5c005d5e80eaa",
+    "parentTaskAttemptId": "task-attempt:sha256:c47a3db58834680727f35df391cec2c2c233185b3d4a163269bfcdd4ff5fdd00",
+    "sourceSpeaker": "agent",
+    "toolUseIds": [
+      "tool-0000"
+    ]
+  }
+}

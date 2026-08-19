@@ -2814,6 +2814,272 @@ mod tests {
 
     use super::*;
 
+    /// Regenerate the small, public historical-reader compatibility set used by
+    /// the Inspector decision matrix. The matrix's current writers own its
+    /// review and Change records; these frozen records cover task-domain and
+    /// carrier families that intentionally have no public review CLI writer.
+    #[test]
+    fn regenerate_inspector_timeline_compatibility_events() {
+        if std::env::var_os("POINTBREAK_REGENERATE_TIMELINE_COMPAT_FIXTURE").is_none() {
+            return;
+        }
+
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::DerivedAccessD0,
+            0,
+        ))
+        .expect("prepare deterministic D0 compatibility source");
+        let one = |event_type: EventType, predicate: &dyn Fn(&ShoreEvent) -> bool| {
+            record
+                .events
+                .iter()
+                .find(|event| event.event_type == event_type && predicate(event))
+                .cloned()
+                .unwrap_or_else(|| panic!("D0 source omitted {event_type:?}"))
+        };
+        let any = |_event: &ShoreEvent| true;
+        let task_payload = |event: &ShoreEvent| {
+            event
+                .payload
+                .pointer("/workObject/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("task_attempt")
+        };
+        let task_request = |event: &ShoreEvent| {
+            event
+                .payload
+                .get("taskTarget")
+                .is_some_and(|value| !value.is_null())
+        };
+
+        let carrier = one(EventType::EventSignatureRecorded, &any);
+        let target_event_id = carrier
+            .payload
+            .get("targetEventId")
+            .and_then(serde_json::Value::as_str)
+            .expect("signature carrier target id");
+        let carrier_target = record
+            .events
+            .iter()
+            .find(|event| event.event_id.as_str() == target_event_id)
+            .cloned()
+            .expect("signature carrier target event");
+
+        let mut selected = vec![
+            one(EventType::ReviewInitialized, &any),
+            one(EventType::WorkObjectProposed, &task_payload),
+            one(EventType::InputRequestOpened, &task_request),
+            one(EventType::InputRequestResponded, &task_request),
+            one(EventType::TaskCheckpointCaptured, &any),
+            one(EventType::TaskObservationRecorded, &any),
+            carrier_target,
+            carrier,
+            one(EventType::ArtifactRemoved, &any),
+        ];
+        selected.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+        selected.dedup_by(|left, right| left.event_id == right.event_id);
+
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/assets/inspector-timeline-compat-v1");
+        std::fs::create_dir_all(&directory).expect("create compatibility fixture directory");
+        for entry in std::fs::read_dir(&directory).expect("read compatibility fixture directory") {
+            let path = entry.expect("fixture directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                std::fs::remove_file(path).expect("remove stale compatibility event");
+            }
+        }
+        for event in &selected {
+            let name = event
+                .event_id
+                .as_str()
+                .strip_prefix("evt:sha256:")
+                .expect("sha256 event id");
+            let mut bytes =
+                serde_json::to_vec_pretty(event).expect("serialize compatibility event");
+            bytes.push(b'\n');
+            std::fs::write(directory.join(format!("{name}.json")), bytes)
+                .expect("write compatibility event");
+        }
+
+        let referenced_paths = selected
+            .iter()
+            .flat_map(|event| {
+                [
+                    event.payload.get("bodyArtifactPath"),
+                    event.payload.get("reasonArtifactPath"),
+                ]
+            })
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        for content in &record.content {
+            if !referenced_paths.contains(content.relative_path()) {
+                continue;
+            }
+            let bytes = match content {
+                PreparedContentV1::ExternalBody {
+                    shape,
+                    block,
+                    global_ordinal,
+                    domain,
+                    ..
+                } => {
+                    let size = BODY_SIZES[(*global_ordinal % BODY_SIZES.len() as u64) as usize];
+                    let body = deterministic_text(*shape, *block, *global_ordinal, domain, size)
+                        .expect("regenerate compatibility body");
+                    NoteBodyEnvelope::new(body)
+                        .to_json_bytes()
+                        .expect("encode compatibility body")
+                }
+                PreparedContentV1::ValidationLog {
+                    shape,
+                    block,
+                    global_ordinal,
+                    ..
+                } => {
+                    let body = deterministic_text(
+                        *shape,
+                        *block,
+                        *global_ordinal,
+                        "validation-log",
+                        1_024,
+                    )
+                    .expect("regenerate compatibility validation log");
+                    NoteBodyEnvelope::new(body)
+                        .to_json_bytes()
+                        .expect("encode compatibility validation log")
+                }
+                PreparedContentV1::Object { .. } => {
+                    panic!("compatibility selection unexpectedly references an object artifact")
+                }
+            };
+            let path = directory.join(content.relative_path());
+            std::fs::create_dir_all(path.parent().expect("compatibility artifact parent"))
+                .expect("create compatibility artifact directory");
+            std::fs::write(path, bytes).expect("write compatibility artifact");
+        }
+        assert_eq!(
+            referenced_paths.len(),
+            record
+                .content
+                .iter()
+                .filter(|content| referenced_paths.contains(content.relative_path()))
+                .count(),
+            "compatibility fixture omitted referenced content"
+        );
+
+        let observed = selected
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            [
+                EventType::ReviewInitialized,
+                EventType::WorkObjectProposed,
+                EventType::InputRequestOpened,
+                EventType::InputRequestResponded,
+                EventType::TaskCheckpointCaptured,
+                EventType::TaskObservationRecorded,
+                EventType::EventSignatureRecorded,
+                EventType::ArtifactRemoved,
+            ]
+            .into_iter()
+            .all(|event_type| observed.contains(event_type.as_str())),
+            "compatibility fixture family set drifted: {observed:?}"
+        );
+    }
+
+    #[test]
+    fn inspector_timeline_compatibility_events_keep_the_public_exclusion_matrix() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/assets/inspector-timeline-compat-v1");
+        let mut events = std::fs::read_dir(&directory)
+            .expect("read compatibility fixture directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+            .map(|path| {
+                let event: ShoreEvent = serde_json::from_slice(
+                    &std::fs::read(&path).expect("read compatibility event"),
+                )
+                .expect("decode compatibility event");
+                assert_eq!(
+                    path.file_stem().and_then(|value| value.to_str()),
+                    event.event_id.as_str().strip_prefix("evt:sha256:"),
+                    "compatibility event filename drifted"
+                );
+                event
+            })
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+        assert_eq!(events.len(), 9, "compatibility event count drifted");
+
+        let observed = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<BTreeSet<_>>();
+        for event_type in [
+            EventType::ReviewInitialized,
+            EventType::WorkObjectProposed,
+            EventType::InputRequestOpened,
+            EventType::InputRequestResponded,
+            EventType::TaskCheckpointCaptured,
+            EventType::TaskObservationRecorded,
+            EventType::EventSignatureRecorded,
+            EventType::ArtifactRemoved,
+        ] {
+            assert!(
+                observed.contains(event_type.as_str()),
+                "compatibility fixture omitted {event_type:?}"
+            );
+        }
+        assert!(events.iter().any(|event| {
+            event.event_type == EventType::WorkObjectProposed
+                && event
+                    .payload
+                    .pointer("/workObject/kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("task_attempt")
+        }));
+        for event_type in [
+            EventType::InputRequestOpened,
+            EventType::InputRequestResponded,
+        ] {
+            assert!(events.iter().any(|event| {
+                event.event_type == event_type
+                    && event
+                        .payload
+                        .get("taskTarget")
+                        .is_some_and(|value| !value.is_null())
+            }));
+        }
+        let carrier_target = events
+            .iter()
+            .find(|event| event.event_type == EventType::EventSignatureRecorded)
+            .and_then(|event| event.payload.get("targetEventId"))
+            .and_then(serde_json::Value::as_str)
+            .expect("compatibility signature carrier target");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_id.as_str() == carrier_target),
+            "compatibility signature carrier target is missing"
+        );
+        for path in events.iter().flat_map(|event| {
+            [
+                event.payload.get("bodyArtifactPath"),
+                event.payload.get("reasonArtifactPath"),
+            ]
+        }) {
+            if let Some(path) = path.and_then(serde_json::Value::as_str) {
+                assert!(
+                    directory.join(path).is_file(),
+                    "compatibility body artifact is missing: {path}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn longitudinal_inventory_keys_use_portable_separators() {
         assert_eq!(
