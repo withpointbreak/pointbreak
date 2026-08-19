@@ -5881,11 +5881,21 @@ mod instrumented {
                 .map(|bytes| sha256_bytes_hex(&bytes))
                 .map_err(|error| error.to_string())?
         };
+        // The live checkpoint document carries a `sha256:`-prefixed identity,
+        // but every receipt/evaluator authority field is bare 64-hex; both
+        // branches must agree or the receipt-layer digest checks reject the
+        // row.
         let checkpoint = storage
             .witness
             .live_checkpoint
             .as_ref()
-            .map(|checkpoint| checkpoint.checkpoint_sha256.clone())
+            .map(|checkpoint| {
+                checkpoint
+                    .checkpoint_sha256
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&checkpoint.checkpoint_sha256)
+                    .to_owned()
+            })
             .unwrap_or_else(|| {
                 sha256_bytes_hex(
                     &canonical_json_bytes(&history["authorityCursor"])
@@ -6434,12 +6444,44 @@ mod instrumented {
         })
     }
 
+    /// Select genuine prose from a Timeline entry summary: multi-word human
+    /// text. Identity-shaped strings — event-family names, ids, tracks,
+    /// digests — contain no spaces and legitimately live in the derived
+    /// index, so feeding one as a retention sentinel would make the storage
+    /// probe test whether the index contains its own vocabulary.
     fn first_timeline_prose(value: &Value) -> Option<String> {
         match value {
-            Value::String(value) if value.len() >= 8 => Some(value.clone()),
+            Value::String(value) if value.len() >= 8 && value.contains(' ') => Some(value.clone()),
             Value::Array(values) => values.iter().find_map(first_timeline_prose),
             Value::Object(values) => values.values().find_map(first_timeline_prose),
             _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod timeline_prose_sentinel_tests {
+        use super::*;
+
+        #[test]
+        fn prose_selection_skips_identity_tokens() {
+            let summary = json!({
+                "kind": "work_object_proposed",
+                "details": {
+                    "revisionId": "rev:sha256:0123456789abcdef0123456789abcdef",
+                    "track": "agent:matrix-facts",
+                    "summary": "Decision continuity matrix",
+                },
+            });
+            assert_eq!(
+                first_timeline_prose(&summary).as_deref(),
+                Some("Decision continuity matrix"),
+                "prose selection must skip event-family, id, and track tokens"
+            );
+            let identity_only = json!({
+                "kind": "work_object_proposed",
+                "eventId": "evt:sha256:0123456789abcdef0123456789abcdef",
+            });
+            assert_eq!(first_timeline_prose(&identity_only), None);
         }
     }
 

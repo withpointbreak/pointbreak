@@ -139,6 +139,20 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
     );
     assert_barrier_empty(barrier.path());
 
+    // Exercise the exact receipt-layer row conditions the producer applies at
+    // receipt assembly, so a receipt-authority mismatch surfaces here instead
+    // of consuming a producer invocation.
+    pointbreak::bench_support::derived_access::validate_qualification_derived_timeline_read_row_v1(
+        &row,
+        row.platform,
+        row.fixture,
+        &row.fixture_inventory_sha256,
+        &row.fixture_witness_sha256,
+        &row.product_identity_sha256,
+        &row.counter_execution_identity_sha256,
+    )
+    .expect("the lifecycle row satisfies the receipt-layer authority conditions");
+
     let failure = row
         .invalid_signature_failure
         .expect("invalid-signature lifecycle evidence");

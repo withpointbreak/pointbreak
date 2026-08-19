@@ -472,22 +472,15 @@ impl QualificationDerivedChangeReadReceiptV2 {
         }
         for row in &self.timeline_read_rows {
             let schedule = super::timeline_request_schedule_v1(self.base.fixture, row.case);
-            if row.platform != self.base.execution.platform
-                || row.fixture != self.base.fixture
-                || row.fixture_inventory_sha256 != self.base.fixture_inventory_sha256
-                || row.fixture_witness_sha256 != self.base.fixture_witness_sha256
-                || row.product_identity_sha256 != product_identity_sha256
-                || row.counter_execution_identity_sha256 != execution_identity_sha256
-                || row.semantic_process_scope
-                    != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
-                || row.counter_process_scope
-                    != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
-                || !timeline_authority_digests_valid(&row.authority)
-                || row.authority.request_schedule_sha256
-                    != super::timeline_request_schedule_sha256_v1(self.base.fixture, row.case)
-            {
-                return Err("derived Timeline read receipt authority drifted".to_owned());
-            }
+            validate_qualification_derived_timeline_read_row_v1(
+                row,
+                self.base.execution.platform,
+                self.base.fixture,
+                &self.base.fixture_inventory_sha256,
+                &self.base.fixture_witness_sha256,
+                &product_identity_sha256,
+                &execution_identity_sha256,
+            )?;
             validate_digest(
                 &row.derived_semantic_sha256,
                 "derived Timeline semantic receipt",
@@ -629,26 +622,103 @@ fn timeline_semantic_receipt_sha256(
         .map_err(|error| error.to_string())
 }
 
-fn timeline_authority_digests_valid(
-    authority: &super::QualificationDerivedTimelineAuthorityEvidenceV1,
-) -> bool {
-    [
-        &authority.request_schedule_sha256,
-        &authority.generation_identity_before_sha256,
-        &authority.generation_identity_after_sha256,
-        &authority.checkpoint_identity_before_sha256,
-        &authority.checkpoint_identity_after_sha256,
-        &authority.timeline_projection_stamp_before_sha256,
-        &authority.timeline_projection_stamp_after_sha256,
-        &authority.trust_identity_before_sha256,
-        &authority.trust_identity_after_sha256,
-    ]
-    .into_iter()
-    .all(|digest| validate_digest(digest, "Timeline authority witness").is_ok())
-        && authority
-            .continuation_token_set_sha256
-            .as_ref()
-            .is_none_or(|digest| validate_digest(digest, "Timeline continuation-token set").is_ok())
+/// Validate one Timeline read row against the receipt's base authority with
+/// per-condition attributable errors. Public so the disposable lifecycle test
+/// can exercise the exact receipt-layer conditions on a real row without
+/// spending a producer invocation.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_qualification_derived_timeline_read_row_v1(
+    row: &super::QualificationDerivedTimelineReadEvidenceV1,
+    platform: super::QualificationDerivedAccessPlatformV1,
+    fixture: super::QualificationDerivedChangeFixtureV1,
+    fixture_inventory_sha256: &str,
+    fixture_witness_sha256: &str,
+    product_identity_sha256: &str,
+    execution_identity_sha256: &str,
+) -> Result<(), String> {
+    let case = row.case;
+    if row.platform != platform {
+        return Err(format!("{case:?} Timeline row platform drifted"));
+    }
+    if row.fixture != fixture {
+        return Err(format!("{case:?} Timeline row fixture drifted"));
+    }
+    if row.fixture_inventory_sha256 != fixture_inventory_sha256 {
+        return Err(format!("{case:?} Timeline row fixture inventory drifted"));
+    }
+    if row.fixture_witness_sha256 != fixture_witness_sha256 {
+        return Err(format!("{case:?} Timeline row fixture witness drifted"));
+    }
+    if row.product_identity_sha256 != product_identity_sha256 {
+        return Err(format!("{case:?} Timeline row product identity drifted"));
+    }
+    if row.counter_execution_identity_sha256 != execution_identity_sha256 {
+        return Err(format!(
+            "{case:?} Timeline row counter execution identity drifted"
+        ));
+    }
+    if row.semantic_process_scope != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
+    {
+        return Err(format!("{case:?} Timeline row semantic scope drifted"));
+    }
+    if row.counter_process_scope != QualificationDerivedAccessProcessScopeV1::InspectorServiceChild
+    {
+        return Err(format!("{case:?} Timeline row counter scope drifted"));
+    }
+    for (digest, field) in [
+        (&row.authority.request_schedule_sha256, "request schedule"),
+        (
+            &row.authority.generation_identity_before_sha256,
+            "generation identity before",
+        ),
+        (
+            &row.authority.generation_identity_after_sha256,
+            "generation identity after",
+        ),
+        (
+            &row.authority.checkpoint_identity_before_sha256,
+            "checkpoint identity before",
+        ),
+        (
+            &row.authority.checkpoint_identity_after_sha256,
+            "checkpoint identity after",
+        ),
+        (
+            &row.authority.timeline_projection_stamp_before_sha256,
+            "timeline projection stamp before",
+        ),
+        (
+            &row.authority.timeline_projection_stamp_after_sha256,
+            "timeline projection stamp after",
+        ),
+        (
+            &row.authority.trust_identity_before_sha256,
+            "trust identity before",
+        ),
+        (
+            &row.authority.trust_identity_after_sha256,
+            "trust identity after",
+        ),
+    ] {
+        if validate_digest(digest, field).is_err() {
+            return Err(format!(
+                "{case:?} Timeline row authority {field} digest drifted: {digest:?}"
+            ));
+        }
+    }
+    if let Some(digest) = &row.authority.continuation_token_set_sha256
+        && validate_digest(digest, "continuation token set").is_err()
+    {
+        return Err(format!(
+            "{case:?} Timeline row continuation-token set digest drifted: {digest:?}"
+        ));
+    }
+    if row.authority.request_schedule_sha256
+        != super::timeline_request_schedule_sha256_v1(fixture, case)
+    {
+        return Err(format!("{case:?} Timeline row request schedule drifted"));
+    }
+    Ok(())
 }
 
 fn timeline_typed_documents_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
