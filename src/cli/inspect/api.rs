@@ -136,6 +136,94 @@ pub(super) fn changes_v2_json(
 
 pub(super) fn event_history_v2_json(
     repo: &Path,
+    access: &DerivedChangeAccess,
+    query: Option<&str>,
+    signer: &super::page_token::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    let request = match super::event_history_page::parse_signed(query, signer) {
+        Ok(request) => request,
+        Err(super::event_history_page::PageError::Invalid(message)) => {
+            return Ok(ChangeV2Json::Invalid(event_history_error_json(
+                "invalid_query",
+                &message,
+                false,
+            )));
+        }
+    };
+    let derived_request = match request.derived_request() {
+        Ok(request) => request,
+        Err(super::event_history_page::PageError::Invalid(message)) => {
+            return Ok(ChangeV2Json::Invalid(event_history_error_json(
+                "invalid_query",
+                &message,
+                false,
+            )));
+        }
+    };
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    let outcome = match access.timeline(&derived_request, &trust_set) {
+        Ok(outcome) => outcome,
+        Err(pointbreak::error::ShoreError::WorkflowInputInvalid { reason }) => {
+            return Ok(ChangeV2Json::Invalid(event_history_error_json(
+                "invalid_query",
+                &reason,
+                false,
+            )));
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    match outcome {
+        DerivedChangeOutcomeV1::Ready(page) => {
+            let document =
+                match super::event_history_query::bind_derived_page(page, &request, signer) {
+                    Ok(document) => document,
+                    Err(super::event_history_query::ApplyError::Invalid(message)) => {
+                        return Ok(ChangeV2Json::Invalid(event_history_error_json(
+                            "invalid_query",
+                            &message,
+                            false,
+                        )));
+                    }
+                    Err(super::event_history_query::ApplyError::Stale) => {
+                        return Ok(ChangeV2Json::Stale(event_history_error_json(
+                            "stale_projection",
+                            "continuation belongs to a stale Timeline projection",
+                            false,
+                        )));
+                    }
+                };
+            serde_json::to_string(&document)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
+        }
+        DerivedChangeOutcomeV1::AuthorityUnavailable(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::AuthorityConflicted(document)
+        | DerivedChangeOutcomeV1::AuthorityInvalid(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::ReaderUpgradeRequired(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::UpgradeRequired)
+            .map_err(|error| error.to_string()),
+        DerivedChangeOutcomeV1::ProjectionUnavailable(document)
+            if document.code() == DerivedProjectionFailureCodeV1::ProjectionStale =>
+        {
+            Ok(ChangeV2Json::Stale(event_history_error_json(
+                "stale_projection",
+                "continuation belongs to a stale Timeline projection",
+                false,
+            )))
+        }
+        DerivedChangeOutcomeV1::ProjectionUnavailable(document)
+        | DerivedChangeOutcomeV1::Retryable(document) => serde_json::to_string(&document)
+            .map(ChangeV2Json::Retryable)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+pub(super) fn authoritative_event_history_v2_json(
+    repo: &Path,
     cache: &super::server::ChangeReaderCache,
     stamp_binder: &StrictChangeStampBinder,
     query: Option<&str>,
@@ -152,7 +240,7 @@ pub(super) fn event_history_v2_json(
         }
     };
     let trust_set = crate::cli::common::discover_trust_set(repo);
-    event_history_v2_from_loaded(
+    authoritative_event_history_v2_from_loaded(
         repo,
         request,
         signer,
@@ -166,7 +254,7 @@ pub(super) fn event_history_v2_json(
 /// parser. Keeping the load result as an argument preserves the route's
 /// invalid-query-before-store-access guarantee while letting the cache-race
 /// test prove that a real moving journal is rendered as a typed retry.
-pub(super) fn event_history_v2_from_loaded(
+pub(super) fn authoritative_event_history_v2_from_loaded(
     _repo: &Path,
     request: super::event_history_page::Request,
     signer: &super::page_token::PageTokenSigner,

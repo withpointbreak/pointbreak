@@ -724,7 +724,7 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
     );
     assert_eq!(
         first["sourceChangeProjectionStamp"], changes["projectionStamp"],
-        "strict Timeline must bind to the staged derived generation"
+        "derived Timeline must bind to the shared staged generation"
     );
     assert_eq!(
         first["authorityCursor"], profile["authorityCursor"],
@@ -759,6 +759,12 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
     ));
     assert_eq!(located["matchIndex"], 0);
     assert_eq!(located["entries"][0]["eventId"], event_id);
+    let (absent_status, absent) =
+        inspector.get_error("/api/v2/history?limit=1&order=asc&at=evt%3Asha256%3Aabsent");
+    assert!(absent_status.contains("400 Bad Request"));
+    assert_eq!(absent["schema"], "pointbreak.inspect-event-history-error");
+    assert_eq!(absent["code"], "invalid_query");
+    assert_eq!(absent["retryable"], false);
 
     let all = inspector.get_json("/api/v2/history?limit=100&order=asc");
     let proposal_summary = all["entries"]
@@ -834,7 +840,37 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
         .as_str()
         .expect("multiple admitted events yield a continuation")
         .to_owned();
+    let second = inspector.get_json(&format!(
+        "/api/v2/history?limit=1&order=asc&after={}",
+        urlencode(&next)
+    ));
+    assert_eq!(second["offset"], 1);
+    assert_ne!(
+        second["entries"][0]["eventId"],
+        first["entries"][0]["eventId"]
+    );
+    assert_eq!(
+        second["timelineProjectionStamp"], first["timelineProjectionStamp"],
+        "adjacent pages must bind one exact Timeline generation"
+    );
+    let previous = second["previous"]
+        .as_str()
+        .expect("the second page yields a previous continuation");
+    let returned = inspector.get_json(&format!(
+        "/api/v2/history?limit=1&order=asc&after={}",
+        urlencode(previous)
+    ));
+    assert_eq!(returned["offset"], 0);
+    assert_eq!(returned["entries"], first["entries"]);
+
+    let old_event_count = first["eventCount"].as_u64().unwrap();
     capture(repo.path());
+    let advanced = inspector.get_json("/api/v2/history?limit=1&order=asc");
+    assert!(advanced["eventCount"].as_u64().unwrap() > old_event_count);
+    assert_ne!(
+        advanced["timelineProjectionStamp"], first["timelineProjectionStamp"],
+        "same-generation catch-up must mint a checkpoint-bound Timeline stamp"
+    );
     let (status, body) = inspector.get_error(&format!(
         "/api/v2/history?limit=1&order=asc&after={}",
         urlencode(&next)
@@ -842,6 +878,34 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
     assert!(status.contains("409 Conflict"), "status: {status}");
     assert_eq!(body["schema"], "pointbreak.inspect-event-history-error");
     assert_eq!(body["code"], "stale_projection");
+
+    let pre_trust_token = advanced["next"]
+        .as_str()
+        .expect("advanced Timeline still has an adjacent page")
+        .to_owned();
+    repo.write(
+        ".pointbreak/allowed-signers.json",
+        r#"{"allowedSigners":{"actor:git-email:reader@example.com":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
+    );
+    let trust_advanced = inspector.get_json("/api/v2/history?limit=1&order=asc");
+    assert_eq!(
+        trust_advanced["sourceChangeProjectionStamp"],
+        advanced["sourceChangeProjectionStamp"]
+    );
+    assert_ne!(
+        trust_advanced["timelineProjectionStamp"], advanced["timelineProjectionStamp"],
+        "runtime trust identity must participate in the Timeline stamp"
+    );
+    let (trust_status, trust_body) = inspector.get_error(&format!(
+        "/api/v2/history?limit=1&order=asc&after={}",
+        urlencode(&pre_trust_token)
+    ));
+    assert!(trust_status.contains("409 Conflict"));
+    assert_eq!(
+        trust_body["schema"],
+        "pointbreak.inspect-event-history-error"
+    );
+    assert_eq!(trust_body["code"], "stale_projection");
 
     let (legacy_status, legacy) = inspector.get_error("/api/history");
     assert!(legacy_status.contains("426 Upgrade Required"));

@@ -964,10 +964,18 @@ fn route(
         return change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes));
     }
     if path == "/api/v2/history" {
+        if !state.derived_changes.is_active() {
+            return change_v2_response(api::authoritative_event_history_v2_json(
+                repo,
+                &state.change_reader_cache,
+                &state.strict_change_stamp,
+                query,
+                &state.page_token_signer,
+            ));
+        }
         return change_v2_response(api::event_history_v2_json(
             repo,
-            &state.change_reader_cache,
-            &state.strict_change_stamp,
+            &state.derived_changes,
             query,
             &state.page_token_signer,
         ));
@@ -1879,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_split_derived_collections_from_strict_timeline_and_exact_reads() {
+    fn routes_split_derived_collections_and_timeline_from_explicit_off_and_exact_reads() {
         let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
         let profile = source_between(
             route,
@@ -1958,9 +1966,19 @@ mod tests {
                 "explicit-off Change routing must not enter {forbidden}"
             );
         }
+        assert!(timeline.contains("state.derived_changes"));
         assert!(timeline.contains("state.change_reader_cache"));
         assert!(timeline.contains("state.strict_change_stamp"));
-        assert!(!timeline.contains("state.derived_changes"));
+        assert_source_order(
+            timeline,
+            "!state.derived_changes.is_active()",
+            "api::authoritative_event_history_v2_json",
+        );
+        assert_source_order(
+            timeline,
+            "api::authoritative_event_history_v2_json",
+            "api::event_history_v2_json",
+        );
 
         let exact = source_between(
             SERVER_SOURCE,
@@ -1984,7 +2002,12 @@ mod tests {
         let timeline_api = source_between(
             API_SOURCE,
             "pub(super) fn event_history_v2_json(",
-            "pub(super) fn event_history_v2_from_loaded(",
+            "pub(super) fn authoritative_event_history_v2_json(",
+        );
+        let authoritative_timeline_api = source_between(
+            API_SOURCE,
+            "pub(super) fn authoritative_event_history_v2_json(",
+            "pub(super) fn authoritative_event_history_v2_from_loaded(",
         );
         let attention_api = source_between(
             API_SOURCE,
@@ -2005,9 +2028,12 @@ mod tests {
                 "{name} API must not accept the strict reader cache"
             );
         }
-        assert!(timeline_api.contains("ChangeReaderCache"));
-        assert!(timeline_api.contains("StrictChangeStampBinder"));
-        assert!(!timeline_api.contains("DerivedChangeAccess"));
+        assert!(timeline_api.contains("DerivedChangeAccess"));
+        assert!(!timeline_api.contains("ChangeReaderCache"));
+        assert!(!timeline_api.contains("StrictChangeStampBinder"));
+        assert!(authoritative_timeline_api.contains("ChangeReaderCache"));
+        assert!(authoritative_timeline_api.contains("StrictChangeStampBinder"));
+        assert!(!authoritative_timeline_api.contains("DerivedChangeAccess"));
     }
 
     #[test]
@@ -2022,16 +2048,37 @@ mod tests {
             "pub(super) fn change_attention_v2_json(",
             "pub(super) fn exact_selection_error_json(",
         );
-        for (name, helper, facade_call) in [
-            ("Changes", changes, ".changes("),
-            ("Attention", attention, ".attention("),
+        let timeline = source_between(
+            API_SOURCE,
+            "pub(super) fn event_history_v2_json(",
+            "pub(super) fn authoritative_event_history_v2_json(",
+        );
+        for (name, helper, parser_call, facade_call) in [
+            (
+                "Changes",
+                changes,
+                "super::change_page::parse_signed",
+                ".changes(",
+            ),
+            (
+                "Attention",
+                attention,
+                "super::change_page::parse_signed",
+                ".attention(",
+            ),
+            (
+                "Timeline",
+                timeline,
+                "super::event_history_page::parse_signed",
+                ".timeline(",
+            ),
         ] {
-            assert!(helper.contains("super::change_page::parse_signed"));
+            assert!(helper.contains(parser_call));
             assert!(
                 helper.contains("DerivedChangeAccess"),
                 "{name} must receive the already-resolved product facade"
             );
-            assert_source_order(helper, "super::change_page::parse_signed", facade_call);
+            assert_source_order(helper, parser_call, facade_call);
             for forbidden in [
                 "ChangeReaderCache",
                 "change_reader_state_for_repo",
@@ -2039,6 +2086,8 @@ mod tests {
                 "with_change_v2",
                 "DerivedHistoryRoute",
                 "ExhaustiveSearchFallback",
+                "event_history_query::apply",
+                "authoritative_event_history_v2",
                 "resolve_for_inspector",
             ] {
                 assert!(
@@ -3375,7 +3424,7 @@ mod tests {
         let signer = super::super::page_token::PageTokenSigner::from_seed([7_u8; 32]);
         let request = super::super::event_history_page::parse_signed(None, &signer)
             .expect("bare Timeline request is valid");
-        let retryable = api::event_history_v2_from_loaded(
+        let retryable = api::authoritative_event_history_v2_from_loaded(
             repo.path(),
             request,
             &signer,

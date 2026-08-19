@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use pointbreak::documents::{EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryOrderV1};
 use pointbreak::session::{
-    QueryDiagnosticCode, QuerySurface, SearchRecord, event_history_search_record, matches_query,
-    parse_search_query_for,
+    DerivedTimelinePageBoundaryV1, DerivedTimelinePageV1, QueryDiagnosticCode, QuerySurface,
+    SearchRecord, event_history_search_record, matches_query, parse_search_query_for,
 };
 
 use super::event_history_page::{
@@ -23,6 +23,63 @@ thread_local! {
 pub(super) enum ApplyError {
     Invalid(String),
     Stale,
+}
+
+/// Attach opaque adjacent-window tokens to a page already selected and
+/// projected by the derived session facade. No filtering or paging is repeated
+/// in the CLI adapter.
+pub(super) fn bind_derived_page(
+    page: DerivedTimelinePageV1,
+    request: &Request,
+    signer: &PageTokenSigner,
+) -> Result<EventHistoryDocumentV1, ApplyError> {
+    let projection_stamp = page.document().timeline_projection_stamp.clone();
+    let previous = page
+        .adjacent()
+        .previous()
+        .map(|boundary| {
+            issue_continuation(
+                request.query(),
+                &projection_stamp,
+                Traversal::Previous,
+                public_boundary(boundary),
+                signer,
+            )
+            .map_err(page_error)
+        })
+        .transpose()?;
+    let next = page
+        .adjacent()
+        .next()
+        .map(|boundary| {
+            let boundary = public_boundary(boundary);
+            if boundary == Boundary::SelectedOrderStart {
+                return Err(invalid("next continuation cannot use the start sentinel"));
+            }
+            issue_continuation(
+                request.query(),
+                &projection_stamp,
+                Traversal::Next,
+                boundary,
+                signer,
+            )
+            .map_err(page_error)
+        })
+        .transpose()?;
+    let mut document = page.into_document();
+    document.previous = previous;
+    document.next = next;
+    Ok(document)
+}
+
+fn public_boundary(boundary: &DerivedTimelinePageBoundaryV1) -> Boundary {
+    match boundary {
+        DerivedTimelinePageBoundaryV1::SelectedOrderStart => Boundary::SelectedOrderStart,
+        DerivedTimelinePageBoundaryV1::Key(key) => Boundary::Key(TimelineKey {
+            occurred_at: key.occurred_at().to_owned(),
+            event_id: key.event_id().as_str().to_owned(),
+        }),
+    }
 }
 
 /// Apply one already-authenticated request to an immutable Timeline generation.

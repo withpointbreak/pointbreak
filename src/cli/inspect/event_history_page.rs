@@ -9,9 +9,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use pointbreak::model::{RevisionId, RevisionRefV1};
+use pointbreak::model::{ChangeId, EventId, RevisionId, RevisionRefV1};
 use pointbreak::session::event::EventType;
-use pointbreak::session::{QueryDiagnosticCode, QuerySurface, parse_search_query_for};
+use pointbreak::session::{
+    DerivedTimelineExactRevisionV1, DerivedTimelineOrderV1, DerivedTimelinePageBoundaryV1,
+    DerivedTimelinePageKeyV1, DerivedTimelinePagePositionV1, DerivedTimelinePageRequestV1,
+    DerivedTimelineTraversalV1, QueryDiagnosticCode, QuerySurface, parse_search_query_for,
+};
 use serde::{Deserialize, Serialize};
 
 use super::page_token::PageTokenSigner;
@@ -161,6 +165,60 @@ impl Request {
     /// or `at` request and therefore has no stale-cursor condition.
     pub(super) fn continuation_projection_stamp(&self) -> Option<&str> {
         self.continuation_projection_stamp.as_deref()
+    }
+
+    /// Convert the authenticated public request into the neutral session
+    /// request. Token bytes and signatures remain private to this module.
+    pub(super) fn derived_request(&self) -> Result<DerivedTimelinePageRequestV1, PageError> {
+        let position = match &self.position {
+            Position::Initial => DerivedTimelinePagePositionV1::Initial,
+            Position::AtEventId(event_id) => {
+                DerivedTimelinePagePositionV1::At(EventId::new(event_id.clone()))
+            }
+            Position::Continuation {
+                traversal,
+                boundary,
+            } => DerivedTimelinePagePositionV1::continuation(
+                match traversal {
+                    Traversal::Previous => DerivedTimelineTraversalV1::Previous,
+                    Traversal::Next => DerivedTimelineTraversalV1::Next,
+                },
+                derived_boundary(boundary)?,
+                self.continuation_projection_stamp
+                    .clone()
+                    .ok_or_else(|| invalid("continuation is missing its projection stamp"))?,
+            )
+            .map_err(|error| invalid(&error.to_string()))?,
+        };
+        DerivedTimelinePageRequestV1::new(
+            self.query.limit,
+            match self.query.order {
+                Order::Asc => DerivedTimelineOrderV1::Asc,
+                Order::Desc => DerivedTimelineOrderV1::Desc,
+            },
+            self.query.q.clone(),
+            self.query.types.clone(),
+            self.query.track.clone(),
+            self.query.change.clone().map(ChangeId::new),
+            self.query
+                .revision
+                .as_ref()
+                .map(|revision| DerivedTimelineExactRevisionV1::new(revision.reference.clone())),
+            position,
+        )
+        .map_err(|error| invalid(&error.to_string()))
+    }
+}
+
+fn derived_boundary(boundary: &Boundary) -> Result<DerivedTimelinePageBoundaryV1, PageError> {
+    match boundary {
+        Boundary::SelectedOrderStart => Ok(DerivedTimelinePageBoundaryV1::SelectedOrderStart),
+        Boundary::Key(key) => DerivedTimelinePageKeyV1::new(
+            key.occurred_at.clone(),
+            EventId::new(key.event_id.clone()),
+        )
+        .map(DerivedTimelinePageBoundaryV1::Key)
+        .map_err(|error| invalid(&error.to_string())),
     }
 }
 
@@ -735,6 +793,35 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_public_request_converts_to_the_neutral_timeline_contract() {
+        let artifact_hash = format!("sha256:{}", "a".repeat(64));
+        let request = parse(Some(&format!(
+            "limit=2&order=asc&q=tag%3Acorrectness&type=review_initialized&\
+             track=agent%3Aone&change=change%3Asha256%3Aone&\
+             revision=rev%3Asha256%3Aone&artifactHash={artifact_hash}&\
+             at=evt%3Asha256%3Atarget"
+        )))
+        .unwrap();
+        let derived = request.derived_request().unwrap();
+
+        assert_eq!(derived.limit(), 2);
+        assert_eq!(derived.order(), DerivedTimelineOrderV1::Asc);
+        assert_eq!(derived.query(), Some("tag:correctness"));
+        assert_eq!(derived.event_types(), &[EventType::ReviewInitialized]);
+        assert_eq!(derived.track(), Some("agent:one"));
+        assert_eq!(derived.change().unwrap().as_str(), "change:sha256:one");
+        assert_eq!(
+            derived.revision().unwrap().reference(),
+            &RevisionRefV1::new(RevisionId::new("rev:sha256:one"), artifact_hash).unwrap()
+        );
+        assert!(matches!(
+            derived.position(),
+            DerivedTimelinePagePositionV1::At(event_id)
+                if event_id.as_str() == "evt:sha256:target"
+        ));
+    }
+
+    #[test]
     fn at_and_after_are_mutually_exclusive() {
         assert!(matches!(
             parse(Some("at=evt%3Aone&after=opaque")),
@@ -776,9 +863,38 @@ mod tests {
                 request.position(),
                 &Position::Continuation {
                     traversal,
-                    boundary
+                    boundary: boundary.clone()
                 }
             );
+            let derived = request.derived_request().unwrap();
+            assert_eq!(
+                derived.position().expected_projection_stamp(),
+                Some("timeline-stamp")
+            );
+            match (derived.position(), traversal, boundary) {
+                (
+                    DerivedTimelinePagePositionV1::Continuation {
+                        traversal: DerivedTimelineTraversalV1::Next,
+                        boundary: DerivedTimelinePageBoundaryV1::Key(key),
+                        ..
+                    },
+                    Traversal::Next,
+                    Boundary::Key(expected),
+                ) => {
+                    assert_eq!(key.occurred_at(), expected.occurred_at);
+                    assert_eq!(key.event_id().as_str(), expected.event_id);
+                }
+                (
+                    DerivedTimelinePagePositionV1::Continuation {
+                        traversal: DerivedTimelineTraversalV1::Previous,
+                        boundary: DerivedTimelinePageBoundaryV1::SelectedOrderStart,
+                        ..
+                    },
+                    Traversal::Previous,
+                    Boundary::SelectedOrderStart,
+                ) => {}
+                other => panic!("public continuation drifted during neutral conversion: {other:?}"),
+            }
         }
     }
 
