@@ -1542,6 +1542,22 @@ mod tests {
         }
     }
 
+    fn wait_for_current_generation(access: &DerivedHistoryAccess, context: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match access.current().unwrap() {
+                CurrentRead::Ready(_) => return,
+                CurrentRead::Unavailable(status) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "{context} did not recover: {status:?}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
     #[test]
     fn unavailable_route_never_serializes_lifecycle_current() {
         let status = unavailable_lifecycle_status(
@@ -2656,8 +2672,7 @@ mod tests {
             panic!("a damaged cached generation must not be served");
         };
         assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
-        wait_for_background_rebuild(&access, "cached generation recovery");
-        assert!(matches!(access.current().unwrap(), CurrentRead::Ready(_)));
+        wait_for_current_generation(&access, "cached generation recovery");
     }
 
     #[test]
