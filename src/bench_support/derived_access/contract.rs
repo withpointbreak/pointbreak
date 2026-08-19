@@ -4012,83 +4012,286 @@ pub(super) fn timeline_invalid_signature_failure_valid_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
     execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
 ) -> bool {
+    timeline_invalid_signature_failure_check_v1(row, execution).is_ok()
+}
+
+/// Per-condition form of the invalid-signature failure contract. The boolean
+/// wrapper above accepts exactly the rows this check accepts, so evaluator
+/// behavior is unchanged; the producer's receipt assembly and the disposable
+/// lifecycle test surface the first failing NAMED condition instead of one
+/// combined predicate. Conditions are pure, so check order affects only which
+/// name is reported, never acceptance.
+pub(super) fn timeline_invalid_signature_failure_check_v1(
+    row: &QualificationDerivedTimelineReadEvidenceV1,
+    execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
+) -> Result<(), String> {
+    let case = row.case;
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite;
     let Some(failure) = &row.invalid_signature_failure else {
-        return !expected;
+        if expected {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature failure evidence is absent"
+            ));
+        }
+        return Ok(());
     };
+    if !expected {
+        return Err(format!(
+            "{case:?} Timeline row carries an unexpected invalid-signature failure"
+        ));
+    }
     let Some(reference_execution) = execution else {
-        return false;
+        return Err(format!(
+            "{case:?} Timeline invalid-signature check requires the reference execution identity"
+        ));
     };
+    if row.status != QualificationDerivedAccessStatusV1::Passed {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature row status is not passed"
+        ));
+    }
+    if row.oracle != QualificationDerivedTimelineReadOracleV1::StrictParity {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature row oracle is not strict parity"
+        ));
+    }
+    if failure.carrier_event_id.trim().is_empty() {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature carrier event id is empty"
+        ));
+    }
     let counter = &failure.counter_receipt;
-    let digests_valid = [
-        &failure.reference_root_identity_sha256,
-        &failure.reference_fixture_witness_sha256,
-        &failure.fault_fixture_witness_sha256,
-        &failure.reference_inventory_sha256,
-        &failure.reference_recovery_inventory_sha256,
-        &failure.fault_clean_inventory_sha256,
-        &failure.fault_derivative_inventory_sha256,
-        &failure.fault_restored_inventory_sha256,
-        &failure.clean_carrier_sha256,
-        &failure.mutated_carrier_sha256,
-        &failure.observed_typed_document.canonical_sha256,
-        &failure.clean_semantic_sha256,
-        &failure.strict_clean_semantic_sha256,
-        &failure.strict_semantic_sha256,
-        &failure.derived_semantic_sha256,
-        &failure.strict_recovery_semantic_sha256,
-        &failure.derived_recovery_semantic_sha256,
-        &failure.reference_trust_identity_staged_sha256,
-        &failure.reference_trust_identity_restored_sha256,
-        &failure.fault_trust_identity_staged_sha256,
-        &failure.fault_trust_identity_restored_sha256,
-    ]
-    .into_iter()
-    .all(|value| validate_hex(value, 64, "invalid-signature digest").is_ok());
-    let inventories_valid = failure.reference_inventory_sha256
-        == failure.reference_recovery_inventory_sha256
-        && failure.reference_inventory_sha256 == failure.fault_clean_inventory_sha256
-        && failure.reference_inventory_sha256 == failure.fault_restored_inventory_sha256
-        && failure.reference_inventory_sha256 != failure.fault_derivative_inventory_sha256
-        && failure.reference_inventory_sha256 == row.fixture_inventory_sha256;
-    let fixture_witnesses_valid = failure.reference_fixture_witness_sha256
-        == row.fixture_witness_sha256
-        && failure.fault_fixture_witness_sha256 == failure.reference_fixture_witness_sha256;
+    for (value, field) in [
+        (
+            &failure.reference_root_identity_sha256,
+            "reference root identity",
+        ),
+        (
+            &failure.reference_fixture_witness_sha256,
+            "reference fixture witness",
+        ),
+        (
+            &failure.fault_fixture_witness_sha256,
+            "fault fixture witness",
+        ),
+        (&failure.reference_inventory_sha256, "reference inventory"),
+        (
+            &failure.reference_recovery_inventory_sha256,
+            "reference recovery inventory",
+        ),
+        (
+            &failure.fault_clean_inventory_sha256,
+            "fault clean inventory",
+        ),
+        (
+            &failure.fault_derivative_inventory_sha256,
+            "fault derivative inventory",
+        ),
+        (
+            &failure.fault_restored_inventory_sha256,
+            "fault restored inventory",
+        ),
+        (&failure.clean_carrier_sha256, "clean carrier"),
+        (&failure.mutated_carrier_sha256, "mutated carrier"),
+        (
+            &failure.observed_typed_document.canonical_sha256,
+            "observed typed document",
+        ),
+        (&failure.clean_semantic_sha256, "clean semantic"),
+        (
+            &failure.strict_clean_semantic_sha256,
+            "strict clean semantic",
+        ),
+        (&failure.strict_semantic_sha256, "strict semantic"),
+        (&failure.derived_semantic_sha256, "derived semantic"),
+        (
+            &failure.strict_recovery_semantic_sha256,
+            "strict recovery semantic",
+        ),
+        (
+            &failure.derived_recovery_semantic_sha256,
+            "derived recovery semantic",
+        ),
+        (
+            &failure.reference_trust_identity_staged_sha256,
+            "reference trust identity staged",
+        ),
+        (
+            &failure.reference_trust_identity_restored_sha256,
+            "reference trust identity restored",
+        ),
+        (
+            &failure.fault_trust_identity_staged_sha256,
+            "fault trust identity staged",
+        ),
+        (
+            &failure.fault_trust_identity_restored_sha256,
+            "fault trust identity restored",
+        ),
+    ] {
+        if validate_hex(value, 64, field).is_err() {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature {field} digest is not bare 64-hex: {value:?}"
+            ));
+        }
+    }
+    for (holds, condition) in [
+        (
+            failure.reference_inventory_sha256 == failure.reference_recovery_inventory_sha256,
+            "reference inventory differs from its recovery inventory",
+        ),
+        (
+            failure.reference_inventory_sha256 == failure.fault_clean_inventory_sha256,
+            "fault clean inventory differs from the reference inventory",
+        ),
+        (
+            failure.reference_inventory_sha256 == failure.fault_restored_inventory_sha256,
+            "fault restored inventory differs from the reference inventory",
+        ),
+        (
+            failure.reference_inventory_sha256 != failure.fault_derivative_inventory_sha256,
+            "fault derivative inventory did not diverge from the reference inventory",
+        ),
+        (
+            failure.reference_inventory_sha256 == row.fixture_inventory_sha256,
+            "reference inventory differs from the row fixture inventory",
+        ),
+        (
+            failure.reference_fixture_witness_sha256 == row.fixture_witness_sha256,
+            "reference fixture witness differs from the row fixture witness",
+        ),
+        (
+            failure.fault_fixture_witness_sha256 == failure.reference_fixture_witness_sha256,
+            "fault fixture witness differs from the reference fixture witness",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
+    reference_execution.validate().map_err(|error| {
+        format!("{case:?} Timeline invalid-signature reference execution is inadmissible: {error}")
+    })?;
+    failure.fault_execution.validate().map_err(|error| {
+        format!("{case:?} Timeline invalid-signature fault execution is inadmissible: {error}")
+    })?;
+    if failure.reference_root_identity_sha256 != reference_execution.root_provenance_sha256 {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature reference root identity differs from the \
+             reference execution root provenance"
+        ));
+    }
+    if failure.reference_root_identity_sha256 == failure.fault_execution.root_provenance_sha256 {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature fault root provenance duplicates the reference \
+             root identity"
+        ));
+    }
     let mut expected_fault_execution = reference_execution.clone();
     expected_fault_execution.root_provenance_sha256 =
         failure.fault_execution.root_provenance_sha256.clone();
-    let executions_valid = reference_execution.validate().is_ok()
-        && failure.fault_execution.validate().is_ok()
-        && failure.reference_root_identity_sha256 == reference_execution.root_provenance_sha256
-        && failure.reference_root_identity_sha256 != failure.fault_execution.root_provenance_sha256
-        && failure.fault_execution == expected_fault_execution;
-    let trust_authority_valid = failure.reference_trust_identity_staged_sha256
-        == failure.fault_trust_identity_staged_sha256
-        && failure.reference_trust_identity_restored_sha256
-            == failure.fault_trust_identity_restored_sha256
-        && failure.reference_trust_identity_staged_sha256
-            == row.authority.trust_identity_after_sha256
-        && failure.reference_trust_identity_restored_sha256
-            == row.authority.trust_identity_before_sha256
-        && failure.reference_trust_identity_staged_sha256
-            != failure.reference_trust_identity_restored_sha256;
-    let failure_document_valid = failure.observed_typed_document.schema
-        == "pointbreak.inspect-change-projection-error"
-        && failure.observed_typed_document.version == 1
-        && failure.observed_typed_document.code == "projection_invalid"
-        && failure.observed_typed_document.retryable == Some(false)
-        && failure.observed_typed_document.validate().is_ok();
-    let semantic_failure_valid = failure.clean_semantic_sha256
-        == failure.strict_clean_semantic_sha256
-        && failure.clean_semantic_sha256 == failure.strict_recovery_semantic_sha256
-        && failure.clean_semantic_sha256 == failure.derived_recovery_semantic_sha256
-        && failure.clean_semantic_sha256 != failure.derived_semantic_sha256
-        && failure.clean_semantic_sha256 != failure.strict_semantic_sha256
-        && failure.strict_semantic_sha256 != failure.derived_semantic_sha256;
+    if failure.fault_execution != expected_fault_execution {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature fault execution drifted from its reference in: {}",
+            super::evidence::execution_identity_mismatches(
+                &expected_fault_execution,
+                &failure.fault_execution,
+            )
+            .join(", ")
+        ));
+    }
+    for (holds, condition) in [
+        (
+            failure.reference_trust_identity_staged_sha256
+                == failure.fault_trust_identity_staged_sha256,
+            "staged trust identity differs between the reference and fault roots",
+        ),
+        (
+            failure.reference_trust_identity_restored_sha256
+                == failure.fault_trust_identity_restored_sha256,
+            "restored trust identity differs between the reference and fault roots",
+        ),
+        (
+            failure.reference_trust_identity_staged_sha256
+                == row.authority.trust_identity_after_sha256,
+            "staged trust identity differs from the row authority trust-after identity",
+        ),
+        (
+            failure.reference_trust_identity_restored_sha256
+                == row.authority.trust_identity_before_sha256,
+            "restored trust identity differs from the row authority trust-before identity",
+        ),
+        (
+            failure.reference_trust_identity_staged_sha256
+                != failure.reference_trust_identity_restored_sha256,
+            "staged trust identity did not diverge from the restored trust identity",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
+    failure
+        .observed_typed_document
+        .validate()
+        .map_err(|error| {
+            format!(
+                "{case:?} Timeline invalid-signature observed typed document is invalid: {error}"
+            )
+        })?;
+    for (holds, condition) in [
+        (
+            failure.observed_typed_document.schema == "pointbreak.inspect-change-projection-error",
+            "observed typed document schema drifted",
+        ),
+        (
+            failure.observed_typed_document.version == 1,
+            "observed typed document version drifted",
+        ),
+        (
+            failure.observed_typed_document.code == "projection_invalid",
+            "observed typed document code drifted",
+        ),
+        (
+            failure.observed_typed_document.retryable == Some(false),
+            "observed typed document retryable flag drifted",
+        ),
+        (
+            failure.clean_semantic_sha256 == failure.strict_clean_semantic_sha256,
+            "clean derived and strict semantics diverged",
+        ),
+        (
+            failure.clean_semantic_sha256 == failure.strict_recovery_semantic_sha256,
+            "strict recovery semantics diverged from the clean semantics",
+        ),
+        (
+            failure.clean_semantic_sha256 == failure.derived_recovery_semantic_sha256,
+            "derived recovery semantics diverged from the clean semantics",
+        ),
+        (
+            failure.clean_semantic_sha256 != failure.derived_semantic_sha256,
+            "mutated derived semantics did not diverge from the clean semantics",
+        ),
+        (
+            failure.clean_semantic_sha256 != failure.strict_semantic_sha256,
+            "mutated strict semantics did not diverge from the clean semantics",
+        ),
+        (
+            failure.strict_semantic_sha256 != failure.derived_semantic_sha256,
+            "mutated strict and derived semantics did not diverge",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
     let counters = &counter.counters;
     let barrier = &failure.barrier_receipt;
-    let counter_run_identity_valid = timeline_invalid_signature_run_identity_v1(
+    counter.validate().map_err(|error| {
+        format!("{case:?} Timeline invalid-signature counter receipt is invalid: {error}")
+    })?;
+    let expected_run_identity = timeline_invalid_signature_run_identity_v1(
         &failure.reference_root_identity_sha256,
         &failure.fault_execution.root_provenance_sha256,
         &row.product_identity_sha256,
@@ -4100,144 +4303,445 @@ pub(super) fn timeline_invalid_signature_failure_valid_v1(
         &barrier.barrier_identity_sha256,
         &failure.phase_process_identity_sha256[2],
     )
-    .ok()
-    .is_some_and(|expected| counter.run_identity == expected);
-    let barrier_valid = barrier.validate().is_ok()
-        && barrier.run_identity == counter.run_identity
-        && barrier.boundary == LongitudinalTimelinePostPinBoundaryV1::CarrierLocatorsSelected
-        && barrier.carrier_opens_before == 0
-        && barrier.selected_carriers_before > 0
-        && barrier.expected_carrier_key_digest == barrier.observed_mismatch_key_digest
-        && barrier.mismatch_kind == LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness
-        && barrier.clean_carrier_sha256 == failure.clean_carrier_sha256
-        && barrier.mutated_carrier_sha256 == failure.mutated_carrier_sha256
-        && barrier.mutation_recipe_sha256 == failure.mutation_recipe_sha256
-        && barrier.derivative_inventory_sha256 == failure.fault_derivative_inventory_sha256;
-    let counter_valid = counter.validate().is_ok()
-        && counter_run_identity_valid
-        && barrier_valid
-        && !counter.success
-        && counter.operation == "timeline_invalid_signature_fault"
-        && counter.phase == QualificationDerivedTimelineReadCaseV1::TrustSuite.as_str()
-        && counter.root_identity == failure.fault_execution.root_provenance_sha256
-        && failure
-            .fault_execution
-            .canonical_sha256()
-            .is_ok_and(|sha256| counter.base_execution_identity_sha256 == sha256)
-        && counter.derivative_execution_identity_sha256 == row.product_identity_sha256
-        && counter.manifest_sha256 == barrier.barrier_identity_sha256
-        && counter.schedule_sha256
-            == timeline_request_schedule_sha256_v1(
-                QualificationDerivedChangeFixtureV1::TopologyV1,
-                QualificationDerivedTimelineReadCaseV1::TrustSuite,
+    .map_err(|error| {
+        format!("{case:?} Timeline invalid-signature run identity is not derivable: {error}")
+    })?;
+    if counter.run_identity != expected_run_identity {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature counter run identity drifted: expected \
+             {expected_run_identity:?}, observed {:?}",
+            counter.run_identity
+        ));
+    }
+    barrier.validate().map_err(|error| {
+        format!("{case:?} Timeline invalid-signature barrier receipt is invalid: {error}")
+    })?;
+    for (holds, condition) in [
+        (
+            barrier.run_identity == counter.run_identity,
+            "barrier run identity differs from the counter run identity",
+        ),
+        (
+            barrier.boundary == LongitudinalTimelinePostPinBoundaryV1::CarrierLocatorsSelected,
+            "barrier boundary is not carrier_locators_selected",
+        ),
+        (
+            barrier.carrier_opens_before == 0,
+            "barrier observed carrier opens before the pin",
+        ),
+        (
+            barrier.selected_carriers_before > 0,
+            "barrier observed no selected carriers before the pin",
+        ),
+        (
+            barrier.expected_carrier_key_digest == barrier.observed_mismatch_key_digest,
+            "barrier mismatch key differs from the expected carrier key",
+        ),
+        (
+            barrier.mismatch_kind == LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+            "barrier mismatch kind is not validation_witness",
+        ),
+        (
+            barrier.clean_carrier_sha256 == failure.clean_carrier_sha256,
+            "barrier clean carrier differs from the failure clean carrier",
+        ),
+        (
+            barrier.mutated_carrier_sha256 == failure.mutated_carrier_sha256,
+            "barrier mutated carrier differs from the failure mutated carrier",
+        ),
+        (
+            barrier.mutation_recipe_sha256 == failure.mutation_recipe_sha256,
+            "barrier mutation recipe differs from the failure mutation recipe",
+        ),
+        (
+            barrier.derivative_inventory_sha256 == failure.fault_derivative_inventory_sha256,
+            "barrier derivative inventory differs from the fault derivative inventory",
+        ),
+        (
+            !counter.success,
+            "counter receipt reports success for the fault request",
+        ),
+        (
+            counter.operation == "timeline_invalid_signature_fault",
+            "counter operation drifted",
+        ),
+        (
+            counter.phase == QualificationDerivedTimelineReadCaseV1::TrustSuite.as_str(),
+            "counter phase drifted",
+        ),
+        (
+            counter.root_identity == failure.fault_execution.root_provenance_sha256,
+            "counter root identity differs from the fault root provenance",
+        ),
+        (
+            counter.derivative_execution_identity_sha256 == row.product_identity_sha256,
+            "counter derivative execution identity differs from the product identity",
+        ),
+        (
+            counter.manifest_sha256 == barrier.barrier_identity_sha256,
+            "counter manifest differs from the barrier identity",
+        ),
+        (
+            counter.schedule_sha256
+                == timeline_request_schedule_sha256_v1(
+                    QualificationDerivedChangeFixtureV1::TopologyV1,
+                    QualificationDerivedTimelineReadCaseV1::TrustSuite,
+                ),
+            "counter schedule digest drifted",
+        ),
+        (
+            counter.semantic_result_sha256 == failure.observed_typed_document.canonical_sha256,
+            "counter semantic result differs from the observed typed document",
+        ),
+        (
+            counter.semantic_result_sha256 == failure.derived_semantic_sha256,
+            "counter semantic result differs from the derived semantic digest",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
+    let fault_execution_identity_sha256 = failure.fault_execution.canonical_sha256().map_err(
+        |error| {
+            format!(
+                "{case:?} Timeline invalid-signature fault execution identity is not canonical: \
+                 {error}"
             )
-        && counter.semantic_result_sha256 == failure.observed_typed_document.canonical_sha256
-        && counter.semantic_result_sha256 == failure.derived_semantic_sha256
-        && counters.directory_entries_walked == 0
-        && counters.authority_identity_rows_scanned == 0
-        && counters.change_candidates == 0
-        && counters.change_candidate_current_revisions == 0
-        && counters.change_capability_carriers_opened == 0
-        && counters.change_proposal_carriers_opened == 0
-        && counters.change_proposal_carriers_validated == 0
-        && counters.change_support_carriers_opened == 0
-        && counters.change_matches == 0
-        && counters.change_rows_emitted == 0
-        && counters.authoritative_fallbacks == 0
-        && counters.full_history_fallbacks == 0
-        && counters.event_folds == 0
-        && counters.projection_rebuilds == 0
-        && counters.state_rebuilds == 0
-        && counters.body_artifact_reads == 0
-        && counters.body_bytes_read == 0
-        && counters.object_artifact_reads == 0
-        && counters.object_bytes_read == 0
-        && counters.chronological_sort_items == 0
-        && counters.carrier_opens > 0
-        && counters.carrier_bytes_read > 0
-        && counters.carrier_opens == counters.timeline_selected_carriers
-        && counters.timeline_sqlite_window_rows == counters.timeline_selected_carriers
-        && counters.timeline_sqlite_facet_rows == 0
-        && counters.timeline_selected_carriers > 0
-        && counters.timeline_revision_candidate_carriers == 0
-        && counters.timeline_removal_support_carriers == 0
-        && counters.timeline_signature_support_carriers == 0
-        && counters.timeline_correlation_support_carriers == 0
-        && counters.timeline_trust_support_carriers == 0
-        && counters.timeline_exhaustive_candidates == 0
-        && counters.timeline_entries_emitted == 0
-        && counters.response_bytes > 0;
+        },
+    )?;
+    if counter.base_execution_identity_sha256 != fault_execution_identity_sha256 {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature counter base execution identity differs from \
+             the fault execution identity"
+        ));
+    }
+    for (holds, condition) in [
+        (
+            counters.directory_entries_walked == 0,
+            "counters walked directory entries",
+        ),
+        (
+            counters.authority_identity_rows_scanned == 0,
+            "counters scanned authority identity rows",
+        ),
+        (
+            counters.change_candidates == 0,
+            "counters observed Change candidates",
+        ),
+        (
+            counters.change_candidate_current_revisions == 0,
+            "counters observed Change candidate current revisions",
+        ),
+        (
+            counters.change_capability_carriers_opened == 0,
+            "counters opened Change capability carriers",
+        ),
+        (
+            counters.change_proposal_carriers_opened == 0,
+            "counters opened Change proposal carriers",
+        ),
+        (
+            counters.change_proposal_carriers_validated == 0,
+            "counters validated Change proposal carriers",
+        ),
+        (
+            counters.change_support_carriers_opened == 0,
+            "counters opened Change support carriers",
+        ),
+        (
+            counters.change_matches == 0,
+            "counters observed Change matches",
+        ),
+        (
+            counters.change_rows_emitted == 0,
+            "counters emitted Change rows",
+        ),
+        (
+            counters.authoritative_fallbacks == 0,
+            "counters observed authoritative fallbacks",
+        ),
+        (
+            counters.full_history_fallbacks == 0,
+            "counters observed full-history fallbacks",
+        ),
+        (counters.event_folds == 0, "counters observed event folds"),
+        (
+            counters.projection_rebuilds == 0,
+            "counters observed projection rebuilds",
+        ),
+        (
+            counters.state_rebuilds == 0,
+            "counters observed state rebuilds",
+        ),
+        (
+            counters.body_artifact_reads == 0,
+            "counters observed body artifact reads",
+        ),
+        (
+            counters.body_bytes_read == 0,
+            "counters observed body bytes read",
+        ),
+        (
+            counters.object_artifact_reads == 0,
+            "counters observed object artifact reads",
+        ),
+        (
+            counters.object_bytes_read == 0,
+            "counters observed object bytes read",
+        ),
+        (
+            counters.chronological_sort_items == 0,
+            "counters observed chronological sort items",
+        ),
+        (
+            counters.carrier_opens > 0,
+            "counters observed no carrier opens",
+        ),
+        (
+            counters.carrier_bytes_read > 0,
+            "counters observed no carrier bytes read",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
+    // Primary hydration covers the selected, revision-candidate, and
+    // correlation-support carriers in one batch that short-circuits at the
+    // first witness mismatch, so the fault request opens the clean carriers
+    // that sort before the mutated one plus the mutated carrier itself. The
+    // exact abort point is witnessed by the validation count: every opened
+    // carrier before the mutated one validated, and the mutated one failed
+    // before validation.
+    let primary_hydration_carriers = counters
+        .timeline_selected_carriers
+        .saturating_add(counters.timeline_revision_candidate_carriers)
+        .saturating_add(counters.timeline_correlation_support_carriers);
+    if counters.carrier_opens > primary_hydration_carriers {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature counters carrier opens ({}) exceed the primary \
+             hydration set ({} selected + {} candidates + {} correlation)",
+            counters.carrier_opens,
+            counters.timeline_selected_carriers,
+            counters.timeline_revision_candidate_carriers,
+            counters.timeline_correlation_support_carriers
+        ));
+    }
+    if counters.event_validations != counters.carrier_opens.saturating_sub(1) {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature counters event validations ({}) do not witness \
+             an abort at the mutated carrier (carrier opens {})",
+            counters.event_validations, counters.carrier_opens
+        ));
+    }
+    if counters.timeline_sqlite_window_rows != counters.timeline_selected_carriers {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature counters sqlite window rows ({}) differ from \
+             the selected carriers ({})",
+            counters.timeline_sqlite_window_rows, counters.timeline_selected_carriers
+        ));
+    }
+    for (holds, condition) in [
+        // The window selection records candidate and facet rows before the
+        // post-pin abort, so neither is pinned to zero here; the zero pins
+        // below cover only the stages the abort genuinely never reaches.
+        (
+            counters.timeline_selected_carriers > 0,
+            "counters observed no selected Timeline carriers",
+        ),
+        (
+            counters.timeline_revision_candidate_carriers
+                <= counters.timeline_selected_carriers.saturating_mul(2),
+            "counters revision candidate carriers exceed twice the selected carriers",
+        ),
+        (
+            counters.timeline_removal_support_carriers == 0,
+            "counters observed removal support carriers",
+        ),
+        (
+            counters.timeline_signature_support_carriers == 0,
+            "counters observed signature support carriers",
+        ),
+        (
+            counters.timeline_correlation_support_carriers
+                <= counters.timeline_selected_carriers.saturating_mul(2),
+            "counters correlation support carriers exceed twice the selected carriers",
+        ),
+        (
+            counters.timeline_trust_support_carriers == 0,
+            "counters observed trust support carriers",
+        ),
+        (
+            counters.timeline_exhaustive_candidates == 0,
+            "counters observed exhaustive candidates",
+        ),
+        (
+            counters.timeline_entries_emitted == 0,
+            "counters emitted Timeline entries",
+        ),
+        (
+            counters.response_bytes > 0,
+            "counters observed no response bytes",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
     // Phase order is reference-clean derived/strict, fault-mutated derived/strict,
     // reference-recovery derived/strict. Success-authority order omits the
     // fault-mutated derived lane, whose typed failure carries no stamps.
-    let phase_authority_valid = failure
+    for (index, value) in failure.phase_process_identity_sha256.iter().enumerate() {
+        if validate_hex(value, 64, "Timeline phase process").is_err() {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature phase {index} process identity is not bare \
+                 64-hex: {value:?}"
+            ));
+        }
+    }
+    if failure
         .phase_process_identity_sha256
         .iter()
-        .all(|value| validate_hex(value, 64, "Timeline phase process").is_ok())
-        && failure
-            .phase_process_identity_sha256
-            .iter()
-            .collect::<BTreeSet<_>>()
-            .len()
-            == 6
-        && failure.phase_http_status == [200, 200, 503, 200, 200, 200]
-        && failure
-            .phase_source_change_projection_stamp
-            .iter()
-            .chain(failure.phase_timeline_projection_stamp.iter())
-            .all(|stamp| validate_prefixed_sha256_v1(stamp, "Timeline phase stamp"))
-        && failure
-            .phase_authority_cursor_sha256
-            .iter()
-            .all(|cursor| validate_hex(cursor, 64, "Timeline phase cursor").is_ok())
-        // Reference-root lanes share one clean cursor; the mutated fault-root
-        // strict lane (index 2) must witness the one-bit carrier mutation in
-        // its live raw journal-record set and therefore differ.
-        && failure.phase_authority_cursor_sha256[1] == failure.phase_authority_cursor_sha256[0]
-        && failure.phase_authority_cursor_sha256[3] == failure.phase_authority_cursor_sha256[0]
-        && failure.phase_authority_cursor_sha256[4] == failure.phase_authority_cursor_sha256[0]
-        && failure.phase_authority_cursor_sha256[2] != failure.phase_authority_cursor_sha256[0]
-        && [
+        .collect::<BTreeSet<_>>()
+        .len()
+        != 6
+    {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature phase process identities are not six distinct \
+             processes"
+        ));
+    }
+    if failure.phase_http_status != [200, 200, 503, 200, 200, 200] {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature phase HTTP statuses drifted: observed {:?}",
+            failure.phase_http_status
+        ));
+    }
+    for (stamps, label) in [
+        (
             &failure.phase_source_change_projection_stamp,
+            "source Change projection stamp",
+        ),
+        (
             &failure.phase_timeline_projection_stamp,
-        ]
-        .into_iter()
-        .all(|stamps| stamps[0] == stamps[3] && stamps[1] == stamps[4])
-        && sha256_bytes_hex(failure.phase_timeline_projection_stamp[0].as_bytes())
-            == row.authority.timeline_projection_stamp_after_sha256;
+            "Timeline projection stamp",
+        ),
+    ] {
+        for (index, stamp) in stamps.iter().enumerate() {
+            if !validate_prefixed_sha256_v1(stamp, "Timeline phase stamp") {
+                return Err(format!(
+                    "{case:?} Timeline invalid-signature phase {index} {label} is not a prefixed \
+                     sha256: {stamp:?}"
+                ));
+            }
+        }
+        if stamps[0] != stamps[3] || stamps[1] != stamps[4] {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature recovery {label} lanes drifted from their \
+                 clean lanes"
+            ));
+        }
+    }
+    for (index, cursor) in failure.phase_authority_cursor_sha256.iter().enumerate() {
+        if validate_hex(cursor, 64, "Timeline phase cursor").is_err() {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature phase {index} authority cursor is not bare \
+                 64-hex: {cursor:?}"
+            ));
+        }
+    }
+    // Reference-root lanes share one clean cursor; the mutated fault-root
+    // strict lane (index 2) must witness the one-bit carrier mutation in
+    // its live raw journal-record set and therefore differ.
+    for reference_lane in [1, 3, 4] {
+        if failure.phase_authority_cursor_sha256[reference_lane]
+            != failure.phase_authority_cursor_sha256[0]
+        {
+            return Err(format!(
+                "{case:?} Timeline invalid-signature reference lane {reference_lane} authority \
+                 cursor drifted from the clean cursor"
+            ));
+        }
+    }
+    if failure.phase_authority_cursor_sha256[2] == failure.phase_authority_cursor_sha256[0] {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature mutated strict lane did not witness the carrier \
+             mutation in its authority cursor"
+        ));
+    }
+    if sha256_bytes_hex(failure.phase_timeline_projection_stamp[0].as_bytes())
+        != row.authority.timeline_projection_stamp_after_sha256
+    {
+        return Err(format!(
+            "{case:?} Timeline invalid-signature clean Timeline projection stamp digest differs \
+             from the row authority stamp-after digest"
+        ));
+    }
     let seed = &failure.fault_seed_receipt;
-    let fault_seed_valid = seed.validate().is_ok()
-        && seed.authoritative_inventory_sha256 == failure.reference_inventory_sha256
-        && seed.witness_sha256 == failure.reference_fixture_witness_sha256;
-    expected
-        && row.status == QualificationDerivedAccessStatusV1::Passed
-        && row.oracle == QualificationDerivedTimelineReadOracleV1::StrictParity
-        && !failure.carrier_event_id.trim().is_empty()
-        && digests_valid
-        && inventories_valid
-        && fault_seed_valid
-        && fixture_witnesses_valid
-        && executions_valid
-        && trust_authority_valid
-        && failure.clean_carrier_sha256 != failure.mutated_carrier_sha256
-        && validate_prefixed_sha256_v1(
-            &failure.clean_event_record_hash,
-            "clean signature event record",
-        )
-        && failure.clean_event_record_hash == failure.mutated_event_record_hash
-        && failure.mutation_recipe_sha256
-            == QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
-        && failure.clean_signature_status == "valid"
-        && failure.mutated_signature_status == "invalid"
-        && failure.strict_observed_signature_status == "invalid"
-        && failure.recovery_signature_status == "valid"
-        && row.authority.checkpoint_identity_before_sha256
-            == row.authority.checkpoint_identity_after_sha256
-        && row.authority.trust_identity_before_sha256 != row.authority.trust_identity_after_sha256
-        && failure_document_valid
-        && semantic_failure_valid
-        && phase_authority_valid
-        && counter_valid
+    seed.validate().map_err(|error| {
+        format!("{case:?} Timeline invalid-signature fault-seed receipt is invalid: {error}")
+    })?;
+    for (holds, condition) in [
+        (
+            seed.authoritative_inventory_sha256 == failure.reference_inventory_sha256,
+            "fault-seed authoritative inventory differs from the reference inventory",
+        ),
+        (
+            seed.witness_sha256 == failure.reference_fixture_witness_sha256,
+            "fault-seed witness differs from the reference fixture witness",
+        ),
+        (
+            failure.clean_carrier_sha256 != failure.mutated_carrier_sha256,
+            "mutated carrier did not diverge from the clean carrier",
+        ),
+        (
+            validate_prefixed_sha256_v1(
+                &failure.clean_event_record_hash,
+                "clean signature event record",
+            ),
+            "clean event record hash is not a prefixed sha256",
+        ),
+        (
+            failure.clean_event_record_hash == failure.mutated_event_record_hash,
+            "event record identity drifted across the one-bit carrier mutation",
+        ),
+        (
+            failure.mutation_recipe_sha256
+                == QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1,
+            "mutation recipe digest drifted from the frozen recipe",
+        ),
+        (
+            failure.clean_signature_status == "valid",
+            "clean signature status is not valid",
+        ),
+        (
+            failure.mutated_signature_status == "invalid",
+            "mutated signature status is not invalid",
+        ),
+        (
+            failure.strict_observed_signature_status == "invalid",
+            "strict observed signature status is not invalid",
+        ),
+        (
+            failure.recovery_signature_status == "valid",
+            "recovery signature status is not valid",
+        ),
+        (
+            row.authority.checkpoint_identity_before_sha256
+                == row.authority.checkpoint_identity_after_sha256,
+            "row authority checkpoint identity drifted across the suite",
+        ),
+        (
+            row.authority.trust_identity_before_sha256 != row.authority.trust_identity_after_sha256,
+            "row authority trust identity did not transition across the suite",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline invalid-signature {condition}"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_prefixed_sha256_v1(value: &str, label: &str) -> bool {
@@ -5063,10 +5567,11 @@ mod tests {
             success: false,
             semantic_result_sha256: semantic_result_sha256.to_owned(),
             counters: LongitudinalCountersV1 {
+                // The single open is the mutated carrier itself, which aborts
+                // at its validation witness before decode or validation, so
+                // the abort witness is validations == opens - 1 == 0.
                 carrier_opens: 1,
                 carrier_bytes_read: 1,
-                event_decodes: 1,
-                event_validations: 1,
                 timeline_sqlite_candidates: 1,
                 timeline_sqlite_window_rows: 1,
                 timeline_selected_carriers: 1,
@@ -6892,6 +7397,85 @@ mod tests {
                 &row,
                 Some(execution)
             ));
+        }
+
+        // The repaired fault counter contract names its failing condition:
+        // carrier opens are bounded by the primary hydration set, the
+        // validation count witnesses the abort at the mutated carrier, and
+        // the selection-time classifications keep the normal-path shape
+        // bounds instead of blind zero pins.
+        for (falsify, expected_condition) in [
+            (
+                (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                    failure.counter_receipt.counters.carrier_opens = 2;
+                    failure.counter_receipt.counters.carrier_bytes_read = 2;
+                    failure.counter_receipt.counters.event_validations = 1;
+                })
+                    as fn(&mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1),
+                "exceed the primary hydration set",
+            ),
+            (
+                |failure| {
+                    failure.counter_receipt.counters.event_validations = 1;
+                },
+                "do not witness an abort at the mutated carrier",
+            ),
+            (
+                |failure| {
+                    failure
+                        .counter_receipt
+                        .counters
+                        .timeline_revision_candidate_carriers = 3;
+                },
+                "revision candidate carriers exceed twice the selected carriers",
+            ),
+            (
+                |failure| {
+                    failure
+                        .counter_receipt
+                        .counters
+                        .timeline_correlation_support_carriers = 3;
+                },
+                "correlation support carriers exceed twice the selected carriers",
+            ),
+        ] {
+            let mut row = signature_row.clone();
+            let failure = row.invalid_signature_failure.as_mut().expect("witness");
+            falsify(failure);
+            failure.counter_receipt.receipt_sha256 = failure
+                .counter_receipt
+                .canonical_sha256()
+                .expect("falsified counter receipt rehashes");
+            let error = timeline_invalid_signature_failure_check_v1(&row, Some(execution))
+                .expect_err("falsified counter contract must fail");
+            assert!(
+                error.contains(expected_condition),
+                "expected {expected_condition:?} in {error:?}"
+            );
+        }
+
+        // The repaired bound must ADMIT the observed real fault shape the old
+        // blind pins rejected: the primary hydration batch (selected=1,
+        // candidates=1, correlation=2) aborts at the mutated carrier after two
+        // opens, having validated exactly the one clean carrier before it.
+        {
+            let mut row = signature_row.clone();
+            let failure = row.invalid_signature_failure.as_mut().expect("witness");
+            let counters = &mut failure.counter_receipt.counters;
+            counters.carrier_opens = 2;
+            counters.carrier_bytes_read = 2;
+            counters.event_decodes = 1;
+            counters.event_validations = 1;
+            counters.timeline_revision_candidate_carriers = 1;
+            counters.timeline_correlation_support_carriers = 2;
+            counters.timeline_sqlite_candidates = 108;
+            counters.timeline_sqlite_facet_rows = 108;
+            failure.counter_receipt.receipt_sha256 = failure
+                .counter_receipt
+                .canonical_sha256()
+                .expect("observed-shape counter receipt rehashes");
+            timeline_invalid_signature_failure_check_v1(&row, Some(execution))
+                .expect("the observed real fault counter shape is admitted");
         }
 
         let mut dead_bounded_instrumentation = complete_change_reads.clone();

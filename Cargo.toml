@@ -35,6 +35,19 @@ path = "src/lib.rs"
 name = "pointbreak"
 path = "src/main.rs"
 
+# Qualification operator tools: exact-source entry points for the Timeline
+# fault-root clone protocol and the derived Change-read request assembly.
+# Feature-gated so default and no-default builds never carry them.
+[[bin]]
+name = "qualification-timeline-fault-seeder"
+path = "src/bin/qualification_timeline_fault_seeder.rs"
+required-features = ["bench", "longitudinal-counting"]
+
+[[bin]]
+name = "qualification-derived-change-request-builder"
+path = "src/bin/qualification_derived_change_request_builder.rs"
+required-features = ["bench", "longitudinal-counting"]
+
 [[bench]]
 name = "store_backend"
 harness = false

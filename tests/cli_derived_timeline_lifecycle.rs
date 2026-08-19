@@ -153,6 +153,37 @@ fn timeline_invalid_signature_lifecycle_uses_fresh_pairs_and_same_counted_child(
     )
     .expect("the lifecycle row satisfies the receipt-layer authority conditions");
 
+    // Exercise the invalid-signature and concurrent-trust receipt-layer
+    // conditions on the same real row. Reconstructing the reference execution
+    // from the row's own fault execution deliberately vacates four clauses
+    // here (reference root identity vs reference provenance, fault-vs-
+    // reference execution equality, and the row product/counter-execution
+    // identity matches, which reuse the row's own fields); the producer's
+    // receipt assembly re-checks those against the real base authority. All
+    // remaining conditions — the digest formats, counter/barrier/seed
+    // bindings, trust and semantic relations, phase authority, and the fault
+    // counter contract — are validated here against real evidence.
+    let reference_execution = {
+        let failure = row
+            .invalid_signature_failure
+            .as_ref()
+            .expect("invalid-signature lifecycle evidence");
+        let mut execution = failure.fault_execution.clone();
+        execution.root_provenance_sha256 = failure.reference_root_identity_sha256.clone();
+        execution
+    };
+    pointbreak::bench_support::derived_access
+        ::validate_qualification_derived_timeline_invalid_signature_row_v1(
+        &row,
+        &reference_execution,
+        &row.product_identity_sha256,
+        &row.counter_execution_identity_sha256,
+    )
+    .expect("the lifecycle row satisfies the receipt-layer invalid-signature conditions");
+    pointbreak::bench_support::derived_access
+        ::validate_qualification_derived_timeline_concurrent_trust_row_v1(&row)
+    .expect("the lifecycle row satisfies the receipt-layer concurrent-trust conditions");
+
     let failure = row
         .invalid_signature_failure
         .expect("invalid-signature lifecycle evidence");

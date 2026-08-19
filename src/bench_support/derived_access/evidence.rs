@@ -513,22 +513,22 @@ impl QualificationDerivedChangeReadReceiptV2 {
             {
                 return Err("derived Timeline semantic receipt aggregate drifted".to_owned());
             }
-            if row
-                .invalid_signature_failure
-                .as_ref()
-                .is_some_and(|failure| {
-                    !run_identities.insert(failure.counter_receipt.run_identity.clone())
-                })
-                || !timeline_invalid_signature_failure_valid_v1(
-                    row,
-                    &self.base.execution,
-                    &product_identity_sha256,
-                    &execution_identity_sha256,
-                )
-                || !timeline_concurrent_trust_valid_v1(row)
+            if let Some(failure) = &row.invalid_signature_failure
+                && !run_identities.insert(failure.counter_receipt.run_identity.clone())
             {
-                return Err("derived Timeline invalid-signature receipt drifted".to_owned());
+                return Err(format!(
+                    "{:?} Timeline invalid-signature counter run identity duplicates another \
+                     receipt",
+                    row.case
+                ));
             }
+            validate_qualification_derived_timeline_invalid_signature_row_v1(
+                row,
+                &self.base.execution,
+                &product_identity_sha256,
+                &execution_identity_sha256,
+            )?;
+            validate_qualification_derived_timeline_concurrent_trust_row_v1(row)?;
         }
 
         let expected_phases = match self.base.fixture {
@@ -744,54 +744,136 @@ fn timeline_typed_documents_valid_v1(row: &QualificationDerivedTimelineReadEvide
             })
 }
 
-fn timeline_concurrent_trust_valid_v1(row: &QualificationDerivedTimelineReadEvidenceV1) -> bool {
+/// Validate one row's concurrent-trust transition with per-condition
+/// attributable errors. Public so the disposable lifecycle test can exercise
+/// the exact receipt-layer conditions without spending a producer invocation.
+pub fn validate_qualification_derived_timeline_concurrent_trust_row_v1(
+    row: &QualificationDerivedTimelineReadEvidenceV1,
+) -> Result<(), String> {
+    let case = row.case;
     let expected = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && row.case == super::QualificationDerivedTimelineReadCaseV1::ProcessLifecycleSuite;
     let Some(transition) = &row.concurrent_trust_transition else {
-        return !expected;
+        if expected {
+            return Err(format!(
+                "{case:?} Timeline concurrent-trust transition evidence is absent"
+            ));
+        }
+        return Ok(());
     };
+    if !expected {
+        return Err(format!(
+            "{case:?} Timeline row carries an unexpected concurrent-trust transition"
+        ));
+    }
+    if transition.signed_event_id.trim().is_empty() {
+        return Err(format!(
+            "{case:?} Timeline concurrent-trust signed event id is empty"
+        ));
+    }
+    if transition.signer_identity.trim().is_empty()
+        || transition.signer_identity.trim() != transition.signer_identity
+    {
+        return Err(format!(
+            "{case:?} Timeline concurrent-trust signer identity is empty or untrimmed"
+        ));
+    }
+    for (identity, field) in [
+        (
+            &transition.trust_identity_before_sha256,
+            "trust identity before",
+        ),
+        (
+            &transition.trust_identity_during_sha256,
+            "trust identity during",
+        ),
+        (
+            &transition.trust_identity_restored_sha256,
+            "trust identity restored",
+        ),
+    ] {
+        if validate_digest(identity, field).is_err() {
+            return Err(format!(
+                "{case:?} Timeline concurrent-trust {field} digest is not bare 64-hex: \
+                 {identity:?}"
+            ));
+        }
+    }
     let expected_operations = BTreeSet::from([
         "timeline_concurrent_asc".to_owned(),
         "timeline_concurrent_desc".to_owned(),
     ]);
-    expected
-        && !transition.signed_event_id.trim().is_empty()
-        && !transition.signer_identity.trim().is_empty()
-        && transition.signer_identity.trim() == transition.signer_identity
-        && [
-            &transition.trust_identity_before_sha256,
-            &transition.trust_identity_during_sha256,
-            &transition.trust_identity_restored_sha256,
-        ]
-        .into_iter()
-        .all(|identity| validate_digest(identity, "concurrent Timeline trust identity").is_ok())
-        && transition.trust_identity_before_sha256 == transition.trust_identity_restored_sha256
-        && transition.trust_identity_before_sha256 != transition.trust_identity_during_sha256
-        && transition.status_before == "untrusted_key"
-        && transition.status_during == "valid"
-        && transition.status_restored == "untrusted_key"
-        && transition
-            .observed_status_by_operation
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            == expected_operations
-        && transition
-            .observed_status_by_operation
-            .values()
-            .all(|status| matches!(status.as_str(), "untrusted_key" | "valid"))
+    for (holds, condition) in [
+        (
+            transition.trust_identity_before_sha256 == transition.trust_identity_restored_sha256,
+            "restored trust identity differs from the before identity",
+        ),
+        (
+            transition.trust_identity_before_sha256 != transition.trust_identity_during_sha256,
+            "staged trust identity did not diverge from the before identity",
+        ),
+        (
+            transition.status_before == "untrusted_key",
+            "status before is not untrusted_key",
+        ),
+        (
+            transition.status_during == "valid",
+            "status during is not valid",
+        ),
+        (
+            transition.status_restored == "untrusted_key",
+            "status restored is not untrusted_key",
+        ),
+        (
+            transition
+                .observed_status_by_operation
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                == expected_operations,
+            "observed operations drifted from the concurrent asc/desc pair",
+        ),
+        (
+            transition
+                .observed_status_by_operation
+                .values()
+                .all(|status| matches!(status.as_str(), "untrusted_key" | "valid")),
+            "observed per-operation status is outside untrusted_key/valid",
+        ),
+    ] {
+        if !holds {
+            return Err(format!("{case:?} Timeline concurrent-trust {condition}"));
+        }
+    }
+    Ok(())
 }
 
-fn timeline_invalid_signature_failure_valid_v1(
+/// Validate one row's invalid-signature failure evidence against the receipt's
+/// base authority with per-condition attributable errors. Public so the
+/// disposable lifecycle test can exercise the exact receipt-layer conditions
+/// without spending a producer invocation.
+pub fn validate_qualification_derived_timeline_invalid_signature_row_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
     execution: &QualificationDerivedAccessExecutionIdentityV1,
     product_identity_sha256: &str,
     execution_identity_sha256: &str,
-) -> bool {
-    row.status == QualificationDerivedAccessStatusV1::Passed
-        && row.product_identity_sha256 == product_identity_sha256
-        && row.counter_execution_identity_sha256 == execution_identity_sha256
-        && super::contract::timeline_invalid_signature_failure_valid_v1(row, Some(execution))
+) -> Result<(), String> {
+    let case = row.case;
+    // These three conditions hold for EVERY row (the historical combined
+    // predicate applied them unconditionally), not only rows that carry the
+    // invalid-signature failure evidence.
+    if row.status != QualificationDerivedAccessStatusV1::Passed {
+        return Err(format!("{case:?} Timeline row status is not passed"));
+    }
+    if row.product_identity_sha256 != product_identity_sha256 {
+        return Err(format!("{case:?} Timeline row product identity drifted"));
+    }
+    if row.counter_execution_identity_sha256 != execution_identity_sha256 {
+        return Err(format!(
+            "{case:?} Timeline row counter execution identity drifted"
+        ));
+    }
+    super::contract::timeline_invalid_signature_failure_check_v1(row, Some(execution))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]

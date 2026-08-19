@@ -18,7 +18,7 @@ fn package_and_library_identity_are_pointbreak() {
 }
 
 #[test]
-fn package_identity_declares_only_pointbreak_binary() {
+fn package_identity_declares_only_pointbreak_binary_unconditionally() {
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .output()
@@ -44,10 +44,57 @@ fn package_identity_declares_only_pointbreak_binary() {
                 .as_array()
                 .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
         })
-        .map(|target| target["name"].as_str().expect("target name"))
         .collect::<Vec<_>>();
 
-    assert_eq!(binary_targets, ["pointbreak"]);
+    // The product declares exactly one unconditional binary: `pointbreak`.
+    // Qualification operator tools may be declared only behind features that
+    // default builds never enable, so `cargo install` and release packaging
+    // still produce the single product executable (the install test below
+    // proves that end-to-end).
+    let features = package["features"].as_object().expect("features map");
+    let mut default_closure = std::collections::BTreeSet::new();
+    let mut queue = vec!["default".to_owned()];
+    while let Some(feature) = queue.pop() {
+        if !default_closure.insert(feature.clone()) {
+            continue;
+        }
+        if let Some(values) = features.get(&feature).and_then(Value::as_array) {
+            for value in values.iter().filter_map(Value::as_str) {
+                if features.contains_key(value) {
+                    queue.push(value.to_owned());
+                }
+            }
+        }
+    }
+    let mut unconditional = Vec::new();
+    for target in &binary_targets {
+        let name = target["name"].as_str().expect("target name");
+        let required = target["required-features"]
+            .as_array()
+            .map(|required| {
+                required
+                    .iter()
+                    .map(|feature| feature.as_str().expect("required feature name"))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if required.is_empty() {
+            unconditional.push(name);
+        } else {
+            assert!(
+                required.iter().any(|feature| {
+                    features.contains_key(*feature) && !default_closure.contains(*feature)
+                }),
+                "binary {name} must require at least one real non-default feature, got \
+                 {required:?}"
+            );
+        }
+    }
+    assert_eq!(unconditional, ["pointbreak"]);
+    let binary_targets = binary_targets
+        .iter()
+        .map(|target| target["name"].as_str().expect("target name"))
+        .collect::<Vec<_>>();
     assert_eq!(
         Path::new(env!("CARGO_BIN_EXE_pointbreak")).file_name(),
         Some(OsStr::new(POINTBREAK_EXECUTABLE_BASENAME))
