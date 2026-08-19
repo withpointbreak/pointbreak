@@ -6,7 +6,11 @@ use super::storage_witness::{
     QualificationDerivedStorageForbiddenProbeHashesV1,
     QualificationDerivedStorageForbiddenProbeKindV1, QualificationDerivedStorageWitnessV1,
 };
-use crate::bench_support::longitudinal::{LongitudinalCounterReceiptV1, LongitudinalCountersV1};
+use crate::bench_support::longitudinal::{
+    LongitudinalCounterReceiptV1, LongitudinalCountersV1,
+    LongitudinalTimelineCarrierMismatchKindV1, LongitudinalTimelinePostPinBarrierReceiptV1,
+    LongitudinalTimelinePostPinBoundaryV1,
+};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SCHEMA_V1: &str =
@@ -37,7 +41,7 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1: &str =
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v4-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1: &str =
-    "c17a3e949bbf2ccee78864db22793e947d10efb34c9c2d9028644f99c95b8524";
+    "a1caa365f3c4fdcad11b63605d8b2755989752f55692594bcd6c810a9c0bd22c";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -55,7 +59,7 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 7] = [
     "reader-v3-authority-lifecycle-concurrency-v1",
     "immutable-schema-and-byte-inventory-v1",
     "completion-last-independent-package-verification-v1",
-    "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-and-one-bit-signature-recovery-v1",
+    "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
 ];
 
 pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
@@ -1737,28 +1741,132 @@ pub struct QualificationDerivedTimelineConcurrentTrustEvidenceV1 {
     pub observed_status_by_operation: BTreeMap<String, String>,
 }
 
+pub const QUALIFICATION_DERIVED_TIMELINE_FAULT_SEED_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-timeline-fault-seed-receipt.v1";
+
+/// Proof that the Timeline fault authority was byte-cloned from one validated
+/// canonical public-matrix materialization into a canonical-path-disjoint
+/// root before any governed derived state beyond idle zero-byte writer locks
+/// and before any staged lifecycle trust existed. The claim is isolation: the
+/// clone shares the reference materialization by construction and makes no
+/// independent fixture-reproducibility claim.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedTimelineFaultSeedReceiptV1 {
+    pub schema: String,
+    pub reference_root_path_sha256: String,
+    pub fault_root_path_sha256: String,
+    pub reference_witness_path_sha256: String,
+    pub fault_witness_path_sha256: String,
+    pub witness_sha256: String,
+    pub tree_manifest_sha256: String,
+    pub authoritative_inventory_sha256: String,
+    pub inclusive_inventory_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_trust_sha256: Option<String>,
+    pub cloned_file_count: u64,
+    pub cloned_byte_count: u64,
+    pub receipt_sha256: String,
+}
+
+impl QualificationDerivedTimelineFaultSeedReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256 = String::new();
+        canonical_sha256(&preimage)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_TIMELINE_FAULT_SEED_RECEIPT_SCHEMA_V1 {
+            return Err("unknown Timeline fault-seed receipt schema".to_owned());
+        }
+        for (value, label) in [
+            (
+                &self.reference_root_path_sha256,
+                "fault-seed reference root path",
+            ),
+            (&self.fault_root_path_sha256, "fault-seed fault root path"),
+            (
+                &self.reference_witness_path_sha256,
+                "fault-seed reference witness path",
+            ),
+            (
+                &self.fault_witness_path_sha256,
+                "fault-seed fault witness path",
+            ),
+            (&self.witness_sha256, "fault-seed witness"),
+            (&self.tree_manifest_sha256, "fault-seed tree manifest"),
+            (
+                &self.authoritative_inventory_sha256,
+                "fault-seed authoritative inventory",
+            ),
+            (
+                &self.inclusive_inventory_sha256,
+                "fault-seed inclusive inventory",
+            ),
+            (&self.receipt_sha256, "fault-seed receipt"),
+        ] {
+            validate_hex(value, 64, label)?;
+        }
+        if let Some(initial_trust) = &self.initial_trust_sha256 {
+            validate_hex(initial_trust, 64, "fault-seed initial trust")?;
+        }
+        if self.reference_root_path_sha256 == self.fault_root_path_sha256
+            || self.reference_witness_path_sha256 == self.fault_witness_path_sha256
+        {
+            return Err("Timeline fault-seed roots are not canonical-path-disjoint".to_owned());
+        }
+        if self.cloned_file_count == 0 || self.cloned_byte_count == 0 {
+            return Err("Timeline fault-seed clone is empty".to_owned());
+        }
+        if self.receipt_sha256 != self.canonical_sha256()? {
+            return Err("Timeline fault-seed receipt hash drifted".to_owned());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1 {
+    pub fault_seed_receipt: QualificationDerivedTimelineFaultSeedReceiptV1,
+    pub reference_root_identity_sha256: String,
+    pub fault_execution: QualificationDerivedAccessExecutionIdentityV1,
+    pub reference_fixture_witness_sha256: String,
+    pub fault_fixture_witness_sha256: String,
     pub carrier_event_id: String,
-    pub clean_inventory_sha256: String,
-    pub derivative_inventory_sha256: String,
-    pub restored_inventory_sha256: String,
+    pub clean_event_record_hash: String,
+    pub mutated_event_record_hash: String,
+    pub reference_inventory_sha256: String,
+    pub reference_recovery_inventory_sha256: String,
+    pub fault_clean_inventory_sha256: String,
+    pub fault_derivative_inventory_sha256: String,
+    pub fault_restored_inventory_sha256: String,
     pub clean_carrier_sha256: String,
     pub mutated_carrier_sha256: String,
     pub mutation_recipe_sha256: String,
     pub clean_signature_status: String,
     pub mutated_signature_status: String,
-    pub observed_http_status: u16,
+    pub strict_observed_signature_status: String,
     pub observed_typed_document: QualificationDerivedChangeTypedDocumentV1,
     pub clean_semantic_sha256: String,
+    pub strict_clean_semantic_sha256: String,
     pub strict_semantic_sha256: String,
     pub derived_semantic_sha256: String,
     pub strict_recovery_semantic_sha256: String,
     pub derived_recovery_semantic_sha256: String,
     pub recovery_signature_status: String,
+    pub reference_trust_identity_staged_sha256: String,
+    pub reference_trust_identity_restored_sha256: String,
+    pub fault_trust_identity_staged_sha256: String,
+    pub fault_trust_identity_restored_sha256: String,
+    pub phase_process_identity_sha256: [String; 6],
+    pub phase_http_status: [u16; 6],
+    pub phase_source_change_projection_stamp: [String; 5],
+    pub phase_timeline_projection_stamp: [String; 5],
+    pub phase_authority_cursor_sha256: [String; 5],
     pub counter_receipt: LongitudinalCounterReceiptV1,
-    pub trust_bindings_observed: u64,
+    pub barrier_receipt: LongitudinalTimelinePostPinBarrierReceiptV1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -2005,6 +2113,38 @@ pub(crate) fn timeline_request_schedule_sha256_v1(
 ) -> String {
     canonical_sha256(&timeline_request_schedule_v1(fixture, case))
         .expect("the Timeline request schedule is canonical")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timeline_invalid_signature_run_identity_v1(
+    reference_root_identity_sha256: &str,
+    fault_root_identity_sha256: &str,
+    product_identity_sha256: &str,
+    carrier_event_id: &str,
+    carrier_key_digest: &str,
+    clean_carrier_sha256: &str,
+    mutated_carrier_sha256: &str,
+    mutation_recipe_sha256: &str,
+    barrier_identity_sha256: &str,
+    mutated_derived_process_identity_sha256: &str,
+) -> Result<String, String> {
+    canonical_json_bytes(&serde_json::json!({
+        "referenceRoot": reference_root_identity_sha256,
+        "faultRoot": fault_root_identity_sha256,
+        "product": product_identity_sha256,
+        "fixture": QualificationDerivedChangeFixtureV1::TopologyV1,
+        "case": QualificationDerivedTimelineReadCaseV1::TrustSuite,
+        "operation": "timeline_invalid_signature_fault",
+        "carrierEventId": carrier_event_id,
+        "carrierKeyDigest": carrier_key_digest,
+        "cleanCarrier": clean_carrier_sha256,
+        "mutatedCarrier": mutated_carrier_sha256,
+        "mutationRecipe": mutation_recipe_sha256,
+        "barrier": barrier_identity_sha256,
+        "derivedChild": mutated_derived_process_identity_sha256,
+    }))
+    .map(|bytes| sha256_bytes_hex(&bytes))
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -3868,7 +4008,7 @@ fn timeline_concurrent_trust_valid_v1(row: &QualificationDerivedTimelineReadEvid
             .all(|status| matches!(status.as_str(), "untrusted_key" | "valid"))
 }
 
-fn timeline_invalid_signature_failure_valid_v1(
+pub(super) fn timeline_invalid_signature_failure_valid_v1(
     row: &QualificationDerivedTimelineReadEvidenceV1,
     execution: Option<&QualificationDerivedAccessExecutionIdentityV1>,
 ) -> bool {
@@ -3877,120 +4017,233 @@ fn timeline_invalid_signature_failure_valid_v1(
     let Some(failure) = &row.invalid_signature_failure else {
         return !expected;
     };
+    let Some(reference_execution) = execution else {
+        return false;
+    };
     let counter = &failure.counter_receipt;
-    let inventory_restored = failure.clean_inventory_sha256 == failure.restored_inventory_sha256
-        && failure.clean_inventory_sha256 != failure.derivative_inventory_sha256
-        && failure.clean_inventory_sha256 == row.fixture_inventory_sha256;
+    let digests_valid = [
+        &failure.reference_root_identity_sha256,
+        &failure.reference_fixture_witness_sha256,
+        &failure.fault_fixture_witness_sha256,
+        &failure.reference_inventory_sha256,
+        &failure.reference_recovery_inventory_sha256,
+        &failure.fault_clean_inventory_sha256,
+        &failure.fault_derivative_inventory_sha256,
+        &failure.fault_restored_inventory_sha256,
+        &failure.clean_carrier_sha256,
+        &failure.mutated_carrier_sha256,
+        &failure.observed_typed_document.canonical_sha256,
+        &failure.clean_semantic_sha256,
+        &failure.strict_clean_semantic_sha256,
+        &failure.strict_semantic_sha256,
+        &failure.derived_semantic_sha256,
+        &failure.strict_recovery_semantic_sha256,
+        &failure.derived_recovery_semantic_sha256,
+        &failure.reference_trust_identity_staged_sha256,
+        &failure.reference_trust_identity_restored_sha256,
+        &failure.fault_trust_identity_staged_sha256,
+        &failure.fault_trust_identity_restored_sha256,
+    ]
+    .into_iter()
+    .all(|value| validate_hex(value, 64, "invalid-signature digest").is_ok());
+    let inventories_valid = failure.reference_inventory_sha256
+        == failure.reference_recovery_inventory_sha256
+        && failure.reference_inventory_sha256 == failure.fault_clean_inventory_sha256
+        && failure.reference_inventory_sha256 == failure.fault_restored_inventory_sha256
+        && failure.reference_inventory_sha256 != failure.fault_derivative_inventory_sha256
+        && failure.reference_inventory_sha256 == row.fixture_inventory_sha256;
+    let fixture_witnesses_valid = failure.reference_fixture_witness_sha256
+        == row.fixture_witness_sha256
+        && failure.fault_fixture_witness_sha256 == failure.reference_fixture_witness_sha256;
+    let mut expected_fault_execution = reference_execution.clone();
+    expected_fault_execution.root_provenance_sha256 =
+        failure.fault_execution.root_provenance_sha256.clone();
+    let executions_valid = reference_execution.validate().is_ok()
+        && failure.fault_execution.validate().is_ok()
+        && failure.reference_root_identity_sha256 == reference_execution.root_provenance_sha256
+        && failure.reference_root_identity_sha256 != failure.fault_execution.root_provenance_sha256
+        && failure.fault_execution == expected_fault_execution;
+    let trust_authority_valid = failure.reference_trust_identity_staged_sha256
+        == failure.fault_trust_identity_staged_sha256
+        && failure.reference_trust_identity_restored_sha256
+            == failure.fault_trust_identity_restored_sha256
+        && failure.reference_trust_identity_staged_sha256
+            == row.authority.trust_identity_after_sha256
+        && failure.reference_trust_identity_restored_sha256
+            == row.authority.trust_identity_before_sha256
+        && failure.reference_trust_identity_staged_sha256
+            != failure.reference_trust_identity_restored_sha256;
     let failure_document_valid = failure.observed_typed_document.schema
         == "pointbreak.inspect-change-projection-error"
         && failure.observed_typed_document.version == 1
         && failure.observed_typed_document.code == "projection_invalid"
         && failure.observed_typed_document.retryable == Some(false)
-        && validate_hex(
-            &failure.observed_typed_document.canonical_sha256,
-            64,
-            "invalid-signature typed failure document",
-        )
-        .is_ok();
-    let semantic_failure_valid = validate_hex(
-        &failure.clean_semantic_sha256,
-        64,
-        "invalid-signature clean semantic receipt",
-    )
-    .is_ok()
-        && validate_hex(
-            &failure.strict_semantic_sha256,
-            64,
-            "invalid-signature strict semantic receipt",
-        )
-        .is_ok()
-        && validate_hex(
-            &failure.derived_semantic_sha256,
-            64,
-            "invalid-signature derived semantic receipt",
-        )
-        .is_ok()
-        && validate_hex(
-            &failure.strict_recovery_semantic_sha256,
-            64,
-            "invalid-signature strict recovery semantic receipt",
-        )
-        .is_ok()
-        && validate_hex(
-            &failure.derived_recovery_semantic_sha256,
-            64,
-            "invalid-signature derived recovery semantic receipt",
-        )
-        .is_ok()
+        && failure.observed_typed_document.validate().is_ok();
+    let semantic_failure_valid = failure.clean_semantic_sha256
+        == failure.strict_clean_semantic_sha256
         && failure.clean_semantic_sha256 == failure.strict_recovery_semantic_sha256
         && failure.clean_semantic_sha256 == failure.derived_recovery_semantic_sha256
         && failure.clean_semantic_sha256 != failure.derived_semantic_sha256
-        && failure.strict_semantic_sha256 == failure.derived_semantic_sha256;
+        && failure.clean_semantic_sha256 != failure.strict_semantic_sha256
+        && failure.strict_semantic_sha256 != failure.derived_semantic_sha256;
     let counters = &counter.counters;
+    let barrier = &failure.barrier_receipt;
+    let counter_run_identity_valid = timeline_invalid_signature_run_identity_v1(
+        &failure.reference_root_identity_sha256,
+        &failure.fault_execution.root_provenance_sha256,
+        &row.product_identity_sha256,
+        &failure.carrier_event_id,
+        &barrier.expected_carrier_key_digest,
+        &failure.clean_carrier_sha256,
+        &failure.mutated_carrier_sha256,
+        &failure.mutation_recipe_sha256,
+        &barrier.barrier_identity_sha256,
+        &failure.phase_process_identity_sha256[2],
+    )
+    .ok()
+    .is_some_and(|expected| counter.run_identity == expected);
+    let barrier_valid = barrier.validate().is_ok()
+        && barrier.run_identity == counter.run_identity
+        && barrier.boundary == LongitudinalTimelinePostPinBoundaryV1::CarrierLocatorsSelected
+        && barrier.carrier_opens_before == 0
+        && barrier.selected_carriers_before > 0
+        && barrier.expected_carrier_key_digest == barrier.observed_mismatch_key_digest
+        && barrier.mismatch_kind == LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness
+        && barrier.clean_carrier_sha256 == failure.clean_carrier_sha256
+        && barrier.mutated_carrier_sha256 == failure.mutated_carrier_sha256
+        && barrier.mutation_recipe_sha256 == failure.mutation_recipe_sha256
+        && barrier.derivative_inventory_sha256 == failure.fault_derivative_inventory_sha256;
     let counter_valid = counter.validate().is_ok()
+        && counter_run_identity_valid
+        && barrier_valid
         && !counter.success
         && counter.operation == "timeline_invalid_signature_fault"
         && counter.phase == QualificationDerivedTimelineReadCaseV1::TrustSuite.as_str()
-        && execution
-            .is_some_and(|identity| counter.root_identity == identity.root_provenance_sha256)
-        && counter.base_execution_identity_sha256 == row.counter_execution_identity_sha256
+        && counter.root_identity == failure.fault_execution.root_provenance_sha256
+        && failure
+            .fault_execution
+            .canonical_sha256()
+            .is_ok_and(|sha256| counter.base_execution_identity_sha256 == sha256)
         && counter.derivative_execution_identity_sha256 == row.product_identity_sha256
-        && counter.manifest_sha256 == failure.derivative_inventory_sha256
+        && counter.manifest_sha256 == barrier.barrier_identity_sha256
         && counter.schedule_sha256
             == timeline_request_schedule_sha256_v1(
                 QualificationDerivedChangeFixtureV1::TopologyV1,
                 QualificationDerivedTimelineReadCaseV1::TrustSuite,
             )
+        && counter.semantic_result_sha256 == failure.observed_typed_document.canonical_sha256
         && counter.semantic_result_sha256 == failure.derived_semantic_sha256
+        && counters.directory_entries_walked == 0
+        && counters.authority_identity_rows_scanned == 0
+        && counters.change_candidates == 0
+        && counters.change_candidate_current_revisions == 0
+        && counters.change_capability_carriers_opened == 0
+        && counters.change_proposal_carriers_opened == 0
+        && counters.change_proposal_carriers_validated == 0
+        && counters.change_support_carriers_opened == 0
+        && counters.change_matches == 0
+        && counters.change_rows_emitted == 0
         && counters.authoritative_fallbacks == 0
         && counters.full_history_fallbacks == 0
         && counters.event_folds == 0
         && counters.projection_rebuilds == 0
         && counters.state_rebuilds == 0
         && counters.body_artifact_reads == 0
+        && counters.body_bytes_read == 0
         && counters.object_artifact_reads == 0
+        && counters.object_bytes_read == 0
+        && counters.chronological_sort_items == 0
+        && counters.carrier_opens > 0
+        && counters.carrier_bytes_read > 0
+        && counters.carrier_opens == counters.timeline_selected_carriers
+        && counters.timeline_sqlite_window_rows == counters.timeline_selected_carriers
+        && counters.timeline_sqlite_facet_rows == 0
+        && counters.timeline_selected_carriers > 0
+        && counters.timeline_revision_candidate_carriers == 0
+        && counters.timeline_removal_support_carriers == 0
+        && counters.timeline_signature_support_carriers == 0
+        && counters.timeline_correlation_support_carriers == 0
         && counters.timeline_trust_support_carriers == 0
-        && counters.timeline_entries_emitted == 0;
+        && counters.timeline_exhaustive_candidates == 0
+        && counters.timeline_entries_emitted == 0
+        && counters.response_bytes > 0;
+    // Phase order is reference-clean derived/strict, fault-mutated derived/strict,
+    // reference-recovery derived/strict. Success-authority order omits the
+    // fault-mutated derived lane, whose typed failure carries no stamps.
+    let phase_authority_valid = failure
+        .phase_process_identity_sha256
+        .iter()
+        .all(|value| validate_hex(value, 64, "Timeline phase process").is_ok())
+        && failure
+            .phase_process_identity_sha256
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 6
+        && failure.phase_http_status == [200, 200, 503, 200, 200, 200]
+        && failure
+            .phase_source_change_projection_stamp
+            .iter()
+            .chain(failure.phase_timeline_projection_stamp.iter())
+            .all(|stamp| validate_prefixed_sha256_v1(stamp, "Timeline phase stamp"))
+        && failure
+            .phase_authority_cursor_sha256
+            .iter()
+            .all(|cursor| validate_hex(cursor, 64, "Timeline phase cursor").is_ok())
+        // Reference-root lanes share one clean cursor; the mutated fault-root
+        // strict lane (index 2) must witness the one-bit carrier mutation in
+        // its live raw journal-record set and therefore differ.
+        && failure.phase_authority_cursor_sha256[1] == failure.phase_authority_cursor_sha256[0]
+        && failure.phase_authority_cursor_sha256[3] == failure.phase_authority_cursor_sha256[0]
+        && failure.phase_authority_cursor_sha256[4] == failure.phase_authority_cursor_sha256[0]
+        && failure.phase_authority_cursor_sha256[2] != failure.phase_authority_cursor_sha256[0]
+        && [
+            &failure.phase_source_change_projection_stamp,
+            &failure.phase_timeline_projection_stamp,
+        ]
+        .into_iter()
+        .all(|stamps| stamps[0] == stamps[3] && stamps[1] == stamps[4])
+        && sha256_bytes_hex(failure.phase_timeline_projection_stamp[0].as_bytes())
+            == row.authority.timeline_projection_stamp_after_sha256;
+    let seed = &failure.fault_seed_receipt;
+    let fault_seed_valid = seed.validate().is_ok()
+        && seed.authoritative_inventory_sha256 == failure.reference_inventory_sha256
+        && seed.witness_sha256 == failure.reference_fixture_witness_sha256;
     expected
+        && row.status == QualificationDerivedAccessStatusV1::Passed
         && row.oracle == QualificationDerivedTimelineReadOracleV1::StrictParity
         && !failure.carrier_event_id.trim().is_empty()
-        && inventory_restored
-        && validate_hex(
-            &failure.clean_inventory_sha256,
-            64,
-            "clean invalid-signature inventory",
-        )
-        .is_ok()
-        && validate_hex(
-            &failure.derivative_inventory_sha256,
-            64,
-            "derivative invalid-signature inventory",
-        )
-        .is_ok()
-        && validate_hex(
-            &failure.restored_inventory_sha256,
-            64,
-            "restored invalid-signature inventory",
-        )
-        .is_ok()
-        && validate_hex(&failure.clean_carrier_sha256, 64, "clean signature carrier").is_ok()
-        && validate_hex(
-            &failure.mutated_carrier_sha256,
-            64,
-            "mutated signature carrier",
-        )
-        .is_ok()
+        && digests_valid
+        && inventories_valid
+        && fault_seed_valid
+        && fixture_witnesses_valid
+        && executions_valid
+        && trust_authority_valid
         && failure.clean_carrier_sha256 != failure.mutated_carrier_sha256
+        && validate_prefixed_sha256_v1(
+            &failure.clean_event_record_hash,
+            "clean signature event record",
+        )
+        && failure.clean_event_record_hash == failure.mutated_event_record_hash
         && failure.mutation_recipe_sha256
             == QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
         && failure.clean_signature_status == "valid"
         && failure.mutated_signature_status == "invalid"
+        && failure.strict_observed_signature_status == "invalid"
         && failure.recovery_signature_status == "valid"
-        && failure.observed_http_status == 503
+        && row.authority.checkpoint_identity_before_sha256
+            == row.authority.checkpoint_identity_after_sha256
+        && row.authority.trust_identity_before_sha256 != row.authority.trust_identity_after_sha256
         && failure_document_valid
         && semantic_failure_valid
+        && phase_authority_valid
         && counter_valid
-        && failure.trust_bindings_observed == 0
+}
+
+fn validate_prefixed_sha256_v1(value: &str, label: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| validate_hex(digest, 64, label).is_ok())
 }
 
 fn timeline_counter_bounds_hold_v1(
@@ -4752,40 +5005,71 @@ mod tests {
         receipt
     }
 
-    fn timeline_invalid_signature_test_receipt(
-        execution: &QualificationDerivedAccessExecutionIdentityV1,
+    #[allow(clippy::too_many_arguments)]
+    fn timeline_invalid_signature_test_receipts(
+        reference_execution: &QualificationDerivedAccessExecutionIdentityV1,
+        fault_execution: &QualificationDerivedAccessExecutionIdentityV1,
         product: &QualificationDerivedAccessProductIdentityV1,
         derivative_inventory_sha256: String,
-    ) -> LongitudinalCounterReceiptV1 {
+        carrier_event_id: &str,
+        carrier_key_digest: &str,
+        clean_carrier_sha256: &str,
+        mutated_carrier_sha256: &str,
+        mutation_recipe_sha256: &str,
+        semantic_result_sha256: &str,
+        mutated_derived_process_identity_sha256: &str,
+    ) -> (
+        LongitudinalCounterReceiptV1,
+        LongitudinalTimelinePostPinBarrierReceiptV1,
+    ) {
+        let product_identity_sha256 = product
+            .canonical_sha256()
+            .expect("invalid-signature product identity");
+        let barrier_identity_sha256 = digest(&format!(
+            "{}/{carrier_event_id}/post-pin-barrier",
+            fault_execution.root_provenance_sha256
+        ));
+        let run_identity = timeline_invalid_signature_run_identity_v1(
+            &reference_execution.root_provenance_sha256,
+            &fault_execution.root_provenance_sha256,
+            &product_identity_sha256,
+            carrier_event_id,
+            carrier_key_digest,
+            clean_carrier_sha256,
+            mutated_carrier_sha256,
+            mutation_recipe_sha256,
+            &barrier_identity_sha256,
+            mutated_derived_process_identity_sha256,
+        )
+        .expect("invalid-signature run identity");
         let mut receipt = LongitudinalCounterReceiptV1 {
             schema: crate::bench_support::longitudinal::LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1
                 .to_owned(),
-            run_identity: digest(&format!(
-                "{:?}/TopologyV1/TrustSuite/timeline_invalid_signature_fault",
-                execution.platform
-            )),
-            root_identity: execution.root_provenance_sha256.clone(),
+            run_identity: run_identity.clone(),
+            root_identity: fault_execution.root_provenance_sha256.clone(),
             operation: "timeline_invalid_signature_fault".to_owned(),
             phase: QualificationDerivedTimelineReadCaseV1::TrustSuite
                 .as_str()
                 .to_owned(),
-            base_execution_identity_sha256: execution
+            base_execution_identity_sha256: fault_execution
                 .canonical_sha256()
                 .expect("invalid-signature execution identity"),
-            derivative_execution_identity_sha256: product
-                .canonical_sha256()
-                .expect("invalid-signature product identity"),
-            manifest_sha256: derivative_inventory_sha256,
+            derivative_execution_identity_sha256: product_identity_sha256,
+            manifest_sha256: barrier_identity_sha256.clone(),
             schedule_sha256: timeline_request_schedule_sha256_v1(
                 QualificationDerivedChangeFixtureV1::TopologyV1,
                 QualificationDerivedTimelineReadCaseV1::TrustSuite,
             ),
             success: false,
-            semantic_result_sha256: digest(&format!(
-                "{:?}/TopologyV1/TrustSuite/invalid-signature/semantic",
-                execution.platform
-            )),
+            semantic_result_sha256: semantic_result_sha256.to_owned(),
             counters: LongitudinalCountersV1 {
+                carrier_opens: 1,
+                carrier_bytes_read: 1,
+                event_decodes: 1,
+                event_validations: 1,
+                timeline_sqlite_candidates: 1,
+                timeline_sqlite_window_rows: 1,
+                timeline_selected_carriers: 1,
                 response_bytes: 1,
                 ..LongitudinalCountersV1::default()
             },
@@ -4795,7 +5079,29 @@ mod tests {
         receipt.receipt_sha256 = receipt
             .canonical_sha256()
             .expect("invalid-signature counter receipt hash");
-        receipt
+        let mut barrier_receipt = LongitudinalTimelinePostPinBarrierReceiptV1 {
+            schema: crate::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1
+                .to_owned(),
+            run_identity,
+            barrier_identity_sha256,
+            boundary: LongitudinalTimelinePostPinBoundaryV1::CarrierLocatorsSelected,
+            carrier_opens_before: 0,
+            selected_carriers_before: 1,
+            expected_carrier_key_digest: carrier_key_digest.to_owned(),
+            observed_mismatch_key_digest: carrier_key_digest.to_owned(),
+            mismatch_kind: LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+            clean_carrier_sha256: clean_carrier_sha256.to_owned(),
+            mutated_carrier_sha256: mutated_carrier_sha256.to_owned(),
+            mutation_recipe_sha256: mutation_recipe_sha256.to_owned(),
+            derivative_inventory_sha256,
+            ready_receipt_sha256: digest("invalid-signature barrier ready receipt"),
+            release_receipt_sha256: digest("invalid-signature barrier release receipt"),
+            receipt_sha256: String::new(),
+        };
+        barrier_receipt.receipt_sha256 = barrier_receipt
+            .canonical_sha256()
+            .expect("invalid-signature barrier receipt hash");
+        (receipt, barrier_receipt)
     }
 
     fn add_complete_timeline_evidence(package: &mut QualificationDerivedAccessPackageV1) {
@@ -4882,6 +5188,9 @@ mod tests {
                                 digest(&format!("{platform:?}/{fixture:?}/{case:?}/stamp"));
                             let trust_before =
                                 digest(&format!("{platform:?}/{fixture:?}/{case:?}/trust"));
+                            let trust_after = digest(&format!(
+                                "{platform:?}/{fixture:?}/{case:?}/trust-after"
+                            ));
                             let carries_family_counts = fixture
                                 == QualificationDerivedChangeFixtureV1::TopologyV1
                                 && case
@@ -4978,50 +5287,179 @@ mod tests {
                                 == QualificationDerivedChangeFixtureV1::TopologyV1
                                 && case == QualificationDerivedTimelineReadCaseV1::TrustSuite)
                                 .then(|| {
-                                    let clean_inventory_sha256 = digest("fixture inventory");
-                                    let derivative_inventory_sha256 = digest(&format!(
+                                    let reference_inventory_sha256 = digest("fixture inventory");
+                                    let fault_derivative_inventory_sha256 = digest(&format!(
                                         "{platform:?}/TopologyV1/invalid-signature/derivative"
                                     ));
-                                    let counter_receipt = timeline_invalid_signature_test_receipt(
-                                        &execution,
-                                        &product,
-                                        derivative_inventory_sha256.clone(),
+                                    let carrier_event_id = "event:invalid-inline-signature";
+                                    let carrier_key_digest = digest(&format!(
+                                        "{platform:?}/TopologyV1/invalid-signature/carrier-key"
+                                    ));
+                                    let clean_carrier_sha256 =
+                                        digest("clean inline signature carrier");
+                                    let mutated_carrier_sha256 =
+                                        digest("mutated inline signature carrier");
+                                    let mutation_recipe_sha256 =
+                                        QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
+                                            .to_owned();
+                                    let clean_cursor = digest(&format!(
+                                        "{platform:?}/TopologyV1/TrustSuite/invalid-signature/cursor"
+                                    ));
+                                    let clean_semantic = digest(&format!(
+                                        "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
+                                    ));
+                                    let event_record_hash = format!(
+                                        "sha256:{}",
+                                        digest("invalid-signature event record")
                                     );
+                                    let phase_process_identity_sha256 = std::array::from_fn(|index| {
+                                        digest(&format!("{platform:?}/invalid-signature/child-{index}"))
+                                    });
+                                    let derived_failure_semantic = digest(&format!(
+                                        "{:?}/TopologyV1/TrustSuite/invalid-signature/semantic",
+                                        execution.platform
+                                    ));
+                                    let mut fault_execution = execution.clone();
+                                    fault_execution.root_provenance_sha256 = digest(&format!(
+                                        "{platform:?}/TopologyV1/invalid-signature/fault-root"
+                                    ));
+                                    let (counter_receipt, barrier_receipt) =
+                                        timeline_invalid_signature_test_receipts(
+                                        &execution,
+                                        &fault_execution,
+                                        &product,
+                                        fault_derivative_inventory_sha256.clone(),
+                                        carrier_event_id,
+                                        &carrier_key_digest,
+                                        &clean_carrier_sha256,
+                                        &mutated_carrier_sha256,
+                                        &mutation_recipe_sha256,
+                                        &derived_failure_semantic,
+                                        &phase_process_identity_sha256[2],
+                                    );
+                                    let phase_stamp = |kind: &str| {
+                                        let reference_derived = format!(
+                                            "sha256:{}",
+                                            digest(&format!("{platform:?}/reference-derived/{kind}"))
+                                        );
+                                        let reference_strict = format!(
+                                            "sha256:{}",
+                                            digest(&format!("{platform:?}/reference-strict/{kind}"))
+                                        );
+                                        let fault_strict = format!(
+                                            "sha256:{}",
+                                            digest(&format!("{platform:?}/fault-strict/{kind}"))
+                                        );
+                                        [
+                                            reference_derived.clone(),
+                                            reference_strict.clone(),
+                                            fault_strict,
+                                            reference_derived,
+                                            reference_strict,
+                                        ]
+                                    };
+                                    let fault_seed_receipt = {
+                                        let mut receipt =
+                                            QualificationDerivedTimelineFaultSeedReceiptV1 {
+                                                schema:
+                                                    QUALIFICATION_DERIVED_TIMELINE_FAULT_SEED_RECEIPT_SCHEMA_V1
+                                                        .to_owned(),
+                                                reference_root_path_sha256: digest(
+                                                    "fault-seed reference root path",
+                                                ),
+                                                fault_root_path_sha256: digest(
+                                                    "fault-seed fault root path",
+                                                ),
+                                                reference_witness_path_sha256: digest(
+                                                    "fault-seed reference witness path",
+                                                ),
+                                                fault_witness_path_sha256: digest(
+                                                    "fault-seed fault witness path",
+                                                ),
+                                                witness_sha256: digest("fixture witness"),
+                                                tree_manifest_sha256: digest(
+                                                    "fault-seed tree manifest",
+                                                ),
+                                                authoritative_inventory_sha256:
+                                                    reference_inventory_sha256.clone(),
+                                                inclusive_inventory_sha256:
+                                                    reference_inventory_sha256.clone(),
+                                                initial_trust_sha256: Some(trust_before.clone()),
+                                                cloned_file_count: 42,
+                                                cloned_byte_count: 4_096,
+                                                receipt_sha256: String::new(),
+                                            };
+                                        receipt.receipt_sha256 = receipt
+                                            .canonical_sha256()
+                                            .expect("fault-seed receipt hash");
+                                        receipt
+                                    };
                                     QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1 {
-                                        carrier_event_id: "event:invalid-inline-signature".to_owned(),
-                                        clean_inventory_sha256: clean_inventory_sha256.clone(),
-                                        derivative_inventory_sha256,
-                                        restored_inventory_sha256: clean_inventory_sha256,
-                                        clean_carrier_sha256: digest("clean inline signature carrier"),
-                                        mutated_carrier_sha256: digest("mutated inline signature carrier"),
-                                        mutation_recipe_sha256:
-                                            QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1
-                                                .to_owned(),
+                                        fault_seed_receipt,
+                                        reference_root_identity_sha256: execution
+                                            .root_provenance_sha256
+                                            .clone(),
+                                        fault_execution,
+                                        reference_fixture_witness_sha256:
+                                            digest("fixture witness"),
+                                        fault_fixture_witness_sha256: digest("fixture witness"),
+                                        carrier_event_id: carrier_event_id.to_owned(),
+                                        clean_event_record_hash: event_record_hash.clone(),
+                                        mutated_event_record_hash: event_record_hash,
+                                        reference_inventory_sha256:
+                                            reference_inventory_sha256.clone(),
+                                        reference_recovery_inventory_sha256:
+                                            reference_inventory_sha256.clone(),
+                                        fault_clean_inventory_sha256:
+                                            reference_inventory_sha256.clone(),
+                                        fault_derivative_inventory_sha256,
+                                        fault_restored_inventory_sha256:
+                                            reference_inventory_sha256,
+                                        clean_carrier_sha256,
+                                        mutated_carrier_sha256,
+                                        mutation_recipe_sha256,
                                         clean_signature_status: "valid".to_owned(),
                                         mutated_signature_status: "invalid".to_owned(),
-                                        observed_http_status: 503,
+                                        strict_observed_signature_status: "invalid".to_owned(),
                                         observed_typed_document: timeline_typed_document(
                                             "projection_invalid",
                                             &format!(
-                                                "{platform:?}/TopologyV1/TrustSuite/invalid-signature"
+                                                "{platform:?}/TopologyV1/TrustSuite/invalid-signature/semantic"
                                             ),
                                         ),
-                                        clean_semantic_sha256: digest(&format!(
-                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
+                                        clean_semantic_sha256: clean_semantic.clone(),
+                                        strict_clean_semantic_sha256: clean_semantic.clone(),
+                                        strict_semantic_sha256: digest(&format!(
+                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/strict-mutated"
                                         )),
-                                        strict_semantic_sha256:
-                                            counter_receipt.semantic_result_sha256.clone(),
-                                        derived_semantic_sha256:
-                                            counter_receipt.semantic_result_sha256.clone(),
-                                        strict_recovery_semantic_sha256: digest(&format!(
-                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
-                                        )),
-                                        derived_recovery_semantic_sha256: digest(&format!(
-                                            "{platform:?}/TopologyV1/TrustSuite/invalid-signature/clean"
-                                        )),
+                                        derived_semantic_sha256: derived_failure_semantic,
+                                        strict_recovery_semantic_sha256: clean_semantic.clone(),
+                                        derived_recovery_semantic_sha256: clean_semantic,
                                         recovery_signature_status: "valid".to_owned(),
+                                        reference_trust_identity_staged_sha256:
+                                            trust_after.clone(),
+                                        reference_trust_identity_restored_sha256:
+                                            trust_before.clone(),
+                                        fault_trust_identity_staged_sha256: trust_after.clone(),
+                                        fault_trust_identity_restored_sha256:
+                                            trust_before.clone(),
+                                        phase_process_identity_sha256,
+                                        phase_http_status: [200, 200, 503, 200, 200, 200],
+                                        phase_source_change_projection_stamp: phase_stamp("source"),
+                                        phase_timeline_projection_stamp: phase_stamp("timeline"),
+                                        phase_authority_cursor_sha256: std::array::from_fn(
+                                            |index| {
+                                                if index == 2 {
+                                                    digest(&format!(
+                                                        "{platform:?}/TopologyV1/TrustSuite/invalid-signature/mutated-cursor"
+                                                    ))
+                                                } else {
+                                                    clean_cursor.clone()
+                                                }
+                                            },
+                                        ),
                                         counter_receipt,
-                                        trust_bindings_observed: 0,
+                                        barrier_receipt,
                                     }
                                 });
                             QualificationDerivedTimelineReadEvidenceV1 {
@@ -5069,11 +5507,25 @@ mod tests {
                                         checkpoint_before
                                     },
                                     timeline_projection_stamp_before_sha256: stamp_before.clone(),
-                                    timeline_projection_stamp_after_sha256: if matches!(
-                                        case,
-                                        QualificationDerivedTimelineReadCaseV1::TrustSuite
-                                            | QualificationDerivedTimelineReadCaseV1::PostAppendSuite
-                                    ) {
+                                    timeline_projection_stamp_after_sha256: if case
+                                        == QualificationDerivedTimelineReadCaseV1::TrustSuite
+                                    {
+                                        invalid_signature_failure
+                                            .as_ref()
+                                            .map(|failure| {
+                                                sha256_bytes_hex(
+                                                    failure.phase_timeline_projection_stamp[0]
+                                                        .as_bytes(),
+                                                )
+                                            })
+                                            .unwrap_or_else(|| {
+                                                digest(&format!(
+                                                    "{platform:?}/{fixture:?}/{case:?}/stamp-after"
+                                                ))
+                                            })
+                                    } else if case
+                                        == QualificationDerivedTimelineReadCaseV1::PostAppendSuite
+                                    {
                                         digest(&format!(
                                             "{platform:?}/{fixture:?}/{case:?}/stamp-after"
                                         ))
@@ -5084,9 +5536,7 @@ mod tests {
                                     trust_identity_after_sha256: if case
                                         == QualificationDerivedTimelineReadCaseV1::TrustSuite
                                     {
-                                        digest(&format!(
-                                            "{platform:?}/{fixture:?}/{case:?}/trust-after"
-                                        ))
+                                        trust_after
                                     } else {
                                         trust_before
                                     },
@@ -6225,47 +6675,224 @@ mod tests {
             QualificationDerivedAccessTerminalOutcomeV1::Reject
         );
 
-        let mut trust_bound_invalid_signature = complete_timeline.clone();
-        trust_bound_invalid_signature
+        let signature_row = complete_timeline
             .timeline_read_rows
-            .iter_mut()
+            .iter()
             .find(|row| {
                 row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
                     && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
                     && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite
             })
-            .expect("invalid-signature Timeline row")
-            .invalid_signature_failure
-            .as_mut()
-            .expect("invalid-signature witness")
-            .trust_bindings_observed = 1;
-        assert_eq!(
-            evaluate_qualification_derived_access_v1(&trust_bound_invalid_signature)
-                .expect("invalid-signature trust binding evaluates")
-                .outcome,
-            QualificationDerivedAccessTerminalOutcomeV1::Reject
-        );
-
-        let mut one_sided_signature_recovery = complete_timeline.clone();
-        one_sided_signature_recovery
-            .timeline_read_rows
-            .iter_mut()
-            .find(|row| {
-                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
-                    && row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
-                    && row.case == QualificationDerivedTimelineReadCaseV1::TrustSuite
+            .expect("invalid-signature Timeline row");
+        let execution = complete_timeline
+            .execution_identities
+            .iter()
+            .find(|identity| identity.platform == signature_row.platform)
+            .expect("invalid-signature execution");
+        for falsify in [
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure
+                    .counter_receipt
+                    .counters
+                    .timeline_trust_support_carriers = 1;
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("trust-support receipt");
             })
-            .expect("invalid-signature Timeline row")
-            .invalid_signature_failure
-            .as_mut()
-            .expect("invalid-signature witness")
-            .strict_recovery_semantic_sha256 = digest("drifted strict recovery");
-        assert_eq!(
-            evaluate_qualification_derived_access_v1(&one_sided_signature_recovery)
-                .expect("one-sided signature recovery evaluates")
-                .outcome,
-            QualificationDerivedAccessTerminalOutcomeV1::Reject
-        );
+                as fn(&mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1),
+            |failure| failure.strict_recovery_semantic_sha256 = digest("one-sided recovery"),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.phase_http_status[3] = 503;
+                failure.strict_semantic_sha256 = failure.derived_semantic_sha256.clone();
+            }),
+            |failure| {
+                failure.phase_process_identity_sha256[2] = digest("substituted mutated child");
+            },
+            |failure| failure.phase_timeline_projection_stamp[2] = "invalid".to_owned(),
+            |failure| {
+                failure.phase_timeline_projection_stamp[3] =
+                    format!("sha256:{}", digest("one-sided reference derived stamp"));
+            },
+            |failure| {
+                let derived = format!("sha256:{}", digest("substituted derived stamp"));
+                let strict = format!("sha256:{}", digest("substituted strict stamp"));
+                failure.phase_timeline_projection_stamp = [
+                    derived.clone(),
+                    strict.clone(),
+                    strict.clone(),
+                    derived,
+                    strict,
+                ];
+            },
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.counters.body_bytes_read = 1;
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("body-byte receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.counters.object_bytes_read = 1;
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("object-byte receipt");
+            }),
+            |failure| failure.phase_authority_cursor_sha256[4] = digest("mixed cursor"),
+            |failure| {
+                failure.phase_authority_cursor_sha256[2] =
+                    failure.phase_authority_cursor_sha256[0].clone();
+            },
+            |failure| failure.reference_trust_identity_restored_sha256 = digest("wrong trust"),
+            |failure| failure.mutated_event_record_hash = format!("sha256:{}", digest("record")),
+            |failure| {
+                failure.fault_execution.root_provenance_sha256 =
+                    failure.reference_root_identity_sha256.clone();
+            },
+            |failure| failure.fault_execution.command_sha256 = digest("fault command drift"),
+            |failure| failure.fault_fixture_witness_sha256 = digest("wrong fault witness"),
+            |failure| {
+                failure.reference_recovery_inventory_sha256 =
+                    digest("wrong reference recovery inventory")
+            },
+            |failure| failure.fault_clean_inventory_sha256 = digest("wrong fault clean inventory"),
+            |failure| {
+                failure.fault_restored_inventory_sha256 = digest("wrong fault restored inventory")
+            },
+            |failure| {
+                failure.fault_derivative_inventory_sha256 =
+                    failure.fault_clean_inventory_sha256.clone()
+            },
+            |failure| {
+                failure.fault_trust_identity_staged_sha256 = digest("wrong fault staged trust")
+            },
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.carrier_opens_before = 1;
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("carrier-open barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.selected_carriers_before = 0;
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("empty-selection barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.observed_mismatch_key_digest =
+                    digest("different mismatch key");
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("mismatched-key barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.clean_carrier_sha256 = digest("different clean carrier");
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("different-carrier barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.root_identity =
+                    failure.reference_root_identity_sha256.clone();
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("reference-root counter receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.base_execution_identity_sha256 =
+                    digest("wrong fault execution identity");
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("wrong-execution counter receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.manifest_sha256 =
+                    failure.fault_derivative_inventory_sha256.clone();
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("derivative-manifest counter receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.counter_receipt.semantic_result_sha256 = digest("wrong response semantic");
+                failure.counter_receipt.receipt_sha256 = failure
+                    .counter_receipt
+                    .canonical_sha256()
+                    .expect("wrong-semantic counter receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.run_identity = digest("wrong barrier run identity");
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("wrong-run barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.barrier_receipt.derivative_inventory_sha256 =
+                    digest("wrong barrier derivative inventory");
+                failure.barrier_receipt.receipt_sha256 = failure
+                    .barrier_receipt
+                    .canonical_sha256()
+                    .expect("wrong-inventory barrier receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.fault_seed_receipt.authoritative_inventory_sha256 =
+                    digest("wrong fault-seed inventory");
+                failure.fault_seed_receipt.inclusive_inventory_sha256 =
+                    digest("wrong fault-seed inventory");
+                failure.fault_seed_receipt.receipt_sha256 = failure
+                    .fault_seed_receipt
+                    .canonical_sha256()
+                    .expect("wrong-inventory fault-seed receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.fault_seed_receipt.witness_sha256 = digest("wrong fault-seed witness");
+                failure.fault_seed_receipt.receipt_sha256 = failure
+                    .fault_seed_receipt
+                    .canonical_sha256()
+                    .expect("wrong-witness fault-seed receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.fault_seed_receipt.fault_root_path_sha256 = failure
+                    .fault_seed_receipt
+                    .reference_root_path_sha256
+                    .clone();
+                failure.fault_seed_receipt.receipt_sha256 = failure
+                    .fault_seed_receipt
+                    .canonical_sha256()
+                    .expect("overlapping-path fault-seed receipt");
+            }),
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.fault_seed_receipt.schema =
+                    "pointbreak.wrong-fault-seed-schema.v1".to_owned();
+                failure.fault_seed_receipt.receipt_sha256 = failure
+                    .fault_seed_receipt
+                    .canonical_sha256()
+                    .expect("wrong-schema fault-seed receipt");
+            }),
+            // The tree manifest is bound to the live roots at runtime by
+            // validate_timeline_fault_seed_bindings_v1, not statically by this
+            // evaluator; the un-rehashed mutation below falsifies only the
+            // receipt's canonical self-hash.
+            (|failure: &mut QualificationDerivedTimelineInvalidSignatureFailureEvidenceV1| {
+                failure.fault_seed_receipt.tree_manifest_sha256 =
+                    digest("stale fault-seed manifest");
+            }),
+        ] {
+            let mut row = signature_row.clone();
+            falsify(row.invalid_signature_failure.as_mut().expect("witness"));
+            assert!(!timeline_invalid_signature_failure_valid_v1(
+                &row,
+                Some(execution)
+            ));
+        }
 
         let mut dead_bounded_instrumentation = complete_change_reads.clone();
         let dead_bounded = dead_bounded_instrumentation

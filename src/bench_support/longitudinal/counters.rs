@@ -1,15 +1,22 @@
 use std::cell::RefCell;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
-    LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1, LongitudinalCapacityOwnershipV1,
+    LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1,
+    LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1, LongitudinalCapacityOwnershipV1,
     LongitudinalContractError, LongitudinalCounterReceiptV1, LongitudinalCountersV1,
+    LongitudinalTimelineCarrierMismatchKindV1, LongitudinalTimelinePostPinBarrierReceiptV1,
+    LongitudinalTimelinePostPinBoundaryV1,
 };
+use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
 thread_local! {
     static ACTIVE_SCOPES: RefCell<Vec<LongitudinalCountingScopeV1>> =
@@ -24,6 +31,158 @@ struct ObserverState {
     capacity_ownership: LongitudinalCapacityOwnershipV1,
     derived_access_phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
     next_phase_ordinal: u16,
+    timeline_post_pin_barrier: Option<LongitudinalTimelinePostPinBarrierStateV1>,
+}
+
+pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-timeline-post-pin-barrier-request.v1";
+pub const LONGITUDINAL_TIMELINE_POST_PIN_READY_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-timeline-post-pin-ready.v1";
+pub const LONGITUDINAL_TIMELINE_POST_PIN_RELEASE_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-timeline-post-pin-release.v1";
+#[doc(hidden)]
+pub const LONGITUDINAL_COUNTING_REQUEST_HEADER_V1: &str = "X-Pointbreak-Longitudinal-Counting";
+#[doc(hidden)]
+pub const LONGITUDINAL_COUNTER_RECEIPT_HEADER_V1: &str = "X-Pointbreak-Longitudinal-Receipt";
+#[doc(hidden)]
+pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_ROOT_ENV_V1: &str =
+    "POINTBREAK_LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_ROOT";
+#[doc(hidden)]
+pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_HEADER_V1: &str =
+    "X-Pointbreak-Longitudinal-Timeline-Post-Pin-Barrier-Receipt";
+
+const TIMELINE_POST_PIN_BARRIER_WAIT: Duration = Duration::from_secs(10);
+const TIMELINE_POST_PIN_BARRIER_POLL: Duration = Duration::from_millis(5);
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalTimelinePostPinBarrierRequestV1 {
+    pub schema: String,
+    pub barrier_identity_sha256: String,
+    pub expected_carrier_key_digest: String,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+}
+
+impl LongitudinalTimelinePostPinBarrierRequestV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1 {
+            return Err("unsupported Timeline post-pin barrier request schema".to_owned());
+        }
+        validate_timeline_barrier_hashes([
+            (&self.barrier_identity_sha256, "barrier identity"),
+            (
+                &self.expected_carrier_key_digest,
+                "expected carrier key digest",
+            ),
+            (&self.clean_carrier_sha256, "clean carrier SHA-256"),
+            (&self.mutated_carrier_sha256, "mutated carrier SHA-256"),
+            (&self.mutation_recipe_sha256, "mutation recipe SHA-256"),
+        ])?;
+        if self.clean_carrier_sha256 == self.mutated_carrier_sha256 {
+            return Err("Timeline post-pin barrier carrier mutation is absent".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalTimelinePostPinReadyV1 {
+    pub schema: String,
+    pub run_identity: String,
+    pub barrier_identity_sha256: String,
+    pub boundary: LongitudinalTimelinePostPinBoundaryV1,
+    pub carrier_opens_before: u64,
+    pub selected_carriers_before: u64,
+    pub expected_carrier_key_digest: String,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+}
+
+impl LongitudinalTimelinePostPinReadyV1 {
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_timeline_barrier_sha256(self)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != LONGITUDINAL_TIMELINE_POST_PIN_READY_SCHEMA_V1 {
+            return Err("unsupported Timeline post-pin ready schema".to_owned());
+        }
+        validate_timeline_barrier_hashes([
+            (&self.run_identity, "run identity"),
+            (&self.barrier_identity_sha256, "barrier identity"),
+            (
+                &self.expected_carrier_key_digest,
+                "expected carrier key digest",
+            ),
+            (&self.clean_carrier_sha256, "clean carrier SHA-256"),
+            (&self.mutated_carrier_sha256, "mutated carrier SHA-256"),
+            (&self.mutation_recipe_sha256, "mutation recipe SHA-256"),
+        ])?;
+        if self.carrier_opens_before != 0 {
+            return Err("Timeline post-pin barrier was reached after a carrier open".to_owned());
+        }
+        if self.selected_carriers_before == 0 {
+            return Err("Timeline post-pin barrier selected no carriers".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalTimelinePostPinReleaseV1 {
+    pub schema: String,
+    pub run_identity: String,
+    pub barrier_identity_sha256: String,
+    pub ready_receipt_sha256: String,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+    pub derivative_inventory_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abort_reason_sha256: Option<String>,
+}
+
+impl LongitudinalTimelinePostPinReleaseV1 {
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_timeline_barrier_sha256(self)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != LONGITUDINAL_TIMELINE_POST_PIN_RELEASE_SCHEMA_V1 {
+            return Err("unsupported Timeline post-pin release schema".to_owned());
+        }
+        validate_timeline_barrier_hashes([
+            (&self.run_identity, "run identity"),
+            (&self.barrier_identity_sha256, "barrier identity"),
+            (&self.ready_receipt_sha256, "ready receipt SHA-256"),
+            (&self.clean_carrier_sha256, "clean carrier SHA-256"),
+            (&self.mutated_carrier_sha256, "mutated carrier SHA-256"),
+            (&self.mutation_recipe_sha256, "mutation recipe SHA-256"),
+            (
+                &self.derivative_inventory_sha256,
+                "derivative inventory SHA-256",
+            ),
+        ])?;
+        if let Some(abort_reason_sha256) = &self.abort_reason_sha256 {
+            validate_timeline_barrier_hashes([(abort_reason_sha256, "abort reason SHA-256")])?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct LongitudinalTimelinePostPinBarrierStateV1 {
+    root: PathBuf,
+    request: LongitudinalTimelinePostPinBarrierRequestV1,
+    ready: Option<LongitudinalTimelinePostPinReadyV1>,
+    release: Option<LongitudinalTimelinePostPinReleaseV1>,
+    observed_mismatch: Option<(String, LongitudinalTimelineCarrierMismatchKindV1)>,
+    error: Option<String>,
 }
 
 /// One request/run-local counting scope.
@@ -231,6 +390,112 @@ impl LongitudinalCountingScopeV1 {
         })
     }
 
+    /// Arms the qualification-only Timeline barrier for this exact request.
+    ///
+    /// The filesystem location is deliberately not part of the authenticated
+    /// request document. The Inspector child receives it through one explicit
+    /// feature-gated environment value, while the request binds all semantic
+    /// identities exchanged through the barrier.
+    #[doc(hidden)]
+    pub fn with_timeline_post_pin_barrier(
+        self,
+        root: impl AsRef<Path>,
+        request: LongitudinalTimelinePostPinBarrierRequestV1,
+    ) -> Result<Self, String> {
+        request.validate()?;
+        let root = fs::canonicalize(root.as_ref())
+            .map_err(|error| format!("canonicalize Timeline post-pin barrier root: {error}"))?;
+        if !root.is_dir() {
+            return Err("Timeline post-pin barrier root is not a directory".to_owned());
+        }
+        let mut entries = fs::read_dir(&root)
+            .map_err(|error| format!("read Timeline post-pin barrier root: {error}"))?;
+        if entries
+            .next()
+            .transpose()
+            .map_err(|error| format!("inspect Timeline post-pin barrier root entry: {error}"))?
+            .is_some()
+        {
+            return Err("Timeline post-pin barrier root must be empty".to_owned());
+        }
+        {
+            let mut state = lock_state(&self.state);
+            if state.timeline_post_pin_barrier.is_some() {
+                return Err("Timeline post-pin barrier is already armed".to_owned());
+            }
+            state.timeline_post_pin_barrier = Some(LongitudinalTimelinePostPinBarrierStateV1 {
+                root,
+                request,
+                ready: None,
+                release: None,
+                observed_mismatch: None,
+                error: None,
+            });
+        }
+        Ok(self)
+    }
+
+    #[doc(hidden)]
+    pub fn has_timeline_post_pin_barrier(&self) -> bool {
+        lock_state(&self.state).timeline_post_pin_barrier.is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn timeline_post_pin_barrier_identity(&self) -> Option<String> {
+        lock_state(&self.state)
+            .timeline_post_pin_barrier
+            .as_ref()
+            .map(|barrier| barrier.request.barrier_identity_sha256.clone())
+    }
+
+    #[doc(hidden)]
+    pub fn timeline_post_pin_barrier_receipt(
+        &self,
+    ) -> Result<Option<LongitudinalTimelinePostPinBarrierReceiptV1>, String> {
+        let state = lock_state(&self.state);
+        let Some(barrier) = &state.timeline_post_pin_barrier else {
+            return Ok(None);
+        };
+        if let Some(error) = &barrier.error {
+            return Err(error.clone());
+        }
+        let ready = barrier
+            .ready
+            .as_ref()
+            .ok_or_else(|| "Timeline post-pin barrier was not reached".to_owned())?;
+        let release = barrier
+            .release
+            .as_ref()
+            .ok_or_else(|| "Timeline post-pin barrier was not released".to_owned())?;
+        let (observed_mismatch_key_digest, mismatch_kind) = barrier
+            .observed_mismatch
+            .as_ref()
+            .ok_or_else(|| "Timeline post-pin barrier observed no carrier mismatch".to_owned())?;
+        let mut receipt = LongitudinalTimelinePostPinBarrierReceiptV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1.to_owned(),
+            run_identity: self.run_identity.clone(),
+            barrier_identity_sha256: barrier.request.barrier_identity_sha256.clone(),
+            boundary: ready.boundary,
+            carrier_opens_before: ready.carrier_opens_before,
+            selected_carriers_before: ready.selected_carriers_before,
+            expected_carrier_key_digest: barrier.request.expected_carrier_key_digest.clone(),
+            observed_mismatch_key_digest: observed_mismatch_key_digest.clone(),
+            mismatch_kind: *mismatch_kind,
+            clean_carrier_sha256: barrier.request.clean_carrier_sha256.clone(),
+            mutated_carrier_sha256: release.mutated_carrier_sha256.clone(),
+            mutation_recipe_sha256: release.mutation_recipe_sha256.clone(),
+            derivative_inventory_sha256: release.derivative_inventory_sha256.clone(),
+            ready_receipt_sha256: release.ready_receipt_sha256.clone(),
+            release_receipt_sha256: release.canonical_sha256()?,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt
+            .canonical_sha256()
+            .map_err(|error| error.to_string())?;
+        receipt.validate().map_err(|error| error.to_string())?;
+        Ok(Some(receipt))
+    }
+
     pub fn enter(&self) -> LongitudinalCountingGuardV1 {
         ACTIVE_SCOPES.with(|scopes| scopes.borrow_mut().push(self.clone()));
         LongitudinalCountingGuardV1 {
@@ -284,6 +549,287 @@ impl LongitudinalCountingScopeV1 {
         receipt.validate()?;
         Ok(receipt)
     }
+}
+
+#[doc(hidden)]
+pub fn longitudinal_timeline_post_pin_ready_path_v1(
+    root: impl AsRef<Path>,
+    barrier_identity_sha256: &str,
+) -> PathBuf {
+    root.as_ref()
+        .join(format!("ready-{barrier_identity_sha256}.json"))
+}
+
+#[doc(hidden)]
+pub fn longitudinal_timeline_post_pin_release_path_v1(
+    root: impl AsRef<Path>,
+    barrier_identity_sha256: &str,
+) -> PathBuf {
+    root.as_ref()
+        .join(format!("release-{barrier_identity_sha256}.json"))
+}
+
+#[doc(hidden)]
+pub fn write_longitudinal_timeline_barrier_document_v1<T: Serialize>(
+    path: impl AsRef<Path>,
+    document: &T,
+) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "Timeline post-pin barrier document has no parent",
+        )
+    })?;
+    let value = serde_json::to_value(document)
+        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+    let bytes = canonical_json_bytes(&value)
+        .map_err(|error| std::io::Error::new(ErrorKind::InvalidData, error))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "Timeline post-pin barrier document has no UTF-8 file name",
+            )
+        })?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)?;
+    let write_result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if path.exists() {
+            return Err(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "Timeline post-pin barrier document already exists",
+            ));
+        }
+        fs::rename(&temporary, path)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+/// Stops an armed request after locator selection and before any carrier is
+/// opened, then waits for its controller's authenticated mutation release.
+#[doc(hidden)]
+pub fn reach_timeline_carrier_locators_selected_v1() -> Result<(), String> {
+    let Some(scope) = LongitudinalCountingScopeV1::current() else {
+        return Ok(());
+    };
+    let ready = {
+        let mut state = lock_state(&scope.state);
+        let counters = state.counters.clone();
+        let Some(barrier) = state.timeline_post_pin_barrier.as_mut() else {
+            return Ok(());
+        };
+        if let Some(error) = &barrier.error {
+            return Err(error.clone());
+        }
+        if barrier.ready.is_some() {
+            return fail_timeline_barrier(
+                barrier,
+                "Timeline post-pin barrier was reached more than once",
+            );
+        }
+        let ready = LongitudinalTimelinePostPinReadyV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_READY_SCHEMA_V1.to_owned(),
+            run_identity: scope.run_identity.clone(),
+            barrier_identity_sha256: barrier.request.barrier_identity_sha256.clone(),
+            boundary: LongitudinalTimelinePostPinBoundaryV1::CarrierLocatorsSelected,
+            carrier_opens_before: counters.carrier_opens,
+            selected_carriers_before: counters.timeline_selected_carriers,
+            expected_carrier_key_digest: barrier.request.expected_carrier_key_digest.clone(),
+            clean_carrier_sha256: barrier.request.clean_carrier_sha256.clone(),
+            mutated_carrier_sha256: barrier.request.mutated_carrier_sha256.clone(),
+            mutation_recipe_sha256: barrier.request.mutation_recipe_sha256.clone(),
+        };
+        if let Err(error) = ready.validate() {
+            barrier.error = Some(error.clone());
+            return Err(error);
+        }
+        barrier.ready = Some(ready.clone());
+        (barrier.root.clone(), ready)
+    };
+    let (root, ready) = ready;
+    let ready_path =
+        longitudinal_timeline_post_pin_ready_path_v1(&root, &ready.barrier_identity_sha256);
+    if let Err(error) = write_longitudinal_timeline_barrier_document_v1(&ready_path, &ready) {
+        return set_timeline_barrier_error(
+            &scope,
+            format!("write Timeline post-pin ready document: {error}"),
+        );
+    }
+    let ready_receipt_sha256 = ready.canonical_sha256()?;
+    let release_path =
+        longitudinal_timeline_post_pin_release_path_v1(&root, &ready.barrier_identity_sha256);
+    let deadline = Instant::now() + TIMELINE_POST_PIN_BARRIER_WAIT;
+    let release = loop {
+        match read_longitudinal_timeline_barrier_document_v1::<LongitudinalTimelinePostPinReleaseV1>(
+            &release_path,
+        ) {
+            Ok(release) => break release,
+            Err(error) if error.starts_with("not_found:") => {
+                if Instant::now() >= deadline {
+                    return set_timeline_barrier_error(
+                        &scope,
+                        "Timeline post-pin barrier release timed out".to_owned(),
+                    );
+                }
+                std::thread::sleep(TIMELINE_POST_PIN_BARRIER_POLL);
+            }
+            Err(error) => {
+                return set_timeline_barrier_error(
+                    &scope,
+                    format!("read Timeline post-pin release document: {error}"),
+                );
+            }
+        }
+    };
+    if let Err(error) = release.validate() {
+        return set_timeline_barrier_error(&scope, error);
+    }
+    if release.run_identity != ready.run_identity
+        || release.barrier_identity_sha256 != ready.barrier_identity_sha256
+        || release.ready_receipt_sha256 != ready_receipt_sha256
+        || release.clean_carrier_sha256 != ready.clean_carrier_sha256
+        || release.mutated_carrier_sha256 != ready.mutated_carrier_sha256
+        || release.mutation_recipe_sha256 != ready.mutation_recipe_sha256
+    {
+        return set_timeline_barrier_error(
+            &scope,
+            "Timeline post-pin release does not match its ready document".to_owned(),
+        );
+    }
+    if let Some(abort_reason_sha256) = &release.abort_reason_sha256 {
+        return set_timeline_barrier_error(
+            &scope,
+            format!("Timeline post-pin barrier aborted: {abort_reason_sha256}"),
+        );
+    }
+    lock_state(&scope.state)
+        .timeline_post_pin_barrier
+        .as_mut()
+        .expect("armed Timeline barrier remains present")
+        .release = Some(release);
+    Ok(())
+}
+
+/// Records the exact carrier rejection reached after an armed post-pin
+/// release. Ordinary requests and counting scopes without a barrier are no-ops.
+#[doc(hidden)]
+pub fn record_timeline_carrier_mismatch_v1(
+    logical_reread_key_digest: &str,
+    kind: LongitudinalTimelineCarrierMismatchKindV1,
+) -> Result<(), String> {
+    let Some(scope) = LongitudinalCountingScopeV1::current() else {
+        return Ok(());
+    };
+    let mut state = lock_state(&scope.state);
+    let Some(barrier) = state.timeline_post_pin_barrier.as_mut() else {
+        return Ok(());
+    };
+    if let Some(error) = &barrier.error {
+        return Err(error.clone());
+    }
+    if logical_reread_key_digest != barrier.request.expected_carrier_key_digest {
+        return fail_timeline_barrier(
+            barrier,
+            "Timeline post-pin barrier rejected a different carrier",
+        );
+    }
+    if barrier.release.is_none() {
+        return fail_timeline_barrier(
+            barrier,
+            "Timeline carrier mismatch was observed before barrier release",
+        );
+    }
+    if barrier.observed_mismatch.is_some() {
+        return fail_timeline_barrier(
+            barrier,
+            "Timeline post-pin barrier observed more than one carrier mismatch",
+        );
+    }
+    barrier.observed_mismatch = Some((logical_reread_key_digest.to_owned(), kind));
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn canonical_longitudinal_response_semantic_sha256_v1(
+    response_body: &[u8],
+) -> Result<String, String> {
+    let document: serde_json::Value = serde_json::from_slice(response_body)
+        .map_err(|error| format!("counted response body is not JSON: {error}"))?;
+    let bytes = canonical_json_bytes(&document).map_err(|error| error.to_string())?;
+    Ok(sha256_bytes_hex(&bytes))
+}
+
+fn fail_timeline_barrier<T>(
+    barrier: &mut LongitudinalTimelinePostPinBarrierStateV1,
+    message: &str,
+) -> Result<T, String> {
+    barrier.error = Some(message.to_owned());
+    Err(message.to_owned())
+}
+
+fn set_timeline_barrier_error<T>(
+    scope: &LongitudinalCountingScopeV1,
+    error: String,
+) -> Result<T, String> {
+    if let Some(barrier) = lock_state(&scope.state).timeline_post_pin_barrier.as_mut() {
+        barrier.error = Some(error.clone());
+    }
+    Err(error)
+}
+
+#[doc(hidden)]
+pub fn read_longitudinal_timeline_barrier_document_v1<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+) -> Result<T, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == ErrorKind::NotFound {
+            format!("not_found:{error}")
+        } else {
+            error.to_string()
+        }
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let canonical = canonical_json_bytes(&value).map_err(|error| error.to_string())?;
+    if canonical != bytes {
+        return Err("barrier document is not canonical JSON".to_owned());
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+fn canonical_timeline_barrier_sha256<T: Serialize>(value: &T) -> Result<String, String> {
+    let value = serde_json::to_value(value).map_err(|error| error.to_string())?;
+    let bytes = canonical_json_bytes(&value).map_err(|error| error.to_string())?;
+    Ok(sha256_bytes_hex(&bytes))
+}
+
+fn validate_timeline_barrier_hashes<'a>(
+    hashes: impl IntoIterator<Item = (&'a String, &'static str)>,
+) -> Result<(), String> {
+    for (hash, field) in hashes {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!(
+                "{field} must be 64 lowercase hexadecimal characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Enter one coarse derived-access phase in the current counting scope.
@@ -1139,5 +1685,211 @@ mod tests {
             .expect("receipt object")
             .insert("wallNanos".to_owned(), serde_json::json!(1));
         assert!(serde_json::from_value::<LongitudinalCounterReceiptV1>(value).is_err());
+    }
+
+    #[test]
+    fn timeline_post_pin_barrier_binds_exact_request_boundary_and_carrier_mismatch() {
+        let root = tempfile::tempdir().expect("barrier root");
+        let request = LongitudinalTimelinePostPinBarrierRequestV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1.to_owned(),
+            barrier_identity_sha256: hash('b'),
+            expected_carrier_key_digest: hash('c'),
+            clean_carrier_sha256: hash('d'),
+            mutated_carrier_sha256: hash('e'),
+            mutation_recipe_sha256: hash('f'),
+        };
+        let scope = LongitudinalCountingScopeV1::new(hash('a'))
+            .expect("valid scope")
+            .with_timeline_post_pin_barrier(root.path(), request.clone())
+            .expect("valid barrier");
+        let ready_path = longitudinal_timeline_post_pin_ready_path_v1(
+            root.path(),
+            &request.barrier_identity_sha256,
+        );
+        let release_path = longitudinal_timeline_post_pin_release_path_v1(
+            root.path(),
+            &request.barrier_identity_sha256,
+        );
+        let controller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let ready: LongitudinalTimelinePostPinReadyV1 = loop {
+                match std::fs::read(&ready_path) {
+                    Ok(bytes) => break serde_json::from_slice(&bytes).expect("ready document"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        assert!(Instant::now() < deadline, "ready document timed out");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("read ready document: {error}"),
+                }
+            };
+            ready.validate().expect("valid ready document");
+            let release = LongitudinalTimelinePostPinReleaseV1 {
+                schema: LONGITUDINAL_TIMELINE_POST_PIN_RELEASE_SCHEMA_V1.to_owned(),
+                run_identity: ready.run_identity.clone(),
+                barrier_identity_sha256: ready.barrier_identity_sha256.clone(),
+                ready_receipt_sha256: ready.canonical_sha256().expect("ready identity"),
+                clean_carrier_sha256: hash('d'),
+                mutated_carrier_sha256: hash('e'),
+                mutation_recipe_sha256: hash('f'),
+                derivative_inventory_sha256: hash('1'),
+                abort_reason_sha256: None,
+            };
+            write_longitudinal_timeline_barrier_document_v1(&release_path, &release)
+                .expect("write release");
+        });
+
+        let _guard = scope.enter();
+        record_timeline_selected_carriers(1);
+        reach_timeline_carrier_locators_selected_v1().expect("release post-pin barrier");
+        record_timeline_carrier_mismatch_v1(
+            &hash('c'),
+            LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+        )
+        .expect("record exact mismatch");
+        controller.join().expect("barrier controller");
+
+        let receipt = scope
+            .timeline_post_pin_barrier_receipt()
+            .expect("complete barrier")
+            .expect("barrier receipt");
+        receipt.validate().expect("valid barrier receipt");
+        assert_eq!(receipt.run_identity, hash('a'));
+        assert_eq!(receipt.carrier_opens_before, 0);
+        assert_eq!(receipt.selected_carriers_before, 1);
+        assert_eq!(receipt.expected_carrier_key_digest, hash('c'));
+        assert_eq!(receipt.observed_mismatch_key_digest, hash('c'));
+        assert_eq!(
+            receipt.mismatch_kind,
+            LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness
+        );
+        assert_eq!(receipt.derivative_inventory_sha256, hash('1'));
+    }
+
+    #[test]
+    fn timeline_post_pin_observations_are_noops_without_an_armed_request() {
+        assert!(reach_timeline_carrier_locators_selected_v1().is_ok());
+        assert!(
+            record_timeline_carrier_mismatch_v1(
+                "not-a-digest",
+                LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+            )
+            .is_ok()
+        );
+
+        let scope = LongitudinalCountingScopeV1::new(hash('a')).expect("valid scope");
+        let _guard = scope.enter();
+        assert!(reach_timeline_carrier_locators_selected_v1().is_ok());
+        assert!(
+            record_timeline_carrier_mismatch_v1(
+                "not-a-digest",
+                LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            scope
+                .timeline_post_pin_barrier_receipt()
+                .expect("unarmed receipt lookup"),
+            None
+        );
+    }
+
+    #[test]
+    fn barrier_response_semantic_is_canonical_json() {
+        let left = canonical_longitudinal_response_semantic_sha256_v1(br#"{"b":2,"a":1}"#)
+            .expect("left semantic");
+        let right = canonical_longitudinal_response_semantic_sha256_v1(br#"{"a":1,"b":2}"#)
+            .expect("right semantic");
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn timeline_post_pin_barrier_rejects_a_different_carrier_mismatch() {
+        let root = tempfile::tempdir().expect("barrier root");
+        let request = LongitudinalTimelinePostPinBarrierRequestV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1.to_owned(),
+            barrier_identity_sha256: hash('b'),
+            expected_carrier_key_digest: hash('c'),
+            clean_carrier_sha256: hash('d'),
+            mutated_carrier_sha256: hash('e'),
+            mutation_recipe_sha256: hash('f'),
+        };
+        let scope = LongitudinalCountingScopeV1::new(hash('a'))
+            .expect("valid scope")
+            .with_timeline_post_pin_barrier(root.path(), request)
+            .expect("valid barrier");
+        let _guard = scope.enter();
+        assert_eq!(
+            record_timeline_carrier_mismatch_v1(
+                &hash('9'),
+                LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+            ),
+            Err("Timeline post-pin barrier rejected a different carrier".to_owned())
+        );
+        assert!(scope.timeline_post_pin_barrier_receipt().is_err());
+    }
+
+    #[test]
+    fn timeline_post_pin_barrier_abort_release_unblocks_and_fails_closed() {
+        let root = tempfile::tempdir().expect("barrier root");
+        let request = LongitudinalTimelinePostPinBarrierRequestV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1.to_owned(),
+            barrier_identity_sha256: hash('b'),
+            expected_carrier_key_digest: hash('c'),
+            clean_carrier_sha256: hash('d'),
+            mutated_carrier_sha256: hash('e'),
+            mutation_recipe_sha256: hash('f'),
+        };
+        let scope = LongitudinalCountingScopeV1::new(hash('a'))
+            .expect("valid scope")
+            .with_timeline_post_pin_barrier(root.path(), request.clone())
+            .expect("valid barrier");
+        let ready_path = longitudinal_timeline_post_pin_ready_path_v1(
+            root.path(),
+            &request.barrier_identity_sha256,
+        );
+        let release_path = longitudinal_timeline_post_pin_release_path_v1(
+            root.path(),
+            &request.barrier_identity_sha256,
+        );
+        let controller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let ready: LongitudinalTimelinePostPinReadyV1 = loop {
+                match read_longitudinal_timeline_barrier_document_v1(&ready_path) {
+                    Ok(ready) => break ready,
+                    Err(error) if error.starts_with("not_found:") => {
+                        assert!(Instant::now() < deadline, "ready document timed out");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("read ready document: {error}"),
+                }
+            };
+            let release = LongitudinalTimelinePostPinReleaseV1 {
+                schema: LONGITUDINAL_TIMELINE_POST_PIN_RELEASE_SCHEMA_V1.to_owned(),
+                run_identity: ready.run_identity.clone(),
+                barrier_identity_sha256: ready.barrier_identity_sha256.clone(),
+                ready_receipt_sha256: ready.canonical_sha256().expect("ready identity"),
+                clean_carrier_sha256: request.clean_carrier_sha256,
+                mutated_carrier_sha256: request.mutated_carrier_sha256,
+                mutation_recipe_sha256: request.mutation_recipe_sha256,
+                derivative_inventory_sha256: hash('1'),
+                abort_reason_sha256: Some(hash('2')),
+            };
+            write_longitudinal_timeline_barrier_document_v1(&release_path, &release)
+                .expect("write abort release");
+        });
+
+        let _guard = scope.enter();
+        record_timeline_selected_carriers(1);
+        let error =
+            reach_timeline_carrier_locators_selected_v1().expect_err("abort release fails closed");
+        controller.join().expect("barrier controller");
+
+        assert_eq!(
+            error,
+            format!("Timeline post-pin barrier aborted: {}", hash('2'))
+        );
+        assert!(scope.timeline_post_pin_barrier_receipt().is_err());
     }
 }

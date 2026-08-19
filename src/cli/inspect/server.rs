@@ -82,6 +82,10 @@ struct RequestHead {
 struct LongitudinalCountingRequest {
     run_identity: String,
     context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
+    #[serde(default)]
+    timeline_post_pin_barrier: Option<
+        pointbreak::bench_support::longitudinal::LongitudinalTimelinePostPinBarrierRequestV1,
+    >,
 }
 
 #[derive(Debug)]
@@ -766,19 +770,98 @@ fn handle_connection(
     }
     #[cfg(feature = "longitudinal-counting")]
     if let Some(counting_request) = longitudinal_counting_request(&request)? {
-        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
-            counting_request.run_identity,
-        )
-        .map_err(std::io::Error::other)?;
+        let LongitudinalCountingRequest {
+            run_identity,
+            context,
+            timeline_post_pin_barrier,
+        } = counting_request;
+        let mut scope =
+            pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(run_identity)
+                .map_err(std::io::Error::other)?;
+        if let Some(barrier) = timeline_post_pin_barrier {
+            // A failed-closed barrier must still answer with a typed response:
+            // a dropped connection leaves the controller unable to attribute
+            // the refusal, while nothing here has touched request state yet.
+            if request.method != "GET" || path != "/api/v2/history" {
+                return write_response(
+                    stream,
+                    &Response::text(
+                        "400 Bad Request",
+                        "Timeline post-pin barrier is valid only for one derived Timeline request",
+                    ),
+                );
+            }
+            if context.manifest_sha256 != barrier.barrier_identity_sha256 {
+                return write_response(
+                    stream,
+                    &Response::text(
+                        "400 Bad Request",
+                        "Timeline post-pin barrier identity must bind the counter manifest",
+                    ),
+                );
+            }
+            let Some(root) = std::env::var_os(
+                pointbreak::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_ROOT_ENV_V1,
+            ) else {
+                return write_response(
+                    stream,
+                    &Response::text(
+                        "400 Bad Request",
+                        "Timeline post-pin barrier request omitted its explicit child environment root",
+                    ),
+                );
+            };
+            scope = match scope.with_timeline_post_pin_barrier(PathBuf::from(root), barrier) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    return write_response(
+                        stream,
+                        &Response::text(
+                            "400 Bad Request",
+                            &format!("Timeline post-pin barrier arming failed: {error}"),
+                        ),
+                    );
+                }
+            };
+        }
         let _guard = scope.enter();
         let response = route(state, policy.serve_static, &request.method, path, query);
         record_response_body(&response);
-        let receipt = longitudinal_receipt_header(&scope, counting_request.context, &response)?;
-        return write_response_inner(
-            stream,
-            &response,
-            Some(("X-Pointbreak-Longitudinal-Receipt", receipt.as_str())),
-        );
+        let receipt = longitudinal_receipt_header(&scope, context, &response)?;
+        // An armed barrier the route never consumed must answer with the
+        // route's own outcome attached: dropping the connection here hides
+        // which early response prevented the pin from being reached.
+        let barrier_receipt = match longitudinal_barrier_receipt_header(&scope) {
+            Ok(barrier_receipt) => barrier_receipt,
+            Err(error) => {
+                let body_prefix: String = String::from_utf8_lossy(&response.body)
+                    .chars()
+                    .take(400)
+                    .collect();
+                return write_response(
+                    stream,
+                    &Response::text(
+                        "400 Bad Request",
+                        &format!(
+                            "Timeline post-pin barrier failed: {error}; \
+                             route response was {} with body {body_prefix}",
+                            response.status
+                        ),
+                    ),
+                );
+            }
+        };
+        let mut headers = vec![(
+            pointbreak::bench_support::longitudinal::LONGITUDINAL_COUNTER_RECEIPT_HEADER_V1,
+            receipt.as_str(),
+        )];
+        if let Some(barrier_receipt) = &barrier_receipt {
+            headers.push((
+                pointbreak::bench_support::longitudinal::LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_HEADER_V1,
+                barrier_receipt.as_str(),
+            ));
+        }
+        return write_response_inner(stream, &response, &headers);
     }
 
     let response = route(state, policy.serve_static, &request.method, path, query);
@@ -792,12 +875,34 @@ fn longitudinal_receipt_header(
     response: &Response,
 ) -> std::io::Result<String> {
     context.success = response.status == "200 OK";
+    if scope.has_timeline_post_pin_barrier() {
+        context.semantic_result_sha256 =
+            pointbreak::bench_support::longitudinal::canonical_longitudinal_response_semantic_sha256_v1(
+                &response.body,
+            )
+            .map_err(std::io::Error::other)?;
+    }
     let receipt = scope
         .receipt(context)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let receipt =
         serde_json::to_vec(&receipt).map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(URL_SAFE_NO_PAD.encode(receipt))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn longitudinal_barrier_receipt_header(
+    scope: &pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1,
+) -> std::io::Result<Option<String>> {
+    scope
+        .timeline_post_pin_barrier_receipt()
+        .map_err(std::io::Error::other)?
+        .map(|receipt| {
+            serde_json::to_vec(&receipt)
+                .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+        .transpose()
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -1704,7 +1809,7 @@ fn routed_api_response(result: Result<api::RoutedJson, String>) -> Response {
 
 fn write_response(stream: TcpStream, response: &Response) -> std::io::Result<()> {
     record_response_body(response);
-    write_response_inner(stream, response, None)
+    write_response_inner(stream, response, &[])
 }
 
 fn record_response_body(response: &Response) {
@@ -1717,7 +1822,7 @@ fn record_response_body(response: &Response) {
 fn write_response_inner(
     mut stream: TcpStream,
     response: &Response,
-    extra_header: Option<(&str, &str)>,
+    extra_headers: &[(&str, &str)],
 ) -> std::io::Result<()> {
     let mut header = format!(
         "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n",
@@ -1736,7 +1841,7 @@ fn write_response_inner(
         header.push_str(value);
         header.push_str("\r\n");
     }
-    if let Some((name, value)) = extra_header {
+    for (name, value) in extra_headers {
         header.push_str(name);
         header.push_str(": ");
         header.push_str(value);
@@ -2366,7 +2471,63 @@ mod tests {
                 .expect("receipt JSON");
         assert_eq!(receipt.operation, "WARM_HEAD");
         assert!(receipt.success);
+        assert_eq!(receipt.semantic_result_sha256, "1".repeat(64));
         assert_eq!(receipt.counters.response_bytes, response.body.len() as u64);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn barrier_counting_binds_the_actual_canonical_response_semantic() {
+        use pointbreak::bench_support::longitudinal::{
+            LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1,
+            LongitudinalCounterReceiptContextV1, LongitudinalCountingScopeV1,
+            LongitudinalTimelinePostPinBarrierRequestV1,
+            canonical_longitudinal_response_semantic_sha256_v1,
+        };
+
+        let root = tempfile::tempdir().expect("barrier root");
+        let barrier = LongitudinalTimelinePostPinBarrierRequestV1 {
+            schema: LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_REQUEST_SCHEMA_V1.to_owned(),
+            barrier_identity_sha256: "b".repeat(64),
+            expected_carrier_key_digest: "c".repeat(64),
+            clean_carrier_sha256: "d".repeat(64),
+            mutated_carrier_sha256: "e".repeat(64),
+            mutation_recipe_sha256: "f".repeat(64),
+        };
+        let scope = LongitudinalCountingScopeV1::new("a".repeat(64))
+            .expect("valid scope")
+            .with_timeline_post_pin_barrier(root.path(), barrier)
+            .expect("armed barrier");
+        let response = Response::json_error("503 Service Unavailable", "projection_invalid");
+        let supplied_semantic = "1".repeat(64);
+        let encoded = longitudinal_receipt_header(
+            &scope,
+            LongitudinalCounterReceiptContextV1 {
+                root_identity: "2".repeat(64),
+                operation: "timeline_invalid_signature_fault".to_owned(),
+                phase: "trust_suite".to_owned(),
+                base_execution_identity_sha256: "3".repeat(64),
+                derivative_execution_identity_sha256: "4".repeat(64),
+                manifest_sha256: "b".repeat(64),
+                schedule_sha256: "5".repeat(64),
+                success: true,
+                semantic_result_sha256: supplied_semantic.clone(),
+                include_capacity_ownership: false,
+            },
+            &response,
+        )
+        .expect("receipt transport");
+        let receipt: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptV1 =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).expect("receipt base64"))
+                .expect("receipt JSON");
+
+        assert!(!receipt.success);
+        assert_ne!(receipt.semantic_result_sha256, supplied_semantic);
+        assert_eq!(
+            receipt.semantic_result_sha256,
+            canonical_longitudinal_response_semantic_sha256_v1(&response.body)
+                .expect("canonical response semantic")
+        );
     }
 
     #[test]

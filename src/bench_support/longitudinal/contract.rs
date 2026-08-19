@@ -21,6 +21,8 @@ pub const LONGITUDINAL_OPERATION_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-operation-receipt.v1";
 pub const LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-counter-receipt.v1";
+pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-timeline-post-pin-barrier-receipt.v1";
 pub const LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.longitudinal-evidence-package.v1";
 pub const LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1: &str =
@@ -3171,6 +3173,112 @@ pub struct LongitudinalCounterReceiptV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity_ownership: Option<LongitudinalCapacityOwnershipV1>,
     pub receipt_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalTimelinePostPinBoundaryV1 {
+    CarrierLocatorsSelected,
+}
+
+impl LongitudinalTimelinePostPinBoundaryV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CarrierLocatorsSelected => "carrier_locators_selected",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalTimelineCarrierMismatchKindV1 {
+    ValidationWitness,
+}
+
+impl LongitudinalTimelineCarrierMismatchKindV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ValidationWitness => "validation_witness",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalTimelinePostPinBarrierReceiptV1 {
+    pub schema: String,
+    pub run_identity: String,
+    pub barrier_identity_sha256: String,
+    pub boundary: LongitudinalTimelinePostPinBoundaryV1,
+    pub carrier_opens_before: u64,
+    pub selected_carriers_before: u64,
+    pub expected_carrier_key_digest: String,
+    pub observed_mismatch_key_digest: String,
+    pub mismatch_kind: LongitudinalTimelineCarrierMismatchKindV1,
+    pub clean_carrier_sha256: String,
+    pub mutated_carrier_sha256: String,
+    pub mutation_recipe_sha256: String,
+    pub derivative_inventory_sha256: String,
+    pub ready_receipt_sha256: String,
+    pub release_receipt_sha256: String,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalTimelinePostPinBarrierReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        for (hash, field) in [
+            (&self.run_identity, "run identity"),
+            (&self.barrier_identity_sha256, "barrier identity"),
+            (
+                &self.expected_carrier_key_digest,
+                "expected carrier key digest",
+            ),
+            (
+                &self.observed_mismatch_key_digest,
+                "observed mismatch key digest",
+            ),
+            (&self.clean_carrier_sha256, "clean carrier SHA-256"),
+            (&self.mutated_carrier_sha256, "mutated carrier SHA-256"),
+            (&self.mutation_recipe_sha256, "mutation recipe SHA-256"),
+            (
+                &self.derivative_inventory_sha256,
+                "derivative inventory SHA-256",
+            ),
+            (&self.ready_receipt_sha256, "ready receipt SHA-256"),
+            (&self.release_receipt_sha256, "release receipt SHA-256"),
+            (&self.receipt_sha256, "barrier receipt SHA-256"),
+        ] {
+            validate_hex(hash, 64, field)?;
+        }
+        if self.carrier_opens_before != 0 {
+            return Err(LongitudinalContractError::CountMismatch {
+                field: "Timeline post-pin carrier opens before",
+                expected: 0,
+                actual: self.carrier_opens_before,
+            });
+        }
+        if self.selected_carriers_before == 0
+            || self.expected_carrier_key_digest != self.observed_mismatch_key_digest
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "Timeline post-pin barrier receipt",
+        )
+    }
 }
 
 impl LongitudinalCounterReceiptV1 {

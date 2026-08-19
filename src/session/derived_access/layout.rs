@@ -294,6 +294,18 @@ impl DerivedStorageLayout {
         })
     }
 
+    /// True only for a governed writer-lock file name. An idle store carries
+    /// zero-byte writer locks as a side effect of ordinary CLI writes; every
+    /// other governed entry represents real derived state.
+    #[cfg(feature = "longitudinal-counting")]
+    pub(crate) fn is_derived_writer_lock_entry(name: &str, is_file: bool) -> bool {
+        is_file
+            && Self::namespaces().any(|namespace| {
+                let layout = Self::for_namespace(Path::new(""), namespace);
+                name == layout.writer_lock_name()
+            })
+    }
+
     fn namespaces() -> impl Iterator<Item = DerivedStorageNamespace> {
         [
             DerivedStorageNamespace::Stable,

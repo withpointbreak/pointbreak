@@ -12,12 +12,12 @@ use rusqlite::types::Value;
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
-    record_timeline_correlation_support_carriers, record_timeline_entries_emitted,
-    record_timeline_exhaustive_candidates, record_timeline_removal_support_carriers,
-    record_timeline_revision_candidate_carriers, record_timeline_selected_carriers,
-    record_timeline_signature_support_carriers, record_timeline_sqlite_candidates,
-    record_timeline_sqlite_facet_rows, record_timeline_sqlite_window_rows,
-    record_timeline_trust_support_carriers,
+    reach_timeline_carrier_locators_selected_v1, record_timeline_correlation_support_carriers,
+    record_timeline_entries_emitted, record_timeline_exhaustive_candidates,
+    record_timeline_removal_support_carriers, record_timeline_revision_candidate_carriers,
+    record_timeline_selected_carriers, record_timeline_signature_support_carriers,
+    record_timeline_sqlite_candidates, record_timeline_sqlite_facet_rows,
+    record_timeline_sqlite_window_rows, record_timeline_trust_support_carriers,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::documents::{
@@ -1397,6 +1397,8 @@ fn validate_timeline_carriers(
     }
     let primary_event_ids = primary_event_ids.into_iter().collect::<Vec<_>>();
     hook(TimelineReadBoundary::CarrierLocatorsSelected);
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    reach_timeline_carrier_locators_selected_v1().map_err(TimelinePageError::Invalid)?;
     let primary_hydrated = hydrate_validated(service, connection, &primary_event_ids, as_of)?;
     hook(TimelineReadBoundary::CarrierHydrationMidpoint);
     let primary_by_id = primary_hydrated
@@ -2660,6 +2662,17 @@ mod tests {
                 "Timeline adapter must not contain {forbidden}"
             );
         }
+
+        let selected = implementation
+            .find("hook(TimelineReadBoundary::CarrierLocatorsSelected);")
+            .expect("carrier-locator selection boundary");
+        let barrier = implementation
+            .rfind("reach_timeline_carrier_locators_selected_v1()")
+            .expect("request-local post-pin barrier");
+        let hydration = implementation
+            .find("let primary_hydrated = hydrate_validated(")
+            .expect("first carrier hydration");
+        assert!(selected < barrier && barrier < hydration);
 
         let cli = include_str!("../../cli/inspect/event_history_query.rs");
         assert!(cli.contains("event_history_search_record(entry)"));

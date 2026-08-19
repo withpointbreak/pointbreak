@@ -937,12 +937,22 @@ pub struct DecisionContinuityMatrixIds {
 pub struct DecisionContinuityMatrix {
     _root: tempfile::TempDir,
     repo: PathBuf,
+    pointbreak_home: PathBuf,
+    fixture_witness: PathBuf,
     pub ids: DecisionContinuityMatrixIds,
 }
 
 impl DecisionContinuityMatrix {
     pub fn repo(&self) -> &Path {
         &self.repo
+    }
+
+    pub fn pointbreak_home(&self) -> &Path {
+        &self.pointbreak_home
+    }
+
+    pub fn fixture_witness(&self) -> &Path {
+        &self.fixture_witness
     }
 }
 
@@ -1009,10 +1019,15 @@ pub fn decision_continuity_matrix() -> DecisionContinuityMatrix {
     );
     let ids = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|error| panic!("parse generated matrix ids: {error}"));
+    let fixture_witness = root.path().join("fixture-witness.json");
+    std::fs::write(&fixture_witness, &output.stdout).expect("write decision matrix witness");
+    let pointbreak_home = repo.join(".git/pointbreak-home");
 
     DecisionContinuityMatrix {
         _root: root,
         repo,
+        pointbreak_home,
+        fixture_witness,
         ids,
     }
 }

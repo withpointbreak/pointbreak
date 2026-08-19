@@ -10,7 +10,10 @@ use rusqlite::{
 
 use super::{immutable_read_only_open_is_safe, sqlite_immutable_read_only_uri};
 #[cfg(any(test, feature = "longitudinal-counting"))]
-use crate::bench_support::longitudinal::record_chronological_sort_items;
+use crate::bench_support::longitudinal::{
+    LongitudinalTimelineCarrierMismatchKindV1, record_chronological_sort_items,
+    record_timeline_carrier_mismatch_v1,
+};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
@@ -989,6 +992,16 @@ fn hydrate_locator_row(
             ))
         })?;
     if sha256_bytes_hex(&bytes) != stored.validation_witness {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_timeline_carrier_mismatch_v1(
+            &stored.logical_reread_key,
+            LongitudinalTimelineCarrierMismatchKindV1::ValidationWitness,
+        )
+        .map_err(|error| {
+            SqliteLocatorError::Metadata(format!(
+                "Timeline post-pin carrier mismatch observation failed: {error}"
+            ))
+        })?;
         return Err(SqliteLocatorError::CarrierMismatch(stored.cursor));
     }
     let event = EventStore::decode_qualification_entry(stored.logical_reread_key.clone(), bytes)
