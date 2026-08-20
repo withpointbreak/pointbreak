@@ -413,7 +413,7 @@ derived-change-fixture request:
 # Compare strict and active Inspector Change reads and classify direct adapter work.
 [group('quality')]
 derived-change-read request:
-    POINTBREAK_HOME="$(jq -ejr '.pointbreakHome' "{{ request }}")" \
+    POINTBREAK_HOME="$(jq -ejr '.base.pointbreakHome // .pointbreakHome' "{{ request }}")" \
         POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
         cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-change-read-evidence --derived-access-request="{{ request }}"
