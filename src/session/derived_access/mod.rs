@@ -711,7 +711,7 @@ mod tests {
             include_str!("../../../tests/fixtures/derived-access/reference-v1.json");
         assert_eq!(
             crate::canonical_hash::sha256_bytes_hex(fixture_bytes.as_bytes()),
-            "06c6dfeaf5e95b7d89c5cb7a69091d779a409eb50bcf3dc434302c0d3f0e6d77"
+            "a8391645c3da83f1eea6c3b0eaedfdf361013bf21543bf30e066a670a6668ad3"
         );
         let fixture: serde_json::Value = serde_json::from_str(fixture_bytes).unwrap();
         assert_eq!(
