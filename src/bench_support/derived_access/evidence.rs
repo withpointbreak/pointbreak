@@ -3943,6 +3943,19 @@ pub struct QualificationDerivedAccessFragmentRequestV1 {
     pub schema: String,
     pub execution: QualificationDerivedAccessExecutionIdentityV1,
     pub receipt_paths: Vec<PathBuf>,
+    /// Evaluator revision the fragment is authored under. Absent means v3, so
+    /// every historical request keeps its exact meaning. A v4 package must
+    /// combine the v2 Change-read fragment with native, lifecycle, retained,
+    /// scale, and resource fragments, and those receipt kinds carry no
+    /// revision of their own, so the request declares it; the summary
+    /// validator still forces V1 Change receipts to v3 and V2 Change receipts
+    /// to v4, and package assembly still refuses mixed revisions.
+    #[serde(default = "default_fragment_evaluator_revision_v1")]
+    pub evaluator_revision: String,
+}
+
+fn default_fragment_evaluator_revision_v1() -> String {
+    super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -4243,11 +4256,27 @@ pub fn build_qualification_derived_access_fragment_v1(
         return Err("invalid derived-access fragment request".to_owned());
     }
     request.execution.validate()?;
+    let (requested_revision, requested_procedure_sha256) = match request.evaluator_revision.as_str()
+    {
+        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3 => (
+            super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3,
+            super::qualification_derived_access_evaluator_v3_procedure_sha256(),
+        ),
+        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4 => (
+            super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4,
+            super::qualification_derived_access_evaluator_v4_procedure_sha256(),
+        ),
+        _ => {
+            return Err(
+                "derived-access fragment request names an unsupported evaluator revision"
+                    .to_owned(),
+            );
+        }
+    };
     let mut package = QualificationDerivedAccessPackageV1 {
         schema: super::QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
-        evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
-        evaluator_procedure_sha256:
-            super::qualification_derived_access_evaluator_v3_procedure_sha256(),
+        evaluator_revision: requested_revision.to_owned(),
+        evaluator_procedure_sha256: requested_procedure_sha256,
         proposed_profile_id: "sqlite-wal-bodyless-v1".to_owned(),
         execution_identities: vec![request.execution.clone()],
         product_identities: Vec::new(),

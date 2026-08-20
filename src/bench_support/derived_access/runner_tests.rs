@@ -129,6 +129,7 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
                 schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
                 execution: execution.clone(),
                 receipt_paths: vec![path.clone()],
+                evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
             })
             .expect("serialize reserved fragment request"),
         )
@@ -222,6 +223,7 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
                 schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
                 execution: execution.clone(),
                 receipt_paths: vec![path.clone()],
+                evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
             })
             .expect("serialize fragment request"),
         )
@@ -304,6 +306,7 @@ fn diagnostic_documents_are_rejected_by_fragment_and_package_evidence_boundaries
             schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
             execution: execution.clone(),
             receipt_paths: vec![ordinary_receipt],
+            evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
         })
         .expect("serialize reserved-path fragment request"),
     )
@@ -1432,6 +1435,7 @@ fn bound_change_read_receipt_crosses_the_fragment_boundary() {
             schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
             execution,
             receipt_paths: vec![receipt_path.clone()],
+            evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
         })
         .expect("serialize fragment request"),
     )
@@ -1881,6 +1885,7 @@ fn scale_receipts_rederive_aggregates_and_reject_missing_raw_samples() {
             schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
             execution: receipt.execution.clone(),
             receipt_paths: vec![receipt_path.clone()],
+            evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
         })
         .expect("serialize fragment request"),
     )
@@ -1930,6 +1935,7 @@ fn bound_smoke_fragment_assembles_into_a_verified_incomplete_evidence_package() 
         schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
         execution,
         receipt_paths: vec![receipt_path],
+        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3.to_owned(),
     };
     let request_path = root.path().join("fragment-request.json");
     std::fs::write(
@@ -1954,4 +1960,118 @@ fn bound_smoke_fragment_assembles_into_a_verified_incomplete_evidence_package() 
         QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
     );
     verify_qualification_derived_access_package_v1(&package_root).expect("verify package");
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[test]
+fn fragment_request_revision_authors_v4_and_assembly_still_refuses_mixed_authority() {
+    let root = tempfile::tempdir().expect("fragment workspace");
+    let smoke =
+        run_qualification_derived_access_non_timing_smoke_at_v1(&root.path().join("d0-workspace"))
+            .expect("D0 smoke");
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let receipt = QualificationDerivedAccessNativeSmokeRunReceiptV1 {
+        schema: QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1.to_owned(),
+        execution: execution.clone(),
+        payload: QualificationDerivedAccessNativeSmokePayloadV1::D0_128(Box::new(smoke)),
+    };
+    let receipt_path = root.path().join("native-smoke.json");
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize smoke receipt"),
+    )
+    .expect("write smoke receipt");
+
+    let write_request = |name: &str, revision: &str| {
+        let request_path = root.path().join(name);
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                receipt_paths: vec![receipt_path.clone()],
+                evaluator_revision: revision.to_owned(),
+            })
+            .expect("serialize fragment request"),
+        )
+        .expect("write fragment request");
+        request_path
+    };
+
+    // An unsupported revision is refused before any receipt is read.
+    let unsupported = write_request("fragment-request-unsupported.json", "evaluator.v9");
+    let error = build_qualification_derived_access_fragment_v1(&unsupported)
+        .expect_err("unsupported revision must refuse");
+    assert!(error.contains("unsupported evaluator revision"), "{error}");
+
+    // A request that omits the field keeps the historical v3 meaning.
+    let default_path = root.path().join("fragment-request-default.json");
+    std::fs::write(
+        &default_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1,
+            "execution": execution,
+            "receiptPaths": [receipt_path],
+        }))
+        .expect("serialize default request"),
+    )
+    .expect("write default request");
+    let v3_fragment =
+        build_qualification_derived_access_fragment_v1(&default_path).expect("build v3 fragment");
+    assert_eq!(
+        v3_fragment.package.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
+    );
+
+    // A change-read-free receipt can now be authored under v4 with the v4
+    // procedure binding, so it can join the v2 Change-read fragment's package.
+    let v4_request = write_request(
+        "fragment-request-v4.json",
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4,
+    );
+    let v4_fragment =
+        build_qualification_derived_access_fragment_v1(&v4_request).expect("build v4 fragment");
+    assert_eq!(
+        v4_fragment.package.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+    );
+    assert_eq!(
+        v4_fragment.package.evaluator_procedure_sha256,
+        qualification_derived_access_evaluator_v4_procedure_sha256()
+    );
+
+    let v3_path = root.path().join("fragment-v3.json");
+    std::fs::write(
+        &v3_path,
+        serde_json::to_vec_pretty(&v3_fragment).expect("serialize v3 fragment"),
+    )
+    .expect("write v3 fragment");
+    let v4_path = root.path().join("fragment-v4.json");
+    std::fs::write(
+        &v4_path,
+        serde_json::to_vec_pretty(&v4_fragment).expect("serialize v4 fragment"),
+    )
+    .expect("write v4 fragment");
+
+    // Mixed revisions still refuse assembly.
+    let mixed = assemble_qualification_derived_access_package_v1(
+        &[v4_path.clone(), v3_path],
+        &root.path().join("mixed-package"),
+    )
+    .expect_err("mixed revisions must refuse assembly");
+    assert!(mixed.contains("mix package authority"), "{mixed}");
+
+    // A v4 package assembles and independently verifies from the v4 fragment.
+    let package_root = root.path().join("v4-package");
+    let evaluation = assemble_qualification_derived_access_package_v1(&[v4_path], &package_root)
+        .expect("assemble v4 package");
+    assert_eq!(
+        evaluation.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+    );
+    assert_eq!(
+        evaluation.outcome,
+        QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+    );
+    verify_qualification_derived_access_package_v1(&package_root).expect("verify v4 package");
 }

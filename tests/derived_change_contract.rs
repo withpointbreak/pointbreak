@@ -85,9 +85,9 @@ fn derived_change_recipe_binds_pointbreak_home_from_its_request() {
         })
         .expect("derived Change read recipe");
 
-    assert!(
-        recipe.contains(r#"POINTBREAK_HOME="$(jq -ejr '.pointbreakHome' "{{ request }}")" \"#,)
-    );
+    assert!(recipe.contains(
+        r#"POINTBREAK_HOME="$(jq -ejr '.base.pointbreakHome // .pointbreakHome' "{{ request }}")" \"#,
+    ));
     assert!(!recipe.contains("POINTBREAK_HOME=\"$$("));
     assert!(recipe.contains("POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1"));
 }
