@@ -429,14 +429,36 @@ impl QualificationDerivedChangeReadReceiptV2 {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        let failures = self.validation_failures();
+        match failures.len() {
+            0 => Ok(()),
+            1 => Err(failures.into_iter().next().expect("exactly one failure")),
+            count => Err(format!(
+                "{count} receipt conditions failed: {}",
+                failures.join(" | ")
+            )),
+        }
+    }
+
+    /// Collect EVERY failing receipt condition instead of stopping at the
+    /// first, so one Red producer invocation surfaces its complete failure
+    /// set. Structural failures that make the later checks meaningless
+    /// (schema, completeness, base validity, exact-source purpose, self-hash,
+    /// identity derivability, and the required-case census) still
+    /// short-circuit; everything after them is collected independently with
+    /// per-row guards. The accept/reject set is identical to the historical
+    /// first-failure form: a receipt is valid exactly when this is empty.
+    pub fn validation_failures(&self) -> Vec<String> {
         if self.schema != QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2
             || !self.complete
             || self.timeline_read_rows.is_empty()
             || self.timeline_storage_rows.is_empty()
         {
-            return Err("derived Change read successor receipt is incomplete".to_owned());
+            return vec!["derived Change read successor receipt is incomplete".to_owned()];
         }
-        self.base.validate()?;
+        if let Err(error) = self.base.validate() {
+            return vec![error];
+        }
         if self.base.purpose
             != QualificationDerivedChangeEvidencePurposeV1::ExactSourceQualification
             || !self.base.product.is_exact_source_for(&self.base.execution)
@@ -447,16 +469,26 @@ impl QualificationDerivedChangeReadReceiptV2 {
                 .iter()
                 .any(|feature| feature == "longitudinal-counting")
         {
-            return Err("Change read successor receipt is not exact-source evidence".to_owned());
+            return vec!["Change read successor receipt is not exact-source evidence".to_owned()];
         }
-        validate_digest(&self.receipt_sha256, "Change read successor receipt")?;
-        if self.receipt_sha256 != self.canonical_sha256()? {
-            return Err("derived Change read successor receipt hash drifted".to_owned());
+        if let Err(error) = validate_digest(&self.receipt_sha256, "Change read successor receipt") {
+            return vec![error];
         }
-
-        let product_identity_sha256 = self.base.product.canonical_sha256()?;
-        let execution_identity_sha256 = self.base.execution.canonical_sha256()?;
-        let mut run_identities = BTreeSet::new();
+        match self.canonical_sha256() {
+            Ok(canonical) if canonical == self.receipt_sha256 => {}
+            Ok(_) => {
+                return vec!["derived Change read successor receipt hash drifted".to_owned()];
+            }
+            Err(error) => return vec![error],
+        }
+        let product_identity_sha256 = match self.base.product.canonical_sha256() {
+            Ok(digest) => digest,
+            Err(error) => return vec![error],
+        };
+        let execution_identity_sha256 = match self.base.execution.canonical_sha256() {
+            Ok(digest) => digest,
+            Err(error) => return vec![error],
+        };
         let expected_cases = super::required_timeline_cases_v1(self.base.fixture)
             .iter()
             .copied()
@@ -468,11 +500,15 @@ impl QualificationDerivedChangeReadReceiptV2 {
             .collect::<BTreeSet<_>>();
         if observed_cases != expected_cases || observed_cases.len() != self.timeline_read_rows.len()
         {
-            return Err("derived Timeline receipt omitted required cases".to_owned());
+            return vec!["derived Timeline receipt omitted required cases".to_owned()];
         }
+
+        let mut failures = Vec::new();
+        let mut run_identities = BTreeSet::new();
         for row in &self.timeline_read_rows {
+            let case = row.case;
             let schedule = super::timeline_request_schedule_v1(self.base.fixture, row.case);
-            validate_qualification_derived_timeline_read_row_v1(
+            if let Err(error) = validate_qualification_derived_timeline_read_row_v1(
                 row,
                 self.base.execution.platform,
                 self.base.fixture,
@@ -480,55 +516,111 @@ impl QualificationDerivedChangeReadReceiptV2 {
                 &self.base.fixture_witness_sha256,
                 &product_identity_sha256,
                 &execution_identity_sha256,
-            )?;
-            validate_digest(
+            ) {
+                failures.push(error);
+            }
+            if validate_digest(
                 &row.derived_semantic_sha256,
                 "derived Timeline semantic receipt",
-            )?;
-            if let Some(strict) = &row.strict_semantic_sha256 {
-                validate_digest(strict, "strict Timeline semantic receipt")?;
+            )
+            .is_err()
+            {
+                failures.push(format!(
+                    "{case:?} Timeline derived semantic digest is not bare 64-hex"
+                ));
+            }
+            if let Some(strict) = &row.strict_semantic_sha256
+                && validate_digest(strict, "strict Timeline semantic receipt").is_err()
+            {
+                failures.push(format!(
+                    "{case:?} Timeline strict semantic digest is not bare 64-hex"
+                ));
             }
             if !timeline_typed_documents_valid_v1(row) {
-                return Err("derived Timeline typed-document receipt drifted".to_owned());
+                failures.push(format!("{case:?} Timeline typed-document receipt drifted"));
             }
             if row.counter_receipts.len() != schedule.len() {
-                return Err("derived Timeline counter receipt schedule is incomplete".to_owned());
-            }
-            for (receipt, operation) in row.counter_receipts.iter().zip(schedule) {
-                receipt.validate().map_err(|error| error.to_string())?;
-                if !run_identities.insert(receipt.run_identity.clone())
-                    || receipt.operation != *operation
-                    || receipt.root_identity != self.base.execution.root_provenance_sha256
-                    || receipt.base_execution_identity_sha256 != execution_identity_sha256
-                    || receipt.derivative_execution_identity_sha256 != product_identity_sha256
-                    || receipt.manifest_sha256 != self.base.fixture_inventory_sha256
-                    || receipt.schedule_sha256 != row.authority.request_schedule_sha256
-                    || receipt.phase != row.case.as_str()
-                {
-                    return Err("derived Timeline counter receipt authority drifted".to_owned());
+                failures.push(format!(
+                    "{case:?} Timeline counter receipt schedule is incomplete: {} receipts for \
+                     {} scheduled operations",
+                    row.counter_receipts.len(),
+                    schedule.len()
+                ));
+            } else {
+                for (receipt, operation) in row.counter_receipts.iter().zip(schedule) {
+                    if let Err(error) = receipt.validate() {
+                        failures.push(format!(
+                            "{case:?} Timeline counter receipt {operation} is invalid: {error}"
+                        ));
+                        continue;
+                    }
+                    if !run_identities.insert(receipt.run_identity.clone()) {
+                        failures.push(format!(
+                            "{case:?} Timeline counter receipt {operation} run identity \
+                             duplicates another receipt"
+                        ));
+                    }
+                    for (holds, condition) in [
+                        (receipt.operation == *operation, "operation drifted"),
+                        (
+                            receipt.root_identity == self.base.execution.root_provenance_sha256,
+                            "root identity differs from the execution root provenance",
+                        ),
+                        (
+                            receipt.base_execution_identity_sha256 == execution_identity_sha256,
+                            "base execution identity drifted",
+                        ),
+                        (
+                            receipt.derivative_execution_identity_sha256 == product_identity_sha256,
+                            "derivative execution identity drifted",
+                        ),
+                        (
+                            receipt.manifest_sha256 == self.base.fixture_inventory_sha256,
+                            "manifest differs from the fixture inventory",
+                        ),
+                        (
+                            receipt.schedule_sha256 == row.authority.request_schedule_sha256,
+                            "schedule digest drifted",
+                        ),
+                        (receipt.phase == row.case.as_str(), "phase drifted"),
+                    ] {
+                        if !holds {
+                            failures.push(format!(
+                                "{case:?} Timeline counter receipt {operation} {condition}"
+                            ));
+                        }
+                    }
                 }
-            }
-            if timeline_semantic_receipt_sha256(&row.counter_receipts)?
-                != row.derived_semantic_sha256
-            {
-                return Err("derived Timeline semantic receipt aggregate drifted".to_owned());
+                match timeline_semantic_receipt_sha256(&row.counter_receipts) {
+                    Ok(aggregate) if aggregate == row.derived_semantic_sha256 => {}
+                    Ok(_) => failures.push(format!(
+                        "{case:?} Timeline semantic receipt aggregate drifted"
+                    )),
+                    Err(error) => failures.push(format!(
+                        "{case:?} Timeline semantic receipt aggregate is not derivable: {error}"
+                    )),
+                }
             }
             if let Some(failure) = &row.invalid_signature_failure
                 && !run_identities.insert(failure.counter_receipt.run_identity.clone())
             {
-                return Err(format!(
-                    "{:?} Timeline invalid-signature counter run identity duplicates another \
-                     receipt",
-                    row.case
+                failures.push(format!(
+                    "{case:?} Timeline invalid-signature counter run identity duplicates another \
+                     receipt"
                 ));
             }
-            validate_qualification_derived_timeline_invalid_signature_row_v1(
+            if let Err(error) = validate_qualification_derived_timeline_invalid_signature_row_v1(
                 row,
                 &self.base.execution,
                 &product_identity_sha256,
                 &execution_identity_sha256,
-            )?;
-            validate_qualification_derived_timeline_concurrent_trust_row_v1(row)?;
+            ) {
+                failures.push(error);
+            }
+            if let Err(error) = validate_qualification_derived_timeline_concurrent_trust_row_v1(row)
+            {
+                failures.push(error);
+            }
         }
 
         let expected_phases = match self.base.fixture {
@@ -543,69 +635,107 @@ impl QualificationDerivedChangeReadReceiptV2 {
             .iter()
             .map(|row| row.phase)
             .collect::<BTreeSet<_>>();
-        if observed_phases != expected_phases
-            || observed_phases.len() != self.timeline_storage_rows.len()
-            || self.timeline_storage_rows.iter().any(|row| {
-                let base_storage_matches = self.base.storage_rows.iter().any(|base| {
-                    base.platform == row.platform
-                        && base.fixture == row.fixture
-                        && base.phase == row.phase
-                        && base.fixture_inventory_sha256 == row.fixture_inventory_sha256
-                        && base.fixture_witness_sha256 == row.fixture_witness_sha256
-                        && base.product_identity_sha256 == row.product_identity_sha256
-                        && base.execution_identity_sha256 == row.execution_identity_sha256
-                });
-                let probe_kinds = row
-                    .forbidden_probes
-                    .iter()
-                    .map(|probe| probe.kind)
-                    .collect::<BTreeSet<_>>();
-                row.platform != self.base.execution.platform
-                    || row.fixture != self.base.fixture
-                    || row.fixture_inventory_sha256 != self.base.fixture_inventory_sha256
-                    || row.fixture_witness_sha256 != self.base.fixture_witness_sha256
-                    || row.product_identity_sha256 != product_identity_sha256
-                    || row.execution_identity_sha256 != execution_identity_sha256
-                    || !base_storage_matches
-                    || row.forbidden_probes.len()
-                        != super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL.len()
-                    || probe_kinds
-                        != super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL
-                            .into_iter()
-                            .collect()
-                    || row.forbidden_probes.iter().any(|probe| {
-                        let token_sentinel_expected = super::qualification_derived_change_expected_outcome_v1(
-                            row.platform,
-                            row.fixture,
-                            super::QualificationDerivedChangeReadCaseV1::ChangesBare,
-                        )
-                        .0 != super::QualificationDerivedChangeReadOracleV1::TypedFailure;
-                        let sentinel_valid = match (&probe.kind, &probe.sentinel_sha256) {
-                            (
-                                super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
-                                None,
-                            ) => !token_sentinel_expected,
-                            (
-                                super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
-                                Some(sentinel),
-                            ) => {
-                                token_sentinel_expected
-                                    && validate_digest(sentinel, "Timeline storage probe").is_ok()
-                            }
-                            (_, Some(sentinel)) => {
-                                validate_digest(sentinel, "Timeline storage probe").is_ok()
-                            }
-                            (_, None) => false,
-                        };
-                        !sentinel_valid
-                            || probe.sqlite_match_count != 0
-                            || probe.file_match_count != 0
-                    })
-            })
-        {
-            return Err("derived Timeline storage receipt is incomplete".to_owned());
+        if observed_phases != expected_phases {
+            failures.push("derived Timeline storage receipt phases drifted".to_owned());
         }
-        Ok(())
+        if observed_phases.len() != self.timeline_storage_rows.len() {
+            failures.push("derived Timeline storage receipt duplicates a phase".to_owned());
+        }
+        for row in &self.timeline_storage_rows {
+            let phase = row.phase;
+            let base_storage_matches = self.base.storage_rows.iter().any(|base| {
+                base.platform == row.platform
+                    && base.fixture == row.fixture
+                    && base.phase == row.phase
+                    && base.fixture_inventory_sha256 == row.fixture_inventory_sha256
+                    && base.fixture_witness_sha256 == row.fixture_witness_sha256
+                    && base.product_identity_sha256 == row.product_identity_sha256
+                    && base.execution_identity_sha256 == row.execution_identity_sha256
+            });
+            for (holds, condition) in [
+                (
+                    row.platform == self.base.execution.platform,
+                    "platform drifted",
+                ),
+                (row.fixture == self.base.fixture, "fixture drifted"),
+                (
+                    row.fixture_inventory_sha256 == self.base.fixture_inventory_sha256,
+                    "fixture inventory drifted",
+                ),
+                (
+                    row.fixture_witness_sha256 == self.base.fixture_witness_sha256,
+                    "fixture witness drifted",
+                ),
+                (
+                    row.product_identity_sha256 == product_identity_sha256,
+                    "product identity drifted",
+                ),
+                (
+                    row.execution_identity_sha256 == execution_identity_sha256,
+                    "execution identity drifted",
+                ),
+                (
+                    base_storage_matches,
+                    "row has no matching base storage witness",
+                ),
+                (
+                    row.forbidden_probes.len()
+                        == super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL.len()
+                        && row
+                            .forbidden_probes
+                            .iter()
+                            .map(|probe| probe.kind)
+                            .collect::<BTreeSet<_>>()
+                            == super::QualificationDerivedTimelineForbiddenProbeKindV1::ALL
+                                .into_iter()
+                                .collect(),
+                    "probe kinds are not the complete required set",
+                ),
+            ] {
+                if !holds {
+                    failures.push(format!("{phase:?} Timeline storage row {condition}"));
+                }
+            }
+            for probe in &row.forbidden_probes {
+                let kind = probe.kind;
+                let token_sentinel_expected =
+                    super::qualification_derived_change_expected_outcome_v1(
+                        row.platform,
+                        row.fixture,
+                        super::QualificationDerivedChangeReadCaseV1::ChangesBare,
+                    )
+                    .0 != super::QualificationDerivedChangeReadOracleV1::TypedFailure;
+                let sentinel_valid = match (&probe.kind, &probe.sentinel_sha256) {
+                    (
+                        super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
+                        None,
+                    ) => !token_sentinel_expected,
+                    (
+                        super::QualificationDerivedTimelineForbiddenProbeKindV1::TimelineContinuationToken,
+                        Some(sentinel),
+                    ) => {
+                        token_sentinel_expected
+                            && validate_digest(sentinel, "Timeline storage probe").is_ok()
+                    }
+                    (_, Some(sentinel)) => {
+                        validate_digest(sentinel, "Timeline storage probe").is_ok()
+                    }
+                    (_, None) => false,
+                };
+                if !sentinel_valid {
+                    failures.push(format!(
+                        "{phase:?} Timeline storage probe {kind:?} sentinel is invalid"
+                    ));
+                }
+                if probe.sqlite_match_count != 0 || probe.file_match_count != 0 {
+                    failures.push(format!(
+                        "{phase:?} Timeline storage probe {kind:?} matched sqlite={} file={}",
+                        probe.sqlite_match_count, probe.file_match_count
+                    ));
+                }
+            }
+        }
+        failures
     }
 }
 

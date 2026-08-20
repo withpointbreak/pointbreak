@@ -2041,7 +2041,19 @@ mod instrumented {
             receipt_sha256: String::new(),
         };
         receipt.refresh_sha256()?;
-        receipt.validate()?;
+        // A retained non-admissible diagnostic from an earlier failed attempt
+        // must not survive into this attempt's evidence root — removed only
+        // here, once this attempt can actually replace it, so an EARLY
+        // failure (bad request, identity mismatch) preserves the previous
+        // attempt's diagnostic instead of deleting it without a successor.
+        if let Some(parent) = request_path.parent() {
+            let _ = std::fs::remove_file(parent.join("receipt-diagnostic.json"));
+        }
+        // Assemble the successor BEFORE any receipt validation: its collector
+        // covers the base receipt's validity as a structural pre-check, and
+        // dumping the successor on ANY failure retains the complete assembled
+        // document — including the timeline rows, the costliest artifact of
+        // the invocation — rather than only the base slice.
         let mut successor = QualificationDerivedChangeReadReceiptV2 {
             schema: QUALIFICATION_DERIVED_CHANGE_READ_RECEIPT_SCHEMA_V2.to_owned(),
             base: receipt,
@@ -2051,8 +2063,63 @@ mod instrumented {
             receipt_sha256: String::new(),
         };
         successor.refresh_sha256()?;
-        successor.validate()?;
+        let failures = successor.validation_failures();
+        if !failures.is_empty() {
+            // A serialization failure must degrade the dump, never mask the
+            // validation failures it was meant to carry.
+            let document = serde_json::to_value(&successor).unwrap_or(Value::Null);
+            return Err(retained_receipt_failure(request_path, document, failures));
+        }
         Ok(successor)
+    }
+
+    /// Retain a failed receipt as a NON-ADMISSIBLE diagnostic document beside
+    /// the request, so every failing condition and the complete assembled row
+    /// data can be analyzed offline without another producer invocation. The
+    /// distinct schema plus the explicit admissible:false marker are rejected
+    /// by every receipt, fragment, package, and evaluator consumer, so the
+    /// retained document can never masquerade as evidence.
+    fn retained_receipt_failure(
+        request_path: &Path,
+        receipt: Value,
+        failures: Vec<String>,
+    ) -> String {
+        let summary = match failures.len() {
+            1 => failures[0].clone(),
+            count => format!(
+                "{count} receipt conditions failed: {}",
+                failures.join(" | ")
+            ),
+        };
+        let Some(parent) = request_path.parent() else {
+            return format!("{summary} (receipt diagnostic not retained: request has no parent)");
+        };
+        let path = parent.join("receipt-diagnostic.json");
+        let document = json!({
+            "schema": "pointbreak.qualification-derived-change-read-receipt-diagnostic.v1",
+            "admissible": false,
+            "failures": failures,
+            "receipt": receipt,
+        });
+        let bytes = match serde_json::to_vec_pretty(&document) {
+            Ok(mut bytes) => {
+                bytes.push(b'\n');
+                bytes
+            }
+            Err(error) => {
+                return format!("{summary} (receipt diagnostic not retained: {error})");
+            }
+        };
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => format!(
+                "{summary} (non-admissible receipt diagnostic retained at {})",
+                path.display()
+            ),
+            Err(error) => format!(
+                "{summary} (receipt diagnostic not retained at {}: {error})",
+                path.display()
+            ),
+        }
     }
 
     pub(super) fn run_derived_change_read_diagnostic_v1(
@@ -4099,7 +4166,7 @@ mod instrumented {
             (None, None) => derived_status == 200,
             _ => false,
         };
-        let strict_matches = match (authoritative, strict_target) {
+        let strict_parity = match (authoritative, strict_target) {
             (Some(authoritative), Some(target)) => {
                 let (status, value) = authoritative.json(target)?;
                 status == derived_status
@@ -4108,8 +4175,20 @@ mod instrumented {
             (None, None) => true,
             _ if timeline_operation_is_expected_failure(operation) => true,
             _ => false,
-        } && typed_contract_matches
-            && timeline_operation_semantics_match(operation, derived_status, &derived_document);
+        };
+        let operation_semantics =
+            timeline_operation_semantics_match(operation, derived_status, &derived_document);
+        let strict_matches = strict_parity && typed_contract_matches && operation_semantics;
+        if !strict_matches {
+            // Non-evidence stderr diagnostic naming the failing wire-contract
+            // component, so a Failed row status arrives attributed instead of
+            // dying inside the row's combined wire accumulator.
+            eprintln!(
+                "{case:?} timeline wire diagnostic: operation {operation} failed with \
+                 strict_parity={strict_parity} typed_contract={typed_contract_matches} \
+                 operation_semantics={operation_semantics} http_status={derived_status}"
+            );
+        }
         let typed_document =
             observed_typed.map(|document| QualificationDerivedTimelineTypedObservationV1 {
                 operation: operation.to_owned(),
@@ -5358,13 +5437,28 @@ mod instrumented {
                 BTreeMap::new(),
             )
         };
+        for (excluded_case, counts) in &excluded_timeline_case_counts {
+            if counts.source_count == 0
+                || counts.strict_output_count != 0
+                || counts.derived_output_count != 0
+            {
+                // Non-evidence stderr diagnostic naming the failing exclusion
+                // family and its counts before the combined accumulator hides
+                // them inside one Failed row status.
+                eprintln!(
+                    "{case:?} timeline wire diagnostic: excluded family {excluded_case} failed \
+                     with source={} strict_output={} derived_output={}",
+                    counts.source_count, counts.strict_output_count, counts.derived_output_count
+                );
+            }
+        }
         wire_contract_matches &= excluded_timeline_case_counts.values().all(|counts| {
             counts.source_count > 0
                 && counts.strict_output_count == 0
                 && counts.derived_output_count == 0
         });
         if case == QualificationDerivedTimelineReadCaseV1::TrustSuite {
-            wire_contract_matches &= trust_transition.as_ref().is_some_and(|transition| {
+            let trust_transition_matches = trust_transition.as_ref().is_some_and(|transition| {
                 transition.status_before_by_event
                     == BTreeMap::from([
                         (
@@ -5379,6 +5473,14 @@ mod instrumented {
                             (transition.unsigned_event_id.clone(), "unsigned".to_owned()),
                         ])
             });
+            if !trust_transition_matches {
+                eprintln!(
+                    "{case:?} timeline wire diagnostic: trust transition failed with \
+                     transition_present={}",
+                    trust_transition.is_some()
+                );
+            }
+            wire_contract_matches &= trust_transition_matches;
         }
         let oracle = if qualification_derived_change_expected_outcome_v1(
             request.execution.platform,
@@ -5514,22 +5616,69 @@ mod instrumented {
         timeline_exact_revision_target_from_document(&value)
     }
 
+    /// Compare a Timeline page's entries under the product's total order:
+    /// normalized instants first (legacy `unix-ms:<millis>` and RFC 3339 UTC
+    /// forms compare by epoch milliseconds, never as raw strings), then the
+    /// event id as the direction-following tie-break. A raw string comparison
+    /// here is format-blind — every `unix-ms:` value sorts after every RFC
+    /// 3339 string — and rejects correctly ordered mixed-format fixtures.
+    pub(super) fn timeline_entries_ordered_v1(entries: &[Value], descending: bool) -> bool {
+        let keys = entries
+            .iter()
+            .filter_map(|entry| {
+                let occurred_at = entry.get("occurredAt")?.as_str()?;
+                // Fail closed on an unparseable timestamp: the comparator
+                // would otherwise sort it before every legal instant and
+                // silently accept a page carrying a malformed value.
+                crate::session::parse_event_instant(occurred_at)?;
+                Some((occurred_at, entry.get("eventId")?.as_str()?))
+            })
+            .collect::<Vec<_>>();
+        keys.len() == entries.len()
+            && keys.windows(2).all(|pair| {
+                let (earlier, later) = if descending {
+                    (pair[1], pair[0])
+                } else {
+                    (pair[0], pair[1])
+                };
+                match crate::session::compare_event_instants(earlier.0, later.0) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Equal => earlier.1 <= later.1,
+                    std::cmp::Ordering::Greater => false,
+                }
+            })
+    }
+
     pub(super) fn timeline_exact_revision_target_from_document(
         value: &Value,
     ) -> Result<String, String> {
+        // The witness serves both the exact-Revision filter and the Revision
+        // correlations operation, and the correlations oracle requires every
+        // returned entry to carry a non-empty Change correlation — so the
+        // witness itself must prove both fields. Selecting the first entry
+        // with only revisionRefs can pick the fixture's single uncorrelated
+        // proposal and make the correlations oracle self-defeating.
         let reference = value
             .get("entries")
             .and_then(Value::as_array)
             .and_then(|entries| {
                 entries.iter().find_map(|entry| {
                     entry
-                        .get("revisionRefs")
+                        .get("changeIds")
                         .and_then(Value::as_array)
-                        .and_then(|refs| refs.first())
+                        .is_some_and(|ids| !ids.is_empty())
+                        .then(|| {
+                            entry
+                                .get("revisionRefs")
+                                .and_then(Value::as_array)
+                                .and_then(|refs| refs.first())
+                        })
+                        .flatten()
                 })
             })
             .ok_or_else(|| {
-                "Timeline fixture omitted an exact Revision filter witness".to_owned()
+                "Timeline fixture omitted a Change-correlated exact Revision filter witness"
+                    .to_owned()
             })?;
         let revision = reference
             .get("revisionId")
@@ -5570,25 +5719,7 @@ mod instrumented {
         if status != 200 || entries.is_empty() {
             return false;
         }
-        let ordered = |descending: bool| {
-            let keys = entries
-                .iter()
-                .filter_map(|entry| {
-                    Some((
-                        entry.get("occurredAt")?.as_str()?,
-                        entry.get("eventId")?.as_str()?,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            keys.len() == entries.len()
-                && keys.windows(2).all(|pair| {
-                    if descending {
-                        pair[0] >= pair[1]
-                    } else {
-                        pair[0] <= pair[1]
-                    }
-                })
-        };
+        let ordered = |descending: bool| timeline_entries_ordered_v1(entries, descending);
         match operation {
             "timeline_all_asc" => ordered(false),
             "timeline_all_desc" => ordered(true),
@@ -8129,6 +8260,125 @@ mod instrumented {
             assert_ne!(stale.0, post_append.0);
             assert_ne!(stale.1, post_append.1);
         }
+
+        #[test]
+        fn timeline_ordering_oracle_normalizes_mixed_timestamp_formats() {
+            let entry = |occurred_at: &str, event_id: &str| json!({ "occurredAt": occurred_at, "eventId": event_id });
+            // unix-ms:1783303159002 is 2026-07-06, which precedes the RFC 3339
+            // August instant chronologically but FOLLOWS it as a raw string
+            // ('u' > '2'). The format-blind oracle rejected exactly this shape.
+            let july = entry("unix-ms:1783303159002", "evt:sha256:aa");
+            let august = entry("2026-08-19T23:43:14.294Z", "evt:sha256:bb");
+            assert!(timeline_entries_ordered_v1(
+                &[july.clone(), august.clone()],
+                false
+            ));
+            assert!(!timeline_entries_ordered_v1(
+                &[august.clone(), july.clone()],
+                false
+            ));
+            assert!(timeline_entries_ordered_v1(
+                &[august.clone(), july.clone()],
+                true
+            ));
+            assert!(!timeline_entries_ordered_v1(&[july.clone(), august], true));
+
+            // Equal instants tie-break by event id, following the direction.
+            let tie_low = entry("2026-08-04T00:00:00Z", "evt:sha256:aa");
+            let tie_high = entry("2026-08-04T00:00:00.000Z", "evt:sha256:bb");
+            assert!(timeline_entries_ordered_v1(
+                &[tie_low.clone(), tie_high.clone()],
+                false
+            ));
+            assert!(!timeline_entries_ordered_v1(
+                &[tie_high.clone(), tie_low.clone()],
+                false
+            ));
+            assert!(timeline_entries_ordered_v1(&[tie_high, tie_low], true));
+
+            // An entry without the key fields fails closed, and so does an
+            // unparseable timestamp — the comparator would otherwise sort it
+            // before every legal instant and accept the page.
+            assert!(!timeline_entries_ordered_v1(
+                &[json!({ "eventId": "evt:sha256:aa" })],
+                false
+            ));
+            assert!(!timeline_entries_ordered_v1(
+                &[
+                    entry("not-a-timestamp", "evt:sha256:aa"),
+                    entry("2026-08-19T23:43:14.294Z", "evt:sha256:bb"),
+                ],
+                false
+            ));
+        }
+
+        #[test]
+        fn exact_revision_witness_selection_requires_a_change_correlation() {
+            let uncorrelated = json!({
+                "revisionRefs": [{
+                    "revisionId": "rev:sha256:uncorrelated",
+                    "objectArtifactContentHash": "sha256:aaaa",
+                }],
+                "changeIds": [],
+            });
+            let correlated = json!({
+                "revisionRefs": [{
+                    "revisionId": "rev:sha256:correlated",
+                    "objectArtifactContentHash": "sha256:bbbb",
+                }],
+                "changeIds": ["change:sha256:cc"],
+            });
+            // The fixture's single uncorrelated proposal sorts first; the
+            // selector must skip it, or the correlations oracle tests a
+            // witness that never promised a Change correlation.
+            let target = timeline_exact_revision_target_from_document(&json!({
+                "entries": [uncorrelated.clone(), correlated],
+            }))
+            .expect("selects the correlated witness");
+            assert!(target.contains("correlated"));
+            assert!(!target.contains("uncorrelated"));
+
+            let error = timeline_exact_revision_target_from_document(&json!({
+                "entries": [uncorrelated],
+            }))
+            .expect_err("an uncorrelated-only fixture is a named error");
+            assert!(error.contains("Change-correlated"), "{error:?}");
+        }
+
+        #[test]
+        fn retained_receipt_diagnostic_is_non_admissible_and_complete() {
+            let root = tempfile::tempdir().expect("diagnostic root");
+            let request_path = root.path().join("request.json");
+            let failures = vec![
+                "first named condition".to_owned(),
+                "second named condition".to_owned(),
+            ];
+            let message = retained_receipt_failure(
+                &request_path,
+                json!({ "schema": "example.receipt", "rows": [1, 2, 3] }),
+                failures,
+            );
+            assert!(
+                message.contains("2 receipt conditions failed"),
+                "{message:?}"
+            );
+            assert!(message.contains("first named condition"), "{message:?}");
+            assert!(message.contains("second named condition"), "{message:?}");
+            assert!(message.contains("receipt-diagnostic.json"), "{message:?}");
+
+            let document: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join("receipt-diagnostic.json"))
+                    .expect("diagnostic retained"),
+            )
+            .expect("diagnostic parses");
+            assert_eq!(
+                document["schema"],
+                "pointbreak.qualification-derived-change-read-receipt-diagnostic.v1"
+            );
+            assert_eq!(document["admissible"], false);
+            assert_eq!(document["failures"].as_array().expect("failures").len(), 2);
+            assert_eq!(document["receipt"]["schema"], "example.receipt");
+        }
     }
 }
 
@@ -8245,8 +8495,12 @@ mod tests {
     #[cfg(feature = "longitudinal-counting")]
     #[test]
     fn timeline_exact_revision_target_maps_the_wire_ref_to_query_names() {
+        // The witness must carry a Change correlation: the selector skips
+        // uncorrelated entries so the correlations oracle never tests a
+        // witness that promised no Change linkage.
         let document = json!({
             "entries": [{
+                "changeIds": ["change:sha256:witness"],
                 "revisionRefs": [{
                     "revisionId": "rev:sha256:one",
                     "objectArtifactContentHash": "sha256:two",
