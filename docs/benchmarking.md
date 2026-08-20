@@ -901,7 +901,9 @@ Historical evaluator-v2 packages remain verifiable as recorded. V1 Change-read r
 frozen at `7ed026636813cdfa3abdcc06bac30268f9968d66bcdd1ad9cd174b36bdd9bae1`. A newly assembled V2 successor
 receipt selects `pointbreak.qualification-derived-access-evaluator.v4` and the additive
 `pointbreak.qualification-derived-access-evaluator-v4-procedure.v1` procedure at
-`c17a3e949bbf2ccee78864db22793e947d10efb34c9c2d9028644f99c95b8524`. Evaluator v4 retains every v3
+`02b5e44244fefc3fbe99212fa7e6ec3be191fe01fc3fde464e947e085921b9a3` (the procedure adds an eighth
+step naming the receipt-proven topology candidate bounds and the attempt-token exemption confined
+to the cursor-ledger entries). Evaluator v4 retains every v3
 requirement and additionally requires the raw-bound Timeline matrix, independently derived typed-error
 expectations, request-bounded service-child work, concurrent trust-snapshot evidence, one-bit invalid-signature
 failure and two-sided recovery, and Timeline storage witnesses from both macOS/APFS and real Windows/NTFS.
