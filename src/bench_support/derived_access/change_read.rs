@@ -857,6 +857,45 @@ fn validate_digest(value: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the reference and fault root provenance values for one assembled
+/// Change-read request. Each root derives
+/// `sha256("<authority sha256>:<root path>")`, binding the per-cycle
+/// authority record and the exact root path while staying distinct across
+/// roots. An explicit campaign override replaces the REFERENCE root's value
+/// only, so a campaign provenance minted once at candidate freeze can thread
+/// through every package-bound execution identity; the fault root always
+/// keeps its derived per-root value, because the clone protocol requires
+/// root distinctness and the fault identity never enters the terminal
+/// package.
+pub fn qualification_change_read_root_provenances_v1(
+    authority_sha256: &str,
+    reference_root: &Path,
+    fault_root: &Path,
+    campaign_override: Option<&str>,
+) -> Result<(String, String), String> {
+    validate_digest(authority_sha256, "campaign authority SHA-256")?;
+    let derived = |path: &Path, label: &str| -> Result<String, String> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| format!("{label} path is not UTF-8"))?;
+        Ok(sha256_bytes_hex(
+            format!("{authority_sha256}:{path}").as_bytes(),
+        ))
+    };
+    let fault = derived(fault_root, "fault root")?;
+    let reference = match campaign_override {
+        None => derived(reference_root, "reference root")?,
+        Some(value) => {
+            validate_digest(value, "campaign root provenance override")?;
+            value.to_owned()
+        }
+    };
+    if reference == fault {
+        return Err("reference root provenance collides with the fault root provenance".to_owned());
+    }
+    Ok((reference, fault))
+}
+
 pub fn run_qualification_derived_change_read_v1(
     request_path: &Path,
 ) -> Result<QualificationDerivedChangeReadReceiptV2, String> {

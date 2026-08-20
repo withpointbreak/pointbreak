@@ -2075,3 +2075,83 @@ fn fragment_request_revision_authors_v4_and_assembly_still_refuses_mixed_authori
     );
     verify_qualification_derived_access_package_v1(&package_root).expect("verify v4 package");
 }
+
+#[test]
+fn change_read_root_provenance_override_binds_the_reference_root_only() {
+    let sha256_hex = |bytes: &[u8]| -> String {
+        use sha2::{Digest as _, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    };
+    let authority_sha256 = digest(41);
+    let reference_root = Path::new("/campaign/root/repo");
+    let fault_root = Path::new("/campaign/root/fault-repo");
+    let derived =
+        |path: &Path| sha256_hex(format!("{authority_sha256}:{}", path.display()).as_bytes());
+
+    // Without an override both roots derive per-root provenance from the
+    // authority record and their exact paths, and the values stay distinct.
+    let (reference, fault) = qualification_change_read_root_provenances_v1(
+        &authority_sha256,
+        reference_root,
+        fault_root,
+        None,
+    )
+    .expect("derive per-root provenance");
+    assert_eq!(reference, derived(reference_root));
+    assert_eq!(fault, derived(fault_root));
+    assert_ne!(reference, fault);
+
+    // A campaign override replaces the reference root's provenance only; the
+    // fault root keeps its derived per-root value.
+    let campaign = digest(7);
+    let (reference, fault_with_override) = qualification_change_read_root_provenances_v1(
+        &authority_sha256,
+        reference_root,
+        fault_root,
+        Some(&campaign),
+    )
+    .expect("apply campaign override");
+    assert_eq!(reference, campaign);
+    assert_eq!(fault_with_override, fault);
+
+    // Malformed overrides are refused before any value is minted.
+    let truncated = &digest(7)[..63];
+    let uppercase = digest(0xab).to_uppercase();
+    let overlong = format!("{}0", digest(7));
+    for malformed in ["not-hex", truncated, &uppercase, &overlong] {
+        let error = qualification_change_read_root_provenances_v1(
+            &authority_sha256,
+            reference_root,
+            fault_root,
+            Some(malformed),
+        )
+        .expect_err("malformed override must refuse");
+        assert!(
+            error.contains("campaign root provenance override"),
+            "{error}"
+        );
+    }
+
+    // An override colliding with the fault root's derived provenance is
+    // refused: the clone protocol requires per-root distinctness.
+    let collision = qualification_change_read_root_provenances_v1(
+        &authority_sha256,
+        reference_root,
+        fault_root,
+        Some(&fault),
+    )
+    .expect_err("fault collision must refuse");
+    assert!(collision.contains("fault root provenance"), "{collision}");
+
+    // A malformed authority digest is refused in every mode.
+    let error =
+        qualification_change_read_root_provenances_v1("bogus", reference_root, fault_root, None)
+            .expect_err("malformed authority must refuse");
+    assert!(error.contains("campaign authority"), "{error}");
+}

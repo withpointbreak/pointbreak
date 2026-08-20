@@ -16,7 +16,11 @@
 //!   `{"arguments": [...]}` of the pinned release build arguments.
 //! - `rootProvenanceSha256`: sha256 of `"<sha256(authority.json)>:<root path>"`
 //!   per root, so each root's provenance binds the per-cycle authority record
-//!   and its exact path while staying distinct across roots.
+//!   and its exact path while staying distinct across roots. An optional
+//!   `--root-provenance` campaign override replaces the REFERENCE root's
+//!   value only, so identities minted for one terminal package share a single
+//!   campaign provenance; the fault root always keeps its derived per-root
+//!   value.
 //!
 //! The control build-command hashes are carried verbatim from the template
 //! request: they are frozen argument-list digests, not per-cycle values.
@@ -26,6 +30,7 @@ use std::process::Command;
 
 use pointbreak::bench_support::derived_access::{
     QUALIFICATION_DERIVED_CHANGE_READ_MODE_V1, QualificationDerivedChangeReadRunRequestV2,
+    qualification_change_read_root_provenances_v1,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -92,6 +97,7 @@ struct Arguments {
     library_control: PathBuf,
     cli_control: PathBuf,
     host_label: String,
+    root_provenance: Option<String>,
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -103,6 +109,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut library_control = None;
     let mut cli_control = None;
     let mut host_label = None;
+    let mut root_provenance = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(flag) = arguments.next() {
         let mut value = |flag: &str| {
@@ -123,6 +130,7 @@ fn parse_arguments() -> Result<Arguments, String> {
             }
             "--cli-control" => cli_control = Some(PathBuf::from(value("--cli-control")?)),
             "--host-label" => host_label = Some(value("--host-label")?),
+            "--root-provenance" => root_provenance = Some(value("--root-provenance")?),
             other => return Err(format!("unknown flag: {other}")),
         }
     }
@@ -135,6 +143,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         library_control: library_control.ok_or("--library-control is required")?,
         cli_control: cli_control.ok_or("--cli-control is required")?,
         host_label: host_label.ok_or("--host-label is required")?,
+        root_provenance,
     })
 }
 
@@ -202,14 +211,12 @@ fn run() -> Result<(), String> {
     let authority_sha256 = sha256_file(&root.join("authority.json"))?;
     let repository = root.join("repo");
     let fault_repository = root.join("fault-repo");
-    let provenance = |path: &Path| -> Result<String, String> {
-        let path = path
-            .to_str()
-            .ok_or_else(|| "root path is not UTF-8".to_owned())?;
-        Ok(sha256_hex(format!("{authority_sha256}:{path}").as_bytes()))
-    };
-    let reference_provenance = provenance(&repository)?;
-    let fault_provenance = provenance(&fault_repository)?;
+    let (reference_provenance, fault_provenance) = qualification_change_read_root_provenances_v1(
+        &authority_sha256,
+        &repository,
+        &fault_repository,
+        arguments.root_provenance.as_deref(),
+    )?;
 
     let harness_path = arguments
         .harness
