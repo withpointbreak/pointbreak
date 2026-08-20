@@ -52,6 +52,11 @@ tests/fixtures/store-foundation/longitudinal-capacity-sentinel-v1.json text eol=
 # Change-ready store records are copied and verified by SHA-256 when public
 # diagnostic fixtures are materialized. Keep their checkout bytes canonical.
 tests/support/assets/change-ready-store/*.json text eol=lf
+
+# Timeline compatibility events and their artifact records are copied
+# byte-for-byte into a live store's event carriers, whose identities hash the
+# exact bytes. Keep their checkout bytes canonical on CRLF-defaulted clones.
+tests/support/assets/inspector-timeline-compat-v1/** text eol=lf
 docs/benchmarking.md text eol=lf
 
 # Source-structure contract tests inspect Rust files with LF-delimited markers.
