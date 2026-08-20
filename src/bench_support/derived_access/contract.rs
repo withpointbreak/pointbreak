@@ -27,7 +27,7 @@ pub const QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-package.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1: &str = "--derived-access-contract";
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1: &str =
-    "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8";
+    "93a4be18b9b8509aaaa3fef045c9e26c4d76d79baed444447362be17593af2d5";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2: &str =
     "pointbreak.qualification-derived-access-evaluator.v2";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3: &str =
@@ -487,7 +487,12 @@ impl QualificationDerivedAccessContractV1 {
             },
             allocation: QualificationDerivedAccessAllocationV1 {
                 steady_fixed_floor_bytes: 64 * MIB,
-                steady_bytes_per_event: 1_024,
+                // Baselined from the first measured schema-v4 retained stores:
+                // L100 observed 1,817 bytes/event and C262 observed 1,581
+                // bytes/event steady, on receipts from both native platforms.
+                // The normalized product-history rows deliberately retain more
+                // per event than the pre-v4 1,024-byte budget assumed.
+                steady_bytes_per_event: 2_048,
                 high_water_ratio_milli: 1_500,
                 append_write_amplification_ratio_milli: 8_000,
             },

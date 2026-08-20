@@ -617,7 +617,7 @@ the historical integration and readiness contracts.
 
 The candidate-independent incremental derived-access contract is compiled into the benchmark target as
 `pointbreak.qualification-derived-access-contract.v1`. Its canonical SHA-256 is
-`c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8`. Print and validate it without
+`93a4be18b9b8509aaaa3fef045c9e26c4d76d79baed444447362be17593af2d5`. Print and validate it without
 constructing a physical profile, reading a corpus, creating a store, or collecting observations:
 
 ```sh
@@ -637,7 +637,7 @@ cargo bench --locked --features bench --bench store_foundation -- --derived-acce
 | Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `1.25` unless the receipt proves that all excess work is selected-output growth |
 | L100 latency / CPU | `SEMANTIC_ID` `150/100 ms`; `FRESH_NO_CHANGE` `50/25 ms`; `NEWCOUNT_ZERO` `50/25 ms`; `WINDOW_HEAD` `150/100 ms`; `WINDOW_MIDDLE` `150/100 ms`; `WINDOW_TAIL` `150/100 ms`; `REVISION_DETAIL_ACTIVE` `250/175 ms`; `REVISION_DETAIL_REMOVED` `250/175 ms`; `APPEND_ONE` `250/200 ms`; `POST_ONE` `500/400 ms`; `RESTART` `3000/2500 ms` |
 | Memory | store-attributable L100 steady/peak RSS at most `96/128 MiB`; L7-to-L100 steady slope at most `512 bytes/event`; zero retained body/object bytes outside the active window |
-| Allocation | steady derived bytes at most `max(64 MiB, 1024 × event count)`; high-water at most `1.5×`; append write amplification at most `8×` |
+| Allocation | steady derived bytes at most `max(64 MiB, 2048 × event count)`; high-water at most `1.5×`; append write amplification at most `8×` |
 | Bootstrap | L100 at most 60 minutes; C262 at most 180 minutes; progress required; experiment-cost guards only |
 | Native gates | macOS/APFS and Windows/NTFS independently pass D0-128/L1/L7 before APFS L100/C262; Linux is compile/CI only |
 | Non-compensation | semantics, provenance, native, lifecycle, complexity, latency/CPU, memory, allocation, write amplification, and bootstrap gate independently |

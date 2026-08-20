@@ -1,7 +1,7 @@
 {
   "schema": "pointbreak.qualification-derived-access-contract-fixture.v1",
   "contractSchema": "pointbreak.qualification-derived-access-contract.v1",
-  "contractSha256": "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8",
+  "contractSha256": "93a4be18b9b8509aaaa3fef045c9e26c4d76d79baed444447362be17593af2d5",
   "evaluatorRevision": "pointbreak.qualification-derived-access-evaluator.v2",
   "d0StoredEvents": 128,
   "d0Revisions": 16,
