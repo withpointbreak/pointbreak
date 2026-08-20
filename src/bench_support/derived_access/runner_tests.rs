@@ -2076,6 +2076,97 @@ fn fragment_request_revision_authors_v4_and_assembly_still_refuses_mixed_authori
     verify_qualification_derived_access_package_v1(&package_root).expect("verify v4 package");
 }
 
+#[cfg(feature = "longitudinal-counting")]
+#[test]
+fn shared_campaign_provenance_lets_both_host_lanes_co_assemble() {
+    // The static co-assembly falsifier: stub identities for every planned
+    // host lane run through the real package guard before an evidence
+    // campaign spends machine time, so an identity-design gap surfaces here
+    // instead of after both lanes' receipts are retained.
+    let root = tempfile::tempdir().expect("falsifier workspace");
+    let smoke =
+        run_qualification_derived_access_non_timing_smoke_at_v1(&root.path().join("d0-workspace"))
+            .expect("D0 smoke");
+    let campaign_provenance = digest(0xca);
+    let mut apfs = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    apfs.root_provenance_sha256 = campaign_provenance.clone();
+    apfs.validate().expect("apfs lane identity is admissible");
+    let mut ntfs = apfs.clone();
+    ntfs.platform = QualificationDerivedAccessPlatformV1::WindowsNtfs;
+    ntfs.operating_system = "windows".to_owned();
+    ntfs.filesystem = "ntfs".to_owned();
+    ntfs.architecture = "x86_64".to_owned();
+    ntfs.binary_sha256 = digest(0x99);
+    ntfs.command_sha256 = digest(0x88);
+    ntfs.host_identity_sha256 = digest(0x78);
+    ntfs.validate().expect("ntfs lane identity is admissible");
+
+    let lane_fragment = |name: &str, execution: &QualificationDerivedAccessExecutionIdentityV1| {
+        let receipt_path = root.path().join(format!("{name}-receipt.json"));
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec_pretty(&QualificationDerivedAccessNativeSmokeRunReceiptV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                payload: QualificationDerivedAccessNativeSmokePayloadV1::D0_128(Box::new(
+                    smoke.clone(),
+                )),
+            })
+            .expect("serialize lane receipt"),
+        )
+        .expect("write lane receipt");
+        let request_path = root.path().join(format!("{name}-request.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                receipt_paths: vec![receipt_path],
+                evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned(),
+            })
+            .expect("serialize lane fragment request"),
+        )
+        .expect("write lane fragment request");
+        let fragment = build_qualification_derived_access_fragment_v1(&request_path)
+            .expect("build lane fragment");
+        let fragment_path = root.path().join(format!("{name}-fragment.json"));
+        std::fs::write(
+            &fragment_path,
+            serde_json::to_vec_pretty(&fragment).expect("serialize lane fragment"),
+        )
+        .expect("write lane fragment");
+        fragment_path
+    };
+
+    // Both lanes share the campaign provenance, so they co-assemble into one
+    // verified package.
+    let apfs_fragment = lane_fragment("apfs", &apfs);
+    let ntfs_fragment = lane_fragment("ntfs", &ntfs);
+    let package_root = root.path().join("package");
+    let evaluation = assemble_qualification_derived_access_package_v1(
+        &[apfs_fragment.clone(), ntfs_fragment],
+        &package_root,
+    )
+    .expect("shared-provenance lanes must co-assemble");
+    assert_eq!(
+        evaluation.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+    );
+    verify_qualification_derived_access_package_v1(&package_root).expect("verify package");
+
+    // The control: a lane keeping its own per-root provenance still refuses
+    // with the exact mixing guard.
+    let mut per_root = ntfs.clone();
+    per_root.root_provenance_sha256 = digest(0x56);
+    let per_root_fragment = lane_fragment("ntfs-per-root", &per_root);
+    let refused = assemble_qualification_derived_access_package_v1(
+        &[apfs_fragment, per_root_fragment],
+        &root.path().join("refused-package"),
+    )
+    .expect_err("per-lane provenance must refuse assembly");
+    assert!(refused.contains("mix source authority"), "{refused}");
+}
+
 #[test]
 fn change_read_root_provenance_override_binds_the_reference_root_only() {
     let sha256_hex = |bytes: &[u8]| -> String {
