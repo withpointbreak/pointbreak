@@ -2530,9 +2530,10 @@
 							.querySelector('[data-lens="attention"] .lens-count')
 							?.textContent?.trim() || "",
 					topbarStat:
-						document.querySelector("#stat-threads")?.textContent?.trim() || "",
+						document.querySelector("#stat-attention")?.textContent?.trim() ||
+						"",
 					topbarStatTitle:
-						document.querySelector("#stat-threads")?.getAttribute("title") ||
+						document.querySelector("#stat-attention")?.getAttribute("title") ||
 						"",
 				}));
 				compare(
@@ -2588,6 +2589,9 @@
 				.evaluateAll((cards) =>
 					cards.map((card) => {
 						const reason = card.querySelector(".change-card-attention-reason");
+						const groupReason = card
+							.closest(".attention-group")
+							?.querySelector(".attention-group-heading");
 						const ask = card.querySelector(".change-card-attention-ask");
 						const evidence = card.querySelector(
 							".change-card-attention-evidence",
@@ -2601,6 +2605,7 @@
 							changeId: card.dataset.changeId || "",
 							reason: reason?.textContent?.trim() || "",
 							reasonTitle: reason?.getAttribute("title") || "",
+							groupReason: groupReason?.textContent?.trim() || "",
 							ask: ask?.textContent?.trim() || "",
 							evidence: evidence?.textContent?.trim() || "",
 							action: action?.textContent?.trim() || "",
@@ -2615,17 +2620,26 @@
 				"> 0",
 				attentionPresentation.length,
 			);
+			// A per-card reason line appears only when it adds information beyond
+			// the attention group heading, so the readable reason is the card's own
+			// line when present and its group heading otherwise. A per-card line
+			// still has to carry its explanatory title.
 			expect(
 				attentionPresentation.every(
 					(card) =>
 						card.changeId.length > 0 &&
-						card.reason.length > 0 &&
-						card.reasonTitle.length > 0 &&
+						(card.reason.length > 0
+							? card.reasonTitle.length > 0
+							: card.groupReason.length > 0) &&
 						card.ask.length > 0 &&
 						card.evidence.length > 0 &&
 						card.action.startsWith("Next: ") &&
-						new Set([card.reason, card.ask, card.evidence, card.action])
-							.size === 4 &&
+						new Set([
+							card.reason.length > 0 ? card.reason : card.groupReason,
+							card.ask,
+							card.evidence,
+							card.action,
+						]).size === 4 &&
 						card.diagnostics.every((diagnostic) => diagnostic.length > 0),
 				),
 				"reason-bearing Attention",
