@@ -41,7 +41,7 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1: &str =
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v4-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1: &str =
-    "f4194829ea7a6d8c99fbbb5e33f071d92ad612b77eb3f68a5ee95736d42c4701";
+    "02b5e44244fefc3fbe99212fa7e6ec3be191fe01fc3fde464e947e085921b9a3";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -60,7 +60,7 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 8] = [
     "immutable-schema-and-byte-inventory-v1",
     "completion-last-independent-package-verification-v1",
     "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
-    "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v1",
+    "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v2",
 ];
 
 pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
@@ -4951,10 +4951,10 @@ fn evaluate_timeline_storage_v1(
                 let schema_valid = change_row.is_some_and(|change| {
                     !change.witness.sqlite_catalog.entries.iter().any(|entry| {
                         forbidden_timeline_storage_name_v1(&entry.name)
-                            || entry
-                                .columns
-                                .iter()
-                                .any(|column| forbidden_timeline_storage_name_v1(&column.name))
+                            || entry.columns.iter().any(|column| {
+                                !timeline_storage_column_exempt_v1(&entry.name, &column.name)
+                                    && forbidden_timeline_storage_name_v1(&column.name)
+                            })
                             || entry.indexes.iter().any(|index| {
                                 forbidden_timeline_storage_name_v1(&index.name)
                                     || index.columns.iter().any(|column| {
@@ -4980,17 +4980,22 @@ fn evaluate_timeline_storage_v1(
     }
 }
 
+/// The cursor ledger's single-use attempt token predates Timeline reads and is
+/// not timeline-derived material. The exemption is confined to the exact
+/// pre-Timeline ledger entries; an `attempt_token` column anywhere else stays
+/// forbidden.
+fn timeline_storage_column_exempt_v1(entry_name: &str, column_name: &str) -> bool {
+    ["cursor_intent", "cursor_receipt", "cursor_receipt_text"]
+        .iter()
+        .any(|ledger| entry_name.eq_ignore_ascii_case(ledger))
+        && column_name.eq_ignore_ascii_case("attempt_token")
+}
+
 fn forbidden_timeline_storage_name_v1(name: &str) -> bool {
     if forbidden_bodyless_storage_name_v1(name) {
         return true;
     }
     let name = name.to_ascii_lowercase();
-    // The cursor ledger's single-use attempt token predates Timeline reads and
-    // is not timeline-derived material; its exact column name is exempt from
-    // the token-name scan.
-    if name == "attempt_token" {
-        return false;
-    }
     let tokens = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .collect::<BTreeSet<_>>();
@@ -6516,6 +6521,23 @@ mod tests {
         ] {
             assert!(forbidden_timeline_storage_name_v1(forbidden), "{forbidden}");
         }
+        // The attempt-token exemption is confined to the exact cursor-ledger
+        // entries; the same column name anywhere else stays forbidden.
+        for ledger in ["cursor_intent", "cursor_receipt", "cursor_receipt_text"] {
+            assert!(
+                timeline_storage_column_exempt_v1(ledger, "attempt_token"),
+                "{ledger}"
+            );
+        }
+        assert!(!timeline_storage_column_exempt_v1(
+            "request_state",
+            "attempt_token"
+        ));
+        assert!(!timeline_storage_column_exempt_v1(
+            "cursor_receipt",
+            "continuation_token"
+        ));
+        assert!(forbidden_timeline_storage_name_v1("attempt_token"));
     }
 
     #[test]
