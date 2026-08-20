@@ -239,7 +239,7 @@ jq -n \
   '{schema: "pointbreak.change-inspector-browser-harness", version: 1,
     sourceCommit: $sourceCommit,
     binary: {requestedPath: $requestedBinary, executedPath: $executedBinary, sha256: $binarySha256},
-    files: [
+    files: ([
       {path: "scripts/change-inspector-browser-verify.sh", sha256: $shellSha256},
       {path: "scripts/change-inspector-browser-verify.mjs", sha256: $templateSha256},
       {path: "scripts/change-inspector-browser-diagnostics.mjs", sha256: $diagnosticsSha256},
@@ -247,7 +247,7 @@ jq -n \
       {path: "scripts/materialize-inspector-decision-matrix.sh", sha256: $materializerSha256},
       {path: ("tests/support/assets/change-ready-store/" + $activationFixture), sha256: $activationFixtureSha256},
       {path: ("tests/support/assets/change-ready-store/" + $completionFixture), sha256: $completionFixtureSha256}
-    ] + $compatibilityFixtureInventory}' >"$log_dir/harness-digests.json"
+    ] + $compatibilityFixtureInventory)}' >"$log_dir/harness-digests.json"
 harness_record_sha256="$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{print $1}')"
 
 pointbreak_binary="$binary_snapshot"
