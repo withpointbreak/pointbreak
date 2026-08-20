@@ -41,7 +41,7 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_PROCEDURE_SHA256_V1: &str =
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v4-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1: &str =
-    "a1caa365f3c4fdcad11b63605d8b2755989752f55692594bcd6c810a9c0bd22c";
+    "f4194829ea7a6d8c99fbbb5e33f071d92ad612b77eb3f68a5ee95736d42c4701";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -52,7 +52,7 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "completion-last-independent-package-verification-v1",
 ];
 
-const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 7] = [
+const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 8] = [
     "change-read-parity-and-bounds-v1",
     "exact-product-and-harness-identity-v1",
     "complete-typed-error-documents-v1",
@@ -60,6 +60,7 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 7] = [
     "immutable-schema-and-byte-inventory-v1",
     "completion-last-independent-package-verification-v1",
     "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
+    "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v1",
 ];
 
 pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
@@ -4979,6 +4980,12 @@ fn forbidden_timeline_storage_name_v1(name: &str) -> bool {
         return true;
     }
     let name = name.to_ascii_lowercase();
+    // The cursor ledger's single-use attempt token predates Timeline reads and
+    // is not timeline-derived material; its exact column name is exempt from
+    // the token-name scan.
+    if name == "attempt_token" {
+        return false;
+    }
     let tokens = name
         .split(|character: char| !character.is_ascii_alphanumeric())
         .collect::<BTreeSet<_>>();
@@ -5033,7 +5040,12 @@ fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
 }
 
 fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> bool {
-    const TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ: u64 = 14;
+    // The topology fixture deliberately contains one incomplete Change with no
+    // current revision, so an unfiltered read enumerates 15 candidates and
+    // narrows to 14 that carry current revisions. Both values are
+    // receipt-proven on macOS/APFS and Windows/NTFS.
+    const TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ: u64 = 15;
+    const TOPOLOGY_CURRENT_CANDIDATES_PER_UNFILTERED_READ: u64 = 14;
     const TOPOLOGY_ROWS_PER_BOUNDED_READ: u64 = 2;
     const TOPOLOGY_PROPOSAL_OPENS_PER_BOUNDED_READ_MAX: u64 = 4;
     const TOPOLOGY_SUPPORT_OPENS_PER_BOUNDED_READ_MAX: u64 = 8;
@@ -5150,10 +5162,10 @@ fn change_read_row_failed(row: &QualificationDerivedChangeReadEvidenceV1) -> boo
     };
     let bounded_topology_failed = row.fixture == QualificationDerivedChangeFixtureV1::TopologyV1
         && bounded_topology_page_count.is_some_and(|page_count| {
-            let expected_candidates =
-                page_count.saturating_mul(TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ);
-            counters.change_candidates != expected_candidates
-                || counters.change_candidate_current_revisions != expected_candidates
+            counters.change_candidates
+                != page_count.saturating_mul(TOPOLOGY_CANDIDATES_PER_UNFILTERED_READ)
+                || counters.change_candidate_current_revisions
+                    != page_count.saturating_mul(TOPOLOGY_CURRENT_CANDIDATES_PER_UNFILTERED_READ)
                 || counters.change_rows_emitted
                     != page_count.saturating_mul(TOPOLOGY_ROWS_PER_BOUNDED_READ)
                 || counters.change_proposal_carriers_opened
@@ -6608,7 +6620,7 @@ mod tests {
                         || fixture == QualificationDerivedChangeFixtureV1::TopologyV1);
                 if direct_work_expected {
                     let topology = fixture == QualificationDerivedChangeFixtureV1::TopologyV1;
-                    counters.change_candidates = if topology { 14 } else { 1 };
+                    counters.change_candidates = if topology { 15 } else { 1 };
                     counters.change_candidate_current_revisions = if topology {
                         14
                     } else if matches!(
@@ -6626,7 +6638,7 @@ mod tests {
                             QualificationDerivedChangeReadCaseV1::ConcurrentReaders
                                 | QualificationDerivedChangeReadCaseV1::WarmReuseSuite
                         ) {
-                            counters.change_candidates = 56;
+                            counters.change_candidates = 60;
                             counters.change_candidate_current_revisions = 56;
                         } else if matches!(
                             case,
@@ -6635,7 +6647,7 @@ mod tests {
                                 | QualificationDerivedChangeReadCaseV1::PostAppendSuite
                                 | QualificationDerivedChangeReadCaseV1::PostAppendFreshProcessSuite
                         ) {
-                            counters.change_candidates = 28;
+                            counters.change_candidates = 30;
                             counters.change_candidate_current_revisions = 28;
                         }
                         let (proposal_opens, rows_emitted) = match case {
@@ -7506,7 +7518,7 @@ mod tests {
                     && row.case == QualificationDerivedChangeReadCaseV1::ChangesBounded
             })
             .expect("bounded topology Change row");
-        candidate_wide.counters.change_candidates = 14;
+        candidate_wide.counters.change_candidates = 15;
         candidate_wide.counters.change_candidate_current_revisions = 14;
         candidate_wide.counters.change_proposal_carriers_opened = 14;
         candidate_wide.counters.change_proposal_carriers_validated = 14;
