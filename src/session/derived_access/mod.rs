@@ -1,5 +1,10 @@
 //! Product contract and candidate-independent reference semantics for derived access.
-#![cfg_attr(not(test), allow(dead_code))]
+// Dead-code analysis here is only meaningful with the evidence harness compiled in:
+// in a `--test` build the tests are the roots, and the paths this module keeps for
+// qualification are exercised by `bench_support::derived_access`, which lives behind
+// the `bench` feature. `just lint` and `just check-types` run with all features, so
+// the analysis still happens where it can tell the truth.
+#![cfg_attr(not(all(test, feature = "bench")), allow(dead_code))]
 
 pub(crate) mod attention;
 pub(crate) mod changes;
@@ -718,6 +723,7 @@ mod tests {
             fixture["schema"],
             "pointbreak.qualification-derived-access-reference.v1"
         );
+        #[cfg(feature = "bench")]
         assert_eq!(
             fixture["contractSha256"],
             crate::bench_support::derived_access::QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1

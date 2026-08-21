@@ -698,6 +698,7 @@ mod tests {
             EventWriteOutcome::Created
         );
         drop(guard);
+        #[cfg(feature = "bench")]
         assert_eq!(
             scope
                 .snapshot()

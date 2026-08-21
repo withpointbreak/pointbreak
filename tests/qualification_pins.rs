@@ -19,15 +19,25 @@ fn repo_path(relative: &str) -> PathBuf {
 }
 
 /// The indented body of a `just` recipe, ending at the next unindented line.
+///
+/// The header may carry parameters (`test-full *args:`), so it is matched on the
+/// recipe name plus a boundary rather than on an exact line.
 fn recipe_body(justfile: &str, name: &str) -> String {
-    let marker = format!("\n{name}:\n");
-    let suffix = justfile
-        .split(&marker)
-        .nth(1)
+    let lines = justfile.lines().collect::<Vec<_>>();
+    let header = lines
+        .iter()
+        .position(|line| {
+            line.ends_with(':')
+                && line
+                    .strip_prefix(name)
+                    .is_some_and(|rest| rest.starts_with([' ', ':']))
+        })
         .unwrap_or_else(|| panic!("Justfile has no `{name}` recipe"));
-    suffix
-        .lines()
+
+    lines[header + 1..]
+        .iter()
         .take_while(|line| line.trim().is_empty() || line.starts_with(char::is_whitespace))
+        .copied()
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -296,5 +306,115 @@ fn pinned_filter_names_and_control_registry_paths_stay_disjoint() {
         shared.is_empty(),
         "these tests are pinned by both the recipe filter and the control registry: {shared:#?}\n\
          Overlap lets one lane silently stand in for the other.",
+    );
+}
+
+const BENCH_GATE: &str = "#[cfg(feature = \"bench\")]";
+const COUNTING_GATE: &str = "#[cfg(any(test, feature = \"longitudinal-counting\"))]";
+
+/// Whether `attribute` is the line immediately above `declaration`.
+fn gate_precedes(source: &str, attribute: &str, declaration: &str) -> bool {
+    let lines = source.lines().map(str::trim).collect::<Vec<_>>();
+    lines
+        .windows(2)
+        .any(|window| window == [attribute, declaration])
+}
+
+/// Whether `declaration` appears with no attribute on the line above it.
+fn declaration_is_ungated(source: &str, declaration: &str) -> bool {
+    let lines = source.lines().map(str::trim).collect::<Vec<_>>();
+    lines
+        .windows(2)
+        .any(|window| window[1] == declaration && !window[0].starts_with("#[cfg"))
+}
+
+/// The gate a module declaration must carry, and the declarations that must carry none.
+struct GateTopology {
+    source: &'static str,
+    gated: &'static [(&'static str, &'static str)],
+    ungated: &'static [&'static str],
+}
+
+#[test]
+fn harness_submodules_stay_behind_the_bench_feature() {
+    let expectations = [
+        GateTopology {
+            source: "src/bench_support.rs",
+            gated: &[
+                (BENCH_GATE, "pub mod derived_access;"),
+                (BENCH_GATE, "pub mod foundation;"),
+            ],
+            ungated: &["pub mod longitudinal;"],
+        },
+        GateTopology {
+            source: "src/bench_support/longitudinal/mod.rs",
+            gated: &[
+                (BENCH_GATE, "mod builder;"),
+                (BENCH_GATE, "mod evidence;"),
+                (BENCH_GATE, "pub use builder::*;"),
+                (BENCH_GATE, "pub use evidence::*;"),
+                (COUNTING_GATE, "mod counters;"),
+                (COUNTING_GATE, "pub use counters::*;"),
+            ],
+            ungated: &[
+                "mod contract;",
+                "mod process;",
+                "pub use contract::*;",
+                "pub use process::*;",
+            ],
+        },
+        GateTopology {
+            source: "src/session/mod.rs",
+            gated: &[(BENCH_GATE, "pub(crate) mod benchmark;")],
+            ungated: &[],
+        },
+    ];
+
+    for topology in expectations {
+        let relative = topology.source;
+        let source = std::fs::read_to_string(repo_path(relative))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"));
+        let windows_checkout = source.replace("\r\n", "\n").replace('\n', "\r\n");
+        let checkouts = [("LF", source.as_str()), ("CRLF", windows_checkout.as_str())];
+
+        for (attribute, declaration) in topology.gated {
+            for (checkout, text) in checkouts {
+                assert!(
+                    gate_precedes(text, attribute, declaration),
+                    "{relative} ({checkout}) must gate `{declaration}` with `{attribute}` \
+                     so the evidence harness stays out of the default test lane"
+                );
+            }
+        }
+
+        for declaration in topology.ungated {
+            for (checkout, text) in checkouts {
+                assert!(
+                    declaration_is_ungated(text, declaration),
+                    "{relative} ({checkout}) must leave `{declaration}` in the default lane: \
+                     the counting sites and the control-registry tests depend on it"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_full_recipe_runs_the_pinned_feature_set_unfiltered() {
+    let justfile = std::fs::read_to_string(repo_path("Justfile")).expect("read Justfile");
+    let body = recipe_body(&justfile, "test-full");
+
+    assert!(
+        body.contains("--features longitudinal-counting"),
+        "test-full must select the feature set the qualification argvs pin"
+    );
+    assert!(
+        !body.contains("-E "),
+        "test-full must stay unfiltered — a filterset here recreates the \
+         silent-partial-match hazard the pin checks exist to close"
+    );
+    assert!(
+        !body.contains("--all-features"),
+        "test-full must not enable lmdb-proof or gix-parity, which no pin uses"
     );
 }

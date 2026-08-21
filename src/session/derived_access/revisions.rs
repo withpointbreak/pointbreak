@@ -1508,6 +1508,7 @@ mod tests {
             panic!("published generation should serve a revision page");
         };
         drop(guard);
+        #[cfg(feature = "bench")]
         assert_eq!(
             scope
                 .snapshot()

@@ -20,7 +20,9 @@ use crate::model::JournalId;
 use crate::session::EventStore;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
 
+#[cfg(feature = "bench")]
 pub mod derived_access;
+#[cfg(feature = "bench")]
 pub mod foundation;
 pub mod longitudinal;
 
@@ -185,10 +187,29 @@ mod tests {
     #[test]
     fn foundation_api_remains_behind_the_test_or_bench_gate() {
         let library_root = include_str!("lib.rs");
-        let windows_checkout = library_root.replace("\r\n", "\n").replace('\n', "\r\n");
+        let harness_root = include_str!("bench_support.rs");
 
-        assert!(source_has_foundation_gate(library_root));
-        assert!(source_has_foundation_gate(&windows_checkout));
+        for source in [library_root, as_windows_checkout(library_root).as_str()] {
+            assert!(source_has_foundation_gate(source));
+        }
+
+        // This module compiles under plain `cfg(test)`, so the module root's gate
+        // alone does not keep the evidence harness out of a featureless test
+        // build. These submodule gates are what does.
+        for source in [harness_root, as_windows_checkout(harness_root).as_str()] {
+            assert!(source_gates_evidence_submodule(
+                source,
+                "pub mod derived_access;"
+            ));
+            assert!(source_gates_evidence_submodule(
+                source,
+                "pub mod foundation;"
+            ));
+        }
+    }
+
+    fn as_windows_checkout(source: &str) -> String {
+        source.replace("\r\n", "\n").replace('\n', "\r\n")
     }
 
     fn source_has_foundation_gate(source: &str) -> bool {
@@ -201,6 +222,13 @@ mod tests {
                     "pub mod bench_support;",
                 ]
         })
+    }
+
+    fn source_gates_evidence_submodule(source: &str, declaration: &str) -> bool {
+        let lines = source.lines().map(str::trim).collect::<Vec<_>>();
+        lines
+            .windows(2)
+            .any(|window| window == ["#[cfg(feature = \"bench\")]", declaration])
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! ```
 
 pub mod adapter;
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 pub(crate) mod benchmark;
 pub(crate) mod derived_access;
 pub mod event;
@@ -112,7 +112,7 @@ pub use signing::{
     trust_set_to_value, verification_view, verify_cosignature, verify_event_signature,
 };
 pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 pub(crate) use store::backend::{
     Journal, JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, LocalJournal,
 };
@@ -219,7 +219,7 @@ pub use workflow::{
     withdraw_revision_from_change,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 pub(crate) use workflow::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
 
 pub use crate::crypto::EventVerificationStatus;

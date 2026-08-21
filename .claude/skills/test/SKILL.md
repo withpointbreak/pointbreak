@@ -11,10 +11,19 @@ If `$ARGUMENTS` is provided, pass it as a nextest filter expression:
 just test -E '$ARGUMENTS'
 ```
 
-If no arguments are provided, run all tests:
+If no arguments are provided, run the default suite:
 
 ```bash
 just test
+```
+
+`just test` excludes the qualification evidence harness, which is behind the `bench`
+feature. Use `just test-full` for the default suite plus that harness when the change
+touches `src/bench_support/**`, `src/session/benchmark.rs`, `benches/store_foundation.rs`,
+or any longitudinal counting site:
+
+```bash
+just test-full
 ```
 
 Common filter patterns:

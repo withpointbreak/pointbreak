@@ -27,15 +27,20 @@ qualification_test_host_identity := "pointbreak-test-" + os() + "-v1"
 default:
     @just --list
 
-# Run all tests.
+# Run the default test suite; `test-full` adds the qualification evidence harness.
 [group('core')]
 test *args:
     cargo +stable nextest run --no-tests pass {{ args }}
 
-# Run all tests (CI mode: no fail-fast, verbose).
+# Run the default test suite (CI mode: no fail-fast, verbose).
 [group('core')]
 test-ci *args:
     cargo +stable nextest run --profile ci --no-tests pass {{ args }}
+
+# Run the default suite plus the qualification evidence harness `just test` skips.
+[group('core')]
+test-full *args:
+    cargo +stable nextest run --features longitudinal-counting --no-tests pass {{ args }}
 
 # Run a specific test file (e.g. just test-file integration).
 [group('core')]
@@ -255,7 +260,7 @@ migrate-store-common-dir repo="." include-ephemeral="false":
     cargo +stable run --bin pointbreak -- store migrate --repo {{ repo }} \
         {{ if include-ephemeral == "true" { "--include-ephemeral" } else { "" } }}
 
-# Run the complete Rust gate: commit check, build, lint, and tests.
+# Run the default Rust gate: commit check, build, lint, and the default test suite.
 [group('quality')]
 check: commit-check build lint test
 

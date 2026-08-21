@@ -3,17 +3,21 @@
 //! Evidence execution remains a later source task; this module exposes only
 //! typed, non-timing workload construction and receipts.
 
+#[cfg(feature = "bench")]
 mod builder;
 mod contract;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 mod counters;
+#[cfg(feature = "bench")]
 mod evidence;
 mod process;
 
+#[cfg(feature = "bench")]
 pub use builder::*;
 pub use contract::*;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 pub use counters::*;
+#[cfg(feature = "bench")]
 pub use evidence::*;
 pub use process::*;
 

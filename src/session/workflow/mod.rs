@@ -136,12 +136,12 @@ pub(crate) use history::{
     MatchKind, history_entries_from_selected_events, match_kind_for, range_bound,
     resolve_assessment_value, resolve_type_value, tag_completion_key,
 };
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
 };
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 pub(crate) use ingest::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
 pub use input_request::{
     InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,

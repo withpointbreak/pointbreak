@@ -147,7 +147,7 @@ impl JournalChangeStamp {
         }
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(feature = "bench")]
     pub(crate) fn continuation_token(&self) -> Option<String> {
         let Self::Observed {
             identity_sha256,
@@ -167,7 +167,7 @@ impl JournalChangeStamp {
         ))
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(feature = "bench")]
     pub(crate) fn from_continuation_token(token: &str) -> Option<Self> {
         let mut parts = token.split(',');
         if parts.next()? != "ntfs-v1" {
@@ -195,7 +195,7 @@ impl JournalChangeStamp {
         })
     }
 
-    #[cfg(any(test, feature = "bench"))]
+    #[cfg(feature = "bench")]
     pub(crate) fn opaque_sha256(&self) -> String {
         match self {
             Self::Absent => crate::canonical_hash::sha256_bytes_hex(b"journal-change-stamp:absent"),
@@ -226,7 +226,7 @@ impl JournalChangeStamp {
     }
 }
 
-#[cfg(any(test, feature = "bench"))]
+#[cfg(feature = "bench")]
 fn is_lower_sha256(value: &str) -> bool {
     value.len() == 64
         && value

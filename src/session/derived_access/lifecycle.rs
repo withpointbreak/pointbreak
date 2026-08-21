@@ -2693,6 +2693,7 @@ mod tests {
 
         drop(guard);
         let observed = scope.snapshot();
+        #[cfg(feature = "bench")]
         assert_eq!(
             observed
                 .derived_access_phases

@@ -56,11 +56,12 @@ Rules:
 Use `just` for day-to-day work. Tests use `cargo-nextest` for parallel execution.
 
 ```bash
-just test                      # Run all tests
+just test                      # Run the default test suite
+just test-full                 # Default suite plus the qualification evidence harness
 just test-file integration     # Run a specific test file
 just test -E 'test(test_name)' # Run a specific nextest filter
 just lint                      # fmt check + clippy
-just check                     # commit check + build + lint + test
+just check                     # commit check + build + lint + default test suite
 just build                     # Debug build
 just release                   # Release build
 just run --help                # Run the CLI
@@ -69,8 +70,13 @@ just fmt                       # Format code
 
 Run `just --list` for grouped recipe discovery. Read `docs/development.md` before choosing gates for
 Inspector, extension, release, installer, canonical-example, or browser changes; `just check` is the
-complete Rust gate, not a universal repository gate. `scripts/README.md` documents script ownership,
+default Rust gate, not a universal repository gate. `scripts/README.md` documents script ownership,
 side effects, expected outcomes, and failure classes.
+
+`just check` runs the **default** test suite. The qualification evidence harness is compiled and
+clippy-linted there, but its roughly 348 tests are behind the `bench` feature and run only under
+`just test-full`. Add `just test-full` when the change touches `src/bench_support/**`,
+`src/session/benchmark.rs`, `benches/store_foundation.rs`, or any longitudinal counting site.
 
 ## Implementation Guidance
 
