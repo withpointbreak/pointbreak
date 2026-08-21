@@ -427,6 +427,9 @@ where
         }
     };
     if let Err(error) = receipt {
+        if let Err(product_error) = &result {
+            let _ = writeln!(stderr, "{product_error}");
+        }
         let _ = writeln!(
             stderr,
             "could not write longitudinal counting receipt: {error}"
@@ -1443,6 +1446,45 @@ mod longitudinal_counting_tests {
         assert_eq!(stdout, b"product output\n");
         assert!(!receipt_path.exists());
         assert!(String::from_utf8_lossy(&stderr).contains("observed route state"));
+    }
+
+    #[test]
+    fn interaction_receipt_failure_preserves_the_product_error_first() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let request = interaction_request(&receipt_path);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, _, _, _| Err("product failed exactly".into()),
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(!receipt_path.exists());
+        let stderr = String::from_utf8(stderr).expect("UTF-8 stderr");
+        assert!(stderr.starts_with("product failed exactly\n"), "{stderr}");
+        assert!(
+            stderr.contains("could not write longitudinal counting receipt:"),
+            "{stderr}"
+        );
     }
 
     #[test]
