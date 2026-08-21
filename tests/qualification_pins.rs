@@ -400,6 +400,38 @@ fn harness_submodules_stay_behind_the_bench_feature() {
 }
 
 #[test]
+fn ci_profile_exclusions_name_tests_that_still_exist_and_spare_the_full_lane() {
+    let profile = std::fs::read_to_string(repo_path(".config/nextest.toml"))
+        .expect("read nextest configuration");
+
+    // The ci profile excludes named slow tests from the per-push lane; the
+    // scheduled full-suite lane still runs them through the default profile.
+    let names = filter_predicate_names(&profile);
+    assert!(
+        names.contains(&"cargo_install_exposes_only_pointbreak_executable".to_owned()),
+        "the slow package-identity install test must be excluded from the per-push ci profile"
+    );
+    assert_eq!(
+        profile.matches("default-filter").count(),
+        1,
+        "only the ci profile may carry a default-filter; one on the default \
+         profile would silently drop the excluded tests from every lane"
+    );
+
+    // A renamed or deleted test leaves a stale exclusion silently filtering
+    // nothing; every excluded name must still resolve to a real function.
+    let sources = read_sources(&tracked_rust_sources());
+    for name in &names {
+        assert!(
+            sources
+                .iter()
+                .any(|(_, source)| declares_function(source, name)),
+            "ci-profile exclusion names a test no tracked Rust source declares: {name}"
+        );
+    }
+}
+
+#[test]
 fn test_full_recipe_runs_the_pinned_feature_set_unfiltered() {
     let justfile = std::fs::read_to_string(repo_path("Justfile")).expect("read Justfile");
     let body = recipe_body(&justfile, "test-full");

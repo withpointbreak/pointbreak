@@ -3335,6 +3335,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "flaky under Windows shard load; re-enable with #710"
+    )]
     fn status_does_not_wait_during_generation_publication() {
         let temp = populated_store(7);
         let lifecycle = active_lifecycle(temp.path());

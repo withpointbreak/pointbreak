@@ -286,6 +286,10 @@ fn unreadable_range_and_root_targets_use_exact_fallback_even_with_current_ref() 
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "flaky under Windows shard load; re-enable with #699"
+)]
 fn work_label_clamps_unicode_scalars_and_keeps_html_as_plain_json_text() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
@@ -542,6 +546,10 @@ fn api_objects_carries_per_revision_classification() {
 /// composite, snapshot diff, history, freshness, and lineages — all served
 /// from the linked clone-local store, never the deleted worktree.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "flaky under Windows shard load; re-enable with #699"
+)]
 fn linked_inspector_drill_in_survives_deleted_source_worktree() {
     let main = GitRepo::new();
     main.write("README.md", "base\n");

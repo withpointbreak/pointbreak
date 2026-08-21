@@ -12,6 +12,10 @@ fail-fast = false
 # Show everything in CI for debugging.
 status-level = "pass"
 final-status-level = "all"
+# Slow machine-shaped tests excluded from the per-push lane; the scheduled
+# full-suite lane still runs them through the default profile. Guarded by a
+# name-resolution test so a stale exclusion fails loudly.
+default-filter = 'not test(cargo_install_exposes_only_pointbreak_executable)'
 
 # Per-test timing report, uploaded as a CI artifact so lane cost is measured
 # from recorded runs rather than scraped from job wall-clock.
