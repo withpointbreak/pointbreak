@@ -104,7 +104,7 @@ fn attention_list(
 enum RoutedAttention {
     Authoritative {
         result: AttentionListResult,
-        #[cfg_attr(not(any(test, feature = "longitudinal-counting")), allow(dead_code))]
+        #[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
         labeled_fallback: bool,
     },
     Derived {
@@ -120,7 +120,7 @@ impl RoutedAttention {
         }
     }
 
-    #[cfg(any(test, feature = "longitudinal-counting"))]
+    #[cfg(feature = "longitudinal-counting")]
     fn observed_state(
         &self,
     ) -> pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1 {
@@ -139,7 +139,7 @@ impl RoutedAttention {
         }
     }
 
-    #[cfg(any(test, feature = "longitudinal-counting"))]
+    #[cfg(feature = "longitudinal-counting")]
     fn record_observed_state(&self) {
         if let Some(counting) =
             pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
@@ -235,7 +235,7 @@ fn render_attention_item_line(item: &AttentionItem) -> String {
     line
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "longitudinal-counting"))]
 mod tests {
     use pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1;
 
