@@ -287,6 +287,7 @@ const CI_JOB_TIERS: &[(&str, Tier)] = &[
     ("extension-check", Tier::PerPush),
     ("test", Tier::PerPush),
     ("store-foundation-qualification", Tier::PerPush),
+    ("cargo-deny", Tier::PerPush),
     ("git-parity", Tier::Nightly),
 ];
 
@@ -387,6 +388,66 @@ fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
         "pushing a branch whose name contains full-ci must run the scheduled \
          suite pre-merge; workflow_dispatch alone means leaving the terminal \
          for the Actions UI, which is easy to skip on exactly the risky change"
+    );
+}
+
+#[test]
+fn dependency_audit_splits_deterministic_and_time_triggered_checks() {
+    // The placement follows the workflow tier note's rule of thumb: license,
+    // ban, and source violations are properties of the change set, so they
+    // run per-push behind the dependency surface; advisory failures are
+    // time-triggered (a new RUSTSEC entry reddens CI with no code change),
+    // so they run on the scheduled lane.
+    let ci = read_workflow("ci.yml");
+    let job = job_block(&ci, "cargo-deny");
+    assert!(
+        job.contains("EmbarkStudios/cargo-deny-action"),
+        "the per-push dependency audit must run through cargo-deny-action"
+    );
+    assert!(
+        job.contains("check bans licenses sources"),
+        "the per-push audit covers the deterministic change-set checks"
+    );
+    assert!(
+        !job.contains("advisories"),
+        "advisories are time-triggered and belong to the scheduled lane, \
+         never the per-push path"
+    );
+    assert!(
+        job.contains("needs.guard.outputs.skip != 'true'")
+            && job.contains("needs.guard.outputs.deps == 'true'"),
+        "the audit must consume the guard's dependency surface resolution"
+    );
+
+    let guard = job_block(&ci, "guard");
+    for surface in ["Cargo.toml", "Cargo.lock", "deny.toml"] {
+        assert!(
+            guard.contains(surface),
+            "guard must map surface {surface} for cargo-deny"
+        );
+    }
+
+    let nightly = read_workflow("nightly.yml");
+    let advisories = job_block(&nightly, "cargo-deny-advisories");
+    assert!(
+        advisories.contains("EmbarkStudios/cargo-deny-action"),
+        "the scheduled advisory audit must run through cargo-deny-action"
+    );
+    assert!(
+        advisories.contains("check advisories"),
+        "the scheduled lane owns the time-triggered advisory check"
+    );
+
+    let deny = std::fs::read_to_string("deny.toml").expect("read deny.toml");
+    for section in ["[advisories]", "[licenses]", "[bans]", "[sources]"] {
+        assert!(
+            deny.contains(section),
+            "deny.toml must configure the {section} check explicitly"
+        );
+    }
+    assert!(
+        deny.contains("multiple-versions = \"warn\""),
+        "duplicate-version detection starts as warn, a deliberate ratchet"
     );
 }
 

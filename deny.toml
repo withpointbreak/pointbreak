@@ -1,0 +1,36 @@
+# Dependency audit policy, enforced by cargo-deny in CI: license, ban, and
+# source checks run per-push behind the dependency surface; the time-triggered
+# advisory check runs on the scheduled lane. See .github/workflows/README.md.
+
+[graph]
+all-features = true
+
+[advisories]
+# Any RUSTSEC advisory or yanked crate in the graph is an error.
+yanked = "deny"
+ignore = [
+    # bincode 1.x is unmaintained (development ceased); it reaches the graph
+    # only through syntect's binary dump format (syntect -> bincode, also via
+    # two-face). Not a vulnerability. Re-evaluate when syntect moves off it.
+    { id = "RUSTSEC-2025-0141", reason = "transitive via syntect; unmaintained, not vulnerable" },
+]
+
+[licenses]
+# Additions to this list are a deliberate, reviewed decision.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Warn to start: the graph carries pre-existing duplicates. Tightening to
+# deny is a deliberate ratchet once they are gone.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

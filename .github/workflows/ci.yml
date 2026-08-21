@@ -27,6 +27,7 @@ jobs:
       skills: ${{ steps.paths.outputs.skills }}
       web: ${{ steps.paths.outputs.web }}
       extension: ${{ steps.paths.outputs.extension }}
+      deps: ${{ steps.paths.outputs.deps }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -43,16 +44,16 @@ jobs:
           # base, an unreachable commit after a force-push — every filtered
           # job runs. A path filter that fails closed silently stops
           # qualifying the product.
-          qualification=true installer=true skills=true web=true extension=true
+          qualification=true installer=true skills=true web=true extension=true deps=true
           if [ -n "$BASE" ] \
              && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
              && files=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
-            qualification=false installer=false skills=false web=false extension=false
+            qualification=false installer=false skills=false web=false extension=false deps=false
             while IFS= read -r file; do
               case "$file" in
                 # A change to how the jobs run must re-run every filtered job.
                 .github/workflows/ci.yml)
-                  qualification=true installer=true skills=true web=true extension=true
+                  qualification=true installer=true skills=true web=true extension=true deps=true
                   ;;
                 src/session/derived_access/*|src/bench_support/*|src/bench_support.rs|benches/store_foundation.rs)
                   qualification=true
@@ -65,6 +66,10 @@ jobs:
                   ;;
                 scripts/install*|.github/binary-targets.json)
                   installer=true
+                  ;;
+                # The dependency graph and its audit policy.
+                Cargo.toml|Cargo.lock|deny.toml)
+                  deps=true
                   ;;
                 # The Justfile defines the recipes the qualification and
                 # installer jobs run, and pins the skills validator.
@@ -89,6 +94,7 @@ jobs:
             echo "skills=$skills"
             echo "web=$web"
             echo "extension=$extension"
+            echo "deps=$deps"
           } >> "$GITHUB_OUTPUT"
       # Only push events can ever suppress anything: on every other event the
       # resolve step is skipped, its output is empty, and downstream
@@ -157,6 +163,24 @@ jobs:
       - uses: taiki-e/install-action@just
       - name: Validate Agent Skills
         run: just skills-validate
+      - name: check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  cargo-deny:
+    name: cargo deny (licenses, bans, sources)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.deps == 'true'
+    # Deterministic change-set checks only; the time-triggered advisory
+    # check lives on the scheduled lane so a new RUSTSEC entry cannot
+    # redden unrelated pull requests.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
       - name: check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree

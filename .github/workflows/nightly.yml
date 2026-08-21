@@ -50,6 +50,23 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
+  cargo-deny-advisories:
+    name: cargo deny (advisories)
+    # Advisory failures are time-triggered — a new RUSTSEC entry can redden
+    # CI with no code change — so they run here on a cadence rather than on
+    # the per-push path. The deterministic license/ban/source checks run
+    # per-push in ci.yml behind the dependency surface.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+      - name: check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
   git-parity:
     name: git parity (${{ matrix.os }})
     timeout-minutes: 15
