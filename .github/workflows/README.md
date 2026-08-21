@@ -8,16 +8,17 @@ new check belongs.
 ## Per-push (`ci.yml`)
 
 Runs on every pull request and every push to `main`: lint, type checks, the default test suite,
-the qualification smoke, the parity harness, and the per-surface checks (installer, skills, web,
-extension, workflows). Jobs guarded by a condition render as `skipped` rows rather than
-disappearing, so a reviewer can always see what did not run and why.
+the qualification smoke, and the per-surface checks (installer, skills, web, extension,
+workflows). Jobs guarded by a condition render as `skipped` rows rather than disappearing, so a
+reviewer can always see what did not run and why — the heavy jobs skip a `push` run only when the
+`guard` job resolved the identical SHA as already green from its pull-request run.
 
 ## Scheduled (`nightly.yml`)
 
 Runs once a day, and every job in it also carries `workflow_dispatch` so it can be triggered by
 hand (`gh workflow run nightly.yml`) — a scheduled lane nobody can rerun on demand is a lane
 nobody can debug. Hosts the full feature-on suite (`just test-full`), which no per-push lane
-executes.
+executes, and the report-only subprocess-vs-gix parity harness (`just git-parity`).
 
 ## Release (`release-plan.yml`, `release.yml`, `release-binaries.yml`, `verify-release.yml`)
 

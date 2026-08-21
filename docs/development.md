@@ -110,8 +110,8 @@ feature, on by default) and the qualified read/scalar classes route to it, while
 and write-tree stay on subprocess `git` permanently. `POINTBREAK_GIT_BACKEND=subprocess` is the
 runtime escape hatch, and `--no-default-features` builds the subprocess-only backend. `just check`
 covers the `gix` code (Clippy runs `--all-features`) but does not run the parity harness, which is
-gated on `--features gix-parity` and exercised by `just git-parity` — and by a dedicated CI lane on
-macOS and Windows. Run `just
+gated on `--features gix-parity` and exercised by `just git-parity` — and by the scheduled lane in
+`.github/workflows/nightly.yml` on macOS and Windows, dispatchable by hand. Run `just
 git-parity` when you change the git seam or either backend; `just git-bench` prints the per-operation
 subprocess-vs-gix win. See `docs/adr/adr-0040-git-backend-seam-and-hybrid.md`.
 

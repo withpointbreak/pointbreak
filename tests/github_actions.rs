@@ -287,7 +287,7 @@ const CI_JOB_TIERS: &[(&str, Tier)] = &[
     ("extension-check", Tier::PerPush),
     ("test", Tier::PerPush),
     ("store-foundation-qualification", Tier::PerPush),
-    ("git-parity", Tier::PerPush),
+    ("git-parity", Tier::Nightly),
 ];
 
 #[test]
@@ -425,7 +425,7 @@ fn every_heavy_job_consults_the_guard() {
     let ci = read_workflow("ci.yml");
     // Per-job blocks, so one wired job cannot satisfy the assertion for an
     // unwired sibling.
-    for job in ["test", "store-foundation-qualification", "git-parity"] {
+    for job in ["test", "store-foundation-qualification"] {
         let block = job_block(&ci, job);
         assert!(
             block.contains("needs: guard"),
