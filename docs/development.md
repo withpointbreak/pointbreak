@@ -44,6 +44,26 @@ call-graph row, the runner executes a source-attestation test inside each binary
 proving that exactly one frozen, fully qualified test ran and passed. An exit code of zero with no matching
 test is not evidence.
 
+### Interaction-performance diagnostics
+
+The interaction-performance receipt is an opt-in implementation and evidence diagnostic, not ordinary
+telemetry or a product SLO. It is compiled only with `longitudinal-counting` and requires an explicit hidden
+CLI request (or the corresponding explicit Inspector header). Ordinary/default and release-package builds do
+not activate it.
+
+Before review, changes to this surface run the focused interaction library/CLI filters and
+`cli_interaction_performance`, default plus `--no-default-features` type/build checks, `just check`,
+`just test-full`, `just longitudinal-contract`, and `just longitudinal-smoke`. The disposable correctness
+matrix covers seven route IDs and three Attention setup/state cells, but contains no timing assertion and is
+not representative-scale performance evidence. Active-unavailable Attention expects exactly one complete
+`BackgroundMaintenance` child because that is existing product behavior; every other cell expects zero, and
+all missing, extra, wrong-actor, duplicate, or incomplete child facts remain invalid.
+
+Implementation Green does not establish final-path readiness. Final debug/release binary identity, preserved
+L100 manifest access or cloning, exact-source compatibility, and a representative final-path case require a
+separate readiness authorization. Task 5.1 baseline/evidence authority remains separate again; never run
+Pointbreak against the preserved seed or an owner store.
+
 Timeline qualification is carried only by `pointbreak.qualification-derived-change-read-receipt.v2`, which
 embeds the complete V1 Change receipt and selects evaluator v4. Its six Timeline suites use the Inspector
 service child for both semantics and request-local counters; direct library counters remain V1 Change
