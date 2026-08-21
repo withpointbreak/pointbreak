@@ -165,6 +165,182 @@ fn release_workflows_bind_the_reviewed_parent_and_keep_published_state_immutable
     }
 }
 
+/// Read a workflow file from `.github/workflows/` by file name.
+fn read_workflow(file_name: &str) -> String {
+    let path = format!(".github/workflows/{file_name}");
+    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {path}: {err}"))
+}
+
+/// Name and contents of every workflow file in `.github/workflows/`.
+fn workflow_sources() -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(".github/workflows").expect("list workflow directory") {
+        let path = entry.expect("read workflow directory entry").path();
+        if path.extension().is_some_and(|extension| extension == "yml") {
+            let name = path
+                .file_name()
+                .expect("workflow file name")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            sources.push((name, text));
+        }
+    }
+    sources
+}
+
+/// Whether a line declares a top-level job key: exactly two spaces of indent, a
+/// lowercase kebab-case name, and a trailing colon with nothing after it.
+fn is_job_key_line(line: &str) -> bool {
+    let Some(key) = line
+        .strip_prefix("  ")
+        .and_then(|rest| rest.strip_suffix(':'))
+    else {
+        return false;
+    };
+    key.starts_with(|c: char| c.is_ascii_lowercase())
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The byte range of the top-level `jobs:` mapping: from the line after `jobs:` to
+/// the next column-zero key or end of file. Anchoring here is what keeps two-space
+/// keys under `on:` or `env:` from ever masquerading as jobs.
+fn jobs_section(workflow: &str) -> &str {
+    let start = if let Some(rest) = workflow.strip_prefix("jobs:\n") {
+        workflow.len() - rest.len()
+    } else {
+        let marker = "\njobs:\n";
+        let at = workflow.find(marker).expect("workflow has a jobs: mapping");
+        at + marker.len()
+    };
+    let section = &workflow[start..];
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if !trimmed.is_empty() && !trimmed.starts_with(' ') && !trimmed.starts_with('#') {
+            return &section[..offset];
+        }
+        offset += line.len();
+    }
+    section
+}
+
+/// The top-level job keys a workflow declares, in file order.
+fn job_keys(workflow: &str) -> Vec<String> {
+    jobs_section(workflow)
+        .lines()
+        .filter(|line| is_job_key_line(line))
+        .map(|line| line.trim().trim_end_matches(':').to_string())
+        .collect()
+}
+
+/// The text of one top-level job's block, from its key line to the next top-level
+/// job key, so a per-job assertion cannot be satisfied by a match elsewhere in the
+/// workflow file.
+fn job_block<'a>(workflow: &'a str, job_key: &str) -> &'a str {
+    let section = jobs_section(workflow);
+    let header = format!("  {job_key}:");
+    let mut start = None;
+    let mut offset = 0;
+    for line in section.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if let Some(block_start) = start {
+            if is_job_key_line(trimmed) {
+                return &section[block_start..offset];
+            }
+        } else if trimmed == header {
+            start = Some(offset);
+        }
+        offset += line.len();
+    }
+    let start = start.unwrap_or_else(|| panic!("job {job_key} not declared in the workflow"));
+    &section[start..]
+}
+
+/// Where a CI job is declared to run. `Nightly` jobs live in a scheduled workflow
+/// that must also be runnable on demand; every other job is declared in `ci.yml`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tier {
+    PerPush,
+    /// Constructed once a job leaves the per-push tier; declared ahead of that so
+    /// moving a job is a one-line table edit rather than new test machinery.
+    #[allow(dead_code)]
+    Nightly,
+}
+
+/// Every CI job and the tier it belongs to. Changing a job's tier is a deliberate
+/// edit to this table, reviewed alongside the workflow change that causes it.
+const CI_JOB_TIERS: &[(&str, Tier)] = &[
+    ("installer-selftest", Tier::PerPush),
+    ("validate-skills", Tier::PerPush),
+    ("lint-workflows", Tier::PerPush),
+    ("web-check", Tier::PerPush),
+    ("extension-check", Tier::PerPush),
+    ("test", Tier::PerPush),
+    ("store-foundation-qualification", Tier::PerPush),
+    ("git-parity", Tier::PerPush),
+];
+
+#[test]
+fn ci_workflow_declares_every_job_in_the_tier_table() {
+    let ci = read_workflow("ci.yml");
+    let declared = job_keys(&ci);
+    let declared: Vec<&str> = declared.iter().map(String::as_str).collect();
+    let expected: Vec<&str> = CI_JOB_TIERS
+        .iter()
+        .filter(|(_, tier)| *tier != Tier::Nightly)
+        .map(|(job, _)| *job)
+        .collect();
+
+    let missing: Vec<&&str> = expected
+        .iter()
+        .filter(|job| !declared.contains(job))
+        .collect();
+    let untiered: Vec<&&str> = declared
+        .iter()
+        .filter(|job| !expected.contains(job))
+        .collect();
+    assert!(
+        missing.is_empty() && untiered.is_empty(),
+        "ci.yml jobs and the tier table diverge; \
+         in the table but missing from ci.yml: {missing:?}; \
+         in ci.yml but not in the table: {untiered:?}"
+    );
+}
+
+#[test]
+fn every_job_that_left_the_per_push_tier_has_a_home() {
+    for (job, tier) in CI_JOB_TIERS {
+        if *tier == Tier::PerPush {
+            continue;
+        }
+        let home = workflow_sources().into_iter().find(|(_, text)| {
+            text.contains("workflow_dispatch:") && job_keys(text).iter().any(|key| key == job)
+        });
+        assert!(
+            home.is_some(),
+            "job {job} left the per-push tier but no workflow with workflow_dispatch declares it"
+        );
+    }
+}
+
+#[test]
+fn job_block_stops_at_the_next_job_key() {
+    let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
+
+    let first = job_block(workflow, "first");
+    assert!(first.contains("run: alpha"));
+    assert!(!first.contains("second:"));
+    assert!(!first.contains("run: beta"));
+
+    let second = job_block(workflow, "second");
+    assert!(second.contains("run: beta"));
+    assert!(!second.contains("run: alpha"));
+}
+
 #[test]
 fn changelog_has_cocogitto_insertion_separator() {
     let changelog = std::fs::read_to_string("CHANGELOG.md").expect("read changelog");

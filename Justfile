@@ -166,6 +166,10 @@ workflow-lint-assertions:
     for t in $(jq -r '.[].target' .github/binary-targets.json); do
       grep -q -- "$t" docs/installation.md || { echo "installation docs missing target: $t" >&2; exit 1; }
     done
+    if grep -Fq -- 'schedule:' .github/workflows/ci.yml; then
+      echo "ci.yml is the per-push workflow; scheduled lanes belong in their own workflow file" >&2
+      exit 1
+    fi
     echo "workflow-lint assertions ok"
 
 # Run Rust formatting checks and Clippy across all targets and features.
