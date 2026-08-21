@@ -57,6 +57,12 @@ jobs:
                 src/session/derived_access/*|src/bench_support/*|src/bench_support.rs|benches/store_foundation.rs)
                   qualification=true
                   ;;
+                # nextest.toml shapes how the filtered lanes run their tests
+                # (profiles, overrides, test groups), so a change to it
+                # re-runs the qualification legs even when no source moved.
+                .config/nextest.toml)
+                  qualification=true
+                  ;;
                 scripts/install*|.github/binary-targets.json)
                   installer=true
                   ;;

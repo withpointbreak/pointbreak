@@ -454,6 +454,10 @@ fn qualification_runs_when_its_own_surface_changes_and_keeps_three_legs() {
         "src/bench_support.rs",
         "benches/store_foundation.rs",
         ".github/workflows/ci.yml",
+        // nextest.toml shapes how the filtered lanes run their tests
+        // (profiles, overrides, test groups), so changing it must re-run
+        // the qualification legs even when no Rust source moved.
+        ".config/nextest.toml",
     ] {
         assert!(
             ci.contains(surface),
