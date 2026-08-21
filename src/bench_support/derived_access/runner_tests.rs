@@ -765,9 +765,7 @@ fn phase_receipt(
                 ownership: phase.ownership(),
                 actor: None,
                 ordinal: ordinal.try_into().expect("small phase list"),
-                parent_ordinal: (*phase
-                    == crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries)
-                    .then_some(5),
+                parent_ordinal: operation.expected_parent_ordinal(ordinal),
                 wall_nanos: 1,
                 process_cpu_nanos: Some(1),
                 resident_bytes_before: Some(100),

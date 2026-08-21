@@ -1040,7 +1040,13 @@ impl QualificationDerivedAccessPhaseOperationV1 {
             ],
             Self::Bootstrap => &[
                 Phase::BootstrapPopulation,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::BootstrapOracle,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::BootstrapFinalization,
             ],
             Self::GovernedWrite => &[
@@ -1049,6 +1055,15 @@ impl QualificationDerivedAccessPhaseOperationV1 {
                 Phase::GovernedWriteCatchUp,
                 Phase::GovernedWriteResponse,
             ],
+        }
+    }
+
+    pub fn expected_parent_ordinal(self, index: usize) -> Option<u16> {
+        match (self, index) {
+            (Self::RevisionPage, 6) => Some(5),
+            (Self::Bootstrap, 1..=3) => Some(0),
+            (Self::Bootstrap, 5..=7) => Some(4),
+            _ => None,
         }
     }
 }
@@ -1176,12 +1191,12 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
             if usize::from(sample.ordinal) != index {
                 return Err("derived-access phase receipt order drifted".to_owned());
             }
-            let expected_parent = match sample.phase {
-                LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries => Some(5_u16),
-                LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance => {
-                    Some(self.phases[index - 1].ordinal)
-                }
-                _ => None,
+            let expected_parent = if sample.phase
+                == LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
+            {
+                Some(self.phases[index - 1].ordinal)
+            } else {
+                self.operation.expected_parent_ordinal(index)
             };
             if sample.parent_ordinal != expected_parent {
                 return Err("derived-access phase nesting drifted".to_owned());

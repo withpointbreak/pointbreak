@@ -2709,6 +2709,25 @@ mod tests {
             crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::Bootstrap
                 .expected_phases()
         );
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            observed
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.parent_ordinal)
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(4),
+                Some(4),
+                Some(4),
+                None,
+            ]
+        );
         assert_eq!(observed.counters.carrier_opens, 14);
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);
