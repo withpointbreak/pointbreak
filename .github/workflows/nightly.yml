@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
+  # Opt-in pre-merge escape hatch: pushing a branch whose name contains
+  # full-ci (for example feat/event-walk-full-ci) runs the whole scheduled
+  # suite on that branch before the PR lands. Costs nothing on any other
+  # branch.
+  push:
+    branches:
+      - "**full-ci**"
 
 permissions:
   contents: read

@@ -382,6 +382,12 @@ fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
         "ignored tests are ignored deliberately; the marker on the test is the \
          only record of why, and this lane must not override it"
     );
+    assert!(
+        nightly.contains(r#"- "**full-ci**""#),
+        "pushing a branch whose name contains full-ci must run the scheduled \
+         suite pre-merge; workflow_dispatch alone means leaving the terminal \
+         for the Actions UI, which is easy to skip on exactly the risky change"
+    );
 }
 
 /// The exact epilogue step every job must end with: the composite action that
@@ -473,6 +479,11 @@ fn development_guide_names_the_command_ci_actually_runs() {
         guide.contains("nightly.yml") && guide.contains("workflow_dispatch"),
         "the scheduled full-suite lane must be discoverable from the gate guide, \
          including how to trigger it by hand"
+    );
+    assert!(
+        guide.contains("full-ci"),
+        "the pre-merge full-ci branch trigger must be discoverable from the \
+         gate guide next to the scheduled lane it runs"
     );
 }
 

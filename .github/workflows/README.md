@@ -18,7 +18,9 @@ reviewer can always see what did not run and why — the heavy jobs skip a `push
 Runs once a day, and every job in it also carries `workflow_dispatch` so it can be triggered by
 hand (`gh workflow run nightly.yml`) — a scheduled lane nobody can rerun on demand is a lane
 nobody can debug. Hosts the full feature-on suite (`just test-full`), which no per-push lane
-executes, and the report-only subprocess-vs-gix parity harness (`just git-parity`).
+executes, and the report-only subprocess-vs-gix parity harness (`just git-parity`). Pushing a
+branch whose name contains `full-ci` also runs the workflow, so the full suite can be exercised
+on a risky change before it merges.
 
 ## Release (`release-plan.yml`, `release.yml`, `release-binaries.yml`, `verify-release.yml`)
 

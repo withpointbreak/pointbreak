@@ -98,7 +98,9 @@ counting site — and whenever a generated fixture the harness owns may need ref
 In CI, the scheduled `test-full (ubuntu-latest)` lane in `.github/workflows/nightly.yml` runs the
 same command once a day, so the feature-gated tests that no per-push lane executes still run on a
 cadence. Trigger it by hand with `workflow_dispatch` (`gh workflow run nightly.yml`) before landing
-a risky change to that surface rather than waiting for the schedule.
+a risky change to that surface rather than waiting for the schedule — or push a branch whose name
+contains `full-ci` (for example `feat/event-walk-full-ci`): the scheduled workflow also fires on
+such branches, so the full suite runs on the exact pre-merge commits without leaving the terminal.
 
 During an uncommitted first edit, `commit-check` may have no task commit to inspect. Run focused tests
 while iterating, then run `just check` after creating the reviewable commit range or pass the intended
