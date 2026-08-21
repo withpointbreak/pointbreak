@@ -10,11 +10,14 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1,
+    INTERACTION_PERFORMANCE_RECEIPT_SCHEMA_V1, InteractionActorV1, InteractionChildScopeFactV1,
+    InteractionLockFactV1, InteractionObservedFactsV1, InteractionObservedRouteStateV1,
+    InteractionPerformanceExpectedContextV1, InteractionPerformanceReceiptV1, InteractionRouteV1,
+    InteractionScopeCoverageV1, LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1,
     LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1, LongitudinalCapacityOwnershipV1,
     LongitudinalContractError, LongitudinalCounterReceiptV1, LongitudinalCountersV1,
     LongitudinalTimelineCarrierMismatchKindV1, LongitudinalTimelinePostPinBarrierReceiptV1,
-    LongitudinalTimelinePostPinBoundaryV1,
+    LongitudinalTimelinePostPinBoundaryV1, interaction_scope_coverage_v1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
@@ -22,6 +25,8 @@ thread_local! {
     static ACTIVE_SCOPES: RefCell<Vec<LongitudinalCountingScopeV1>> =
         const { RefCell::new(Vec::new()) };
     static ACTIVE_DERIVED_ACCESS_PHASES: RefCell<Vec<u16>> =
+        const { RefCell::new(Vec::new()) };
+    static ACTIVE_INTERACTION_ACTORS: RefCell<Vec<(Arc<Mutex<ObserverState>>, InteractionActorV1)>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -31,6 +36,16 @@ struct ObserverState {
     capacity_ownership: LongitudinalCapacityOwnershipV1,
     derived_access_phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
     next_phase_ordinal: u16,
+    observed_routes: Vec<InteractionRouteV1>,
+    observed_route_states: Vec<InteractionObservedRouteStateV1>,
+    execution_actors: Vec<InteractionActorV1>,
+    outcomes: Vec<(bool, i32)>,
+    semantic_result_sha256: Vec<String>,
+    child_reservations: Vec<(u16, InteractionActorV1)>,
+    child_terminals: Vec<InteractionChildScopeFactV1>,
+    #[allow(dead_code)] // Consumed by the Task 3.2 child-launch instrumentation.
+    next_child_ordinal: u16,
+    lock_facts: Vec<InteractionLockFactV1>,
     timeline_post_pin_barrier: Option<LongitudinalTimelinePostPinBarrierStateV1>,
 }
 
@@ -198,6 +213,13 @@ pub struct LongitudinalCountingScopeV1 {
 /// Restores the previously active scope when dropped.
 pub struct LongitudinalCountingGuardV1 {
     state: Arc<Mutex<ObserverState>>,
+    interaction_actor_entered: bool,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+#[allow(dead_code)] // Constructed by the Task 3.2 child-actor instrumentation.
+pub(crate) struct InteractionActorScopeGuardV1 {
+    state: Arc<Mutex<ObserverState>>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -226,6 +248,22 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     GovernedWriteCatchUp,
     GovernedWriteAuthorityCursorMaintenance,
     GovernedWriteResponse,
+    CliCapabilityPreflightH1,
+    WorkflowActivatedCapabilityProbe,
+    OrdinaryReadStoreResolutionH2,
+    WorkflowChangeReaderReplayH3,
+    WorkflowChangeStoreReopenInspection,
+    RouteRevisionSelection,
+    RouteProjectionFold,
+    RouteBodyHydration,
+    GitContextResolution,
+    SqliteSelection,
+    CarrierValidation,
+    SerializationAndOutput,
+    CacheAndFallback,
+    ReadTransaction,
+    CheckpointAndWal,
+    GenerationLeaseAndRetention,
 }
 
 impl LongitudinalDerivedAccessPhaseV1 {
@@ -238,22 +276,38 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::RevisionPageEventIdExpansion => Ownership::DerivedAccess,
             Self::ChangePageCarrierHydrationValidation
             | Self::RevisionPageCarrierHydrationValidation
-            | Self::GovernedWriteTruth => Ownership::AuthoritativeTruth,
+            | Self::GovernedWriteTruth
+            | Self::CliCapabilityPreflightH1
+            | Self::OrdinaryReadStoreResolutionH2
+            | Self::WorkflowChangeReaderReplayH3
+            | Self::WorkflowChangeStoreReopenInspection
+            | Self::RouteBodyHydration
+            | Self::CarrierValidation => Ownership::AuthoritativeTruth,
             Self::ChangePagePresentationProjection
             | Self::ChangePageExhaustiveProposalSearch
             | Self::RevisionPageListProjection
             | Self::RevisionPageOverviewConstruction
-            | Self::RevisionPageSnapshotSummaries => Ownership::ProductProjection,
+            | Self::RevisionPageSnapshotSummaries
+            | Self::RouteProjectionFold
+            | Self::GitContextResolution
+            | Self::SerializationAndOutput => Ownership::ProductProjection,
             Self::ChangePageSnapshotAcquisition
             | Self::ChangePageSupportExpansion
             | Self::RevisionPageSupersederSupportExpansion
             | Self::BootstrapPopulation
             | Self::BootstrapOracle
-            | Self::GovernedWriteCatchUp => Ownership::MixedDerivedAndTruth,
+            | Self::GovernedWriteCatchUp
+            | Self::WorkflowActivatedCapabilityProbe
+            | Self::RouteRevisionSelection => Ownership::MixedDerivedAndTruth,
             Self::BootstrapFinalization
             | Self::GovernedWriteAdmission
             | Self::GovernedWriteAuthorityCursorMaintenance
-            | Self::GovernedWriteResponse => Ownership::DerivedAccess,
+            | Self::GovernedWriteResponse
+            | Self::SqliteSelection
+            | Self::CacheAndFallback
+            | Self::ReadTransaction
+            | Self::CheckpointAndWal
+            | Self::GenerationLeaseAndRetention => Ownership::DerivedAccess,
         }
     }
 }
@@ -272,6 +326,8 @@ pub enum LongitudinalDerivedAccessPhaseOwnershipV1 {
 pub struct LongitudinalDerivedAccessPhaseSampleV1 {
     pub phase: LongitudinalDerivedAccessPhaseV1,
     pub ownership: LongitudinalDerivedAccessPhaseOwnershipV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<InteractionActorV1>,
     pub ordinal: u16,
     pub parent_ordinal: Option<u16>,
     pub wall_nanos: u64,
@@ -298,6 +354,7 @@ pub struct LongitudinalDerivedAccessPhaseGuardV1 {
     phase: LongitudinalDerivedAccessPhaseV1,
     ordinal: u16,
     parent_ordinal: Option<u16>,
+    actor: Option<InteractionActorV1>,
     started: Instant,
     counters_before: LongitudinalCountersV1,
     process_before: Option<super::LongitudinalProcessSnapshotV1>,
@@ -355,6 +412,22 @@ pub struct LongitudinalCountingSnapshotV1 {
     pub counters: LongitudinalCountersV1,
     pub capacity_ownership: LongitudinalCapacityOwnershipV1,
     pub derived_access_phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
+    #[serde(skip)]
+    pub(crate) observed_routes: Vec<InteractionRouteV1>,
+    #[serde(skip)]
+    pub(crate) observed_route_states: Vec<InteractionObservedRouteStateV1>,
+    #[serde(skip)]
+    pub(crate) execution_actors: Vec<InteractionActorV1>,
+    #[serde(skip)]
+    pub(crate) outcomes: Vec<(bool, i32)>,
+    #[serde(skip)]
+    pub(crate) semantic_result_sha256: Vec<String>,
+    #[serde(skip)]
+    pub(crate) child_reservations: Vec<(u16, InteractionActorV1)>,
+    #[serde(skip)]
+    pub(crate) child_terminals: Vec<InteractionChildScopeFactV1>,
+    #[serde(skip)]
+    pub(crate) lock_facts: Vec<InteractionLockFactV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -498,8 +571,18 @@ impl LongitudinalCountingScopeV1 {
 
     pub fn enter(&self) -> LongitudinalCountingGuardV1 {
         ACTIVE_SCOPES.with(|scopes| scopes.borrow_mut().push(self.clone()));
+        let execution_actor = {
+            let state = lock_state(&self.state);
+            (state.execution_actors.len() == 1).then(|| state.execution_actors[0])
+        };
+        if let Some(actor) = execution_actor {
+            ACTIVE_INTERACTION_ACTORS.with(|actors| {
+                actors.borrow_mut().push((Arc::clone(&self.state), actor));
+            });
+        }
         LongitudinalCountingGuardV1 {
             state: Arc::clone(&self.state),
+            interaction_actor_entered: execution_actor.is_some(),
             _not_send: PhantomData,
         }
     }
@@ -508,6 +591,79 @@ impl LongitudinalCountingScopeV1 {
     /// thread. A child remains uncounted unless it enters the returned scope.
     pub fn current() -> Option<Self> {
         ACTIVE_SCOPES.with(|scopes| scopes.borrow().last().cloned())
+    }
+
+    pub fn record_observed_route_once(&self, route: InteractionRouteV1) {
+        lock_state(&self.state).observed_routes.push(route);
+    }
+
+    pub fn record_observed_route_state_once(&self, state: InteractionObservedRouteStateV1) {
+        lock_state(&self.state).observed_route_states.push(state);
+    }
+
+    pub fn record_execution_actor_once(&self, actor: InteractionActorV1) {
+        lock_state(&self.state).execution_actors.push(actor);
+    }
+
+    pub fn record_outcome_once(&self, success: bool, exit_code: i32) {
+        lock_state(&self.state).outcomes.push((success, exit_code));
+    }
+
+    pub fn record_semantic_result_sha256_once(&self, semantic_result_sha256: impl Into<String>) {
+        lock_state(&self.state)
+            .semantic_result_sha256
+            .push(semantic_result_sha256.into());
+    }
+
+    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
+    pub(crate) fn enter_actor_scope(
+        &self,
+        actor: InteractionActorV1,
+    ) -> InteractionActorScopeGuardV1 {
+        assert!(
+            Self::current().is_some_and(|active| Arc::ptr_eq(&active.state, &self.state)),
+            "interaction actor scope requires its counting scope to be active"
+        );
+        ACTIVE_INTERACTION_ACTORS.with(|actors| {
+            actors.borrow_mut().push((Arc::clone(&self.state), actor));
+        });
+        InteractionActorScopeGuardV1 {
+            state: Arc::clone(&self.state),
+            _not_send: PhantomData,
+        }
+    }
+
+    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
+    pub(crate) fn reserve_child_scope(&self, actor: InteractionActorV1) -> u16 {
+        let mut state = lock_state(&self.state);
+        let ordinal = state.next_child_ordinal;
+        state.next_child_ordinal = state
+            .next_child_ordinal
+            .checked_add(1)
+            .expect("interaction child ordinal overflow");
+        state.child_reservations.push((ordinal, actor));
+        ordinal
+    }
+
+    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
+    pub(crate) fn record_child_scope_terminal_once(
+        &self,
+        ordinal: u16,
+        actor: InteractionActorV1,
+        coverage: InteractionScopeCoverageV1,
+    ) {
+        lock_state(&self.state)
+            .child_terminals
+            .push(InteractionChildScopeFactV1 {
+                ordinal,
+                actor,
+                coverage,
+            });
+    }
+
+    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
+    pub(crate) fn record_lock_fact(&self, fact: InteractionLockFactV1) {
+        lock_state(&self.state).lock_facts.push(fact);
     }
 
     pub fn snapshot(&self) -> LongitudinalCountingSnapshotV1 {
@@ -519,6 +675,14 @@ impl LongitudinalCountingScopeV1 {
             counters: state.counters.clone(),
             capacity_ownership: state.capacity_ownership.clone(),
             derived_access_phases,
+            observed_routes: state.observed_routes.clone(),
+            observed_route_states: state.observed_route_states.clone(),
+            execution_actors: state.execution_actors.clone(),
+            outcomes: state.outcomes.clone(),
+            semantic_result_sha256: state.semantic_result_sha256.clone(),
+            child_reservations: state.child_reservations.clone(),
+            child_terminals: state.child_terminals.clone(),
+            lock_facts: state.lock_facts.clone(),
         }
     }
 
@@ -549,6 +713,111 @@ impl LongitudinalCountingScopeV1 {
         receipt.validate()?;
         Ok(receipt)
     }
+
+    pub fn interaction_receipt(
+        &self,
+        expected: InteractionPerformanceExpectedContextV1,
+    ) -> Result<InteractionPerformanceReceiptV1, LongitudinalContractError> {
+        let snapshot = self.snapshot();
+        let route = exactly_one(&snapshot.observed_routes, "interaction observed route")?;
+        let route_state = exactly_one(
+            &snapshot.observed_route_states,
+            "interaction observed route state",
+        )?;
+        let execution_actor = exactly_one(
+            &snapshot.execution_actors,
+            "interaction root execution actor",
+        )?;
+        let (success, exit_code) = exactly_one(&snapshot.outcomes, "interaction outcome")?;
+        let semantic_result_sha256 = exactly_one(
+            &snapshot.semantic_result_sha256,
+            "interaction semantic result SHA-256",
+        )?;
+
+        let children =
+            reconcile_child_scope_facts(&snapshot.child_reservations, &snapshot.child_terminals)?;
+        let scope_coverage = interaction_scope_coverage_v1(&children)?;
+        let observed = InteractionObservedFactsV1 {
+            route,
+            route_state,
+            execution_actor,
+            success,
+            exit_code,
+            semantic_result_sha256,
+        };
+        let mut receipt = InteractionPerformanceReceiptV1 {
+            schema: INTERACTION_PERFORMANCE_RECEIPT_SCHEMA_V1.to_owned(),
+            expected,
+            observed,
+            scope_coverage,
+            counters: snapshot.counters,
+            capacity_ownership: snapshot.capacity_ownership,
+            phases: snapshot.derived_access_phases,
+            children,
+            locks: snapshot.lock_facts,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+}
+
+fn exactly_one<T: Clone>(
+    values: &[T],
+    field: &'static str,
+) -> Result<T, LongitudinalContractError> {
+    if values.len() != 1 {
+        return Err(LongitudinalContractError::CountMismatch {
+            field,
+            expected: 1,
+            actual: u64::try_from(values.len()).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(values[0].clone())
+}
+
+fn reconcile_child_scope_facts(
+    reservations: &[(u16, InteractionActorV1)],
+    terminals: &[InteractionChildScopeFactV1],
+) -> Result<Vec<InteractionChildScopeFactV1>, LongitudinalContractError> {
+    let mut children = Vec::with_capacity(reservations.len());
+    for (index, (ordinal, actor)) in reservations.iter().copied().enumerate() {
+        let expected_ordinal =
+            u16::try_from(index).map_err(|_| LongitudinalContractError::ContractDrift {
+                field: "interaction child reservation ordinal",
+            })?;
+        if ordinal != expected_ordinal {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction child reservation ordinal",
+            });
+        }
+        let matching = terminals
+            .iter()
+            .filter(|terminal| terminal.ordinal == ordinal)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(LongitudinalContractError::CountMismatch {
+                field: "interaction child terminal",
+                expected: 1,
+                actual: u64::try_from(matching.len()).unwrap_or(u64::MAX),
+            });
+        }
+        let terminal = matching[0];
+        terminal.validate()?;
+        if terminal.actor != actor {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        children.push(terminal.clone());
+    }
+    if terminals.len() != reservations.len() {
+        return Err(LongitudinalContractError::CountMismatch {
+            field: "interaction child terminal count",
+            expected: u64::try_from(reservations.len()).unwrap_or(u64::MAX),
+            actual: u64::try_from(terminals.len()).unwrap_or(u64::MAX),
+        });
+    }
+    Ok(children)
 }
 
 #[doc(hidden)]
@@ -862,6 +1131,7 @@ pub fn enter_derived_access_phase_v1(
             parent
         })
     });
+    let actor = state.as_ref().and_then(current_interaction_actor_for_state);
     let process_before = state
         .as_ref()
         .and_then(|_| super::capture_longitudinal_process_snapshot_v1(std::process::id()).ok());
@@ -870,6 +1140,7 @@ pub fn enter_derived_access_phase_v1(
         phase,
         ordinal,
         parent_ordinal,
+        actor,
         started: Instant::now(),
         counters_before,
         process_before,
@@ -879,6 +1150,9 @@ pub fn enter_derived_access_phase_v1(
 
 impl Drop for LongitudinalCountingGuardV1 {
     fn drop(&mut self) {
+        if self.interaction_actor_entered {
+            remove_active_interaction_actor(&self.state);
+        }
         ACTIVE_SCOPES.with(|scopes| {
             let mut scopes = scopes.borrow_mut();
             if scopes
@@ -895,6 +1169,12 @@ impl Drop for LongitudinalCountingGuardV1 {
                 scopes.remove(index);
             }
         });
+    }
+}
+
+impl Drop for InteractionActorScopeGuardV1 {
+    fn drop(&mut self) {
+        remove_active_interaction_actor(&self.state);
     }
 }
 
@@ -938,6 +1218,7 @@ impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
             .push(LongitudinalDerivedAccessPhaseSampleV1 {
                 phase: self.phase,
                 ownership: self.phase.ownership(),
+                actor: self.actor,
                 ordinal: self.ordinal,
                 parent_ordinal: self.parent_ordinal,
                 wall_nanos,
@@ -948,6 +1229,37 @@ impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
                 counters,
             });
     }
+}
+
+fn current_interaction_actor_for_state(
+    state: &Arc<Mutex<ObserverState>>,
+) -> Option<InteractionActorV1> {
+    ACTIVE_INTERACTION_ACTORS.with(|actors| {
+        actors
+            .borrow()
+            .iter()
+            .rev()
+            .find_map(|(active_state, actor)| Arc::ptr_eq(active_state, state).then_some(*actor))
+    })
+}
+
+fn remove_active_interaction_actor(state: &Arc<Mutex<ObserverState>>) {
+    ACTIVE_INTERACTION_ACTORS.with(|actors| {
+        let mut actors = actors.borrow_mut();
+        if actors
+            .last()
+            .is_some_and(|(active_state, _)| Arc::ptr_eq(active_state, state))
+        {
+            actors.pop();
+            return;
+        }
+        if let Some(index) = actors
+            .iter()
+            .rposition(|(active_state, _)| Arc::ptr_eq(active_state, state))
+        {
+            actors.remove(index);
+        }
+    });
 }
 
 fn counter_delta(
@@ -1306,10 +1618,529 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    use super::super::{
+        InteractionExecutionIdentityV1, InteractionLockAcquisitionV1, InteractionLockKindV1,
+        InteractionLockModeV1, InteractionLockOutcomeV1, InteractionSetupExpectationV1,
+    };
     use super::*;
 
     fn hash(byte: char) -> String {
         std::iter::repeat_n(byte, 64).collect()
+    }
+
+    fn interaction_context(
+        route: InteractionRouteV1,
+        setup_expectation: InteractionSetupExpectationV1,
+    ) -> InteractionPerformanceExpectedContextV1 {
+        let is_version = route == InteractionRouteV1::VersionJson;
+        let requires_track = matches!(
+            route,
+            InteractionRouteV1::AssessmentCurrentResult
+                | InteractionRouteV1::AssessmentCurrentSummary
+                | InteractionRouteV1::ObservationReviewerList
+                | InteractionRouteV1::ValidationReviewerList
+        );
+        InteractionPerformanceExpectedContextV1 {
+            execution: InteractionExecutionIdentityV1 {
+                source_commit: "a".repeat(40),
+                source_tree: "b".repeat(40),
+                cargo_lock_sha256: hash('c'),
+                binary_path: "/tmp/pointbreak-interaction-test".to_owned(),
+                binary_sha256: hash('d'),
+                build_profile: "debug".to_owned(),
+                rustc_version: "rustc test".to_owned(),
+                features: vec!["gix".to_owned(), "longitudinal-counting".to_owned()],
+            },
+            route,
+            arguments: if is_version {
+                vec![
+                    "version".to_owned(),
+                    "--format".to_owned(),
+                    "json".to_owned(),
+                ]
+            } else {
+                vec!["fixture-route".to_owned()]
+            },
+            setup_expectation,
+            fixture_identity_sha256: (!is_version).then(|| hash('e')),
+            revision: (!is_version).then(|| format!("rev:sha256:{}", hash('f'))),
+            track: requires_track.then(|| "agent:reviewer".to_owned()),
+            domain_actor: (!is_version).then(|| "actor:agent:claude-code".to_owned()),
+            expected_child_actors: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn record_minimal_interaction_facts(
+        scope: &LongitudinalCountingScopeV1,
+        route: InteractionRouteV1,
+        observed_state: InteractionObservedRouteStateV1,
+    ) {
+        scope.record_observed_route_once(route);
+        scope.record_observed_route_state_once(observed_state);
+        scope.record_execution_actor_once(InteractionActorV1::RequestReader);
+        scope.record_outcome_once(true, 0);
+        scope.record_semantic_result_sha256_once(hash('9'));
+    }
+
+    #[test]
+    fn interaction_receipt_is_additive_actor_qualified_and_self_authenticating() {
+        let scope = LongitudinalCountingScopeV1::new(hash('1')).expect("valid scope");
+        let _scope_guard = scope.enter();
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentSummary,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+
+        let _actor = scope.enter_actor_scope(InteractionActorV1::RequestReader);
+        {
+            let _phase = enter_derived_access_phase_v1(
+                LongitudinalDerivedAccessPhaseV1::RouteProjectionFold,
+            );
+            record_event_folds(7);
+        }
+        let child_ordinal = scope.reserve_child_scope(InteractionActorV1::BackgroundMaintenance);
+        scope.record_child_scope_terminal_once(
+            child_ordinal,
+            InteractionActorV1::BackgroundMaintenance,
+            InteractionScopeCoverageV1::Complete,
+        );
+        scope.record_lock_fact(InteractionLockFactV1 {
+            ordinal: 0,
+            actor: InteractionActorV1::RequestReader,
+            kind: InteractionLockKindV1::Derived,
+            mode: InteractionLockModeV1::Try,
+            outcome: InteractionLockOutcomeV1::Busy,
+            acquisition: InteractionLockAcquisitionV1::NotAcquired,
+            wait_nanos: 3,
+            hold_nanos: None,
+        });
+
+        let mut expected = interaction_context(
+            InteractionRouteV1::AssessmentCurrentSummary,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        expected
+            .expected_child_actors
+            .insert(InteractionActorV1::BackgroundMaintenance, 1);
+        let receipt = scope
+            .interaction_receipt(expected)
+            .expect("valid interaction receipt");
+        receipt.validate().expect("interaction receipt validates");
+        assert_eq!(receipt.observed.semantic_result_sha256, hash('9'));
+        assert_eq!(receipt.scope_coverage, InteractionScopeCoverageV1::Complete);
+        assert_eq!(receipt.phases.len(), 1);
+        assert_eq!(
+            receipt.phases[0].actor,
+            Some(InteractionActorV1::RequestReader)
+        );
+        assert_eq!(receipt.children.len(), 1);
+        assert_eq!(receipt.locks.len(), 1);
+        assert_eq!(receipt.counters.event_folds, 7);
+        assert_eq!(
+            receipt.receipt_sha256,
+            receipt.canonical_sha256().expect("canonical receipt hash")
+        );
+        let receipt_json = serde_json::to_value(&receipt).expect("interaction receipt JSON");
+        let round_trip =
+            serde_json::from_value::<InteractionPerformanceReceiptV1>(receipt_json.clone())
+                .expect("interaction receipt round trip");
+        assert_eq!(round_trip, receipt);
+        round_trip.validate().expect("round-trip receipt validates");
+        let mut unknown = receipt_json;
+        unknown
+            .as_object_mut()
+            .expect("interaction receipt object")
+            .insert("latencyMillis".to_owned(), serde_json::json!(1));
+        assert!(serde_json::from_value::<InteractionPerformanceReceiptV1>(unknown).is_err());
+
+        let v1 = scope
+            .receipt(LongitudinalCounterReceiptContextV1 {
+                root_identity: hash('2'),
+                operation: "WARM_HEAD".to_owned(),
+                phase: "warm".to_owned(),
+                base_execution_identity_sha256: hash('3'),
+                derivative_execution_identity_sha256: hash('4'),
+                manifest_sha256: hash('5'),
+                schedule_sha256: hash('6'),
+                success: true,
+                semantic_result_sha256: hash('7'),
+                include_capacity_ownership: true,
+            })
+            .expect("legacy V1 receipt");
+        let v1_json = serde_json::to_value(v1).expect("legacy receipt JSON");
+        assert!(v1_json.get("phases").is_none());
+        assert!(v1_json.get("observed").is_none());
+    }
+
+    #[test]
+    fn interaction_receipt_enforces_the_exact_route_state_matrix() {
+        let valid = [
+            (
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::AssessmentCurrentSummary,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::InputRequestOpenAllTracks,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::ObservationReviewerList,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::ValidationReviewerList,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::VersionJson,
+                InteractionSetupExpectationV1::NotApplicable,
+                InteractionObservedRouteStateV1::NotApplicable,
+            ),
+            (
+                InteractionRouteV1::AttentionCurrentOrFallback,
+                InteractionSetupExpectationV1::AttentionDerivedCurrent,
+                InteractionObservedRouteStateV1::DerivedCurrent,
+            ),
+            (
+                InteractionRouteV1::AttentionCurrentOrFallback,
+                InteractionSetupExpectationV1::AttentionColdInactive,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::AttentionCurrentOrFallback,
+                InteractionSetupExpectationV1::AttentionActiveUnavailable,
+                InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative,
+            ),
+        ];
+        for (ordinal, (route, setup, observed)) in valid.into_iter().enumerate() {
+            let scope =
+                LongitudinalCountingScopeV1::new(format!("{ordinal:064x}")).expect("valid scope");
+            record_minimal_interaction_facts(&scope, route, observed);
+            scope
+                .interaction_receipt(interaction_context(route, setup))
+                .expect("valid route/state pair");
+        }
+
+        let invalid = [
+            (
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+                InteractionObservedRouteStateV1::DerivedCurrent,
+            ),
+            (
+                InteractionRouteV1::VersionJson,
+                InteractionSetupExpectationV1::NotApplicable,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                InteractionRouteV1::AttentionCurrentOrFallback,
+                InteractionSetupExpectationV1::AttentionColdInactive,
+                InteractionObservedRouteStateV1::DerivedCurrent,
+            ),
+        ];
+        for (ordinal, (route, setup, observed)) in invalid.into_iter().enumerate() {
+            let scope = LongitudinalCountingScopeV1::new(format!("{:064x}", ordinal + 32))
+                .expect("valid scope");
+            record_minimal_interaction_facts(&scope, route, observed);
+            assert!(
+                scope
+                    .interaction_receipt(interaction_context(route, setup))
+                    .is_err(),
+                "invalid route/state pair was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn interaction_receipt_rejects_duplicate_or_incomplete_source_facts() {
+        let scope = LongitudinalCountingScopeV1::new(hash('2')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        scope
+            .record_observed_route_state_once(InteractionObservedRouteStateV1::AuthoritativeReplay);
+        assert!(
+            scope
+                .interaction_receipt(interaction_context(
+                    InteractionRouteV1::AssessmentCurrentResult,
+                    InteractionSetupExpectationV1::AuthoritativeReplay,
+                ))
+                .is_err()
+        );
+
+        let scope = LongitudinalCountingScopeV1::new(hash('3')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        scope.reserve_child_scope(InteractionActorV1::BackgroundMaintenance);
+        let mut expected = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        expected
+            .expected_child_actors
+            .insert(InteractionActorV1::BackgroundMaintenance, 1);
+        assert!(scope.interaction_receipt(expected).is_err());
+
+        let scope = LongitudinalCountingScopeV1::new(hash('4')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        let ordinal = scope.reserve_child_scope(InteractionActorV1::BackgroundMaintenance);
+        scope.record_child_scope_terminal_once(
+            ordinal,
+            InteractionActorV1::BackgroundMaintenance,
+            InteractionScopeCoverageV1::Incomplete {
+                reason: " ".to_owned(),
+            },
+        );
+        let mut expected = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        expected
+            .expected_child_actors
+            .insert(InteractionActorV1::BackgroundMaintenance, 1);
+        assert!(scope.interaction_receipt(expected).is_err());
+    }
+
+    #[test]
+    fn interaction_receipt_rejects_every_missing_or_duplicate_once_only_fact() {
+        for field in 0..5 {
+            let scope = LongitudinalCountingScopeV1::new(format!("{:064x}", field + 64))
+                .expect("valid scope");
+            record_minimal_interaction_facts(
+                &scope,
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            );
+            let mut state = lock_state(&scope.state);
+            match field {
+                0 => state.observed_routes.clear(),
+                1 => state.observed_route_states.clear(),
+                2 => state.execution_actors.clear(),
+                3 => state.outcomes.clear(),
+                4 => state.semantic_result_sha256.clear(),
+                _ => unreachable!(),
+            }
+            drop(state);
+            assert!(
+                scope
+                    .interaction_receipt(interaction_context(
+                        InteractionRouteV1::AssessmentCurrentResult,
+                        InteractionSetupExpectationV1::AuthoritativeReplay,
+                    ))
+                    .is_err(),
+                "missing once-only field {field} was accepted"
+            );
+        }
+
+        for field in 0..5 {
+            let scope = LongitudinalCountingScopeV1::new(format!("{:064x}", field + 96))
+                .expect("valid scope");
+            record_minimal_interaction_facts(
+                &scope,
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            );
+            match field {
+                0 => scope.record_observed_route_once(InteractionRouteV1::AssessmentCurrentResult),
+                1 => scope.record_observed_route_state_once(
+                    InteractionObservedRouteStateV1::AuthoritativeReplay,
+                ),
+                2 => scope.record_execution_actor_once(InteractionActorV1::RequestReader),
+                3 => scope.record_outcome_once(true, 0),
+                4 => scope.record_semantic_result_sha256_once(hash('9')),
+                _ => unreachable!(),
+            }
+            assert!(
+                scope
+                    .interaction_receipt(interaction_context(
+                        InteractionRouteV1::AssessmentCurrentResult,
+                        InteractionSetupExpectationV1::AuthoritativeReplay,
+                    ))
+                    .is_err(),
+                "duplicate once-only field {field} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn interaction_receipt_rejects_missing_phase_actor_and_child_terminal_drift() {
+        let scope = LongitudinalCountingScopeV1::new(hash('5')).expect("valid scope");
+        let _guard = scope.enter();
+        {
+            let _phase = enter_derived_access_phase_v1(
+                LongitudinalDerivedAccessPhaseV1::RouteProjectionFold,
+            );
+        }
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        assert!(
+            scope
+                .interaction_receipt(interaction_context(
+                    InteractionRouteV1::AssessmentCurrentResult,
+                    InteractionSetupExpectationV1::AuthoritativeReplay,
+                ))
+                .is_err()
+        );
+
+        for case in 0..3 {
+            let scope = LongitudinalCountingScopeV1::new(format!("{:064x}", case + 128))
+                .expect("valid scope");
+            record_minimal_interaction_facts(
+                &scope,
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            );
+            let ordinal = scope.reserve_child_scope(InteractionActorV1::BackgroundMaintenance);
+            scope.record_child_scope_terminal_once(
+                ordinal,
+                if case == 1 {
+                    InteractionActorV1::BackgroundRebuild
+                } else {
+                    InteractionActorV1::BackgroundMaintenance
+                },
+                InteractionScopeCoverageV1::Complete,
+            );
+            if case == 0 {
+                scope.record_child_scope_terminal_once(
+                    ordinal,
+                    InteractionActorV1::BackgroundMaintenance,
+                    InteractionScopeCoverageV1::Complete,
+                );
+            }
+            if case == 2 {
+                scope.record_child_scope_terminal_once(
+                    ordinal + 1,
+                    InteractionActorV1::BackgroundMaintenance,
+                    InteractionScopeCoverageV1::Complete,
+                );
+            }
+            let mut expected = interaction_context(
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+            );
+            expected
+                .expected_child_actors
+                .insert(InteractionActorV1::BackgroundMaintenance, 1);
+            assert!(
+                scope.interaction_receipt(expected).is_err(),
+                "child terminal drift case {case} was accepted"
+            );
+        }
+
+        let scope = LongitudinalCountingScopeV1::new(hash('6')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        let ordinal = scope.reserve_child_scope(InteractionActorV1::BackgroundMaintenance);
+        scope.record_child_scope_terminal_once(
+            ordinal,
+            InteractionActorV1::BackgroundMaintenance,
+            InteractionScopeCoverageV1::Complete,
+        );
+        assert!(
+            scope
+                .interaction_receipt(interaction_context(
+                    InteractionRouteV1::AssessmentCurrentResult,
+                    InteractionSetupExpectationV1::AuthoritativeReplay,
+                ))
+                .is_err(),
+            "unexpected source child was silently omitted"
+        );
+    }
+
+    #[test]
+    fn interaction_phases_have_stable_spellings_and_ownership() {
+        let phases = [
+            LongitudinalDerivedAccessPhaseV1::CliCapabilityPreflightH1,
+            LongitudinalDerivedAccessPhaseV1::WorkflowActivatedCapabilityProbe,
+            LongitudinalDerivedAccessPhaseV1::OrdinaryReadStoreResolutionH2,
+            LongitudinalDerivedAccessPhaseV1::WorkflowChangeReaderReplayH3,
+            LongitudinalDerivedAccessPhaseV1::WorkflowChangeStoreReopenInspection,
+            LongitudinalDerivedAccessPhaseV1::RouteRevisionSelection,
+            LongitudinalDerivedAccessPhaseV1::RouteProjectionFold,
+            LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+            LongitudinalDerivedAccessPhaseV1::GitContextResolution,
+            LongitudinalDerivedAccessPhaseV1::SqliteSelection,
+            LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+            LongitudinalDerivedAccessPhaseV1::SerializationAndOutput,
+            LongitudinalDerivedAccessPhaseV1::CacheAndFallback,
+            LongitudinalDerivedAccessPhaseV1::ReadTransaction,
+            LongitudinalDerivedAccessPhaseV1::CheckpointAndWal,
+            LongitudinalDerivedAccessPhaseV1::GenerationLeaseAndRetention,
+        ];
+        let spellings = phases
+            .iter()
+            .map(|phase| serde_json::to_value(phase).expect("phase JSON"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            spellings,
+            [
+                "cli_capability_preflight_h1",
+                "workflow_activated_capability_probe",
+                "ordinary_read_store_resolution_h2",
+                "workflow_change_reader_replay_h3",
+                "workflow_change_store_reopen_inspection",
+                "route_revision_selection",
+                "route_projection_fold",
+                "route_body_hydration",
+                "git_context_resolution",
+                "sqlite_selection",
+                "carrier_validation",
+                "serialization_and_output",
+                "cache_and_fallback",
+                "read_transaction",
+                "checkpoint_and_wal",
+                "generation_lease_and_retention",
+            ]
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            phases.map(LongitudinalDerivedAccessPhaseV1::ownership),
+            [
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::MixedDerivedAndTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::MixedDerivedAndTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+            ]
+        );
     }
 
     #[test]

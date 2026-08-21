@@ -21,6 +21,9 @@ pub const LONGITUDINAL_OPERATION_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-operation-receipt.v1";
 pub const LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-counter-receipt.v1";
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const INTERACTION_PERFORMANCE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.interaction-performance-receipt.v1";
 pub const LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-timeline-post-pin-barrier-receipt.v1";
 pub const LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1: &str =
@@ -3155,6 +3158,384 @@ pub struct LongitudinalCapacityOwnershipV1 {
     pub retained_snapshot_highlight_bytes: u64,
 }
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionExecutionIdentityV1 {
+    pub source_commit: String,
+    pub source_tree: String,
+    pub cargo_lock_sha256: String,
+    pub binary_path: String,
+    pub binary_sha256: String,
+    pub build_profile: String,
+    pub rustc_version: String,
+    pub features: Vec<String>,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionExecutionIdentityV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        validate_hex(&self.source_commit, 40, "interaction source commit")?;
+        validate_hex(&self.source_tree, 40, "interaction source tree")?;
+        validate_hex(
+            &self.cargo_lock_sha256,
+            64,
+            "interaction Cargo.lock SHA-256",
+        )?;
+        validate_hex(&self.binary_sha256, 64, "interaction binary SHA-256")?;
+        let binary_path = std::path::Path::new(&self.binary_path);
+        if !binary_path.is_absolute() || binary_path.file_name().is_none() {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction binary path",
+            });
+        }
+        require_nonempty(&self.build_profile, "interaction build profile")?;
+        require_nonempty(&self.rustc_version, "interaction rustc version")?;
+        if self.features.is_empty() {
+            return Err(LongitudinalContractError::EmptyField {
+                field: "interaction feature set",
+            });
+        }
+        for feature in &self.features {
+            require_nonempty(feature, "interaction feature")?;
+        }
+        require_unique(
+            self.features.iter().map(String::as_str),
+            "interaction feature",
+        )?;
+        if !self.features.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction feature order",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionRouteV1 {
+    AssessmentCurrentResult,
+    AssessmentCurrentSummary,
+    InputRequestOpenAllTracks,
+    ObservationReviewerList,
+    ValidationReviewerList,
+    VersionJson,
+    AttentionCurrentOrFallback,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionSetupExpectationV1 {
+    NotApplicable,
+    AuthoritativeReplay,
+    AttentionDerivedCurrent,
+    AttentionColdInactive,
+    AttentionActiveUnavailable,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionObservedRouteStateV1 {
+    NotApplicable,
+    AuthoritativeReplay,
+    DerivedCurrent,
+    LabeledFallbackToAuthoritative,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionActorV1 {
+    RequestReader,
+    ProductWriter,
+    BackgroundMaintenance,
+    BackgroundRebuild,
+    ExplicitRecovery,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "status", deny_unknown_fields)]
+pub enum InteractionScopeCoverageV1 {
+    Complete,
+    Incomplete { reason: String },
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionScopeCoverageV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if let Self::Incomplete { reason } = self {
+            require_nonempty(reason, "interaction incomplete reason")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionPerformanceExpectedContextV1 {
+    pub execution: InteractionExecutionIdentityV1,
+    pub route: InteractionRouteV1,
+    pub arguments: Vec<String>,
+    pub setup_expectation: InteractionSetupExpectationV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_identity_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_child_actors: BTreeMap<InteractionActorV1, u16>,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionPerformanceExpectedContextV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        self.execution.validate()?;
+        if self.arguments.is_empty() {
+            return Err(LongitudinalContractError::EmptyField {
+                field: "interaction route arguments",
+            });
+        }
+        for argument in &self.arguments {
+            require_nonempty(argument, "interaction route argument")?;
+        }
+        for count in self.expected_child_actors.values() {
+            if *count == 0 {
+                return Err(LongitudinalContractError::CountMismatch {
+                    field: "interaction expected child actor count",
+                    expected: 1,
+                    actual: 0,
+                });
+            }
+        }
+
+        let requires_fixture = self.route != InteractionRouteV1::VersionJson;
+        match (&self.fixture_identity_sha256, requires_fixture) {
+            (Some(identity), true) => validate_hex(identity, 64, "interaction fixture identity")?,
+            (None, false) => {}
+            _ => {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction route fixture applicability",
+                });
+            }
+        }
+
+        let requires_revision = self.route != InteractionRouteV1::VersionJson;
+        match (&self.revision, requires_revision) {
+            (Some(revision), true) => {
+                validate_prefixed_hash(revision, "rev:sha256:", "interaction Revision")?
+            }
+            (None, false) => {}
+            _ => {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction route Revision applicability",
+                });
+            }
+        }
+
+        let requires_track = matches!(
+            self.route,
+            InteractionRouteV1::AssessmentCurrentResult
+                | InteractionRouteV1::AssessmentCurrentSummary
+                | InteractionRouteV1::ObservationReviewerList
+                | InteractionRouteV1::ValidationReviewerList
+        );
+        match (&self.track, requires_track) {
+            (Some(track), true) => require_nonempty(track, "interaction route track")?,
+            (None, false) => {}
+            _ => {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction route track applicability",
+                });
+            }
+        }
+
+        let requires_domain_actor = self.route != InteractionRouteV1::VersionJson;
+        match (&self.domain_actor, requires_domain_actor) {
+            (Some(actor), true) => require_nonempty(actor, "interaction domain actor")?,
+            (None, false) => {}
+            _ => {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction domain actor applicability",
+                });
+            }
+        }
+
+        let setup_is_valid = match self.route {
+            InteractionRouteV1::AssessmentCurrentResult
+            | InteractionRouteV1::AssessmentCurrentSummary
+            | InteractionRouteV1::InputRequestOpenAllTracks
+            | InteractionRouteV1::ObservationReviewerList
+            | InteractionRouteV1::ValidationReviewerList => {
+                self.setup_expectation == InteractionSetupExpectationV1::AuthoritativeReplay
+            }
+            InteractionRouteV1::VersionJson => {
+                self.setup_expectation == InteractionSetupExpectationV1::NotApplicable
+            }
+            InteractionRouteV1::AttentionCurrentOrFallback => matches!(
+                self.setup_expectation,
+                InteractionSetupExpectationV1::AttentionDerivedCurrent
+                    | InteractionSetupExpectationV1::AttentionColdInactive
+                    | InteractionSetupExpectationV1::AttentionActiveUnavailable
+            ),
+        };
+        if !setup_is_valid {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction expected setup",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionObservedFactsV1 {
+    pub route: InteractionRouteV1,
+    pub route_state: InteractionObservedRouteStateV1,
+    pub execution_actor: InteractionActorV1,
+    pub success: bool,
+    pub exit_code: i32,
+    pub semantic_result_sha256: String,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionObservedFactsV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        validate_hex(
+            &self.semantic_result_sha256,
+            64,
+            "interaction semantic result SHA-256",
+        )?;
+        if self.success != (self.exit_code == 0) {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction success and exit code",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionChildScopeFactV1 {
+    pub ordinal: u16,
+    pub actor: InteractionActorV1,
+    pub coverage: InteractionScopeCoverageV1,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionChildScopeFactV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        self.coverage.validate()
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionLockKindV1 {
+    Authority,
+    Derived,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionLockModeV1 {
+    Blocking,
+    Try,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionLockOutcomeV1 {
+    Acquired,
+    Busy,
+    Deferred,
+    Failed,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionLockAcquisitionV1 {
+    Physical,
+    Reentrant,
+    NotAcquired,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionLockFactV1 {
+    pub ordinal: u16,
+    pub actor: InteractionActorV1,
+    pub kind: InteractionLockKindV1,
+    pub mode: InteractionLockModeV1,
+    pub outcome: InteractionLockOutcomeV1,
+    pub acquisition: InteractionLockAcquisitionV1,
+    pub wait_nanos: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_nanos: Option<u64>,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionLockFactV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        let valid = match (self.outcome, self.acquisition) {
+            (InteractionLockOutcomeV1::Acquired, InteractionLockAcquisitionV1::Physical) => {
+                self.hold_nanos.is_some()
+            }
+            (InteractionLockOutcomeV1::Acquired, InteractionLockAcquisitionV1::Reentrant) => {
+                self.kind == InteractionLockKindV1::Authority
+                    && self.wait_nanos == 0
+                    && self.hold_nanos.is_none()
+            }
+            (
+                InteractionLockOutcomeV1::Busy
+                | InteractionLockOutcomeV1::Deferred
+                | InteractionLockOutcomeV1::Failed,
+                InteractionLockAcquisitionV1::NotAcquired,
+            ) => self.hold_nanos.is_none(),
+            _ => false,
+        };
+        if !valid {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction lock acquisition",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InteractionPerformanceReceiptV1 {
+    pub schema: String,
+    pub expected: InteractionPerformanceExpectedContextV1,
+    pub observed: InteractionObservedFactsV1,
+    pub scope_coverage: InteractionScopeCoverageV1,
+    pub counters: LongitudinalCountersV1,
+    pub capacity_ownership: LongitudinalCapacityOwnershipV1,
+    pub phases: Vec<super::counters::LongitudinalDerivedAccessPhaseSampleV1>,
+    pub children: Vec<InteractionChildScopeFactV1>,
+    pub locks: Vec<InteractionLockFactV1>,
+    pub receipt_sha256: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LongitudinalCounterReceiptV1 {
@@ -3319,6 +3700,165 @@ impl LongitudinalCounterReceiptV1 {
             "counter receipt",
         )
     }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionPerformanceReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != INTERACTION_PERFORMANCE_RECEIPT_SCHEMA_V1 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.expected.validate()?;
+        self.observed.validate()?;
+        self.scope_coverage.validate()?;
+        if self.expected.route != self.observed.route {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        if self.observed.execution_actor != InteractionActorV1::RequestReader {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction root execution actor",
+            });
+        }
+        validate_interaction_route_state_v1(
+            self.expected.route,
+            self.expected.setup_expectation,
+            self.observed.route_state,
+        )?;
+
+        for (index, phase) in self.phases.iter().enumerate() {
+            let expected_ordinal =
+                u16::try_from(index).map_err(|_| LongitudinalContractError::ContractDrift {
+                    field: "interaction phase ordinal",
+                })?;
+            if phase.ordinal != expected_ordinal
+                || phase.ownership != phase.phase.ownership()
+                || phase.actor.is_none()
+                || phase
+                    .parent_ordinal
+                    .is_some_and(|parent| parent >= phase.ordinal)
+            {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction phase facts",
+                });
+            }
+        }
+
+        let mut actual_child_actors = BTreeMap::new();
+        for (index, child) in self.children.iter().enumerate() {
+            child.validate()?;
+            let expected_ordinal =
+                u16::try_from(index).map_err(|_| LongitudinalContractError::ContractDrift {
+                    field: "interaction child ordinal",
+                })?;
+            if child.ordinal != expected_ordinal {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction child ordinal",
+                });
+            }
+            let count = actual_child_actors.entry(child.actor).or_insert(0_u16);
+            *count = count
+                .checked_add(1)
+                .ok_or(LongitudinalContractError::ContractDrift {
+                    field: "interaction child actor count",
+                })?;
+        }
+        if actual_child_actors != self.expected.expected_child_actors {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction expected child actors",
+            });
+        }
+        if self.scope_coverage != interaction_scope_coverage_v1(&self.children)? {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "interaction scope coverage",
+            });
+        }
+
+        for (index, lock) in self.locks.iter().enumerate() {
+            lock.validate()?;
+            let expected_ordinal =
+                u16::try_from(index).map_err(|_| LongitudinalContractError::ContractDrift {
+                    field: "interaction lock ordinal",
+                })?;
+            if lock.ordinal != expected_ordinal {
+                return Err(LongitudinalContractError::ContractDrift {
+                    field: "interaction lock ordinal",
+                });
+            }
+        }
+
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "interaction performance receipt",
+        )
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub(crate) fn interaction_scope_coverage_v1(
+    children: &[InteractionChildScopeFactV1],
+) -> Result<InteractionScopeCoverageV1, LongitudinalContractError> {
+    let mut incomplete_reasons = Vec::new();
+    for child in children {
+        child.validate()?;
+        if let InteractionScopeCoverageV1::Incomplete { reason } = &child.coverage {
+            incomplete_reasons.push(reason.as_str());
+        }
+    }
+    if incomplete_reasons.is_empty() {
+        Ok(InteractionScopeCoverageV1::Complete)
+    } else {
+        Ok(InteractionScopeCoverageV1::Incomplete {
+            reason: incomplete_reasons.join("; "),
+        })
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn validate_interaction_route_state_v1(
+    route: InteractionRouteV1,
+    setup: InteractionSetupExpectationV1,
+    observed: InteractionObservedRouteStateV1,
+) -> Result<(), LongitudinalContractError> {
+    let valid = match route {
+        InteractionRouteV1::AssessmentCurrentResult
+        | InteractionRouteV1::AssessmentCurrentSummary
+        | InteractionRouteV1::InputRequestOpenAllTracks
+        | InteractionRouteV1::ObservationReviewerList
+        | InteractionRouteV1::ValidationReviewerList => {
+            setup == InteractionSetupExpectationV1::AuthoritativeReplay
+                && observed == InteractionObservedRouteStateV1::AuthoritativeReplay
+        }
+        InteractionRouteV1::VersionJson => {
+            setup == InteractionSetupExpectationV1::NotApplicable
+                && observed == InteractionObservedRouteStateV1::NotApplicable
+        }
+        InteractionRouteV1::AttentionCurrentOrFallback => matches!(
+            (setup, observed),
+            (
+                InteractionSetupExpectationV1::AttentionDerivedCurrent,
+                InteractionObservedRouteStateV1::DerivedCurrent,
+            ) | (
+                InteractionSetupExpectationV1::AttentionColdInactive,
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ) | (
+                InteractionSetupExpectationV1::AttentionActiveUnavailable,
+                InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative,
+            )
+        ),
+    };
+    if !valid {
+        return Err(LongitudinalContractError::PairMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -5310,6 +5850,215 @@ mod contract_tests {
             filesystem: "apfs".to_owned(),
             parent_commit: None,
         }
+    }
+
+    fn interaction_execution() -> InteractionExecutionIdentityV1 {
+        InteractionExecutionIdentityV1 {
+            source_commit: "a".repeat(40),
+            source_tree: "b".repeat(40),
+            cargo_lock_sha256: digest("interaction-cargo-lock"),
+            binary_path: "/tmp/pointbreak-interaction-test".to_owned(),
+            binary_sha256: digest("interaction-binary"),
+            build_profile: "debug".to_owned(),
+            rustc_version: "rustc 1.89.0".to_owned(),
+            features: vec!["gix".to_owned(), "longitudinal-counting".to_owned()],
+        }
+    }
+
+    fn interaction_context(
+        route: InteractionRouteV1,
+        setup_expectation: InteractionSetupExpectationV1,
+    ) -> InteractionPerformanceExpectedContextV1 {
+        let is_version = route == InteractionRouteV1::VersionJson;
+        let requires_track = matches!(
+            route,
+            InteractionRouteV1::AssessmentCurrentResult
+                | InteractionRouteV1::AssessmentCurrentSummary
+                | InteractionRouteV1::ObservationReviewerList
+                | InteractionRouteV1::ValidationReviewerList
+        );
+        InteractionPerformanceExpectedContextV1 {
+            execution: interaction_execution(),
+            route,
+            arguments: if is_version {
+                vec![
+                    "version".to_owned(),
+                    "--format".to_owned(),
+                    "json".to_owned(),
+                ]
+            } else {
+                vec!["fixture-route".to_owned()]
+            },
+            setup_expectation,
+            fixture_identity_sha256: (!is_version).then(|| digest("fixture")),
+            revision: (!is_version).then(|| format!("rev:sha256:{}", digest("revision"))),
+            track: requires_track.then(|| "agent:reviewer".to_owned()),
+            domain_actor: (!is_version).then(|| "actor:agent:claude-code".to_owned()),
+            expected_child_actors: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn interaction_contract_round_trips_strict_expected_and_fact_types() {
+        let context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentSummary,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.validate().expect("valid expected context");
+        let encoded = serde_json::to_value(&context).expect("expected context JSON");
+        assert_eq!(
+            serde_json::from_value::<InteractionPerformanceExpectedContextV1>(encoded.clone())
+                .expect("strict expected context"),
+            context
+        );
+
+        let mut unknown = encoded;
+        unknown
+            .as_object_mut()
+            .expect("expected context object")
+            .insert(
+                "observedState".to_owned(),
+                serde_json::json!("derived_current"),
+            );
+        assert!(
+            serde_json::from_value::<InteractionPerformanceExpectedContextV1>(unknown).is_err()
+        );
+
+        for actor in [
+            InteractionActorV1::RequestReader,
+            InteractionActorV1::ProductWriter,
+            InteractionActorV1::BackgroundMaintenance,
+            InteractionActorV1::BackgroundRebuild,
+            InteractionActorV1::ExplicitRecovery,
+        ] {
+            let json = serde_json::to_string(&actor).expect("actor JSON");
+            assert_eq!(
+                serde_json::from_str::<InteractionActorV1>(&json).expect("actor round trip"),
+                actor
+            );
+        }
+
+        for coverage in [
+            InteractionScopeCoverageV1::Complete,
+            InteractionScopeCoverageV1::Incomplete {
+                reason: "child propagation unavailable".to_owned(),
+            },
+        ] {
+            coverage.validate().expect("valid coverage");
+            let json = serde_json::to_string(&coverage).expect("coverage JSON");
+            assert_eq!(
+                serde_json::from_str::<InteractionScopeCoverageV1>(&json)
+                    .expect("coverage round trip"),
+                coverage
+            );
+        }
+
+        let facts = InteractionObservedFactsV1 {
+            route: InteractionRouteV1::AssessmentCurrentSummary,
+            route_state: InteractionObservedRouteStateV1::AuthoritativeReplay,
+            execution_actor: InteractionActorV1::RequestReader,
+            success: true,
+            exit_code: 0,
+            semantic_result_sha256: digest("stdout"),
+        };
+        facts.validate().expect("valid observed facts");
+        let json = serde_json::to_string(&facts).expect("observed facts JSON");
+        assert_eq!(
+            serde_json::from_str::<InteractionObservedFactsV1>(&json)
+                .expect("observed facts round trip"),
+            facts
+        );
+
+        let child = InteractionChildScopeFactV1 {
+            ordinal: 0,
+            actor: InteractionActorV1::BackgroundMaintenance,
+            coverage: InteractionScopeCoverageV1::Complete,
+        };
+        child.validate().expect("valid child fact");
+        let lock = InteractionLockFactV1 {
+            ordinal: 0,
+            actor: InteractionActorV1::ProductWriter,
+            kind: InteractionLockKindV1::Authority,
+            mode: InteractionLockModeV1::Blocking,
+            outcome: InteractionLockOutcomeV1::Acquired,
+            acquisition: InteractionLockAcquisitionV1::Physical,
+            wait_nanos: 7,
+            hold_nanos: Some(11),
+        };
+        lock.validate().expect("valid lock fact");
+    }
+
+    #[test]
+    fn interaction_expected_context_rejects_identity_and_route_drift() {
+        let mut context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.execution.binary_path = "target/debug/pointbreak".to_owned();
+        assert!(context.validate().is_err());
+
+        let mut context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.execution.binary_sha256 = "not-a-hash".to_owned();
+        assert!(context.validate().is_err());
+
+        let mut context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.execution.features.clear();
+        assert!(context.validate().is_err());
+
+        let mut context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.arguments.clear();
+        assert!(context.validate().is_err());
+
+        let mut context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::AuthoritativeReplay,
+        );
+        context.track = None;
+        assert!(context.validate().is_err());
+
+        let mut version = interaction_context(
+            InteractionRouteV1::VersionJson,
+            InteractionSetupExpectationV1::NotApplicable,
+        );
+        version.fixture_identity_sha256 = Some(digest("forbidden-store-fixture"));
+        assert!(version.validate().is_err());
+    }
+
+    #[test]
+    fn interaction_lock_contract_rejects_impossible_acquisitions() {
+        let mut fact = InteractionLockFactV1 {
+            ordinal: 0,
+            actor: InteractionActorV1::RequestReader,
+            kind: InteractionLockKindV1::Authority,
+            mode: InteractionLockModeV1::Blocking,
+            outcome: InteractionLockOutcomeV1::Acquired,
+            acquisition: InteractionLockAcquisitionV1::Reentrant,
+            wait_nanos: 0,
+            hold_nanos: None,
+        };
+        fact.validate().expect("authority reentry is valid");
+
+        fact.kind = InteractionLockKindV1::Derived;
+        assert!(fact.validate().is_err());
+        fact.kind = InteractionLockKindV1::Authority;
+        fact.wait_nanos = 1;
+        assert!(fact.validate().is_err());
+
+        fact.outcome = InteractionLockOutcomeV1::Busy;
+        fact.acquisition = InteractionLockAcquisitionV1::NotAcquired;
+        fact.wait_nanos = 3;
+        fact.validate().expect("busy is not acquired");
+        fact.hold_nanos = Some(5);
+        assert!(fact.validate().is_err());
     }
 
     fn selectors(

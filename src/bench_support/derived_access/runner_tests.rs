@@ -763,6 +763,7 @@ fn phase_receipt(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseSampleV1 {
                 phase: *phase,
                 ownership: phase.ownership(),
+                actor: None,
                 ordinal: ordinal.try_into().expect("small phase list"),
                 parent_ordinal: (*phase
                     == crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries)
@@ -913,6 +914,7 @@ fn governed_write_phase_receipt_accepts_counted_nested_authority_maintenance() {
         LongitudinalDerivedAccessPhaseSampleV1 {
             phase,
             ownership: phase.ownership(),
+            actor: None,
             ordinal: 3,
             parent_ordinal: Some(2),
             wall_nanos: 1,
