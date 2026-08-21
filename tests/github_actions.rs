@@ -418,6 +418,10 @@ fn ci_short_circuits_a_push_whose_sha_already_passed_as_a_pull_request() {
     assert!(guard.contains("actions/workflows/ci.yml/runs"));
     assert!(guard.contains("event=pull_request"));
     assert!(guard.contains("status=completed"));
+    // Conclusions must be evaluated one per line: a single-line JSON array
+    // makes a line-based scan treat ["failure","success"] as green.
+    assert!(guard.contains("--jq '.workflow_runs[].conclusion'"));
+    assert!(guard.contains("grep -qv '^success$'"));
 }
 
 #[test]
@@ -499,6 +503,14 @@ fn cheap_jobs_declare_the_surface_they_guard() {
             "{job} must consume the guard's {output} surface resolution"
         );
     }
+
+    // The Justfile defines the commands the installer and qualification jobs
+    // run, so a change to it must re-run them, not only the skills check.
+    assert!(
+        guard.contains("Justfile)"),
+        "Justfile needs its own classifier arm covering every job whose recipe it defines"
+    );
+    assert!(!guard.contains("skills/*|Justfile"));
 
     // lint-workflows validates the very file the filters live in; it stays
     // unconditional deliberately.

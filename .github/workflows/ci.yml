@@ -60,7 +60,12 @@ jobs:
                 scripts/install*|.github/binary-targets.json)
                   installer=true
                   ;;
-                skills/*|Justfile)
+                # The Justfile defines the recipes the qualification and
+                # installer jobs run, and pins the skills validator.
+                Justfile)
+                  qualification=true installer=true skills=true
+                  ;;
+                skills/*)
                   skills=true
                   ;;
                 src/cli/inspect/web/*|src/cli/inspect/assets/app.js)
@@ -96,12 +101,14 @@ jobs:
           # non-success conclusion runs the full matrix — a guard that fails
           # closed silently stops testing main.
           skip=false
+          # One conclusion per line: a line-based scan over the compact JSON
+          # array would treat a mixed ["failure","success"] as green.
           if conclusions=$(gh api -X GET \
                "repos/${REPOSITORY}/actions/workflows/ci.yml/runs" \
                -f head_sha="$SHA" -f event=pull_request -f status=completed \
-               --jq '[.workflow_runs[].conclusion]' 2>/dev/null); then
-            if [ "$conclusions" != "[]" ] \
-               && ! printf '%s' "$conclusions" | grep -qv '"success"'; then
+               --jq '.workflow_runs[].conclusion' 2>/dev/null); then
+            if [ -n "$conclusions" ] \
+               && ! printf '%s\n' "$conclusions" | grep -qv '^success$'; then
               echo "SHA ${SHA} already passed as a pull_request run; skipping the push matrix."
               skip=true
             fi
