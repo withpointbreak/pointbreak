@@ -39,6 +39,9 @@ jobs:
           name: test-timings-nightly-test-full
           path: target/nextest/default/junit.xml
           if-no-files-found: error
+      - name: check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
 
   git-parity:
     name: git parity (${{ matrix.os }})
@@ -63,3 +66,6 @@ jobs:
           tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@v2
       - run: just git-parity
+      - name: check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

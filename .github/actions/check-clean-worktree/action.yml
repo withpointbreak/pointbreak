@@ -1,0 +1,17 @@
+name: check clean worktree
+description: >-
+  Fail when the job left tracked changes or untracked files in the checkout.
+  A build step that rewrites a committed artifact or a test that writes into
+  the repository fails loudly at the job that caused it.
+runs:
+  using: composite
+  steps:
+    - name: git status must report nothing
+      shell: bash
+      run: |
+        status="$(git status --porcelain=v1 --untracked-files=normal --ignore-submodules=none)"
+        if [ -n "$status" ]; then
+          echo "::error::the job left the worktree dirty — a step wrote into the checkout:"
+          echo "$status"
+          exit 1
+        fi

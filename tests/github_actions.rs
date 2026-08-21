@@ -384,6 +384,47 @@ fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
     );
 }
 
+/// The exact epilogue step every job must end with: the composite action that
+/// fails the job when it leaves tracked changes or untracked files behind.
+const CLEAN_WORKTREE_EPILOGUE: &str = "      - name: check for a clean worktree\n\
+                                       \x20       if: always() && !cancelled()\n\
+                                       \x20       uses: ./.github/actions/check-clean-worktree";
+
+#[test]
+fn every_job_ends_with_a_clean_worktree_check() {
+    let action = std::fs::read_to_string(".github/actions/check-clean-worktree/action.yml")
+        .expect("read the clean-worktree composite action");
+    assert!(action.contains("using: composite"));
+    assert!(
+        action.contains("git status --porcelain"),
+        "the composite action must fail on any tracked change or untracked file"
+    );
+
+    for file in ["ci.yml", "nightly.yml"] {
+        let text = read_workflow(file);
+        for job in job_keys(&text) {
+            // Normalize line endings so a Windows checkout sees the same
+            // epilogue a Unix checkout does.
+            let block = job_block(&text, &job).replace("\r\n", "\n");
+            let start = block.find(CLEAN_WORKTREE_EPILOGUE).unwrap_or_else(|| {
+                panic!(
+                    "{file} job {job} must end with the clean-worktree epilogue, \
+                     guarded by `if: always() && !cancelled()` so it runs even \
+                     after a failing step"
+                )
+            });
+            let remainder = &block[start + CLEAN_WORKTREE_EPILOGUE.len()..];
+            assert!(
+                !remainder
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("- ")),
+                "{file} job {job} must run the clean-worktree check as its final \
+                 step, after every step that could write into the checkout"
+            );
+        }
+    }
+}
+
 #[test]
 fn nightly_lane_records_and_uploads_per_test_timings() {
     let nightly = read_workflow("nightly.yml");
