@@ -435,23 +435,32 @@ fn every_job_ends_with_a_clean_worktree_check() {
 fn nightly_lane_records_and_uploads_per_test_timings() {
     let nightly = read_workflow("nightly.yml");
     let job = job_block(&nightly, "test-full");
-    assert!(
-        job.contains("actions/upload-artifact"),
+    // Scope every assertion to the upload step itself: the clean-worktree
+    // epilogue in the same job also carries a `!cancelled()` guard, so a
+    // job-wide search would keep passing after the upload's own condition
+    // regressed.
+    let start = job.find("- name: upload test timings").expect(
         "the nightly test-full job must upload its per-test timing report; \
-         without it the feature-on suite's cost is invisible between runs"
+         without it the feature-on suite's cost is invisible between runs",
+    );
+    let step = &job[start..];
+    let step = step.find("\n      - ").map_or(step, |end| &step[..end]);
+    assert!(
+        step.contains("actions/upload-artifact"),
+        "the timing upload must go through upload-artifact"
     );
     assert!(
-        job.contains("target/nextest/default/junit.xml"),
+        step.contains("target/nextest/default/junit.xml"),
         "the upload must take the default profile's report: test-full's body \
          is pinned, so it runs the default profile, not ci"
     );
     assert!(
-        job.contains("!cancelled()"),
+        step.contains("!cancelled()"),
         "the timing upload must run on failure too; the runs that most need \
          timing evidence are the ones that did not pass"
     );
     assert!(
-        job.contains("if-no-files-found: error"),
+        step.contains("if-no-files-found: error"),
         "a silently missing report reads as a passing upload"
     );
 
