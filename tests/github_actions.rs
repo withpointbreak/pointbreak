@@ -362,6 +362,41 @@ fn every_ci_job_declares_a_timeout() {
 }
 
 #[test]
+fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
+    let nightly = read_workflow("nightly.yml");
+    assert!(nightly.contains("schedule:"));
+    assert!(
+        nightly.contains("workflow_dispatch:"),
+        "a scheduled lane nobody can trigger by hand is a lane nobody can debug"
+    );
+    assert!(nightly.contains("run: just test-full"));
+    assert!(nightly.contains("ubuntu-latest"));
+    assert!(
+        !nightly.contains("--include-ignored"),
+        "ignored tests are ignored deliberately; the marker on the test is the \
+         only record of why, and this lane must not override it"
+    );
+}
+
+#[test]
+fn development_guide_names_the_command_ci_actually_runs() {
+    let guide = std::fs::read_to_string("docs/development.md").expect("read development guide");
+    let ci = read_workflow("ci.yml");
+
+    assert!(ci.contains("just workflow-lint-assertions"));
+    assert!(
+        guide.contains("just workflow-lint-assertions"),
+        "the guide must name the assertions recipe the CI lint-workflows job runs, \
+         not only the local umbrella recipe"
+    );
+    assert!(
+        guide.contains("nightly.yml") && guide.contains("workflow_dispatch"),
+        "the scheduled full-suite lane must be discoverable from the gate guide, \
+         including how to trigger it by hand"
+    );
+}
+
+#[test]
 fn job_block_stops_at_the_next_job_key() {
     let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
 

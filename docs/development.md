@@ -19,7 +19,7 @@ a change and how to interpret its result. Script-level ownership and side effect
 | Developer-only LMDB proof surface | Focused closure/core/lifecycle tests plus `cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- --lmdb-proof-open-close`, `--lmdb-smoke`, and `--lmdb-lifecycle-smoke` | Compile every `.github/binary-targets.json` target; run plain open/close and native dependency inspection on representative macOS, Linux glibc, Linux musl, and Windows hosts; run the lifecycle smoke natively on Windows for open-handle replacement, interrupted-copy cleanup, and reopen evidence | Exact reviewed sources compile and link statically; semantic and lifecycle smoke are non-timing, public-input-only, and disposable; online copy/restore/repair receipts and native allocation inventory are exact; no encryption, production routing, performance evaluation, or default-package/release inclusion |
 | Inspector `web/src` | `just check`, `just web-check`, `just web-verify` | `just web-test` while iterating; `just web-build` when intentionally refreshing the bundle | Rust gate passes, front-end lint/types/tests pass, and committed `assets/app.js` matches source |
 | VS Code extension | `just check`, `just extension-check` | `just extension-package` when packaging, binary selection, or extension delivery changes | Rust and extension checks pass; optional host VSIX contains the intended binary |
-| GitHub Actions, binary targets, packaging, or release identity | `just workflow-lint`, `just package-archive-selftest` | `just release-bump-selftest` for Cocogitto/tag changes; `just installer-selftest` for acquisition changes | Workflow syntax and shell contracts pass without publication |
+| GitHub Actions, binary targets, packaging, or release identity | `just workflow-lint`, `just package-archive-selftest` | `just release-bump-selftest` for Cocogitto/tag changes; `just installer-selftest` for acquisition changes. CI's lint-workflows job runs actionlint via reviewdog plus `just workflow-lint-assertions`; the local umbrella covers both halves. The workflow tier strategy lives in `.github/workflows/README.md` | Workflow syntax and shell contracts pass without publication |
 | Unix or Windows installer | `just installer-selftest` on the current host | Opposite-platform CI/live evidence required by `docs/releasing.md` | Hermetic acquisition, identity, upgrade, and rollback cases pass |
 | Canonical Review example | `just review-example-verify` | Materialize into an empty repository when changing export/import behavior | Manifest, documents, projection identity, and source test agree |
 | Review decision continuity | `just review-decision-browser-verify <empty-root>` | Inject the exact binary with `POINTBREAK_BINARY` for release evidence | Disposable canonical/synthetic stores pass browser behavior and viewport checks |
@@ -94,6 +94,11 @@ to the harness itself, to `src/session/benchmark.rs`, to `benches/store_foundati
 counting site — and whenever a generated fixture the harness owns may need refreshing. It selects
 `longitudinal-counting` (which implies `bench`), deliberately not `--all-features`: the
 `gix-parity` and `lmdb-proof` lanes stay separate and keep their own recipes.
+
+In CI, the scheduled `test-full (ubuntu-latest)` lane in `.github/workflows/nightly.yml` runs the
+same command once a day, so the feature-gated tests that no per-push lane executes still run on a
+cadence. Trigger it by hand with `workflow_dispatch` (`gh workflow run nightly.yml`) before landing
+a risky change to that surface rather than waiting for the schedule.
 
 During an uncommitted first edit, `commit-check` may have no task commit to inspect. Run focused tests
 while iterating, then run `just check` after creating the reviewable commit range or pass the intended

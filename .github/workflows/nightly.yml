@@ -1,0 +1,32 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test-full:
+    name: test-full (ubuntu-latest)
+    # The full suite with the qualification evidence harness compiled in: the
+    # feature-gated tests that run in no per-push lane run here on a schedule.
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@nextest
+        with:
+          tool: nextest@0.9.140
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-test-full
+      - run: just test-full
