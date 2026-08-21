@@ -25,13 +25,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install just
-        uses: taiki-e/install-action@just
+        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
 
       # nixfmt --check + statix + deadnix + `nix flake check`. Runs only on Nix
       # changes (see paths above); the Rust gate stays in ci.yml.

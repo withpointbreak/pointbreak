@@ -35,8 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout reviewed main
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
           fetch-tags: true
@@ -54,15 +55,19 @@ jobs:
           test "$(git rev-parse origin/main)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
-      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
 
       - name: Verify package and archive contract
         run: just package-archive-selftest
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
 
       - name: Install tools
         run: cargo binstall --no-confirm cocogitto@6.5.0 cargo-edit
@@ -193,7 +198,7 @@ jobs:
 
       - name: Upload release plan
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-plan
           path: ${{ runner.temp }}/release-plan.md
@@ -214,7 +219,7 @@ jobs:
           permission-contents: write
 
       - name: Checkout reviewed main
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -222,15 +227,19 @@ jobs:
           token: ${{ steps.release-token.outputs.token }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
-      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
 
       - name: Verify package and archive contract
         run: just package-archive-selftest
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
 
       - name: Install tools
         run: cargo binstall --no-confirm cocogitto@6.5.0 cargo-edit
@@ -239,7 +248,7 @@ jobs:
         run: just release-bump-selftest
 
       - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v7
+        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           git_user_signingkey: true
@@ -321,7 +330,7 @@ jobs:
 
       - name: Upload release report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-plan
           path: ${{ runner.temp }}/release-plan.md

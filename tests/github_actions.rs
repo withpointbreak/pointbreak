@@ -5,11 +5,15 @@ fn ci_workflow_runs_project_lint_and_tests() {
     assert!(ci.contains("name: CI"));
     assert!(ci.contains("branches: [main]"));
     assert!(ci.contains("pull_request:"));
-    assert!(ci.contains("actions/checkout@v6"));
-    assert!(ci.contains("dtolnay/rust-toolchain@stable"));
-    assert!(ci.contains("dtolnay/rust-toolchain@nightly"));
-    assert!(ci.contains("taiki-e/install-action@just"));
-    assert!(ci.contains("taiki-e/install-action@nextest"));
+    // Toolchain and tool selection ride explicit inputs, not floating refs;
+    // the SHA-pin sweep test owns the reference form itself.
+    assert!(ci.contains("actions/checkout@"));
+    assert!(ci.contains("dtolnay/rust-toolchain@"));
+    assert!(ci.contains("toolchain: stable"));
+    assert!(ci.contains("toolchain: nightly"));
+    assert!(ci.contains("taiki-e/install-action@"));
+    assert!(ci.contains("tool: just"));
+    assert!(ci.contains("tool: nextest"));
     assert!(ci.contains("ubuntu-latest"));
     assert!(ci.contains("macos-latest"));
     assert!(ci.contains("windows-latest"));
@@ -389,6 +393,129 @@ fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
          suite pre-merge; workflow_dispatch alone means leaving the terminal \
          for the Actions UI, which is easy to skip on exactly the risky change"
     );
+}
+
+/// Name and contents of every composite action in `.github/actions/`.
+fn composite_action_sources() -> Vec<(String, String)> {
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(".github/actions").expect("list composite actions") {
+        let path = entry
+            .expect("read actions directory entry")
+            .path()
+            .join("action.yml");
+        if path.exists() {
+            let name = path.to_string_lossy().into_owned();
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {name}: {err}"));
+            sources.push((name, text));
+        }
+    }
+    sources
+}
+
+/// Whether an action reference is pinned to a full commit SHA with a trailing
+/// comment naming what the SHA is (a version tag, or a branch for actions
+/// without releases).
+fn is_sha_pinned(reference: &str) -> bool {
+    let Some((_, rest)) = reference.split_once('@') else {
+        return false;
+    };
+    let Some((sha, comment)) = rest.split_once('#') else {
+        return false;
+    };
+    let sha = sha.trim();
+    sha.len() == 40
+        && sha
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        && !comment.trim().is_empty()
+}
+
+#[test]
+fn every_third_party_action_is_sha_pinned_with_a_version_comment() {
+    let mut sources = workflow_sources();
+    sources.extend(composite_action_sources());
+
+    let mut offenders = Vec::new();
+    for (file, text) in &sources {
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(position) = trimmed.find("uses:") else {
+                continue;
+            };
+            let target = trimmed[position + "uses:".len()..].trim();
+            if target.starts_with("./") {
+                continue;
+            }
+            if !is_sha_pinned(target) {
+                offenders.push(format!("{file}: {target}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "every third-party action must be pinned to a full commit SHA with a \
+         version comment — a floating tag executes whatever the tag moves to, \
+         with the workflow's token: {offenders:#?}"
+    );
+}
+
+/// The step blocks of a workflow that check out the repository.
+fn checkout_steps(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut steps = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if !trimmed.starts_with("- ") {
+            index += 1;
+            continue;
+        }
+        let indent = lines[index].len() - trimmed.len();
+        let mut end = index + 1;
+        while end < lines.len() {
+            let candidate = lines[end].trim_start();
+            let candidate_indent = lines[end].len() - candidate.len();
+            if !candidate.is_empty() && candidate_indent <= indent {
+                break;
+            }
+            end += 1;
+        }
+        let block = lines[index..end].join("\n");
+        if block.contains("uses: actions/checkout@") {
+            steps.push(block);
+        }
+        index = end;
+    }
+    steps
+}
+
+#[test]
+fn every_checkout_disables_credential_persistence_unless_it_pushes() {
+    for (file, text) in workflow_sources() {
+        for step in checkout_steps(&text) {
+            // A checkout that passes an explicit push token is the exception:
+            // it needs its credentials for the push that follows.
+            assert!(
+                step.contains("persist-credentials: false") || step.contains("token:"),
+                "{file} has a checkout that leaves the repo token readable by \
+                 every later step; set persist-credentials: false (or pass the \
+                 explicit push token if this checkout pushes):\n{step}"
+            );
+        }
+    }
+}
+
+#[test]
+fn checkout_step_parser_isolates_each_step() {
+    let workflow = "jobs:\n  sample:\n    steps:\n      - name: first\n        uses: actions/checkout@abc\n        with:\n          persist-credentials: false\n      - uses: actions/checkout@def\n      - run: echo done\n";
+    let steps = checkout_steps(workflow);
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains("persist-credentials: false"));
+    assert!(!steps[1].contains("persist-credentials"));
 }
 
 #[test]

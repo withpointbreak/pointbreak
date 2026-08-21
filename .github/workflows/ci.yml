@@ -29,8 +29,9 @@ jobs:
       extension: ${{ steps.paths.outputs.extension }}
       deps: ${{ steps.paths.outputs.deps }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           # The surface resolution diffs against the event's base commit, which
           # a depth-one clone does not have.
           fetch-depth: 0
@@ -143,8 +144,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
       - run: just installer-selftest
       - name: check for a clean worktree
         if: always() && !cancelled()
@@ -157,12 +162,16 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: false
           ignore-nothing-to-cache: true
-      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
       - name: Validate Agent Skills
         run: just skills-validate
       - name: check for a clean worktree
@@ -179,8 +188,10 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check bans licenses sources
       - name: check for a clean worktree
@@ -195,8 +206,12 @@ jobs:
       checks: write
       contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: taiki-e/install-action@just
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
       - uses: reviewdog/action-actionlint@5eaffa19a1991ecc52b11eddcdd57760d1ac7e3d # v1.72.0
         with:
           fail_level: error
@@ -213,8 +228,10 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: src/cli/inspect/web/.nvmrc
           cache: npm
@@ -242,8 +259,10 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: extensions/vscode/.nvmrc
           cache: npm
@@ -316,18 +335,24 @@ jobs:
             }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: nightly
           components: rustfmt
-      - uses: taiki-e/install-action@just
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
         with:
           tool: nextest@0.9.140
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ${{ runner.os == 'Windows' && 'windows-shards' || '' }}
       - name: just lint
@@ -347,7 +372,7 @@ jobs:
         # Runs on failure too: the runs that most need timing evidence are the
         # ones that did not pass.
         if: ${{ !cancelled() && matrix.run_tests }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-timings-${{ matrix.os }}${{ matrix.shard && format('-{0}-of-{1}', matrix.shard, matrix.shards) || '' }}
           path: target/nextest/ci/junit.xml
@@ -367,13 +392,19 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@just
-      - uses: taiki-e/install-action@nextest
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        with:
+          tool: just
+      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
         with:
           tool: nextest@0.9.140
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: store-foundation-qualification
       - name: run derived-access feature tests

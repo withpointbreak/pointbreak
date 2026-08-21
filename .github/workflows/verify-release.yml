@@ -28,8 +28,9 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       commit: ${{ steps.meta.outputs.commit }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
           fetch-tags: true
@@ -93,7 +94,7 @@ jobs:
             echo "commit=$release_commit"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-verification-metadata
           path: release-verification.json
@@ -112,8 +113,9 @@ jobs:
             label: macos
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ needs.metadata.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
@@ -135,7 +137,7 @@ jobs:
               '. + {schema:"pointbreak.release-verification",platform:$platform,installerSha256:$installerSha256,acquisition:"live"}' \
             >"release-verification-${PLATFORM_LABEL}.json"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-verification-${{ matrix.label }}
           path: release-verification-${{ matrix.label }}.json
@@ -146,8 +148,9 @@ jobs:
     needs: metadata
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ needs.metadata.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
@@ -199,7 +202,7 @@ jobs:
               versionDocument = $document
           } | ConvertTo-Json -Depth 8 | Set-Content release-verification-windows.json -Encoding utf8
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-verification-windows
           path: release-verification-windows.json
@@ -210,8 +213,9 @@ jobs:
     needs: metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ needs.metadata.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
@@ -239,7 +243,7 @@ jobs:
           test -s "$output/release-verification-linux-musl.json"
           cp "$output/release-verification-linux-musl.json" .
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-verification-linux-musl
           path: release-verification-linux-musl.json

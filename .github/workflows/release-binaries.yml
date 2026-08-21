@@ -26,8 +26,9 @@ jobs:
       commit: ${{ steps.meta.outputs.commit }}
     steps:
       - name: Checkout annotated release tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ github.ref_name }}
           fetch-depth: 0
           fetch-tags: true
@@ -69,8 +70,9 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.targets) }}
     steps:
       - name: Checkout annotated release tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
@@ -89,11 +91,12 @@ jobs:
           test "$(git describe --tags --always --dirty)" = "$TAG"
           test -z "$(git status --porcelain --untracked-files=all)"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
+          toolchain: stable
           targets: ${{ matrix.rust-target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.target }}
           cache-bin: false
@@ -151,7 +154,7 @@ jobs:
             "$VERSION" \
             "target/${{ matrix.rust-target }}/release"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.target }}
           path: |
@@ -166,13 +169,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout annotated release tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
+          persist-credentials: false
           ref: refs/tags/${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           pattern: bin-*
@@ -206,7 +210,7 @@ jobs:
             echo checksums.txt
           )
 
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
