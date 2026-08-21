@@ -30,6 +30,15 @@ jobs:
         with:
           shared-key: nightly-test-full
       - run: just test-full
+      - name: upload test timings
+        # Runs on failure too: the runs that most need timing evidence are the
+        # ones that did not pass.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timings-nightly-test-full
+          path: target/nextest/default/junit.xml
+          if-no-files-found: error
 
   git-parity:
     name: git parity (${{ matrix.os }})

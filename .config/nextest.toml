@@ -6,6 +6,12 @@ status-level = "fail"
 # Final status: show only failed tests in summary.
 final-status-level = "fail"
 
+# Per-test timing report for the lanes that ride the default profile — the
+# nightly test-full lane uploads it. test-full's recipe body is pinned, so
+# the profile carries the report rather than a lane-specific flag.
+[profile.default.junit]
+path = "junit.xml"
+
 [profile.ci]
 # CI: run all tests even if some fail.
 fail-fast = false

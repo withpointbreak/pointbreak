@@ -385,6 +385,39 @@ fn nightly_workflow_runs_the_feature_on_suite_and_is_dispatchable() {
 }
 
 #[test]
+fn nightly_lane_records_and_uploads_per_test_timings() {
+    let nightly = read_workflow("nightly.yml");
+    let job = job_block(&nightly, "test-full");
+    assert!(
+        job.contains("actions/upload-artifact"),
+        "the nightly test-full job must upload its per-test timing report; \
+         without it the feature-on suite's cost is invisible between runs"
+    );
+    assert!(
+        job.contains("target/nextest/default/junit.xml"),
+        "the upload must take the default profile's report: test-full's body \
+         is pinned, so it runs the default profile, not ci"
+    );
+    assert!(
+        job.contains("!cancelled()"),
+        "the timing upload must run on failure too; the runs that most need \
+         timing evidence are the ones that did not pass"
+    );
+    assert!(
+        job.contains("if-no-files-found: error"),
+        "a silently missing report reads as a passing upload"
+    );
+
+    let profile =
+        std::fs::read_to_string(".config/nextest.toml").expect("read nextest configuration");
+    assert!(
+        profile.contains("[profile.default.junit]"),
+        "the default nextest profile must record per-test timings; test-full \
+         deliberately keeps its pinned body, so the profile carries the report"
+    );
+}
+
+#[test]
 fn development_guide_names_the_command_ci_actually_runs() {
     let guide = std::fs::read_to_string("docs/development.md").expect("read development guide");
     let ci = read_workflow("ci.yml");
