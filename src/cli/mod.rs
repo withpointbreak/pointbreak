@@ -8,6 +8,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "longitudinal-counting")]
+use sha2::{Digest as _, Sha256};
 
 use crate::cli_tracing::TracingArgs;
 
@@ -110,6 +112,9 @@ struct Cli {
 struct LongitudinalCliCountingRequest {
     run_identity: String,
     context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interaction_context:
+        Option<pointbreak::bench_support::longitudinal::InteractionPerformanceExpectedContextV1>,
     receipt_path: std::path::PathBuf,
 }
 
@@ -312,6 +317,26 @@ fn run_counted_cli(
     encoded: &str,
     raw_args: &[OsString],
 ) -> ExitCode {
+    run_counted_cli_with_dispatch(cli, stdout, stderr, encoded, raw_args, run_cli)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn run_counted_cli_with_dispatch<F>(
+    cli: Cli,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    encoded: &str,
+    raw_args: &[OsString],
+    dispatch: F,
+) -> ExitCode
+where
+    F: FnOnce(
+        Cli,
+        &mut dyn Write,
+        &mut dyn Write,
+        &[OsString],
+    ) -> Result<(), Box<dyn std::error::Error>>,
+{
     let request = URL_SAFE_NO_PAD
         .decode(encoded)
         .map_err(|error| error.to_string())
@@ -333,6 +358,30 @@ fn run_counted_cli(
         );
         return ExitCode::FAILURE;
     }
+    match request.receipt_path.try_exists() {
+        Ok(false) => {}
+        Ok(true) => {
+            let _ = writeln!(stderr, "longitudinal counting receipt path already exists");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "could not inspect longitudinal counting receipt path: {error}"
+            );
+            return ExitCode::FAILURE;
+        }
+    }
+    let interaction = match request.interaction_context {
+        Some(expected) => match validate_interaction_request(expected, raw_args, encoded) {
+            Ok(interaction) => Some(interaction),
+            Err(error) => {
+                let _ = writeln!(stderr, "invalid interaction counting request: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let scope = match pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
         request.run_identity,
     ) {
@@ -342,15 +391,37 @@ fn run_counted_cli(
             return ExitCode::FAILURE;
         }
     };
+    if let Some((_, route)) = &interaction {
+        scope.record_observed_route_once(*route);
+        scope.record_execution_actor_once(
+            pointbreak::bench_support::longitudinal::InteractionActorV1::RequestReader,
+        );
+    }
     let _guard = scope.enter();
-    let mut counting_stdout = LongitudinalCountingWriter { inner: stdout };
-    let result = run_cli(cli, &mut counting_stdout, stderr, raw_args);
-    let mut context = request.context;
-    context.success = result.is_ok();
-    let receipt = scope
-        .receipt(context)
-        .map_err(|error| error.to_string())
-        .and_then(|receipt| write_counting_receipt(&request.receipt_path, &receipt));
+    let (result, semantic_result_sha256) = {
+        let mut counting_stdout = LongitudinalCountingWriter::new(stdout);
+        let result = dispatch(cli, &mut counting_stdout, stderr, raw_args);
+        let semantic_result_sha256 = counting_stdout.semantic_result_sha256();
+        (result, semantic_result_sha256)
+    };
+    if interaction.is_some() {
+        scope.record_semantic_result_sha256_once(semantic_result_sha256);
+        scope.record_outcome_once(result.is_ok(), i32::from(result.is_err()));
+    }
+    let receipt = match interaction {
+        Some((expected, _)) => scope
+            .interaction_receipt(expected)
+            .map_err(|error| error.to_string())
+            .and_then(|receipt| write_counting_receipt(&request.receipt_path, &receipt)),
+        None => {
+            let mut context = request.context;
+            context.success = result.is_ok();
+            scope
+                .receipt(context)
+                .map_err(|error| error.to_string())
+                .and_then(|receipt| write_counting_receipt(&request.receipt_path, &receipt))
+        }
+    };
     if let Err(error) = receipt {
         let _ = writeln!(
             stderr,
@@ -362,9 +433,195 @@ fn run_counted_cli(
 }
 
 #[cfg(feature = "longitudinal-counting")]
-fn write_counting_receipt(
+fn validate_interaction_request(
+    expected: pointbreak::bench_support::longitudinal::InteractionPerformanceExpectedContextV1,
+    raw_args: &[OsString],
+    encoded: &str,
+) -> Result<
+    (
+        pointbreak::bench_support::longitudinal::InteractionPerformanceExpectedContextV1,
+        pointbreak::bench_support::longitudinal::InteractionRouteV1,
+    ),
+    String,
+> {
+    expected.validate().map_err(|error| error.to_string())?;
+    let arguments = interaction_product_arguments(raw_args, encoded)?;
+    if arguments != expected.arguments {
+        return Err("interaction arguments do not match the actual CLI argv".to_owned());
+    }
+    let route = interaction_route_for_arguments(&arguments, &expected)?;
+    if route != expected.route {
+        return Err("interaction route does not match the actual CLI argv".to_owned());
+    }
+    Ok((expected, route))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn interaction_product_arguments(
+    raw_args: &[OsString],
+    encoded: &str,
+) -> Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    let mut index = 1;
+    let mut hidden_request_count = 0;
+    while index < raw_args.len() {
+        let argument = raw_args[index]
+            .to_str()
+            .ok_or_else(|| "interaction CLI argv must be UTF-8".to_owned())?;
+        if argument == "--longitudinal-counting" {
+            let value = raw_args
+                .get(index + 1)
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| "interaction counting option requires a UTF-8 value".to_owned())?;
+            if value != encoded {
+                return Err(
+                    "interaction counting option does not match the decoded request".to_owned(),
+                );
+            }
+            hidden_request_count += 1;
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--longitudinal-counting=") {
+            if value != encoded {
+                return Err(
+                    "interaction counting option does not match the decoded request".to_owned(),
+                );
+            }
+            hidden_request_count += 1;
+            index += 1;
+            continue;
+        }
+        arguments.push(argument.to_owned());
+        index += 1;
+    }
+    if hidden_request_count != 1 {
+        return Err("interaction counting option must occur exactly once".to_owned());
+    }
+    Ok(arguments)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn interaction_route_for_arguments(
+    arguments: &[String],
+    expected: &pointbreak::bench_support::longitudinal::InteractionPerformanceExpectedContextV1,
+) -> Result<pointbreak::bench_support::longitudinal::InteractionRouteV1, String> {
+    use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
+
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    let (route, repo, revision, track) = match arguments.as_slice() {
+        ["version", "--format", "json"] => (Route::VersionJson, None, None, None),
+        [
+            "assessment",
+            "show",
+            "--repo",
+            repo,
+            "--exact-revision",
+            revision,
+            "--track",
+            track,
+            "--format",
+            "json",
+        ] => (
+            Route::AssessmentCurrentResult,
+            Some(*repo),
+            Some(*revision),
+            Some(*track),
+        ),
+        [
+            "assessment",
+            "show",
+            "--repo",
+            repo,
+            "--exact-revision",
+            revision,
+            "--track",
+            track,
+            "--include-summary",
+            "--format",
+            "json",
+        ] => (
+            Route::AssessmentCurrentSummary,
+            Some(*repo),
+            Some(*revision),
+            Some(*track),
+        ),
+        [
+            "input-request",
+            "list",
+            "--repo",
+            repo,
+            "--exact-revision",
+            revision,
+            "--status",
+            "open",
+            "--format",
+            "json",
+        ] => (
+            Route::InputRequestOpenAllTracks,
+            Some(*repo),
+            Some(*revision),
+            None,
+        ),
+        [
+            family @ ("observation" | "validation"),
+            "list",
+            "--repo",
+            repo,
+            "--exact-revision",
+            revision,
+            "--track",
+            track,
+            "--format",
+            "json",
+        ] => (
+            if *family == "observation" {
+                Route::ObservationReviewerList
+            } else {
+                Route::ValidationReviewerList
+            },
+            Some(*repo),
+            Some(*revision),
+            Some(*track),
+        ),
+        [
+            "attention",
+            "list",
+            "--repo",
+            repo,
+            "--revision",
+            revision,
+            "--format",
+            "json",
+        ] => (
+            Route::AttentionCurrentOrFallback,
+            Some(*repo),
+            Some(*revision),
+            None,
+        ),
+        _ => return Err("interaction CLI argv is not one of the seven frozen routes".to_owned()),
+    };
+    if let Some(repo) = repo
+        && !std::path::Path::new(repo).is_absolute()
+    {
+        return Err("interaction route repository path must be absolute".to_owned());
+    }
+    if route != expected.route {
+        return Ok(route);
+    }
+    if revision != expected.revision.as_deref() {
+        return Err("interaction route Revision does not match expected context".to_owned());
+    }
+    if track != expected.track.as_deref() {
+        return Err("interaction route track does not match expected context".to_owned());
+    }
+    Ok(route)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn write_counting_receipt<T: serde::Serialize>(
     path: &std::path::Path,
-    receipt: &pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptV1,
+    receipt: &T,
 ) -> Result<(), String> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -378,12 +635,28 @@ fn write_counting_receipt(
 #[cfg(feature = "longitudinal-counting")]
 struct LongitudinalCountingWriter<'a> {
     inner: &'a mut dyn Write,
+    semantic_sha256: Sha256,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+impl<'a> LongitudinalCountingWriter<'a> {
+    fn new(inner: &'a mut dyn Write) -> Self {
+        Self {
+            inner,
+            semantic_sha256: Sha256::new(),
+        }
+    }
+
+    fn semantic_result_sha256(&self) -> String {
+        format!("{:x}", self.semantic_sha256.clone().finalize())
+    }
 }
 
 #[cfg(feature = "longitudinal-counting")]
 impl Write for LongitudinalCountingWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(bytes)?;
+        self.semantic_sha256.update(&bytes[..written]);
         pointbreak::bench_support::longitudinal::record_response_bytes(written);
         Ok(written)
     }
@@ -749,7 +1022,78 @@ mod change_reader_cli_tests {
 
 #[cfg(all(test, feature = "longitudinal-counting"))]
 mod longitudinal_counting_tests {
+    use std::io::{Error, ErrorKind};
+
+    use sha2::{Digest, Sha256};
+
     use super::*;
+
+    fn legacy_context() -> serde_json::Value {
+        serde_json::json!({
+            "rootIdentity": "2".repeat(64),
+            "operation": "VERSION",
+            "phase": "cold",
+            "baseExecutionIdentitySha256": "3".repeat(64),
+            "derivativeExecutionIdentitySha256": "4".repeat(64),
+            "manifestSha256": "5".repeat(64),
+            "scheduleSha256": "6".repeat(64),
+            "success": false,
+            "semanticResultSha256": "7".repeat(64),
+            "includeCapacityOwnership": false
+        })
+    }
+
+    fn interaction_request(receipt_path: &std::path::Path) -> serde_json::Value {
+        serde_json::json!({
+            "runIdentity": "1".repeat(64),
+            "context": legacy_context(),
+            "interactionContext": {
+                "execution": {
+                    "sourceCommit": "a".repeat(40),
+                    "sourceTree": "b".repeat(40),
+                    "cargoLockSha256": "c".repeat(64),
+                    "binaryPath": "/tmp/pointbreak-interaction-test",
+                    "binarySha256": "d".repeat(64),
+                    "buildProfile": "debug",
+                    "rustcVersion": "rustc test",
+                    "features": ["gix", "longitudinal-counting"]
+                },
+                "route": "version_json",
+                "arguments": ["version", "--format", "json"],
+                "setupExpectation": "not_applicable"
+            },
+            "receiptPath": receipt_path
+        })
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    struct PartialThenErrorWriter {
+        accepted: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for PartialThenErrorWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.writes == 1 {
+                let accepted = bytes.len().min(3);
+                self.accepted.extend_from_slice(&bytes[..accepted]);
+                Ok(accepted)
+            } else {
+                Err(Error::new(
+                    ErrorKind::BrokenPipe,
+                    "fixture writer rejected bytes",
+                ))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn final_cli_writer_counts_only_successfully_emitted_stdout_bytes() {
@@ -759,7 +1103,7 @@ mod longitudinal_counting_tests {
         .expect("valid scope");
         let _guard = scope.enter();
         let mut output = Vec::new();
-        let mut writer = LongitudinalCountingWriter { inner: &mut output };
+        let mut writer = LongitudinalCountingWriter::new(&mut output);
 
         writer.write_all(b"pointbreak").expect("write output");
         writer.flush().expect("flush output");
@@ -772,24 +1116,180 @@ mod longitudinal_counting_tests {
     }
 
     #[test]
-    fn hidden_cli_transport_writes_a_disjoint_receipt_after_the_final_stdout_boundary() {
+    fn counted_writer_hashes_only_each_accepted_prefix_and_preserves_errors() {
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            "8".repeat(64),
+        )
+        .expect("valid scope");
+        let _guard = scope.enter();
+        let mut output = PartialThenErrorWriter {
+            accepted: Vec::new(),
+            writes: 0,
+        };
+        let mut writer = LongitudinalCountingWriter::new(&mut output);
+
+        assert_eq!(writer.write(b"abcdef").expect("partial write"), 3);
+        let error = writer.write(b"def").expect_err("writer error");
+        assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+        assert_eq!(error.to_string(), "fixture writer rejected bytes");
+        assert_eq!(writer.semantic_result_sha256(), sha256(b"abc"));
+        assert_eq!(scope.snapshot().counters.response_bytes, 3);
+        drop(writer);
+        assert_eq!(output.accepted, b"abc");
+    }
+
+    #[test]
+    fn interaction_transport_binds_actual_route_actor_outcome_and_accepted_stdout() {
         let directory = tempfile::tempdir().expect("temporary receipt directory");
-        let receipt_path = directory.path().join("receipt.json");
-        let request = serde_json::json!({
-            "runIdentity": "1".repeat(64),
-            "context": {
-                "rootIdentity": "2".repeat(64),
-                "operation": "VERSION",
-                "phase": "cold",
-                "baseExecutionIdentitySha256": "3".repeat(64),
-                "derivativeExecutionIdentitySha256": "4".repeat(64),
-                "manifestSha256": "5".repeat(64),
-                "scheduleSha256": "6".repeat(64),
-                "success": false,
-                "semanticResultSha256": "7".repeat(64),
-                "includeCapacityOwnership": false
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let request = interaction_request(&receipt_path);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        assert_eq!(
+            cli.longitudinal_counting.take().as_deref(),
+            Some(encoded.as_str())
+        );
+        let product_stdout = b"{\"ok\":true}\n";
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, stdout, _, _| {
+                pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+                    .expect("active interaction scope")
+                    .record_observed_route_state_once(
+                        pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1::NotApplicable,
+                    );
+                stdout.write_all(product_stdout)?;
+                Ok(())
             },
-            "receiptPath": receipt_path
+        );
+
+        assert_eq!(
+            exit,
+            ExitCode::SUCCESS,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert_eq!(stdout, product_stdout);
+        let receipt: pointbreak::bench_support::longitudinal::InteractionPerformanceReceiptV1 =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt bytes"))
+                .expect("receipt JSON");
+        receipt.validate().expect("valid interaction receipt");
+        assert_eq!(
+            receipt.observed.route,
+            pointbreak::bench_support::longitudinal::InteractionRouteV1::VersionJson
+        );
+        assert_eq!(
+            receipt.observed.execution_actor,
+            pointbreak::bench_support::longitudinal::InteractionActorV1::RequestReader
+        );
+        assert!(receipt.observed.success);
+        assert_eq!(receipt.observed.exit_code, 0);
+        assert_eq!(
+            receipt.observed.semantic_result_sha256,
+            sha256(product_stdout)
+        );
+    }
+
+    #[test]
+    fn interaction_transport_rejects_expected_arguments_that_do_not_match_actual_argv() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let mut request = interaction_request(&receipt_path);
+        request["interactionContext"]["arguments"] = serde_json::json!(["version"]);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, _, _, _| panic!("mismatched route must fail before product dispatch"),
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(!receipt_path.exists());
+        assert!(String::from_utf8_lossy(&stderr).contains("arguments do not match"));
+    }
+
+    #[test]
+    fn interaction_transport_rejects_an_expected_route_that_does_not_match_actual_argv() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let mut request = interaction_request(&receipt_path);
+        request["interactionContext"]["route"] = serde_json::json!("assessment_current_result");
+        request["interactionContext"]["setupExpectation"] =
+            serde_json::json!("authoritative_replay");
+        request["interactionContext"]["fixtureIdentitySha256"] = serde_json::json!("e".repeat(64));
+        request["interactionContext"]["revision"] =
+            serde_json::json!(format!("rev:sha256:{}", "f".repeat(64)));
+        request["interactionContext"]["track"] = serde_json::json!("agent:reviewer");
+        request["interactionContext"]["domainActor"] = serde_json::json!("actor:agent:test");
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, _, _, _| panic!("mismatched route must fail before product dispatch"),
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(!receipt_path.exists());
+        assert!(String::from_utf8_lossy(&stderr).contains("route does not match"));
+    }
+
+    #[test]
+    fn interaction_transport_rejects_caller_supplied_observed_facts() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let mut request = interaction_request(&receipt_path);
+        request["interactionContext"]["observed"] = serde_json::json!({
+            "success": true,
+            "semanticResultSha256": "0".repeat(64)
         });
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
         let mut stdout = Vec::new();
@@ -808,6 +1308,194 @@ mod longitudinal_counting_tests {
             &mut stderr,
         );
 
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(!receipt_path.exists());
+        assert!(String::from_utf8_lossy(&stderr).contains("unknown field"));
+    }
+
+    #[test]
+    fn interaction_transport_refuses_a_preexisting_receipt_before_dispatch() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        std::fs::write(&receipt_path, b"preserve me\n").expect("preexisting receipt");
+        let request = interaction_request(&receipt_path);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, _, _, _| panic!("preexisting path must fail before product dispatch"),
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            std::fs::read(&receipt_path).expect("preserved receipt"),
+            b"preserve me\n"
+        );
+        assert!(String::from_utf8_lossy(&stderr).contains("already exists"));
+    }
+
+    #[test]
+    fn interaction_receipt_validation_failure_never_publishes_a_partial_receipt() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let request = interaction_request(&receipt_path);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, stdout, _, _| {
+                stdout.write_all(b"product output\n")?;
+                Ok(())
+            },
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert_eq!(stdout, b"product output\n");
+        assert!(!receipt_path.exists());
+        assert!(String::from_utf8_lossy(&stderr).contains("observed route state"));
+    }
+
+    #[test]
+    fn interaction_transport_records_the_real_product_error_outcome() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("interaction-receipt.json");
+        let request = interaction_request(&receipt_path);
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |_, _, _, _| {
+                pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+                    .expect("active interaction scope")
+                    .record_observed_route_state_once(
+                        pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1::NotApplicable,
+                    );
+                Err("product failed exactly".into())
+            },
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("product failed exactly"));
+        let receipt: pointbreak::bench_support::longitudinal::InteractionPerformanceReceiptV1 =
+            serde_json::from_slice(&std::fs::read(&receipt_path).expect("receipt bytes"))
+                .expect("receipt JSON");
+        assert!(!receipt.observed.success);
+        assert_eq!(receipt.observed.exit_code, 1);
+        assert_eq!(receipt.observed.semantic_result_sha256, sha256(b""));
+    }
+
+    #[test]
+    fn interaction_transport_rejects_a_relative_receipt_path() {
+        let mut request = interaction_request(std::path::Path::new("relative-receipt.json"));
+        request["receiptPath"] = serde_json::json!("relative-receipt.json");
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_with_io(
+            [
+                "pointbreak",
+                "--longitudinal-counting",
+                encoded.as_str(),
+                "version",
+                "--format",
+                "json",
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit, ExitCode::FAILURE);
+        assert!(stdout.is_empty());
+        assert!(String::from_utf8_lossy(&stderr).contains("must be absolute"));
+    }
+
+    #[test]
+    fn hidden_cli_transport_writes_a_disjoint_receipt_after_the_final_stdout_boundary() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("receipt.json");
+        let request = serde_json::json!({
+            "runIdentity": "1".repeat(64),
+            "context": legacy_context(),
+            "receiptPath": receipt_path
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("--longitudinal-counting"),
+            OsString::from(&encoded),
+            OsString::from("version"),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let mut cli = Cli::try_parse_from(raw_args.clone()).expect("valid CLI");
+        cli.longitudinal_counting.take();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_counted_cli_with_dispatch(
+            cli,
+            &mut stdout,
+            &mut stderr,
+            &encoded,
+            &raw_args,
+            |cli, stdout, _, _| match cli.command {
+                Command::Version(args) => version::run(args, stdout),
+                _ => unreachable!("version fixture parsed another command"),
+            },
+        );
+
         assert_eq!(
             exit,
             ExitCode::SUCCESS,
@@ -821,5 +1509,28 @@ mod longitudinal_counting_tests {
         assert_eq!(receipt.operation, "VERSION");
         assert_eq!(receipt.counters.response_bytes, stdout.len() as u64);
         assert!(receipt.capacity_ownership.is_none());
+    }
+
+    #[test]
+    fn ordinary_version_invocations_are_byte_and_outcome_stable_without_a_hidden_request() {
+        fn run_ordinary_version() -> (Result<(), String>, Vec<u8>) {
+            let cli = Cli::try_parse_from(["pointbreak", "version", "--format", "json"])
+                .expect("ordinary version CLI");
+            assert!(cli.longitudinal_counting.is_none());
+            let mut stdout = Vec::new();
+            let result = match cli.command {
+                Command::Version(args) => version::run(args, &mut stdout),
+                _ => unreachable!("version fixture parsed another command"),
+            }
+            .map_err(|error| error.to_string());
+            (result, stdout)
+        }
+
+        let (first_result, first_stdout) = run_ordinary_version();
+        let (second_result, second_stdout) = run_ordinary_version();
+
+        assert_eq!(first_result, second_result);
+        assert_eq!(first_stdout, second_stdout);
+        assert!(first_result.is_ok());
     }
 }
