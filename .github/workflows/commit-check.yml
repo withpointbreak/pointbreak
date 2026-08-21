@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   conventional-commits:
+    timeout-minutes: 10
     name: Conventional Commits
     runs-on: ubuntu-latest
     steps:

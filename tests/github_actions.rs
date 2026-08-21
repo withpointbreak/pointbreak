@@ -328,6 +328,40 @@ fn every_job_that_left_the_per_push_tier_has_a_home() {
 }
 
 #[test]
+fn ci_pins_the_nextest_version_and_retains_timing_reports() {
+    let ci = read_workflow("ci.yml");
+    assert!(
+        ci.contains("tool: nextest@"),
+        "ci.yml must pin the nextest version; an unpinned install silently \
+         changes the runner between timing measurements"
+    );
+    assert!(
+        ci.contains("actions/upload-artifact"),
+        "ci.yml must upload the per-run test timing report"
+    );
+
+    let profile =
+        std::fs::read_to_string(".config/nextest.toml").expect("read nextest configuration");
+    assert!(
+        profile.contains("[profile.ci.junit]"),
+        "the ci nextest profile must record per-test timings"
+    );
+}
+
+#[test]
+fn every_ci_job_declares_a_timeout() {
+    for (file, text) in workflow_sources() {
+        for job in job_keys(&text) {
+            assert!(
+                job_block(&text, &job).contains("timeout-minutes:"),
+                "{file} job {job} declares no timeout-minutes, \
+                 so a hang runs to the six-hour default"
+            );
+        }
+    }
+}
+
+#[test]
 fn job_block_stops_at_the_next_job_key() {
     let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
 

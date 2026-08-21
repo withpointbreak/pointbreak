@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   prepare:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.load.outputs.targets }}
@@ -59,6 +60,7 @@ jobs:
         run: echo "targets=$(jq -c . .github/binary-targets.json)" >> "$GITHUB_OUTPUT"
 
   build:
+    timeout-minutes: 60
     needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
@@ -159,6 +161,7 @@ jobs:
           retention-days: 7
 
   release:
+    timeout-minutes: 15
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:

@@ -39,6 +39,7 @@ env:
 
 jobs:
   measure:
+    timeout-minutes: 90
     name: measure (windows-latest)
     runs-on: windows-latest
     steps:
@@ -115,6 +116,7 @@ jobs:
           time env CARGO_TERM_COLOR=never just test-ci --status-level fail --final-status-level fail
 
   probe:
+    timeout-minutes: 90
     name: shard probe ${{ matrix.shard }}/3
     if: ${{ inputs.shard_probe }}
     runs-on: windows-latest

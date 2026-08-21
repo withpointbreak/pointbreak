@@ -15,6 +15,7 @@ env:
 jobs:
   installer-selftest:
     name: installer self-test (${{ matrix.os }})
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +28,7 @@ jobs:
 
   validate-skills:
     name: validate skills
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -40,6 +42,7 @@ jobs:
 
   lint-workflows:
     name: lint workflows
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     permissions:
       checks: write
@@ -55,6 +58,7 @@ jobs:
 
   web-check:
     name: web check (inspector front-end)
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -78,6 +82,7 @@ jobs:
 
   extension-check:
     name: extension check
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -95,6 +100,9 @@ jobs:
 
   test:
     name: ${{ matrix.name }}
+    # Roughly double the slowest observed leg, so a cache-cold run passes while
+    # a hang fails within the hour instead of the six-hour default.
+    timeout-minutes: 30
     # Windows is the CI long pole and is spawn-bound (per-CreateProcess cost), so its
     # ~226s execution is fanned across parallel slice-partitioned shards while ubuntu and
     # macOS stay single legs. Lint runs on Linux only; the cfg(windows)/cfg(not(unix))
@@ -155,6 +163,8 @@ jobs:
           components: rustfmt
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
+        with:
+          tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os == 'Windows' && 'windows-shards' || '' }}
@@ -171,9 +181,19 @@ jobs:
       - name: just test-ci
         if: matrix.run_tests
         run: just test-ci ${{ matrix.shard && format('--partition slice:{0}/{1}', matrix.shard, matrix.shards) || '' }}
+      - name: upload test timings
+        # Runs on failure too: the runs that most need timing evidence are the
+        # ones that did not pass.
+        if: ${{ !cancelled() && matrix.run_tests }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-timings-${{ matrix.os }}${{ matrix.shard && format('-{0}-of-{1}', matrix.shard, matrix.shards) || '' }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: error
 
   store-foundation-qualification:
     name: store foundation qualification (${{ matrix.os }})
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -184,6 +204,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
+        with:
+          tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: store-foundation-qualification
@@ -211,6 +233,7 @@ jobs:
 
   git-parity:
     name: git parity (${{ matrix.os }})
+    timeout-minutes: 15
     # The differential subprocess-vs-gix parity harness, exercised on both
     # platforms where the object-format and path-separator behavior differs.
     # Report-only in this phase: divergences in unqualified classes are expected
@@ -226,5 +249,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
+        with:
+          tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@v2
       - run: just git-parity

@@ -29,6 +29,7 @@ concurrency:
 
 jobs:
   plan:
+    timeout-minutes: 30
     name: Release Plan
     if: inputs.mode == 'plan'
     runs-on: ubuntu-latest
@@ -199,6 +200,7 @@ jobs:
           retention-days: 90
 
   release:
+    timeout-minutes: 30
     name: Execute Release
     if: inputs.mode == 'release'
     runs-on: ubuntu-latest

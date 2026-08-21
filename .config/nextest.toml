@@ -13,6 +13,11 @@ fail-fast = false
 status-level = "pass"
 final-status-level = "all"
 
+# Per-test timing report, uploaded as a CI artifact so lane cost is measured
+# from recorded runs rather than scraped from job wall-clock.
+[profile.ci.junit]
+path = "junit.xml"
+
 [profile.ignored-only]
 # Run only ignored tests, and show all results for debugging.
 # Run with `cargo nextest run --profile ignored-only --run-ignored only`.

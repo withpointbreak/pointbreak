@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   nix-check:
+    timeout-minutes: 60
     name: Format and lint
     runs-on: ubuntu-latest
     steps:
