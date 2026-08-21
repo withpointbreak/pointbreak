@@ -3894,10 +3894,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 Phase::ChangePageSnapshotAcquisition,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageBodylessSelection,
                 Phase::ChangePageProposalLocatorExpansion,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageCarrierHydrationValidation,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageSupportExpansion,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::ChangePagePresentationProjection,
             ]
         );
@@ -4249,20 +4254,25 @@ mod tests {
             phases.iter().map(|sample| sample.phase).collect::<Vec<_>>(),
             vec![
                 Phase::ChangePageSnapshotAcquisition,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageBodylessSelection,
                 Phase::ChangePageProposalLocatorExpansion,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageCarrierHydrationValidation,
+                Phase::CheckpointAndWal,
                 Phase::ChangePageExhaustiveProposalSearch,
                 Phase::ChangePageSupportExpansion,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::ChangePagePresentationProjection,
             ]
         );
-        assert_eq!(phases[1].counters.change_candidates, 3);
-        assert_eq!(phases[1].counters.change_candidate_current_revisions, 3);
-        assert_eq!(phases[3].counters.change_proposal_carriers_opened, 6);
-        assert_eq!(phases[3].counters.change_proposal_carriers_validated, 6);
-        assert_eq!(phases[4].counters.change_matches, 1);
-        assert_eq!(phases[5].counters.change_support_carriers_opened, 2);
+        assert_eq!(phases[2].counters.change_candidates, 3);
+        assert_eq!(phases[2].counters.change_candidate_current_revisions, 3);
+        assert_eq!(phases[5].counters.change_proposal_carriers_opened, 6);
+        assert_eq!(phases[5].counters.change_proposal_carriers_validated, 6);
+        assert_eq!(phases[7].counters.change_matches, 1);
+        assert_eq!(phases[8].counters.change_support_carriers_opened, 2);
         assert!(
             phases
                 .iter()
