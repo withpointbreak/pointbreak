@@ -22,7 +22,38 @@ jobs:
       contents: read
     outputs:
       skip: ${{ steps.resolve.outputs.skip }}
+      qualification: ${{ steps.paths.outputs.qualification }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          # The surface resolution diffs against the event's base commit, which
+          # a depth-one clone does not have.
+          fetch-depth: 0
+      - id: paths
+        name: resolve which filtered surfaces the change set touches
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          # Fail OPEN: when the diff cannot be computed — an empty or all-zero
+          # base, an unreachable commit after a force-push — every filtered
+          # job runs. A path filter that fails closed silently stops
+          # qualifying the product.
+          qualification=true
+          if [ -n "$BASE" ] \
+             && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+             && files=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
+            qualification=false
+            while IFS= read -r file; do
+              case "$file" in
+                src/session/derived_access/*|src/bench_support/*|src/bench_support.rs|benches/store_foundation.rs|.github/workflows/ci.yml)
+                  qualification=true
+                  break
+                  ;;
+              esac
+            done <<< "$files"
+          fi
+          echo "qualification=$qualification" >> "$GITHUB_OUTPUT"
       # Only push events can ever suppress anything: on every other event the
       # resolve step is skipped, its output is empty, and downstream
       # conditions treat an empty output as "run".
@@ -235,7 +266,7 @@ jobs:
   store-foundation-qualification:
     name: store foundation qualification (${{ matrix.os }})
     needs: guard
-    if: needs.guard.outputs.skip != 'true'
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.qualification == 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false

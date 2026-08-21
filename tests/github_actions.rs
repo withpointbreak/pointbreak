@@ -440,6 +440,34 @@ fn every_heavy_job_consults_the_guard() {
 }
 
 #[test]
+fn qualification_runs_when_its_own_surface_changes_and_keeps_three_legs() {
+    let ci = read_workflow("ci.yml");
+    let job = job_block(&ci, "store-foundation-qualification");
+
+    for surface in [
+        "src/session/derived_access/",
+        "src/bench_support/",
+        "src/bench_support.rs",
+        "benches/store_foundation.rs",
+        ".github/workflows/ci.yml",
+    ] {
+        assert!(
+            ci.contains(surface),
+            "qualification filter must cover {surface}"
+        );
+    }
+    assert!(
+        job.contains("needs.guard.outputs.qualification == 'true'"),
+        "the qualification job must consume the guard's surface resolution"
+    );
+    // The demotion is a filter, never a platform drop: these assertions are
+    // here to fail later, if someone "optimizes" the filter into one.
+    for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+        assert!(job.contains(os));
+    }
+}
+
+#[test]
 fn job_block_stops_at_the_next_job_key() {
     let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
 
