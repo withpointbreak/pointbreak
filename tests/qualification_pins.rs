@@ -418,3 +418,76 @@ fn test_full_recipe_runs_the_pinned_feature_set_unfiltered() {
         "test-full must not enable lmdb-proof or gix-parity, which no pin uses"
     );
 }
+
+/// Name and body of every `just` recipe, in file order.
+fn recipes(justfile: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = justfile.lines().collect();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        index += 1;
+        if line.starts_with(char::is_whitespace)
+            || line.starts_with('#')
+            || line.starts_with('[')
+            || line.contains(":=")
+        {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let Some(name) = line[..colon].split_whitespace().next() else {
+            continue;
+        };
+        let name = name.to_string();
+        let body_start = index;
+        while index < lines.len()
+            && (lines[index].trim().is_empty() || lines[index].starts_with(char::is_whitespace))
+        {
+            index += 1;
+        }
+        found.push((name, lines[body_start..index].join("\n")));
+    }
+    found
+}
+
+/// Filter-bearing recipes whose zero-match policy is not yet pinned. Each entry
+/// can still report success while running nothing if its filter stops matching;
+/// the goal state is an empty list. Growing it is a deliberate, reviewed
+/// decision, and an entry that stops naming an unguarded filter-bearing recipe
+/// is stale and must be removed.
+const ZERO_MATCH_GUARD_PENDING: &[&str] = &["git-bench", "git-parity"];
+
+#[test]
+fn every_filtered_recipe_refuses_a_zero_match_run() {
+    let justfile = std::fs::read_to_string(repo_path("Justfile")).expect("read Justfile");
+    let filtered: Vec<(String, String)> = recipes(&justfile)
+        .into_iter()
+        .filter(|(_, body)| body.contains("-E '"))
+        .collect();
+
+    for pending in ZERO_MATCH_GUARD_PENDING {
+        assert!(
+            filtered
+                .iter()
+                .any(|(name, body)| name == pending && !body.contains("--no-tests fail")),
+            "{pending} is listed as pending a zero-match guard but is no longer \
+             an unguarded filter-bearing recipe; remove the stale entry"
+        );
+    }
+
+    let offenders: Vec<&str> = filtered
+        .iter()
+        .filter(|(name, body)| {
+            !body.contains("--no-tests fail") && !ZERO_MATCH_GUARD_PENDING.contains(&name.as_str())
+        })
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    assert!(
+        offenders.is_empty(),
+        "filter-bearing recipes must refuse a zero-match run with `--no-tests fail`, \
+         or the lane can report success while running nothing: {offenders:?}"
+    );
+}
