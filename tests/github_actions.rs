@@ -421,6 +421,25 @@ fn ci_short_circuits_a_push_whose_sha_already_passed_as_a_pull_request() {
 }
 
 #[test]
+fn every_heavy_job_consults_the_guard() {
+    let ci = read_workflow("ci.yml");
+    // Per-job blocks, so one wired job cannot satisfy the assertion for an
+    // unwired sibling.
+    for job in ["test", "store-foundation-qualification", "git-parity"] {
+        let block = job_block(&ci, job);
+        assert!(
+            block.contains("needs: guard"),
+            "heavy job {job} must depend on the guard"
+        );
+        assert!(
+            block.contains("needs.guard.outputs.skip != 'true'"),
+            "heavy job {job} must run unless the guard positively resolved \
+             this SHA as already green — an empty or missing output means run"
+        );
+    }
+}
+
+#[test]
 fn job_block_stops_at_the_next_job_key() {
     let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
 

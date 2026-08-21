@@ -139,6 +139,8 @@ jobs:
 
   test:
     name: ${{ matrix.name }}
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     # Roughly double the slowest observed leg, so a cache-cold run passes while
     # a hang fails within the hour instead of the six-hour default.
     timeout-minutes: 30
@@ -232,6 +234,8 @@ jobs:
 
   store-foundation-qualification:
     name: store foundation qualification (${{ matrix.os }})
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -272,6 +276,8 @@ jobs:
 
   git-parity:
     name: git parity (${{ matrix.os }})
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
     timeout-minutes: 15
     # The differential subprocess-vs-gix parity harness, exercised on both
     # platforms where the object-format and path-separator behavior differs.
