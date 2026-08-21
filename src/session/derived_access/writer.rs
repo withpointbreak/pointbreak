@@ -709,6 +709,16 @@ mod tests {
             crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::GovernedWrite
                 .expected_phases()
         );
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            scope
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.parent_ordinal)
+                .collect::<Vec<_>>(),
+            vec![None, Some(0), None, None, Some(3), Some(3), None]
+        );
         assert_eq!(
             governed.record_event_once(&event(1)).unwrap(),
             EventWriteOutcome::Existing

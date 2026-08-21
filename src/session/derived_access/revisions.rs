@@ -1519,6 +1519,30 @@ mod tests {
             crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::RevisionPage
                 .expected_phases()
         );
+        #[cfg(feature = "bench")]
+        assert_eq!(
+            scope
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.parent_ordinal)
+                .collect::<Vec<_>>(),
+            vec![
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(5),
+                Some(5),
+                None,
+                None,
+                Some(9),
+                None,
+                Some(11),
+            ]
+        );
         assert_eq!(first.result.entries.len(), 1);
         assert_eq!(first.work.rows_selected, 2);
         assert_eq!(first.work.entries_returned, 1);

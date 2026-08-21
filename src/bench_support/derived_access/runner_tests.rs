@@ -765,7 +765,9 @@ fn phase_receipt(
                 ownership: phase.ownership(),
                 actor: None,
                 ordinal: ordinal.try_into().expect("small phase list"),
-                parent_ordinal: operation.expected_parent_ordinal(ordinal),
+                parent_ordinal: operation
+                    .expected_parent_index(ordinal)
+                    .map(|parent| parent.try_into().expect("small parent ordinal")),
                 wall_nanos: 1,
                 process_cpu_nanos: Some(1),
                 resident_bytes_before: Some(100),
@@ -856,7 +858,7 @@ fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() 
     );
 
     let mut duplicate = receipt.clone();
-    duplicate.phases[1].phase = duplicate.phases[0].phase;
+    duplicate.phases[4].phase = duplicate.phases[3].phase;
     duplicate
         .refresh_sha256()
         .expect("rehash duplicate receipt");
@@ -882,7 +884,11 @@ fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() 
     );
 
     let mut flattened = receipt.clone();
-    flattened.phases[6].parent_ordinal = None;
+    flattened
+        .phases
+        .last_mut()
+        .expect("revision-page receipt has a snapshot-summary phase")
+        .parent_ordinal = None;
     flattened
         .refresh_sha256()
         .expect("rehash flattened receipt");
@@ -901,20 +907,22 @@ fn governed_write_phase_receipt_accepts_counted_nested_authority_maintenance() {
         QualificationDerivedAccessPhaseOperationV1::GovernedWrite,
         digest(47),
     );
-    receipt.phases[3].ordinal = 4;
+    for sample in &mut receipt.phases[4..] {
+        sample.ordinal += 1;
+    }
     let counters = LongitudinalCountersV1 {
         authority_identity_rows_scanned: 17,
         ..LongitudinalCountersV1::default()
     };
     let phase = LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance;
     receipt.phases.insert(
-        3,
+        4,
         LongitudinalDerivedAccessPhaseSampleV1 {
             phase,
             ownership: phase.ownership(),
             actor: None,
-            ordinal: 3,
-            parent_ordinal: Some(2),
+            ordinal: 4,
+            parent_ordinal: Some(3),
             wall_nanos: 1,
             process_cpu_nanos: Some(1),
             resident_bytes_before: Some(100),
@@ -930,11 +938,11 @@ fn governed_write_phase_receipt_accepts_counted_nested_authority_maintenance() {
 
     let serialized = serde_json::to_value(&receipt).expect("maintenance receipt JSON");
     assert_eq!(
-        serialized["phases"][3]["counters"]["authorityIdentityRowsScanned"],
+        serialized["phases"][4]["counters"]["authorityIdentityRowsScanned"],
         17
     );
 
-    receipt.phases[3].counters.authority_identity_rows_scanned = 0;
+    receipt.phases[4].counters.authority_identity_rows_scanned = 0;
     receipt
         .refresh_sha256()
         .expect("rehash uncounted maintenance receipt");

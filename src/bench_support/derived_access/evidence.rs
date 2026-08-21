@@ -1030,11 +1030,17 @@ impl QualificationDerivedAccessPhaseOperationV1 {
         use LongitudinalDerivedAccessPhaseV1 as Phase;
         match self {
             Self::RevisionPage => &[
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::RevisionPageSqlSelection,
                 Phase::RevisionPageEventIdExpansion,
                 Phase::RevisionPageCarrierHydrationValidation,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::RevisionPageListProjection,
                 Phase::RevisionPageSupersederSupportExpansion,
+                Phase::CheckpointAndWal,
                 Phase::RevisionPageOverviewConstruction,
                 Phase::RevisionPageSnapshotSummaries,
             ],
@@ -1051,18 +1057,25 @@ impl QualificationDerivedAccessPhaseOperationV1 {
             ],
             Self::GovernedWrite => &[
                 Phase::GovernedWriteAdmission,
+                Phase::CheckpointAndWal,
                 Phase::GovernedWriteTruth,
                 Phase::GovernedWriteCatchUp,
+                Phase::CheckpointAndWal,
+                Phase::CheckpointAndWal,
                 Phase::GovernedWriteResponse,
             ],
         }
     }
 
-    pub fn expected_parent_ordinal(self, index: usize) -> Option<u16> {
+    pub fn expected_parent_index(self, index: usize) -> Option<usize> {
         match (self, index) {
-            (Self::RevisionPage, 6) => Some(5),
+            (Self::RevisionPage, 6 | 7) => Some(5),
+            (Self::RevisionPage, 10) => Some(9),
+            (Self::RevisionPage, 12) => Some(11),
             (Self::Bootstrap, 1..=3) => Some(0),
             (Self::Bootstrap, 5..=7) => Some(4),
+            (Self::GovernedWrite, 1) => Some(0),
+            (Self::GovernedWrite, 4 | 5) => Some(3),
             _ => None,
         }
     }
@@ -1176,16 +1189,26 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
         {
             return Err("derived-access phase receipt order drifted".to_owned());
         }
-        if let Some(index) = maintenance_index
-            && (index == 0
-                || index + 1 >= self.phases.len()
-                || self.phases[index - 1].phase
-                    != LongitudinalDerivedAccessPhaseV1::GovernedWriteCatchUp
-                || self.phases[index + 1].phase
-                    != LongitudinalDerivedAccessPhaseV1::GovernedWriteResponse
-                || self.phases[index].counters.authority_identity_rows_scanned == 0)
-        {
-            return Err("derived-access authority maintenance phase drifted".to_owned());
+        let governed_catch_up = self.phases.iter().position(|sample| {
+            sample.phase == LongitudinalDerivedAccessPhaseV1::GovernedWriteCatchUp
+        });
+        let governed_response = self.phases.iter().position(|sample| {
+            sample.phase == LongitudinalDerivedAccessPhaseV1::GovernedWriteResponse
+        });
+        if let Some(index) = maintenance_index {
+            let Some(catch_up_index) = governed_catch_up else {
+                return Err("derived-access authority maintenance phase drifted".to_owned());
+            };
+            let Some(response_index) = governed_response else {
+                return Err("derived-access authority maintenance phase drifted".to_owned());
+            };
+            if index <= catch_up_index
+                || index >= response_index
+                || self.phases[index].parent_ordinal != Some(self.phases[catch_up_index].ordinal)
+                || self.phases[index].counters.authority_identity_rows_scanned == 0
+            {
+                return Err("derived-access authority maintenance phase drifted".to_owned());
+            }
         }
         for (index, sample) in self.phases.iter().enumerate() {
             if usize::from(sample.ordinal) != index {
@@ -1194,9 +1217,15 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
             let expected_parent = if sample.phase
                 == LongitudinalDerivedAccessPhaseV1::GovernedWriteAuthorityCursorMaintenance
             {
-                Some(self.phases[index - 1].ordinal)
+                governed_catch_up.map(|catch_up| self.phases[catch_up].ordinal)
             } else {
-                self.operation.expected_parent_ordinal(index)
+                let baseline_index = baseline
+                    .iter()
+                    .position(|candidate| candidate.ordinal == sample.ordinal)
+                    .expect("non-maintenance samples are retained in the baseline");
+                self.operation
+                    .expected_parent_index(baseline_index)
+                    .map(|parent| baseline[parent].ordinal)
             };
             if sample.parent_ordinal != expected_parent {
                 return Err("derived-access phase nesting drifted".to_owned());
