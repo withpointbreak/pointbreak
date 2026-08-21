@@ -23,6 +23,10 @@ jobs:
     outputs:
       skip: ${{ steps.resolve.outputs.skip }}
       qualification: ${{ steps.paths.outputs.qualification }}
+      installer: ${{ steps.paths.outputs.installer }}
+      skills: ${{ steps.paths.outputs.skills }}
+      web: ${{ steps.paths.outputs.web }}
+      extension: ${{ steps.paths.outputs.extension }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,21 +43,42 @@ jobs:
           # base, an unreachable commit after a force-push — every filtered
           # job runs. A path filter that fails closed silently stops
           # qualifying the product.
-          qualification=true
+          qualification=true installer=true skills=true web=true extension=true
           if [ -n "$BASE" ] \
              && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
              && files=$(git diff --name-only "$BASE" HEAD 2>/dev/null); then
-            qualification=false
+            qualification=false installer=false skills=false web=false extension=false
             while IFS= read -r file; do
               case "$file" in
-                src/session/derived_access/*|src/bench_support/*|src/bench_support.rs|benches/store_foundation.rs|.github/workflows/ci.yml)
+                # A change to how the jobs run must re-run every filtered job.
+                .github/workflows/ci.yml)
+                  qualification=true installer=true skills=true web=true extension=true
+                  ;;
+                src/session/derived_access/*|src/bench_support/*|src/bench_support.rs|benches/store_foundation.rs)
                   qualification=true
-                  break
+                  ;;
+                scripts/install*|.github/binary-targets.json)
+                  installer=true
+                  ;;
+                skills/*|Justfile)
+                  skills=true
+                  ;;
+                src/cli/inspect/web/*|src/cli/inspect/assets/app.js)
+                  web=true
+                  ;;
+                extensions/vscode/*)
+                  extension=true
                   ;;
               esac
             done <<< "$files"
           fi
-          echo "qualification=$qualification" >> "$GITHUB_OUTPUT"
+          {
+            echo "qualification=$qualification"
+            echo "installer=$installer"
+            echo "skills=$skills"
+            echo "web=$web"
+            echo "extension=$extension"
+          } >> "$GITHUB_OUTPUT"
       # Only push events can ever suppress anything: on every other event the
       # resolve step is skipped, its output is empty, and downstream
       # conditions treat an empty output as "run".
@@ -85,6 +110,8 @@ jobs:
 
   installer-selftest:
     name: installer self-test (${{ matrix.os }})
+    needs: guard
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.installer == 'true'
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -98,6 +125,8 @@ jobs:
 
   validate-skills:
     name: validate skills
+    needs: guard
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.skills == 'true'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -128,6 +157,8 @@ jobs:
 
   web-check:
     name: web check (inspector front-end)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.web == 'true'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -152,6 +183,8 @@ jobs:
 
   extension-check:
     name: extension check
+    needs: guard
+    if: needs.guard.outputs.skip != 'true' && needs.guard.outputs.extension == 'true'
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:

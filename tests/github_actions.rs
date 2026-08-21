@@ -468,6 +468,44 @@ fn qualification_runs_when_its_own_surface_changes_and_keeps_three_legs() {
 }
 
 #[test]
+fn cheap_jobs_declare_the_surface_they_guard() {
+    let ci = read_workflow("ci.yml");
+    let guard = job_block(&ci, "guard");
+
+    let mappings: &[(&str, &str, &[&str])] = &[
+        (
+            "installer-selftest",
+            "installer",
+            &["scripts/install", ".github/binary-targets.json"],
+        ),
+        ("validate-skills", "skills", &["skills/", "Justfile"]),
+        (
+            "web-check",
+            "web",
+            &["src/cli/inspect/web/", "src/cli/inspect/assets/app.js"],
+        ),
+        ("extension-check", "extension", &["extensions/vscode/"]),
+    ];
+    for (job, output, surfaces) in mappings {
+        for surface in *surfaces {
+            assert!(
+                guard.contains(surface),
+                "guard must map surface {surface} for {job}"
+            );
+        }
+        let block = job_block(&ci, job);
+        assert!(
+            block.contains(&format!("needs.guard.outputs.{output} == 'true'")),
+            "{job} must consume the guard's {output} surface resolution"
+        );
+    }
+
+    // lint-workflows validates the very file the filters live in; it stays
+    // unconditional deliberately.
+    assert!(!job_block(&ci, "lint-workflows").contains("needs:"));
+}
+
+#[test]
 fn job_block_stops_at_the_next_job_key() {
     let workflow = "name: sample\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - run: alpha\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - run: beta\n";
 
