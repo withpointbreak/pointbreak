@@ -1296,7 +1296,7 @@ fn decode_digest(value: &str, label: &'static str) -> Result<[u8; 32], CursorLed
         )));
     }
     let mut digest = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         digest[index] = u8::from_str_radix(
             std::str::from_utf8(pair).expect("ASCII hex slices are UTF-8"),
             16,

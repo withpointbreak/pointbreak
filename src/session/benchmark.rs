@@ -3415,7 +3415,7 @@ mod tests {
 
         assert_eq!(sequence.events.len(), 330);
         assert_record_identity_is_unique(&sequence.events);
-        for burst in sequence.events[30..].chunks_exact(30) {
+        for burst in sequence.events[30..].as_chunks::<30>().0 {
             let signatures = signature_carriers(burst);
             assert_eq!(signatures.len(), 1);
             assert_eq!(signature_pairs(&signatures).len(), 1);

@@ -676,7 +676,9 @@ pub(super) fn logical_key_digest(logical_key: &str) -> [u8; 32] {
         let mut decoded = [0_u8; 32];
         let valid = hex
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .enumerate()
             .all(|(index, pair)| {
                 std::str::from_utf8(pair)
@@ -796,7 +798,9 @@ mod tests {
         assert_eq!(value.len() % 2, 0);
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 u8::from_str_radix(std::str::from_utf8(pair).expect("hex pair"), 16).expect("hex")
             })
