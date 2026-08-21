@@ -22,6 +22,15 @@ default-filter = 'not test(cargo_install_exposes_only_pointbreak_executable)'
 [profile.ci.junit]
 path = "junit.xml"
 
+# The derived-access lifecycle tests assert lease/publication timing and time
+# out as a family under Windows shard load (#710). Retry them there instead of
+# ignoring: a deterministic break still fails every retry, while a load flake
+# reports FLAKY without reddening the lane.
+[[profile.ci.overrides]]
+platform = 'cfg(windows)'
+filter = 'test(session::derived_access::lifecycle::tests)'
+retries = 2
+
 [profile.ignored-only]
 # Run only ignored tests, and show all results for debugging.
 # Run with `cargo nextest run --profile ignored-only --run-ignored only`.
