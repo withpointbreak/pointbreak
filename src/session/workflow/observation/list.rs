@@ -101,15 +101,24 @@ pub struct ObservationListResult {
 
 pub fn list_observations(options: ObservationListOptions) -> Result<ObservationListResult> {
     let (read_store, events) = super::super::capable_read_store_and_events(&options.repo)?;
-    let resolved = resolve_revision(
-        &events,
-        RevisionSelection::from_revision_options(
-            options.revision_id.as_ref(),
-            options.exact_revision_id.as_ref(),
-        )?,
-        &CurrentRevisionContext::for_repo(&options.repo)?,
-        RevisionScope::default(),
+    let selection = RevisionSelection::from_revision_options(
+        options.revision_id.as_ref(),
+        options.exact_revision_id.as_ref(),
     )?;
+    let context = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::GitContextResolution,
+        );
+        CurrentRevisionContext::for_repo(&options.repo)?
+    };
+    let resolved = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteRevisionSelection,
+        );
+        resolve_revision(&events, selection, &context, RevisionScope::default())?
+    };
     let track_filter = options
         .track
         .as_deref()
@@ -123,17 +132,25 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
         options.removal_policy,
         &cosig_index,
     );
-    let observations = project_observations(ObservationProjectionOptions {
-        backend: read_store.backend(),
-        events: &events,
-        resolved: &resolved,
-        track_filter: track_filter.clone(),
-        file_filter: options.file.as_deref(),
-        tag_filters: &options.tags,
-        include_body: options.include_body,
-        read_for_display: false,
-        removal_lens: &removal_lens,
-    })?;
+    let observations = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteProjectionFold,
+        );
+        project_observations(ObservationProjectionOptions {
+            backend: read_store.backend(),
+            events: &events,
+            resolved: &resolved,
+            track_filter: track_filter.clone(),
+            file_filter: options.file.as_deref(),
+            tag_filters: &options.tags,
+            include_body: options.include_body,
+            read_for_display: false,
+            removal_lens: &removal_lens,
+        })?
+    };
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    super::super::record_authoritative_replay_state();
     let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
     diagnostics.extend(body_content_diagnostics(
         observations

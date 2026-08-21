@@ -264,6 +264,10 @@ fn preflight_public_store_capability(
     if exempt {
         return Ok(());
     }
+    #[cfg(feature = "longitudinal-counting")]
+    let _phase = pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
+        pointbreak::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CliCapabilityPreflightH1,
+    );
 
     let repo = args
         .windows(2)
@@ -1017,6 +1021,59 @@ mod change_reader_cli_tests {
             .unwrap()
             .cursor;
         assert_eq!(before, after);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_h1_preserves_the_l0_refusal_and_attributes_only_the_real_preflight() {
+        use pointbreak::bench_support::longitudinal::{
+            InteractionActorV1, LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let revision = format!("rev:sha256:{}", "1".repeat(64));
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("observation"),
+            OsString::from("list"),
+            OsString::from("--repo"),
+            repo.path().as_os_str().to_owned(),
+            OsString::from("--exact-revision"),
+            OsString::from(revision),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let ordinary = Cli::try_parse_from(raw_args.clone()).unwrap();
+        let ordinary_error = preflight_public_store_capability(&ordinary, &raw_args)
+            .expect_err("L0 refusal")
+            .to_string();
+        let diagnostic = Cli::try_parse_from(raw_args.clone()).unwrap();
+        let counting = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+
+        let diagnostic_error = preflight_public_store_capability(&diagnostic, &raw_args)
+            .expect_err("same L0 refusal")
+            .to_string();
+
+        assert_eq!(diagnostic_error, ordinary_error);
+        assert_eq!(
+            counting
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            vec![LongitudinalDerivedAccessPhaseV1::CliCapabilityPreflightH1]
+        );
     }
 }
 

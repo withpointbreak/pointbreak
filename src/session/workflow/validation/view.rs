@@ -139,6 +139,23 @@ pub fn project_validation_checks(
 
     let mut validations = Vec::new();
     for (_, record) in validation_records {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _body_phase = (options.include_body
+            && (record.payload.summary.is_some()
+                || record.payload.summary_artifact_path.is_some()))
+        .then(|| {
+            crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+            )
+        });
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _carrier_phase = ((options.include_body || options.read_for_display)
+            && record.payload.summary_artifact_path.is_some())
+        .then(|| {
+            crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+            )
+        });
         let content = resolve_body_content_for_read(
             options.backend,
             options.removal_lens,

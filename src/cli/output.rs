@@ -133,6 +133,10 @@ where
     T: serde::Serialize,
     F: FnOnce() -> String,
 {
+    #[cfg(feature = "longitudinal-counting")]
+    let _phase = pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
+        pointbreak::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::SerializationAndOutput,
+    );
     match format.format {
         OutputFormat::Json => json::write_json(stdout, document, false)?,
         OutputFormat::JsonPretty => json::write_json(stdout, document, true)?,
@@ -272,6 +276,39 @@ mod tests {
         let mut via_legacy = Vec::new();
         crate::cli::json::write_json(&mut via_legacy, &document, false).unwrap();
         assert_eq!(via_seam, via_legacy);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn write_document_attributes_serialization_without_changing_json_bytes() {
+        use pointbreak::bench_support::longitudinal::{
+            InteractionActorV1, LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1,
+        };
+
+        let counting = LongitudinalCountingScopeV1::new("d".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+        let document = serde_json::json!({"schema": "shore.test", "value": 7});
+        let format = ResolvedFormat {
+            format: OutputFormat::Json,
+            defaulted: false,
+        };
+        let mut actual = Vec::new();
+
+        write_document(&mut actual, format, &document, String::new).unwrap();
+
+        let mut expected = Vec::new();
+        crate::cli::json::write_json(&mut expected, &document, false).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            counting
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            vec![LongitudinalDerivedAccessPhaseV1::SerializationAndOutput]
+        );
     }
 
     #[test]

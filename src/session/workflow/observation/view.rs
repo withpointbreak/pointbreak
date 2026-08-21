@@ -143,6 +143,22 @@ pub(crate) fn project_observations(
 
     let mut observations = Vec::new();
     for (_, record) in observation_records {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _body_phase = (options.include_body
+            && (record.payload.body.is_some() || record.payload.body_artifact_path.is_some()))
+        .then(|| {
+            crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+            )
+        });
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _carrier_phase = ((options.include_body || options.read_for_display)
+            && record.payload.body_artifact_path.is_some())
+        .then(|| {
+            crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+            )
+        });
         let content = resolve_body_content_for_read(
             options.backend,
             options.removal_lens,

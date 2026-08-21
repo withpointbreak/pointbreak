@@ -228,6 +228,22 @@ fn assessment_view_from_event(
     replaced_ids: &BTreeSet<AssessmentId>,
     read_mode: BodyReadMode,
 ) -> Result<AssessmentView> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _body_phase = (read_mode.include_body
+        && (payload.summary.is_some() || payload.summary_artifact_path.is_some()))
+    .then(|| {
+        crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+        )
+    });
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _carrier_phase = ((read_mode.include_body || read_mode.read_for_display)
+        && payload.summary_artifact_path.is_some())
+    .then(|| {
+        crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+        )
+    });
     // With a lens (paired with a live backend), the seam decides removed vs
     // present vs missing; without one (status-only projections) the legacy
     // path runs and the state stays `Present` unresolved.

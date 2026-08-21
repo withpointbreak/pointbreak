@@ -451,6 +451,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assessment_interaction_attribution_separates_resolution_git_projection_and_body_work() {
+        use crate::bench_support::longitudinal::{
+            InteractionActorV1, InteractionObservedRouteStateV1, LongitudinalCountingScopeV1,
+            LongitudinalDerivedAccessPhaseV1 as Phase,
+        };
+
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::Accepted)
+                .with_summary("large ".repeat(1000)),
+        )
+        .unwrap();
+        let ordinary = show_assessments(AssessmentShowOptions::new(repo.path())).unwrap();
+
+        let without_body = LongitudinalCountingScopeV1::new("c".repeat(64)).unwrap();
+        without_body.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = without_body.enter();
+        let diagnostic = show_assessments(AssessmentShowOptions::new(repo.path())).unwrap();
+        drop(guard);
+        assert_eq!(diagnostic, ordinary);
+        let snapshot = without_body.snapshot();
+        let phases = snapshot
+            .derived_access_phases
+            .iter()
+            .map(|sample| sample.phase)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            snapshot.observed_route_states,
+            vec![InteractionObservedRouteStateV1::AuthoritativeReplay]
+        );
+        assert!(phases.contains(&Phase::OrdinaryReadStoreResolutionH2));
+        assert!(!phases.contains(&Phase::WorkflowChangeReaderReplayH3));
+        assert!(!phases.contains(&Phase::WorkflowChangeStoreReopenInspection));
+        assert!(phases.contains(&Phase::GitContextResolution));
+        assert!(phases.contains(&Phase::RouteRevisionSelection));
+        assert!(phases.contains(&Phase::RouteProjectionFold));
+        assert!(!phases.contains(&Phase::RouteBodyHydration));
+        assert!(!phases.contains(&Phase::CarrierValidation));
+
+        let with_body = LongitudinalCountingScopeV1::new("f".repeat(64)).unwrap();
+        with_body.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = with_body.enter();
+        let result =
+            show_assessments(AssessmentShowOptions::new(repo.path()).with_include_summary(true))
+                .unwrap();
+        let snapshot = with_body.snapshot();
+        let phases = snapshot
+            .derived_access_phases
+            .iter()
+            .map(|sample| sample.phase)
+            .collect::<Vec<_>>();
+        assert!(result.assessments[0].summary.is_some());
+        assert!(phases.contains(&Phase::RouteBodyHydration));
+        assert!(phases.contains(&Phase::CarrierValidation));
+        assert!(snapshot.counters.body_artifact_reads > 0);
+    }
+
     fn assessment_payload(
         repo: &TestRepo,
         assessment_id: &crate::model::AssessmentId,

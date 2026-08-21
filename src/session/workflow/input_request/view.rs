@@ -298,6 +298,23 @@ pub(super) fn response_views_from_records(
     records
         .iter()
         .map(|record| {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _body_phase = (include_body
+                && (record.payload.reason.is_some()
+                    || record.payload.reason_artifact_path.is_some()))
+            .then(|| {
+                crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                    crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+                )
+            });
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _carrier_phase = ((include_body || read_for_display)
+                && record.payload.reason_artifact_path.is_some())
+            .then(|| {
+                crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                    crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+                )
+            });
             let content = resolve_body_content_for_read(
                 backend,
                 removal_lens,
@@ -338,6 +355,22 @@ pub(super) fn input_request_view_from_event(
     responses: Vec<InputRequestResponseView>,
     read_mode: BodyReadMode,
 ) -> Result<InputRequestView> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _body_phase = (read_mode.include_body
+        && (payload.body.is_some() || payload.body_artifact_path.is_some()))
+    .then(|| {
+        crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteBodyHydration,
+        )
+    });
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _carrier_phase = ((read_mode.include_body || read_mode.read_for_display)
+        && payload.body_artifact_path.is_some())
+    .then(|| {
+        crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CarrierValidation,
+        )
+    });
     let content = resolve_body_content_for_read(
         backend,
         removal_lens,

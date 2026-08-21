@@ -33,8 +33,21 @@ fn capable_read_store_and_events(
     crate::session::store::resolution::ReadStore,
     Vec<crate::session::event::ShoreEvent>,
 )> {
-    if crate::session::activated_store_capability_for_repo(repo)?.is_some() {
-        let state = change_reader_state_for_repo(repo)?;
+    let activated = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::WorkflowActivatedCapabilityProbe,
+        );
+        crate::session::activated_store_capability_for_repo(repo)?
+    };
+    if activated.is_some() {
+        let state = {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::WorkflowChangeReaderReplayH3,
+            );
+            change_reader_state_for_repo(repo)?
+        };
         let ready =
             state
                 .ready()
@@ -46,12 +59,34 @@ fn capable_read_store_and_events(
             }
                 })?;
         let events = ready.events().to_vec();
-        let (store, _) = crate::session::store::resolution::resolve_change_read_store(repo)?;
+        let (store, _) = {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::WorkflowChangeStoreReopenInspection,
+            );
+            crate::session::store::resolution::resolve_change_read_store(repo)?
+        };
         Ok((store, events))
     } else {
-        let store = crate::session::store::resolution::resolve_read_store(repo)?;
+        let store = {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::OrdinaryReadStoreResolutionH2,
+            );
+            crate::session::store::resolution::resolve_read_store(repo)?
+        };
         let events = crate::session::EventStore::from_backend(store.backend()).list_events()?;
         Ok((store, events))
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_authoritative_replay_state() {
+    if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        scope.record_observed_route_state_once(
+            crate::bench_support::longitudinal::InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
     }
 }
 
@@ -211,3 +246,146 @@ pub use validation::{
 pub(crate) use validation::{
     ValidationCheckProjectionOptions, annotate_validation_supersession, project_validation_checks,
 };
+
+#[cfg(test)]
+mod interaction_attribution_tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::*;
+    use crate::bench_support::longitudinal::{
+        InteractionActorV1, InteractionObservedRouteStateV1, LongitudinalCountingScopeV1,
+        LongitudinalCountingSnapshotV1, LongitudinalDerivedAccessPhaseV1 as Phase,
+    };
+    use crate::crypto::TestEd25519Signer;
+    use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+    #[test]
+    fn all_four_authoritative_routes_record_one_state_and_the_inactive_shared_path() {
+        let repo = captured_repo();
+
+        for snapshot in [
+            observe(|| show_assessments(AssessmentShowOptions::new(repo.path()))),
+            observe(|| list_input_requests(InputRequestListOptions::new(repo.path()))),
+            observe(|| list_observations(ObservationListOptions::new(repo.path()))),
+            observe(|| list_validation_checks(ValidationListOptions::new(repo.path()))),
+        ] {
+            assert_eq!(
+                snapshot.observed_route_states,
+                vec![InteractionObservedRouteStateV1::AuthoritativeReplay]
+            );
+            let phases = snapshot
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                phases,
+                vec![
+                    Phase::WorkflowActivatedCapabilityProbe,
+                    Phase::OrdinaryReadStoreResolutionH2,
+                    Phase::GitContextResolution,
+                    Phase::RouteRevisionSelection,
+                    Phase::RouteProjectionFold,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn activated_shared_path_preserves_each_probe_h3_and_reopen_invocation() {
+        let repo = captured_repo();
+        migrate_to_ready(repo.path());
+        let counting = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+
+        capable_read_store_and_events(repo.path()).unwrap();
+        capable_read_store_and_events(repo.path()).unwrap();
+
+        let phases = counting
+            .snapshot()
+            .derived_access_phases
+            .iter()
+            .map(|sample| sample.phase)
+            .filter(|phase| {
+                matches!(
+                    phase,
+                    Phase::WorkflowActivatedCapabilityProbe
+                        | Phase::WorkflowChangeReaderReplayH3
+                        | Phase::WorkflowChangeStoreReopenInspection
+                        | Phase::OrdinaryReadStoreResolutionH2
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            phases,
+            vec![
+                Phase::WorkflowActivatedCapabilityProbe,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::WorkflowChangeStoreReopenInspection,
+                Phase::WorkflowActivatedCapabilityProbe,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::WorkflowChangeStoreReopenInspection,
+            ]
+        );
+    }
+
+    fn observe<T>(run: impl FnOnce() -> crate::error::Result<T>) -> LongitudinalCountingSnapshotV1 {
+        let counting = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+        run().unwrap();
+        counting.snapshot()
+    }
+
+    fn migrate_to_ready(repo: &Path) {
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo)).unwrap();
+        let backup = tempfile::tempdir().unwrap();
+        migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo,
+                dry_run.clone(),
+                dry_run.manifest_hash.clone(),
+                dry_run.roots[0].cohort_manifest_hash.clone().unwrap(),
+                backup.path().join("task-3-1-backup"),
+                "task-3-1-attribution-test",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x31; 32]))
+            .with_fixed_occurred_at("2026-08-21T20:45:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+    }
+
+    fn captured_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
+        git(repo.path(), &["config", "user.name", "Pointbreak Test"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "pointbreak@example.test"],
+        );
+        std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
+        git(repo.path(), &["add", "file.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        std::fs::write(repo.path().join("file.txt"), "two\n").unwrap();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        repo
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
