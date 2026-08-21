@@ -43,3 +43,20 @@ fn init_at_bootstraps_with_zero_git_spawns() {
     let head = std::fs::read_to_string(nested.join(".git/HEAD")).expect("read nested HEAD");
     assert_eq!(head.trim(), "ref: refs/heads/main");
 }
+
+#[test]
+fn inside_work_tree_probe_is_memoized_per_path() {
+    let repo = GitRepo::new();
+
+    let first = support::inside_work_tree(repo.path());
+    assert!(first, "fixture scaffold is a work tree");
+    let spawns_after_first = support::work_tree_probe_spawns();
+
+    let second = support::inside_work_tree(repo.path());
+    assert_eq!(first, second);
+    assert_eq!(
+        support::work_tree_probe_spawns(),
+        spawns_after_first,
+        "repeat probe of the same path must not spawn git again"
+    );
+}

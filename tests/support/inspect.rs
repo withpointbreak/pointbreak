@@ -671,6 +671,18 @@ fn is_transient_git_lock(relative: &Path) -> bool {
 
 pub(super) fn sync_legacy_mirrors(repo: &Path) {
     let source_key = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    // Consult the mirror registry before locating the store. Only `legacy_reader_clone`
+    // registers a mirror, so almost every helper CLI call leaves here without paying
+    // for a `git` subprocess.
+    let mut registry = legacy_mirrors()
+        .lock()
+        .expect("legacy mirror registry lock");
+    let Some(mirrors) = registry.get_mut(&source_key) else {
+        return;
+    };
+    if mirrors.is_empty() {
+        return;
+    }
     let output = Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(repo)
@@ -685,12 +697,6 @@ pub(super) fn sync_legacy_mirrors(repo: &Path) {
         return;
     };
     let source_store = Path::new(common_dir.trim()).join("pointbreak");
-    let mut registry = legacy_mirrors()
-        .lock()
-        .expect("legacy mirror registry lock");
-    let Some(mirrors) = registry.get_mut(&source_key) else {
-        return;
-    };
     mirrors.retain(|mirror_repo| {
         if !mirror_repo.exists() {
             return false;

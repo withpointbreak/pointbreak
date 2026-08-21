@@ -157,6 +157,7 @@ fn capture_script_supports_pack_linkage_without_changing_readme_defaults() {
     assert!(script.contains("REVISION=\"93326e73\""));
     assert!(script.contains("TRACK=\"agent:codex-450\""));
     assert!(script.contains("OUT_DIR=\"$REPO_ROOT/assets\""));
+    assert!(script.contains("POINTBREAK_REVIEW_EXAMPLE_PACK"));
 }
 
 #[test]
@@ -182,6 +183,12 @@ fn pack_aware_capture_preserves_accepted_outputs_on_command_failure() {
     )
     .unwrap();
     make_executable(&fake_playwright);
+    // The pack verifier is an example target, so no CARGO_BIN_EXE_* path exists for
+    // it; the script's injection hook stands in, and real pack verification is
+    // covered in-process by tests/review_example_pack.rs.
+    let stub_pack = temp.path().join("review_example_pack");
+    fs::write(&stub_pack, "#!/usr/bin/env bash\nexit 0\n").unwrap();
+    make_executable(&stub_pack);
 
     let path = format!(
         "{}:{}",
@@ -200,6 +207,7 @@ fn pack_aware_capture_preserves_accepted_outputs_on_command_failure() {
         .arg(&output)
         .env("PATH", path)
         .env("PLAYWRIGHT_CLI", &fake_playwright)
+        .env("POINTBREAK_REVIEW_EXAMPLE_PACK", &stub_pack)
         .current_dir(repo_root())
         .status()
         .expect("run capture script with a failing browser command");

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn readme_teaches_the_pointbreak_package_and_command() {
@@ -105,42 +105,11 @@ fn legacy_product_word_detection_is_case_insensitive_and_word_bounded() {
 
 #[test]
 fn every_retained_public_legacy_reference_has_a_narrow_classification() {
-    let mut paths = vec![
-        Path::new("CONTRIBUTING.md").to_path_buf(),
-        Path::new("README.md").to_path_buf(),
-        Path::new("Justfile").to_path_buf(),
-    ];
-    if Path::new("CHANGELOG.md").exists() {
-        paths.push(Path::new("CHANGELOG.md").to_path_buf());
-    }
-    for root in ["docs", "skills", "scripts", "benches"] {
-        collect_files(Path::new(root), &mut paths);
-    }
-    for root in [
-        "tests/fixtures/event_signatures",
-        "tests/fixtures/legacy_stores",
-        "tests/fixtures/naming-cutover",
-        "tests/fixtures/packages",
-        "tests/fixtures/review_documents",
-    ] {
-        collect_files(Path::new(root), &mut paths);
-    }
-    paths.extend(
-        [
-            "tests/agent_skill_validation_evidence.rs",
-            "tests/docs_open_source_readiness.rs",
-            "tests/docs_package_identity.rs",
-        ]
-        .into_iter()
-        .map(Path::new)
-        .map(Path::to_path_buf),
-    );
-    paths.sort();
-
-    for path in paths {
+    for path in auditable_files() {
         let audit_path = public_audit_path(&path);
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read {audit_path}: {error}"));
+        let Some(contents) = auditable_text(&path) else {
+            continue;
+        };
         for (index, line) in contents.lines().enumerate() {
             if contains_legacy_reference(line)
                 && classify_retained_reference(&audit_path, line).is_none()
@@ -200,7 +169,97 @@ const FORBIDDEN_LIVING_PATTERNS: &[(&str, &str)] = &[
     ("automatically migrate", "automatic migration behavior"),
 ];
 
-fn collect_files(root: &Path, paths: &mut Vec<std::path::PathBuf>) {
+/// Directory trees the public-language audit reads in full.
+const AUDIT_ROOTS: &[&str] = &[
+    "docs",
+    "skills",
+    "scripts",
+    "benches",
+    "tests/fixtures/event_signatures",
+    "tests/fixtures/legacy_stores",
+    "tests/fixtures/naming-cutover",
+    "tests/fixtures/packages",
+    "tests/fixtures/review_documents",
+];
+
+/// Individual files the audit reads outside the walked trees.
+const AUDIT_FILES: &[&str] = &[
+    "CONTRIBUTING.md",
+    "README.md",
+    "Justfile",
+    "CHANGELOG.md",
+    "tests/agent_skill_validation_evidence.rs",
+    "tests/docs_open_source_readiness.rs",
+    "tests/docs_package_identity.rs",
+];
+
+/// Every file the public-language audit reads, sorted and de-duplicated.
+///
+/// The tree contents come from git so that build output and untracked local
+/// artifacts — a macOS `.DS_Store`, a scratch note — can never change the audit's
+/// verdict. A checkout without git falls back to a plain recursive walk.
+fn auditable_files() -> Vec<PathBuf> {
+    let mut paths = AUDIT_FILES
+        .iter()
+        .map(Path::new)
+        .filter(|path| path.exists())
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+
+    match tracked_files(Path::new("."), AUDIT_ROOTS) {
+        Some(tracked) => paths.extend(tracked),
+        None => {
+            for root in AUDIT_ROOTS {
+                collect_files(Path::new(root), &mut paths);
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Read a file the audit inspects, yielding `None` for content that is not text.
+fn auditable_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Enumerate the git-tracked files under `pathspecs`, relative to `root`.
+///
+/// Returns `None` when git cannot answer — a packaged checkout without a
+/// repository — so callers can fall back to walking the directories.
+fn tracked_files(root: &Path, pathspecs: &[&str]) -> Option<Vec<PathBuf>> {
+    let present = pathspecs
+        .iter()
+        .filter(|pathspec| root.join(pathspec).exists())
+        .collect::<Vec<_>>();
+    if present.is_empty() {
+        return None;
+    }
+
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z", "--"])
+        .args(&present)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| PathBuf::from(String::from_utf8_lossy(entry).into_owned()))
+            .collect(),
+    )
+}
+
+fn collect_files(root: &Path, paths: &mut Vec<PathBuf>) {
     for entry in
         std::fs::read_dir(root).unwrap_or_else(|error| panic!("read {}: {error}", root.display()))
     {
@@ -460,4 +519,64 @@ fn just_run_targets_the_pointbreak_binary() {
     let justfile = std::fs::read_to_string("Justfile").expect("read Justfile");
 
     assert!(justfile.contains("cargo +stable run --bin pointbreak --"));
+}
+
+#[test]
+fn tracked_file_enumeration_excludes_ignored_and_untracked_files() {
+    let temp = tempfile::tempdir().expect("temporary repository");
+    let root = temp.path();
+    let docs = root.join("docs");
+    std::fs::create_dir(&docs).expect("create docs directory");
+    std::fs::write(root.join(".gitignore"), "*.ignored\n").expect("write gitignore");
+    std::fs::write(docs.join("kept.md"), "kept\n").expect("write tracked doc");
+    std::fs::write(docs.join("build.ignored"), "ignored\n").expect("write ignored doc");
+    std::fs::write(docs.join("scratch.md"), "scratch\n").expect("write untracked doc");
+
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["add", "docs/kept.md", ".gitignore"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(root)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let tracked = tracked_files(root, &["docs"]).expect("enumerate tracked files");
+
+    assert!(tracked.contains(&Path::new("docs").join("kept.md")));
+    assert!(!tracked.iter().any(|path| path.ends_with("build.ignored")));
+    assert!(!tracked.iter().any(|path| path.ends_with("scratch.md")));
+}
+
+#[test]
+fn audit_sources_exclude_untracked_files() {
+    let files = auditable_files();
+
+    assert!(files.iter().any(|path| path.ends_with("README.md")));
+    assert!(
+        files
+            .iter()
+            .any(|path| path.ends_with("docs/installation.md"))
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|path| path.components().any(|part| part.as_os_str() == "target")),
+        "audited set must not reach into build output"
+    );
+}
+
+#[test]
+fn auditable_text_skips_non_utf8_bytes() {
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let binary = temp.path().join("junk.bin");
+    std::fs::write(&binary, [0xff, 0xfe, 0x00]).expect("write non-UTF-8 bytes");
+    let text = temp.path().join("readable.md");
+    std::fs::write(&text, "readable\n").expect("write text");
+
+    assert!(auditable_text(&binary).is_none());
+    assert_eq!(auditable_text(&text).as_deref(), Some("readable\n"));
 }

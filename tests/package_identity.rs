@@ -118,7 +118,6 @@ fn cargo_install_exposes_only_pointbreak_executable() {
         .args(["install", "--path", env!("CARGO_MANIFEST_DIR"), "--root"])
         .arg(install_root.path())
         .arg("--debug")
-        .env("CARGO_TARGET_DIR", install_root.path().join("target"))
         .output()
         .expect("run cargo install");
     assert!(

@@ -39,6 +39,8 @@ Options:
 
 Environment:
   PLAYWRIGHT_CLI        Optional path to playwright-cli or a compatible wrapper
+  POINTBREAK_REVIEW_EXAMPLE_PACK
+                        Optional path to a prebuilt review_example_pack verifier
 EOF
 }
 
@@ -53,6 +55,7 @@ OUT_DIR="$REPO_ROOT/assets"
 HIDE_OBSERVATIONS="false"
 EXAMPLE_MANIFEST=""
 MANIFEST=""
+REVIEW_EXAMPLE_PACK="${POINTBREAK_REVIEW_EXAMPLE_PACK:-}"
 REVISION_SET="false"
 TRACK_SET="false"
 ASSESSMENT_SET="false"
@@ -85,9 +88,17 @@ if [ -n "$EXAMPLE_MANIFEST" ]; then
   MANIFEST="$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$MANIFEST")"
   [ -f "$EXAMPLE_MANIFEST" ] || die "example manifest not found: $EXAMPLE_MANIFEST"
 
-  cargo run --quiet --example review_example_pack -- verify \
-    --pack "$(dirname "$EXAMPLE_MANIFEST")" \
-    || die "example pack verification failed"
+  if [ -n "$REVIEW_EXAMPLE_PACK" ]; then
+    [ -x "$REVIEW_EXAMPLE_PACK" ] \
+      || die "POINTBREAK_REVIEW_EXAMPLE_PACK is not executable: $REVIEW_EXAMPLE_PACK"
+    "$REVIEW_EXAMPLE_PACK" verify \
+      --pack "$(dirname "$EXAMPLE_MANIFEST")" \
+      || die "example pack verification failed"
+  else
+    cargo run --quiet --example review_example_pack -- verify \
+      --pack "$(dirname "$EXAMPLE_MANIFEST")" \
+      || die "example pack verification failed"
+  fi
 
   IFS=$'\t' read -r PACK_REVISION PACK_TRACK PACK_ASSESSMENT \
     < <(node -e '

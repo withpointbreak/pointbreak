@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 #[allow(dead_code)]
@@ -170,12 +171,49 @@ fn prepare_change_cli_fixture(args: Vec<OsString>) -> Vec<OsString> {
     args
 }
 
-fn maybe_install_empty_ready_change_store(repo_root: &Path) {
-    let git = Command::new("git")
+/// Number of `git rev-parse --is-inside-work-tree` probes that actually spawned a
+/// subprocess. Every helper CLI call consults the probe, so the memo below is what
+/// keeps that from costing a process per call; this counter makes the memo assertable.
+static WORK_TREE_PROBE_SPAWNS: AtomicUsize = AtomicUsize::new(0);
+
+#[allow(dead_code)]
+pub fn work_tree_probe_spawns() -> usize {
+    WORK_TREE_PROBE_SPAWNS.load(Ordering::Relaxed)
+}
+
+/// Answer whether `repo_root` sits inside a git work tree, spawning `git` at most
+/// once per path.
+///
+/// Only the affirmative answer is memoized. A directory that is already a work tree
+/// stays one for the life of a fixture, but a plain directory can be turned into a
+/// repository partway through a test, so a negative answer is re-probed.
+#[allow(dead_code)]
+pub fn inside_work_tree(repo_root: &Path) -> bool {
+    static CONFIRMED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let key = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let mut confirmed = CONFIRMED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("work tree probe cache lock");
+    if confirmed.contains(&key) {
+        return true;
+    }
+    WORK_TREE_PROBE_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    let probe = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(repo_root)
         .output();
-    if !git.is_ok_and(|output| output.status.success()) {
+    let inside = probe.is_ok_and(|output| output.status.success());
+    if inside {
+        confirmed.insert(key);
+    }
+    inside
+}
+
+fn maybe_install_empty_ready_change_store(repo_root: &Path) {
+    if !inside_work_tree(repo_root) {
         return;
     }
     let events = fixture_store_dir(repo_root).join("events");
