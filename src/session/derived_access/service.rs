@@ -694,7 +694,18 @@ impl DerivedAccessService {
         LocatorRead<crate::session::derived_access::semantic::MaterializedAttentionSnapshot>,
         DerivedAccessServiceError,
     > {
-        let observed = self.cursor.head()?.cursor;
+        let observed = {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let _transaction_phase =
+                crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                    crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::ReadTransaction,
+                );
+            self.cursor.head()?.cursor
+        };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _selection_phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::SqliteSelection,
+        );
         Ok(self.semantic.materialized_attention_snapshot(observed)?)
     }
 

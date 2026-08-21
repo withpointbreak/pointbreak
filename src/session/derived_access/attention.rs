@@ -32,6 +32,11 @@ impl DerivedHistoryAccess {
         let Some((store_identity, _)) = self.active_context() else {
             return Ok(DerivedAttentionRoute::Off);
         };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _generation_phase =
+            crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+                crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::GenerationLeaseAndRetention,
+            );
         let current = match self.current()? {
             CurrentRead::Ready(current) => current,
             CurrentRead::Unavailable(status) => {

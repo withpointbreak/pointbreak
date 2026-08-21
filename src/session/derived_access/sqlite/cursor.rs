@@ -1087,6 +1087,10 @@ impl SqliteCursorLedger {
     }
 
     pub(crate) fn checkpoint(&self) -> Result<CursorLedgerCheckpoint, CursorLedgerError> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _checkpoint_phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CheckpointAndWal,
+        );
         let connection = self.validated_connection()?;
         let (busy, log_frames, checkpointed_frames) = connection
             .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {

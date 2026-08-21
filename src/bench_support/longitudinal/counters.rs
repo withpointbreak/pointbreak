@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     INTERACTION_PERFORMANCE_RECEIPT_SCHEMA_V1, InteractionActorV1, InteractionChildScopeFactV1,
-    InteractionLockFactV1, InteractionObservedFactsV1, InteractionObservedRouteStateV1,
-    InteractionPerformanceExpectedContextV1, InteractionPerformanceReceiptV1, InteractionRouteV1,
-    InteractionScopeCoverageV1, LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1,
+    InteractionLockAcquisitionV1, InteractionLockFactV1, InteractionLockKindV1,
+    InteractionLockModeV1, InteractionLockOutcomeV1, InteractionObservedFactsV1,
+    InteractionObservedRouteStateV1, InteractionPerformanceExpectedContextV1,
+    InteractionPerformanceReceiptV1, InteractionRouteV1, InteractionScopeCoverageV1,
+    LONGITUDINAL_COUNTER_RECEIPT_SCHEMA_V1,
     LONGITUDINAL_TIMELINE_POST_PIN_BARRIER_RECEIPT_SCHEMA_V1, LongitudinalCapacityOwnershipV1,
     LongitudinalContractError, LongitudinalCounterReceiptV1, LongitudinalCountersV1,
     LongitudinalTimelineCarrierMismatchKindV1, LongitudinalTimelinePostPinBarrierReceiptV1,
@@ -43,9 +45,9 @@ struct ObserverState {
     semantic_result_sha256: Vec<String>,
     child_reservations: Vec<(u16, InteractionActorV1)>,
     child_terminals: Vec<InteractionChildScopeFactV1>,
-    #[allow(dead_code)] // Consumed by the Task 3.2 child-launch instrumentation.
     next_child_ordinal: u16,
     lock_facts: Vec<InteractionLockFactV1>,
+    next_lock_ordinal: u16,
     timeline_post_pin_barrier: Option<LongitudinalTimelinePostPinBarrierStateV1>,
 }
 
@@ -217,10 +219,50 @@ pub struct LongitudinalCountingGuardV1 {
     _not_send: PhantomData<Rc<()>>,
 }
 
-#[allow(dead_code)] // Constructed by the Task 3.2 child-actor instrumentation.
 pub(crate) struct InteractionActorScopeGuardV1 {
     state: Arc<Mutex<ObserverState>>,
     _not_send: PhantomData<Rc<()>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct InteractionChildScopeReservationV1 {
+    scope: LongitudinalCountingScopeV1,
+    ordinal: u16,
+    actor: InteractionActorV1,
+}
+
+pub(crate) struct InteractionChildScopeExecutionV1 {
+    scope: LongitudinalCountingScopeV1,
+    ordinal: u16,
+    actor: InteractionActorV1,
+    incomplete_reason: &'static str,
+    completed: bool,
+    _actor_guard: InteractionActorScopeGuardV1,
+    _scope_guard: LongitudinalCountingGuardV1,
+}
+
+#[derive(Debug)]
+struct InteractionLockAttemptObservationV1 {
+    state: Arc<Mutex<ObserverState>>,
+    ordinal: u16,
+    actor: InteractionActorV1,
+}
+
+#[derive(Debug)]
+pub(crate) struct InteractionLockAttemptRecorderV1 {
+    observation: Option<InteractionLockAttemptObservationV1>,
+    kind: InteractionLockKindV1,
+    mode: InteractionLockModeV1,
+    started: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct InteractionPhysicalLockHoldRecorderV1 {
+    observation: InteractionLockAttemptObservationV1,
+    kind: InteractionLockKindV1,
+    mode: InteractionLockModeV1,
+    wait_nanos: u64,
+    acquired_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -615,7 +657,6 @@ impl LongitudinalCountingScopeV1 {
             .push(semantic_result_sha256.into());
     }
 
-    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
     pub(crate) fn enter_actor_scope(
         &self,
         actor: InteractionActorV1,
@@ -633,7 +674,6 @@ impl LongitudinalCountingScopeV1 {
         }
     }
 
-    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
     pub(crate) fn reserve_child_scope(&self, actor: InteractionActorV1) -> u16 {
         let mut state = lock_state(&self.state);
         let ordinal = state.next_child_ordinal;
@@ -645,7 +685,6 @@ impl LongitudinalCountingScopeV1 {
         ordinal
     }
 
-    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
     pub(crate) fn record_child_scope_terminal_once(
         &self,
         ordinal: u16,
@@ -661,15 +700,19 @@ impl LongitudinalCountingScopeV1 {
             });
     }
 
-    #[allow(dead_code)] // Consumed by Task 3.2 after the shared contract lands.
+    #[cfg(test)]
     pub(crate) fn record_lock_fact(&self, fact: InteractionLockFactV1) {
-        lock_state(&self.state).lock_facts.push(fact);
+        let mut state = lock_state(&self.state);
+        state.next_lock_ordinal = state.next_lock_ordinal.max(fact.ordinal.saturating_add(1));
+        state.lock_facts.push(fact);
     }
 
     pub fn snapshot(&self) -> LongitudinalCountingSnapshotV1 {
         let state = lock_state(&self.state);
         let mut derived_access_phases = state.derived_access_phases.clone();
         derived_access_phases.sort_by_key(|sample| sample.ordinal);
+        let mut lock_facts = state.lock_facts.clone();
+        lock_facts.sort_by_key(|fact| fact.ordinal);
         LongitudinalCountingSnapshotV1 {
             run_identity: self.run_identity.clone(),
             counters: state.counters.clone(),
@@ -682,7 +725,7 @@ impl LongitudinalCountingScopeV1 {
             semantic_result_sha256: state.semantic_result_sha256.clone(),
             child_reservations: state.child_reservations.clone(),
             child_terminals: state.child_terminals.clone(),
-            lock_facts: state.lock_facts.clone(),
+            lock_facts,
         }
     }
 
@@ -761,6 +804,195 @@ impl LongitudinalCountingScopeV1 {
         receipt.validate()?;
         Ok(receipt)
     }
+}
+
+pub(crate) fn reserve_interaction_child_scope_v1(
+    actor: InteractionActorV1,
+) -> Option<InteractionChildScopeReservationV1> {
+    let scope = LongitudinalCountingScopeV1::current()?;
+    current_interaction_actor_for_state(&scope.state)?;
+    let ordinal = scope.reserve_child_scope(actor);
+    Some(InteractionChildScopeReservationV1 {
+        scope,
+        ordinal,
+        actor,
+    })
+}
+
+impl InteractionChildScopeReservationV1 {
+    pub(crate) fn enter(self, incomplete_reason: &'static str) -> InteractionChildScopeExecutionV1 {
+        let scope_guard = self.scope.enter();
+        let actor_guard = self.scope.enter_actor_scope(self.actor);
+        InteractionChildScopeExecutionV1 {
+            scope: self.scope,
+            ordinal: self.ordinal,
+            actor: self.actor,
+            incomplete_reason,
+            completed: false,
+            _actor_guard: actor_guard,
+            _scope_guard: scope_guard,
+        }
+    }
+
+    pub(crate) fn record_incomplete(self, reason: impl Into<String>) {
+        self.scope.record_child_scope_terminal_once(
+            self.ordinal,
+            self.actor,
+            InteractionScopeCoverageV1::Incomplete {
+                reason: reason.into(),
+            },
+        );
+    }
+}
+
+impl InteractionChildScopeExecutionV1 {
+    pub(crate) fn complete(mut self) {
+        self.scope.record_child_scope_terminal_once(
+            self.ordinal,
+            self.actor,
+            InteractionScopeCoverageV1::Complete,
+        );
+        self.completed = true;
+    }
+}
+
+impl Drop for InteractionChildScopeExecutionV1 {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.scope.record_child_scope_terminal_once(
+            self.ordinal,
+            self.actor,
+            InteractionScopeCoverageV1::Incomplete {
+                reason: self.incomplete_reason.to_owned(),
+            },
+        );
+    }
+}
+
+pub(crate) fn begin_interaction_lock_attempt_v1(
+    kind: InteractionLockKindV1,
+    mode: InteractionLockModeV1,
+) -> InteractionLockAttemptRecorderV1 {
+    let observation = LongitudinalCountingScopeV1::current().and_then(|scope| {
+        let actor = current_interaction_actor_for_state(&scope.state)?;
+        let ordinal = {
+            let mut state = lock_state(&scope.state);
+            let ordinal = state.next_lock_ordinal;
+            state.next_lock_ordinal = state
+                .next_lock_ordinal
+                .checked_add(1)
+                .expect("interaction lock ordinal overflow");
+            ordinal
+        };
+        Some(InteractionLockAttemptObservationV1 {
+            state: scope.state,
+            ordinal,
+            actor,
+        })
+    });
+    InteractionLockAttemptRecorderV1 {
+        observation,
+        kind,
+        mode,
+        started: Instant::now(),
+    }
+}
+
+impl InteractionLockAttemptRecorderV1 {
+    pub(crate) fn record_reentrant_acquired(self) {
+        let Some(observation) = self.observation else {
+            return;
+        };
+        record_interaction_lock_fact(
+            observation,
+            self.kind,
+            self.mode,
+            InteractionLockOutcomeV1::Acquired,
+            InteractionLockAcquisitionV1::Reentrant,
+            0,
+            None,
+        );
+    }
+
+    pub(crate) fn record_not_acquired(self, outcome: InteractionLockOutcomeV1) {
+        debug_assert!(matches!(
+            outcome,
+            InteractionLockOutcomeV1::Busy
+                | InteractionLockOutcomeV1::Deferred
+                | InteractionLockOutcomeV1::Failed
+        ));
+        let Some(observation) = self.observation else {
+            return;
+        };
+        record_interaction_lock_fact(
+            observation,
+            self.kind,
+            self.mode,
+            outcome,
+            InteractionLockAcquisitionV1::NotAcquired,
+            elapsed_nanos(self.started),
+            None,
+        );
+    }
+
+    pub(crate) fn record_physical_acquired(self) -> Option<InteractionPhysicalLockHoldRecorderV1> {
+        let observation = self.observation?;
+        Some(InteractionPhysicalLockHoldRecorderV1 {
+            observation,
+            kind: self.kind,
+            mode: self.mode,
+            wait_nanos: elapsed_nanos(self.started),
+            acquired_at: Instant::now(),
+        })
+    }
+}
+
+impl Drop for InteractionPhysicalLockHoldRecorderV1 {
+    fn drop(&mut self) {
+        let observation = InteractionLockAttemptObservationV1 {
+            state: Arc::clone(&self.observation.state),
+            ordinal: self.observation.ordinal,
+            actor: self.observation.actor,
+        };
+        record_interaction_lock_fact(
+            observation,
+            self.kind,
+            self.mode,
+            InteractionLockOutcomeV1::Acquired,
+            InteractionLockAcquisitionV1::Physical,
+            self.wait_nanos,
+            Some(elapsed_nanos(self.acquired_at)),
+        );
+    }
+}
+
+fn record_interaction_lock_fact(
+    observation: InteractionLockAttemptObservationV1,
+    kind: InteractionLockKindV1,
+    mode: InteractionLockModeV1,
+    outcome: InteractionLockOutcomeV1,
+    acquisition: InteractionLockAcquisitionV1,
+    wait_nanos: u64,
+    hold_nanos: Option<u64>,
+) {
+    lock_state(&observation.state)
+        .lock_facts
+        .push(InteractionLockFactV1 {
+            ordinal: observation.ordinal,
+            actor: observation.actor,
+            kind,
+            mode,
+            outcome,
+            acquisition,
+            wait_nanos,
+            hold_nanos,
+        });
+}
+
+fn elapsed_nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn exactly_one<T: Clone>(
@@ -1918,6 +2150,34 @@ mod tests {
             .expected_child_actors
             .insert(InteractionActorV1::BackgroundMaintenance, 1);
         assert!(scope.interaction_receipt(expected).is_err());
+    }
+
+    #[test]
+    fn child_execution_drop_records_a_source_owned_incomplete_terminal() {
+        let scope = LongitudinalCountingScopeV1::new(hash('b')).expect("valid scope");
+        scope.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _scope_guard = scope.enter();
+        let child = reserve_interaction_child_scope_v1(InteractionActorV1::BackgroundMaintenance)
+            .expect("active interaction reserves a child");
+        drop(child.enter("background maintenance exited before completion"));
+
+        let snapshot = scope.snapshot();
+        assert_eq!(
+            snapshot.child_reservations,
+            vec![(0, InteractionActorV1::BackgroundMaintenance)]
+        );
+        assert_eq!(snapshot.child_terminals.len(), 1);
+        assert_eq!(snapshot.child_terminals[0].ordinal, 0);
+        assert_eq!(
+            snapshot.child_terminals[0].actor,
+            InteractionActorV1::BackgroundMaintenance
+        );
+        assert_eq!(
+            snapshot.child_terminals[0].coverage,
+            InteractionScopeCoverageV1::Incomplete {
+                reason: "background maintenance exited before completion".to_owned(),
+            }
+        );
     }
 
     #[test]

@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use super::layout::DerivedStorageLayout;
 use super::product_contract::DerivedAccessProfile;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    InteractionLockKindV1, InteractionLockModeV1, InteractionLockOutcomeV1,
+    InteractionPhysicalLockHoldRecorderV1, begin_interaction_lock_attempt_v1,
+};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::store::backend::JournalChangeStamp;
 
@@ -125,6 +130,8 @@ impl GenerationProgress {
 #[derive(Debug)]
 pub(crate) struct GenerationReadLease {
     file: File,
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    _hold_recorder: Option<InteractionPhysicalLockHoldRecorderV1>,
 }
 
 #[derive(Debug)]
@@ -132,6 +139,15 @@ pub(crate) struct RebuildLease {
     file: File,
     path: PathBuf,
     _not_send: PhantomData<Rc<()>>,
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    _hold_recorder: Option<InteractionPhysicalLockHoldRecorderV1>,
+}
+
+#[derive(Debug)]
+struct GenerationProbeLease {
+    file: File,
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    _hold_recorder: Option<InteractionPhysicalLockHoldRecorderV1>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -210,12 +226,37 @@ impl GenerationLayout {
         std::fs::create_dir_all(self.storage_layout.store_root())
             .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
         let path = self.storage_layout.rebuild_lock();
-        let file = open_lock_file(&path)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let attempt = begin_interaction_lock_attempt_v1(
+            InteractionLockKindV1::Derived,
+            InteractionLockModeV1::Try,
+        );
+        let file = match open_lock_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                return Err(error);
+            }
+        };
         let identity = rebuild_lease_identity(&path);
         match file.try_lock() {
-            Ok(()) => Ok(register_rebuild_lease(file, identity)),
-            Err(std::fs::TryLockError::WouldBlock) => Err(GenerationError::RebuildBusy),
-            Err(std::fs::TryLockError::Error(error)) => Err(io_error(&path, error)),
+            Ok(()) => Ok(register_rebuild_lease(
+                file,
+                identity,
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_physical_acquired(),
+            )),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Busy);
+                Err(GenerationError::RebuildBusy)
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                Err(io_error(&path, error))
+            }
         }
     }
 
@@ -223,10 +264,33 @@ impl GenerationLayout {
         std::fs::create_dir_all(self.storage_layout.store_root())
             .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
         let path = self.storage_layout.rebuild_lock();
-        let file = open_lock_file(&path)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let attempt = begin_interaction_lock_attempt_v1(
+            InteractionLockKindV1::Derived,
+            InteractionLockModeV1::Blocking,
+        );
+        let file = match open_lock_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                return Err(error);
+            }
+        };
         let identity = rebuild_lease_identity(&path);
-        file.lock().map_err(|error| io_error(&path, error))?;
-        Ok(register_rebuild_lease(file, identity))
+        match file.lock() {
+            Ok(()) => Ok(register_rebuild_lease(
+                file,
+                identity,
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_physical_acquired(),
+            )),
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                Err(io_error(&path, error))
+            }
+        }
     }
 
     pub(crate) fn rebuild_lease_held_by_current_thread(&self) -> bool {
@@ -240,9 +304,31 @@ impl GenerationLayout {
     ) -> Result<GenerationReadLease, GenerationError> {
         validate_generation_id(generation_id)?;
         let path = self.generation_lease_path(generation_id);
-        let file = open_lock_file(&path)?;
-        file.lock_shared().map_err(|error| io_error(&path, error))?;
-        Ok(GenerationReadLease { file })
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let attempt = begin_interaction_lock_attempt_v1(
+            InteractionLockKindV1::Derived,
+            InteractionLockModeV1::Blocking,
+        );
+        let file = match open_lock_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                return Err(error);
+            }
+        };
+        match file.lock_shared() {
+            Ok(()) => Ok(GenerationReadLease {
+                file,
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                _hold_recorder: attempt.record_physical_acquired(),
+            }),
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                Err(io_error(&path, error))
+            }
+        }
     }
 
     pub(crate) fn next_generation(&self) -> Result<(u64, String), GenerationError> {
@@ -481,9 +567,26 @@ impl GenerationLayout {
                 continue;
             }
             let lease_path = self.generation_lease_path(&generation_id);
-            let lease = open_lock_file(&lease_path)?;
-            match lease.try_lock() {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let attempt = begin_interaction_lock_attempt_v1(
+                InteractionLockKindV1::Derived,
+                InteractionLockModeV1::Try,
+            );
+            let lease_file = match open_lock_file(&lease_path) {
+                Ok(file) => file,
+                Err(error) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                    return Err(error);
+                }
+            };
+            match lease_file.try_lock() {
                 Ok(()) => {
+                    let _lease = register_generation_probe_lease(
+                        lease_file,
+                        #[cfg(any(test, feature = "longitudinal-counting"))]
+                        attempt.record_physical_acquired(),
+                    );
                     let generation = entry.path();
                     std::fs::remove_dir_all(&generation)
                         .map_err(|error| io_error(&generation, error))?;
@@ -496,9 +599,13 @@ impl GenerationLayout {
                     receipt.reclaimed.push(generation_id);
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Busy);
                     receipt.retained_by_readers.push(generation_id);
                 }
                 Err(std::fs::TryLockError::Error(error)) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
                     return Err(io_error(&lease_path, error));
                 }
             }
@@ -526,14 +633,32 @@ impl GenerationLayout {
             {
                 continue;
             }
-            let lease = OpenOptions::new()
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let attempt = begin_interaction_lock_attempt_v1(
+                InteractionLockKindV1::Derived,
+                InteractionLockModeV1::Try,
+            );
+            let lease_file = match OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&path)
-                .map_err(|error| io_error(&path, error))?;
-            match lease.try_lock() {
+                .map_err(|error| io_error(&path, error))
+            {
+                Ok(file) => file,
+                Err(error) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                    return Err(error);
+                }
+            };
+            match lease_file.try_lock() {
                 Ok(()) => {
-                    let _ = lease.unlock();
+                    let lease = register_generation_probe_lease(
+                        lease_file,
+                        #[cfg(any(test, feature = "longitudinal-counting"))]
+                        attempt.record_physical_acquired(),
+                    );
+                    let _ = lease.file.unlock();
                     drop(lease);
                     match std::fs::remove_file(&path) {
                         Ok(()) => {}
@@ -541,8 +666,13 @@ impl GenerationLayout {
                         Err(error) => return Err(io_error(&path, error)),
                     }
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Deferred);
+                }
                 Err(std::fs::TryLockError::Error(error)) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
                     return Err(io_error(&path, error));
                 }
             }
@@ -688,13 +818,33 @@ impl GenerationLayout {
         let lease_paths = self.generation_lease_paths_under(path)?;
         let mut leases = Vec::with_capacity(lease_paths.len());
         for lease_path in &lease_paths {
-            let lease = open_lock_file(lease_path)?;
-            match lease.try_lock() {
-                Ok(()) => leases.push(lease),
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let attempt = begin_interaction_lock_attempt_v1(
+                InteractionLockKindV1::Derived,
+                InteractionLockModeV1::Try,
+            );
+            let lease_file = match open_lock_file(lease_path) {
+                Ok(file) => file,
+                Err(error) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                    return Err(error);
+                }
+            };
+            match lease_file.try_lock() {
+                Ok(()) => leases.push(register_generation_probe_lease(
+                    lease_file,
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_physical_acquired(),
+                )),
                 Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Busy);
                     return Err(GenerationError::GenerationInUse);
                 }
                 Err(std::fs::TryLockError::Error(error)) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
                     return Err(io_error(lease_path, error));
                 }
             }
@@ -703,7 +853,7 @@ impl GenerationLayout {
             std::fs::remove_dir_all(path).map_err(|error| io_error(path, error))?;
         }
         for (lease, lease_path) in leases.into_iter().zip(lease_paths) {
-            let _ = lease.unlock();
+            let _ = lease.file.unlock();
             drop(lease);
             let _ = std::fs::remove_file(lease_path);
         }
@@ -754,7 +904,13 @@ impl Drop for GenerationReadLease {
     }
 }
 
-fn register_rebuild_lease(file: File, path: PathBuf) -> RebuildLease {
+fn register_rebuild_lease(
+    file: File,
+    path: PathBuf,
+    #[cfg(any(test, feature = "longitudinal-counting"))] hold_recorder: Option<
+        InteractionPhysicalLockHoldRecorderV1,
+    >,
+) -> RebuildLease {
     let inserted = HELD_REBUILD_LEASES.with(|held| held.borrow_mut().insert(path.clone()));
     debug_assert!(
         inserted,
@@ -764,6 +920,21 @@ fn register_rebuild_lease(file: File, path: PathBuf) -> RebuildLease {
         file,
         path,
         _not_send: PhantomData,
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        _hold_recorder: hold_recorder,
+    }
+}
+
+fn register_generation_probe_lease(
+    file: File,
+    #[cfg(any(test, feature = "longitudinal-counting"))] hold_recorder: Option<
+        InteractionPhysicalLockHoldRecorderV1,
+    >,
+) -> GenerationProbeLease {
+    GenerationProbeLease {
+        file,
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        _hold_recorder: hold_recorder,
     }
 }
 

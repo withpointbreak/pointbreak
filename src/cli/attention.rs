@@ -68,12 +68,14 @@ fn attention_list(
         })
         .transpose()?;
     let routed = read_attention(&args.repo, revision)?;
+    #[cfg(feature = "longitudinal-counting")]
+    routed.record_observed_state();
     let result = routed.result();
     // The text lane reads the same result the document consumes; clone it only
     // when that lane will render (eager-clone rule).
     let text_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
     match routed {
-        RoutedAttention::Authoritative(result) => {
+        RoutedAttention::Authoritative { result, .. } => {
             let document = attention_list_document(result);
             output::write_document(stdout, format, &document, || {
                 render_attention_list_text(
@@ -100,7 +102,11 @@ fn attention_list(
 }
 
 enum RoutedAttention {
-    Authoritative(AttentionListResult),
+    Authoritative {
+        result: AttentionListResult,
+        #[cfg_attr(not(any(test, feature = "longitudinal-counting")), allow(dead_code))]
+        labeled_fallback: bool,
+    },
     Derived {
         result: AttentionListResult,
         projection_stamp: String,
@@ -110,7 +116,35 @@ enum RoutedAttention {
 impl RoutedAttention {
     fn result(&self) -> &AttentionListResult {
         match self {
-            Self::Authoritative(result) | Self::Derived { result, .. } => result,
+            Self::Authoritative { result, .. } | Self::Derived { result, .. } => result,
+        }
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    fn observed_state(
+        &self,
+    ) -> pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1 {
+        use pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1 as State;
+
+        match self {
+            Self::Derived { .. } => State::DerivedCurrent,
+            Self::Authoritative {
+                labeled_fallback: false,
+                ..
+            } => State::AuthoritativeReplay,
+            Self::Authoritative {
+                labeled_fallback: true,
+                ..
+            } => State::LabeledFallbackToAuthoritative,
+        }
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    fn record_observed_state(&self) {
+        if let Some(counting) =
+            pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+        {
+            counting.record_observed_route_state_once(self.observed_state());
         }
     }
 }
@@ -119,13 +153,16 @@ fn read_attention(
     repo: &std::path::Path,
     revision: Option<RevisionId>,
 ) -> Result<RoutedAttention, Box<dyn std::error::Error>> {
-    let authoritative = || {
+    let authoritative = |labeled_fallback| {
         let mut options = AttentionListOptions::new(repo);
         if let Some(revision) = &revision {
             options = options.with_revision(revision.clone());
         }
         list_attention(options)
-            .map(RoutedAttention::Authoritative)
+            .map(|result| RoutedAttention::Authoritative {
+                result,
+                labeled_fallback,
+            })
             .map_err(Into::into)
     };
     let access = DerivedHistoryAccess::resolve(repo).map_err(std::io::Error::other)?;
@@ -143,10 +180,20 @@ fn read_attention(
             },
             projection_stamp: derived.projection_stamp,
         }),
-        DerivedAttentionRoute::Off if !access.is_active() => authoritative(),
+        DerivedAttentionRoute::Off if !access.is_active() => authoritative(false),
         DerivedAttentionRoute::Off | DerivedAttentionRoute::Unavailable(_) => {
+            #[cfg(feature = "longitudinal-counting")]
+            let _fallback_phase =
+                pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
+                    pointbreak::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CacheAndFallback,
+                );
+            #[cfg(feature = "longitudinal-counting")]
+            {
+                pointbreak::bench_support::longitudinal::record_authoritative_fallback();
+                pointbreak::bench_support::longitudinal::record_full_history_fallback();
+            }
             crate::cli::derived_read::emit_authoritative_fallback_hint(&access);
-            authoritative()
+            authoritative(true)
         }
     }
 }
@@ -186,4 +233,50 @@ fn render_attention_item_line(item: &AttentionItem) -> String {
         line.push_str(&clamp_title(title));
     }
     line
+}
+
+#[cfg(test)]
+mod tests {
+    use pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1;
+
+    use super::*;
+
+    #[test]
+    fn attention_route_state_is_owned_by_the_selected_live_route() {
+        for (routed, expected) in [
+            (
+                RoutedAttention::Derived {
+                    result: empty_result(),
+                    projection_stamp: "sha256:derived".to_owned(),
+                },
+                InteractionObservedRouteStateV1::DerivedCurrent,
+            ),
+            (
+                RoutedAttention::Authoritative {
+                    result: empty_result(),
+                    labeled_fallback: false,
+                },
+                InteractionObservedRouteStateV1::AuthoritativeReplay,
+            ),
+            (
+                RoutedAttention::Authoritative {
+                    result: empty_result(),
+                    labeled_fallback: true,
+                },
+                InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative,
+            ),
+        ] {
+            assert_eq!(routed.observed_state(), expected);
+        }
+    }
+
+    fn empty_result() -> AttentionListResult {
+        AttentionListResult {
+            event_set_hash: String::new(),
+            event_count: 0,
+            revision: None,
+            items: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
 }

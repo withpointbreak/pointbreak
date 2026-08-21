@@ -1191,7 +1191,6 @@ mod longitudinal_counting_tests {
         assert_eq!(error.to_string(), "fixture writer rejected bytes");
         assert_eq!(writer.semantic_result_sha256(), sha256(b"abc"));
         assert_eq!(scope.snapshot().counters.response_bytes, 3);
-        drop(writer);
         assert_eq!(output.accepted, b"abc");
     }
 

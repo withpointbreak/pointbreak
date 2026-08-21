@@ -30,7 +30,8 @@ use super::sqlite::{
 use super::verification::strict_bodyless_materialized_snapshot_at;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
-    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+    InteractionActorV1, LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1 as Phase,
+    enter_derived_access_phase_v1,
 };
 use crate::canonical_hash::canonical_json_bytes;
 use crate::documents::{
@@ -531,6 +532,11 @@ impl DerivedAccessLifecycle {
         if self.profile == DerivedAccessProfile::Off {
             return Err(LifecycleError::Disabled);
         }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _recovery_actor = matches!(execution, RebuildExecution::Synchronous)
+            .then(LongitudinalCountingScopeV1::current)
+            .flatten()
+            .map(|scope| scope.enter_actor_scope(InteractionActorV1::ExplicitRecovery));
         // Every rebuild acquires authority before the rebuild lease and holds
         // it through publication. Ordinary synchronous callers remain
         // fail-fast under contention; migration's required post-activation

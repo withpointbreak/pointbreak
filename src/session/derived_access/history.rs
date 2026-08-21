@@ -1735,6 +1735,74 @@ mod tests {
     }
 
     #[test]
+    fn background_rebuild_reserves_propagates_and_completes_one_child_scope() {
+        use crate::bench_support::longitudinal::{
+            InteractionActorV1, InteractionScopeCoverageV1, LongitudinalCountingScopeV1,
+        };
+
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let counting = LongitudinalCountingScopeV1::new("9".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _scope = counting.enter();
+
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "interaction background rebuild");
+
+        let snapshot = counting.snapshot();
+        assert_eq!(
+            snapshot.child_reservations,
+            vec![(0, InteractionActorV1::BackgroundRebuild)]
+        );
+        assert_eq!(snapshot.child_terminals.len(), 1);
+        assert_eq!(snapshot.child_terminals[0].ordinal, 0);
+        assert_eq!(
+            snapshot.child_terminals[0].actor,
+            InteractionActorV1::BackgroundRebuild
+        );
+        assert_eq!(
+            snapshot.child_terminals[0].coverage,
+            InteractionScopeCoverageV1::Complete
+        );
+        assert!(!snapshot.derived_access_phases.is_empty());
+        assert!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| { sample.actor == Some(InteractionActorV1::BackgroundRebuild) })
+        );
+    }
+
+    #[test]
+    fn synchronous_build_attributes_existing_work_to_explicit_recovery() {
+        use crate::bench_support::longitudinal::{InteractionActorV1, LongitudinalCountingScopeV1};
+
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let counting = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _scope = counting.enter();
+
+        access
+            .build(|_| DerivedHistoryControl::Continue)
+            .expect("explicit build");
+
+        let snapshot = counting.snapshot();
+        assert!(!snapshot.derived_access_phases.is_empty());
+        assert!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| { sample.actor == Some(InteractionActorV1::ExplicitRecovery) })
+        );
+        assert!(!snapshot.lock_facts.is_empty());
+        assert!(
+            snapshot
+                .lock_facts
+                .iter()
+                .all(|fact| fact.actor == InteractionActorV1::ExplicitRecovery)
+        );
+    }
+
+    #[test]
     fn activated_store_without_a_current_generation_only_schedules_maintenance() {
         let temp = TempDir::new().unwrap();
         let backend = StoreBackend::Local(temp.path().to_path_buf());
@@ -1765,11 +1833,47 @@ mod tests {
             backend,
         });
 
+        let interaction =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("e".repeat(64))
+                .unwrap();
+        interaction.record_execution_actor_once(
+            crate::bench_support::longitudinal::InteractionActorV1::RequestReader,
+        );
+        let interaction_guard = interaction.enter();
         assert!(matches!(
             access.current().unwrap(),
             CurrentRead::Unavailable(_)
         ));
         wait_for_background_rebuild(&access, "activated cold-store maintenance");
+        drop(interaction_guard);
+        let interaction_snapshot = interaction.snapshot();
+        assert_eq!(
+            interaction_snapshot.child_reservations,
+            vec![(
+                0,
+                crate::bench_support::longitudinal::InteractionActorV1::BackgroundMaintenance
+            )]
+        );
+        assert_eq!(interaction_snapshot.child_terminals.len(), 1);
+        assert_eq!(
+            interaction_snapshot.child_terminals[0].coverage,
+            crate::bench_support::longitudinal::InteractionScopeCoverageV1::Complete
+        );
+        assert!(
+            interaction_snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| {
+                    sample.actor
+                == Some(
+                    crate::bench_support::longitudinal::InteractionActorV1::BackgroundMaintenance,
+                )
+                })
+        );
+        assert!(interaction_snapshot.lock_facts.iter().all(|fact| {
+            fact.actor
+                == crate::bench_support::longitudinal::InteractionActorV1::BackgroundMaintenance
+        }));
         assert_eq!(lifecycle.published_generation_id().unwrap(), None);
         assert!(!access.rebuild_in_flight());
         drop(rebuild_lease);

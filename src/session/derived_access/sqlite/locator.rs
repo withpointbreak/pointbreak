@@ -850,6 +850,10 @@ fn validate_locator_checkpoint(
 pub(crate) fn read_locator_checkpoint(
     connection: &Connection,
 ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let _checkpoint_phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+        crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CheckpointAndWal,
+    );
     connection
         .query_row(
             "SELECT epoch, applied_sequence, observed_sequence

@@ -12,6 +12,8 @@ use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
 };
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{InteractionActorV1, reserve_interaction_child_scope_v1};
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 
@@ -91,6 +93,16 @@ impl BackgroundWorkPolicy {
 
     fn allows_rebuild(self) -> bool {
         self != Self::MaintenanceOnly
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    fn interaction_actor(self) -> InteractionActorV1 {
+        match self {
+            Self::MaintenanceOnly => InteractionActorV1::BackgroundMaintenance,
+            Self::RebuildWhenRequired | Self::RebuildRequested => {
+                InteractionActorV1::BackgroundRebuild
+            }
+        }
     }
 }
 
@@ -514,11 +526,23 @@ impl DerivedAccessRuntime {
         }
         let work_state = Arc::clone(&self.background_work_state);
         let cancel = Arc::clone(&self.background_rebuild_cancel);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let child_reservation = reserve_interaction_child_scope_v1(policy.interaction_actor());
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let spawned_child_reservation = child_reservation.clone();
         let spawned = std::thread::Builder::new()
             .name("pointbreak-derived-rebuild".to_owned())
             .spawn(move || {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                let child_execution = spawned_child_reservation.map(|reservation| {
+                    reservation.enter("derived background worker exited before source completion")
+                });
                 let _guard = BackgroundWorkerGuard(Arc::clone(&work_state));
-                background_rebuild(lifecycle, policy, &work_state, cancel)
+                background_rebuild(lifecycle, policy, &work_state, cancel);
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                if let Some(child_execution) = child_execution {
+                    child_execution.complete();
+                }
             });
         match spawned {
             Ok(handle) => {
@@ -526,6 +550,12 @@ impl DerivedAccessRuntime {
                 Ok(())
             }
             Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                if let Some(child_reservation) = child_reservation {
+                    child_reservation.record_incomplete(format!(
+                        "derived background worker launch failed: {error}"
+                    ));
+                }
                 self.background_work_state
                     .store(BackgroundWorkState::Idle as u8, Ordering::Release);
                 Err(format!("could not start derived-access rebuild: {error}"))

@@ -6,6 +6,11 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::ThreadId;
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    InteractionLockKindV1, InteractionLockModeV1, InteractionLockOutcomeV1,
+    InteractionPhysicalLockHoldRecorderV1, begin_interaction_lock_attempt_v1,
+};
 use crate::error::{Result, ShoreError};
 
 pub(crate) const STORE_AUTHORITY_LOCK_FILE: &str = "authority.writer.lock";
@@ -16,6 +21,8 @@ pub(crate) const STORE_AUTHORITY_LOCK_FILE: &str = "authority.writer.lock";
 #[derive(Debug)]
 struct StoreAuthorityLockState {
     _file: File,
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    _hold_recorder: Option<InteractionPhysicalLockHoldRecorderV1>,
 }
 
 #[derive(Debug)]
@@ -33,25 +40,76 @@ static HELD_AUTHORITY_LOCKS: OnceLock<Mutex<HeldAuthorityLocks>> = OnceLock::new
 impl StoreAuthorityLock {
     pub(crate) fn acquire(store_root: &Path) -> Result<Self> {
         let (key, path) = lock_key(store_root)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let attempt = begin_interaction_lock_attempt_v1(
+            InteractionLockKindV1::Authority,
+            InteractionLockModeV1::Blocking,
+        );
         if let Some(state) = held_state(&key) {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            attempt.record_reentrant_acquired();
             return Ok(Self::new(key, state, true));
         }
-        let file = open_lock_file(&path)?;
-        file.lock()
-            .map_err(|error| lock_error(&path, "acquire", error))?;
-        Ok(register_lock(key, file))
+        let file = match open_lock_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                return Err(error);
+            }
+        };
+        match file.lock() {
+            Ok(()) => Ok(register_lock(
+                key,
+                file,
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_physical_acquired(),
+            )),
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                Err(lock_error(&path, "acquire", error))
+            }
+        }
     }
 
     pub(crate) fn try_acquire(store_root: &Path) -> Result<Option<Self>> {
         let (key, path) = lock_key(store_root)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let attempt = begin_interaction_lock_attempt_v1(
+            InteractionLockKindV1::Authority,
+            InteractionLockModeV1::Try,
+        );
         if let Some(state) = held_state(&key) {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            attempt.record_reentrant_acquired();
             return Ok(Some(Self::new(key, state, true)));
         }
-        let file = open_lock_file(&path)?;
+        let file = match open_lock_file(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                return Err(error);
+            }
+        };
         match file.try_lock() {
-            Ok(()) => Ok(Some(register_lock(key, file))),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(error)) => Err(lock_error(&path, "acquire", error)),
+            Ok(()) => Ok(Some(register_lock(
+                key,
+                file,
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_physical_acquired(),
+            ))),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Busy);
+                Ok(None)
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                attempt.record_not_acquired(InteractionLockOutcomeV1::Failed);
+                Err(lock_error(&path, "acquire", error))
+            }
         }
     }
 
@@ -127,8 +185,18 @@ fn held_state(key: &(ThreadId, PathBuf)) -> Option<Arc<StoreAuthorityLockState>>
     state
 }
 
-fn register_lock(key: (ThreadId, PathBuf), file: File) -> StoreAuthorityLock {
-    let state = Arc::new(StoreAuthorityLockState { _file: file });
+fn register_lock(
+    key: (ThreadId, PathBuf),
+    file: File,
+    #[cfg(any(test, feature = "longitudinal-counting"))] hold_recorder: Option<
+        InteractionPhysicalLockHoldRecorderV1,
+    >,
+) -> StoreAuthorityLock {
+    let state = Arc::new(StoreAuthorityLockState {
+        _file: file,
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        _hold_recorder: hold_recorder,
+    });
     HELD_AUTHORITY_LOCKS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -150,6 +218,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::bench_support::longitudinal::{
+        InteractionActorV1, InteractionLockAcquisitionV1, InteractionLockKindV1,
+        InteractionLockModeV1, InteractionLockOutcomeV1, LongitudinalCountingScopeV1,
+    };
 
     #[test]
     fn authority_lock_serializes_independent_store_writers() {
@@ -233,5 +305,108 @@ mod tests {
                 .contains_key(&key),
             "the final owning-thread drop removes its stale registry key"
         );
+    }
+
+    #[test]
+    fn authority_lock_facts_follow_physical_release_and_reentrant_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        let counting = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _scope = counting.enter();
+        let _actor = counting.enter_actor_scope(InteractionActorV1::ExplicitRecovery);
+
+        let outer = StoreAuthorityLock::acquire(root.path()).unwrap();
+        let nested = StoreAuthorityLock::try_acquire(root.path())
+            .unwrap()
+            .expect("same-thread authority reentry");
+        assert!(!outer.is_reentrant());
+        assert!(nested.is_reentrant());
+
+        drop(outer);
+        let before_final_release = counting.snapshot();
+        assert_eq!(before_final_release.lock_facts.len(), 1);
+        assert_eq!(
+            before_final_release.lock_facts[0].acquisition,
+            InteractionLockAcquisitionV1::Reentrant
+        );
+        assert_eq!(before_final_release.lock_facts[0].wait_nanos, 0);
+        assert_eq!(before_final_release.lock_facts[0].hold_nanos, None);
+
+        drop(nested);
+        let after_final_release = counting.snapshot();
+        assert_eq!(after_final_release.lock_facts.len(), 2);
+        assert_eq!(after_final_release.lock_facts[0].ordinal, 0);
+        assert_eq!(
+            after_final_release.lock_facts[0].actor,
+            InteractionActorV1::ExplicitRecovery
+        );
+        assert_eq!(
+            after_final_release.lock_facts[0].kind,
+            InteractionLockKindV1::Authority
+        );
+        assert_eq!(
+            after_final_release.lock_facts[0].mode,
+            InteractionLockModeV1::Blocking
+        );
+        assert_eq!(
+            after_final_release.lock_facts[0].outcome,
+            InteractionLockOutcomeV1::Acquired
+        );
+        assert_eq!(
+            after_final_release.lock_facts[0].acquisition,
+            InteractionLockAcquisitionV1::Physical
+        );
+        assert!(after_final_release.lock_facts[0].hold_nanos.is_some());
+        assert_eq!(after_final_release.lock_facts[1].ordinal, 1);
+        assert_eq!(
+            after_final_release.lock_facts[1].acquisition,
+            InteractionLockAcquisitionV1::Reentrant
+        );
+    }
+
+    #[test]
+    fn authority_contender_preserves_busy_and_physical_wait_facts() {
+        let root = tempfile::tempdir().unwrap();
+        let counting = LongitudinalCountingScopeV1::new("c".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _scope = counting.enter();
+        let _actor = counting.enter_actor_scope(InteractionActorV1::ExplicitRecovery);
+        let held = StoreAuthorityLock::acquire(root.path()).unwrap();
+
+        let contender_scope = counting.clone();
+        let contender_root = root.path().to_path_buf();
+        let (busy_tx, busy_rx) = mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            let _scope = contender_scope.enter();
+            let _actor = contender_scope.enter_actor_scope(InteractionActorV1::ProductWriter);
+            assert!(
+                StoreAuthorityLock::try_acquire(&contender_root)
+                    .unwrap()
+                    .is_none()
+            );
+            busy_tx.send(()).unwrap();
+            let acquired = StoreAuthorityLock::acquire(&contender_root).unwrap();
+            drop(acquired);
+        });
+
+        busy_rx.recv().unwrap();
+        drop(held);
+        contender.join().unwrap();
+
+        let locks = counting.snapshot().lock_facts;
+        assert_eq!(locks.len(), 3);
+        assert_eq!(locks[0].acquisition, InteractionLockAcquisitionV1::Physical);
+        assert_eq!(locks[0].actor, InteractionActorV1::ExplicitRecovery);
+        assert_eq!(locks[1].outcome, InteractionLockOutcomeV1::Busy);
+        assert_eq!(
+            locks[1].acquisition,
+            InteractionLockAcquisitionV1::NotAcquired
+        );
+        assert_eq!(locks[1].actor, InteractionActorV1::ProductWriter);
+        assert_eq!(locks[2].outcome, InteractionLockOutcomeV1::Acquired);
+        assert_eq!(locks[2].acquisition, InteractionLockAcquisitionV1::Physical);
+        assert_eq!(locks[2].actor, InteractionActorV1::ProductWriter);
+        assert!(locks[2].wait_nanos > 0);
+        assert!(locks[2].hold_nanos.is_some());
     }
 }

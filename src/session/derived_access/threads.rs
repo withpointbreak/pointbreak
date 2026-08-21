@@ -379,6 +379,9 @@ mod tests {
         let scope =
             crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("d".repeat(64))
                 .unwrap();
+        scope.record_execution_actor_once(
+            crate::bench_support::longitudinal::InteractionActorV1::RequestReader,
+        );
         let _guard = scope.enter();
 
         let DerivedThreadsRoute::Ready(threads) = access.threads().unwrap() else {
@@ -396,6 +399,26 @@ mod tests {
         assert_eq!(snapshot.counters.event_folds, 0);
         assert_eq!(snapshot.counters.projection_rebuilds, 0);
         assert_eq!(snapshot.counters.state_rebuilds, 0);
+        let phases = snapshot
+            .derived_access_phases
+            .iter()
+            .map(|sample| sample.phase)
+            .collect::<Vec<_>>();
+        for expected in [
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::GenerationLeaseAndRetention,
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::ReadTransaction,
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::SqliteSelection,
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CheckpointAndWal,
+        ] {
+            assert!(phases.contains(&expected), "missing Attention phase {expected:?}");
+        }
+        assert!(snapshot.derived_access_phases.iter().all(|sample| {
+            sample.actor
+                == Some(crate::bench_support::longitudinal::InteractionActorV1::RequestReader)
+        }));
+        assert!(snapshot.lock_facts.is_empty());
+        assert_eq!(snapshot.counters.authoritative_fallbacks, 0);
+        assert_eq!(snapshot.counters.full_history_fallbacks, 0);
         let ownership = snapshot.capacity_ownership;
         assert_eq!(ownership.retained_decoded_events, 0);
         assert_eq!(ownership.retained_hydrated_history_entries, 0);
