@@ -279,6 +279,7 @@ enum Tier {
 /// Every CI job and the tier it belongs to. Changing a job's tier is a deliberate
 /// edit to this table, reviewed alongside the workflow change that causes it.
 const CI_JOB_TIERS: &[(&str, Tier)] = &[
+    ("guard", Tier::PerPush),
     ("installer-selftest", Tier::PerPush),
     ("validate-skills", Tier::PerPush),
     ("lint-workflows", Tier::PerPush),
@@ -399,6 +400,24 @@ fn development_guide_names_the_command_ci_actually_runs() {
         "the scheduled full-suite lane must be discoverable from the gate guide, \
          including how to trigger it by hand"
     );
+}
+
+#[test]
+fn ci_short_circuits_a_push_whose_sha_already_passed_as_a_pull_request() {
+    let ci = read_workflow("ci.yml");
+    let guard = job_block(&ci, "guard");
+
+    // The guard only ever suppresses on push events; pull_request runs are
+    // never conditional on it.
+    assert!(guard.contains("github.event_name == 'push'"));
+    // Fail open: skip starts false and only a positive already-green match
+    // flips it. Anything unexpected runs the full matrix.
+    assert!(guard.contains("skip=false"));
+    // The already-green resolution queries this workflow's own pull_request
+    // runs for the pushed SHA (filters verified against the live API).
+    assert!(guard.contains("actions/workflows/ci.yml/runs"));
+    assert!(guard.contains("event=pull_request"));
+    assert!(guard.contains("status=completed"));
 }
 
 #[test]

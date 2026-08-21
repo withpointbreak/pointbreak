@@ -13,6 +13,45 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  guard:
+    name: guard
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+    steps:
+      # Only push events can ever suppress anything: on every other event the
+      # resolve step is skipped, its output is empty, and downstream
+      # conditions treat an empty output as "run".
+      - id: resolve
+        if: github.event_name == 'push'
+        name: resolve whether this SHA already passed as a pull_request run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          # Fail OPEN: skip starts false and only a positive already-green
+          # match flips it. An API error, an empty result, or any
+          # non-success conclusion runs the full matrix — a guard that fails
+          # closed silently stops testing main.
+          skip=false
+          if conclusions=$(gh api -X GET \
+               "repos/${REPOSITORY}/actions/workflows/ci.yml/runs" \
+               -f head_sha="$SHA" -f event=pull_request -f status=completed \
+               --jq '[.workflow_runs[].conclusion]' 2>/dev/null); then
+            if [ "$conclusions" != "[]" ] \
+               && ! printf '%s' "$conclusions" | grep -qv '"success"'; then
+              echo "SHA ${SHA} already passed as a pull_request run; skipping the push matrix."
+              skip=true
+            fi
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
   installer-selftest:
     name: installer self-test (${{ matrix.os }})
     timeout-minutes: 10
