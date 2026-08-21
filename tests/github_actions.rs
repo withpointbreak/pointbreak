@@ -209,13 +209,18 @@ fn is_job_key_line(line: &str) -> bool {
 /// the next column-zero key or end of file. Anchoring here is what keeps two-space
 /// keys under `on:` or `env:` from ever masquerading as jobs.
 fn jobs_section(workflow: &str) -> &str {
-    let start = if let Some(rest) = workflow.strip_prefix("jobs:\n") {
-        workflow.len() - rest.len()
-    } else {
-        let marker = "\njobs:\n";
-        let at = workflow.find(marker).expect("workflow has a jobs: mapping");
-        at + marker.len()
-    };
+    // Scan by line rather than by byte marker: a Windows checkout carries
+    // CRLF endings, which a "\njobs:\n" match silently fails to find.
+    let mut start = None;
+    let mut scanned = 0;
+    for line in workflow.split_inclusive('\n') {
+        scanned += line.len();
+        if line.trim_end_matches(['\n', '\r']) == "jobs:" {
+            start = Some(scanned);
+            break;
+        }
+    }
+    let start = start.expect("workflow has a jobs: mapping");
     let section = &workflow[start..];
     let mut offset = 0;
     for line in section.split_inclusive('\n') {
@@ -408,6 +413,18 @@ fn job_block_stops_at_the_next_job_key() {
     let second = job_block(workflow, "second");
     assert!(second.contains("run: beta"));
     assert!(!second.contains("run: alpha"));
+}
+
+#[test]
+fn workflow_parsing_handles_windows_line_endings() {
+    // Windows runners check out with CRLF line endings; the parser must see
+    // the same jobs a Unix checkout does.
+    let workflow = "name: sample\r\njobs:\r\n  first:\r\n    runs-on: ubuntu-latest\r\n  second:\r\n    runs-on: windows-latest\r\n";
+
+    assert_eq!(job_keys(workflow), ["first", "second"]);
+    let second = job_block(workflow, "second");
+    assert!(second.contains("windows-latest"));
+    assert!(!second.contains("ubuntu-latest"));
 }
 
 #[test]
