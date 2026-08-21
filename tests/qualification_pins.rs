@@ -512,7 +512,7 @@ fn recipes(justfile: &str) -> Vec<(String, String)> {
 /// the goal state is an empty list. Growing it is a deliberate, reviewed
 /// decision, and an entry that stops naming an unguarded filter-bearing recipe
 /// is stale and must be removed.
-const ZERO_MATCH_GUARD_PENDING: &[&str] = &["git-bench", "git-parity"];
+const ZERO_MATCH_GUARD_PENDING: &[&str] = &[];
 
 #[test]
 fn every_filtered_recipe_refuses_a_zero_match_run() {
