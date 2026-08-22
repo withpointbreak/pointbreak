@@ -420,7 +420,10 @@ fn dependency_audit_splits_deterministic_and_time_triggered_checks() {
     );
 
     let guard = job_block(&ci, "guard");
-    for surface in ["Cargo.toml", "Cargo.lock", "deny.toml"] {
+    // The vendored path dependencies carry their own manifests, which
+    // cargo-deny audits under all-features; the nested pattern keeps a
+    // manifest-only change there from skipping the per-push audit.
+    for surface in ["Cargo.toml", "Cargo.lock", "deny.toml", "*/Cargo.toml"] {
         assert!(
             guard.contains(surface),
             "guard must map surface {surface} for cargo-deny"

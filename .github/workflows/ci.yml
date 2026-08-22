@@ -67,8 +67,10 @@ jobs:
                 scripts/install*|.github/binary-targets.json)
                   installer=true
                   ;;
-                # The dependency graph and its audit policy.
-                Cargo.toml|Cargo.lock|deny.toml)
+                # The dependency graph and its audit policy. The nested
+                # pattern covers the vendored path dependencies' manifests,
+                # which cargo-deny audits under all-features.
+                Cargo.toml|Cargo.lock|deny.toml|*/Cargo.toml)
                   deps=true
                   ;;
                 # The Justfile defines the recipes the qualification and
