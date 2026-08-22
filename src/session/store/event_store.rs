@@ -26,6 +26,26 @@ pub struct EventStore {
     files: Option<LocalEventFiles>,
 }
 
+/// A streaming writer session admitted once against the current product
+/// capability. The authority lock stays held for the session lifetime while
+/// callers supply events one at a time; the session itself owns no event buffer.
+pub(crate) struct EventWriteBatch<'a> {
+    store: &'a EventStore,
+    _authority: Option<StoreAuthorityLock>,
+}
+
+impl EventWriteBatch<'_> {
+    pub(crate) fn record_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        validate_event(event, None)?;
+        let bytes = serde_json::to_vec(event)?;
+        if let Some(coordinator) = &self.store.coordinator {
+            return coordinator
+                .record_event_once(event, || self.store.publish_validated_event(event, &bytes));
+        }
+        self.store.publish_validated_event(event, &bytes)
+    }
+}
+
 /// One strict journal entry decoded and validated from the same carrier read
 /// that produced its durable byte witness. Bootstrap uses this paired shape so
 /// cursor, locator, and semantic population never reopen a carrier merely to
@@ -119,26 +139,23 @@ impl EventStore {
         );
         let _entered = span.enter();
 
-        let _authority = self
+        self.begin_current_product_batch()?.record_event_once(event)
+    }
+
+    /// Admit a current-product writer once, then accept events incrementally
+    /// while one authority lock remains held. Admission point-reads the immutable
+    /// L2 capability pair and never enumerates the Journal.
+    pub(crate) fn begin_current_product_batch(&self) -> Result<EventWriteBatch<'_>> {
+        let authority = self
             .files
             .as_ref()
             .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
             .transpose()?;
-
-        // The event-only writer is intentionally dark once the non-event
-        // activation root exists. This keyed probe is O(1) for ordinary L0
-        // stores and the full router runs before any activated-store mutation.
         preflight_current_product(self.journal.as_ref())?;
-
-        // The journal owns key→address mapping, so the write needs no on-disk path;
-        // the prior path-stem check was a tautology over the key-derived filename.
-        validate_event(event, None)?;
-        let bytes = serde_json::to_vec(event)?;
-        if let Some(coordinator) = &self.coordinator {
-            return coordinator
-                .record_event_once(event, || self.publish_validated_event(event, &bytes));
-        }
-        self.publish_validated_event(event, &bytes)
+        Ok(EventWriteBatch {
+            store: self,
+            _authority: authority,
+        })
     }
 
     /// Record an evidence-only append only through an admitted governed writer.
@@ -894,6 +911,50 @@ mod tests {
         assert_eq!(counters.carrier_bytes_read, expected_bytes);
         assert_eq!(counters.event_decodes, 1);
         assert_eq!(counters.event_validations, 1);
+    }
+
+    #[test]
+    fn current_product_batch_streams_events_under_one_bounded_admission() {
+        use crate::bench_support::longitudinal::{
+            InteractionActorV1, InteractionLockAcquisitionV1, InteractionLockKindV1,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(
+            backend.journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let store = EventStore::from_backend(&backend);
+        let scope = counting_scope('b');
+        scope.record_execution_actor_once(InteractionActorV1::ProductWriter);
+        let mut outcomes = Vec::new();
+
+        {
+            let _guard = scope.enter();
+            let _actor = scope.enter_actor_scope(InteractionActorV1::ProductWriter);
+            let batch = store.begin_current_product_batch().unwrap();
+            for ordinal in 0..3 {
+                let event = review_initialized_event_for(&format!("journal:batch-{ordinal}"));
+                outcomes.push(batch.record_event_once(&event).unwrap());
+            }
+        }
+
+        assert_eq!(outcomes, vec![EventWriteOutcome::Created; 3]);
+        let snapshot = scope.snapshot();
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.carrier_opens, 2);
+        assert_eq!(snapshot.counters.change_capability_carriers_opened, 2);
+        assert_eq!(snapshot.lock_facts.len(), 1);
+        assert_eq!(
+            snapshot.lock_facts[0].kind,
+            InteractionLockKindV1::Authority
+        );
+        assert_eq!(
+            snapshot.lock_facts[0].acquisition,
+            InteractionLockAcquisitionV1::Physical
+        );
     }
 
     #[test]

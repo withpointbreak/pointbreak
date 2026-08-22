@@ -34,7 +34,6 @@ use super::store::object_artifact::{
 };
 use super::store::resolution::{prepare_write_landing, resolve_read_store, resolve_write_store};
 use super::workflow::assessment::add::{AssessmentIdMaterial, build_assessment_id};
-use super::workflow::ingest_events_with_clock;
 use super::workflow::input_request::open::{InputRequestIdMaterial, build_input_request_id};
 use super::workflow::input_request::respond::{
     InputRequestResponseIdMaterial, build_input_request_response_id,
@@ -42,9 +41,10 @@ use super::workflow::input_request::respond::{
 use super::workflow::observation::add::{ObservationIdMaterial, build_observation_id};
 use super::workflow::observation::staged_body;
 use super::workflow::validation::add::{ValidationCheckIdMaterial, build_validation_check_id};
+use super::workflow::{IngestBatchSession, ingest_events_with_clock, prepare_events_for_ingest};
 use super::{
-    EventStore, IngestClock, IngestEventsOptions, IngestVia, SessionState, TrustSet,
-    allowed_signers_path_for_repo, event_signature_trust_set, store_dir_for_repo,
+    EventStore, EventVerificationPolicy, IngestClock, IngestEventsOptions, IngestVia, SessionState,
+    TrustSet, allowed_signers_path_for_repo, event_signature_trust_set, store_dir_for_repo,
     trust_set_to_value,
 };
 use crate::bench_support::longitudinal::{
@@ -235,6 +235,9 @@ pub(crate) struct LongitudinalL2ChangeWriteReceiptV1 {
     pub(crate) events_created: u64,
     pub(crate) events_existing: u64,
     pub(crate) final_event_count: u64,
+    pub(crate) change_count: u64,
+    pub(crate) membership_count: u64,
+    pub(crate) relation_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1661,58 +1664,101 @@ pub(crate) fn prepare_longitudinal_l2_change_events_v1(
     Ok(events)
 }
 
-/// Reconstruct only the current Change authority for the frozen L100-O10K
-/// workload. Preparing one superblock at a time keeps the successor fixture's
-/// peak memory bounded without changing the source materialization contract.
-pub(crate) fn prepare_longitudinal_l2_capacity_change_events_v1() -> Result<Vec<ShoreEvent>> {
-    let mut events = Vec::with_capacity(21_000);
-    for block in 0..100 {
-        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+pub(crate) fn write_generated_longitudinal_l2_change_events_v1(
+    repo: &Path,
+    block_count: u64,
+) -> Result<LongitudinalL2ChangeWriteReceiptV1> {
+    let write_store = resolve_write_store(repo)?;
+    let storage = LocalStorage::new(write_store.store_dir());
+    prepare_write_landing(&write_store, &storage)?;
+    let trust = longitudinal_trust_set()?;
+    let event_store = write_store.event_store()?;
+    let mut ingest = IngestBatchSession::begin(&event_store, write_store.worktree_root(), &trust)?;
+    let mut attempted = 0_u64;
+    let mut change_count = 0_u64;
+    let mut membership_count = 0_u64;
+    let mut relation_count = 0_u64;
+    let mut write_error = None;
+    for block in 0..block_count {
+        let record = match prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
             LongitudinalRecordShapeV1::CapacityL100O10K,
             block,
-        ))?;
-        events.extend(prepare_longitudinal_l2_change_events_v1(
-            std::slice::from_ref(&record),
-        )?);
+        )) {
+            Ok(record) => record,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        let events = match prepare_longitudinal_l2_change_events_v1(std::slice::from_ref(&record)) {
+            Ok(events) => events,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        if events.iter().any(|event| {
+            !matches!(
+                event.event_type,
+                EventType::ChangeDeclared
+                    | EventType::ChangeMembershipAsserted
+                    | EventType::ChangeRevisionRelationAsserted
+            )
+        }) {
+            write_error = Some(ShoreError::Message(
+                "L2 capacity write included a non-Change authority event".to_owned(),
+            ));
+            break;
+        }
+        let (events, mut verification) = match prepare_events_for_ingest(
+            &events,
+            EventVerificationPolicy::advisory(),
+            &trust,
+            LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        change_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeDeclared)
+            .count() as u64;
+        membership_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeMembershipAsserted)
+            .count() as u64;
+        relation_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeRevisionRelationAsserted)
+            .count() as u64;
+        attempted += events.len() as u64;
+        if let Err(error) = ingest.record_verified_events(&events, &mut verification) {
+            write_error = Some(error);
+            break;
+        }
     }
-    events.sort_by(|left, right| left.idempotency_key.cmp(&right.idempotency_key));
-    if events.len() != 21_000 {
+    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    if let Some(error) = write_error {
+        return Err(error);
+    }
+    let expected = block_count
+        .checked_mul(210)
+        .ok_or_else(|| ShoreError::Message("L2 capacity event count overflowed".to_owned()))?;
+    if attempted != expected {
         return Err(ShoreError::Message(format!(
-            "L2 capacity Change authority drifted: expected 21000, got {}",
-            events.len()
+            "L2 capacity Change authority drifted: expected {expected}, got {attempted}"
         )));
     }
-    Ok(events)
-}
-
-pub(crate) fn write_longitudinal_l2_change_events_v1(
-    repo: &Path,
-    events: Vec<ShoreEvent>,
-) -> Result<LongitudinalL2ChangeWriteReceiptV1> {
-    if events.iter().any(|event| {
-        !matches!(
-            event.event_type,
-            EventType::ChangeDeclared
-                | EventType::ChangeMembershipAsserted
-                | EventType::ChangeRevisionRelationAsserted
-        )
-    }) {
-        return Err(ShoreError::Message(
-            "L2 capacity write included a non-Change authority event".to_owned(),
-        ));
-    }
-    let result = ingest_events_with_clock(
-        IngestEventsOptions::new(repo, events).with_trust_set(longitudinal_trust_set()?),
-        &FixedBenchmarkIngestClock,
-    )?;
-    let listed = EventStore::from_backend(resolve_read_store(repo)?.backend()).list_events()?;
     Ok(LongitudinalL2ChangeWriteReceiptV1 {
-        events_created: u64::try_from(result.events_created)
-            .map_err(|_| ShoreError::Message("L2 created count overflowed".to_owned()))?,
-        events_existing: u64::try_from(result.events_existing)
-            .map_err(|_| ShoreError::Message("L2 existing count overflowed".to_owned()))?,
-        final_event_count: u64::try_from(listed.len())
-            .map_err(|_| ShoreError::Message("L2 final event count overflowed".to_owned()))?,
+        events_created: completed.events_created as u64,
+        events_existing: completed.events_existing as u64,
+        final_event_count: completed.events.len() as u64,
+        change_count,
+        membership_count,
+        relation_count,
     })
 }
 
@@ -1775,51 +1821,334 @@ pub(crate) fn write_longitudinal_records_v1(
     repo: &Path,
     records: &[PreparedLongitudinalRecordV1],
 ) -> Result<LongitudinalWriteReceiptV1> {
-    let events = records
-        .iter()
-        .flat_map(|record| record.events.iter().cloned())
-        .collect::<Vec<_>>();
-    reject_legacy_longitudinal_removals(repo, &events)?;
+    write_longitudinal_record_stream_v1(repo, records.iter().cloned().map(Ok))
+}
+
+/// Generate and write deterministic records one bounded block at a time. The
+/// production ingest session holds authority across the stream and performs one
+/// final replay; only lightweight receipt identities survive each block.
+pub(crate) fn write_generated_longitudinal_records_v1(
+    repo: &Path,
+    shape: LongitudinalRecordShapeV1,
+    block_count: u64,
+) -> Result<LongitudinalWriteReceiptV1> {
+    write_longitudinal_record_stream_v1(
+        repo,
+        (0..block_count).map(|block| {
+            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(shape, block))
+        }),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LongitudinalL2ResumePreflightV1 {
+    pub(crate) base_events_existing: u64,
+    pub(crate) change_events_existing: u64,
+    pub(crate) content_existing: u64,
+}
+
+/// Prove that an existing L2 capacity root is an exact subset of the
+/// deterministic final fixture before any resume mutation. Missing expected
+/// carriers are resumable; foreign or divergent carriers and content are not.
+pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
+    repo: &Path,
+    block_count: u64,
+) -> Result<LongitudinalL2ResumePreflightV1> {
+    let read_store = resolve_read_store(repo)?;
+    let store_dir = read_store.store_dir().to_path_buf();
+    let mut existing_events = EventStore::from_backend(read_store.backend())
+        .list_events()?
+        .into_iter()
+        .map(|event| (event.event_id.as_str().to_owned(), event))
+        .collect::<BTreeMap<_, _>>();
+    let content_store = ContentArtifacts::from_backend(read_store.backend());
+    let mut existing_content = BTreeSet::new();
+    collect_regular_relative_files(
+        &store_dir,
+        &store_dir.join("artifacts"),
+        &mut existing_content,
+    )?;
+    let trust = longitudinal_trust_set()?;
+    let mut base_events_existing = 0_u64;
+    let mut change_events_existing = 0_u64;
+    let mut content_existing = 0_u64;
+
+    for block in 0..block_count {
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            block,
+        ))?;
+        let (base_events, _) = prepare_events_for_ingest(
+            &record.events,
+            EventVerificationPolicy::advisory(),
+            &trust,
+            LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
+        )?;
+        for expected in base_events {
+            if let Some(existing) = existing_events.remove(expected.event_id.as_str()) {
+                if existing != expected {
+                    return Err(ShoreError::Message(format!(
+                        "longitudinal resume rejects divergent event {}",
+                        expected.event_id.as_str()
+                    )));
+                }
+                base_events_existing += 1;
+            }
+        }
+        let change_events =
+            prepare_longitudinal_l2_change_events_v1(std::slice::from_ref(&record))?;
+        let (change_events, _) = prepare_events_for_ingest(
+            &change_events,
+            EventVerificationPolicy::advisory(),
+            &trust,
+            LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
+        )?;
+        for expected in change_events {
+            if let Some(existing) = existing_events.remove(expected.event_id.as_str()) {
+                if existing != expected {
+                    return Err(ShoreError::Message(format!(
+                        "longitudinal resume rejects divergent Change event {}",
+                        expected.event_id.as_str()
+                    )));
+                }
+                change_events_existing += 1;
+            }
+        }
+        for content in &record.content {
+            if !existing_content.remove(content.relative_path()) {
+                continue;
+            }
+            let existing = content_store
+                .get_if_exists(content.relative_path())?
+                .ok_or_else(|| {
+                    ShoreError::Message(format!(
+                        "longitudinal resume content disappeared: {}",
+                        content.relative_path()
+                    ))
+                })?;
+            if existing != prepared_content_bytes(content)? {
+                return Err(ShoreError::Message(format!(
+                    "longitudinal resume rejects divergent content {}",
+                    content.relative_path()
+                )));
+            }
+            content_existing += 1;
+        }
+    }
+    if let Some((event_id, _)) = existing_events.first_key_value() {
+        return Err(ShoreError::Message(format!(
+            "longitudinal resume rejects foreign event {event_id}"
+        )));
+    }
+    if let Some(relative_path) = existing_content.first() {
+        return Err(ShoreError::Message(format!(
+            "longitudinal resume rejects foreign content {relative_path}"
+        )));
+    }
+    Ok(LongitudinalL2ResumePreflightV1 {
+        base_events_existing,
+        change_events_existing,
+        content_existing,
+    })
+}
+
+fn collect_regular_relative_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeSet<String>,
+) -> Result<()> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)
+        .map_err(|error| ShoreError::Message(format!("read {}: {error}", directory.display())))?
+    {
+        let entry = entry.map_err(|error| {
+            ShoreError::Message(format!("read entry in {}: {error}", directory.display()))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| ShoreError::Message(format!("inspect {}: {error}", path.display())))?;
+        if metadata.is_dir() {
+            collect_regular_relative_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| ShoreError::Message("content path escaped its store".to_owned()))?
+                .to_str()
+                .ok_or_else(|| ShoreError::Message("content path is not UTF-8".to_owned()))?
+                .replace('\\', "/");
+            files.insert(relative);
+        } else {
+            return Err(ShoreError::Message(format!(
+                "longitudinal resume rejects non-file content path {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn write_longitudinal_record_stream_v1(
+    repo: &Path,
+    records: impl IntoIterator<Item = Result<PreparedLongitudinalRecordV1>>,
+) -> Result<LongitudinalWriteReceiptV1> {
+    let existing_removals = EventStore::from_backend(resolve_read_store(repo)?.backend())
+        .list_events()?
+        .into_iter()
+        .filter(|event| event.event_type == EventType::ArtifactRemoved)
+        .map(|event| {
+            (
+                event.event_id.as_str().to_owned(),
+                (event.signer, event.signature),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let write_store = resolve_write_store(repo)?;
     let storage = LocalStorage::new(write_store.store_dir());
     prepare_write_landing(&write_store, &storage)?;
     let content_store = ContentArtifacts::from_backend(write_store.backend());
+    let trust = longitudinal_trust_set()?;
+    let event_store = write_store.event_store()?;
+    let mut ingest = IngestBatchSession::begin(&event_store, write_store.worktree_root(), &trust)?;
+    let mut ordered_event_ids = Vec::new();
+    let mut content_inventory = Vec::new();
+    let mut removed_content_sha256 = Vec::new();
+    let mut revision_count = 0_u64;
+    let mut task_attempt_count = 0_u64;
+    let mut body_fact_count = 0_u64;
+    let mut external_body_count = 0_u64;
+    let mut object_artifact_count = 0_u64;
+    let mut decoded_body_bytes = 0_u64;
+    let mut decoded_object_target_bytes = 0_u64;
+    let mut write_error = None;
 
-    for record in records {
-        for content in &record.content {
-            publish_content(&content_store, content)?;
-        }
-    }
-
-    let result = ingest_events_with_clock(
-        IngestEventsOptions::new(repo, events.clone()).with_trust_set(longitudinal_trust_set()?),
-        &FixedBenchmarkIngestClock,
-    )?;
-
-    for record in records {
-        for content in &record.removed {
-            match content_store.remove(content.relative_path())? {
-                RemoveOutcome::Removed | RemoveOutcome::Missing => {}
+    'records: for prepared in records {
+        let record = match prepared {
+            Ok(record) => record,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        for event in record
+            .events
+            .iter()
+            .filter(|event| event.event_type == EventType::ArtifactRemoved)
+        {
+            if existing_removals
+                .get(event.event_id.as_str())
+                .is_some_and(|(signer, signature)| {
+                    signer != &event.signer || signature != &event.signature
+                })
+            {
+                write_error = Some(ShoreError::Message(
+                    "legacy longitudinal removals require the explicit clone upgrade".to_owned(),
+                ));
+                break 'records;
             }
         }
+        for content in &record.content {
+            if let Err(error) = publish_content(&content_store, content) {
+                write_error = Some(error);
+                break 'records;
+            }
+        }
+        let (stamped, mut verification) = match prepare_events_for_ingest(
+            &record.events,
+            EventVerificationPolicy::advisory(),
+            &trust,
+            LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        if let Err(error) = ingest.record_verified_events(&stamped, &mut verification) {
+            write_error = Some(error);
+            break;
+        }
+
+        let content_result = (|| -> Result<()> {
+            let removed_paths = record
+                .removed
+                .iter()
+                .map(PreparedContentV1::relative_path)
+                .collect::<BTreeSet<_>>();
+            for content in &record.removed {
+                match content_store.remove(content.relative_path())? {
+                    RemoveOutcome::Removed | RemoveOutcome::Missing => {}
+                }
+                removed_content_sha256.push(
+                    content
+                        .content_hash()
+                        .trim_start_matches("sha256:")
+                        .to_owned(),
+                );
+            }
+            for content in &record.content {
+                if removed_paths.contains(content.relative_path()) {
+                    if content_store
+                        .get_if_exists(content.relative_path())?
+                        .is_some()
+                    {
+                        return Err(ShoreError::Message(format!(
+                            "removed longitudinal content still exists: {}",
+                            content.relative_path()
+                        )));
+                    }
+                    continue;
+                }
+                let raw = content_store
+                    .get_if_exists(content.relative_path())?
+                    .ok_or_else(|| {
+                        ShoreError::Message(format!(
+                            "present longitudinal content is missing: {}",
+                            content.relative_path()
+                        ))
+                    })?;
+                content_inventory.push(inventory_entry(content, &raw)?);
+            }
+            Ok(())
+        })();
+        if let Err(error) = content_result {
+            write_error = Some(error);
+            break 'records;
+        }
+
+        ordered_event_ids.extend(
+            stamped
+                .iter()
+                .map(|event| event.event_id.as_str().to_owned()),
+        );
+        revision_count += record.revision_count;
+        task_attempt_count += record.task_attempt_count;
+        body_fact_count += record.body_fact_count;
+        external_body_count += record.external_body_count;
+        object_artifact_count += record.object_artifact_count;
+        decoded_body_bytes += record.decoded_body_bytes;
+        decoded_object_target_bytes += record.decoded_object_target_bytes;
     }
 
-    let read_store = resolve_read_store(repo)?;
-    let event_store = EventStore::from_backend(read_store.backend());
-    let listed = event_store.list_events()?;
-    let recomputed_state = SessionState::from_events(&listed)?;
+    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    if let Some(error) = write_error {
+        return Err(error);
+    }
+    let listed = completed.events;
     let stored_state: SessionState =
-        LocalStorage::new(read_store.store_dir()).read_json(Path::new("state.json"))?;
-    if recomputed_state != stored_state {
+        storage.read_json(&write_store.store_dir().join("state.json"))?;
+    if completed.state != stored_state {
         return Err(ShoreError::Message(
             "longitudinal state.json does not match strict replay".to_owned(),
         ));
     }
-    if listed.len() != events.len() {
+    if listed.len() != ordered_event_ids.len() {
         return Err(ShoreError::Message(format!(
             "longitudinal strict replay count mismatch: expected {}, got {}",
-            events.len(),
+            ordered_event_ids.len(),
             listed.len()
         )));
     }
@@ -1838,11 +2167,11 @@ pub(crate) fn write_longitudinal_records_v1(
         .iter()
         .map(|event| (event.event_id.as_str(), event))
         .collect::<BTreeMap<_, _>>();
-    let mut ordered_events = Vec::with_capacity(events.len());
-    let mut event_carriers = Vec::with_capacity(events.len());
-    for generated in &events {
+    let mut ordered_events = Vec::with_capacity(ordered_event_ids.len());
+    let mut event_carriers = Vec::with_capacity(ordered_event_ids.len());
+    for event_id in &ordered_event_ids {
         let stored = stored_by_id
-            .get(generated.event_id.as_str())
+            .get(event_id.as_str())
             .ok_or_else(|| ShoreError::Message("stored longitudinal event missing".to_owned()))?;
         let decoded = canonical_json_bytes(&serde_json::to_value(stored)?)?;
         let raw = serde_json::to_vec(stored)?;
@@ -1857,46 +2186,7 @@ pub(crate) fn write_longitudinal_records_v1(
             raw_bytes: raw.len() as u64,
         });
     }
-    let removed_refs = records
-        .iter()
-        .flat_map(|record| record.removed.iter().map(PreparedContentV1::relative_path))
-        .collect::<BTreeSet<_>>();
-    let mut content_inventory = Vec::new();
-    for content in records.iter().flat_map(|record| &record.content) {
-        if removed_refs.contains(content.relative_path()) {
-            if content_store
-                .get_if_exists(content.relative_path())?
-                .is_some()
-            {
-                return Err(ShoreError::Message(format!(
-                    "removed longitudinal content still exists: {}",
-                    content.relative_path()
-                )));
-            }
-            continue;
-        }
-        let raw = content_store
-            .get_if_exists(content.relative_path())?
-            .ok_or_else(|| {
-                ShoreError::Message(format!(
-                    "present longitudinal content is missing: {}",
-                    content.relative_path()
-                ))
-            })?;
-        content_inventory.push(inventory_entry(content, &raw)?);
-    }
     content_inventory.sort_by(|left, right| left.logical_key.cmp(&right.logical_key));
-
-    let mut removed_content_sha256 = records
-        .iter()
-        .flat_map(|record| record.removed.iter())
-        .map(|content| {
-            content
-                .content_hash()
-                .trim_start_matches("sha256:")
-                .to_owned()
-        })
-        .collect::<Vec<_>>();
     removed_content_sha256.sort();
 
     let event_set_sha256 = event_set_hash_for_events(&listed)?
@@ -1918,8 +2208,12 @@ pub(crate) fn write_longitudinal_records_v1(
         projection_sha256,
         content_inventory_sha256,
     };
-    let capacity_selectors =
-        capacity_selectors(&events, &event_carriers, &content_inventory, records)?;
+    let capacity_selectors = capacity_selectors(
+        &listed,
+        &event_carriers,
+        &content_inventory,
+        &removed_content_sha256,
+    )?;
 
     let mut by_type = BTreeMap::new();
     for event in &listed {
@@ -1937,52 +2231,18 @@ pub(crate) fn write_longitudinal_records_v1(
         removed_content_sha256,
         strict,
         capacity_selectors,
-        events_created: result.events_created as u64,
-        events_existing: result.events_existing as u64,
+        events_created: completed.events_created as u64,
+        events_existing: completed.events_existing as u64,
         event_count: listed.len() as u64,
-        revision_count: records.iter().map(|record| record.revision_count).sum(),
-        task_attempt_count: records.iter().map(|record| record.task_attempt_count).sum(),
-        body_fact_count: records.iter().map(|record| record.body_fact_count).sum(),
-        external_body_count: records
-            .iter()
-            .map(|record| record.external_body_count)
-            .sum(),
-        object_artifact_count: records
-            .iter()
-            .map(|record| record.object_artifact_count)
-            .sum(),
-        decoded_body_bytes: records.iter().map(|record| record.decoded_body_bytes).sum(),
-        decoded_object_target_bytes: records
-            .iter()
-            .map(|record| record.decoded_object_target_bytes)
-            .sum(),
+        revision_count,
+        task_attempt_count,
+        body_fact_count,
+        external_body_count,
+        object_artifact_count,
+        decoded_body_bytes,
+        decoded_object_target_bytes,
         by_type,
     })
-}
-
-fn reject_legacy_longitudinal_removals(repo: &Path, desired: &[ShoreEvent]) -> Result<()> {
-    let existing = EventStore::from_backend(resolve_read_store(repo)?.backend()).list_events()?;
-    if existing.is_empty() {
-        return Ok(());
-    }
-    let existing_by_id = existing
-        .iter()
-        .map(|event| (event.event_id.as_str(), event))
-        .collect::<BTreeMap<_, _>>();
-    for generated in desired
-        .iter()
-        .filter(|event| event.event_type == EventType::ArtifactRemoved)
-    {
-        let Some(stored) = existing_by_id.get(generated.event_id.as_str()) else {
-            continue;
-        };
-        if stored.signer != generated.signer || stored.signature != generated.signature {
-            return Err(ShoreError::Message(
-                "legacy longitudinal removals require the explicit clone upgrade".to_owned(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn upgrade_longitudinal_removals_v1(
@@ -2145,7 +2405,7 @@ fn capacity_selectors(
     events: &[ShoreEvent],
     carriers: &[LongitudinalEventCarrierV1],
     content_inventory: &[LongitudinalInventoryEntryV1],
-    records: &[PreparedLongitudinalRecordV1],
+    removed_content_sha256: &[String],
 ) -> Result<LongitudinalCapacitySelectorsV1> {
     let carrier_event = ranked_min(events.iter(), "capacity-carrier-hit", |event| {
         event.idempotency_key.clone()
@@ -2163,10 +2423,9 @@ fn capacity_selectors(
         ));
     }
 
-    let removed = records
+    let removed = removed_content_sha256
         .iter()
-        .flat_map(|record| record.removed.iter())
-        .map(|content| content.content_hash().to_owned())
+        .map(|hash| format!("sha256:{hash}"))
         .collect::<BTreeSet<_>>();
     let mut revision_objects = Vec::new();
     for event in events {
@@ -2571,6 +2830,21 @@ fn validate_append_burst_mix(events: &[ShoreEvent]) -> Result<()> {
 }
 
 fn publish_content(content_store: &ContentArtifacts, content: &PreparedContentV1) -> Result<()> {
+    let bytes = prepared_content_bytes(content)?;
+    match content {
+        PreparedContentV1::ExternalBody { relative_path, .. }
+        | PreparedContentV1::ValidationLog { relative_path, .. } => {
+            content_store.put_note_body(relative_path, &bytes)?;
+        }
+        PreparedContentV1::Object { relative_path, .. } => {
+            let artifact = decode_and_validate_object_artifact(&bytes)?;
+            content_store.put_object(relative_path, &bytes, artifact)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepared_content_bytes(content: &PreparedContentV1) -> Result<Vec<u8>> {
     match content {
         PreparedContentV1::ExternalBody {
             shape,
@@ -2592,10 +2866,7 @@ fn publish_content(content_store: &ContentArtifacts, content: &PreparedContentV1
                     "longitudinal external body regeneration drifted".to_owned(),
                 ));
             }
-            content_store.put_note_body(
-                relative_path,
-                bytes.as_deref().expect("external body has envelope bytes"),
-            )?;
+            Ok(bytes.expect("external body has envelope bytes"))
         }
         PreparedContentV1::Object {
             shape,
@@ -2626,15 +2897,14 @@ fn publish_content(content_store: &ContentArtifacts, content: &PreparedContentV1
                     "longitudinal object artifact regeneration drifted".to_owned(),
                 ));
             }
-            let bytes = serde_json::to_vec(&artifact)?;
-            content_store.put_object(relative_path, &bytes, artifact)?;
+            Ok(serde_json::to_vec(&artifact)?)
         }
         PreparedContentV1::ValidationLog {
             shape,
             block,
             ordinal,
             global_ordinal,
-            relative_path,
+            relative_path: _,
             content_hash,
         } => {
             let body =
@@ -2644,11 +2914,9 @@ fn publish_content(content_store: &ContentArtifacts, content: &PreparedContentV1
                     "longitudinal validation log {ordinal} regeneration drifted"
                 )));
             }
-            let bytes = NoteBodyEnvelope::new(body).to_json_bytes()?;
-            content_store.put_note_body(relative_path, &bytes)?;
+            Ok(NoteBodyEnvelope::new(body).to_json_bytes()?)
         }
     }
-    Ok(())
 }
 
 fn inventory_entry(
@@ -3550,11 +3818,11 @@ mod tests {
     }
 
     #[test]
-    fn longitudinal_l2_superblock_is_ready_and_projects_ten_changes() {
+    fn longitudinal_l2_stream_resumes_an_exact_partial_root() {
         let repo = initialized_repo();
         let activation = crate::session::activate_empty_store_for_qualification(
             repo.path(),
-            "longitudinal-empty-l2-test".to_owned(),
+            "longitudinal-l100-o10k-l2-v1".to_owned(),
             "2026-08-22T00:00:00Z".to_owned(),
             "2026-08-22T00:00:01Z".to_owned(),
             &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
@@ -3567,27 +3835,64 @@ mod tests {
             ),
             (0, 2)
         );
-        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+        assert_eq!(
+            activation.status,
+            crate::session::expected_empty_store_qualification_status(
+                "longitudinal-l100-o10k-l2-v1".to_owned(),
+                "2026-08-22T00:00:00Z".to_owned(),
+                "2026-08-22T00:00:01Z".to_owned(),
+                &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
+            )
+            .unwrap()
+        );
+        let first = write_generated_longitudinal_records_v1(
+            repo.path(),
             LongitudinalRecordShapeV1::CapacityL100O10K,
-            0,
-        ))
+            1,
+        )
         .unwrap();
-        write_longitudinal_records_v1(repo.path(), std::slice::from_ref(&record)).unwrap();
+        assert_eq!((first.events_created, first.events_existing), (1_024, 0));
+        let partial = preflight_longitudinal_l2_capacity_resume_v1(repo.path(), 2).unwrap();
+        assert_eq!(partial.base_events_existing, 1_024);
+        assert_eq!(partial.change_events_existing, 0);
+        assert!(partial.content_existing > 0);
+        let resumed = write_generated_longitudinal_records_v1(
+            repo.path(),
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            2,
+        )
+        .unwrap();
+        assert_eq!(
+            (resumed.events_created, resumed.events_existing),
+            (1_024, 1_024)
+        );
         let base_authority = crate::session::store_capability_for_repo(repo.path()).unwrap();
         assert_eq!(
             (
                 base_authority.cursor.event_count,
                 base_authority.cursor.journal_record_count,
             ),
-            (1_024, 1_026)
+            (2_048, 2_050)
         );
-        let events = prepare_longitudinal_l2_change_events_v1(&[record]).unwrap();
-        let write = write_longitudinal_l2_change_events_v1(repo.path(), events).unwrap();
+        let write = write_generated_longitudinal_l2_change_events_v1(repo.path(), 2).unwrap();
         let final_authority = crate::session::store_capability_for_repo(repo.path()).unwrap();
 
-        assert_eq!((write.events_created, write.events_existing), (210, 0));
-        assert_eq!(write.final_event_count, 1_234);
-        assert_eq!(final_authority.cursor.journal_record_count, 1_236);
+        assert_eq!((write.events_created, write.events_existing), (420, 0));
+        assert_eq!(write.final_event_count, 2_468);
+        assert_eq!(final_authority.cursor.journal_record_count, 2_470);
+        let complete = preflight_longitudinal_l2_capacity_resume_v1(repo.path(), 2).unwrap();
+        assert_eq!(complete.base_events_existing, 2_048);
+        assert_eq!(complete.change_events_existing, 420);
+        let resumed_change =
+            write_generated_longitudinal_l2_change_events_v1(repo.path(), 2).unwrap();
+        assert_eq!(
+            (
+                resumed_change.events_created,
+                resumed_change.events_existing,
+                resumed_change.final_event_count,
+            ),
+            (0, 420, 2_468)
+        );
         assert_eq!(
             base_authority.cursor.capability_set_hash,
             final_authority.cursor.capability_set_hash
@@ -3604,8 +3909,26 @@ mod tests {
                 .projection
                 .changes
                 .len(),
-            10
+            20
         );
+
+        let store_dir = crate::session::store_dir_for_repo(repo.path()).unwrap();
+        let foreign = one_event_record("sha256:foreign")
+            .events
+            .into_iter()
+            .next()
+            .unwrap();
+        EventStore::open(&store_dir)
+            .record_event_once(&foreign)
+            .unwrap();
+        let backend = crate::session::store::backend::StoreBackend::Local(store_dir);
+        let before = backend.journal().list_record_entries().unwrap();
+        assert!(preflight_longitudinal_l2_capacity_resume_v1(repo.path(), 2).is_err());
+        let after = backend.journal().list_record_entries().unwrap();
+        assert_eq!(before.len(), after.len());
+        assert!(before.iter().zip(after).all(|(left, right)| {
+            left.key_digest == right.key_digest && left.bytes == right.bytes
+        }));
     }
 
     #[test]

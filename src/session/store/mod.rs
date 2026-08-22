@@ -18,7 +18,7 @@ pub(in crate::session) mod user_level;
 pub use capabilities::{AuthorityCursorV2, StoreCapabilityInspection, StoreCapabilityStatus};
 pub(crate) use capabilities::{BulkAdoptionManifestV1, ReservedCohortRecordV1};
 pub use event_store::EventWriteOutcome;
-pub(crate) use event_store::{EventStore, SkippedEvent};
+pub(crate) use event_store::{EventStore, EventWriteBatch, SkippedEvent};
 #[cfg(test)]
 pub use fingerprint::compute_revision_fingerprint;
 pub(crate) use fingerprint::worktree_fingerprint_for_files;

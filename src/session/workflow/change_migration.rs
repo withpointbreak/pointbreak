@@ -18,6 +18,8 @@ use crate::session::event::{
     build_revision_relation_asserted,
 };
 use crate::session::store::authority_lock::{STORE_AUTHORITY_LOCK_FILE, StoreAuthorityLock};
+#[cfg(any(test, feature = "bench"))]
+use crate::session::store::capabilities::route_journal_entries;
 use crate::session::store::capabilities::{
     BulkAdoptionCompletionV1, REVIEW_CHANGE_REVISION_COHORT_V1, StoreCapabilityActivationV1,
     build_signed_activation, build_signed_completion, inspect_journal_records,
@@ -1669,6 +1671,44 @@ pub(crate) fn activate_empty_store_for_qualification(
         ));
     }
     Ok(final_authority)
+}
+
+/// Derive the exact capability identities produced by the empty qualification
+/// activation without opening or mutating a store. Resume uses this to reject a
+/// different, otherwise valid L2 authority before it writes anything.
+#[cfg(any(test, feature = "bench"))]
+#[allow(
+    dead_code,
+    reason = "the exact identity oracle is consumed by the bench-gated resume executor"
+)]
+pub(crate) fn expected_empty_store_qualification_status(
+    activation_nonce: String,
+    activation_occurred_at: String,
+    completion_occurred_at: String,
+    signer: &impl EventSigner,
+) -> Result<StoreCapabilityStatus> {
+    let source = route_journal_entries(Vec::new())?.cursor;
+    let manifest = BulkAdoptionManifestV1::from_reserved_records(source, Vec::new())?;
+    let writer = Writer {
+        actor_id: ActorId::new("actor:bulk-adoption-dry-run"),
+        producer: WriterProducer {
+            name: "pointbreak".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    };
+    let activation = build_signed_activation(
+        signer,
+        manifest,
+        activation_nonce,
+        writer.clone(),
+        activation_occurred_at,
+    )?;
+    let completion = build_signed_completion(signer, &activation, writer, completion_occurred_at)?;
+    Ok(StoreCapabilityStatus::Ready {
+        activation_id: activation.activation_id().to_owned(),
+        manifest_hash: activation.manifest_hash().to_owned(),
+        completion_id: completion.completion_id().to_owned(),
+    })
 }
 
 /// Execute a previously frozen migration plan against one resolved store.

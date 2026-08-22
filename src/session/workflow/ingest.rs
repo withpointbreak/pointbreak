@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::event_signature::assemble_and_record_cosignature;
+use super::event_signature::assemble_and_record_cosignature_with_writer;
 use crate::crypto::EventVerificationStatus;
 use crate::error::{Result, ShoreError};
 use crate::session::event::{
@@ -9,6 +9,7 @@ use crate::session::event::{
     stamp_ingest_provenance,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::EventWriteBatch;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
     COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
@@ -115,6 +116,189 @@ pub struct IngestEventsResult {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+/// One admitted ingest writer that accepts already-validated event slices
+/// incrementally. It retains the authority lock and carrier target index, but
+/// owns no whole-batch event buffer.
+pub(crate) struct IngestBatchSession<'a> {
+    event_store: &'a EventStore,
+    batch_writer: EventWriteBatch<'a>,
+    worktree_root: &'a Path,
+    trust: &'a TrustSet,
+    carrier_targets: CarrierTargetIndex,
+    ingest_diagnostics: Vec<ProjectionDiagnostic>,
+    events_created: usize,
+    events_existing: usize,
+    events_created_by_type: BTreeMap<String, usize>,
+}
+
+#[allow(
+    dead_code,
+    reason = "complete replay state is consumed by the bench-gated deterministic stream writer"
+)]
+pub(crate) struct IngestBatchCompletion {
+    pub(crate) events_created: usize,
+    pub(crate) events_existing: usize,
+    pub(crate) events_created_by_type: BTreeMap<String, usize>,
+    pub(crate) events: Vec<ShoreEvent>,
+    pub(crate) state: SessionState,
+    pub(crate) diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+impl<'a> IngestBatchSession<'a> {
+    pub(crate) fn begin(
+        event_store: &'a EventStore,
+        worktree_root: &'a Path,
+        trust: &'a TrustSet,
+    ) -> Result<Self> {
+        Ok(Self {
+            event_store,
+            batch_writer: event_store.begin_current_product_batch()?,
+            worktree_root,
+            trust,
+            carrier_targets: CarrierTargetIndex::default(),
+            ingest_diagnostics: Vec::new(),
+            events_created: 0,
+            events_existing: 0,
+            events_created_by_type: BTreeMap::new(),
+        })
+    }
+
+    /// Append one input-ordered slice whose attribution and signatures were
+    /// already validated. Slices may be supplied one at a time; target lookup
+    /// state survives between calls without retaining the slices themselves.
+    pub(crate) fn record_verified_events(
+        &mut self,
+        stamped: &[ShoreEvent],
+        verification: &mut Vec<IngestEventVerification>,
+    ) -> Result<()> {
+        // The nth non-carrier stamped event corresponds to `verification[n]`:
+        // both are input-ordered with carriers skipped, and carrier rows append.
+        let mut verified_row_cursor = 0usize;
+        for event in stamped {
+            if event.event_type == EventType::EventSignatureRecorded {
+                let (created, existing) = ingest_detached_cosignature(
+                    self.event_store,
+                    &self.batch_writer,
+                    event,
+                    CarrierIngestContext {
+                        targets: &mut self.carrier_targets,
+                    },
+                    self.trust,
+                    verification,
+                    &mut self.ingest_diagnostics,
+                )?;
+                self.events_created += created;
+                self.events_existing += existing;
+                if created > 0 {
+                    *self
+                        .events_created_by_type
+                        .entry(event.event_type.as_str().to_owned())
+                        .or_default() += 1;
+                }
+                continue;
+            }
+
+            let row_index = verified_row_cursor;
+            verified_row_cursor += 1;
+            let outcome = self.batch_writer.record_event_once(event)?;
+            self.carrier_targets
+                .observe_batch_write(self.event_store, event, outcome)?;
+            verification[row_index].write_outcome = Some(outcome);
+            match outcome {
+                EventWriteOutcome::Created => {
+                    self.events_created += 1;
+                    *self
+                        .events_created_by_type
+                        .entry(event.event_type.as_str().to_owned())
+                        .or_default() += 1;
+                }
+                EventWriteOutcome::Existing => self.events_existing += 1,
+                EventWriteOutcome::ExistingDivergentSignature => {
+                    self.events_existing += 1;
+                    let (created, existing) = transcribe_divergent_signature(
+                        self.event_store,
+                        &self.batch_writer,
+                        event,
+                        self.worktree_root,
+                        self.trust,
+                        &mut self.carrier_targets,
+                        &mut self.ingest_diagnostics,
+                    )?;
+                    self.events_existing += existing;
+                    if created > 0 {
+                        self.events_created += created;
+                        *self
+                            .events_created_by_type
+                            .entry(EventType::EventSignatureRecorded.as_str().to_owned())
+                            .or_default() += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Perform the one complete post-write replay, rebuild `state.json`, and
+    /// release the batch authority only after projection publication.
+    pub(crate) fn finish(
+        self,
+        storage: &LocalStorage,
+        store_dir: &Path,
+    ) -> Result<IngestBatchCompletion> {
+        let Self {
+            event_store,
+            batch_writer,
+            carrier_targets,
+            ingest_diagnostics,
+            events_created,
+            events_existing,
+            events_created_by_type,
+            ..
+        } = self;
+        drop(carrier_targets);
+        let events = event_store.list_events()?;
+        let state = SessionState::from_events(&events)?;
+        storage.write_json_atomic(
+            &store_dir.join("state.json"),
+            &state,
+            Durability::Projection,
+        )?;
+        drop(batch_writer);
+        let mut diagnostics = state.diagnostics.clone();
+        diagnostics.extend(ingest_diagnostics);
+        Ok(IngestBatchCompletion {
+            events_created,
+            events_existing,
+            events_created_by_type,
+            events,
+            state,
+            diagnostics,
+        })
+    }
+}
+
+pub(crate) fn prepare_events_for_ingest(
+    events: &[ShoreEvent],
+    verification_policy: EventVerificationPolicy,
+    trust_set: &TrustSet,
+    received_at: &str,
+) -> Result<(Vec<ShoreEvent>, Vec<IngestEventVerification>)> {
+    for event in events {
+        if !is_valid_actor_id(event.writer.actor_id.as_str()) {
+            return Err(ShoreError::InvalidEvent {
+                message: format!(
+                    "ingested event {} has a malformed writer actor id: {}",
+                    event.event_id.as_str(),
+                    event.writer.actor_id.as_str()
+                ),
+            });
+        }
+    }
+    let verification = verify_events_for_ingest(events, verification_policy, trust_set)?;
+    let stamped = stamp_ingest_provenance(events, IngestVia::IngestEvents, received_at);
+    Ok((stamped, verification))
+}
+
 /// Ingest a single pre-formed event. See [`ingest_events`].
 pub fn import_event(options: ImportEventOptions) -> Result<IngestEventsResult> {
     ingest_events(
@@ -153,165 +337,34 @@ pub(crate) fn ingest_events_with_clock(
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    // Reject malformed attribution before any write so the batch is atomic on
-    // attribution: a bad actor id can never partially corrupt the log.
-    for event in &options.events {
-        if !is_valid_actor_id(event.writer.actor_id.as_str()) {
-            return Err(ShoreError::InvalidEvent {
-                message: format!(
-                    "ingested event {} has a malformed writer actor id: {}",
-                    event.event_id.as_str(),
-                    event.writer.actor_id.as_str()
-                ),
-            });
-        }
-    }
-
-    let mut verification = verify_events_for_ingest(
+    // The public Vec contract validates its complete caller-owned input before
+    // the streaming writer opens, preserving attribution atomicity.
+    let (stamped, mut verification) = prepare_events_for_ingest(
         &options.events,
         options.verification_policy,
         &options.trust_set,
-    )?;
-
-    let stamped = stamp_ingest_provenance(
-        &options.events,
-        IngestVia::IngestEvents,
         &clock.received_at(),
-    );
-
-    let event_store = write_store.event_store()?;
-    let worktree_root = write_store.worktree_root();
-    let mut events_created = 0usize;
-    let mut events_existing = 0usize;
-    let mut events_created_by_type: BTreeMap<String, usize> = BTreeMap::new();
-    let mut ingest_diagnostics = Vec::new();
-    let mut write_error = None;
-    // The nth non-carrier stamped event corresponds to `verification[n]`: both are
-    // input-ordered with carriers skipped, and carrier rows only ever append past
-    // the initial segment. Index matching, not event-id matching — duplicate event
-    // ids in one batch would mis-assign by id.
-    let mut verified_row_cursor = 0usize;
-
-    let mut carrier_targets = CarrierTargetIndex::default();
-    for (event_index, event) in stamped.iter().enumerate() {
-        // A standalone detached co-signature carrier from a peer flows through the
-        // family verify-before-store gate, NOT the plain record path: the gate is
-        // the always-on family rule (reject `invalid`, keep `untrusted_key`/`valid`,
-        // drop on absent target), independent of `EventVerificationPolicy`.
-        if event.event_type == EventType::EventSignatureRecorded {
-            match ingest_detached_cosignature(
-                &event_store,
-                event,
-                CarrierIngestContext {
-                    batch: &stamped,
-                    event_index,
-                    targets: &mut carrier_targets,
-                },
-                &options.trust_set,
-                &mut verification,
-                &mut ingest_diagnostics,
-            ) {
-                Ok((created, existing)) => {
-                    events_created += created;
-                    events_existing += existing;
-                    if created > 0 {
-                        *events_created_by_type
-                            .entry(event.event_type.as_str().to_owned())
-                            .or_default() += 1;
-                    }
-                }
-                Err(err) => {
-                    write_error = Some(err);
-                    break;
-                }
-            }
-            continue;
-        }
-
-        let row_index = verified_row_cursor;
-        verified_row_cursor += 1;
-        match event_store.record_event_once(event) {
-            Ok(outcome) => {
-                if let Err(err) =
-                    carrier_targets.observe_batch_write(&event_store, event, event_index, outcome)
-                {
-                    write_error = Some(err);
-                    break;
-                }
-                verification[row_index].write_outcome = Some(outcome);
-                match outcome {
-                    EventWriteOutcome::Created => {
-                        events_created += 1;
-                        *events_created_by_type
-                            .entry(event.event_type.as_str().to_owned())
-                            .or_default() += 1;
-                    }
-                    EventWriteOutcome::Existing => events_existing += 1,
-                    EventWriteOutcome::ExistingDivergentSignature => {
-                        // Class-(b) dissolution: a divergent inline signature over the same
-                        // content record is not a conflict — the store keeps its first-stored
-                        // copy and transcribes the incoming attestation into a co-signature
-                        // carrier, converging the set to both signers with no winner-selection.
-                        events_existing += 1;
-                        match transcribe_divergent_signature(
-                            &event_store,
-                            event,
-                            worktree_root,
-                            &options.trust_set,
-                            &mut carrier_targets,
-                            &mut ingest_diagnostics,
-                        ) {
-                            Ok((created, existing)) => {
-                                events_existing += existing;
-                                if created > 0 {
-                                    events_created += created;
-                                    *events_created_by_type
-                                        .entry(
-                                            EventType::EventSignatureRecorded.as_str().to_owned(),
-                                        )
-                                        .or_default() += 1;
-                                }
-                            }
-                            Err(err) => {
-                                write_error = Some(err);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                write_error = Some(err);
-                break;
-            }
-        }
-    }
-
-    // Rebuild the projection from whatever is durably on disk — even on a
-    // partial-batch failure — so state.json never drifts from the event log.
-    // Release the batch index first so a capacity-scale resume does not retain
-    // its decoded seed alongside the projection rebuild's complete replay.
-    drop(carrier_targets);
-    let events = event_store.list_events()?;
-    let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
     )?;
-    let mut diagnostics = state.diagnostics;
-    diagnostics.extend(ingest_diagnostics);
-
+    let event_store = write_store.event_store()?;
+    let mut session = IngestBatchSession::begin(
+        &event_store,
+        write_store.worktree_root(),
+        &options.trust_set,
+    )?;
+    let write_error = session
+        .record_verified_events(&stamped, &mut verification)
+        .err();
+    let completed = session.finish(&storage, store_dir)?;
     if let Some(err) = write_error {
         return Err(err);
     }
 
     Ok(IngestEventsResult {
-        events_created,
-        events_existing,
-        events_created_by_type,
+        events_created: completed.events_created,
+        events_existing: completed.events_existing,
+        events_created_by_type: completed.events_created_by_type,
         verification,
-        diagnostics,
+        diagnostics: completed.diagnostics,
     })
 }
 
@@ -321,13 +374,12 @@ pub(crate) fn ingest_events_with_clock(
 /// any drop/authorization diagnostics. A carrier is an ordinary event: when stored
 /// it rides the same event-set machinery as every event, with no separate channel.
 struct CarrierIngestContext<'a> {
-    batch: &'a [ShoreEvent],
-    event_index: usize,
     targets: &'a mut CarrierTargetIndex,
 }
 
 fn ingest_detached_cosignature(
     event_store: &EventStore,
+    batch_writer: &EventWriteBatch<'_>,
     event: &ShoreEvent,
     context: CarrierIngestContext<'_>,
     trust: &TrustSet,
@@ -336,11 +388,9 @@ fn ingest_detached_cosignature(
 ) -> Result<(usize, usize)> {
     let payload: EventSignatureRecordedPayload = serde_json::from_value(event.payload.clone())?;
     let (decision, target_context) = {
-        let target = context.targets.resolve(
-            event_store,
-            context.batch,
-            payload.target_event_id.as_str(),
-        )?;
+        let target = context
+            .targets
+            .resolve(event_store, payload.target_event_id.as_str())?;
         let decision = gate_cosignature_for_store(&payload, target, trust)?;
         let target_context =
             target.map(|target| (target.event_id.clone(), target.writer.actor_id.clone()));
@@ -349,13 +399,10 @@ fn ingest_detached_cosignature(
 
     match decision {
         CosignatureGateDecision::Store(status) => {
-            let outcome = event_store.record_event_once(event)?;
-            context.targets.observe_batch_write(
-                event_store,
-                event,
-                context.event_index,
-                outcome,
-            )?;
+            let outcome = batch_writer.record_event_once(event)?;
+            context
+                .targets
+                .observe_batch_write(event_store, event, outcome)?;
             let counts = match outcome {
                 EventWriteOutcome::Created => (1, 0),
                 // A carrier's identity is the full attestation triple, so a divergent
@@ -427,7 +474,6 @@ fn ingest_detached_cosignature(
 #[derive(Clone, Copy, Debug)]
 enum CarrierTargetLocation {
     Seeded(usize),
-    Batch(usize),
     Recorded(usize),
 }
 
@@ -443,7 +489,6 @@ impl CarrierTargetIndex {
     fn resolve<'a>(
         &'a mut self,
         event_store: &EventStore,
-        batch: &'a [ShoreEvent],
         event_id: &str,
     ) -> Result<Option<&'a ShoreEvent>> {
         if !self.seeded {
@@ -462,7 +507,6 @@ impl CarrierTargetIndex {
             .copied()
             .map(|location| match location {
                 CarrierTargetLocation::Seeded(index) => &self.seeded_events[index],
-                CarrierTargetLocation::Batch(index) => &batch[index],
                 CarrierTargetLocation::Recorded(index) => &self.recorded_events[index],
             }))
     }
@@ -471,7 +515,6 @@ impl CarrierTargetIndex {
         &mut self,
         event_store: &EventStore,
         event: &ShoreEvent,
-        event_index: usize,
         outcome: EventWriteOutcome,
     ) -> Result<()> {
         if !self.seeded || self.by_event_id.contains_key(event.event_id.as_str()) {
@@ -479,9 +522,11 @@ impl CarrierTargetIndex {
         }
         match outcome {
             EventWriteOutcome::Created => {
+                let index = self.recorded_events.len();
+                self.recorded_events.push(event.clone());
                 self.by_event_id.insert(
                     event.event_id.as_str().to_owned(),
-                    CarrierTargetLocation::Batch(event_index),
+                    CarrierTargetLocation::Recorded(index),
                 );
             }
             EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
@@ -524,6 +569,7 @@ fn list_events_for_carrier_target(event_store: &EventStore) -> Result<Vec<ShoreE
 /// `(events_created, events_existing)` for the transcribed carrier.
 fn transcribe_divergent_signature(
     event_store: &EventStore,
+    batch_writer: &EventWriteBatch<'_>,
     event: &ShoreEvent,
     worktree_root: &Path,
     trust: &TrustSet,
@@ -554,14 +600,14 @@ fn transcribe_divergent_signature(
     // The carrier is authored by the importer; its envelope writer is the local
     // identity, orthogonal to the embedded attestation.
     let writer = writer_from_options(worktree_root, None);
-    let record = assemble_and_record_cosignature(
-        event_store,
+    let record = assemble_and_record_cosignature_with_writer(
         &stored_target,
         &attesting_signer,
         &attestation,
         writer,
         trust,
         current_timestamp(),
+        |carrier| batch_writer.record_event_once(carrier),
     )?;
 
     match record.decision {
@@ -643,6 +689,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::bench_support::longitudinal::{
+        InteractionActorV1, InteractionLockAcquisitionV1, InteractionLockKindV1,
+        LongitudinalCountingScopeV1,
+    };
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::{EventSignatureBytes, EventSigner, EventVerificationStatus};
     use crate::model::{
@@ -663,6 +713,10 @@ mod tests {
         reader_actor, task_attempt_event, task_input_request_event_with_target, user_response_event,
     };
     use crate::session::signing::test_support::{DeterministicSigner, trust_for_actor};
+    use crate::session::store::backend::StoreBackend;
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
     use crate::session::store::resolution::{resolve_read_store, resolve_store};
     use crate::session::{
         CaptureOptions, EventSignatureRecordOptions, EventVerificationPolicy,
@@ -788,6 +842,44 @@ mod tests {
                 .is_empty(),
             "worktree-local store received no ingested events in linked mode"
         );
+    }
+
+    #[test]
+    fn l2_ingest_uses_one_streaming_writer_admission_for_the_batch() {
+        let (_origin, events) = origin_events();
+        let expected_event_count = events.len();
+        let dest = dest_repo();
+        let backend = StoreBackend::Local(resolved_store_dir(dest.path()));
+        write_capability_fixture_for_test(
+            backend.journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let scope = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
+        scope.record_execution_actor_once(InteractionActorV1::ProductWriter);
+
+        let result = {
+            let _guard = scope.enter();
+            let _actor = scope.enter_actor_scope(InteractionActorV1::ProductWriter);
+            ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap()
+        };
+
+        assert_eq!(result.events_created, expected_event_count);
+        let snapshot = scope.snapshot();
+        assert_eq!(
+            snapshot.counters.directory_entries_walked,
+            u64::try_from(expected_event_count + 2).unwrap()
+        );
+        assert_eq!(snapshot.counters.change_capability_carriers_opened, 4);
+        let physical_authority_locks = snapshot
+            .lock_facts
+            .iter()
+            .filter(|fact| {
+                fact.kind == InteractionLockKindV1::Authority
+                    && fact.acquisition == InteractionLockAcquisitionV1::Physical
+            })
+            .count();
+        assert_eq!(physical_authority_locks, 1);
     }
 
     fn on_disk_state(repo: &Path) -> serde_json::Value {

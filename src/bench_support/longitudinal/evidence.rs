@@ -25,15 +25,16 @@ use super::{
     LongitudinalOperationReceiptV1, LongitudinalOperationV1,
     LongitudinalPackageVerificationReceiptV1, LongitudinalRemovalUpgradeAuthorityCompletionV1,
     LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalRemovalUpgradeReceiptV1,
-    LongitudinalStderrClassificationV1, LongitudinalStderrFailureV1,
-    LongitudinalStoreDataInventoryV1, LongitudinalTierV1, LongitudinalVerifiedPackageKindV1,
-    LongitudinalWorkloadManifestV1, apply_longitudinal_removal_upgrade_v1,
-    longitudinal_authoritative_store_data_inventory_v1, longitudinal_capacity_contract_v1,
-    longitudinal_runner_contract_v1, longitudinal_store_data_inventory_v1,
-    longitudinal_workload_manifest_carry_invariant_sha256_v1,
+    LongitudinalResumedMaterializationV1, LongitudinalStderrClassificationV1,
+    LongitudinalStderrFailureV1, LongitudinalStoreDataInventoryV1, LongitudinalTierV1,
+    LongitudinalVerifiedPackageKindV1, LongitudinalWorkloadManifestV1,
+    apply_longitudinal_removal_upgrade_v1, longitudinal_authoritative_store_data_inventory_v1,
+    longitudinal_capacity_contract_v1, longitudinal_runner_contract_v1,
+    longitudinal_store_data_inventory_v1, longitudinal_workload_manifest_carry_invariant_sha256_v1,
     longitudinal_workload_manifest_upgrade_invariant_sha256_v1,
     materialize_longitudinal_capacity_v1, materialize_longitudinal_workload_v1,
-    verify_longitudinal_materialization_pair_v1, verify_longitudinal_materializer_equivalence_v1,
+    resume_longitudinal_capacity_v1, verify_longitudinal_materialization_pair_v1,
+    verify_longitudinal_materializer_equivalence_v1,
 };
 use crate::bench_support::foundation::{
     QualificationFilesystemDispositionV1, classify_qualification_filesystem,
@@ -44,14 +45,14 @@ use crate::keys::FileEd25519Signer;
 use crate::model::ObjectId;
 use crate::session::benchmark::{
     append_longitudinal_contention_writer_v1, append_longitudinal_event_slice_v1,
-    prepare_longitudinal_l2_capacity_change_events_v1, read_longitudinal_carrier_by_key_v1,
-    stage_longitudinal_append_records_v1, write_longitudinal_l2_change_events_v1,
+    preflight_longitudinal_l2_capacity_resume_v1, read_longitudinal_carrier_by_key_v1,
+    stage_longitudinal_append_records_v1, write_generated_longitudinal_l2_change_events_v1,
 };
 use crate::session::{
     AuthorityCursorV2, SessionState, StoreCapabilityStatus, StoreMode,
     activate_empty_store_for_qualification, allowed_signers_path_for_repo, event_log_head_marker,
-    read_bound_object_artifact, read_events, set_store_mode_for_repo, store_dir_for_repo,
-    store_id_index,
+    expected_empty_store_qualification_status, read_bound_object_artifact, read_events,
+    resolve_store_mode_for_repo, set_store_mode_for_repo, store_dir_for_repo, store_id_index,
 };
 
 pub const LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1: &str = "longitudinal-evidence-package.json";
@@ -770,27 +771,15 @@ pub fn materialize_longitudinal_l2_capacity_evidence_root_v1(
     {
         return Err(LongitudinalEvidenceError::InvalidReceipt);
     }
-    let change_events = prepare_longitudinal_l2_capacity_change_events_v1()
+    let write = write_generated_longitudinal_l2_change_events_v1(&options.root, 100)
         .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
-    let change_count = change_events
-        .iter()
-        .filter(|event| event.event_type == crate::session::event::EventType::ChangeDeclared)
-        .count() as u64;
-    let membership_count = change_events
-        .iter()
-        .filter(|event| {
-            event.event_type == crate::session::event::EventType::ChangeMembershipAsserted
-        })
-        .count() as u64;
-    let relation_count = change_events
-        .iter()
-        .filter(|event| {
-            event.event_type == crate::session::event::EventType::ChangeRevisionRelationAsserted
-        })
-        .count() as u64;
-    let change_authority_event_count = change_events.len() as u64;
-    let write = write_longitudinal_l2_change_events_v1(&options.root, change_events)
-        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let change_count = write.change_count;
+    let membership_count = write.membership_count;
+    let relation_count = write.relation_count;
+    let change_authority_event_count = change_count
+        .checked_add(membership_count)
+        .and_then(|count| count.checked_add(relation_count))
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
     if write.events_created != change_authority_event_count || write.events_existing != 0 {
         return Err(LongitudinalEvidenceError::InvalidReceipt);
     }
@@ -820,6 +809,141 @@ pub fn materialize_longitudinal_l2_capacity_evidence_root_v1(
         change_count,
         membership_count,
         relation_count,
+        change_authority_event_count,
+        final_inventory,
+        receipt_sha256: String::new(),
+    };
+    l2_materialization.receipt_sha256 = l2_materialization.canonical_sha256()?;
+    l2_materialization.validate()?;
+    Ok(LongitudinalL2CapacityMaterializationArtifactsV1 {
+        source_materialization,
+        l2_materialization,
+    })
+}
+
+/// Resume the one deterministic current-capability L100-O10K evidence root in
+/// place. All existing capability, event, and content carriers are proven to be
+/// an exact subset before the first mutation.
+pub fn resume_longitudinal_l2_capacity_evidence_root_v1(
+    options: LongitudinalCapacityEvidenceMaterializeOptionsV1,
+) -> Result<LongitudinalL2CapacityMaterializationArtifactsV1, LongitudinalEvidenceError> {
+    if options.subject
+        != LongitudinalCapacitySubjectV1::Companion(LongitudinalCapacityProfileV1::L100O10K)
+        || options.c524_gate.is_some()
+        || options.c524_gate_inputs.is_some()
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    validate_existing_materialization_boundary(
+        &options.root,
+        &options.source_root,
+        &options.runner,
+        &options.execution,
+    )?;
+    if resolve_store_mode_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?
+        .mode
+        != StoreMode::Ephemeral
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+    let expected_status = expected_empty_store_qualification_status(
+        "longitudinal-l100-o10k-l2-v1".to_owned(),
+        "2026-08-22T00:00:00Z".to_owned(),
+        "2026-08-22T00:00:01Z".to_owned(),
+        &FileEd25519Signer::from_seed([0x62; 32]),
+    )
+    .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let initial_authority = crate::session::store_capability_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if initial_authority.status != expected_status
+        || initial_authority.minimum_reader_profile.as_deref() != Some("review_change_revision_v1")
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+    let subset = preflight_longitudinal_l2_capacity_resume_v1(&options.root, 100)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+
+    let resumed =
+        resume_longitudinal_capacity_v1(super::LongitudinalCapacityMaterializeOptionsV1::new(
+            &options.root,
+            LongitudinalCapacityProfileV1::L100O10K,
+            options.execution,
+        ))
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if resumed.events_existing != subset.base_events_existing
+        || resumed.events_created.checked_add(resumed.events_existing) != Some(102_400)
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let source_materialization = match resumed.materialization {
+        LongitudinalResumedMaterializationV1::Capacity(receipt)
+            if receipt.manifest.subject
+                == LongitudinalCapacitySubjectV1::Companion(
+                    LongitudinalCapacityProfileV1::L100O10K,
+                ) =>
+        {
+            receipt
+        }
+        _ => return Err(LongitudinalEvidenceError::InvalidReceipt),
+    };
+    let base_authority = crate::session::store_capability_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if base_authority.status != expected_status
+        || base_authority.minimum_reader_profile.as_deref() != Some("review_change_revision_v1")
+        || base_authority.cursor.event_count != 102_400
+        || base_authority.cursor.journal_record_count != 102_402
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+
+    let write = write_generated_longitudinal_l2_change_events_v1(&options.root, 100)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let change_authority_event_count = write
+        .change_count
+        .checked_add(write.membership_count)
+        .and_then(|count| count.checked_add(write.relation_count))
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+    if write.events_existing != subset.change_events_existing
+        || write.events_created.checked_add(write.events_existing)
+            != Some(change_authority_event_count)
+        || change_authority_event_count != 21_000
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let final_authority = crate::session::store_capability_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if final_authority.status != expected_status
+        || final_authority.minimum_reader_profile.as_deref() != Some("review_change_revision_v1")
+        || write.final_event_count != final_authority.cursor.event_count
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let (activation_id, capability_manifest_hash, completion_id) = match expected_status {
+        StoreCapabilityStatus::Ready {
+            activation_id,
+            manifest_hash,
+            completion_id,
+        } => (activation_id, manifest_hash, completion_id),
+        _ => return Err(LongitudinalEvidenceError::InvalidReceipt),
+    };
+    let final_inventory = longitudinal_authoritative_store_data_inventory_v1(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let mut l2_materialization = LongitudinalL2CapacityMaterializationReceiptV1 {
+        schema: LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
+        profile: LongitudinalCapacityProfileV1::L100O10K,
+        root_identity: source_materialization.root_identity.clone(),
+        source_manifest_sha256: source_materialization.manifest.manifest_sha256.clone(),
+        source_materialization_sha256: source_materialization.materialization_sha256.clone(),
+        base_authority_cursor: base_authority.cursor,
+        final_authority_cursor: final_authority.cursor,
+        minimum_reader_profile: "review_change_revision_v1".to_owned(),
+        activation_id,
+        capability_manifest_hash,
+        completion_id,
+        change_count: write.change_count,
+        membership_count: write.membership_count,
+        relation_count: write.relation_count,
         change_authority_event_count,
         final_inventory,
         receipt_sha256: String::new(),
@@ -2448,6 +2572,28 @@ fn validate_materialization_boundary(
         .validate()
         .map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
     validate_fresh_local_root(root, source_root)?;
+    validate_materialization_execution_identity(root, source_root, runner, execution)
+}
+
+fn validate_existing_materialization_boundary(
+    root: &Path,
+    source_root: &Path,
+    runner: &Path,
+    execution: &LongitudinalExecutionIdentityV1,
+) -> Result<(), LongitudinalEvidenceError> {
+    execution
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
+    validate_existing_local_root(root, source_root)?;
+    validate_materialization_execution_identity(root, source_root, runner, execution)
+}
+
+fn validate_materialization_execution_identity(
+    root: &Path,
+    source_root: &Path,
+    runner: &Path,
+    execution: &LongitudinalExecutionIdentityV1,
+) -> Result<(), LongitudinalEvidenceError> {
     require_unprotected_environment()?;
     let source_root =
         fs::canonicalize(source_root).map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
@@ -2493,24 +2639,7 @@ fn validate_fresh_local_root(
         root.file_name()
             .ok_or(LongitudinalEvidenceError::UnsafeRoot)?,
     );
-    if candidate.starts_with(&source_root)
-        || root
-            .components()
-            .filter_map(|component| component.as_os_str().to_str())
-            .any(|component| {
-                matches!(
-                    component.to_ascii_lowercase().as_str(),
-                    ".pointbreak"
-                        | ".gumbo"
-                        | ".git"
-                        | "dropbox"
-                        | "onedrive"
-                        | "icloud drive"
-                        | "google drive"
-                        | "syncthing"
-                )
-            })
-    {
+    if candidate.starts_with(&source_root) || has_protected_root_component(root) {
         return Err(LongitudinalEvidenceError::ProtectedRoot);
     }
     let filesystem = qualification_filesystem_name(&parent);
@@ -2521,6 +2650,54 @@ fn validate_fresh_local_root(
         return Err(LongitudinalEvidenceError::UnsafeRoot);
     }
     Ok(())
+}
+
+fn validate_existing_local_root(
+    root: &Path,
+    source_root: &Path,
+) -> Result<(), LongitudinalEvidenceError> {
+    if !root.is_absolute() || !root.is_dir() {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    if root
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    let root = fs::canonicalize(root).map_err(|_| LongitudinalEvidenceError::UnsafeRoot)?;
+    let source_root =
+        fs::canonicalize(source_root).map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
+    if root.starts_with(&source_root) || has_protected_root_component(&root) {
+        return Err(LongitudinalEvidenceError::ProtectedRoot);
+    }
+    let parent = root.parent().ok_or(LongitudinalEvidenceError::UnsafeRoot)?;
+    let filesystem = qualification_filesystem_name(parent);
+    if filesystem == "unavailable"
+        || classify_qualification_filesystem(&filesystem)
+            != QualificationFilesystemDispositionV1::LocalProofEligible
+    {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    Ok(())
+}
+
+fn has_protected_root_component(path: &Path) -> bool {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .any(|component| {
+            matches!(
+                component.to_ascii_lowercase().as_str(),
+                ".pointbreak"
+                    | ".gumbo"
+                    | ".git"
+                    | "dropbox"
+                    | "onedrive"
+                    | "icloud drive"
+                    | "google drive"
+                    | "syncthing"
+            )
+        })
 }
 
 fn initialize_evidence_root(root: &Path) -> Result<(), LongitudinalEvidenceError> {

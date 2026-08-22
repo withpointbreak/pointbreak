@@ -211,6 +211,29 @@ pub(crate) fn assemble_and_record_cosignature(
     trust: &TrustSet,
     occurred_at: String,
 ) -> Result<CosignatureRecord> {
+    assemble_and_record_cosignature_with_writer(
+        target,
+        attesting_signer,
+        attestation,
+        writer,
+        trust,
+        occurred_at,
+        |carrier| event_store.record_event_once(carrier),
+    )
+}
+
+/// Assemble and gate a co-signature while delegating the admitted append. The
+/// ingest workflow supplies its streaming batch writer here so transcribed
+/// carriers share the batch's one authority lock and capability admission.
+pub(crate) fn assemble_and_record_cosignature_with_writer(
+    target: &ShoreEvent,
+    attesting_signer: &SignerId,
+    attestation: &EventSignature,
+    writer: Writer,
+    trust: &TrustSet,
+    occurred_at: String,
+    record_event_once: impl FnOnce(&ShoreEvent) -> Result<EventWriteOutcome>,
+) -> Result<CosignatureRecord> {
     let target_event_record_hash = target.event_record_hash()?;
     let payload = EventSignatureRecordedPayload {
         target_event_id: target.event_id.clone(),
@@ -237,7 +260,7 @@ pub(crate) fn assemble_and_record_cosignature(
 
     let decision = gate_cosignature_for_store(&payload, Some(target), trust)?;
     let write_outcome = if decision.stores() {
-        Some(event_store.record_event_once(&carrier)?)
+        Some(record_event_once(&carrier)?)
     } else {
         None
     };

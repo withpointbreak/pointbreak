@@ -24,7 +24,8 @@ use crate::bench_support::longitudinal::contract::{
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::benchmark::{
     LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
-    upgrade_longitudinal_removals_v1, write_longitudinal_records_v1,
+    upgrade_longitudinal_removals_v1, write_generated_longitudinal_records_v1,
+    write_longitudinal_records_v1,
 };
 use crate::session::{
     carrier_target_full_scan_count, format_rfc3339_utc_millis,
@@ -513,13 +514,8 @@ pub fn materialize_longitudinal_capacity_v1(
         LongitudinalCapacityProfileV1::C262 => (LongitudinalRecordShapeV1::CapacityV1, 1_024),
         LongitudinalCapacityProfileV1::C524 => (LongitudinalRecordShapeV1::CapacityV1, 2_048),
     };
-    let records = (0..block_count)
-        .map(|block| {
-            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(shape, block))
-                .map_err(store_error)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let write = write_longitudinal_records_v1(&options.root, &records).map_err(store_error)?;
+    let write = write_generated_longitudinal_records_v1(&options.root, shape, block_count)
+        .map_err(store_error)?;
     if write.events_created != write.event_count
         || write.events_existing != 0
         || write.event_count != requirement.event_count
@@ -668,13 +664,8 @@ fn resume_longitudinal_capacity_inner_v1(
         LongitudinalCapacityProfileV1::C262 => (LongitudinalRecordShapeV1::CapacityV1, 1_024),
         LongitudinalCapacityProfileV1::C524 => (LongitudinalRecordShapeV1::CapacityV1, 2_048),
     };
-    let records = (0..block_count)
-        .map(|block| {
-            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(shape, block))
-                .map_err(store_error)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let write = write_longitudinal_records_v1(&options.root, &records).map_err(store_error)?;
+    let write = write_generated_longitudinal_records_v1(&options.root, shape, block_count)
+        .map_err(store_error)?;
     let counts = MaterializationWriteCountsV1 {
         events_created: write.events_created,
         events_existing: write.events_existing,

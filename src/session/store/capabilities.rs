@@ -777,14 +777,6 @@ pub(crate) fn validate_bounded_change_capability_pair(
                 "published capability activation carrier is absent: {activation_logical_key}"
             ))
         })?;
-    let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&activation_bytes)?;
-    activation.validate()?;
-    if activation.logical_key() != activation_logical_key {
-        return capability_error(
-            "published capability activation does not match its bounded logical key",
-        );
-    }
-
     #[cfg(any(test, feature = "longitudinal-counting"))]
     record_change_capability_carriers_opened(1);
     let completion_bytes = journal
@@ -794,12 +786,37 @@ pub(crate) fn validate_bounded_change_capability_pair(
                 "published bulk-adoption completion carrier is absent: {completion_logical_key}"
             ))
         })?;
-    let completion: BulkAdoptionCompletionV1 = serde_json::from_slice(&completion_bytes)?;
+    validate_bounded_change_capability_records(
+        activation_logical_key,
+        completion_logical_key,
+        &activation_bytes,
+        &completion_bytes,
+    )
+}
+
+fn validate_bounded_change_capability_records(
+    activation_logical_key: &str,
+    completion_logical_key: &str,
+    activation_bytes: &[u8],
+    completion_bytes: &[u8],
+) -> Result<BoundedChangeCapabilityPairV1> {
+    let activation: StoreCapabilityActivationV1 = serde_json::from_slice(activation_bytes)?;
+    activation.validate()?;
+    if activation.logical_key() != activation_logical_key {
+        return capability_error(
+            "published capability activation does not match its bounded logical key",
+        );
+    }
+
+    let completion: BulkAdoptionCompletionV1 = serde_json::from_slice(completion_bytes)?;
     completion.validate()?;
     if completion.logical_key() != completion_logical_key {
         return capability_error(
             "published bulk-adoption completion does not match its bounded logical key",
         );
+    }
+    if completion.writer.actor_id != activation.writer.actor_id {
+        return capability_error("capability activation and completion require the same writer");
     }
     if completion.activation_id != activation.activation_id
         || completion.bulk_adoption_manifest_hash != activation.bulk_adoption_manifest_hash
@@ -819,8 +836,76 @@ pub(crate) fn validate_bounded_change_capability_pair(
         manifest_hash: activation.bulk_adoption_manifest_hash,
         completion_id: completion.completion_id,
         minimum_reader_profile: activation.minimum_reader_profile,
-        activation_record_sha256: format!("sha256:{}", sha256_bytes_hex(&activation_bytes)),
-        completion_record_sha256: format!("sha256:{}", sha256_bytes_hex(&completion_bytes)),
+        activation_record_sha256: format!("sha256:{}", sha256_bytes_hex(activation_bytes)),
+        completion_record_sha256: format!("sha256:{}", sha256_bytes_hex(completion_bytes)),
+    })
+}
+
+fn expected_completion_logical_key(activation: &StoreCapabilityActivationV1) -> Result<String> {
+    // One frozen migration plan authors both controls, so the activation actor
+    // supplies the last identity field needed to address the completion. Keep
+    // that production invariant explicit: without it writer admission could
+    // locate completion only by enumerating the Journal.
+    let covered_record_set_hash =
+        reserved_record_set_hash(&activation.bulk_adoption_manifest.reserved_records)?;
+    let completion_id = format!(
+        "bulk-adoption-completion:sha256:{}",
+        sha256_bytes_hex(&canonical_json_bytes(&serde_json::to_value(
+            CompletionIdentityView {
+                schema: "pointbreak.bulk-adoption-completion-identity",
+                version: 1,
+                activation_id: &activation.activation_id,
+                bulk_adoption_manifest_hash: &activation.bulk_adoption_manifest_hash,
+                covered_record_set_hash: &covered_record_set_hash,
+                actor_id: activation.writer.actor_id.as_str(),
+            },
+        )?)?),
+    );
+    Ok(format!("bulk_adoption_completion:{completion_id}"))
+}
+
+fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabilityStatus> {
+    if !journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+        return Ok(StoreCapabilityStatus::MigrationRequired);
+    }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_change_capability_carriers_opened(1);
+    let activation_bytes = journal
+        .read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)?
+        .ok_or_else(|| {
+            ShoreError::Message(
+                "published root capability activation disappeared during writer admission"
+                    .to_owned(),
+            )
+        })?;
+    let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&activation_bytes)?;
+    activation.validate()?;
+    if activation.logical_key() != ROOT_ACTIVATION_LOGICAL_KEY_V1 {
+        return capability_error(
+            "published capability activation does not match its bounded logical key",
+        );
+    }
+
+    let completion_logical_key = expected_completion_logical_key(&activation)?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_change_capability_carriers_opened(1);
+    let Some(completion_bytes) = journal.read_event_bytes(&completion_logical_key)? else {
+        return Ok(StoreCapabilityStatus::MigrationInProgress {
+            activation_id: activation.activation_id,
+            manifest_hash: activation.bulk_adoption_manifest_hash,
+        });
+    };
+    let pair = validate_bounded_change_capability_records(
+        ROOT_ACTIVATION_LOGICAL_KEY_V1,
+        &completion_logical_key,
+        &activation_bytes,
+        &completion_bytes,
+    )?;
+    Ok(StoreCapabilityStatus::Ready {
+        activation_id: pair.activation_id,
+        manifest_hash: pair.manifest_hash,
+        completion_id: pair.completion_id,
     })
 }
 
@@ -973,8 +1058,7 @@ pub(crate) fn preflight_event_only_product(journal: &dyn Journal) -> Result<()> 
 /// root may proceed. Keeping the checks separate prevents either writer family
 /// from silently crossing the minimum-reader boundary.
 pub(crate) fn preflight_change_writer(journal: &dyn Journal) -> Result<()> {
-    let inspection = inspect_change_reader_journal_records(journal)?;
-    match inspection.status {
+    match bounded_writer_capability_status(journal)? {
         StoreCapabilityStatus::Ready { .. } => Ok(()),
         StoreCapabilityStatus::MigrationRequired => capability_error(
             "migration_required; Change writes require an explicit completed store migration",
@@ -1014,17 +1098,12 @@ pub(crate) fn event_entries_for_event_only_product(
 /// pre-activation and complete Change cohorts. The transition state remains a
 /// hard stop: no command may observe or append against partial authority.
 pub(crate) fn preflight_current_product(journal: &dyn Journal) -> Result<()> {
-    let Some(inspection) = inspect_activated_journal_records(journal)? else {
-        return Ok(());
-    };
-    match inspection.status {
+    match bounded_writer_capability_status(journal)? {
         StoreCapabilityStatus::Ready { .. } => Ok(()),
         StoreCapabilityStatus::MigrationInProgress { .. } => capability_error(
             "migration_in_progress; normal product routes refuse partial Change authority",
         ),
-        StoreCapabilityStatus::MigrationRequired => {
-            capability_error("activation root disappeared during current-product preflight")
-        }
+        StoreCapabilityStatus::MigrationRequired => Ok(()),
     }
 }
 
@@ -1214,6 +1293,9 @@ fn validate_completion(
     active: &StoreCapabilityActivationV1,
     entries: &[JournalEntry],
 ) -> Result<()> {
+    if completion.writer.actor_id != active.writer.actor_id {
+        return capability_error("capability activation and completion require the same writer");
+    }
     if completion.activation_id != active.activation_id
         || completion.bulk_adoption_manifest_hash != active.bulk_adoption_manifest_hash
     {
@@ -1594,6 +1676,9 @@ pub(crate) fn build_signed_completion(
     writer: Writer,
     occurred_at: String,
 ) -> Result<BulkAdoptionCompletionV1> {
+    if writer.actor_id != activation.writer.actor_id {
+        return capability_error("capability activation and completion require the same writer");
+    }
     let mut completion = BulkAdoptionCompletionV1 {
         schema: COMPLETION_SCHEMA_V1.to_owned(),
         version: 1,
@@ -2232,6 +2317,105 @@ mod tests {
         assert_eq!(counters.directory_entries_walked, 0);
         assert_eq!(counters.carrier_opens, 2);
         assert_eq!(counters.change_capability_carriers_opened, 2);
+    }
+
+    #[test]
+    fn current_and_change_writer_admission_never_enumerate_the_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(
+            backend.journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+
+        for admit in [
+            preflight_current_product as fn(&dyn Journal) -> Result<()>,
+            preflight_change_writer,
+        ] {
+            let scope = LongitudinalCountingScopeV1::new("8".repeat(64)).unwrap();
+            {
+                let _guard = scope.enter();
+                admit(backend.journal().as_ref()).unwrap();
+            }
+            let counters = scope.snapshot().counters;
+            assert_eq!(counters.directory_entries_walked, 0);
+            assert_eq!(counters.carrier_opens, 2);
+            assert_eq!(counters.change_capability_carriers_opened, 2);
+        }
+    }
+
+    #[test]
+    fn bounded_writer_admission_preserves_l0_m1_and_corrupt_refusals() {
+        let l0 = tempfile::tempdir().unwrap();
+        let l0_backend = StoreBackend::Local(l0.path().to_path_buf());
+        preflight_current_product(l0_backend.journal().as_ref()).unwrap();
+        let error = preflight_change_writer(l0_backend.journal().as_ref())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("migration_required"), "{error}");
+
+        let m1 = tempfile::tempdir().unwrap();
+        let m1_backend = StoreBackend::Local(m1.path().to_path_buf());
+        write_capability_fixture_for_test(
+            m1_backend.journal().as_ref(),
+            CapabilityFixtureState::M1,
+        )
+        .unwrap();
+        for admit in [
+            preflight_current_product as fn(&dyn Journal) -> Result<()>,
+            preflight_change_writer,
+        ] {
+            let error = admit(m1_backend.journal().as_ref())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("migration_in_progress"), "{error}");
+        }
+
+        let corrupt = tempfile::tempdir().unwrap();
+        let corrupt_backend = StoreBackend::Local(corrupt.path().to_path_buf());
+        write_corrupt_capability_fixture_for_test(
+            corrupt_backend.journal().as_ref(),
+            CapabilityFixtureCorruption::UnsupportedMinimumReaderProfile,
+        )
+        .unwrap();
+        for admit in [
+            preflight_current_product as fn(&dyn Journal) -> Result<()>,
+            preflight_change_writer,
+        ] {
+            assert!(admit(corrupt_backend.journal().as_ref()).is_err());
+        }
+    }
+
+    #[test]
+    fn completion_writer_must_match_the_activation_writer() {
+        let signer = crate::crypto::TestEd25519Signer::from_seed([0x41; 32]);
+        let manifest = BulkAdoptionManifestV1 {
+            schema: BULK_MANIFEST_SCHEMA_V1.to_owned(),
+            version: 1,
+            cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
+            source_authority_cursor: route_journal_entries(Vec::new()).unwrap().cursor,
+            reserved_records: Vec::new(),
+        };
+        let activation = signed_activation(&signer, manifest).unwrap();
+        let different_writer = Writer {
+            actor_id: ActorId::new("actor:different-completion-writer"),
+            producer: WriterProducer {
+                name: "pointbreak-qualification".to_owned(),
+                version: "1".to_owned(),
+            },
+        };
+
+        let error = build_signed_completion(
+            &signer,
+            &activation,
+            different_writer,
+            "2026-08-04T00:00:01Z".to_owned(),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("same writer"), "{error}");
     }
 
     #[test]

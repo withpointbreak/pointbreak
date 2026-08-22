@@ -128,8 +128,6 @@ pub use change::{
     create_change, join_revision_to_change, link_changes, withdraw_change_revision_relation,
     withdraw_revision_from_change,
 };
-#[cfg(feature = "bench")]
-pub(crate) use change_migration::activate_empty_store_for_qualification;
 pub use change_migration::{
     BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1, BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1,
     BULK_ADOPTION_BACKUP_RESTORE_RECEIPT_SCHEMA_V1, BULK_ADOPTION_DRY_RUN_SCHEMA_V1,
@@ -142,6 +140,10 @@ pub use change_migration::{
     BulkAdoptionOverlapIdentityDecisionV1, BulkAdoptionOwnerDecisionManifestV1,
     BulkAdoptionRetainedAllocationV1, BulkAdoptionRetainedManifestV1, dry_run_bulk_adoption,
     migrate_bulk_adoption, restore_bulk_adoption_backup,
+};
+#[cfg(feature = "bench")]
+pub(crate) use change_migration::{
+    activate_empty_store_for_qualification, expected_empty_store_qualification_status,
 };
 pub use change_read::{
     ChangeReaderPresentationV1, ChangeReaderReadyV1, ChangeReaderStateV1,
@@ -173,10 +175,12 @@ pub(crate) use history::{
     MatchKind, history_entries_from_selected_events, match_kind_for, range_bound,
     resolve_assessment_value, resolve_type_value, tag_completion_key,
 };
-#[cfg(feature = "bench")]
-pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
+};
+#[cfg(feature = "bench")]
+pub(in crate::session) use ingest::{
+    IngestBatchSession, ingest_events_with_clock, prepare_events_for_ingest,
 };
 #[cfg(feature = "bench")]
 pub(crate) use ingest::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
