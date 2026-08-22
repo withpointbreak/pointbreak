@@ -23,7 +23,8 @@ use crate::bench_support::longitudinal::contract::{
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::benchmark::{
-    LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
+    LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, LongitudinalWriteReceiptV1,
+    prepare_longitudinal_record_v1, resume_generated_longitudinal_l2_base_records_v1,
     upgrade_longitudinal_removals_v1, write_generated_longitudinal_records_v1,
     write_longitudinal_records_v1,
 };
@@ -501,12 +502,6 @@ pub fn materialize_longitudinal_capacity_v1(
     options: LongitudinalCapacityMaterializeOptionsV1,
 ) -> Result<LongitudinalCapacityMaterializationReceiptV1, LongitudinalMaterializeError> {
     validate_frozen_inputs(&options.public_seed_hex, &options.clock_identity)?;
-    let contract = longitudinal_capacity_contract_v1();
-    let requirement = contract
-        .profiles
-        .iter()
-        .find(|requirement| requirement.profile == options.profile)
-        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
     let (shape, block_count) = match options.profile {
         LongitudinalCapacityProfileV1::L100O10K => {
             (LongitudinalRecordShapeV1::CapacityL100O10K, 100)
@@ -516,9 +511,27 @@ pub fn materialize_longitudinal_capacity_v1(
     };
     let write = write_generated_longitudinal_records_v1(&options.root, shape, block_count)
         .map_err(store_error)?;
-    if write.events_created != write.event_count
-        || write.events_existing != 0
-        || write.event_count != requirement.event_count
+    if write.events_created != write.event_count || write.events_existing != 0 {
+        return Err(LongitudinalMaterializeError::Store(
+            "strict capacity counts drifted from the frozen profile".to_owned(),
+        ));
+    }
+
+    build_longitudinal_capacity_materialization_receipt_v1(options, write)
+}
+
+pub(crate) fn build_longitudinal_capacity_materialization_receipt_v1(
+    options: LongitudinalCapacityMaterializeOptionsV1,
+    write: LongitudinalWriteReceiptV1,
+) -> Result<LongitudinalCapacityMaterializationReceiptV1, LongitudinalMaterializeError> {
+    validate_frozen_inputs(&options.public_seed_hex, &options.clock_identity)?;
+    let contract = longitudinal_capacity_contract_v1();
+    let requirement = contract
+        .profiles
+        .iter()
+        .find(|requirement| requirement.profile == options.profile)
+        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
+    if write.event_count != requirement.event_count
         || write.revision_count != requirement.revision_count
         || write.object_artifact_count != requirement.object_artifact_count
         || write.task_attempt_count != requirement.task_attempt_count
@@ -528,7 +541,7 @@ pub fn materialize_longitudinal_capacity_v1(
         || write.decoded_object_target_bytes != requirement.decoded_object_target_bytes
     {
         return Err(LongitudinalMaterializeError::Store(
-            "strict capacity counts drifted from the frozen profile".to_owned(),
+            "capacity counts drifted from the frozen profile".to_owned(),
         ));
     }
 
@@ -651,12 +664,6 @@ fn resume_longitudinal_capacity_inner_v1(
     options: LongitudinalCapacityMaterializeOptionsV1,
 ) -> Result<ResumedCapacityMaterializationV1, LongitudinalMaterializeError> {
     validate_frozen_inputs(&options.public_seed_hex, &options.clock_identity)?;
-    let contract = longitudinal_capacity_contract_v1();
-    let requirement = contract
-        .profiles
-        .iter()
-        .find(|requirement| requirement.profile == options.profile)
-        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
     let (shape, block_count) = match options.profile {
         LongitudinalCapacityProfileV1::L100O10K => {
             (LongitudinalRecordShapeV1::CapacityL100O10K, 100)
@@ -664,8 +671,14 @@ fn resume_longitudinal_capacity_inner_v1(
         LongitudinalCapacityProfileV1::C262 => (LongitudinalRecordShapeV1::CapacityV1, 1_024),
         LongitudinalCapacityProfileV1::C524 => (LongitudinalRecordShapeV1::CapacityV1, 2_048),
     };
-    let write = write_generated_longitudinal_records_v1(&options.root, shape, block_count)
-        .map_err(store_error)?;
+    let write = if options.profile == LongitudinalCapacityProfileV1::L100O10K {
+        resume_generated_longitudinal_l2_base_records_v1(&options.root, block_count)
+            .map_err(store_error)?
+            .1
+    } else {
+        write_generated_longitudinal_records_v1(&options.root, shape, block_count)
+            .map_err(store_error)?
+    };
     let counts = MaterializationWriteCountsV1 {
         events_created: write.events_created,
         events_existing: write.events_existing,
@@ -673,58 +686,13 @@ fn resume_longitudinal_capacity_inner_v1(
     if write
         .events_created
         .checked_add(write.events_existing)
-        .is_none_or(|count| count != requirement.event_count)
-        || write.event_count != requirement.event_count
-        || write.revision_count != requirement.revision_count
-        || write.object_artifact_count != requirement.object_artifact_count
-        || write.task_attempt_count != requirement.task_attempt_count
-        || write.body_fact_count != requirement.body_fact_count
-        || write.external_body_count != requirement.external_body_count
-        || write.decoded_body_bytes != requirement.decoded_body_bytes
-        || write.decoded_object_target_bytes != requirement.decoded_object_target_bytes
+        .is_none_or(|count| count != write.event_count)
     {
         return Err(LongitudinalMaterializeError::Store(
-            "capacity counts drifted from the frozen profile".to_owned(),
+            "capacity resume write counts drifted from its receipt".to_owned(),
         ));
     }
-
-    let probe_schedule = contract.probes.clone();
-    let schedule_sha256 = canonical_sha256(&probe_schedule)?;
-    let mut manifest = LongitudinalCapacityManifestV1 {
-        schema: contract.schema,
-        contract_sha256: contract.contract_sha256,
-        execution: options.execution,
-        public_seed_hex: options.public_seed_hex,
-        subject: LongitudinalCapacitySubjectV1::Companion(options.profile),
-        event_count: write.event_count,
-        revision_count: write.revision_count,
-        object_artifact_count: write.object_artifact_count,
-        task_attempt_count: write.task_attempt_count,
-        body_fact_count: write.body_fact_count,
-        external_body_count: write.external_body_count,
-        decoded_body_bytes: write.decoded_body_bytes,
-        decoded_object_target_bytes: write.decoded_object_target_bytes,
-        ordered_events: write.ordered_events,
-        event_carriers: write.event_carriers,
-        content_inventory: write.content_inventory,
-        removed_content_sha256: write.removed_content_sha256,
-        selectors: write.capacity_selectors,
-        probe_schedule,
-        schedule_sha256,
-        manifest_sha256: String::new(),
-    };
-    manifest.manifest_sha256 = manifest.canonical_sha256().map_err(contract_error)?;
-    manifest.validate().map_err(contract_error)?;
-
-    let mut receipt = LongitudinalCapacityMaterializationReceiptV1 {
-        schema: LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
-        root_identity: root_identity(&options.root)?,
-        manifest,
-        strict: write.strict,
-        materialization_sha256: String::new(),
-    };
-    receipt.materialization_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
-    receipt.validate().map_err(contract_error)?;
+    let receipt = build_longitudinal_capacity_materialization_receipt_v1(options, write)?;
     Ok(ResumedCapacityMaterializationV1 { receipt, counts })
 }
 

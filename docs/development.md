@@ -64,13 +64,14 @@ L100 manifest access or cloning, exact-source compatibility, and a representativ
 separate readiness authorization. Task 5.1 baseline/evidence authority remains separate again; never run
 Pointbreak against the preserved seed or an owner store.
 
-Current-product writer admission is intentionally bounded. An L2 append point-reads the immutable activation
-and completion carriers; it does not enumerate or replay the Journal. Callers that append a logical batch
-should retain one admitted writer session and authority lock while supplying validated event slices
-incrementally, so neither the writer nor the deterministic longitudinal generator needs to buffer the complete
-batch. Complete Journal scans remain required at reader, audit, recovery, capability-reporting, and final
-projection boundaries. The capacity generator additionally supports exact-subset same-root resume in bounded
-superblocks and rejects foreign or divergent event and content carriers before its first mutation.
+Current-product writer admission is intentionally bounded. Production `EventStore::record_event_once` and its
+batch form point-read the immutable L2 activation and completion carriers; neither enumerates nor replays the
+Journal. Callers that append a logical batch should retain one admitted writer session and authority lock while
+supplying validated event slices incrementally, so neither the writer nor the deterministic longitudinal
+generator needs to buffer the complete batch. Complete Journal scans remain required at reader, audit,
+recovery, capability-reporting, and final projection boundaries. The capacity generator additionally supports
+exact-subset same-root resume in bounded superblocks and repeats that exhaustive proof inside each stage's
+authority lock before its first mutation.
 
 Timeline qualification is carried only by `pointbreak.qualification-derived-change-read-receipt.v2`, which
 embeds the complete V1 Change receipt and selects evaluator v4. Its six Timeline suites use the Inspector

@@ -28,6 +28,7 @@ use super::event::{
 use super::projection::SupersessionView;
 use super::projection::freshness::event_set_hash_for_events;
 use super::store::body_artifact::{NoteBodyEnvelope, parse_note_body_artifact};
+use super::store::capabilities::{inspect_journal_records, route_journal_entries};
 use super::store::content::ContentArtifacts;
 use super::store::object_artifact::{
     build_object_artifact_v2, decode_and_validate_object_artifact, object_artifact_path_for_hash,
@@ -43,9 +44,9 @@ use super::workflow::observation::staged_body;
 use super::workflow::validation::add::{ValidationCheckIdMaterial, build_validation_check_id};
 use super::workflow::{IngestBatchSession, ingest_events_with_clock, prepare_events_for_ingest};
 use super::{
-    EventStore, EventVerificationPolicy, IngestClock, IngestEventsOptions, IngestVia, SessionState,
-    TrustSet, allowed_signers_path_for_repo, event_signature_trust_set, store_dir_for_repo,
-    trust_set_to_value,
+    AuthorityCursorV2, EventStore, EventVerificationPolicy, IngestClock, IngestEventsOptions,
+    IngestVia, SessionState, TrustSet, allowed_signers_path_for_repo, event_signature_trust_set,
+    store_dir_for_repo, trust_set_to_value,
 };
 use crate::bench_support::longitudinal::{
     FixedLongitudinalClockV1, LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
@@ -1668,12 +1669,50 @@ pub(crate) fn write_generated_longitudinal_l2_change_events_v1(
     repo: &Path,
     block_count: u64,
 ) -> Result<LongitudinalL2ChangeWriteReceiptV1> {
+    write_generated_longitudinal_l2_change_events_inner_v1(repo, block_count, false)
+        .map(|(write, _)| write)
+}
+
+fn resume_generated_longitudinal_l2_change_events_v1(
+    repo: &Path,
+    block_count: u64,
+) -> Result<(
+    LongitudinalL2ResumePreflightV1,
+    LongitudinalL2ChangeWriteReceiptV1,
+)> {
+    let (write, preflight) =
+        write_generated_longitudinal_l2_change_events_inner_v1(repo, block_count, true)?;
+    Ok((
+        preflight.expect("exact Change resume always captures its locked preflight"),
+        write,
+    ))
+}
+
+fn write_generated_longitudinal_l2_change_events_inner_v1(
+    repo: &Path,
+    block_count: u64,
+    exact_resume: bool,
+) -> Result<(
+    LongitudinalL2ChangeWriteReceiptV1,
+    Option<LongitudinalL2ResumePreflightV1>,
+)> {
     let write_store = resolve_write_store(repo)?;
     let storage = LocalStorage::new(write_store.store_dir());
     prepare_write_landing(&write_store, &storage)?;
     let trust = longitudinal_trust_set()?;
     let event_store = write_store.event_store()?;
     let mut ingest = IngestBatchSession::begin(&event_store, write_store.worktree_root(), &trust)?;
+    let resume_preflight = if exact_resume {
+        let preflight = preflight_longitudinal_l2_capacity_resume_v1(repo, block_count)?;
+        if preflight.base_authority_cursor.is_none() || !preflight.base_content_complete {
+            return Err(ShoreError::Message(
+                "longitudinal Change resume requires a complete base stage".to_owned(),
+            ));
+        }
+        Some(preflight)
+    } else {
+        None
+    };
     let mut attempted = 0_u64;
     let mut change_count = 0_u64;
     let mut membership_count = 0_u64;
@@ -1752,13 +1791,51 @@ pub(crate) fn write_generated_longitudinal_l2_change_events_v1(
             "L2 capacity Change authority drifted: expected {expected}, got {attempted}"
         )));
     }
-    Ok(LongitudinalL2ChangeWriteReceiptV1 {
-        events_created: completed.events_created as u64,
-        events_existing: completed.events_existing as u64,
-        final_event_count: completed.events.len() as u64,
-        change_count,
-        membership_count,
-        relation_count,
+    Ok((
+        LongitudinalL2ChangeWriteReceiptV1 {
+            events_created: completed.events_created as u64,
+            events_existing: completed.events_existing as u64,
+            final_event_count: completed.events.len() as u64,
+            change_count,
+            membership_count,
+            relation_count,
+        },
+        resume_preflight,
+    ))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LongitudinalL2CapacityResumeStagesV1 {
+    pub(crate) initial_preflight: LongitudinalL2ResumePreflightV1,
+    pub(crate) base_write: LongitudinalWriteReceiptV1,
+    pub(crate) base_authority_cursor: AuthorityCursorV2,
+    pub(crate) change_write: LongitudinalL2ChangeWriteReceiptV1,
+}
+
+/// Resume both deterministic L2 stages serially. Each stage acquires the
+/// production authority lock and performs exactly one exact-subset proof before
+/// its first publication; that locked proof is also reused for receipt facts.
+pub(crate) fn resume_longitudinal_l2_capacity_stages_v1(
+    repo: &Path,
+    block_count: u64,
+) -> Result<LongitudinalL2CapacityResumeStagesV1> {
+    let (initial_preflight, base_write) =
+        resume_generated_longitudinal_l2_base_records_v1(repo, block_count)?;
+    let (before_change, change_write) =
+        resume_generated_longitudinal_l2_change_events_v1(repo, block_count)?;
+    if !before_change.base_content_complete {
+        return Err(ShoreError::Message(
+            "longitudinal Change resume requires complete base content".to_owned(),
+        ));
+    }
+    let base_authority_cursor = before_change.base_authority_cursor.ok_or_else(|| {
+        ShoreError::Message("longitudinal Change resume requires complete base events".to_owned())
+    })?;
+    Ok(LongitudinalL2CapacityResumeStagesV1 {
+        initial_preflight,
+        base_write,
+        base_authority_cursor,
+        change_write,
     })
 }
 
@@ -1821,7 +1898,8 @@ pub(crate) fn write_longitudinal_records_v1(
     repo: &Path,
     records: &[PreparedLongitudinalRecordV1],
 ) -> Result<LongitudinalWriteReceiptV1> {
-    write_longitudinal_record_stream_v1(repo, records.iter().cloned().map(Ok))
+    write_longitudinal_record_stream_v1(repo, records.iter().cloned().map(Ok), None)
+        .map(|(write, _)| write)
 }
 
 /// Generate and write deterministic records one bounded block at a time. The
@@ -1837,14 +1915,38 @@ pub(crate) fn write_generated_longitudinal_records_v1(
         (0..block_count).map(|block| {
             prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(shape, block))
         }),
+        None,
     )
+    .map(|(write, _)| write)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) fn resume_generated_longitudinal_l2_base_records_v1(
+    repo: &Path,
+    block_count: u64,
+) -> Result<(LongitudinalL2ResumePreflightV1, LongitudinalWriteReceiptV1)> {
+    let (write, preflight) = write_longitudinal_record_stream_v1(
+        repo,
+        (0..block_count).map(|block| {
+            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+                LongitudinalRecordShapeV1::CapacityL100O10K,
+                block,
+            ))
+        }),
+        Some(block_count),
+    )?;
+    Ok((
+        preflight.expect("exact base resume always captures its locked preflight"),
+        write,
+    ))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LongitudinalL2ResumePreflightV1 {
     pub(crate) base_events_existing: u64,
     pub(crate) change_events_existing: u64,
     pub(crate) content_existing: u64,
+    pub(crate) base_content_complete: bool,
+    pub(crate) base_authority_cursor: Option<AuthorityCursorV2>,
 }
 
 /// Prove that an existing L2 capacity root is an exact subset of the
@@ -1854,13 +1956,18 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
     repo: &Path,
     block_count: u64,
 ) -> Result<LongitudinalL2ResumePreflightV1> {
+    validate_longitudinal_resume_trust_set(repo)?;
     let read_store = resolve_read_store(repo)?;
     let store_dir = read_store.store_dir().to_path_buf();
-    let mut existing_events = EventStore::from_backend(read_store.backend())
-        .list_events()?
-        .into_iter()
-        .map(|event| (event.event_id.as_str().to_owned(), event))
-        .collect::<BTreeMap<_, _>>();
+    let inspection = inspect_journal_records(read_store.backend().journal().as_ref())?;
+    let mut existing_events = inspection
+        .event_entries
+        .iter()
+        .map(|entry| {
+            let event: ShoreEvent = serde_json::from_slice(&entry.bytes)?;
+            Ok((event.event_id.as_str().to_owned(), event))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let content_store = ContentArtifacts::from_backend(read_store.backend());
     let mut existing_content = BTreeSet::new();
     collect_regular_relative_files(
@@ -1872,6 +1979,9 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
     let mut base_events_existing = 0_u64;
     let mut change_events_existing = 0_u64;
     let mut content_existing = 0_u64;
+    let mut expected_present_content = 0_u64;
+    let mut removed_content_existing = 0_u64;
+    let mut change_key_digests = BTreeSet::new();
 
     for block in 0..block_count {
         let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
@@ -1904,6 +2014,7 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
             LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
         )?;
         for expected in change_events {
+            change_key_digests.insert(sha256_bytes_hex(expected.idempotency_key.as_bytes()));
             if let Some(existing) = existing_events.remove(expected.event_id.as_str()) {
                 if existing != expected {
                     return Err(ShoreError::Message(format!(
@@ -1914,7 +2025,15 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
                 change_events_existing += 1;
             }
         }
+        let removed_paths = record
+            .removed
+            .iter()
+            .map(PreparedContentV1::relative_path)
+            .collect::<BTreeSet<_>>();
         for content in &record.content {
+            if !removed_paths.contains(content.relative_path()) {
+                expected_present_content += 1;
+            }
             if !existing_content.remove(content.relative_path()) {
                 continue;
             }
@@ -1932,7 +2051,11 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
                     content.relative_path()
                 )));
             }
-            content_existing += 1;
+            if removed_paths.contains(content.relative_path()) {
+                removed_content_existing += 1;
+            } else {
+                content_existing += 1;
+            }
         }
     }
     if let Some((event_id, _)) = existing_events.first_key_value() {
@@ -1945,11 +2068,51 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
             "longitudinal resume rejects foreign content {relative_path}"
         )));
     }
+    let expected_base_events = block_count
+        .checked_mul(CAPACITY_SUPERBLOCK_EVENT_COUNT)
+        .ok_or_else(|| ShoreError::Message("longitudinal base count overflowed".to_owned()))?;
+    let base_content_complete =
+        content_existing == expected_present_content && removed_content_existing == 0;
+    if change_events_existing > 0
+        && (base_events_existing != expected_base_events || !base_content_complete)
+    {
+        return Err(ShoreError::Message(
+            "longitudinal resume rejects Change authority before the base stage is complete"
+                .to_owned(),
+        ));
+    }
+    let base_authority_cursor = if base_events_existing == expected_base_events {
+        Some(
+            route_journal_entries(
+                inspection
+                    .record_entries
+                    .into_iter()
+                    .filter(|entry| !change_key_digests.contains(&entry.key_digest))
+                    .collect(),
+            )?
+            .cursor,
+        )
+    } else {
+        None
+    };
     Ok(LongitudinalL2ResumePreflightV1 {
         base_events_existing,
         change_events_existing,
         content_existing,
+        base_content_complete,
+        base_authority_cursor,
     })
+}
+
+fn validate_longitudinal_resume_trust_set(repo: &Path) -> Result<()> {
+    let path = allowed_signers_path_for_repo(repo)?;
+    if path.exists() && TrustSet::from_allowed_signers_file(&path)? != longitudinal_trust_set()? {
+        return Err(ShoreError::Message(format!(
+            "longitudinal resume rejects divergent signer enrollment {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn collect_regular_relative_files(
@@ -1992,7 +2155,11 @@ fn collect_regular_relative_files(
 fn write_longitudinal_record_stream_v1(
     repo: &Path,
     records: impl IntoIterator<Item = Result<PreparedLongitudinalRecordV1>>,
-) -> Result<LongitudinalWriteReceiptV1> {
+    l2_resume_block_count: Option<u64>,
+) -> Result<(
+    LongitudinalWriteReceiptV1,
+    Option<LongitudinalL2ResumePreflightV1>,
+)> {
     let existing_removals = EventStore::from_backend(resolve_read_store(repo)?.backend())
         .list_events()?
         .into_iter()
@@ -2012,6 +2179,17 @@ fn write_longitudinal_record_stream_v1(
     let trust = longitudinal_trust_set()?;
     let event_store = write_store.event_store()?;
     let mut ingest = IngestBatchSession::begin(&event_store, write_store.worktree_root(), &trust)?;
+    let resume_preflight = if let Some(block_count) = l2_resume_block_count {
+        // This exhaustive proof is intentionally inside the authority epoch and
+        // before the first content or event publication. Ordinary writer
+        // admission remains the bounded two-control point read.
+        Some(preflight_longitudinal_l2_capacity_resume_v1(
+            repo,
+            block_count,
+        )?)
+    } else {
+        None
+    };
     let mut ordered_event_ids = Vec::new();
     let mut content_inventory = Vec::new();
     let mut removed_content_sha256 = Vec::new();
@@ -2137,13 +2315,17 @@ fn write_longitudinal_record_stream_v1(
     if let Some(error) = write_error {
         return Err(error);
     }
-    let listed = completed.events;
+    let mut listed = completed.events;
     let stored_state: SessionState =
         storage.read_json(&write_store.store_dir().join("state.json"))?;
     if completed.state != stored_state {
         return Err(ShoreError::Message(
             "longitudinal state.json does not match strict replay".to_owned(),
         ));
+    }
+    let ordered_event_id_set = ordered_event_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if l2_resume_block_count.is_some() {
+        listed.retain(|event| ordered_event_id_set.contains(event.event_id.as_str()));
     }
     if listed.len() != ordered_event_ids.len() {
         return Err(ShoreError::Message(format!(
@@ -2198,8 +2380,14 @@ fn write_longitudinal_record_stream_v1(
             .map(|event| event.event_id.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let state_sha256 = canonical_sha256(&stored_state)?;
-    let projection_sha256 = canonical_sha256(&ProjectionReceiptV1::from(&stored_state))?;
+    let receipt_state = SessionState::from_events(&listed)?;
+    if l2_resume_block_count.is_none() && receipt_state != stored_state {
+        return Err(ShoreError::Message(
+            "longitudinal receipt replay does not match stored state".to_owned(),
+        ));
+    }
+    let state_sha256 = canonical_sha256(&receipt_state)?;
+    let projection_sha256 = canonical_sha256(&ProjectionReceiptV1::from(&receipt_state))?;
     let content_inventory_sha256 = canonical_sha256(&content_inventory)?;
     let strict = LongitudinalStrictSemanticReceiptV1 {
         event_set_sha256,
@@ -2224,25 +2412,28 @@ fn write_longitudinal_record_stream_v1(
 
     persist_longitudinal_trust_set(repo)?;
 
-    Ok(LongitudinalWriteReceiptV1 {
-        ordered_events,
-        event_carriers,
-        content_inventory,
-        removed_content_sha256,
-        strict,
-        capacity_selectors,
-        events_created: completed.events_created as u64,
-        events_existing: completed.events_existing as u64,
-        event_count: listed.len() as u64,
-        revision_count,
-        task_attempt_count,
-        body_fact_count,
-        external_body_count,
-        object_artifact_count,
-        decoded_body_bytes,
-        decoded_object_target_bytes,
-        by_type,
-    })
+    Ok((
+        LongitudinalWriteReceiptV1 {
+            ordered_events,
+            event_carriers,
+            content_inventory,
+            removed_content_sha256,
+            strict,
+            capacity_selectors,
+            events_created: completed.events_created as u64,
+            events_existing: completed.events_existing as u64,
+            event_count: listed.len() as u64,
+            revision_count,
+            task_attempt_count,
+            body_fact_count,
+            external_body_count,
+            object_artifact_count,
+            decoded_body_bytes,
+            decoded_object_target_bytes,
+            by_type,
+        },
+        resume_preflight,
+    ))
 }
 
 pub(crate) fn upgrade_longitudinal_removals_v1(
@@ -2386,6 +2577,16 @@ pub(crate) fn upgrade_longitudinal_removals_v1(
 
 fn persist_longitudinal_trust_set(repo: &Path) -> Result<()> {
     let path = allowed_signers_path_for_repo(repo)?;
+    let expected = longitudinal_trust_set()?;
+    if path.exists() {
+        if TrustSet::from_allowed_signers_file(&path)? != expected {
+            return Err(ShoreError::Message(format!(
+                "longitudinal writer refuses divergent signer enrollment {}",
+                path.display()
+            )));
+        }
+        return Ok(());
+    }
     let parent = path.parent().ok_or_else(|| {
         ShoreError::Message(format!(
             "longitudinal signer enrollment path has no parent: {}",
@@ -2396,7 +2597,7 @@ fn persist_longitudinal_trust_set(repo: &Path) -> Result<()> {
         .map_err(|error| ShoreError::Message(format!("create {}: {error}", parent.display())))?;
     LocalStorage::new(parent).write_json_atomic(
         &path,
-        &trust_set_to_value(&longitudinal_trust_set()?),
+        &trust_set_to_value(&expected),
         Durability::Durable,
     )
 }
@@ -3874,17 +4075,33 @@ mod tests {
             ),
             (2_048, 2_050)
         );
-        let write = write_generated_longitudinal_l2_change_events_v1(repo.path(), 2).unwrap();
+        let partial_change =
+            write_generated_longitudinal_l2_change_events_v1(repo.path(), 1).unwrap();
+        assert_eq!(
+            (
+                partial_change.events_created,
+                partial_change.events_existing,
+                partial_change.final_event_count,
+            ),
+            (210, 0, 2_258)
+        );
+        let stages = resume_longitudinal_l2_capacity_stages_v1(repo.path(), 2).unwrap();
+        assert_eq!(stages.base_write.strict, resumed.strict);
+        assert_eq!(stages.base_write.ordered_events, resumed.ordered_events);
+        assert_eq!(stages.base_write.event_carriers, resumed.event_carriers);
+        assert_eq!(stages.base_authority_cursor, base_authority.cursor);
+        let write = stages.change_write;
         let final_authority = crate::session::store_capability_for_repo(repo.path()).unwrap();
 
-        assert_eq!((write.events_created, write.events_existing), (420, 0));
+        assert_eq!((write.events_created, write.events_existing), (210, 210));
         assert_eq!(write.final_event_count, 2_468);
         assert_eq!(final_authority.cursor.journal_record_count, 2_470);
         let complete = preflight_longitudinal_l2_capacity_resume_v1(repo.path(), 2).unwrap();
         assert_eq!(complete.base_events_existing, 2_048);
         assert_eq!(complete.change_events_existing, 420);
-        let resumed_change =
-            write_generated_longitudinal_l2_change_events_v1(repo.path(), 2).unwrap();
+        let resumed_change = resume_generated_longitudinal_l2_change_events_v1(repo.path(), 2)
+            .unwrap()
+            .1;
         assert_eq!(
             (
                 resumed_change.events_created,
@@ -3924,11 +4141,67 @@ mod tests {
         let backend = crate::session::store::backend::StoreBackend::Local(store_dir);
         let before = backend.journal().list_record_entries().unwrap();
         assert!(preflight_longitudinal_l2_capacity_resume_v1(repo.path(), 2).is_err());
+        assert!(resume_generated_longitudinal_l2_base_records_v1(repo.path(), 2).is_err());
+        assert!(resume_generated_longitudinal_l2_change_events_v1(repo.path(), 2).is_err());
         let after = backend.journal().list_record_entries().unwrap();
         assert_eq!(before.len(), after.len());
         assert!(before.iter().zip(after).all(|(left, right)| {
             left.key_digest == right.key_digest && left.bytes == right.bytes
         }));
+    }
+
+    #[test]
+    fn longitudinal_l2_resume_rejects_divergent_signer_config_before_store_mutation() {
+        let repo = initialized_repo();
+        crate::session::activate_empty_store_for_qualification(
+            repo.path(),
+            "longitudinal-l100-o10k-l2-v1".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+        write_generated_longitudinal_records_v1(
+            repo.path(),
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            1,
+        )
+        .unwrap();
+        let enrollment = allowed_signers_path_for_repo(repo.path()).unwrap();
+        std::fs::write(
+            &enrollment,
+            serde_json::to_vec_pretty(&trust_set_to_value(&TrustSet::default())).unwrap(),
+        )
+        .unwrap();
+        let store_dir = crate::session::store_dir_for_repo(repo.path()).unwrap();
+        let backend = crate::session::store::backend::StoreBackend::Local(store_dir.clone());
+        let before = backend.journal().list_record_entries().unwrap();
+        let mut before_content = BTreeSet::new();
+        collect_regular_relative_files(
+            &store_dir,
+            &store_dir.join("artifacts"),
+            &mut before_content,
+        )
+        .unwrap();
+
+        let error = resume_longitudinal_l2_capacity_stages_v1(repo.path(), 2)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("divergent signer enrollment"), "{error}");
+        let after = backend.journal().list_record_entries().unwrap();
+        assert!(before.iter().zip(&after).all(|(left, right)| {
+            left.key_digest == right.key_digest && left.bytes == right.bytes
+        }));
+        assert_eq!(before.len(), after.len());
+        let mut after_content = BTreeSet::new();
+        collect_regular_relative_files(
+            &store_dir,
+            &store_dir.join("artifacts"),
+            &mut after_content,
+        )
+        .unwrap();
+        assert_eq!(before_content, after_content);
     }
 
     #[test]

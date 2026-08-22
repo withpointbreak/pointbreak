@@ -471,18 +471,11 @@ fn ingest_detached_cosignature(
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum CarrierTargetLocation {
-    Seeded(usize),
-    Recorded(usize),
-}
-
 #[derive(Debug, Default)]
 struct CarrierTargetIndex {
     seeded: bool,
-    seeded_events: Vec<ShoreEvent>,
-    recorded_events: Vec<ShoreEvent>,
-    by_event_id: BTreeMap<String, CarrierTargetLocation>,
+    idempotency_key_by_event_id: BTreeMap<String, String>,
+    resolved_event: Option<ShoreEvent>,
 }
 
 impl CarrierTargetIndex {
@@ -492,23 +485,26 @@ impl CarrierTargetIndex {
         event_id: &str,
     ) -> Result<Option<&'a ShoreEvent>> {
         if !self.seeded {
-            self.seeded_events = list_events_for_carrier_target(event_store)?;
-            for (index, event) in self.seeded_events.iter().enumerate() {
-                self.by_event_id
+            for event in list_events_for_carrier_target(event_store)? {
+                self.idempotency_key_by_event_id
                     .entry(event.event_id.as_str().to_owned())
-                    .or_insert(CarrierTargetLocation::Seeded(index));
+                    .or_insert(event.idempotency_key);
             }
             self.seeded = true;
         }
 
-        Ok(self
-            .by_event_id
-            .get(event_id)
-            .copied()
-            .map(|location| match location {
-                CarrierTargetLocation::Seeded(index) => &self.seeded_events[index],
-                CarrierTargetLocation::Recorded(index) => &self.recorded_events[index],
-            }))
+        let Some(idempotency_key) = self.idempotency_key_by_event_id.get(event_id).cloned() else {
+            self.resolved_event = None;
+            return Ok(None);
+        };
+        if self
+            .resolved_event
+            .as_ref()
+            .is_none_or(|event| event.event_id.as_str() != event_id)
+        {
+            self.resolved_event = Some(event_store.read_stored_event(&idempotency_key)?);
+        }
+        Ok(self.resolved_event.as_ref())
     }
 
     fn observe_batch_write(
@@ -517,16 +513,18 @@ impl CarrierTargetIndex {
         event: &ShoreEvent,
         outcome: EventWriteOutcome,
     ) -> Result<()> {
-        if !self.seeded || self.by_event_id.contains_key(event.event_id.as_str()) {
+        if !self.seeded
+            || self
+                .idempotency_key_by_event_id
+                .contains_key(event.event_id.as_str())
+        {
             return Ok(());
         }
         match outcome {
             EventWriteOutcome::Created => {
-                let index = self.recorded_events.len();
-                self.recorded_events.push(event.clone());
-                self.by_event_id.insert(
+                self.idempotency_key_by_event_id.insert(
                     event.event_id.as_str().to_owned(),
-                    CarrierTargetLocation::Recorded(index),
+                    event.idempotency_key.clone(),
                 );
             }
             EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
@@ -541,18 +539,32 @@ impl CarrierTargetIndex {
         event_store: &EventStore,
         event: &ShoreEvent,
     ) -> Result<()> {
-        if !self.seeded || self.by_event_id.contains_key(event.event_id.as_str()) {
+        if !self.seeded
+            || self
+                .idempotency_key_by_event_id
+                .contains_key(event.event_id.as_str())
+        {
             return Ok(());
         }
-        let stored = event_store
-            .read_event(&event_store.event_path_for_idempotency_key(&event.idempotency_key))?;
-        let index = self.recorded_events.len();
-        self.recorded_events.push(stored);
-        self.by_event_id.insert(
+        let stored = event_store.read_stored_event(&event.idempotency_key)?;
+        self.idempotency_key_by_event_id.insert(
             event.event_id.as_str().to_owned(),
-            CarrierTargetLocation::Recorded(index),
+            event.idempotency_key.clone(),
         );
+        self.idempotency_key_by_event_id
+            .entry(stored.event_id.as_str().to_owned())
+            .or_insert(stored.idempotency_key);
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn retained_decoded_event_count(&self) -> usize {
+        usize::from(self.resolved_event.is_some())
+    }
+
+    #[cfg(test)]
+    fn indexed_event_count(&self) -> usize {
+        self.idempotency_key_by_event_id.len()
     }
 }
 
@@ -700,8 +712,9 @@ mod tests {
         WorkObjectId,
     };
     use crate::session::event::{
-        AssertionMode, EventSignature, EventSignatureRecordedPayload, EventToBeSigned, EventType,
-        IngestProvenance, IngestVia, InputRequestReasonCode, InputRequestResponseOutcome,
+        AssertionMode, EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned,
+        EventType, IngestProvenance, IngestVia, InputRequestReasonCode,
+        InputRequestResponseOutcome, ReviewInitializedPayload, Writer,
         event_signature_pre_authentication_encoding,
     };
     use crate::session::projection::freshness::event_set_hash_for_events;
@@ -1221,6 +1234,46 @@ mod tests {
             0,
             "ordinary ingest should not pay for carrier target lookup"
         );
+    }
+
+    #[test]
+    fn carrier_target_index_retains_only_the_resolved_decoded_event() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EventStore::open(root.path());
+        let seeded = (0..64)
+            .map(|ordinal| carrier_index_event(&format!("journal:seed-{ordinal}")))
+            .collect::<Vec<_>>();
+        for event in &seeded {
+            store.record_event_once(event).unwrap();
+        }
+        let mut index = CarrierTargetIndex::default();
+
+        assert!(
+            index
+                .resolve(&store, seeded[0].event_id.as_str())
+                .unwrap()
+                .is_some()
+        );
+        for ordinal in 64..128 {
+            let event = carrier_index_event(&format!("journal:seed-{ordinal}"));
+            let outcome = store.record_event_once(&event).unwrap();
+            index.observe_batch_write(&store, &event, outcome).unwrap();
+        }
+
+        assert_eq!(index.retained_decoded_event_count(), 1);
+        assert_eq!(index.indexed_event_count(), 128);
+    }
+
+    fn carrier_index_event(session: &str) -> ShoreEvent {
+        ShoreEvent::new(
+            EventType::ReviewInitialized,
+            format!("review_initialized:{session}:work:default"),
+            EventTarget::for_journal(JournalId::new(session)),
+            Writer::shore_local("0.1.0"),
+            ReviewInitializedPayload {},
+            "2026-05-10T00:00:00Z",
+        )
+        .unwrap()
     }
 
     #[test]

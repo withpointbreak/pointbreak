@@ -25,16 +25,16 @@ use super::{
     LongitudinalOperationReceiptV1, LongitudinalOperationV1,
     LongitudinalPackageVerificationReceiptV1, LongitudinalRemovalUpgradeAuthorityCompletionV1,
     LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalRemovalUpgradeReceiptV1,
-    LongitudinalResumedMaterializationV1, LongitudinalStderrClassificationV1,
-    LongitudinalStderrFailureV1, LongitudinalStoreDataInventoryV1, LongitudinalTierV1,
-    LongitudinalVerifiedPackageKindV1, LongitudinalWorkloadManifestV1,
-    apply_longitudinal_removal_upgrade_v1, longitudinal_authoritative_store_data_inventory_v1,
-    longitudinal_capacity_contract_v1, longitudinal_runner_contract_v1,
-    longitudinal_store_data_inventory_v1, longitudinal_workload_manifest_carry_invariant_sha256_v1,
+    LongitudinalStderrClassificationV1, LongitudinalStderrFailureV1,
+    LongitudinalStoreDataInventoryV1, LongitudinalTierV1, LongitudinalVerifiedPackageKindV1,
+    LongitudinalWorkloadManifestV1, apply_longitudinal_removal_upgrade_v1,
+    build_longitudinal_capacity_materialization_receipt_v1,
+    longitudinal_authoritative_store_data_inventory_v1, longitudinal_capacity_contract_v1,
+    longitudinal_runner_contract_v1, longitudinal_store_data_inventory_v1,
+    longitudinal_workload_manifest_carry_invariant_sha256_v1,
     longitudinal_workload_manifest_upgrade_invariant_sha256_v1,
     materialize_longitudinal_capacity_v1, materialize_longitudinal_workload_v1,
-    resume_longitudinal_capacity_v1, verify_longitudinal_materialization_pair_v1,
-    verify_longitudinal_materializer_equivalence_v1,
+    verify_longitudinal_materialization_pair_v1, verify_longitudinal_materializer_equivalence_v1,
 };
 use crate::bench_support::foundation::{
     QualificationFilesystemDispositionV1, classify_qualification_filesystem,
@@ -45,7 +45,7 @@ use crate::keys::FileEd25519Signer;
 use crate::model::ObjectId;
 use crate::session::benchmark::{
     append_longitudinal_contention_writer_v1, append_longitudinal_event_slice_v1,
-    preflight_longitudinal_l2_capacity_resume_v1, read_longitudinal_carrier_by_key_v1,
+    read_longitudinal_carrier_by_key_v1, resume_longitudinal_l2_capacity_stages_v1,
     stage_longitudinal_append_records_v1, write_generated_longitudinal_l2_change_events_v1,
 };
 use crate::session::{
@@ -861,50 +861,41 @@ pub fn resume_longitudinal_l2_capacity_evidence_root_v1(
     {
         return Err(LongitudinalEvidenceError::Preflight);
     }
-    let subset = preflight_longitudinal_l2_capacity_resume_v1(&options.root, 100)
+    let stages = resume_longitudinal_l2_capacity_stages_v1(&options.root, 100)
         .map_err(|_| LongitudinalEvidenceError::Preflight)?;
-
-    let resumed =
-        resume_longitudinal_capacity_v1(super::LongitudinalCapacityMaterializeOptionsV1::new(
+    if stages.base_write.events_existing != stages.initial_preflight.base_events_existing
+        || stages
+            .base_write
+            .events_created
+            .checked_add(stages.base_write.events_existing)
+            != Some(102_400)
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let source_materialization = build_longitudinal_capacity_materialization_receipt_v1(
+        super::LongitudinalCapacityMaterializeOptionsV1::new(
             &options.root,
             LongitudinalCapacityProfileV1::L100O10K,
             options.execution,
-        ))
-        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
-    if resumed.events_existing != subset.base_events_existing
-        || resumed.events_created.checked_add(resumed.events_existing) != Some(102_400)
-    {
-        return Err(LongitudinalEvidenceError::InvalidReceipt);
-    }
-    let source_materialization = match resumed.materialization {
-        LongitudinalResumedMaterializationV1::Capacity(receipt)
-            if receipt.manifest.subject
-                == LongitudinalCapacitySubjectV1::Companion(
-                    LongitudinalCapacityProfileV1::L100O10K,
-                ) =>
-        {
-            receipt
-        }
-        _ => return Err(LongitudinalEvidenceError::InvalidReceipt),
-    };
-    let base_authority = crate::session::store_capability_for_repo(&options.root)
-        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
-    if base_authority.status != expected_status
-        || base_authority.minimum_reader_profile.as_deref() != Some("review_change_revision_v1")
-        || base_authority.cursor.event_count != 102_400
-        || base_authority.cursor.journal_record_count != 102_402
+        ),
+        stages.base_write,
+    )
+    .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let base_authority_cursor = stages.base_authority_cursor;
+    if base_authority_cursor.event_count != 102_400
+        || base_authority_cursor.journal_record_count != 102_402
+        || base_authority_cursor.capability_set_hash != initial_authority.cursor.capability_set_hash
     {
         return Err(LongitudinalEvidenceError::InvalidReceipt);
     }
 
-    let write = write_generated_longitudinal_l2_change_events_v1(&options.root, 100)
-        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let write = stages.change_write;
     let change_authority_event_count = write
         .change_count
         .checked_add(write.membership_count)
         .and_then(|count| count.checked_add(write.relation_count))
         .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
-    if write.events_existing != subset.change_events_existing
+    if write.events_existing != stages.initial_preflight.change_events_existing
         || write.events_created.checked_add(write.events_existing)
             != Some(change_authority_event_count)
         || change_authority_event_count != 21_000
@@ -935,7 +926,7 @@ pub fn resume_longitudinal_l2_capacity_evidence_root_v1(
         root_identity: source_materialization.root_identity.clone(),
         source_manifest_sha256: source_materialization.manifest.manifest_sha256.clone(),
         source_materialization_sha256: source_materialization.materialization_sha256.clone(),
-        base_authority_cursor: base_authority.cursor,
+        base_authority_cursor,
         final_authority_cursor: final_authority.cursor,
         minimum_reader_profile: "review_change_revision_v1".to_owned(),
         activation_id,
