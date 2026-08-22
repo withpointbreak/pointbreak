@@ -147,7 +147,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
       - run: just installer-selftest
@@ -169,7 +169,7 @@ jobs:
         with:
           enable-cache: false
           ignore-nothing-to-cache: true
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
       - name: Validate Agent Skills
@@ -209,7 +209,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
       - uses: reviewdog/action-actionlint@5eaffa19a1991ecc52b11eddcdd57760d1ac7e3d # v1.72.0
@@ -346,10 +346,10 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -398,10 +398,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
-      - uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: nextest@0.9.140
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

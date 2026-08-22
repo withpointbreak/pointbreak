@@ -33,7 +33,7 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install just
-        uses: taiki-e/install-action@899b013517f9e7774591216672bf75a46bb9a481 # v2.86.5
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: just
 
