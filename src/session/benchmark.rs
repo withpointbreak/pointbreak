@@ -12,7 +12,7 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use super::event::{
-    ArtifactRemovedPayload, AssertionMode, BodyContentType, EventSignature,
+    ArtifactRemovedPayload, AssertionMode, BodyContentType, EventPayload, EventSignature,
     EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType, IngestProvenance,
     InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
     InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
@@ -20,8 +20,9 @@ use super::event::{
     RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload,
     RevisionRefWithdrawnPayload, ShoreEvent, SourceSpeaker, TaskCheckpointCapturedPayload,
     TaskObservationRecordedPayload, ValidationCheckRecordedPayload, WorkObjectProposal,
-    WorkObjectProposedPayload, Writer, WriterProducer, build_commit_association_id,
-    build_commit_withdrawal_id, build_ref_association_id, build_ref_withdrawal_id,
+    WorkObjectProposedPayload, Writer, WriterProducer, build_change_declared,
+    build_commit_association_id, build_commit_withdrawal_id, build_membership_asserted,
+    build_ref_association_id, build_ref_withdrawal_id, build_revision_relation_asserted,
     event_signature_pre_authentication_encoding,
 };
 use super::projection::SupersessionView;
@@ -57,10 +58,11 @@ use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::keys::FileEd25519Signer;
 use crate::model::{
-    ActorId, CheckpointId, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, EngagementId,
-    EngagementType, FileId, FileStatus, HunkId, JournalId, ObjectId, ReviewEndpoint, ReviewHunk,
-    ReviewId, ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, ValidationStatus,
-    ValidationTarget, ValidationTrigger, WorkObjectId, WorkObjectType, id_prefix,
+    ActorId, ChangeIdentityDescriptorV1, CheckpointId, DiffFile, DiffRow, DiffRowKind,
+    DiffSnapshot, EngagementId, EngagementType, FileId, FileStatus, HunkId, JournalId, ObjectId,
+    ReviewEndpoint, ReviewHunk, ReviewId, ReviewTargetRef, RevisionId, RevisionRefV1, TargetRef,
+    TaskTargetRef, TrackId, ValidationStatus, ValidationTarget, ValidationTrigger, WorkObjectId,
+    WorkObjectType, id_prefix,
 };
 use crate::storage::{Durability, LocalStorage, RemoveOutcome};
 
@@ -192,9 +194,12 @@ impl PreparedContentV1 {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedLongitudinalRecordV1 {
+    spec: LongitudinalRecordSpecV1,
+    journal_id: JournalId,
     events: Vec<ShoreEvent>,
     content: Vec<PreparedContentV1>,
     removed: Vec<PreparedContentV1>,
+    revisions: Vec<RevisionFixtureV1>,
     revision_count: u64,
     task_attempt_count: u64,
     body_fact_count: u64,
@@ -223,6 +228,13 @@ pub(crate) struct LongitudinalWriteReceiptV1 {
     pub(crate) decoded_body_bytes: u64,
     pub(crate) decoded_object_target_bytes: u64,
     pub(crate) by_type: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LongitudinalL2ChangeWriteReceiptV1 {
+    pub(crate) events_created: u64,
+    pub(crate) events_existing: u64,
+    pub(crate) final_event_count: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -278,7 +290,7 @@ impl IngestClock for FixedBenchmarkIngestClock {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct RevisionFixtureV1 {
     revision_id: RevisionId,
     object_id: ObjectId,
@@ -1376,9 +1388,12 @@ impl BlockBuilderV1 {
         let revision_count = self.revisions.len() as u64;
         let task_attempt_count = self.tasks.len() as u64;
         Ok(PreparedLongitudinalRecordV1 {
+            spec: self.spec,
+            journal_id: self.journal_id,
             events: self.events,
             content: self.content,
             removed: self.removed,
+            revisions: self.revisions,
             revision_count,
             task_attempt_count,
             body_fact_count: self.body_ordinal,
@@ -1519,6 +1534,241 @@ impl BlockBuilderV1 {
         self.events.push(event);
         Ok(())
     }
+}
+
+/// Derive the current stable Change authority for deterministic longitudinal
+/// Revision groups without changing the frozen source workload events.
+pub(crate) fn prepare_longitudinal_l2_change_events_v1(
+    records: &[PreparedLongitudinalRecordV1],
+) -> Result<Vec<ShoreEvent>> {
+    let writer = Writer {
+        actor_id: ActorId::new("actor:agent:longitudinal-l2-materializer"),
+        producer: WriterProducer {
+            name: "pointbreak".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    };
+    let mut events = Vec::new();
+    for record in records {
+        if record.spec.shape != LongitudinalRecordShapeV1::CapacityL100O10K {
+            return Err(ShoreError::Message(
+                "L2 capacity authority requires the frozen L100-O10K record shape".to_owned(),
+            ));
+        }
+        let mut groups = BTreeMap::<EngagementId, Vec<&RevisionFixtureV1>>::new();
+        for revision in &record.revisions {
+            groups
+                .entry(revision.engagement_id.clone())
+                .or_default()
+                .push(revision);
+        }
+        for (group_ordinal, revisions) in groups.values_mut().enumerate() {
+            revisions.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
+            let root = revisions
+                .iter()
+                .find(|revision| revision.supersedes.is_empty())
+                .ok_or_else(|| {
+                    ShoreError::Message(
+                        "L2 capacity Change group omitted its root Revision".to_owned(),
+                    )
+                })?;
+            let declaration = build_change_declared(
+                ChangeIdentityDescriptorV1::root_revision(root.revision_id.clone()),
+                longitudinal_l2_claim_nonce(record.spec, group_ordinal, "declaration", 0)?,
+            )?;
+            let change_id = declaration.change_id.clone();
+            events.push(longitudinal_l2_change_event(
+                &record.journal_id,
+                &writer,
+                declaration,
+            )?);
+
+            let revision_refs = revisions
+                .iter()
+                .map(|revision| {
+                    Ok((
+                        revision.revision_id.clone(),
+                        RevisionRefV1::new(
+                            revision.revision_id.clone(),
+                            revision.object_content_hash.clone(),
+                        )?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            for (ordinal, revision_id) in revision_refs.keys().enumerate() {
+                let membership = build_membership_asserted(
+                    &change_id,
+                    revision_id,
+                    longitudinal_l2_claim_nonce(record.spec, group_ordinal, "membership", ordinal)?,
+                )?;
+                events.push(longitudinal_l2_change_event(
+                    &record.journal_id,
+                    &writer,
+                    membership,
+                )?);
+            }
+
+            let relations = revisions
+                .iter()
+                .flat_map(|revision| {
+                    revision
+                        .supersedes
+                        .iter()
+                        .cloned()
+                        .map(move |predecessor| (revision.revision_id.clone(), predecessor))
+                })
+                .collect::<BTreeSet<_>>();
+            for (ordinal, (successor, predecessor)) in relations.into_iter().enumerate() {
+                let relation = build_revision_relation_asserted(
+                    &change_id,
+                    revision_refs
+                        .get(&successor)
+                        .ok_or_else(|| {
+                            ShoreError::Message(
+                                "L2 capacity relation omitted its successor Revision".to_owned(),
+                            )
+                        })?
+                        .clone(),
+                    revision_refs
+                        .get(&predecessor)
+                        .ok_or_else(|| {
+                            ShoreError::Message(
+                                "L2 capacity relation omitted its predecessor Revision".to_owned(),
+                            )
+                        })?
+                        .clone(),
+                    longitudinal_l2_claim_nonce(record.spec, group_ordinal, "relation", ordinal)?,
+                )?;
+                events.push(longitudinal_l2_change_event(
+                    &record.journal_id,
+                    &writer,
+                    relation,
+                )?);
+            }
+        }
+    }
+    events.sort_by(|left, right| left.idempotency_key.cmp(&right.idempotency_key));
+    let expected = records
+        .len()
+        .checked_mul(210)
+        .ok_or_else(|| ShoreError::Message("L2 capacity event count overflowed".to_owned()))?;
+    if events.len() != expected {
+        return Err(ShoreError::Message(format!(
+            "L2 capacity Change authority drifted: expected {expected}, got {}",
+            events.len()
+        )));
+    }
+    Ok(events)
+}
+
+/// Reconstruct only the current Change authority for the frozen L100-O10K
+/// workload. Preparing one superblock at a time keeps the successor fixture's
+/// peak memory bounded without changing the source materialization contract.
+pub(crate) fn prepare_longitudinal_l2_capacity_change_events_v1() -> Result<Vec<ShoreEvent>> {
+    let mut events = Vec::with_capacity(21_000);
+    for block in 0..100 {
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            block,
+        ))?;
+        events.extend(prepare_longitudinal_l2_change_events_v1(
+            std::slice::from_ref(&record),
+        )?);
+    }
+    events.sort_by(|left, right| left.idempotency_key.cmp(&right.idempotency_key));
+    if events.len() != 21_000 {
+        return Err(ShoreError::Message(format!(
+            "L2 capacity Change authority drifted: expected 21000, got {}",
+            events.len()
+        )));
+    }
+    Ok(events)
+}
+
+pub(crate) fn write_longitudinal_l2_change_events_v1(
+    repo: &Path,
+    events: Vec<ShoreEvent>,
+) -> Result<LongitudinalL2ChangeWriteReceiptV1> {
+    if events.iter().any(|event| {
+        !matches!(
+            event.event_type,
+            EventType::ChangeDeclared
+                | EventType::ChangeMembershipAsserted
+                | EventType::ChangeRevisionRelationAsserted
+        )
+    }) {
+        return Err(ShoreError::Message(
+            "L2 capacity write included a non-Change authority event".to_owned(),
+        ));
+    }
+    let result = ingest_events_with_clock(
+        IngestEventsOptions::new(repo, events).with_trust_set(longitudinal_trust_set()?),
+        &FixedBenchmarkIngestClock,
+    )?;
+    let listed = EventStore::from_backend(resolve_read_store(repo)?.backend()).list_events()?;
+    Ok(LongitudinalL2ChangeWriteReceiptV1 {
+        events_created: u64::try_from(result.events_created)
+            .map_err(|_| ShoreError::Message("L2 created count overflowed".to_owned()))?,
+        events_existing: u64::try_from(result.events_existing)
+            .map_err(|_| ShoreError::Message("L2 existing count overflowed".to_owned()))?,
+        final_event_count: u64::try_from(listed.len())
+            .map_err(|_| ShoreError::Message("L2 final event count overflowed".to_owned()))?,
+    })
+}
+
+fn longitudinal_l2_claim_nonce(
+    spec: LongitudinalRecordSpecV1,
+    group_ordinal: usize,
+    family: &str,
+    ordinal: usize,
+) -> Result<[u8; 32]> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Material<'a> {
+        schema: &'static str,
+        public_seed_hex: &'static str,
+        shape: &'static str,
+        block: u64,
+        group_ordinal: usize,
+        family: &'a str,
+        ordinal: usize,
+    }
+    let bytes = canonical_json_bytes(&serde_json::to_value(Material {
+        schema: "pointbreak.longitudinal-l2-change-claim.v1",
+        public_seed_hex: LONGITUDINAL_PUBLIC_SEED_HEX_V1,
+        shape: spec.shape.namespace(),
+        block: spec.block,
+        group_ordinal,
+        family,
+        ordinal,
+    })?)?;
+    let digest = Sha256::digest(bytes);
+    let mut nonce = [0_u8; 32];
+    nonce.copy_from_slice(&digest);
+    Ok(nonce)
+}
+
+fn longitudinal_l2_change_event<P: EventPayload>(
+    journal_id: &JournalId,
+    writer: &Writer,
+    payload: P,
+) -> Result<ShoreEvent> {
+    let payload_value = serde_json::to_value(&payload)?;
+    let payload_hash = format!(
+        "sha256:{}",
+        sha256_bytes_hex(&canonical_json_bytes(&payload_value)?)
+    );
+    ShoreEvent::new(
+        payload.event_type(),
+        format!(
+            "longitudinal-l2:{}:{payload_hash}",
+            payload.event_type().as_str()
+        ),
+        EventTarget::for_journal(journal_id.clone()),
+        writer.clone(),
+        payload,
+        "2026-08-22T00:00:02Z",
+    )
 }
 
 pub(crate) fn write_longitudinal_records_v1(
@@ -3265,6 +3515,100 @@ mod tests {
     }
 
     #[test]
+    fn longitudinal_l2_superblock_adds_current_change_authority() {
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            0,
+        ))
+        .unwrap();
+        let events =
+            prepare_longitudinal_l2_change_events_v1(std::slice::from_ref(&record)).unwrap();
+
+        assert_eq!(events.len(), 210);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeDeclared)
+                .count(),
+            10
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeMembershipAsserted)
+                .count(),
+            100
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeRevisionRelationAsserted)
+                .count(),
+            100
+        );
+        assert_record_identity_is_unique(&events);
+    }
+
+    #[test]
+    fn longitudinal_l2_superblock_is_ready_and_projects_ten_changes() {
+        let repo = initialized_repo();
+        let activation = crate::session::activate_empty_store_for_qualification(
+            repo.path(),
+            "longitudinal-empty-l2-test".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                activation.cursor.event_count,
+                activation.cursor.journal_record_count,
+            ),
+            (0, 2)
+        );
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            0,
+        ))
+        .unwrap();
+        write_longitudinal_records_v1(repo.path(), std::slice::from_ref(&record)).unwrap();
+        let base_authority = crate::session::store_capability_for_repo(repo.path()).unwrap();
+        assert_eq!(
+            (
+                base_authority.cursor.event_count,
+                base_authority.cursor.journal_record_count,
+            ),
+            (1_024, 1_026)
+        );
+        let events = prepare_longitudinal_l2_change_events_v1(&[record]).unwrap();
+        let write = write_longitudinal_l2_change_events_v1(repo.path(), events).unwrap();
+        let final_authority = crate::session::store_capability_for_repo(repo.path()).unwrap();
+
+        assert_eq!((write.events_created, write.events_existing), (210, 0));
+        assert_eq!(write.final_event_count, 1_234);
+        assert_eq!(final_authority.cursor.journal_record_count, 1_236);
+        assert_eq!(
+            base_authority.cursor.capability_set_hash,
+            final_authority.cursor.capability_set_hash
+        );
+        assert!(matches!(
+            final_authority.status,
+            crate::session::StoreCapabilityStatus::Ready { .. }
+        ));
+        assert_eq!(
+            crate::session::change_reader_state_for_repo(repo.path())
+                .unwrap()
+                .ready()
+                .unwrap()
+                .projection
+                .changes
+                .len(),
+            10
+        );
+    }
+
+    #[test]
     fn longitudinal_materialize_writer_preserves_create_once_and_conflict_semantics() {
         let repo = initialized_repo();
         let record = one_event_record("sha256:first");
@@ -3506,9 +3850,12 @@ mod tests {
         )
         .unwrap();
         PreparedLongitudinalRecordV1 {
+            spec: LongitudinalRecordSpecV1::new(LongitudinalRecordShapeV1::Workload, 0),
+            journal_id: JournalId::new("journal:longitudinal:test"),
             events: vec![event],
             content: Vec::new(),
             removed: Vec::new(),
+            revisions: Vec::new(),
             revision_count: 0,
             task_attempt_count: 0,
             body_fact_count: 0,

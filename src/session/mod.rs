@@ -218,8 +218,11 @@ pub use workflow::{
     withdraw_change_revision_relation, withdraw_commit, withdraw_ref,
     withdraw_revision_from_change,
 };
-pub(in crate::session) use workflow::{assessment, input_request, observation};
 #[cfg(feature = "bench")]
-pub(crate) use workflow::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
+pub(crate) use workflow::{
+    activate_empty_store_for_qualification, carrier_target_full_scan_count,
+    reset_carrier_target_full_scan_count,
+};
+pub(in crate::session) use workflow::{assessment, input_request, observation};
 
 pub use crate::crypto::EventVerificationStatus;

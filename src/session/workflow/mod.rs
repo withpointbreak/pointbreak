@@ -128,6 +128,8 @@ pub use change::{
     create_change, join_revision_to_change, link_changes, withdraw_change_revision_relation,
     withdraw_revision_from_change,
 };
+#[cfg(feature = "bench")]
+pub(crate) use change_migration::activate_empty_store_for_qualification;
 pub use change_migration::{
     BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1, BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1,
     BULK_ADOPTION_BACKUP_RESTORE_RECEIPT_SCHEMA_V1, BULK_ADOPTION_DRY_RUN_SCHEMA_V1,

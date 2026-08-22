@@ -26,6 +26,8 @@ use crate::session::store::capabilities::{
 use crate::session::store::resolution::resolve_change_read_store;
 use crate::session::store::{BulkAdoptionManifestV1, ReservedCohortRecordV1};
 use crate::session::{AuthorityCursorV2, StoreCapabilityStatus, StoreIdentityOptions};
+#[cfg(any(test, feature = "bench"))]
+use crate::session::{StoreCapabilityInspection, store_capability_for_repo};
 use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
 pub const BULK_ADOPTION_DRY_RUN_SCHEMA_V1: &str = "pointbreak.bulk-adoption-dry-run.v1";
@@ -1604,6 +1606,71 @@ pub(crate) fn prepare_bulk_adoption_for_qualification(
     })
 }
 
+/// Activate one empty disposable qualification root through the production
+/// capability machinery without introducing the backup/key-management boundary.
+///
+/// The signed activation/completion records, append ordering, and final strict
+/// capability fold are the production implementations. Requiring an empty root
+/// keeps synthetic current-data fixtures out of the legacy adoption contract.
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn activate_empty_store_for_qualification(
+    repo: &Path,
+    activation_nonce: String,
+    activation_occurred_at: String,
+    completion_occurred_at: String,
+    signer: &impl EventSigner,
+) -> Result<StoreCapabilityInspection> {
+    let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo))?;
+    if dry_run.requires_owner_decision || dry_run.roots.len() != 1 || !dry_run.anomalies.is_empty()
+    {
+        return Err(invalid_migration(
+            "qualification capability activation requires one anomaly-free L0 root",
+        ));
+    }
+    let root = &dry_run.roots[0];
+    if root.source_authority_cursor.event_count != 0
+        || root.source_authority_cursor.journal_record_count != 0
+        || root.revision_count != 0
+        || !root.proposed_changes.is_empty()
+    {
+        return Err(invalid_migration(
+            "qualification capability activation requires an empty store",
+        ));
+    }
+    let acknowledged_manifest_hash = root
+        .cohort_manifest_hash
+        .as_deref()
+        .ok_or_else(|| invalid_migration("qualification root omitted its cohort manifest"))?;
+    let plan = prepare_bulk_adoption_for_qualification(
+        repo,
+        acknowledged_manifest_hash,
+        dry_run.writer.clone(),
+        dry_run.claim_occurred_at,
+        activation_nonce,
+        activation_occurred_at,
+        completion_occurred_at,
+        signer,
+    )?;
+    if !plan.events.is_empty() {
+        return Err(invalid_migration(
+            "empty qualification activation unexpectedly planned Change events",
+        ));
+    }
+    execute_bulk_adoption_plan(repo, &plan, None)?;
+    let final_authority = store_capability_for_repo(repo)?;
+    if !matches!(final_authority.status, StoreCapabilityStatus::Ready { .. })
+        || final_authority.minimum_reader_profile.as_deref()
+            != Some(REVIEW_CHANGE_REVISION_COHORT_V1)
+        || final_authority.cursor.event_count != 0
+        || final_authority.cursor.journal_record_count != 2
+    {
+        return Err(invalid_migration(
+            "qualification activation did not produce exact empty L2 authority",
+        ));
+    }
+    Ok(final_authority)
+}
+
 /// Execute a previously frozen migration plan against one resolved store.
 /// `interrupt_after_append` counts activation, each Change event, then
 /// completion. Retrying the same plan converges through exclusive-create
@@ -2411,6 +2478,47 @@ mod tests {
     }
 
     #[test]
+    fn qualification_activation_requires_and_produces_an_empty_l2_store() {
+        use crate::crypto::TestEd25519Signer;
+
+        let repo = empty_repo();
+        let authority = activate_empty_store_for_qualification(
+            repo.path(),
+            "qualification-l2-capacity-v1".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+
+        assert_eq!(authority.cursor.event_count, 0);
+        assert_eq!(authority.cursor.journal_record_count, 2);
+        assert_eq!(
+            authority.minimum_reader_profile.as_deref(),
+            Some("review_change_revision_v1")
+        );
+        assert!(matches!(
+            authority.status,
+            StoreCapabilityStatus::Ready { .. }
+        ));
+
+        let nonempty = real_l0_repo();
+        let before = resolve_change_read_store(nonempty.path()).unwrap().1;
+        let error = activate_empty_store_for_qualification(
+            nonempty.path(),
+            "qualification-must-stay-empty".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires an empty store"));
+        let after = resolve_change_read_store(nonempty.path()).unwrap().1;
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.cursor, before.cursor);
+    }
+
+    #[test]
     fn execution_plan_tampering_fails_before_activation() {
         use crate::crypto::TestEd25519Signer;
 
@@ -2922,6 +3030,12 @@ mod tests {
                 .with_supersedes(vec![first.revision_id]),
         )
         .unwrap();
+        repo
+    }
+
+    fn empty_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "--quiet"]);
         repo
     }
 
