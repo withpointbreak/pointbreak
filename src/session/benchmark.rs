@@ -1962,9 +1962,9 @@ pub(crate) fn preflight_longitudinal_l2_capacity_resume_v1(
     let inspection = inspect_journal_records(read_store.backend().journal().as_ref())?;
     let mut existing_events = inspection
         .event_entries
-        .iter()
+        .into_iter()
         .map(|entry| {
-            let event: ShoreEvent = serde_json::from_slice(&entry.bytes)?;
+            let event = EventStore::decode_qualification_entry(entry.key_digest, entry.bytes)?;
             Ok((event.event_id.as_str().to_owned(), event))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
@@ -4148,6 +4148,77 @@ mod tests {
         assert!(before.iter().zip(after).all(|(left, right)| {
             left.key_digest == right.key_digest && left.bytes == right.bytes
         }));
+    }
+
+    #[test]
+    fn longitudinal_l2_change_resume_rejects_retired_envelope_before_store_mutation() {
+        let repo = initialized_repo();
+        crate::session::activate_empty_store_for_qualification(
+            repo.path(),
+            "longitudinal-l100-o10k-l2-v1".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+        write_generated_longitudinal_records_v1(
+            repo.path(),
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            1,
+        )
+        .unwrap();
+
+        let store_dir = crate::session::store_dir_for_repo(repo.path()).unwrap();
+        let backend = crate::session::store::backend::StoreBackend::Local(store_dir.clone());
+        let expected = inspect_journal_records(backend.journal().as_ref())
+            .unwrap()
+            .event_entries
+            .into_iter()
+            .next()
+            .expect("the partial root has generated events");
+        let event_path = store_dir
+            .join("events")
+            .join(format!("{}.json", expected.key_digest));
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&event_path).unwrap()).unwrap();
+        envelope
+            .get_mut("writer")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("generated event has a writer")
+            .insert(
+                "role".to_owned(),
+                serde_json::Value::String("reviewer".to_owned()),
+            );
+        std::fs::write(&event_path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        let before = backend.journal().list_record_entries().unwrap();
+        let mut before_content = BTreeSet::new();
+        collect_regular_relative_files(
+            &store_dir,
+            &store_dir.join("artifacts"),
+            &mut before_content,
+        )
+        .unwrap();
+
+        let error = resume_generated_longitudinal_l2_change_events_v1(repo.path(), 1).unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ShoreError::UnsupportedEventEnvelope(record) if record.retired == "writer.role"
+        ));
+        let after = backend.journal().list_record_entries().unwrap();
+        assert_eq!(before.len(), after.len());
+        assert!(before.iter().zip(&after).all(|(left, right)| {
+            left.key_digest == right.key_digest && left.bytes == right.bytes
+        }));
+        let mut after_content = BTreeSet::new();
+        collect_regular_relative_files(
+            &store_dir,
+            &store_dir.join("artifacts"),
+            &mut after_content,
+        )
+        .unwrap();
+        assert_eq!(before_content, after_content);
     }
 
     #[test]
