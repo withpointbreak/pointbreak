@@ -114,7 +114,9 @@ pub use association::{
 pub use attention::{
     AttentionAssessmentRecord, AttentionDetail, AttentionFreshness, AttentionFreshnessState,
     AttentionItem, AttentionListOptions, AttentionListResult, AttentionProjection, AttentionTier,
-    list_attention,
+    PublicReadAttentionFallbackV1, PublicReadAttentionRouteV1,
+    complete_public_read_attention_fallback_v1, list_attention,
+    list_attention_with_public_read_context,
 };
 pub use capture::{
     CaptureDiffstat, CaptureOptions, CaptureResult, CommitRangeSpec, RootCommitSpec, StagedSpec,

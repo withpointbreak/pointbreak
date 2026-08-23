@@ -325,14 +325,21 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             ObservedState::AuthoritativeReplay,
             OFF_ENV,
             vec![
-                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::RouteProjectionFold,
                 Phase::SerializationAndOutput,
             ],
             vec![
+                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowActivatedCapabilityProbe,
+                Phase::WorkflowChangeStoreReopenInspection,
+                Phase::OrdinaryReadStoreResolutionH2,
                 Phase::CacheAndFallback,
                 Phase::ReadTransaction,
                 Phase::SqliteSelection,
                 Phase::GenerationLeaseAndRetention,
+                Phase::RouteBodyHydration,
+                Phase::CarrierValidation,
             ],
             true,
         ),
@@ -342,11 +349,21 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             ObservedState::LabeledFallbackToAuthoritative,
             ACTIVE_ENV,
             vec![
-                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowChangeReaderReplayH3,
                 Phase::CacheAndFallback,
+                Phase::RouteProjectionFold,
                 Phase::SerializationAndOutput,
             ],
-            vec![Phase::SqliteSelection, Phase::ReadTransaction],
+            vec![
+                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowActivatedCapabilityProbe,
+                Phase::WorkflowChangeStoreReopenInspection,
+                Phase::OrdinaryReadStoreResolutionH2,
+                Phase::SqliteSelection,
+                Phase::ReadTransaction,
+                Phase::RouteBodyHydration,
+                Phase::CarrierValidation,
+            ],
             true,
         ),
     ];
@@ -370,6 +387,35 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             exhaustive,
         );
         assert_eq!(receipt.observed.route_state, state);
+        assert_eq!(
+            receipt.counters.directory_entries_walked, fixture.journal_record_count,
+            "{name} must perform one strict Journal inspection"
+        );
+        assert_eq!(
+            receipt.counters.carrier_opens,
+            fixture.journal_record_count + 2,
+            "{name} must add only the bounded capability pair"
+        );
+        assert_eq!(receipt.counters.change_capability_carriers_opened, 2);
+        assert_eq!(receipt.counters.event_decodes, fixture.event_count);
+        assert_eq!(receipt.counters.event_validations, fixture.event_count);
+        assert_eq!(receipt.counters.body_artifact_reads, 0);
+        assert_eq!(
+            receipt.counters.authoritative_fallbacks,
+            u64::from(name == "active-unavailable")
+        );
+        assert_eq!(
+            receipt.counters.full_history_fallbacks,
+            u64::from(name == "active-unavailable")
+        );
+        let document = assert_attention_output_lanes(&attention_arguments, env, name);
+        assert!(document["eventSetHash"].as_str().is_some());
+        assert!(document.get("projectionStamp").is_none());
+        assert_eq!(
+            derived_publication_count(fixture.repo.path()),
+            0,
+            "{name} must not publish a request-owned replacement"
+        );
         representative_receipts.push(receipt);
     }
 
@@ -389,13 +435,13 @@ fn cli_interaction_performance_cases_preserve_semantics() {
         &derived_expected,
         &receipt_dir,
         &[
-            Phase::CliCapabilityPreflightH1,
             Phase::GenerationLeaseAndRetention,
             Phase::ReadTransaction,
             Phase::SqliteSelection,
             Phase::SerializationAndOutput,
         ],
         &[
+            Phase::CliCapabilityPreflightH1,
             Phase::OrdinaryReadStoreResolutionH2,
             Phase::WorkflowChangeReaderReplayH3,
             Phase::RouteBodyHydration,
@@ -408,6 +454,15 @@ fn cli_interaction_performance_cases_preserve_semantics() {
         derived_receipt.observed.route_state,
         ObservedState::DerivedCurrent
     );
+    assert_eq!(derived_receipt.counters.directory_entries_walked, 0);
+    assert_eq!(derived_receipt.counters.event_decodes, 0);
+    assert_eq!(derived_receipt.counters.event_validations, 0);
+    assert_eq!(derived_receipt.counters.authoritative_fallbacks, 0);
+    assert_eq!(derived_receipt.counters.full_history_fallbacks, 0);
+    let derived_document =
+        assert_attention_output_lanes(&attention_arguments, ACTIVE_ENV, "derived-current");
+    assert!(derived_document["projectionStamp"].as_str().is_some());
+    assert!(derived_document.get("eventSetHash").is_none());
     representative_receipts.push(derived_receipt);
 
     assert_eq!(
@@ -422,6 +477,7 @@ fn cli_interaction_performance_cases_preserve_semantics() {
         &representative_receipts[1].expected,
         &receipt_dir,
     );
+    assert_attention_hint_precedes_strict_replay_error(&fixture, &attention_arguments);
 }
 
 fn fixture() -> Fixture {
@@ -968,6 +1024,71 @@ fn assert_selected_carrier_corruption_fails_closed(
     );
 }
 
+fn assert_attention_output_lanes(
+    arguments: &[String],
+    env: &[(&str, &str)],
+    case: &str,
+) -> serde_json::Value {
+    let json = run_binary(arguments, env);
+    let json_value = serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap();
+    let pretty = run_binary(arguments_with_format(arguments, "json-pretty"), env);
+    assert_success(&format!("attention {case} json-pretty"), &pretty);
+    assert_eq!(pretty.stderr, json.stderr, "attention {case} stderr drift");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&pretty.stdout).unwrap(),
+        json_value,
+        "attention {case} JSON lane semantics drifted"
+    );
+    let text_arguments = arguments_with_format(arguments, "text");
+    let text = run_binary(&text_arguments, env);
+    let repeated_text = run_binary(&text_arguments, env);
+    assert_success(&format!("attention {case} text"), &text);
+    assert_eq!(
+        text.stderr, json.stderr,
+        "attention {case} text stderr drift"
+    );
+    assert_eq!(
+        text.stdout, repeated_text.stdout,
+        "attention {case} text drift"
+    );
+    assert!(!text.stdout.is_empty(), "attention {case} text is empty");
+    json_value
+}
+
+fn assert_attention_hint_precedes_strict_replay_error(fixture: &Fixture, arguments: &[String]) {
+    let idempotency_key = "unrelated-future-control";
+    let stem = Sha256::digest(idempotency_key.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::write(
+        common_dir_store(fixture.repo.path())
+            .join("events")
+            .join(format!("{stem}.json")),
+        br#"{"schema":"pointbreak.future-control","version":1}"#,
+    )
+    .expect("write unrelated future control");
+
+    let output = run_binary(arguments, ACTIVE_ENV);
+
+    assert!(!output.status.success(), "strict replay error must refuse");
+    assert!(
+        output.stdout.is_empty(),
+        "strict replay error wrote product bytes"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let hint = stderr
+        .find("hint: derived access is unavailable")
+        .expect("fallback hint");
+    let refusal = stderr
+        .find("unknown Journal record schema")
+        .expect("strict replay refusal");
+    assert!(
+        hint < refusal,
+        "fallback hint must precede replay refusal: {stderr}"
+    );
+}
+
 fn build_derived(repo: &GitRepo) {
     let output = pointbreak_env(
         [
@@ -980,6 +1101,15 @@ fn build_derived(repo: &GitRepo) {
         ACTIVE_ENV,
     );
     assert_success("build disposable derived generation", &output);
+}
+
+fn derived_publication_count(repo: &Path) -> usize {
+    let publications = common_dir_store(repo).join("derived/publications");
+    match fs::read_dir(publications) {
+        Ok(entries) => entries.count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("read derived publications: {error}"),
+    }
 }
 
 fn encode_request(case_name: &str, expected: &ExpectedContext, receipt_path: &Path) -> String {

@@ -64,6 +64,17 @@ impl PublicReadCommandContextV1 {
         &self.read_store
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_derived_access_profile_for_test(
+        mut self,
+        profile: crate::session::derived_access::product_contract::DerivedAccessProfile,
+    ) -> Self {
+        self.read_store = self
+            .read_store
+            .with_derived_access_profile_for_test(profile);
+        self
+    }
+
     pub(crate) fn postflight(self) -> Result<()> {
         let check = self
             .read_store

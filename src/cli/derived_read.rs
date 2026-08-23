@@ -6,7 +6,11 @@ use pointbreak::session::DerivedHistoryAccess;
 /// implementation. Reads and writes share the exact-store cadence owned by
 /// the session layer.
 pub(super) fn emit_authoritative_fallback_hint(access: &DerivedHistoryAccess) {
-    if let Some(hint) = access.claim_authoritative_fallback_hint() {
+    emit_claimed_authoritative_fallback_hint(access.claim_authoritative_fallback_hint());
+}
+
+pub(super) fn emit_claimed_authoritative_fallback_hint(hint: Option<&str>) {
+    if let Some(hint) = hint {
         eprintln!("{hint}");
     }
 }

@@ -345,6 +345,7 @@ fn preflight_public_store_capability(
                 | InvocationReadRouteV1::InputRequestOpenAllTracks
                 | InvocationReadRouteV1::ObservationReviewerList
                 | InvocationReadRouteV1::ValidationReviewerList
+                | InvocationReadRouteV1::AttentionCurrentOrFallback
         )
     ) {
         let qualified = qualified_invocation_read_v1(cli)
@@ -1077,7 +1078,10 @@ fn run_cli(
             None => assessment::run(*args, stdout, stderr),
         },
         Command::Association(args) => association::run(*args, stdout, stderr),
-        Command::Attention(args) => attention::run(args, stdout),
+        Command::Attention(args) => match public_read_context.take() {
+            Some(context) => attention::run_with_public_read_context(args, context, stdout),
+            None => attention::run(args, stdout),
+        },
         Command::Capture(args) => capture::run(args, &cli.tracing, stdout, stderr),
         Command::Change(args) => change::run(args, stdout, stderr),
         Command::Diff(args) => diff::run(args, stdout),
@@ -1309,6 +1313,50 @@ mod change_reader_cli_tests {
                 .collect::<Vec<_>>(),
             vec![LongitudinalDerivedAccessPhaseV1::CliCapabilityPreflightH1]
         );
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn qualified_attention_l0_refuses_without_entering_legacy_h1() {
+        use pointbreak::bench_support::longitudinal::{
+            InteractionActorV1, LongitudinalCountingScopeV1,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("attention"),
+            OsString::from("list"),
+            OsString::from("--repo"),
+            repo.path().as_os_str().to_owned(),
+            OsString::from("--revision"),
+            OsString::from(format!("rev:sha256:{}", "1".repeat(64))),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let cli = Cli::try_parse_from(raw_args.clone()).unwrap();
+        let counting = LongitudinalCountingScopeV1::new("8".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+
+        let error = preflight_public_store_capability(&cli, &raw_args)
+            .err()
+            .expect("L0 refusal")
+            .to_string();
+
+        assert!(error.contains("migration_required"), "{error}");
+        let snapshot = counting.snapshot();
+        assert!(snapshot.derived_access_phases.is_empty());
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.event_decodes, 0);
     }
 }
 

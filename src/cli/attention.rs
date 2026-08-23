@@ -6,7 +6,9 @@ use pointbreak::documents::{attention_list_document, derived_attention_list_docu
 use pointbreak::model::RevisionId;
 use pointbreak::session::{
     AttentionDetail, AttentionItem, AttentionListOptions, AttentionListResult, AttentionTier,
-    DerivedAttentionRoute, DerivedHistoryAccess, list_attention,
+    DerivedAttentionRoute, DerivedHistoryAccess, PublicReadAttentionRouteV1,
+    PublicReadCommandContextV1, complete_public_read_attention_fallback_v1, list_attention,
+    list_attention_with_public_read_context,
 };
 
 use crate::cli::common::clamp_title;
@@ -63,13 +65,33 @@ pub(super) fn run(
             let span = tracing::info_span!("shore.attention.list");
             let _entered = span.enter();
             tracing::debug!(command = "attention.list", "command_start");
-            attention_list(args, stdout)
+            attention_list(args, read_attention, stdout)
         }
     }
 }
 
+pub(super) fn run_with_public_read_context(
+    args: AttentionArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let AttentionCommand::List(args) = args.command;
+    let span = tracing::info_span!("shore.attention.list");
+    let _entered = span.enter();
+    tracing::debug!(command = "attention.list", "command_start");
+    attention_list(
+        args,
+        |repo, revision| read_attention_with_public_read_context(repo, revision, context),
+        stdout,
+    )
+}
+
 fn attention_list(
     args: AttentionListArgs,
+    read: impl FnOnce(
+        &std::path::Path,
+        Option<RevisionId>,
+    ) -> Result<RoutedAttention, Box<dyn std::error::Error>>,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let format_explicit = args.format_args.explicit();
@@ -84,7 +106,7 @@ fn attention_list(
                 .map(RevisionId::new)
         })
         .transpose()?;
-    let routed = read_attention(&args.repo, revision)?;
+    let routed = read(&args.repo, revision)?;
     #[cfg(feature = "longitudinal-counting")]
     routed.record_observed_state();
     let result = routed.result();
@@ -199,20 +221,76 @@ fn read_attention(
         }),
         DerivedAttentionRoute::Off if !access.is_active() => authoritative(false),
         DerivedAttentionRoute::Off | DerivedAttentionRoute::Unavailable(_) => {
-            #[cfg(feature = "longitudinal-counting")]
-            let _fallback_phase =
-                pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
-                    pointbreak::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CacheAndFallback,
-                );
-            #[cfg(feature = "longitudinal-counting")]
-            {
-                pointbreak::bench_support::longitudinal::record_authoritative_fallback();
-                pointbreak::bench_support::longitudinal::record_full_history_fallback();
-            }
-            crate::cli::derived_read::emit_authoritative_fallback_hint(&access);
-            authoritative(true)
+            let hint = access.claim_authoritative_fallback_hint();
+            run_authoritative_fallback(hint, || authoritative(true))
         }
     }
+}
+
+fn read_attention_with_public_read_context(
+    repo: &std::path::Path,
+    revision: Option<RevisionId>,
+    context: PublicReadCommandContextV1,
+) -> Result<RoutedAttention, Box<dyn std::error::Error>> {
+    let mut options = AttentionListOptions::new(repo);
+    if let Some(revision) = revision {
+        options = options.with_revision(revision);
+    }
+    let route = list_attention_with_public_read_context(options, context)?;
+    public_attention_route(route)
+}
+
+fn public_attention_route(
+    route: PublicReadAttentionRouteV1,
+) -> Result<RoutedAttention, Box<dyn std::error::Error>> {
+    match route {
+        PublicReadAttentionRouteV1::Authoritative {
+            result,
+            labeled_fallback,
+        } => Ok(RoutedAttention::Authoritative {
+            result,
+            labeled_fallback,
+        }),
+        PublicReadAttentionRouteV1::Derived {
+            result,
+            projection_stamp,
+        } => Ok(RoutedAttention::Derived {
+            result,
+            projection_stamp,
+        }),
+        PublicReadAttentionRouteV1::LabeledFallbackPending {
+            fallback_hint,
+            continuation,
+        } => run_authoritative_fallback(fallback_hint.as_deref(), || {
+            match complete_public_read_attention_fallback_v1(continuation)? {
+                PublicReadAttentionRouteV1::Authoritative {
+                    result,
+                    labeled_fallback: true,
+                } => Ok(RoutedAttention::Authoritative {
+                    result,
+                    labeled_fallback: true,
+                }),
+                _ => Err("public read Attention fallback returned a non-fallback route".into()),
+            }
+        }),
+    }
+}
+
+fn run_authoritative_fallback<T>(
+    hint: Option<&str>,
+    fallback: impl FnOnce() -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    #[cfg(feature = "longitudinal-counting")]
+    let _fallback_phase = pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
+        pointbreak::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::CacheAndFallback,
+    );
+    #[cfg(feature = "longitudinal-counting")]
+    {
+        pointbreak::bench_support::longitudinal::record_authoritative_fallback();
+        pointbreak::bench_support::longitudinal::record_full_history_fallback();
+    }
+    crate::cli::derived_read::emit_claimed_authoritative_fallback_hint(hint);
+    fallback()
 }
 
 /// Bespoke text lane for `attention list` (ADR-0029: text is disposable, never

@@ -205,6 +205,15 @@ impl ReadStore {
             },
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_derived_access_profile_for_test(
+        mut self,
+        profile: DerivedAccessProfile,
+    ) -> Self {
+        self.resolution.derived_access_profile = profile;
+        self
+    }
 }
 
 /// The read seam: read surfaces resolve their store here. With one default store

@@ -303,6 +303,14 @@ impl DerivedHistoryAccess {
         Self::resolve_with_profile(repo.as_ref(), profile)
     }
 
+    pub(crate) fn from_public_read_store(
+        read_store: crate::session::store::resolution::ReadStore,
+    ) -> Result<Self, String> {
+        Ok(Self::from_runtime(DerivedAccessRuntime::from_read_store(
+            read_store,
+        )?))
+    }
+
     fn resolve_with_profile(repo: &Path, profile: DerivedAccessProfile) -> Result<Self, String> {
         if profile == DerivedAccessProfile::Off {
             return Ok(Self::from_mode(DerivedHistoryMode::Off));
