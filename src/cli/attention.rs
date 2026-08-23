@@ -26,7 +26,8 @@ impl AttentionArgs {
     ) -> Option<super::QualifiedInvocationReadV1<'_>> {
         let AttentionCommand::List(args) = &self.command;
         args.revision
-            .is_some()
+            .as_deref()
+            .is_some_and(super::id_resolver::is_index_free_full_revision_id_v1)
             .then_some(super::QualifiedInvocationReadV1 {
                 route: super::InvocationReadRouteV1::AttentionCurrentOrFallback,
                 repo: &args.repo,

@@ -35,7 +35,10 @@ impl InputRequestArgs {
             return None;
         };
         (args.revision.is_none()
-            && args.exact_revision.is_some()
+            && args
+                .exact_revision
+                .as_deref()
+                .is_some_and(super::id_resolver::is_index_free_full_revision_id_v1)
             && args.track.is_none()
             && args.mode.is_none()
             && args.file.is_none()

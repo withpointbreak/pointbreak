@@ -393,6 +393,11 @@ fn preflight_public_store_capability(
 mod invocation_read_catalog_tests {
     use super::*;
 
+    const FULL_REVISION: &str = concat!(
+        "rev:sha256:",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+    );
+
     fn classify(arguments: &str) -> InvocationReadCatalogV1 {
         let cli =
             Cli::try_parse_from(std::iter::once("pointbreak").chain(arguments.split_whitespace()))
@@ -407,31 +412,39 @@ mod invocation_read_catalog_tests {
 
         for (arguments, expected) in [
             (
-                "assessment show --repo /tmp/a --exact-revision rev:one --track agent:r",
+                format!(
+                    "assessment show --repo /tmp/a --exact-revision {FULL_REVISION} --track agent:r"
+                ),
                 Route::AssessmentCurrentResult,
             ),
             (
-                "assessment show --include-summary --track agent:r --exact-revision rev:one --repo /tmp/b --format json-pretty",
+                format!(
+                    "assessment show --include-summary --track agent:r --exact-revision {FULL_REVISION} --repo /tmp/b --format json-pretty"
+                ),
                 Route::AssessmentCurrentSummary,
             ),
             (
-                "input-request list --exact-revision rev:one --status open --format text",
+                format!(
+                    "input-request list --exact-revision {FULL_REVISION} --status open --format text"
+                ),
                 Route::InputRequestOpenAllTracks,
             ),
             (
-                "observation list --track agent:r --exact-revision rev:one --format json",
+                format!(
+                    "observation list --track agent:r --exact-revision {FULL_REVISION} --format json"
+                ),
                 Route::ObservationReviewerList,
             ),
             (
-                "validation list --exact-revision rev:one --track agent:r",
+                format!("validation list --exact-revision {FULL_REVISION} --track agent:r"),
                 Route::ValidationReviewerList,
             ),
             (
-                "attention list --revision rev:one --repo /tmp/c --format text",
+                format!("attention list --revision {FULL_REVISION} --repo /tmp/c --format text"),
                 Route::AttentionCurrentOrFallback,
             ),
         ] {
-            assert_eq!(classify(arguments), Qualified(expected), "{arguments}");
+            assert_eq!(classify(&arguments), Qualified(expected), "{arguments}");
         }
 
         for arguments in [
@@ -452,17 +465,56 @@ mod invocation_read_catalog_tests {
     }
 
     #[test]
+    fn fragments_and_selector_errors_never_enter_the_qualified_lane() {
+        use InvocationReadCatalogV1::LegacyPreflight;
+
+        for selector in [
+            "11111111",
+            "rev:11111111",
+            "deadbeef",
+            "abc",
+            "not-hex",
+            "obj:11111111",
+        ] {
+            for arguments in [
+                format!("assessment show --exact-revision {selector} --track agent:r"),
+                format!(
+                    "assessment show --include-summary --exact-revision {selector} --track agent:r"
+                ),
+                format!("input-request list --exact-revision {selector} --status open"),
+                format!("observation list --exact-revision {selector} --track agent:r"),
+                format!("validation list --exact-revision {selector} --track agent:r"),
+                format!("attention list --revision {selector}"),
+            ] {
+                assert_eq!(
+                    classify(&arguments),
+                    LegacyPreflight(LegacyPreflightKindV1::Unqualified),
+                    "{arguments}",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn presentation_and_repository_selection_do_not_change_membership() {
         use InvocationReadCatalogV1::Qualified;
         use InvocationReadRouteV1::AssessmentCurrentResult;
 
         for arguments in [
-            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/default",
-            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/a --format json",
-            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/b --format json-pretty",
-            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/c --format text",
+            format!(
+                "assessment show --exact-revision {FULL_REVISION} --track agent:r --repo /tmp/default"
+            ),
+            format!(
+                "assessment show --exact-revision {FULL_REVISION} --track agent:r --repo /tmp/a --format json"
+            ),
+            format!(
+                "assessment show --exact-revision {FULL_REVISION} --track agent:r --repo /tmp/b --format json-pretty"
+            ),
+            format!(
+                "assessment show --exact-revision {FULL_REVISION} --track agent:r --repo /tmp/c --format text"
+            ),
         ] {
-            assert_eq!(classify(arguments), Qualified(AssessmentCurrentResult));
+            assert_eq!(classify(&arguments), Qualified(AssessmentCurrentResult));
         }
     }
 

@@ -28,7 +28,10 @@ impl AssessmentArgs {
             return None;
         };
         if args.revision.is_some()
-            || args.exact_revision.is_none()
+            || !args
+                .exact_revision
+                .as_deref()
+                .is_some_and(super::id_resolver::is_index_free_full_revision_id_v1)
             || args.track.is_none()
             || args.all
         {

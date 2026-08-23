@@ -174,6 +174,16 @@ fn classify(kinds: &[IdKind], input: &str) -> CliResult<Resolution> {
     })
 }
 
+/// Whether `input` is a full Revision id that the current resolver can accept
+/// without building the store-wide id index. Every fragment and parser error
+/// stays on its existing resolution path.
+pub(super) fn is_index_free_full_revision_id_v1(input: &str) -> bool {
+    matches!(
+        classify(&[IdKind::Revision], input),
+        Ok(Resolution::Full(_))
+    )
+}
+
 /// Scan one kind's id set for digest-prefix matches. Zero → not-found; one →
 /// resolved; more than one → hard error listing every full candidate (INV-6).
 fn match_fragment(index: &StoreIdIndex, kind: IdKind, hex: &str) -> CliResult<String> {
@@ -262,7 +272,9 @@ mod tests {
 
     use pointbreak::session::StoreIdIndex;
 
-    use super::{IdKind, IdResolver, MIN_ID_FRAGMENT, resolve_within};
+    use super::{
+        IdKind, IdResolver, MIN_ID_FRAGMENT, is_index_free_full_revision_id_v1, resolve_within,
+    };
 
     /// A full rev id whose 64-hex digest begins with `head` (padded with `fill`).
     /// The length must be exactly 64 or the full-id passthrough test is invalid.
@@ -293,6 +305,23 @@ mod tests {
         let resolver = IdResolver::new(Path::new("/definitely/missing/shore-store"));
         let out = resolver.resolve(&[IdKind::Revision], &rev_a).unwrap();
         assert_eq!(out, rev_a);
+    }
+
+    #[test]
+    fn only_an_index_free_full_revision_id_qualifies() {
+        let revision = rev_full("40c47f97", '0');
+        assert!(is_index_free_full_revision_id_v1(&revision));
+
+        for input in [
+            "40c47f97",
+            "rev:40c47f97",
+            "deadbeef",
+            "abc",
+            "not-hex",
+            "obj:40c47f97",
+        ] {
+            assert!(!is_index_free_full_revision_id_v1(input), "{input}");
+        }
     }
 
     #[test]
@@ -377,5 +406,22 @@ mod tests {
         let index = index_with_revisions(&[rev_a.as_str()]);
         let err = resolve_within(&index, &[IdKind::Revision], "deadbeef").unwrap_err();
         assert!(err.to_string().to_lowercase().contains("no"), "err: {err}");
+    }
+
+    #[test]
+    fn malformed_and_wrong_kind_inputs_keep_their_parser_errors() {
+        let index = StoreIdIndex::default();
+
+        let malformed = resolve_within(&index, &[IdKind::Revision], "not-hex").unwrap_err();
+        assert!(
+            malformed.to_string().contains("lowercase hex"),
+            "err: {malformed}"
+        );
+
+        let wrong_kind = resolve_within(&index, &[IdKind::Revision], "obj:40c47f97").unwrap_err();
+        assert!(
+            wrong_kind.to_string().contains("expected kinds (rev:)"),
+            "err: {wrong_kind}"
+        );
     }
 }

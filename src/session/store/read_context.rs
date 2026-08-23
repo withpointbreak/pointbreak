@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_head_marker_cannot_hide_movement_and_a_new_invocation_reproves() {
+    fn equal_head_marker_cannot_hide_atomic_replacement_and_a_new_invocation_reproves() {
         let repo = repository();
         let store = capability_store(repo.path(), CapabilityFixtureState::L2);
         let context = prepare_public_read_command_context_v1(repo.path()).unwrap();

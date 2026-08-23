@@ -23,7 +23,8 @@ use pointbreak::bench_support::longitudinal::{
     InteractionPerformanceExpectedContextV1 as ExpectedContext,
     InteractionPerformanceReceiptV1 as Receipt, InteractionRouteV1 as Route,
     InteractionScopeCoverageV1 as Coverage, InteractionSetupExpectationV1 as Setup,
-    LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1 as Phase,
+    LongitudinalCounterReceiptV1, LongitudinalCountingScopeV1,
+    LongitudinalDerivedAccessPhaseV1 as Phase,
 };
 use sha2::{Digest, Sha256};
 use support::git_repo::GitRepo;
@@ -97,14 +98,8 @@ struct ReceiptExpectation<'a> {
     exhaustive: bool,
 }
 
-#[test]
-fn cli_interaction_performance_cases_preserve_semantics() {
-    let fixture = fixture();
-    let execution = execution_identity();
-    let receipt_dir = tempfile::tempdir().expect("temporary receipt directory");
-    let repo = fixture.repo.path().to_string_lossy().into_owned();
-
-    let primary_cases = [
+fn fact_route_cases(repo: &str, revision: &str) -> [RouteCase; 5] {
+    [
         RouteCase {
             id: ROUTE_IDS[0],
             route: Route::AssessmentCurrentResult,
@@ -112,9 +107,9 @@ fn cli_interaction_performance_cases_preserve_semantics() {
                 "assessment",
                 "show",
                 "--repo",
-                &repo,
+                repo,
                 "--exact-revision",
-                &fixture.revision,
+                revision,
                 "--track",
                 TRACK,
                 "--format",
@@ -129,9 +124,9 @@ fn cli_interaction_performance_cases_preserve_semantics() {
                 "assessment",
                 "show",
                 "--repo",
-                &repo,
+                repo,
                 "--exact-revision",
-                &fixture.revision,
+                revision,
                 "--track",
                 TRACK,
                 "--include-summary",
@@ -147,9 +142,9 @@ fn cli_interaction_performance_cases_preserve_semantics() {
                 "input-request",
                 "list",
                 "--repo",
-                &repo,
+                repo,
                 "--exact-revision",
-                &fixture.revision,
+                revision,
                 "--status",
                 "open",
                 "--format",
@@ -164,9 +159,9 @@ fn cli_interaction_performance_cases_preserve_semantics() {
                 "observation",
                 "list",
                 "--repo",
-                &repo,
+                repo,
                 "--exact-revision",
-                &fixture.revision,
+                revision,
                 "--track",
                 TRACK,
                 "--format",
@@ -181,9 +176,9 @@ fn cli_interaction_performance_cases_preserve_semantics() {
                 "validation",
                 "list",
                 "--repo",
-                &repo,
+                repo,
                 "--exact-revision",
-                &fixture.revision,
+                revision,
                 "--track",
                 TRACK,
                 "--format",
@@ -191,7 +186,17 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             ]),
             includes_body: false,
         },
-    ];
+    ]
+}
+
+#[test]
+fn cli_interaction_performance_cases_preserve_semantics() {
+    let fixture = fixture();
+    let execution = execution_identity();
+    let receipt_dir = tempfile::tempdir().expect("temporary receipt directory");
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+
+    let primary_cases = fact_route_cases(&repo, &fixture.revision);
 
     let mut observed_route_ids = BTreeSet::new();
     let mut representative_receipts = Vec::new();
@@ -480,6 +485,75 @@ fn cli_interaction_performance_cases_preserve_semantics() {
     assert_attention_hint_precedes_strict_replay_error(&fixture, &attention_arguments);
 }
 
+#[test]
+fn abbreviated_revision_selectors_preserve_legacy_counted_paths() {
+    let fixture = fixture();
+    let receipt_dir = tempfile::tempdir().expect("temporary receipt directory");
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    let digest = fixture
+        .revision
+        .rsplit_once("sha256:")
+        .expect("Revision id has a sha256 digest")
+        .1;
+    let fragment = &digest[..8];
+
+    for case in fact_route_cases(&repo, &fixture.revision) {
+        let case_name = format!("fragment-{}", case.id);
+        let fragment_arguments = arguments_with_revision_selector(&case.arguments, fragment);
+        run_legacy_fragment_case(
+            &case_name,
+            &case.arguments,
+            &fragment_arguments,
+            OFF_ENV,
+            &receipt_dir,
+            &fixture,
+            5,
+        );
+    }
+
+    let attention_full_arguments = strings(&[
+        "attention",
+        "list",
+        "--repo",
+        &repo,
+        "--revision",
+        &fixture.revision,
+        "--format",
+        "json",
+    ]);
+    let attention_fragment_arguments =
+        arguments_with_revision_selector(&attention_full_arguments, fragment);
+    run_legacy_fragment_case(
+        "fragment-attention-off",
+        &attention_full_arguments,
+        &attention_fragment_arguments,
+        OFF_ENV,
+        &receipt_dir,
+        &fixture,
+        2,
+    );
+    run_legacy_fragment_case(
+        "fragment-attention-active-unavailable",
+        &attention_full_arguments,
+        &attention_fragment_arguments,
+        ACTIVE_ENV,
+        &receipt_dir,
+        &fixture,
+        2,
+    );
+
+    build_derived(&fixture.repo);
+    run_legacy_fragment_case(
+        "fragment-attention-current",
+        &attention_full_arguments,
+        &attention_fragment_arguments,
+        ACTIVE_ENV,
+        &receipt_dir,
+        &fixture,
+        1,
+    );
+}
+
 fn fixture() -> Fixture {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
@@ -723,6 +797,66 @@ fn run_success_case(
     )
     .unwrap_or_else(|error| panic!("{case_name} receipt drift: {error}"));
     receipt
+}
+
+fn run_legacy_fragment_case(
+    case_name: &str,
+    full_arguments: &[String],
+    fragment_arguments: &[String],
+    env: &[(&str, &str)],
+    receipt_dir: &tempfile::TempDir,
+    fixture: &Fixture,
+    expected_decode_passes: u64,
+) {
+    let full = run_binary(full_arguments, env);
+    assert_success(&format!("{case_name} full selector"), &full);
+    let fragment = run_binary(fragment_arguments, env);
+    assert_success(case_name, &fragment);
+    assert_eq!(fragment.status.code(), full.status.code(), "{case_name}");
+    assert_eq!(fragment.stdout, full.stdout, "{case_name} stdout parity");
+    assert_eq!(fragment.stderr, full.stderr, "{case_name} stderr parity");
+
+    let receipt_path = receipt_dir.path().join(format!("{case_name}.json"));
+    let encoded = encode_counter_request(case_name, &receipt_path);
+    let counted_arguments = [
+        vec!["--longitudinal-counting".to_owned(), encoded],
+        fragment_arguments.to_vec(),
+    ]
+    .concat();
+    let counted = run_binary(&counted_arguments, env);
+    assert_eq!(counted.status.code(), fragment.status.code(), "{case_name}");
+    assert_eq!(
+        counted.stdout, fragment.stdout,
+        "{case_name} counted stdout"
+    );
+    assert_eq!(
+        counted.stderr, fragment.stderr,
+        "{case_name} counted stderr"
+    );
+
+    let receipt: LongitudinalCounterReceiptV1 = serde_json::from_slice(
+        &fs::read(&receipt_path)
+            .unwrap_or_else(|error| panic!("read {case_name} receipt: {error}")),
+    )
+    .unwrap_or_else(|error| panic!("parse {case_name} receipt: {error}"));
+    receipt
+        .validate()
+        .unwrap_or_else(|error| panic!("validate {case_name} receipt: {error}"));
+    assert!(receipt.success, "{case_name} counted product result");
+    assert_eq!(
+        receipt.counters.event_decodes,
+        fixture.event_count * expected_decode_passes,
+        "{case_name} must retain its legacy complete-history decode multiplicity"
+    );
+    assert_eq!(
+        receipt.counters.event_validations, receipt.counters.event_decodes,
+        "{case_name} must validate every decoded event"
+    );
+    assert!(
+        receipt.counters.directory_entries_walked
+            >= fixture.journal_record_count * expected_decode_passes,
+        "{case_name} must truthfully count every legacy complete-history walk"
+    );
 }
 
 fn check_case_receipt(
@@ -1133,6 +1267,26 @@ fn encode_request(case_name: &str, expected: &ExpectedContext, receipt_path: &Pa
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("counting request JSON"))
 }
 
+fn encode_counter_request(case_name: &str, receipt_path: &Path) -> String {
+    let request = serde_json::json!({
+        "runIdentity": sha256(case_name.as_bytes()),
+        "context": {
+            "rootIdentity": "1".repeat(64),
+            "operation": "FRAGMENT_SELECTOR_LEGACY_PATH",
+            "phase": case_name,
+            "baseExecutionIdentitySha256": "2".repeat(64),
+            "derivativeExecutionIdentitySha256": "3".repeat(64),
+            "manifestSha256": "4".repeat(64),
+            "scheduleSha256": "5".repeat(64),
+            "success": false,
+            "semanticResultSha256": "6".repeat(64),
+            "includeCapacityOwnership": false
+        },
+        "receiptPath": receipt_path,
+    });
+    URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("counting request JSON"))
+}
+
 fn run_binary<I, S>(arguments: I, env: &[(&str, &str)]) -> Output
 where
     I: IntoIterator<Item = S>,
@@ -1186,6 +1340,16 @@ fn arguments_with_format(arguments: &[String], format: &str) -> Vec<String> {
         .position(|argument| argument == "--format")
         .expect("fixture format option");
     arguments[index + 1] = format.to_owned();
+    arguments
+}
+
+fn arguments_with_revision_selector(arguments: &[String], selector: &str) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let index = arguments
+        .iter()
+        .position(|argument| matches!(argument.as_str(), "--exact-revision" | "--revision"))
+        .expect("fixture Revision selector");
+    arguments[index + 1] = selector.to_owned();
     arguments
 }
 

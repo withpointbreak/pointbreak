@@ -540,17 +540,17 @@ mod tests {
     }
 
     #[test]
-    fn head_marker_unchanged_by_an_in_place_envelope_edit() {
+    fn head_marker_unchanged_by_an_atomic_envelope_replacement() {
         for (_guard, backend) in each_backend() {
             let journal = backend.journal();
             journal.create_event_once("k:a", b"original").unwrap();
             journal.create_event_once("k:b", b"original").unwrap();
             let before = journal.head_marker().unwrap();
 
-            // An out-of-band edit to an existing event's bytes overwrites in place;
-            // it adds no entry, so the count is unchanged — the same blind spot the
-            // event-set hash carries for an envelope-only edit.
-            journal.insert_raw("k:a", b"edited-in-place").unwrap();
+            // The test hook atomically replaces an existing event's bytes. It adds
+            // no entry, so the count is unchanged — the same blind spot the event-
+            // set hash carries for an envelope-only replacement.
+            journal.insert_raw("k:a", b"atomically-replaced").unwrap();
 
             assert_eq!(journal.head_marker().unwrap(), before);
         }
@@ -582,25 +582,6 @@ mod tests {
                 journal.changes_since(&created).unwrap().verdict,
                 JournalChangeVerdict::Changed,
                 "a second created carrier changes the bounded observation again"
-            );
-        }
-    }
-
-    #[test]
-    fn journal_change_stamp_has_an_explicit_existing_carrier_overwrite_non_claim() {
-        for (_guard, backend) in each_backend() {
-            let journal = backend.journal();
-            journal.create_event_once("k:a", b"original").unwrap();
-            let before = journal.change_stamp().unwrap();
-
-            journal.insert_raw("k:a", b"tampered").unwrap();
-
-            let after = journal.change_stamp().unwrap();
-            let _observed_stamp_change = before != after;
-            assert_eq!(
-                journal.read_event_bytes("k:a").unwrap(),
-                Some(b"tampered".to_vec()),
-                "the selected-carrier read still exposes bytes for validation"
             );
         }
     }

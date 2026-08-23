@@ -741,6 +741,38 @@ mod tests {
         assert_eq!(head.carrier_bytes_read, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_same_entry_overwrite_is_an_unsupported_stable_stamp_non_claim() {
+        use std::io::Write as _;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let journal = LocalJournal::new(root.path());
+        journal.create_event_once("k:a", b"original").unwrap();
+        let path = journal.event_path("k:a");
+        let before_stamp = journal.change_stamp().unwrap();
+        let before_metadata = std::fs::metadata(&path).unwrap();
+
+        let mut carrier = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        carrier.write_all(b"same-entry-overwrite").unwrap();
+        carrier.sync_all().unwrap();
+
+        let after_metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(after_metadata.dev(), before_metadata.dev());
+        assert_eq!(after_metadata.ino(), before_metadata.ino());
+        assert_eq!(std::fs::read(&path).unwrap(), b"same-entry-overwrite");
+        assert_eq!(
+            journal.changes_since(&before_stamp).unwrap().verdict,
+            super::super::JournalChangeVerdict::Stable,
+            "external same-entry overwrite is outside D15's supported publication interval"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_watch_second_drain_rejects_a_create_after_the_first_drain() {

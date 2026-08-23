@@ -27,7 +27,10 @@ impl ValidationArgs {
             return None;
         };
         (args.revision.is_none()
-            && args.exact_revision.is_some()
+            && args
+                .exact_revision
+                .as_deref()
+                .is_some_and(super::id_resolver::is_index_free_full_revision_id_v1)
             && args.track.is_some()
             && args.status.is_none()
             && !args.include_body)
