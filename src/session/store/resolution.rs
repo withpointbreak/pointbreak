@@ -241,6 +241,16 @@ pub(crate) fn resolve_change_read_backend(repo: impl AsRef<Path>) -> Result<Read
     })
 }
 
+/// Resolve one retained store for the bounded public-read command factory.
+///
+/// Capability admission is deliberately absent here: the factory immediately
+/// binds this value to its point-read pair proof and native change interval.
+pub(crate) fn resolve_public_read_context_store_v1(repo: &Path) -> Result<ReadStore> {
+    Ok(ReadStore {
+        resolution: resolve_store(repo)?,
+    })
+}
+
 /// Cheap append-only marker used to invalidate the Inspector's Change cache.
 ///
 /// Unlike [`event_log_head_marker`], this bypasses the legacy semantic

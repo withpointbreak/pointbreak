@@ -640,6 +640,15 @@ pub(crate) struct BoundedChangeCapabilityPairV1 {
     pub(crate) completion_record_sha256: String,
 }
 
+pub(crate) enum BoundedChangeCapabilityPairStateV1 {
+    MigrationRequired,
+    MigrationInProgress {
+        activation_id: String,
+        manifest_hash: String,
+    },
+    Ready(BoundedChangeCapabilityPairV1),
+}
+
 #[derive(Debug)]
 pub(crate) struct JournalInspection {
     pub(crate) status: StoreCapabilityStatus,
@@ -864,9 +873,11 @@ fn expected_completion_logical_key(activation: &StoreCapabilityActivationV1) -> 
     Ok(format!("bulk_adoption_completion:{completion_id}"))
 }
 
-fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabilityStatus> {
+pub(crate) fn bounded_change_capability_pair_state_v1(
+    journal: &dyn Journal,
+) -> Result<BoundedChangeCapabilityPairStateV1> {
     if !journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
-        return Ok(StoreCapabilityStatus::MigrationRequired);
+        return Ok(BoundedChangeCapabilityPairStateV1::MigrationRequired);
     }
 
     #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -891,7 +902,7 @@ fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabi
     #[cfg(any(test, feature = "longitudinal-counting"))]
     record_change_capability_carriers_opened(1);
     let Some(completion_bytes) = journal.read_event_bytes(&completion_logical_key)? else {
-        return Ok(StoreCapabilityStatus::MigrationInProgress {
+        return Ok(BoundedChangeCapabilityPairStateV1::MigrationInProgress {
             activation_id: activation.activation_id,
             manifest_hash: activation.bulk_adoption_manifest_hash,
         });
@@ -902,10 +913,26 @@ fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabi
         &activation_bytes,
         &completion_bytes,
     )?;
-    Ok(StoreCapabilityStatus::Ready {
-        activation_id: pair.activation_id,
-        manifest_hash: pair.manifest_hash,
-        completion_id: pair.completion_id,
+    Ok(BoundedChangeCapabilityPairStateV1::Ready(pair))
+}
+
+fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabilityStatus> {
+    Ok(match bounded_change_capability_pair_state_v1(journal)? {
+        BoundedChangeCapabilityPairStateV1::MigrationRequired => {
+            StoreCapabilityStatus::MigrationRequired
+        }
+        BoundedChangeCapabilityPairStateV1::MigrationInProgress {
+            activation_id,
+            manifest_hash,
+        } => StoreCapabilityStatus::MigrationInProgress {
+            activation_id,
+            manifest_hash,
+        },
+        BoundedChangeCapabilityPairStateV1::Ready(pair) => StoreCapabilityStatus::Ready {
+            activation_id: pair.activation_id,
+            manifest_hash: pair.manifest_hash,
+            completion_id: pair.completion_id,
+        },
     })
 }
 

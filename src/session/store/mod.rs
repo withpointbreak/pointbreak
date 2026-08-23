@@ -8,6 +8,7 @@ mod event_store;
 pub(in crate::session) mod fingerprint;
 pub(in crate::session) mod inventory;
 pub(in crate::session) mod object_artifact;
+mod read_context;
 pub(in crate::session) mod resolution;
 pub(in crate::session) mod sensitivity;
 pub(in crate::session) mod sensitivity_config;
@@ -25,6 +26,7 @@ pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
 pub(crate) use object_artifact::build_object_artifact_v2;
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
+pub use read_context::{PublicReadCommandContextV1, prepare_public_read_command_context_v1};
 pub use resolution::{
     StorePaths, activated_store_capability_for_repo, change_reader_head_marker_for_repo,
     event_log_head_marker, family_link_advisory, store_capability_for_repo, store_paths_for_repo,

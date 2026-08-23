@@ -123,13 +123,13 @@ pub(crate) use store::compute_revision_fingerprint;
 #[cfg(feature = "longitudinal-counting")]
 pub(crate) use store::resolution::opaque_path_identity;
 pub use store::{
-    AuthorityCursorV2, EventWriteOutcome, ObjectArtifact, StoreCapabilityInspection,
-    StoreCapabilityStatus, StoreMode, StoreModeOutcome, StoreModeSource, StorePaths,
-    activated_store_capability_for_repo, capture_worktree_fingerprint,
+    AuthorityCursorV2, EventWriteOutcome, ObjectArtifact, PublicReadCommandContextV1,
+    StoreCapabilityInspection, StoreCapabilityStatus, StoreMode, StoreModeOutcome, StoreModeSource,
+    StorePaths, activated_store_capability_for_repo, capture_worktree_fingerprint,
     change_reader_head_marker_for_repo, ensure_pointbreak_gitignore, event_log_head_marker,
-    family_link_advisory, read_bound_object_artifact, read_object_artifact,
-    resolve_store_mode_for_repo, set_store_mode_for_repo, store_capability_for_repo,
-    store_dir_for_repo, store_paths_for_repo,
+    family_link_advisory, prepare_public_read_command_context_v1, read_bound_object_artifact,
+    read_object_artifact, resolve_store_mode_for_repo, set_store_mode_for_repo,
+    store_capability_for_repo, store_dir_for_repo, store_paths_for_repo,
 };
 pub(crate) use store::{
     EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, build_object_artifact_v2,
