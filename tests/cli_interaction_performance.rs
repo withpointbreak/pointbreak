@@ -1,9 +1,9 @@
-//! Disposable correctness contract for Plan 0175's seven interaction routes.
+//! Disposable correctness contract for seven representative interaction routes.
 //!
 //! This fixture is intentionally small. It proves semantic/output parity and
 //! receipt truth only; it cannot supply a performance result. Representative-
-//! scale readiness and evidence belong to Task 4.2's separately authorized
-//! disposable L100 clone, never this repository or an owner store.
+//! scale readiness and evidence require a separately authorized disposable
+//! L100 clone, never this repository or an owner store.
 
 #![cfg(feature = "longitudinal-counting")]
 

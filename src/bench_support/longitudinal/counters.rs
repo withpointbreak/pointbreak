@@ -1877,7 +1877,10 @@ mod tests {
                 source_commit: "a".repeat(40),
                 source_tree: "b".repeat(40),
                 cargo_lock_sha256: hash('c'),
-                binary_path: "/tmp/pointbreak-interaction-test".to_owned(),
+                binary_path: std::env::current_exe()
+                    .expect("current interaction counter test binary")
+                    .display()
+                    .to_string(),
                 binary_sha256: hash('d'),
                 build_profile: "debug".to_owned(),
                 rustc_version: "rustc test".to_owned(),

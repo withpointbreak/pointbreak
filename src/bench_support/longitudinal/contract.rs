@@ -5857,7 +5857,10 @@ mod contract_tests {
             source_commit: "a".repeat(40),
             source_tree: "b".repeat(40),
             cargo_lock_sha256: digest("interaction-cargo-lock"),
-            binary_path: "/tmp/pointbreak-interaction-test".to_owned(),
+            binary_path: std::env::current_exe()
+                .expect("current interaction contract test binary")
+                .display()
+                .to_string(),
             binary_sha256: digest("interaction-binary"),
             build_profile: "debug".to_owned(),
             rustc_version: "rustc 1.89.0".to_owned(),

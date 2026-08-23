@@ -61,8 +61,8 @@ all missing, extra, wrong-actor, duplicate, or incomplete child facts remain inv
 
 Implementation Green does not establish final-path readiness. Final debug/release binary identity, preserved
 L100 manifest access or cloning, exact-source compatibility, and a representative final-path case require a
-separate readiness authorization. Task 5.1 baseline/evidence authority remains separate again; never run
-Pointbreak against the preserved seed or an owner store.
+separate readiness authorization. Baseline and evidence execution require another explicit authorization;
+never run Pointbreak against the preserved seed or an owner store.
 
 Current-product writer admission is intentionally bounded. Production `EventStore::record_event_once` and its
 batch form point-read the immutable L2 activation and completion carriers; neither enumerates nor replays the
