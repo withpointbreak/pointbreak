@@ -6,8 +6,7 @@ use super::view::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
-use crate::session::ArtifactRemovalProjection;
-use crate::session::event::AssertionMode;
+use crate::session::event::{AssertionMode, ShoreEvent};
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
@@ -15,6 +14,8 @@ use crate::session::projection::body_content::{BodyRemovalLens, body_content_dia
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::ReadStore;
+use crate::session::{ArtifactRemovalProjection, PublicReadCommandContextV1};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestListOptions {
@@ -116,6 +117,38 @@ pub struct InputRequestListResult {
 
 pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequestListResult> {
     let (read_store, events) = super::super::capable_read_store_and_events(&options.repo)?;
+    list_input_requests_from_events(options, &read_store, &events)
+}
+
+#[doc(hidden)]
+pub fn list_input_requests_with_public_read_context(
+    options: InputRequestListOptions,
+    context: PublicReadCommandContextV1,
+) -> Result<InputRequestListResult> {
+    if options.revision_id.is_some()
+        || options.exact_revision_id.is_none()
+        || options.track.is_some()
+        || options.mode.is_some()
+        || options.file.is_some()
+        || options.status != InputRequestStatusFilter::Open
+        || options.include_body
+    {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "public read context requires the exact qualified input-request shape"
+                .to_owned(),
+        });
+    }
+    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+    let result = list_input_requests_from_events(options, reader.read_store(), reader.events())?;
+    reader.postflight()?;
+    Ok(result)
+}
+
+fn list_input_requests_from_events(
+    options: InputRequestListOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+) -> Result<InputRequestListResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
         options.exact_revision_id.as_ref(),
@@ -132,15 +165,15 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
         let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteRevisionSelection,
         );
-        resolve_revision(&events, selection, &context, RevisionScope::default())?
+        resolve_revision(events, selection, &context, RevisionScope::default())?
     };
     let track_filter = options
         .track
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let removal = ArtifactRemovalProjection::from_events(&events)?;
-    let cosig_index = CosignatureIndex::build(&events)?;
+    let removal = ArtifactRemovalProjection::from_events(events)?;
+    let cosig_index = CosignatureIndex::build(events)?;
     let removal_lens = BodyRemovalLens::new(
         &removal,
         &options.trust_set,
@@ -154,7 +187,7 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
         );
         project_input_requests(InputRequestProjectionOptions {
             backend: read_store.backend(),
-            events: &events,
+            events,
             resolved: &resolved,
             track_filter: track_filter.clone(),
             mode_filter: options.mode,
@@ -167,7 +200,7 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
     };
     #[cfg(any(test, feature = "longitudinal-counting"))]
     super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
+    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
     diagnostics.extend(body_content_diagnostics(
         input_requests
             .iter()

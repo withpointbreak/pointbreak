@@ -5,7 +5,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use pointbreak::documents::{validation_add_document, validation_list_document};
 use pointbreak::model::{RevisionId, ValidationStatus, ValidationTrigger};
 use pointbreak::session::{
-    ValidationAddOptions, ValidationListOptions, ValidationListResult, list_validation_checks,
+    PublicReadCommandContextV1, ValidationAddOptions, ValidationListOptions, ValidationListResult,
+    list_validation_checks, list_validation_checks_with_public_read_context,
     record_validation_check,
 };
 
@@ -181,9 +182,36 @@ pub(super) fn run(
             let span = tracing::info_span!("shore.review.validation.list");
             let _entered = span.enter();
             tracing::debug!(command = "review.validation.list", "command_start");
-            review_validation_list(args, stdout)
+            review_validation_list(
+                args,
+                |args| Ok(list_validation_checks(validation_list_options(args)?)?),
+                stdout,
+            )
         }
     }
+}
+
+pub(super) fn run_with_public_read_context(
+    args: ValidationArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ValidationCommand::List(args) = args.command else {
+        return Err("public read context reached a non-list validation adapter".into());
+    };
+    let span = tracing::info_span!("shore.review.validation.list");
+    let _entered = span.enter();
+    tracing::debug!(command = "review.validation.list", "command_start");
+    review_validation_list(
+        args,
+        |args| {
+            Ok(list_validation_checks_with_public_read_context(
+                validation_list_options_without_ready_probe(args)?,
+                context,
+            )?)
+        },
+        stdout,
+    )
 }
 
 fn review_validation_add(
@@ -219,13 +247,14 @@ fn review_validation_add(
 
 fn review_validation_list(
     args: ValidationListArgs,
+    read: impl FnOnce(ValidationListArgs) -> Result<ValidationListResult, Box<dyn std::error::Error>>,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let format_explicit = args.format_args.explicit();
     let repo = args.repo.clone();
-    let result = list_validation_checks(validation_list_options(args)?)?;
-    let delegation_map = crate::cli::common::discover_delegation_map(&repo);
+    let result = read(args)?;
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
+    let delegation_map = crate::cli::common::discover_delegation_map(&repo);
     // `validation_list_document` consumes the result by value; render the digest
     // up front on the text lane only, so the machine lanes pay nothing extra.
     let text = matches!(format.format, output::OutputFormat::Text)
@@ -352,6 +381,12 @@ fn validation_list_options(
     if args.exact_revision.is_some() {
         crate::cli::common::require_ready_change_reader(&args.repo)?;
     }
+    validation_list_options_without_ready_probe(args)
+}
+
+fn validation_list_options_without_ready_probe(
+    args: ValidationListArgs,
+) -> Result<ValidationListOptions, Box<dyn std::error::Error>> {
     let mut options = ValidationListOptions::new(&args.repo)
         .with_include_body(args.include_body)
         .with_trust_set(crate::cli::common::discover_trust_set(&args.repo));

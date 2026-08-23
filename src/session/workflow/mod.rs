@@ -103,6 +103,7 @@ pub use assessment::{
     AssessmentAddOptions, AssessmentAddResult, AssessmentRecordStatus, AssessmentShowFilters,
     AssessmentShowOptions, AssessmentShowResult, AssessmentTargetSelector, AssessmentView,
     CurrentAssessmentStatus, CurrentAssessmentView, record_assessment, show_assessments,
+    show_assessments_with_public_read_context,
 };
 pub use association::{
     AssociateCommitOptions, AssociateCommitResult, AssociateRefOptions, AssociateRefResult,
@@ -189,13 +190,14 @@ pub use input_request::{
     InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
     InputRequestRespondOptions, InputRequestRespondResult, InputRequestResponseView,
     InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
-    fetch_input_request, list_input_requests, open_input_request, respond_input_request,
+    fetch_input_request, list_input_requests, list_input_requests_with_public_read_context,
+    open_input_request, respond_input_request,
 };
 pub use landing::{LandCommitOptions, LandCommitResultV1, land_commit};
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
-    record_observation, validated_track_id,
+    list_observations_with_public_read_context, record_observation, validated_track_id,
 };
 pub use review_cursor::{
     CommitProofStateV1, CommitSourceStateV1, REVIEW_CURSOR_SCHEMA_V1, ReviewCursorRefusalV1,
@@ -247,7 +249,8 @@ pub use store_status::{
 };
 pub use validation::{
     ValidationAddOptions, ValidationAddResult, ValidationCheckView, ValidationListFilters,
-    ValidationListOptions, ValidationListResult, list_validation_checks, record_validation_check,
+    ValidationListOptions, ValidationListResult, list_validation_checks,
+    list_validation_checks_with_public_read_context, record_validation_check,
 };
 pub(crate) use validation::{
     ValidationCheckProjectionOptions, annotate_validation_supersession, project_validation_checks,
@@ -268,7 +271,7 @@ mod interaction_attribution_tests {
 
     #[test]
     fn all_four_authoritative_routes_record_one_state_and_the_inactive_shared_path() {
-        let repo = captured_repo();
+        let (repo, _) = captured_repo();
 
         for snapshot in [
             observe(|| show_assessments(AssessmentShowOptions::new(repo.path()))),
@@ -300,7 +303,7 @@ mod interaction_attribution_tests {
 
     #[test]
     fn activated_shared_path_preserves_each_probe_h3_and_reopen_invocation() {
-        let repo = captured_repo();
+        let (repo, _) = captured_repo();
         migrate_to_ready(repo.path());
         let counting = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
         counting.record_execution_actor_once(InteractionActorV1::RequestReader);
@@ -337,6 +340,190 @@ mod interaction_attribution_tests {
         );
     }
 
+    #[test]
+    fn five_qualified_fact_cells_consume_one_context_without_duplicate_reader_work() {
+        let (repo, revision_id) = captured_repo();
+        migrate_to_ready(repo.path());
+        let cursor = crate::session::store_capability_for_repo(repo.path())
+            .unwrap()
+            .cursor;
+        let context = || crate::session::prepare_public_read_command_context_v1(repo.path());
+        let snapshots = [
+            observe(|| {
+                show_assessments_with_public_read_context(
+                    AssessmentShowOptions::new(repo.path())
+                        .with_exact_revision_id(revision_id.clone())
+                        .with_track("agent:reviewer"),
+                    context()?,
+                )
+            }),
+            observe(|| {
+                show_assessments_with_public_read_context(
+                    AssessmentShowOptions::new(repo.path())
+                        .with_exact_revision_id(revision_id.clone())
+                        .with_track("agent:reviewer")
+                        .with_include_summary(true),
+                    context()?,
+                )
+            }),
+            observe(|| {
+                list_input_requests_with_public_read_context(
+                    InputRequestListOptions::new(repo.path())
+                        .with_exact_revision_id(revision_id.clone()),
+                    context()?,
+                )
+            }),
+            observe(|| {
+                list_observations_with_public_read_context(
+                    ObservationListOptions::new(repo.path())
+                        .with_exact_revision_id(revision_id.clone())
+                        .with_track("agent:reviewer"),
+                    context()?,
+                )
+            }),
+            observe(|| {
+                list_validation_checks_with_public_read_context(
+                    ValidationListOptions::new(repo.path())
+                        .with_exact_revision_id(revision_id.clone())
+                        .with_track("agent:reviewer"),
+                    context()?,
+                )
+            }),
+        ];
+
+        for snapshot in snapshots {
+            assert_eq!(
+                snapshot.counters.directory_entries_walked,
+                cursor.journal_record_count
+            );
+            assert_eq!(
+                snapshot.counters.carrier_opens,
+                cursor.journal_record_count + 2
+            );
+            assert_eq!(snapshot.counters.change_capability_carriers_opened, 2);
+            assert_eq!(snapshot.counters.event_decodes, cursor.event_count);
+            assert_eq!(snapshot.counters.event_validations, cursor.event_count);
+            assert_eq!(
+                snapshot.observed_route_states,
+                vec![InteractionObservedRouteStateV1::AuthoritativeReplay]
+            );
+            assert_eq!(
+                snapshot
+                    .derived_access_phases
+                    .iter()
+                    .map(|sample| sample.phase)
+                    .collect::<Vec<_>>(),
+                vec![
+                    Phase::WorkflowChangeReaderReplayH3,
+                    Phase::GitContextResolution,
+                    Phase::RouteRevisionSelection,
+                    Phase::RouteProjectionFold,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn qualified_consumers_reject_shape_and_repository_misuse_before_projection() {
+        let (repo, revision_id) = captured_repo();
+        migrate_to_ready(repo.path());
+        let other = captured_repo().0;
+        let context =
+            || crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap();
+
+        assert!(
+            show_assessments_with_public_read_context(
+                AssessmentShowOptions::new(repo.path())
+                    .with_exact_revision_id(revision_id.clone())
+                    .with_track("agent:reviewer")
+                    .with_all(true),
+                context(),
+            )
+            .is_err()
+        );
+        assert!(
+            list_input_requests_with_public_read_context(
+                InputRequestListOptions::new(repo.path())
+                    .with_exact_revision_id(revision_id.clone())
+                    .with_include_body(true),
+                context(),
+            )
+            .is_err()
+        );
+        assert!(
+            list_observations_with_public_read_context(
+                ObservationListOptions::new(repo.path())
+                    .with_exact_revision_id(revision_id.clone())
+                    .with_track("agent:reviewer")
+                    .with_file("src/lib.rs"),
+                context(),
+            )
+            .is_err()
+        );
+        assert!(
+            list_validation_checks_with_public_read_context(
+                ValidationListOptions::new(repo.path())
+                    .with_exact_revision_id(revision_id.clone())
+                    .with_track("agent:reviewer")
+                    .with_status(crate::model::ValidationStatus::Passed),
+                context(),
+            )
+            .is_err()
+        );
+        assert!(
+            show_assessments_with_public_read_context(
+                AssessmentShowOptions::new(other.path())
+                    .with_exact_revision_id(revision_id)
+                    .with_track("agent:reviewer"),
+                context(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn unrelated_unknown_control_reaches_only_the_strict_consumer_and_never_falls_back() {
+        let (repo, revision_id) = captured_repo();
+        migrate_to_ready(repo.path());
+        let store =
+            crate::session::store::resolution::resolve_change_read_backend(repo.path()).unwrap();
+        store
+            .backend()
+            .journal()
+            .create_record_once(
+                "unrelated-future-control",
+                br#"{"schema":"pointbreak.future-control","version":1}"#,
+            )
+            .unwrap();
+        let context = crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap();
+        let counting = LongitudinalCountingScopeV1::new("c".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+
+        let error = show_assessments_with_public_read_context(
+            AssessmentShowOptions::new(repo.path())
+                .with_exact_revision_id(revision_id)
+                .with_track("agent:reviewer"),
+            context,
+        )
+        .unwrap_err()
+        .to_string();
+        let snapshot = counting.snapshot();
+
+        assert!(error.contains("unknown Journal record schema"), "{error}");
+        assert_eq!(snapshot.counters.event_decodes, 0);
+        assert_eq!(snapshot.counters.projection_rebuilds, 0);
+        assert!(snapshot.observed_route_states.is_empty());
+        assert_eq!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            vec![Phase::WorkflowChangeReaderReplayH3]
+        );
+    }
+
     fn observe<T>(run: impl FnOnce() -> crate::error::Result<T>) -> LongitudinalCountingSnapshotV1 {
         let counting = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
         counting.record_execution_actor_once(InteractionActorV1::RequestReader);
@@ -366,7 +553,7 @@ mod interaction_attribution_tests {
         .unwrap();
     }
 
-    fn captured_repo() -> tempfile::TempDir {
+    fn captured_repo() -> (tempfile::TempDir, crate::model::RevisionId) {
         let repo = tempfile::tempdir().unwrap();
         git(repo.path(), &["init", "--quiet"]);
         git(repo.path(), &["config", "user.name", "Pointbreak Test"]);
@@ -378,8 +565,8 @@ mod interaction_attribution_tests {
         git(repo.path(), &["add", "file.txt"]);
         git(repo.path(), &["commit", "--quiet", "-m", "base"]);
         std::fs::write(repo.path().join("file.txt"), "two\n").unwrap();
-        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        repo
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        (repo, capture.revision_id)
     }
 
     fn git(repo: &Path, args: &[&str]) {

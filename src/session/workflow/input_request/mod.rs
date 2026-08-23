@@ -9,7 +9,10 @@ mod target;
 mod view;
 
 pub use self::fetch::{InputRequestFetchOptions, InputRequestFetchResult, fetch_input_request};
-pub use self::list::{InputRequestListOptions, InputRequestListResult, list_input_requests};
+pub use self::list::{
+    InputRequestListOptions, InputRequestListResult, list_input_requests,
+    list_input_requests_with_public_read_context,
+};
 pub use self::open::{InputRequestOpenOptions, InputRequestOpenResult, open_input_request};
 pub use self::respond::{
     InputRequestRespondOptions, InputRequestRespondResult, respond_input_request,

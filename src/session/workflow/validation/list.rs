@@ -8,11 +8,13 @@ use super::view::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId, ValidationStatus};
-use crate::session::ArtifactRemovalProjection;
+use crate::session::event::ShoreEvent;
 use crate::session::projection::body_content::{BodyRemovalLens, body_content_diagnostics};
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::ReadStore;
+use crate::session::{ArtifactRemovalProjection, PublicReadCommandContextV1};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidationListOptions {
@@ -96,6 +98,35 @@ pub struct ValidationListResult {
 
 pub fn list_validation_checks(options: ValidationListOptions) -> Result<ValidationListResult> {
     let (read_store, events) = super::super::capable_read_store_and_events(&options.repo)?;
+    list_validation_checks_from_events(options, &read_store, &events)
+}
+
+#[doc(hidden)]
+pub fn list_validation_checks_with_public_read_context(
+    options: ValidationListOptions,
+    context: PublicReadCommandContextV1,
+) -> Result<ValidationListResult> {
+    if options.revision_id.is_some()
+        || options.exact_revision_id.is_none()
+        || options.track.is_none()
+        || options.status.is_some()
+        || options.include_body
+    {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "public read context requires the exact qualified validation shape".to_owned(),
+        });
+    }
+    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+    let result = list_validation_checks_from_events(options, reader.read_store(), reader.events())?;
+    reader.postflight()?;
+    Ok(result)
+}
+
+fn list_validation_checks_from_events(
+    options: ValidationListOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+) -> Result<ValidationListResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
         options.exact_revision_id.as_ref(),
@@ -112,15 +143,15 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
         let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteRevisionSelection,
         );
-        resolve_revision(&events, selection, &context, RevisionScope::default())?
+        resolve_revision(events, selection, &context, RevisionScope::default())?
     };
     let track_filter = options
         .track
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let removal = ArtifactRemovalProjection::from_events(&events)?;
-    let cosig_index = CosignatureIndex::build(&events)?;
+    let removal = ArtifactRemovalProjection::from_events(events)?;
+    let cosig_index = CosignatureIndex::build(events)?;
     let removal_lens = BodyRemovalLens::new(
         &removal,
         &options.trust_set,
@@ -134,7 +165,7 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
         );
         project_validation_checks(ValidationCheckProjectionOptions {
             backend: read_store.backend(),
-            events: &events,
+            events,
             revision_id: &resolved.revision_id,
             track_filter: track_filter.clone(),
             status_filter: options.status,
@@ -145,7 +176,7 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
     };
     #[cfg(any(test, feature = "longitudinal-counting"))]
     super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
+    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
     diagnostics.extend(body_content_diagnostics(
         validation_checks
             .iter()

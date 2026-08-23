@@ -50,18 +50,18 @@ const ROUTE_IDS: [&str; 7] = [
     "attention_current_or_fallback",
 ];
 
-const AUTHORITATIVE_REQUIRED: [Phase; 8] = [
-    Phase::CliCapabilityPreflightH1,
-    Phase::WorkflowActivatedCapabilityProbe,
+const AUTHORITATIVE_REQUIRED: [Phase; 5] = [
     Phase::WorkflowChangeReaderReplayH3,
-    Phase::WorkflowChangeStoreReopenInspection,
     Phase::GitContextResolution,
     Phase::RouteRevisionSelection,
     Phase::RouteProjectionFold,
     Phase::SerializationAndOutput,
 ];
 
-const AUTHORITATIVE_FORBIDDEN: [Phase; 8] = [
+const AUTHORITATIVE_FORBIDDEN: [Phase; 11] = [
+    Phase::CliCapabilityPreflightH1,
+    Phase::WorkflowActivatedCapabilityProbe,
+    Phase::WorkflowChangeStoreReopenInspection,
     Phase::OrdinaryReadStoreResolutionH2,
     Phase::SqliteSelection,
     Phase::CacheAndFallback,
@@ -77,6 +77,8 @@ struct Fixture {
     revision: String,
     summary_content_hash: String,
     fixture_identity_sha256: String,
+    journal_record_count: u64,
+    event_count: u64,
     _manifest_dir: tempfile::TempDir,
 }
 
@@ -227,6 +229,46 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             "{} body-read applicability drifted",
             case.id
         );
+        assert_eq!(
+            receipt.counters.directory_entries_walked, fixture.journal_record_count,
+            "{} must perform one strict Journal inspection",
+            case.id
+        );
+        assert_eq!(
+            receipt.counters.carrier_opens,
+            fixture.journal_record_count + 2,
+            "{} must add only the bounded capability pair",
+            case.id
+        );
+        assert_eq!(receipt.counters.change_capability_carriers_opened, 2);
+        assert_eq!(receipt.counters.event_decodes, fixture.event_count);
+        assert_eq!(receipt.counters.event_validations, fixture.event_count);
+        let json = run_binary(&case.arguments, OFF_ENV);
+        let pretty_arguments = arguments_with_format(&case.arguments, "json-pretty");
+        let pretty = run_binary(&pretty_arguments, OFF_ENV);
+        assert_success(&format!("{} json-pretty", case.id), &pretty);
+        assert_eq!(
+            pretty.stderr, json.stderr,
+            "{} pretty stderr drift",
+            case.id
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&pretty.stdout).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&json.stdout).unwrap(),
+            "{} JSON lane semantics drifted",
+            case.id
+        );
+        let text_arguments = arguments_with_format(&case.arguments, "text");
+        let text = run_binary(&text_arguments, OFF_ENV);
+        let repeated_text = run_binary(&text_arguments, OFF_ENV);
+        assert_success(&format!("{} text", case.id), &text);
+        assert_eq!(text.stderr, json.stderr, "{} text stderr drift", case.id);
+        assert_eq!(
+            text.stdout, repeated_text.stdout,
+            "{} text bytes drifted",
+            case.id
+        );
+        assert!(!text.stdout.is_empty(), "{} text lane is empty", case.id);
         representative_receipts.push(receipt);
     }
 
@@ -506,12 +548,17 @@ fn fixture() -> Fixture {
     )
     .expect("write fixture manifest");
     let fixture_identity_sha256 = sha256(&manifest_bytes);
+    let authority = pointbreak::session::store_capability_for_repo(repo.path())
+        .expect("inspect fixture authority")
+        .cursor;
 
     Fixture {
         repo,
         revision,
         summary_content_hash,
         fixture_identity_sha256,
+        journal_record_count: authority.journal_record_count,
+        event_count: authority.event_count,
         _manifest_dir: manifest_dir,
     }
 }
@@ -1000,6 +1047,16 @@ fn resign(receipt: &mut Receipt) {
 
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn arguments_with_format(arguments: &[String], format: &str) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let index = arguments
+        .iter()
+        .position(|argument| argument == "--format")
+        .expect("fixture format option");
+    arguments[index + 1] = format.to_owned();
+    arguments
 }
 
 fn sha256(bytes: &[u8]) -> String {

@@ -332,12 +332,26 @@ fn qualified_invocation_read_v1(cli: &Cli) -> Option<QualifiedInvocationReadV1<'
 fn preflight_public_store_capability(
     cli: &Cli,
     args: &[OsString],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<pointbreak::session::PublicReadCommandContextV1>, Box<dyn std::error::Error>> {
+    let catalog = classify_invocation_read_v1(cli);
+    if matches!(catalog, InvocationReadCatalogV1::Exempt(_)) {
+        return Ok(None);
+    }
     if matches!(
-        classify_invocation_read_v1(cli),
-        InvocationReadCatalogV1::Exempt(_)
+        catalog,
+        InvocationReadCatalogV1::Qualified(
+            InvocationReadRouteV1::AssessmentCurrentResult
+                | InvocationReadRouteV1::AssessmentCurrentSummary
+                | InvocationReadRouteV1::InputRequestOpenAllTracks
+                | InvocationReadRouteV1::ObservationReviewerList
+                | InvocationReadRouteV1::ValidationReviewerList
+        )
     ) {
-        return Ok(());
+        let qualified = qualified_invocation_read_v1(cli)
+            .expect("the typed catalog preserves the qualified read shape");
+        return Ok(Some(
+            pointbreak::session::prepare_public_read_command_context_v1(qualified.repo)?,
+        ));
     }
     #[cfg(feature = "longitudinal-counting")]
     let _phase = pointbreak::bench_support::longitudinal::enter_derived_access_phase_v1(
@@ -363,7 +377,7 @@ fn preflight_public_store_capability(
         );
     };
     match capability.status {
-        pointbreak::session::StoreCapabilityStatus::Ready { .. } => Ok(()),
+        pointbreak::session::StoreCapabilityStatus::Ready { .. } => Ok(None),
         pointbreak::session::StoreCapabilityStatus::MigrationRequired => Err(
             "migration_required; this command requires an explicit completed store migration"
                 .into(),
@@ -1055,10 +1069,13 @@ fn run_cli(
     // surfaces one actionable error before any git operation runs.
     pointbreak::git::validate_backend_selector()?;
     crate::cli_tracing::init_tracing(&cli.tracing)?;
-    preflight_public_store_capability(&cli, raw_args)?;
+    let mut public_read_context = preflight_public_store_capability(&cli, raw_args)?;
 
     let result = match cli.command {
-        Command::Assessment(args) => assessment::run(*args, stdout, stderr),
+        Command::Assessment(args) => match public_read_context.take() {
+            Some(context) => assessment::run_with_public_read_context(*args, context, stdout),
+            None => assessment::run(*args, stdout, stderr),
+        },
         Command::Association(args) => association::run(*args, stdout, stderr),
         Command::Attention(args) => attention::run(args, stdout),
         Command::Capture(args) => capture::run(args, &cli.tracing, stdout, stderr),
@@ -1068,13 +1085,22 @@ fn run_cli(
         Command::Fact(args) => fact::run(args, stdout, stderr),
         Command::History(args) => history::run(args, stdout),
         Command::Identity(args) => identity::run(args, stdout, stderr),
-        Command::InputRequest(args) => input_request::run(*args, stdout, stderr),
+        Command::InputRequest(args) => match public_read_context.take() {
+            Some(context) => input_request::run_with_public_read_context(*args, context, stdout),
+            None => input_request::run(*args, stdout, stderr),
+        },
         Command::Inspect(args) => inspect::run(args, stdout),
         Command::Key(args) => key::run(args, stdout),
-        Command::Observation(args) => observation::run(*args, stdout, stderr),
+        Command::Observation(args) => match public_read_context.take() {
+            Some(context) => observation::run_with_public_read_context(*args, context, stdout),
+            None => observation::run(*args, stdout, stderr),
+        },
         Command::Revision(args) => revision::run(args, stdout),
         Command::Store(args) => store::run(args, stdout, stderr),
-        Command::Validation(args) => validation::run(args, stdout, stderr),
+        Command::Validation(args) => match public_read_context.take() {
+            Some(context) => validation::run_with_public_read_context(args, context, stdout),
+            None => validation::run(args, stdout, stderr),
+        },
         Command::Version(args) => version::run(args, stdout),
     };
     for diagnostic in pointbreak::session::take_derived_write_diagnostics() {
@@ -1260,7 +1286,8 @@ mod change_reader_cli_tests {
         ];
         let ordinary = Cli::try_parse_from(raw_args.clone()).unwrap();
         let ordinary_error = preflight_public_store_capability(&ordinary, &raw_args)
-            .expect_err("L0 refusal")
+            .err()
+            .expect("L0 refusal")
             .to_string();
         let diagnostic = Cli::try_parse_from(raw_args.clone()).unwrap();
         let counting = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
@@ -1268,7 +1295,8 @@ mod change_reader_cli_tests {
         let _guard = counting.enter();
 
         let diagnostic_error = preflight_public_store_capability(&diagnostic, &raw_args)
-            .expect_err("same L0 refusal")
+            .err()
+            .expect("same L0 refusal")
             .to_string();
 
         assert_eq!(diagnostic_error, ordinary_error);

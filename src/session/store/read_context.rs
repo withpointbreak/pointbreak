@@ -26,22 +26,15 @@ use crate::session::store::resolution::{ReadStore, resolve_public_read_context_s
 /// requires_serialize::<pointbreak::session::PublicReadCommandContextV1>();
 /// ```
 #[doc(hidden)]
-#[allow(
-    dead_code,
-    reason = "the catalog-qualified workflow consumers are added in Plan 0177 Tasks 3.1-3.2"
-)]
 pub struct PublicReadCommandContextV1 {
     canonical_repository: PathBuf,
     canonical_store: PathBuf,
     read_store: ReadStore,
+    #[allow(dead_code, reason = "the context retains the bounded authority proof")]
     capability_pair: BoundedChangeCapabilityPairV1,
     after_pair: JournalChangeStamp,
 }
 
-#[allow(
-    dead_code,
-    reason = "the catalog-qualified workflow consumers are added in Plan 0177 Tasks 3.1-3.2"
-)]
 impl PublicReadCommandContextV1 {
     pub(crate) fn require_repository(&self, repo: &Path) -> Result<()> {
         if git_worktree_root(repo)? != self.canonical_repository {

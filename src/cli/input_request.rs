@@ -13,8 +13,9 @@ use pointbreak::session::event::{
 use pointbreak::session::{
     InputRequestFetchOptions, InputRequestListOptions, InputRequestListResult,
     InputRequestOpenOptions, InputRequestRespondOptions, InputRequestRespondResult,
-    InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView, fetch_input_request,
-    list_input_requests, open_input_request, respond_input_request,
+    InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
+    PublicReadCommandContextV1, fetch_input_request, list_input_requests,
+    list_input_requests_with_public_read_context, open_input_request, respond_input_request,
 };
 
 use crate::cli::common::{ContentTypeArg, SideArg, read_body_input, wire_label};
@@ -270,7 +271,11 @@ pub(super) fn run(
             let span = tracing::info_span!("shore.input_request.list");
             let _entered = span.enter();
             tracing::debug!(command = "input_request.list", "command_start");
-            review_input_request_list(args, stdout)
+            review_input_request_list(
+                args,
+                |args| Ok(list_input_requests(input_request_list_options(args)?)?),
+                stdout,
+            )
         }
         InputRequestCommand::Show(args) => {
             let span = tracing::info_span!("shore.input_request.show");
@@ -285,6 +290,29 @@ pub(super) fn run(
             review_input_request_respond(args, stdout, stderr)
         }
     }
+}
+
+pub(super) fn run_with_public_read_context(
+    args: InputRequestArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let InputRequestCommand::List(args) = args.command else {
+        return Err("public read context reached a non-list input-request adapter".into());
+    };
+    let span = tracing::info_span!("shore.input_request.list");
+    let _entered = span.enter();
+    tracing::debug!(command = "input_request.list", "command_start");
+    review_input_request_list(
+        args,
+        |args| {
+            Ok(list_input_requests_with_public_read_context(
+                input_request_list_options_without_ready_probe(args)?,
+                context,
+            )?)
+        },
+        stdout,
+    )
 }
 
 fn review_input_request_open(
@@ -321,12 +349,15 @@ fn review_input_request_open(
 
 fn review_input_request_list(
     args: InputRequestListArgs,
+    read: impl FnOnce(
+        InputRequestListArgs,
+    ) -> Result<InputRequestListResult, Box<dyn std::error::Error>>,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let format_explicit = args.format_args.explicit();
     let repo = args.repo.clone();
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
-    let result = list_input_requests(input_request_list_options(args)?)?;
+    let result = read(args)?;
     let delegation_map = crate::cli::common::discover_delegation_map(&repo);
     // `input_request_list_document` consumes the result by value; the text lane
     // reads the same result, so clone it only when that lane will render.
@@ -536,6 +567,12 @@ fn input_request_list_options(
     if args.exact_revision.is_some() {
         crate::cli::common::require_ready_change_reader(&args.repo)?;
     }
+    input_request_list_options_without_ready_probe(args)
+}
+
+fn input_request_list_options_without_ready_probe(
+    args: InputRequestListArgs,
+) -> Result<InputRequestListOptions, Box<dyn std::error::Error>> {
     let mut options = InputRequestListOptions::new(&args.repo)
         .with_status(args.status.into())
         .with_include_body(args.include_body)

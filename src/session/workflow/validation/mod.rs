@@ -7,6 +7,7 @@ mod view;
 pub use self::add::{ValidationAddOptions, ValidationAddResult, record_validation_check};
 pub use self::list::{
     ValidationListFilters, ValidationListOptions, ValidationListResult, list_validation_checks,
+    list_validation_checks_with_public_read_context,
 };
 pub use self::view::ValidationCheckView;
 pub(crate) use self::view::{

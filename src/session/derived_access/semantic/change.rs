@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -1225,6 +1226,11 @@ pub(crate) struct ChangeSemanticGenerationV2 {
     pub(crate) reader_profile: ChangeReaderProfileReceiptV2,
 }
 
+pub(crate) struct ChangeSemanticBuildV2 {
+    pub(crate) generation: ChangeSemanticGenerationV2,
+    pub(crate) events: Arc<Vec<ShoreEvent>>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReaderReceiptPreimage<'a> {
@@ -1259,6 +1265,12 @@ fn compact_change_document_facts(facts: &[SemanticFact]) -> Vec<ChangeDocumentPr
 pub(crate) fn build_change_semantic_generation(
     inspection: &JournalInspection,
 ) -> Result<ChangeSemanticGenerationV2> {
+    Ok(build_change_semantic_generation_with_events(inspection)?.generation)
+}
+
+pub(crate) fn build_change_semantic_generation_with_events(
+    inspection: &JournalInspection,
+) -> Result<ChangeSemanticBuildV2> {
     match inspection.status {
         StoreCapabilityStatus::MigrationRequired => {
             return Err(ShoreError::Message(
@@ -1286,6 +1298,15 @@ pub(crate) fn build_change_semantic_generation(
             entry.bytes.clone(),
         )?);
     }
+    let events = Arc::new(events);
+    let generation = build_change_semantic_generation_from_events(inspection, &events)?;
+    Ok(ChangeSemanticBuildV2 { generation, events })
+}
+
+fn build_change_semantic_generation_from_events(
+    inspection: &JournalInspection,
+    events: &[ShoreEvent],
+) -> Result<ChangeSemanticGenerationV2> {
     let facts = events
         .iter()
         .map(extract_change_projection_fact)
@@ -1293,8 +1314,8 @@ pub(crate) fn build_change_semantic_generation(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let projection = crate::session::project_changes(&events)?;
-    let document_projection = crate::session::project_change_documents(&events)?;
+    let projection = crate::session::project_changes(events)?;
+    let document_projection = crate::session::project_change_documents(events)?;
     if project_changes_from_facts(&facts)? != projection {
         return Err(ShoreError::Message(
             "bodyless Change facts diverge from strict replay".to_owned(),
@@ -1305,7 +1326,7 @@ pub(crate) fn build_change_semantic_generation(
     // witness. The Change reader receipt additionally binds the capability
     // cursor and the frozen public document versions.
     let cursor = TruthCursor::new(1, inspection.cursor.event_count.max(1));
-    let semantic_snapshot = SemanticSnapshot::from_events(cursor, &events)
+    let semantic_snapshot = SemanticSnapshot::from_events(cursor, events)
         .map_err(|error| ShoreError::Message(error.to_string()))?;
     let rebuilt_facts = events
         .iter()
@@ -1338,8 +1359,8 @@ pub(crate) fn build_change_semantic_generation(
         ));
     }
 
-    let fact_availability = fact_availability(&events);
-    let resource_availability = resource_availability(&events)?;
+    let fact_availability = fact_availability(events);
+    let resource_availability = resource_availability(events)?;
     let document_versions = reader_document_versions_v1();
     let projection_sha256 = sha256_json_prefixed(&serde_json::to_value(&compact_projection)?)?;
     let mut reader_profile = ChangeReaderProfileReceiptV2 {

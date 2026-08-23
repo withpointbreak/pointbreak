@@ -2,17 +2,22 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::session::derived_access::semantic::change::build_change_semantic_generation;
+use crate::session::derived_access::semantic::change::{
+    ChangeSemanticBuildV2, build_change_semantic_generation,
+    build_change_semantic_generation_with_events,
+};
 use crate::session::event::ShoreEvent;
 #[cfg(test)]
 use crate::session::store::backend::StoreBackend;
-#[cfg(test)]
-use crate::session::store::capabilities::inspect_change_reader_journal_records;
 use crate::session::store::capabilities::{
     JournalInspection, StoreCapabilityInspection, StoreCapabilityStatus,
+    inspect_change_reader_journal_records,
 };
-use crate::session::store::resolution::resolve_change_read_store;
-use crate::session::{AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection, EventStore};
+use crate::session::store::resolution::{ReadStore, resolve_change_read_store};
+use crate::session::{
+    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection, EventStore,
+    PublicReadCommandContextV1,
+};
 
 /// The complete strict semantic input for a Change-capable reader.
 ///
@@ -134,6 +139,25 @@ pub struct ChangeReaderStateV1 {
     ready: Option<ChangeReaderReadyV1>,
 }
 
+pub(crate) struct PublicReadChangeReaderV1 {
+    context: PublicReadCommandContextV1,
+    ready: ChangeReaderReadyV1,
+}
+
+impl PublicReadChangeReaderV1 {
+    pub(crate) fn read_store(&self) -> &ReadStore {
+        self.context.read_store()
+    }
+
+    pub(crate) fn events(&self) -> &[ShoreEvent] {
+        self.ready.events()
+    }
+
+    pub(crate) fn postflight(self) -> Result<()> {
+        self.context.postflight()
+    }
+}
+
 impl ChangeReaderStateV1 {
     pub fn ready(&self) -> Option<&ChangeReaderReadyV1> {
         self.ready.as_ref()
@@ -178,6 +202,42 @@ fn change_reader_state_from_inspection(
         None
     };
     Ok(ChangeReaderStateV1 { capability, ready })
+}
+
+pub(crate) fn public_read_change_reader_v1(
+    context: PublicReadCommandContextV1,
+    repo: &Path,
+) -> Result<PublicReadChangeReaderV1> {
+    context.require_repository(repo)?;
+    let (inspection, build) = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::WorkflowChangeReaderReplayH3,
+        );
+        let inspection = inspect_change_reader_journal_records(
+            context.read_store().backend().journal().as_ref(),
+        )?;
+        let build = build_change_semantic_generation_with_events(&inspection)?;
+        (inspection, build)
+    };
+    let ready = change_reader_ready_from_build(&inspection, build)?;
+    drop(inspection);
+    Ok(PublicReadChangeReaderV1 { context, ready })
+}
+
+fn change_reader_ready_from_build(
+    inspection: &JournalInspection,
+    build: ChangeSemanticBuildV2,
+) -> Result<ChangeReaderReadyV1> {
+    let generation = build.generation;
+    generation.validate()?;
+    Ok(ChangeReaderReadyV1 {
+        projection: generation.projection,
+        document_projection: generation.document_projection,
+        events: build.events,
+        event_set_hash: inspection.cursor.event_set_hash.clone(),
+        authority_cursor: inspection.cursor.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -264,6 +324,20 @@ mod tests {
             error.to_string(),
             "Change presentation belongs to a different authority generation"
         );
+    }
+
+    #[test]
+    fn qualified_ready_state_reuses_the_semantic_build_event_allocation() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let inspection = inspect_change_reader_journal_records(backend.journal().as_ref()).unwrap();
+        let build = build_change_semantic_generation_with_events(&inspection).unwrap();
+        let decoded_events = Arc::clone(&build.events);
+
+        let ready = change_reader_ready_from_build(&inspection, build).unwrap();
+
+        assert!(Arc::ptr_eq(&decoded_events, &ready.events));
     }
 
     #[test]

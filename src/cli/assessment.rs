@@ -7,7 +7,8 @@ use pointbreak::model::{AssessmentId, InputRequestId, ObservationId, RevisionId}
 use pointbreak::session::event::ReviewAssessment;
 use pointbreak::session::{
     AssessmentAddOptions, AssessmentRecordStatus, AssessmentShowOptions, AssessmentShowResult,
-    AssessmentTargetSelector, record_assessment, show_assessments,
+    AssessmentTargetSelector, PublicReadCommandContextV1, record_assessment, show_assessments,
+    show_assessments_with_public_read_context,
 };
 
 use crate::cli::common::{ContentTypeArg, SideArg, read_body_input};
@@ -207,9 +208,36 @@ pub(super) fn run(
             let span = tracing::info_span!("shore.review.assessment.show");
             let _entered = span.enter();
             tracing::debug!(command = "review.assessment.show", "command_start");
-            review_assessment_show(args, stdout)
+            review_assessment_show(
+                args,
+                |args| Ok(show_assessments(assessment_show_options(args)?)?),
+                stdout,
+            )
         }
     }
+}
+
+pub(super) fn run_with_public_read_context(
+    args: AssessmentArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let AssessmentCommand::Show(args) = args.command else {
+        return Err("public read context reached a non-show assessment adapter".into());
+    };
+    let span = tracing::info_span!("shore.review.assessment.show");
+    let _entered = span.enter();
+    tracing::debug!(command = "review.assessment.show", "command_start");
+    review_assessment_show(
+        args,
+        |args| {
+            Ok(show_assessments_with_public_read_context(
+                assessment_show_options_without_ready_probe(args)?,
+                context,
+            )?)
+        },
+        stdout,
+    )
 }
 
 fn review_assessment_add(
@@ -244,12 +272,13 @@ fn review_assessment_add(
 
 fn review_assessment_show(
     args: AssessmentShowArgs,
+    read: impl FnOnce(AssessmentShowArgs) -> Result<AssessmentShowResult, Box<dyn std::error::Error>>,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let format_explicit = args.format_args.explicit();
     let repo = args.repo.clone();
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
-    let result = show_assessments(assessment_show_options(args)?)?;
+    let result = read(args)?;
     let delegation_map = crate::cli::common::discover_delegation_map(&repo);
     // `assessment_show_document` consumes the result by value; the text lane
     // reads the same result, so clone it only when that lane will render.
@@ -385,6 +414,12 @@ pub(super) fn assessment_show_options(
     if args.exact_revision.is_some() {
         crate::cli::common::require_ready_change_reader(&args.repo)?;
     }
+    assessment_show_options_without_ready_probe(args)
+}
+
+fn assessment_show_options_without_ready_probe(
+    args: AssessmentShowArgs,
+) -> Result<AssessmentShowOptions, Box<dyn std::error::Error>> {
     let mut options = AssessmentShowOptions::new(&args.repo)
         .with_all(args.all)
         .with_include_summary(args.include_summary)

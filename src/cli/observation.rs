@@ -6,7 +6,8 @@ use pointbreak::documents::{observation_add_document, observation_list_document}
 use pointbreak::model::{ObservationId, RevisionId};
 use pointbreak::session::{
     ObservationAddOptions, ObservationListOptions, ObservationListResult,
-    ObservationTargetSelector, list_observations, record_observation,
+    ObservationTargetSelector, PublicReadCommandContextV1, list_observations,
+    list_observations_with_public_read_context, record_observation,
 };
 
 use crate::cli::common::{
@@ -178,9 +179,36 @@ pub(super) fn run(
             let span = tracing::info_span!("shore.review.observation.list");
             let _entered = span.enter();
             tracing::debug!(command = "review.observation.list", "command_start");
-            review_observation_list(args, stdout)
+            review_observation_list(
+                args,
+                |args| Ok(list_observations(observation_list_options(args)?)?),
+                stdout,
+            )
         }
     }
+}
+
+pub(super) fn run_with_public_read_context(
+    args: ObservationArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ObservationCommand::List(args) = args.command else {
+        return Err("public read context reached a non-list observation adapter".into());
+    };
+    let span = tracing::info_span!("shore.review.observation.list");
+    let _entered = span.enter();
+    tracing::debug!(command = "review.observation.list", "command_start");
+    review_observation_list(
+        args,
+        |args| {
+            Ok(list_observations_with_public_read_context(
+                observation_list_options_without_ready_probe(args)?,
+                context,
+            )?)
+        },
+        stdout,
+    )
 }
 
 fn review_observation_add(
@@ -217,13 +245,14 @@ fn review_observation_add(
 
 fn review_observation_list(
     args: ObservationListArgs,
+    read: impl FnOnce(ObservationListArgs) -> Result<ObservationListResult, Box<dyn std::error::Error>>,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let format_explicit = args.format_args.explicit();
     let repo = args.repo.clone();
-    let result = list_observations(observation_list_options(args)?)?;
-    let delegation_map = crate::cli::common::discover_delegation_map(&repo);
+    let result = read(args)?;
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
+    let delegation_map = crate::cli::common::discover_delegation_map(&repo);
     // `observation_list_document` consumes the result by value; render the digest
     // up front on the text lane only, so the machine lanes pay nothing extra.
     let text = matches!(format.format, output::OutputFormat::Text)
@@ -337,6 +366,12 @@ fn observation_list_options(
     if args.exact_revision.is_some() {
         crate::cli::common::require_ready_change_reader(&args.repo)?;
     }
+    observation_list_options_without_ready_probe(args)
+}
+
+fn observation_list_options_without_ready_probe(
+    args: ObservationListArgs,
+) -> Result<ObservationListOptions, Box<dyn std::error::Error>> {
     let mut options = ObservationListOptions::new(&args.repo)
         .with_include_body(args.include_body)
         .with_trust_set(crate::cli::common::discover_trust_set(&args.repo));

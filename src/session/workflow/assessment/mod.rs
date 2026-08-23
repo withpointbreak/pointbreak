@@ -8,6 +8,7 @@ mod view;
 pub use self::add::{AssessmentAddOptions, AssessmentAddResult, record_assessment};
 pub use self::show::{
     AssessmentShowFilters, AssessmentShowOptions, AssessmentShowResult, show_assessments,
+    show_assessments_with_public_read_context,
 };
 pub use self::target::AssessmentTargetSelector;
 pub(crate) use self::view::{

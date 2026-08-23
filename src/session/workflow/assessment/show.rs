@@ -5,7 +5,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
-use crate::session::ArtifactRemovalProjection;
+use crate::session::event::ShoreEvent;
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
@@ -13,6 +13,8 @@ use crate::session::projection::body_content::{BodyRemovalLens, body_content_dia
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::ReadStore;
+use crate::session::{ArtifactRemovalProjection, PublicReadCommandContextV1};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssessmentShowOptions {
@@ -98,6 +100,34 @@ pub struct AssessmentShowFilters {
 
 pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShowResult> {
     let (read_store, events) = super::super::capable_read_store_and_events(&options.repo)?;
+    show_assessments_from_events(options, &read_store, &events)
+}
+
+#[doc(hidden)]
+pub fn show_assessments_with_public_read_context(
+    options: AssessmentShowOptions,
+    context: PublicReadCommandContextV1,
+) -> Result<AssessmentShowResult> {
+    if options.revision_id.is_some()
+        || options.exact_revision_id.is_none()
+        || options.track.is_none()
+        || options.include_all
+    {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "public read context requires the exact qualified assessment shape".to_owned(),
+        });
+    }
+    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+    let result = show_assessments_from_events(options, reader.read_store(), reader.events())?;
+    reader.postflight()?;
+    Ok(result)
+}
+
+fn show_assessments_from_events(
+    options: AssessmentShowOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+) -> Result<AssessmentShowResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
         options.exact_revision_id.as_ref(),
@@ -114,15 +144,15 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
         let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RouteRevisionSelection,
         );
-        resolve_revision(&events, selection, &context, RevisionScope::default())?
+        resolve_revision(events, selection, &context, RevisionScope::default())?
     };
     let track_filter = options
         .track
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let removal = ArtifactRemovalProjection::from_events(&events)?;
-    let cosig_index = CosignatureIndex::build(&events)?;
+    let removal = ArtifactRemovalProjection::from_events(events)?;
+    let cosig_index = CosignatureIndex::build(events)?;
     let removal_lens = BodyRemovalLens::new(
         &removal,
         &options.trust_set,
@@ -136,7 +166,7 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
         );
         project_assessments(AssessmentProjectionOptions {
             backend: Some(read_store.backend()),
-            events: &events,
+            events,
             resolved: &resolved,
             track_filter: track_filter.clone(),
             include_summary: options.include_summary,
@@ -147,7 +177,7 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
     };
     #[cfg(any(test, feature = "longitudinal-counting"))]
     super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
+    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
     diagnostics.extend(body_content_diagnostics(
         assessments
             .iter()
