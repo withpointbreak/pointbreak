@@ -20,6 +20,29 @@ pub(super) struct ObservationArgs {
     command: ObservationCommand,
 }
 
+impl ObservationArgs {
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<super::QualifiedInvocationReadV1<'_>> {
+        let ObservationCommand::List(args) = &self.command else {
+            return None;
+        };
+        (args.revision.is_none()
+            && args.exact_revision.is_some()
+            && args.track.is_some()
+            && args.file.is_none()
+            && args.tags.is_empty()
+            && !args.include_body)
+            .then_some(super::QualifiedInvocationReadV1 {
+                route: super::InvocationReadRouteV1::ObservationReviewerList,
+                repo: &args.repo,
+                revision: args.exact_revision.as_deref(),
+                track: args.track.as_deref(),
+                explicit_format: args.format_args.explicit(),
+            })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ObservationCommand {
     Add(Box<ObservationAddArgs>),

@@ -41,6 +41,18 @@ impl StoreArgs {
                 | StoreCommand::Unlink(_)
         )
     }
+
+    pub(super) fn invocation_read_catalog_v1(&self) -> super::InvocationReadCatalogV1 {
+        if self.is_capability_exempt() {
+            super::InvocationReadCatalogV1::Exempt(
+                super::InvocationReadExemptV1::OwnCapabilityBoundary,
+            )
+        } else {
+            super::InvocationReadCatalogV1::LegacyPreflight(
+                super::LegacyPreflightKindV1::ExplicitExhaustive,
+            )
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

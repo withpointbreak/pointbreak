@@ -19,6 +19,35 @@ pub(super) struct AssessmentArgs {
     command: AssessmentCommand,
 }
 
+impl AssessmentArgs {
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<super::QualifiedInvocationReadV1<'_>> {
+        let AssessmentCommand::Show(args) = &self.command else {
+            return None;
+        };
+        if args.revision.is_some()
+            || args.exact_revision.is_none()
+            || args.track.is_none()
+            || args.all
+        {
+            return None;
+        }
+        let route = if args.include_summary {
+            super::InvocationReadRouteV1::AssessmentCurrentSummary
+        } else {
+            super::InvocationReadRouteV1::AssessmentCurrentResult
+        };
+        Some(super::QualifiedInvocationReadV1 {
+            route,
+            repo: &args.repo,
+            revision: args.exact_revision.as_deref(),
+            track: args.track.as_deref(),
+            explicit_format: args.format_args.explicit(),
+        })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AssessmentCommand {
     Add(Box<AssessmentAddArgs>),

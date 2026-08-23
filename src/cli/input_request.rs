@@ -26,6 +26,30 @@ pub(super) struct InputRequestArgs {
     command: InputRequestCommand,
 }
 
+impl InputRequestArgs {
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<super::QualifiedInvocationReadV1<'_>> {
+        let InputRequestCommand::List(args) = &self.command else {
+            return None;
+        };
+        (args.revision.is_none()
+            && args.exact_revision.is_some()
+            && args.track.is_none()
+            && args.mode.is_none()
+            && args.file.is_none()
+            && matches!(args.status, InputRequestStatusArg::Open)
+            && !args.include_body)
+            .then_some(super::QualifiedInvocationReadV1 {
+                route: super::InvocationReadRouteV1::InputRequestOpenAllTracks,
+                repo: &args.repo,
+                revision: args.exact_revision.as_deref(),
+                track: None,
+                explicit_format: args.format_args.explicit(),
+            })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum InputRequestCommand {
     Open(InputRequestOpenArgs),

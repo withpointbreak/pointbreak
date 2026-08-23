@@ -12,6 +12,13 @@ pub(super) struct VersionArgs {
     format: FormatArgs,
 }
 
+impl VersionArgs {
+    #[cfg(feature = "longitudinal-counting")]
+    pub(super) fn explicit_format_v1(&self) -> Option<output::OutputFormat> {
+        self.format.explicit()
+    }
+}
+
 pub(super) fn run(
     args: VersionArgs,
     stdout: &mut dyn Write,

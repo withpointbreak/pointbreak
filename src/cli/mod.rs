@@ -241,6 +241,87 @@ mod process_io_tests {
     }
 }
 
+/// Total admission classification for the invocation-scoped public-read seam.
+///
+/// The catalog is intentionally private to the binary: it classifies parsed
+/// command semantics, while the session library will only receive an opaque
+/// repository-bound context after a qualified route has been selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvocationReadCatalogV1 {
+    Qualified(InvocationReadRouteV1),
+    LegacyPreflight(LegacyPreflightKindV1),
+    Exempt(InvocationReadExemptV1),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvocationReadRouteV1 {
+    AssessmentCurrentResult,
+    AssessmentCurrentSummary,
+    InputRequestOpenAllTracks,
+    ObservationReviewerList,
+    ValidationReviewerList,
+    AttentionCurrentOrFallback,
+}
+
+#[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
+struct QualifiedInvocationReadV1<'a> {
+    route: InvocationReadRouteV1,
+    repo: &'a std::path::Path,
+    revision: Option<&'a str>,
+    track: Option<&'a str>,
+    explicit_format: Option<output::OutputFormat>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyPreflightKindV1 {
+    Unqualified,
+    ExplicitExhaustive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvocationReadExemptV1 {
+    VersionControl,
+    OwnCapabilityBoundary,
+}
+
+fn classify_invocation_read_v1(cli: &Cli) -> InvocationReadCatalogV1 {
+    use InvocationReadCatalogV1::{Exempt, LegacyPreflight, Qualified};
+
+    if let Some(qualified) = qualified_invocation_read_v1(cli) {
+        return Qualified(qualified.route);
+    }
+    match &cli.command {
+        Command::History(_) => LegacyPreflight(LegacyPreflightKindV1::ExplicitExhaustive),
+        Command::Store(args) => args.invocation_read_catalog_v1(),
+        Command::Version(_) => Exempt(InvocationReadExemptV1::VersionControl),
+        Command::Change(_) | Command::Identity(_) | Command::Inspect(_) | Command::Key(_) => {
+            Exempt(InvocationReadExemptV1::OwnCapabilityBoundary)
+        }
+        Command::Assessment(_)
+        | Command::Association(_)
+        | Command::Attention(_)
+        | Command::Capture(_)
+        | Command::Diff(_)
+        | Command::Endorse(_)
+        | Command::Fact(_)
+        | Command::InputRequest(_)
+        | Command::Observation(_)
+        | Command::Revision(_)
+        | Command::Validation(_) => LegacyPreflight(LegacyPreflightKindV1::Unqualified),
+    }
+}
+
+fn qualified_invocation_read_v1(cli: &Cli) -> Option<QualifiedInvocationReadV1<'_>> {
+    match &cli.command {
+        Command::Assessment(args) => args.qualified_invocation_read_v1(),
+        Command::Attention(args) => args.qualified_invocation_read_v1(),
+        Command::InputRequest(args) => args.qualified_invocation_read_v1(),
+        Command::Observation(args) => args.qualified_invocation_read_v1(),
+        Command::Validation(args) => args.qualified_invocation_read_v1(),
+        _ => None,
+    }
+}
+
 /// Fence ordinary public product commands at the L2 capability boundary.
 ///
 /// The `change` family owns the typed profile/migration-plan responses and its
@@ -252,16 +333,10 @@ fn preflight_public_store_capability(
     cli: &Cli,
     args: &[OsString],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let exempt = match &cli.command {
-        Command::Change(_)
-        | Command::Identity(_)
-        | Command::Inspect(_)
-        | Command::Key(_)
-        | Command::Version(_) => true,
-        Command::Store(args) => args.is_capability_exempt(),
-        _ => false,
-    };
-    if exempt {
+    if matches!(
+        classify_invocation_read_v1(cli),
+        InvocationReadCatalogV1::Exempt(_)
+    ) {
         return Ok(());
     }
     #[cfg(feature = "longitudinal-counting")]
@@ -296,6 +371,198 @@ fn preflight_public_store_capability(
         pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
             Err("migration_in_progress; this command refuses partial Change authority".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod invocation_read_catalog_tests {
+    use super::*;
+
+    fn classify(arguments: &str) -> InvocationReadCatalogV1 {
+        let cli =
+            Cli::try_parse_from(std::iter::once("pointbreak").chain(arguments.split_whitespace()))
+                .unwrap_or_else(|error| panic!("fixture {arguments:?} must parse: {error}"));
+        classify_invocation_read_v1(&cli)
+    }
+
+    #[test]
+    fn exact_semantic_shapes_are_the_only_qualified_routes() {
+        use InvocationReadCatalogV1::{LegacyPreflight, Qualified};
+        use InvocationReadRouteV1 as Route;
+
+        for (arguments, expected) in [
+            (
+                "assessment show --repo /tmp/a --exact-revision rev:one --track agent:r",
+                Route::AssessmentCurrentResult,
+            ),
+            (
+                "assessment show --include-summary --track agent:r --exact-revision rev:one --repo /tmp/b --format json-pretty",
+                Route::AssessmentCurrentSummary,
+            ),
+            (
+                "input-request list --exact-revision rev:one --status open --format text",
+                Route::InputRequestOpenAllTracks,
+            ),
+            (
+                "observation list --track agent:r --exact-revision rev:one --format json",
+                Route::ObservationReviewerList,
+            ),
+            (
+                "validation list --exact-revision rev:one --track agent:r",
+                Route::ValidationReviewerList,
+            ),
+            (
+                "attention list --revision rev:one --repo /tmp/c --format text",
+                Route::AttentionCurrentOrFallback,
+            ),
+        ] {
+            assert_eq!(classify(arguments), Qualified(expected), "{arguments}");
+        }
+
+        for arguments in [
+            "assessment show --exact-revision rev:one --track agent:r --all",
+            "assessment show --revision rev:one --track agent:r",
+            "input-request list --exact-revision rev:one --status all",
+            "input-request list --exact-revision rev:one --include-body",
+            "observation list --exact-revision rev:one --track agent:r --tag security",
+            "validation list --exact-revision rev:one --track agent:r --status passed",
+            "attention list",
+        ] {
+            assert_eq!(
+                classify(arguments),
+                LegacyPreflight(LegacyPreflightKindV1::Unqualified),
+                "{arguments}",
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_and_repository_selection_do_not_change_membership() {
+        use InvocationReadCatalogV1::Qualified;
+        use InvocationReadRouteV1::AssessmentCurrentResult;
+
+        for arguments in [
+            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/default",
+            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/a --format json",
+            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/b --format json-pretty",
+            "assessment show --exact-revision rev:one --track agent:r --repo /tmp/c --format text",
+        ] {
+            assert_eq!(classify(arguments), Qualified(AssessmentCurrentResult));
+        }
+    }
+
+    #[test]
+    fn version_exempt_and_named_exhaustive_operations_are_distinct() {
+        use InvocationReadCatalogV1::{Exempt, LegacyPreflight};
+
+        assert_eq!(
+            classify("version --format text"),
+            Exempt(InvocationReadExemptV1::VersionControl),
+        );
+        for arguments in [
+            "history --repo /tmp/repo",
+            "store status --repo /tmp/repo",
+            "store derived status --repo /tmp/repo",
+            "store derived build --repo /tmp/repo",
+            "store derived rebuild --repo /tmp/repo",
+            "store migrate --repo /tmp/repo",
+            "store remove --repo /tmp/repo --revision rev:one",
+            "store compact --repo /tmp/repo --dry-run",
+        ] {
+            assert_eq!(
+                classify(arguments),
+                LegacyPreflight(LegacyPreflightKindV1::ExplicitExhaustive),
+                "{arguments}",
+            );
+        }
+    }
+
+    #[test]
+    fn every_store_subcommand_keeps_its_existing_preflight_posture() {
+        use InvocationReadCatalogV1::{Exempt, LegacyPreflight};
+        use InvocationReadExemptV1::OwnCapabilityBoundary;
+        use LegacyPreflightKindV1::ExplicitExhaustive;
+
+        for arguments in [
+            "store paths --repo /tmp/repo",
+            "store mode show --repo /tmp/repo",
+            "store list",
+            "store forget slug",
+            "store unlink --repo /tmp/repo",
+        ] {
+            assert_eq!(
+                classify(arguments),
+                Exempt(OwnCapabilityBoundary),
+                "{arguments}",
+            );
+        }
+        for arguments in [
+            "store status",
+            "store derived status",
+            "store derived build",
+            "store derived rebuild",
+            "store migrate",
+            "store link --dry-run",
+            "store remove --revision rev:one",
+            "store gc --dry-run",
+            "store compact --dry-run",
+        ] {
+            assert_eq!(
+                classify(arguments),
+                LegacyPreflight(ExplicitExhaustive),
+                "{arguments}",
+            );
+        }
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_classifier_uses_the_typed_catalog_for_frozen_routes() {
+        use std::collections::BTreeMap;
+
+        use pointbreak::bench_support::longitudinal::{
+            InteractionExecutionIdentityV1, InteractionPerformanceExpectedContextV1,
+            InteractionRouteV1, InteractionSetupExpectationV1,
+        };
+
+        let revision = format!("rev:sha256:{}", "1".repeat(64));
+        let arguments = vec![
+            "assessment".to_owned(),
+            "show".to_owned(),
+            "--track".to_owned(),
+            "agent:reviewer".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+            "--exact-revision".to_owned(),
+            revision.clone(),
+            "--repo".to_owned(),
+            "/tmp/reordered".to_owned(),
+        ];
+        let expected = InteractionPerformanceExpectedContextV1 {
+            execution: InteractionExecutionIdentityV1 {
+                source_commit: "a".repeat(40),
+                source_tree: "b".repeat(40),
+                cargo_lock_sha256: "c".repeat(64),
+                binary_path: "/tmp/pointbreak".to_owned(),
+                binary_sha256: "d".repeat(64),
+                build_profile: "debug".to_owned(),
+                rustc_version: "rustc test".to_owned(),
+                features: vec!["longitudinal-counting".to_owned()],
+            },
+            route: InteractionRouteV1::AssessmentCurrentResult,
+            arguments: arguments.clone(),
+            setup_expectation: InteractionSetupExpectationV1::AuthoritativeReplay,
+            fixture_identity_sha256: Some("e".repeat(64)),
+            revision: Some(revision),
+            track: Some("agent:reviewer".to_owned()),
+            domain_actor: Some("actor:agent:test".to_owned()),
+            expected_child_actors: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            interaction_route_for_arguments(&arguments, &expected).unwrap(),
+            InteractionRouteV1::AssessmentCurrentResult,
+        );
     }
 }
 
@@ -515,101 +782,38 @@ fn interaction_route_for_arguments(
 ) -> Result<pointbreak::bench_support::longitudinal::InteractionRouteV1, String> {
     use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
 
-    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    let (route, repo, revision, track) = match arguments.as_slice() {
-        ["version", "--format", "json"] => (Route::VersionJson, None, None, None),
-        [
-            "assessment",
-            "show",
-            "--repo",
-            repo,
-            "--exact-revision",
-            revision,
-            "--track",
-            track,
-            "--format",
-            "json",
-        ] => (
-            Route::AssessmentCurrentResult,
-            Some(*repo),
-            Some(*revision),
-            Some(*track),
-        ),
-        [
-            "assessment",
-            "show",
-            "--repo",
-            repo,
-            "--exact-revision",
-            revision,
-            "--track",
-            track,
-            "--include-summary",
-            "--format",
-            "json",
-        ] => (
-            Route::AssessmentCurrentSummary,
-            Some(*repo),
-            Some(*revision),
-            Some(*track),
-        ),
-        [
-            "input-request",
-            "list",
-            "--repo",
-            repo,
-            "--exact-revision",
-            revision,
-            "--status",
-            "open",
-            "--format",
-            "json",
-        ] => (
-            Route::InputRequestOpenAllTracks,
-            Some(*repo),
-            Some(*revision),
-            None,
-        ),
-        [
-            family @ ("observation" | "validation"),
-            "list",
-            "--repo",
-            repo,
-            "--exact-revision",
-            revision,
-            "--track",
-            track,
-            "--format",
-            "json",
-        ] => (
-            if *family == "observation" {
-                Route::ObservationReviewerList
-            } else {
-                Route::ValidationReviewerList
-            },
-            Some(*repo),
-            Some(*revision),
-            Some(*track),
-        ),
-        [
-            "attention",
-            "list",
-            "--repo",
-            repo,
-            "--revision",
-            revision,
-            "--format",
-            "json",
-        ] => (
-            Route::AttentionCurrentOrFallback,
-            Some(*repo),
-            Some(*revision),
-            None,
-        ),
-        _ => return Err("interaction CLI argv is not one of the seven frozen routes".to_owned()),
+    let cli = Cli::try_parse_from(
+        std::iter::once("pointbreak").chain(arguments.iter().map(String::as_str)),
+    )
+    .map_err(|_| "interaction CLI argv is not one of the seven frozen routes".to_owned())?;
+    let (route, repo, revision, track) = if let Some(qualified) = qualified_invocation_read_v1(&cli)
+    {
+        if qualified.explicit_format != Some(output::OutputFormat::Json) {
+            return Err("interaction CLI argv is not one of the seven frozen routes".to_owned());
+        }
+        let route = match qualified.route {
+            InvocationReadRouteV1::AssessmentCurrentResult => Route::AssessmentCurrentResult,
+            InvocationReadRouteV1::AssessmentCurrentSummary => Route::AssessmentCurrentSummary,
+            InvocationReadRouteV1::InputRequestOpenAllTracks => Route::InputRequestOpenAllTracks,
+            InvocationReadRouteV1::ObservationReviewerList => Route::ObservationReviewerList,
+            InvocationReadRouteV1::ValidationReviewerList => Route::ValidationReviewerList,
+            InvocationReadRouteV1::AttentionCurrentOrFallback => Route::AttentionCurrentOrFallback,
+        };
+        (
+            route,
+            Some(qualified.repo),
+            qualified.revision,
+            qualified.track,
+        )
+    } else if let Command::Version(args) = &cli.command
+        && args.explicit_format_v1() == Some(output::OutputFormat::Json)
+    {
+        (Route::VersionJson, None, None, None)
+    } else {
+        return Err("interaction CLI argv is not one of the seven frozen routes".to_owned());
     };
     if let Some(repo) = repo
-        && !std::path::Path::new(repo).is_absolute()
+        && !repo.is_absolute()
     {
         return Err("interaction route repository path must be absolute".to_owned());
     }

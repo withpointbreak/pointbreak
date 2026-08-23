@@ -18,6 +18,28 @@ pub(super) struct ValidationArgs {
     command: ValidationCommand,
 }
 
+impl ValidationArgs {
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<super::QualifiedInvocationReadV1<'_>> {
+        let ValidationCommand::List(args) = &self.command else {
+            return None;
+        };
+        (args.revision.is_none()
+            && args.exact_revision.is_some()
+            && args.track.is_some()
+            && args.status.is_none()
+            && !args.include_body)
+            .then_some(super::QualifiedInvocationReadV1 {
+                route: super::InvocationReadRouteV1::ValidationReviewerList,
+                repo: &args.repo,
+                revision: args.exact_revision.as_deref(),
+                track: args.track.as_deref(),
+                explicit_format: args.format_args.explicit(),
+            })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ValidationCommand {
     Add(Box<ValidationAddArgs>),

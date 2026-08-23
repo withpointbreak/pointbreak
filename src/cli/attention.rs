@@ -18,6 +18,23 @@ pub(super) struct AttentionArgs {
     command: AttentionCommand,
 }
 
+impl AttentionArgs {
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<super::QualifiedInvocationReadV1<'_>> {
+        let AttentionCommand::List(args) = &self.command;
+        args.revision
+            .is_some()
+            .then_some(super::QualifiedInvocationReadV1 {
+                route: super::InvocationReadRouteV1::AttentionCurrentOrFallback,
+                repo: &args.repo,
+                revision: args.revision.as_deref(),
+                track: None,
+                explicit_format: args.format_args.explicit(),
+            })
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AttentionCommand {
     List(AttentionListArgs),
