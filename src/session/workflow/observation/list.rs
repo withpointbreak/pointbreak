@@ -5,6 +5,8 @@ use super::util::validated_track_id;
 use super::view::{ObservationProjectionOptions, ObservationView, project_observations};
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
+use crate::session::derived_access::fact_reads::ExactRevisionFactReadRouteV1;
+use crate::session::derived_access::history::DerivedHistoryAccess;
 use crate::session::event::ShoreEvent;
 use crate::session::projection::body_content::{BodyRemovalLens, body_content_diagnostics};
 use crate::session::projection::cosignature::CosignatureIndex;
@@ -122,16 +124,67 @@ pub fn list_observations_with_public_read_context(
             reason: "public read context requires the exact qualified observation shape".to_owned(),
         });
     }
-    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
-    let result = list_observations_from_events(options, reader.read_store(), reader.events())?;
-    reader.postflight()?;
-    Ok(result)
+    context.require_repository(&options.repo)?;
+    let revision_id = options
+        .exact_revision_id
+        .as_ref()
+        .expect("qualified observation shape has an exact Revision")
+        .clone();
+    let access = DerivedHistoryAccess::from_public_read_store(context.read_store().clone())
+        .map_err(crate::error::ShoreError::Message)?;
+    match access
+        .exact_revision_fact_read_v1(&revision_id)
+        .map_err(crate::error::ShoreError::Message)?
+    {
+        ExactRevisionFactReadRouteV1::Ready(derived) => {
+            let result = list_observations_from_event_selection(
+                options,
+                context.read_store(),
+                &derived.events,
+                ObservationDiagnosticsSource::Materialized(derived.diagnostics),
+            )?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::super::record_derived_current_state();
+            Ok(result)
+        }
+        ExactRevisionFactReadRouteV1::Off | ExactRevisionFactReadRouteV1::Unavailable => {
+            let reader =
+                super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+            let result =
+                list_observations_from_events(options, reader.read_store(), reader.events())?;
+            reader.postflight()?;
+            Ok(result)
+        }
+    }
 }
 
 fn list_observations_from_events(
     options: ObservationListOptions,
     read_store: &ReadStore,
     events: &[ShoreEvent],
+) -> Result<ObservationListResult> {
+    let result = list_observations_from_event_selection(
+        options,
+        read_store,
+        events,
+        ObservationDiagnosticsSource::AuthoritativeEvents,
+    )?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    super::super::record_authoritative_replay_state();
+    Ok(result)
+}
+
+enum ObservationDiagnosticsSource {
+    AuthoritativeEvents,
+    Materialized(Vec<ProjectionDiagnostic>),
+}
+
+fn list_observations_from_event_selection(
+    options: ObservationListOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+    diagnostics_source: ObservationDiagnosticsSource,
 ) -> Result<ObservationListResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
@@ -181,9 +234,12 @@ fn list_observations_from_events(
             removal_lens: &removal_lens,
         })?
     };
-    #[cfg(any(test, feature = "longitudinal-counting"))]
-    super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
+    let mut diagnostics = match diagnostics_source {
+        ObservationDiagnosticsSource::AuthoritativeEvents => {
+            SessionState::from_events(events)?.diagnostics
+        }
+        ObservationDiagnosticsSource::Materialized(diagnostics) => diagnostics,
+    };
     diagnostics.extend(body_content_diagnostics(
         observations
             .iter()

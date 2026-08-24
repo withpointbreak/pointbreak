@@ -699,11 +699,225 @@ mod interaction_attribution_tests {
         assert_eq!(snapshot.counters.body_artifact_reads, 0);
     }
 
+    #[test]
+    fn last_two_qualified_fact_cells_use_current_exact_revision_facts_with_parity() {
+        let (repo, revision_id) = captured_repo();
+        let original = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_title("reviewer finding")
+                .with_body("observation body ".repeat(1000))
+                .with_target(ObservationTargetSelector::file("file.txt"))
+                .with_tag("correctness")
+                .with_confidence("high")
+                .with_idempotency_key("observation-a"),
+        )
+        .unwrap();
+        let cross_track = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("human:operator")
+                .with_title("cross-track correction and response")
+                .superseding(original.observation_id.clone())
+                .responding_to(original.observation_id.clone()),
+        )
+        .unwrap();
+        let active = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_title("active reviewer finding")
+                .with_tag("usability"),
+        )
+        .unwrap();
+
+        let log_hash = format!("sha256:{}", "7".repeat(64));
+        let validation = record_validation_check(
+            ValidationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_check_name("cargo test")
+                .with_command("cargo test --locked")
+                .with_status(crate::model::ValidationStatus::Passed)
+                .with_exit_code(0)
+                .with_source_fingerprint("source:sha256:task-3-2")
+                .with_summary("validation summary ".repeat(1000))
+                .with_started_at("2026-08-24T19:00:00Z")
+                .with_completed_at("2026-08-24T19:01:00Z")
+                .with_log_artifact_content_hash(log_hash.clone())
+                .with_idempotency_key("validation-a"),
+        )
+        .unwrap();
+        record_validation_check(
+            ValidationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("human:operator")
+                .with_check_name("manual inspection")
+                .with_status(crate::model::ValidationStatus::Failed)
+                .with_exit_code(1)
+                .with_completed_at("2026-08-24T19:00:30Z"),
+        )
+        .unwrap();
+
+        let inline_removal_signer = TestEd25519Signer::from_seed([0x51; 32]);
+        let inline_removal_signer_id = inline_removal_signer.signer_id().clone();
+        remove_content(
+            RemoveOptions::new(repo.path(), RemoveSelector::Revision(revision_id.clone()))
+                .sign_with(inline_removal_signer),
+        )
+        .unwrap();
+        let store_dir = crate::git::git_common_dir(repo.path())
+            .unwrap()
+            .join("pointbreak");
+        let event_store = crate::session::EventStore::open(&store_dir);
+        let log_removal = crate::session::event::ShoreEvent::new(
+            crate::session::event::EventType::ArtifactRemoved,
+            crate::session::event::ArtifactRemovedPayload::idempotency_key(&log_hash),
+            crate::session::event::EventTarget::for_journal(crate::model::JournalId::new(format!(
+                "{}:default",
+                crate::model::id_prefix::JOURNAL
+            ))),
+            crate::session::event::Writer::shore_local("task-3-2-test"),
+            crate::session::event::ArtifactRemovedPayload {
+                content_hash: log_hash,
+            },
+            "2026-08-24T19:02:00Z",
+        )
+        .unwrap();
+        event_store.record_event_once(&log_removal).unwrap();
+        let detached_removal_signer = TestEd25519Signer::from_seed([0x52; 32]);
+        let detached_removal_signer_id = detached_removal_signer.signer_id().clone();
+        record_event_signature(crate::session::EventSignatureRecordOptions::new(
+            repo.path(),
+            log_removal.event_id,
+            detached_removal_signer,
+        ))
+        .unwrap();
+        let trust = crate::session::event_signature_trust_set(serde_json::json!({
+            "allowedSigners": {
+                "actor:git-email:pointbreak@example.test": [
+                    inline_removal_signer_id.as_str(),
+                    detached_removal_signer_id.as_str()
+                ]
+            }
+        }))
+        .unwrap();
+
+        migrate_to_ready(repo.path());
+        let lifecycle = publish_current_derived_generation(repo.path());
+        append_semantic_duplicate(repo.path(), &lifecycle, &original.event_id, "observation-b");
+        append_semantic_duplicate(
+            repo.path(),
+            &lifecycle,
+            &validation.event_id,
+            "validation-b",
+        );
+
+        let observation_options = || {
+            ObservationListOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_trust_set(trust.clone())
+                .with_removal_policy(crate::session::RemovalPolicy::TrustedStrict)
+        };
+        let validation_options = || {
+            ValidationListOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_trust_set(trust.clone())
+                .with_removal_policy(crate::session::RemovalPolicy::TrustedStrict)
+        };
+        let authoritative_context = || {
+            crate::session::prepare_public_read_command_context_v1(repo.path())
+                .unwrap()
+                .with_derived_access_profile_for_test(DerivedAccessProfile::Off)
+        };
+        let authoritative_observations = list_observations_with_public_read_context(
+            observation_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+        let authoritative_validations = list_validation_checks_with_public_read_context(
+            validation_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+
+        let observation_counting = LongitudinalCountingScopeV1::new("4".repeat(64)).unwrap();
+        observation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = observation_counting.enter();
+        let actual_observations = list_observations_with_public_read_context(
+            observation_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_observations, authoritative_observations);
+        let original_view = actual_observations
+            .observations
+            .iter()
+            .find(|view| view.id == original.observation_id)
+            .unwrap();
+        assert_eq!(original_view.status, ObservationStatus::Superseded);
+        assert_eq!(original_view.responded_by, vec![cross_track.observation_id]);
+        assert!(original_view.body.is_none());
+        assert!(original_view.body_content_state.is_removed());
+        assert!(actual_observations.observations.iter().any(|view| view.id
+            == active.observation_id
+            && view.status == ObservationStatus::Active));
+        assert!(actual_observations.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE
+        }));
+        let observation_snapshot = observation_counting.snapshot();
+        assert_eq!(observation_snapshot.counters.body_artifact_reads, 0);
+
+        let validation_counting = LongitudinalCountingScopeV1::new("5".repeat(64)).unwrap();
+        validation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = validation_counting.enter();
+        let actual_validations = list_validation_checks_with_public_read_context(
+            validation_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_validations, authoritative_validations);
+        let validation_view = actual_validations
+            .validation_checks
+            .iter()
+            .find(|view| view.id == validation.validation_check_id)
+            .unwrap();
+        assert_eq!(
+            validation_view.command.as_deref(),
+            Some("cargo test --locked")
+        );
+        assert_eq!(validation_view.exit_code, Some(0));
+        assert_eq!(
+            validation_view.completed_at.as_deref(),
+            Some("2026-08-24T19:01:00Z")
+        );
+        assert_eq!(validation_view.log_artifact_content_hashes.len(), 1);
+        assert!(validation_view.summary.is_none());
+        assert!(validation_view.summary_content_state.is_removed());
+        assert!(actual_validations.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == crate::session::state::DUPLICATE_SEMANTIC_VALIDATION_EVENT_CODE
+        }));
+        let validation_snapshot = validation_counting.snapshot();
+        assert_eq!(validation_snapshot.counters.body_artifact_reads, 0);
+
+        assert_current_fact_route(&observation_snapshot);
+        assert_current_fact_route(&validation_snapshot);
+    }
+
     fn assert_current_fact_route(snapshot: &LongitudinalCountingSnapshotV1) {
         assert_eq!(
             snapshot.observed_route_states,
             vec![InteractionObservedRouteStateV1::DerivedCurrent]
         );
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.strict_journal_inspections, 0);
+        assert_eq!(snapshot.counters.change_semantic_constructions, 0);
+        assert_eq!(snapshot.counters.change_projection_constructions, 0);
         assert_eq!(snapshot.counters.full_history_fallbacks, 0);
         assert!(
             snapshot
@@ -793,6 +1007,118 @@ mod interaction_attribution_tests {
         assert!(
             derived_error.contains("content hash mismatch"),
             "{derived_error}"
+        );
+    }
+
+    #[test]
+    fn observation_and_validation_selected_or_support_corruption_never_falls_back() {
+        let (validation_repo, validation_revision) = captured_repo();
+        let validation = record_validation_check(
+            ValidationAddOptions::new(validation_repo.path())
+                .with_exact_revision_id(validation_revision.clone())
+                .with_track("agent:reviewer")
+                .with_check_name("cargo test")
+                .with_status(crate::model::ValidationStatus::Passed),
+        )
+        .unwrap();
+        migrate_to_ready(validation_repo.path());
+        publish_current_derived_generation(validation_repo.path());
+        let validation_context =
+            crate::session::prepare_public_read_command_context_v1(validation_repo.path()).unwrap();
+        let validation_store_dir = crate::git::git_common_dir(validation_repo.path())
+            .unwrap()
+            .join("pointbreak");
+        let validation_store = crate::session::EventStore::open(&validation_store_dir);
+        let validation_event = validation_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_id == validation.event_id)
+            .unwrap();
+        std::fs::write(
+            validation_store.event_path_for_idempotency_key(&validation_event.idempotency_key),
+            br#"{"not":"a valid selected Shore event"}"#,
+        )
+        .unwrap();
+        let validation_counting = LongitudinalCountingScopeV1::new("6".repeat(64)).unwrap();
+        validation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = validation_counting.enter();
+        let validation_error = list_validation_checks_with_public_read_context(
+            ValidationListOptions::new(validation_repo.path())
+                .with_exact_revision_id(validation_revision)
+                .with_track("agent:reviewer"),
+            validation_context,
+        )
+        .unwrap_err()
+        .to_string();
+        drop(guard);
+        assert!(!validation_error.is_empty());
+        assert_failed_fact_route_never_fell_back(&validation_counting.snapshot());
+
+        let (observation_repo, observation_revision) = captured_repo();
+        let observation = record_observation(
+            ObservationAddOptions::new(observation_repo.path())
+                .with_exact_revision_id(observation_revision.clone())
+                .with_track("agent:reviewer")
+                .with_title("support corruption")
+                .with_body("support body ".repeat(1000)),
+        )
+        .unwrap();
+        remove_content(RemoveOptions::new(
+            observation_repo.path(),
+            RemoveSelector::Revision(observation_revision.clone()),
+        ))
+        .unwrap();
+        migrate_to_ready(observation_repo.path());
+        publish_current_derived_generation(observation_repo.path());
+        let observation_context =
+            crate::session::prepare_public_read_command_context_v1(observation_repo.path())
+                .unwrap();
+        let observation_store_dir = crate::git::git_common_dir(observation_repo.path())
+            .unwrap()
+            .join("pointbreak");
+        let observation_store = crate::session::EventStore::open(&observation_store_dir);
+        let body_hash = observation.body_content_hash.unwrap();
+        let removal_event = observation_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| {
+                event.event_type == crate::session::event::EventType::ArtifactRemoved
+                    && event.payload["contentHash"].as_str() == Some(&body_hash)
+            })
+            .unwrap();
+        std::fs::write(
+            observation_store.event_path_for_idempotency_key(&removal_event.idempotency_key),
+            br#"{"not":"a valid support Shore event"}"#,
+        )
+        .unwrap();
+        let observation_counting = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
+        observation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = observation_counting.enter();
+        let observation_error = list_observations_with_public_read_context(
+            ObservationListOptions::new(observation_repo.path())
+                .with_exact_revision_id(observation_revision)
+                .with_track("agent:reviewer"),
+            observation_context,
+        )
+        .unwrap_err()
+        .to_string();
+        drop(guard);
+        assert!(!observation_error.is_empty());
+        assert_failed_fact_route_never_fell_back(&observation_counting.snapshot());
+    }
+
+    fn assert_failed_fact_route_never_fell_back(snapshot: &LongitudinalCountingSnapshotV1) {
+        assert!(snapshot.observed_route_states.is_empty());
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.strict_journal_inspections, 0);
+        assert_eq!(snapshot.counters.full_history_fallbacks, 0);
+        assert!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| sample.phase != Phase::WorkflowChangeReaderReplayH3)
         );
     }
 
@@ -949,7 +1275,8 @@ mod interaction_attribution_tests {
         use crate::session::EventStore;
         use crate::session::derived_access::writer::DerivedWriteCoordinator;
         use crate::session::event::{
-            EventType, InputRequestOpenedPayload, ReviewAssessmentRecordedPayload, ShoreEvent,
+            EventType, InputRequestOpenedPayload, ReviewAssessmentRecordedPayload,
+            ReviewObservationRecordedPayload, ShoreEvent, ValidationCheckRecordedPayload,
         };
 
         let read_store =
@@ -977,6 +1304,28 @@ mod interaction_attribution_tests {
                 original.target.clone(),
                 original.writer.clone(),
                 serde_json::from_value::<InputRequestOpenedPayload>(original.payload.clone())
+                    .unwrap(),
+                original.occurred_at.clone(),
+            )
+            .unwrap(),
+            EventType::ReviewObservationRecorded => ShoreEvent::new(
+                original.event_type,
+                idempotency_key,
+                original.target.clone(),
+                original.writer.clone(),
+                serde_json::from_value::<ReviewObservationRecordedPayload>(
+                    original.payload.clone(),
+                )
+                .unwrap(),
+                original.occurred_at.clone(),
+            )
+            .unwrap(),
+            EventType::ValidationCheckRecorded => ShoreEvent::new(
+                original.event_type,
+                idempotency_key,
+                original.target.clone(),
+                original.writer.clone(),
+                serde_json::from_value::<ValidationCheckRecordedPayload>(original.payload.clone())
                     .unwrap(),
                 original.occurred_at.clone(),
             )

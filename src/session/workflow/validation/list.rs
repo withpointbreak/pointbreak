@@ -8,6 +8,8 @@ use super::view::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId, ValidationStatus};
+use crate::session::derived_access::fact_reads::ExactRevisionFactReadRouteV1;
+use crate::session::derived_access::history::DerivedHistoryAccess;
 use crate::session::event::ShoreEvent;
 use crate::session::projection::body_content::{BodyRemovalLens, body_content_diagnostics};
 use crate::session::projection::cosignature::CosignatureIndex;
@@ -116,16 +118,67 @@ pub fn list_validation_checks_with_public_read_context(
             reason: "public read context requires the exact qualified validation shape".to_owned(),
         });
     }
-    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
-    let result = list_validation_checks_from_events(options, reader.read_store(), reader.events())?;
-    reader.postflight()?;
-    Ok(result)
+    context.require_repository(&options.repo)?;
+    let revision_id = options
+        .exact_revision_id
+        .as_ref()
+        .expect("qualified validation shape has an exact Revision")
+        .clone();
+    let access = DerivedHistoryAccess::from_public_read_store(context.read_store().clone())
+        .map_err(crate::error::ShoreError::Message)?;
+    match access
+        .exact_revision_fact_read_v1(&revision_id)
+        .map_err(crate::error::ShoreError::Message)?
+    {
+        ExactRevisionFactReadRouteV1::Ready(derived) => {
+            let result = list_validation_checks_from_event_selection(
+                options,
+                context.read_store(),
+                &derived.events,
+                ValidationDiagnosticsSource::Materialized(derived.diagnostics),
+            )?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::super::record_derived_current_state();
+            Ok(result)
+        }
+        ExactRevisionFactReadRouteV1::Off | ExactRevisionFactReadRouteV1::Unavailable => {
+            let reader =
+                super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+            let result =
+                list_validation_checks_from_events(options, reader.read_store(), reader.events())?;
+            reader.postflight()?;
+            Ok(result)
+        }
+    }
 }
 
 fn list_validation_checks_from_events(
     options: ValidationListOptions,
     read_store: &ReadStore,
     events: &[ShoreEvent],
+) -> Result<ValidationListResult> {
+    let result = list_validation_checks_from_event_selection(
+        options,
+        read_store,
+        events,
+        ValidationDiagnosticsSource::AuthoritativeEvents,
+    )?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    super::super::record_authoritative_replay_state();
+    Ok(result)
+}
+
+enum ValidationDiagnosticsSource {
+    AuthoritativeEvents,
+    Materialized(Vec<ProjectionDiagnostic>),
+}
+
+fn list_validation_checks_from_event_selection(
+    options: ValidationListOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+    diagnostics_source: ValidationDiagnosticsSource,
 ) -> Result<ValidationListResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
@@ -174,9 +227,12 @@ fn list_validation_checks_from_events(
             removal_lens: &removal_lens,
         })?
     };
-    #[cfg(any(test, feature = "longitudinal-counting"))]
-    super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
+    let mut diagnostics = match diagnostics_source {
+        ValidationDiagnosticsSource::AuthoritativeEvents => {
+            SessionState::from_events(events)?.diagnostics
+        }
+        ValidationDiagnosticsSource::Materialized(diagnostics) => diagnostics,
+    };
     diagnostics.extend(body_content_diagnostics(
         validation_checks
             .iter()

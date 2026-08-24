@@ -69,7 +69,7 @@ fn bounded_active_documents_preserve_authoritative_domain_content() {
 }
 
 #[test]
-fn exact_revision_assessment_and_open_request_lanes_are_byte_equal_to_explicit_off() {
+fn five_exact_revision_fact_lanes_are_byte_equal_to_explicit_off() {
     let repo = support::dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
     let capture = pointbreak_env(["capture", "--repo", repo_arg], OFF);
@@ -117,6 +117,54 @@ fn exact_revision_assessment_and_open_request_lanes_are_byte_equal_to_explicit_o
         OFF,
     );
     assert_success(&request);
+    let observation = pointbreak_env(
+        [
+            "observation",
+            "add",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &cursor,
+            "--track",
+            "agent:reviewer",
+            "--title",
+            "qualified reviewer observation",
+            "--body",
+            "body remains disabled on the qualified list route",
+            "--tag",
+            "correctness",
+        ],
+        OFF,
+    );
+    assert_success(&observation);
+    let validation = pointbreak_env(
+        [
+            "validation",
+            "add",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &cursor,
+            "--track",
+            "agent:reviewer",
+            "--check-name",
+            "cargo test",
+            "--status",
+            "passed",
+            "--command",
+            "cargo test --locked",
+            "--exit-code",
+            "0",
+            "--summary",
+            "summary remains disabled on the qualified list route",
+            "--completed-at",
+            "2026-08-24T19:01:00Z",
+            "--log-content-hash",
+            "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        ],
+        OFF,
+    );
+    assert_success(&validation);
     build(&repo);
 
     for format in ["json", "json-pretty", "text"] {
@@ -153,6 +201,30 @@ fn exact_revision_assessment_and_open_request_lanes_are_byte_equal_to_explicit_o
                 repo_arg,
                 "--exact-revision",
                 revision_id,
+                "--format",
+                format,
+            ],
+            vec![
+                "observation",
+                "list",
+                "--repo",
+                repo_arg,
+                "--exact-revision",
+                revision_id,
+                "--track",
+                "agent:reviewer",
+                "--format",
+                format,
+            ],
+            vec![
+                "validation",
+                "list",
+                "--repo",
+                repo_arg,
+                "--exact-revision",
+                revision_id,
+                "--track",
+                "agent:reviewer",
                 "--format",
                 format,
             ],
