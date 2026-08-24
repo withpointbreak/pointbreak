@@ -3357,6 +3357,7 @@ pub fn interaction_route_state_contract_v1(
         observed: Observed::DerivedSelectionFailedClosed,
         success: false,
         performance_role: Role::TerminalDiagnostic,
+        background_maintenance_children: 1,
         ..BASE
     };
     const ATTENTION_CURRENT: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
@@ -6186,7 +6187,7 @@ mod contract_tests {
                         InteractionPerformanceRoleV1::TerminalDiagnostic,
                         false,
                         0,
-                        0,
+                        1,
                         0,
                         0,
                         InteractionFallbackPresentationV1::None,

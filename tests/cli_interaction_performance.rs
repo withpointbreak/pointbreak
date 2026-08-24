@@ -1041,7 +1041,9 @@ fn expected_context(
 ) -> ExpectedContext {
     let expected_child_actors = if matches!(
         &setup_expectation,
-        Setup::FactActiveUnavailable | Setup::AttentionActiveUnavailable
+        Setup::FactActiveUnavailable
+            | Setup::FactPostSelectionFailure
+            | Setup::AttentionActiveUnavailable
     ) {
         BTreeMap::from([(Actor::BackgroundMaintenance, 1)])
     } else {

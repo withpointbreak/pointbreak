@@ -272,6 +272,7 @@ fn normalize_events(events: &mut Vec<ShoreEvent>) {
 
 #[cfg(test)]
 mod contract_tests {
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -279,7 +280,11 @@ mod contract_tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+    use crate::bench_support::longitudinal::{
+        InteractionActorV1, InteractionExecutionIdentityV1,
+        InteractionPerformanceExpectedContextV1, InteractionRouteV1, InteractionSetupExpectationV1,
+        LongitudinalCountingScopeV1, interaction_route_state_contract_v1,
+    };
     use crate::crypto::{EventSigner, TestEd25519Signer};
     use crate::model::{
         AssessmentId, ChangeIdentityDescriptorV1, EngagementId, InputRequestId,
@@ -982,6 +987,86 @@ mod contract_tests {
             error.contains("moved"),
             "unexpected terminal error: {error}"
         );
+    }
+
+    #[test]
+    fn postselection_authority_movement_publishes_truthful_terminal_receipt() {
+        let fixture = FactFixture::new(0, 1);
+        let scope = LongitudinalCountingScopeV1::new("f".repeat(64)).unwrap();
+        scope.record_observed_route_once(InteractionRouteV1::AssessmentCurrentResult);
+        scope.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let mut guard = Some(scope.enter());
+
+        let mut appended = false;
+        let result = fixture.access.exact_revision_fact_read_v1_with_hook(
+            &fixture.revision_id,
+            |boundary| {
+                if boundary == ExactRevisionFactReadBoundary::Selected && !appended {
+                    drop(guard.take());
+                    let out_of_band =
+                        unrelated_authoritative_event("postselection-counted-movement");
+                    record(&EventStore::from_backend(&fixture.backend), &out_of_band);
+                    guard = Some(scope.enter());
+                    appended = true;
+                }
+            },
+        );
+        fixture
+            .access
+            .cancel_background_rebuild()
+            .expect("join post-selection maintenance child");
+        scope.record_semantic_result_sha256_once("9".repeat(64));
+        scope.record_outcome_once(false, 1);
+        drop(guard.take());
+
+        assert!(appended);
+        assert!(result.unwrap_err().contains("moved"));
+        let contract = interaction_route_state_contract_v1(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::FactPostSelectionFailure,
+        )
+        .expect("post-selection terminal contract");
+        let expected_child_actors = if contract.background_maintenance_children > 0 {
+            BTreeMap::from([(
+                InteractionActorV1::BackgroundMaintenance,
+                u16::from(contract.background_maintenance_children),
+            )])
+        } else {
+            BTreeMap::new()
+        };
+        let receipt = scope
+            .interaction_receipt(InteractionPerformanceExpectedContextV1 {
+                execution: InteractionExecutionIdentityV1 {
+                    source_commit: "a".repeat(40),
+                    source_tree: "b".repeat(40),
+                    cargo_lock_sha256: "c".repeat(64),
+                    binary_path: std::env::current_exe()
+                        .expect("current fact-read test binary")
+                        .display()
+                        .to_string(),
+                    binary_sha256: "d".repeat(64),
+                    build_profile: "test".to_owned(),
+                    rustc_version: "rustc test".to_owned(),
+                    features: vec!["gix".to_owned(), "longitudinal-counting".to_owned()],
+                },
+                route: InteractionRouteV1::AssessmentCurrentResult,
+                arguments: vec!["assessment".to_owned(), "show".to_owned()],
+                setup_expectation: InteractionSetupExpectationV1::FactPostSelectionFailure,
+                fixture_identity_sha256: Some("e".repeat(64)),
+                revision: Some(fixture.revision_id.as_str().to_owned()),
+                track: Some(TRACK.to_owned()),
+                domain_actor: Some("actor:agent:fact-read-test".to_owned()),
+                expected_child_actors,
+            })
+            .expect("truthful post-selection movement receipt");
+        receipt.validate().expect("terminal receipt validates");
+        assert_eq!(receipt.children.len(), 1);
+        assert_eq!(
+            receipt.children[0].actor,
+            InteractionActorV1::BackgroundMaintenance
+        );
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
     }
 
     #[test]
