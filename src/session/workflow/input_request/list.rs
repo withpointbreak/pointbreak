@@ -153,24 +153,33 @@ pub fn list_input_requests_with_public_read_context(
         .map_err(crate::error::ShoreError::Message)?
     {
         ExactRevisionFactReadRouteV1::Ready(derived) => {
-            let result = list_input_requests_from_event_selection(
-                options,
-                context.read_store(),
-                &derived.events,
-                InputRequestDiagnosticsSource::Materialized(derived.diagnostics),
-            )?;
-            context.postflight()?;
-            #[cfg(any(test, feature = "longitudinal-counting"))]
-            super::super::record_derived_current_state();
-            Ok(result)
+            super::super::complete_current_derived_fact_projection_v1(context, |store| {
+                list_input_requests_from_event_selection(
+                    options,
+                    store,
+                    &derived.events,
+                    InputRequestDiagnosticsSource::Materialized(derived.diagnostics),
+                )
+            })
         }
-        ExactRevisionFactReadRouteV1::Off | ExactRevisionFactReadRouteV1::Unavailable => {
+        ExactRevisionFactReadRouteV1::Off => {
             let reader =
                 super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
             let result =
                 list_input_requests_from_events(options, reader.read_store(), reader.events())?;
             reader.postflight()?;
             Ok(result)
+        }
+        ExactRevisionFactReadRouteV1::Unavailable => {
+            let repo = options.repo.clone();
+            super::super::complete_unavailable_fact_fallback_v1(context, &repo, |store, events| {
+                list_input_requests_from_event_selection(
+                    options,
+                    store,
+                    events,
+                    InputRequestDiagnosticsSource::AuthoritativeEvents,
+                )
+            })
         }
     }
 }

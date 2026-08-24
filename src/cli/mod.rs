@@ -473,16 +473,44 @@ mod invocation_read_catalog_tests {
         }
 
         for arguments in [
-            "assessment show --exact-revision rev:one --track agent:r --all",
-            "assessment show --revision rev:one --track agent:r",
-            "input-request list --exact-revision rev:one --status all",
-            "input-request list --exact-revision rev:one --include-body",
-            "observation list --exact-revision rev:one --track agent:r --tag security",
-            "validation list --exact-revision rev:one --track agent:r --status passed",
-            "attention list",
+            format!("assessment show --exact-revision {FULL_REVISION} --track agent:r --all"),
+            format!("assessment show --exact-revision {FULL_REVISION}"),
+            format!("assessment show --revision {FULL_REVISION} --track agent:r"),
+            format!("input-request list --exact-revision {FULL_REVISION} --status all"),
+            format!("input-request list --exact-revision {FULL_REVISION} --include-body"),
+            format!(
+                "input-request list --exact-revision {FULL_REVISION} --track agent:r --status open"
+            ),
+            format!(
+                "input-request list --exact-revision {FULL_REVISION} --mode operative --status open"
+            ),
+            format!(
+                "input-request list --exact-revision {FULL_REVISION} --file src/lib.rs --status open"
+            ),
+            format!("input-request list --revision {FULL_REVISION} --status open"),
+            format!(
+                "observation list --exact-revision {FULL_REVISION} --track agent:r --tag security"
+            ),
+            format!(
+                "observation list --exact-revision {FULL_REVISION} --track agent:r --file src/lib.rs"
+            ),
+            format!(
+                "observation list --exact-revision {FULL_REVISION} --track agent:r --include-body"
+            ),
+            format!("observation list --exact-revision {FULL_REVISION}"),
+            format!("observation list --revision {FULL_REVISION} --track agent:r"),
+            format!(
+                "validation list --exact-revision {FULL_REVISION} --track agent:r --status passed"
+            ),
+            format!(
+                "validation list --exact-revision {FULL_REVISION} --track agent:r --include-body"
+            ),
+            format!("validation list --exact-revision {FULL_REVISION}"),
+            format!("validation list --revision {FULL_REVISION} --track agent:r"),
+            "attention list".to_owned(),
         ] {
             assert_eq!(
-                classify(arguments),
+                classify(&arguments),
                 LegacyPreflight(LegacyPreflightKindV1::Unqualified),
                 "{arguments}",
             );

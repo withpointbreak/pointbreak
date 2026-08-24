@@ -100,6 +100,79 @@ fn record_derived_current_state() {
     }
 }
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_fact_authoritative_fallback() {
+    crate::bench_support::longitudinal::record_authoritative_fallback();
+    crate::bench_support::longitudinal::record_full_history_fallback();
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_unlabeled_authoritative_fallback_state() {
+    if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        scope.record_observed_route_state_once(
+            crate::bench_support::longitudinal::InteractionObservedRouteStateV1::UnlabeledFallbackToAuthoritative,
+        );
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_derived_selection_failed_closed_state() {
+    if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        scope.record_observed_route_state_once(
+            crate::bench_support::longitudinal::InteractionObservedRouteStateV1::DerivedSelectionFailedClosed,
+        );
+    }
+}
+
+fn complete_current_derived_fact_projection_v1<T>(
+    context: crate::session::PublicReadCommandContextV1,
+    project: impl FnOnce(&crate::session::store::resolution::ReadStore) -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let projection_phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
+        crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::FactWorkflowProjection,
+    );
+    let result = project(context.read_store());
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(projection_phase);
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            record_derived_selection_failed_closed_state();
+            return Err(error);
+        }
+    };
+    if let Err(error) = context.postflight() {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        record_derived_selection_failed_closed_state();
+        return Err(error);
+    }
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_derived_current_state();
+    Ok(result)
+}
+
+fn complete_unavailable_fact_fallback_v1<T>(
+    context: crate::session::PublicReadCommandContextV1,
+    repo: &std::path::Path,
+    project: impl FnOnce(
+        &crate::session::store::resolution::ReadStore,
+        &[crate::session::event::ShoreEvent],
+    ) -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_fact_authoritative_fallback();
+    let reader = change_read::public_read_change_reader_v1(context, repo)?;
+    let result = project(reader.read_store(), reader.events())?;
+    reader.postflight()?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_unlabeled_authoritative_fallback_state();
+    Ok(result)
+}
+
 pub use artifact_removal::{
     CompactOptions, CompactResult, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
     SkippedRemoval, SweepOutcome, SweptBlob, compact_store, remove_content,
@@ -419,7 +492,7 @@ mod interaction_attribution_tests {
             assert_eq!(snapshot.counters.event_validations, cursor.event_count);
             assert_eq!(
                 snapshot.observed_route_states,
-                vec![InteractionObservedRouteStateV1::AuthoritativeReplay]
+                vec![InteractionObservedRouteStateV1::UnlabeledFallbackToAuthoritative]
             );
             assert_eq!(
                 snapshot
@@ -993,7 +1066,10 @@ mod interaction_attribution_tests {
                 .iter()
                 .all(|sample| sample.phase != Phase::WorkflowChangeReaderReplayH3)
         );
-        assert!(snapshot.observed_route_states.is_empty());
+        assert_eq!(
+            snapshot.observed_route_states,
+            vec![InteractionObservedRouteStateV1::DerivedSelectionFailedClosed]
+        );
 
         let authoritative_error = show_assessments_with_public_read_context(
             include_summary,
@@ -1110,7 +1186,10 @@ mod interaction_attribution_tests {
     }
 
     fn assert_failed_fact_route_never_fell_back(snapshot: &LongitudinalCountingSnapshotV1) {
-        assert!(snapshot.observed_route_states.is_empty());
+        assert_eq!(
+            snapshot.observed_route_states,
+            vec![InteractionObservedRouteStateV1::DerivedSelectionFailedClosed]
+        );
         assert_eq!(snapshot.counters.directory_entries_walked, 0);
         assert_eq!(snapshot.counters.strict_journal_inspections, 0);
         assert_eq!(snapshot.counters.full_history_fallbacks, 0);

@@ -81,7 +81,8 @@ impl DerivedHistoryAccess {
         let selected_event_ids = snapshot
             .exact_revision_event_ids(revision_id, observed)
             .map_err(|error| error.to_string());
-        if selected_event_ids.is_ok() {
+        let selection_started = selected_event_ids.is_ok();
+        if selection_started {
             hook(ExactRevisionFactReadBoundary::Selected);
         }
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -121,12 +122,23 @@ impl DerivedHistoryAccess {
         });
         let finished = snapshot.finish().map_err(|error| error.to_string());
         match (prepared, finished) {
-            (_, Err(error)) => Err(error),
-            (Err(error), Ok(())) => Err(error),
+            (_, Err(error)) => {
+                if selection_started {
+                    record_derived_selection_failed_closed_state();
+                }
+                Err(error)
+            }
+            (Err(error), Ok(())) => {
+                if selection_started {
+                    record_derived_selection_failed_closed_state();
+                }
+                Err(error)
+            }
             (Ok(read), Ok(())) => {
                 let final_current = match self.current()? {
                     CurrentRead::Ready(final_current) => final_current,
                     CurrentRead::Unavailable(_) => {
+                        record_derived_selection_failed_closed_state();
                         return Err(
                             "derived exact Revision fact snapshot moved before response preparation"
                                 .to_owned(),
@@ -142,6 +154,7 @@ impl DerivedHistoryAccess {
                     || final_current.authority_head() != observed
                     || final_observed != observed
                 {
+                    record_derived_selection_failed_closed_state();
                     return Err(
                         "derived exact Revision fact snapshot moved before response preparation"
                             .to_owned(),
@@ -152,6 +165,19 @@ impl DerivedHistoryAccess {
         }
     }
 }
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_derived_selection_failed_closed_state() {
+    if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        scope.record_observed_route_state_once(
+            crate::bench_support::longitudinal::InteractionObservedRouteStateV1::DerivedSelectionFailedClosed,
+        );
+    }
+}
+
+#[cfg(not(any(test, feature = "longitudinal-counting")))]
+fn record_derived_selection_failed_closed_state() {}
 
 fn validate_selected_events(events: &[ShoreEvent], revision_id: &RevisionId) -> Result<(), String> {
     let mut has_proposal = false;

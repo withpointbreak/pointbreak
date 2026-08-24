@@ -18,6 +18,7 @@ use std::process::{Command, Output};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use pointbreak::bench_support::longitudinal::{
+    INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1, INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1,
     InteractionActorV1 as Actor, InteractionChildScopeFactV1, InteractionExecutionIdentityV1,
     InteractionObservedRouteStateV1 as ObservedState,
     InteractionPerformanceExpectedContextV1 as ExpectedContext,
@@ -266,6 +267,14 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             case.id
         );
         assert_eq!(
+            receipt.observed.route_state,
+            ObservedState::AuthoritativeReplay
+        );
+        assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
+        assert!(receipt.children.is_empty());
+        assert_eq!(
             receipt.counters.directory_entries_walked, fixture.journal_record_count,
             "{} must perform one strict Journal inspection",
             case.id
@@ -305,6 +314,70 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             case.id
         );
         assert!(!text.stdout.is_empty(), "{} text lane is empty", case.id);
+        representative_receipts.push(receipt);
+    }
+
+    for case in fact_route_cases(&repo, &fixture.revision) {
+        let authoritative = run_binary(&case.arguments, OFF_ENV);
+        let unavailable = run_binary(&case.arguments, ACTIVE_ENV);
+        assert_eq!(
+            unavailable.status.code(),
+            authoritative.status.code(),
+            "{} active-unavailable exit parity",
+            case.id
+        );
+        assert_eq!(
+            unavailable.stdout, authoritative.stdout,
+            "{} active-unavailable stdout must stay unlabeled",
+            case.id
+        );
+        assert_eq!(
+            unavailable.stderr, authoritative.stderr,
+            "{} active-unavailable stderr must stay unlabeled",
+            case.id
+        );
+        let expected = expected_context(
+            execution.clone(),
+            case.route,
+            case.arguments.clone(),
+            Setup::FactActiveUnavailable,
+            Some(&fixture),
+            route_track(case.route),
+        );
+        let mut required = AUTHORITATIVE_REQUIRED.to_vec();
+        let mut forbidden = AUTHORITATIVE_FORBIDDEN.to_vec();
+        if case.includes_body {
+            required.extend([Phase::RouteBodyHydration, Phase::CarrierValidation]);
+            forbidden.retain(|phase| {
+                !matches!(phase, Phase::RouteBodyHydration | Phase::CarrierValidation)
+            });
+        }
+        let receipt = run_success_case(
+            &format!("{}-active-unavailable", case.id),
+            &case.arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &required,
+            &forbidden,
+            true,
+        );
+        assert_eq!(
+            receipt.observed.route_state,
+            ObservedState::UnlabeledFallbackToAuthoritative
+        );
+        assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 1);
+        assert_eq!(receipt.counters.full_history_fallbacks, 1);
+        assert_eq!(receipt.children.len(), 1);
+        assert_eq!(receipt.children[0].actor, Actor::BackgroundMaintenance);
+        assert_eq!(receipt.children[0].coverage, Coverage::Complete);
+        assert_eq!(
+            derived_publication_count(fixture.repo.path()),
+            0,
+            "{} must not publish a request-owned generation",
+            case.id
+        );
         representative_receipts.push(receipt);
     }
 
@@ -456,6 +529,66 @@ fn cli_interaction_performance_cases_preserve_semantics() {
     }
 
     build_derived(&fixture.repo);
+    for case in fact_route_cases(&repo, &fixture.revision) {
+        let authoritative = run_binary(&case.arguments, OFF_ENV);
+        let current = run_binary(&case.arguments, ACTIVE_ENV);
+        assert_eq!(
+            current.status.code(),
+            authoritative.status.code(),
+            "{} active-current exit parity",
+            case.id
+        );
+        assert_eq!(
+            current.stdout, authoritative.stdout,
+            "{} active-current stdout parity",
+            case.id
+        );
+        assert_eq!(
+            current.stderr, authoritative.stderr,
+            "{} active-current stderr parity",
+            case.id
+        );
+        let expected = expected_context(
+            execution.clone(),
+            case.route,
+            case.arguments.clone(),
+            Setup::FactActiveCurrent,
+            Some(&fixture),
+            route_track(case.route),
+        );
+        let mut required = INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1.to_vec();
+        required.extend([
+            Phase::GitContextResolution,
+            Phase::RouteRevisionSelection,
+            Phase::RouteProjectionFold,
+            Phase::SerializationAndOutput,
+        ]);
+        if case.includes_body {
+            required.extend([Phase::RouteBodyHydration, Phase::CarrierValidation]);
+        }
+        let receipt = run_success_case(
+            &format!("{}-active-current", case.id),
+            &case.arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &required,
+            &INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1,
+            false,
+        );
+        assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
+        assert_eq!(receipt.counters.directory_entries_walked, 0);
+        assert_eq!(receipt.counters.strict_journal_inspections, 0);
+        assert_eq!(receipt.counters.change_semantic_constructions, 0);
+        assert_eq!(receipt.counters.change_projection_constructions, 0);
+        assert!(receipt.counters.fact_sqlite_rows_selected > 0);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
+        assert!(receipt.children.is_empty());
+        assert_eq!(receipt.counters.body_artifact_reads > 0, case.includes_body);
+        assert_eq!(derived_publication_count(fixture.repo.path()), 1);
+        representative_receipts.push(receipt);
+    }
     let derived_expected = expected_context(
         execution,
         Route::AttentionCurrentOrFallback,
@@ -500,6 +633,70 @@ fn cli_interaction_performance_cases_preserve_semantics() {
     assert!(derived_document["projectionStamp"].as_str().is_some());
     assert!(derived_document.get("eventSetHash").is_none());
     representative_receipts.push(derived_receipt);
+
+    let drift = pointbreak_env(
+        [
+            "observation",
+            "add",
+            "--repo",
+            &repo,
+            "--revision",
+            &fixture.revision,
+            "--track",
+            "agent:interaction-fixture-drift",
+            "--title",
+            "post-build authority drift",
+        ],
+        OFF_ENV,
+    );
+    assert_success("append post-build authority drift", &drift);
+    let catching_up = fact_route_cases(&repo, &fixture.revision)
+        .into_iter()
+        .next()
+        .expect("representative catching-up fact case");
+    let authoritative = run_binary(&catching_up.arguments, OFF_ENV);
+    assert_success("catching-up authoritative reference", &authoritative);
+    let catching_up_expected = expected_context(
+        derived_expected.execution.clone(),
+        catching_up.route,
+        catching_up.arguments.clone(),
+        Setup::FactActiveUnavailable,
+        Some(&fixture),
+        route_track(catching_up.route),
+    );
+    let mut catching_up_required = AUTHORITATIVE_REQUIRED.to_vec();
+    catching_up_required.push(Phase::CheckpointAndWal);
+    let catching_up_forbidden = AUTHORITATIVE_FORBIDDEN
+        .into_iter()
+        .filter(|phase| *phase != Phase::CheckpointAndWal)
+        .collect::<Vec<_>>();
+    let catching_up_receipt = run_counted_success_case_against(
+        "assessment-current-result-catching-up",
+        &catching_up.arguments,
+        ACTIVE_ENV,
+        &authoritative,
+        &catching_up_expected,
+        &receipt_dir,
+        &catching_up_required,
+        &catching_up_forbidden,
+        true,
+    );
+    assert_eq!(
+        catching_up_receipt.observed.route_state,
+        ObservedState::UnlabeledFallbackToAuthoritative
+    );
+    assert_eq!(catching_up_receipt.counters.fact_sqlite_rows_selected, 0);
+    assert_eq!(catching_up_receipt.counters.authoritative_fallbacks, 1);
+    assert_eq!(catching_up_receipt.counters.full_history_fallbacks, 1);
+    assert_eq!(catching_up_receipt.children.len(), 1);
+    assert_eq!(
+        catching_up_receipt.children[0].actor,
+        Actor::BackgroundMaintenance
+    );
+    assert_eq!(catching_up_receipt.children[0].coverage, Coverage::Complete);
+    assert_eq!(derived_publication_count(fixture.repo.path()), 1);
+    build_derived(&fixture.repo);
+    assert_eq!(derived_publication_count(fixture.repo.path()), 1);
 
     assert_eq!(
         observed_route_ids,
@@ -583,6 +780,99 @@ fn abbreviated_revision_selectors_preserve_legacy_counted_paths() {
         &fixture,
         1,
     );
+}
+
+#[test]
+fn selector_errors_and_excluded_fact_shapes_stay_legacy_and_byte_equal() {
+    let fixture = fixture();
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    build_derived(&fixture.repo);
+
+    let base = fact_route_cases(&repo, &fixture.revision);
+    let excluded_cases = [
+        (
+            "assessment-all",
+            arguments_with_extra(&base[0].arguments, &["--all"]),
+        ),
+        (
+            "assessment-all-tracks",
+            arguments_without_option_value(&base[0].arguments, "--track"),
+        ),
+        (
+            "input-request-track",
+            arguments_with_extra(&base[2].arguments, &["--track", TRACK]),
+        ),
+        (
+            "input-request-mode",
+            arguments_with_extra(&base[2].arguments, &["--mode", "operative"]),
+        ),
+        (
+            "input-request-file",
+            arguments_with_extra(&base[2].arguments, &["--file", "src/lib.rs"]),
+        ),
+        (
+            "input-request-status-all",
+            arguments_with_option_value(&base[2].arguments, "--status", "all"),
+        ),
+        (
+            "input-request-body",
+            arguments_with_extra(&base[2].arguments, &["--include-body"]),
+        ),
+        (
+            "observation-all-tracks",
+            arguments_without_option_value(&base[3].arguments, "--track"),
+        ),
+        (
+            "observation-file",
+            arguments_with_extra(&base[3].arguments, &["--file", "src/lib.rs"]),
+        ),
+        (
+            "observation-tag",
+            arguments_with_extra(&base[3].arguments, &["--tag", "security"]),
+        ),
+        (
+            "observation-body",
+            arguments_with_extra(&base[3].arguments, &["--include-body"]),
+        ),
+        (
+            "validation-all-tracks",
+            arguments_without_option_value(&base[4].arguments, "--track"),
+        ),
+        (
+            "validation-status",
+            arguments_with_extra(&base[4].arguments, &["--status", "passed"]),
+        ),
+        (
+            "validation-body",
+            arguments_with_extra(&base[4].arguments, &["--include-body"]),
+        ),
+    ];
+
+    for (name, arguments) in excluded_cases {
+        let off = run_binary(&arguments, OFF_ENV);
+        assert_success(&format!("{name} explicit-off"), &off);
+        let active = run_binary(&arguments, ACTIVE_ENV);
+        assert_eq!(active.status.code(), off.status.code(), "{name} status");
+        assert_eq!(active.stdout, off.stdout, "{name} stdout");
+        assert_eq!(active.stderr, off.stderr, "{name} stderr");
+    }
+
+    for selector in ["abc", "not-hex", "deadbeef", "obj:11111111"] {
+        for case in fact_route_cases(&repo, &fixture.revision) {
+            let arguments = arguments_with_revision_selector(&case.arguments, selector);
+            let off = run_binary(&arguments, OFF_ENV);
+            assert!(!off.status.success(), "{} {selector} must fail", case.id);
+            let active = run_binary(&arguments, ACTIVE_ENV);
+            assert_eq!(
+                active.status.code(),
+                off.status.code(),
+                "{} {selector} status",
+                case.id
+            );
+            assert_eq!(active.stdout, off.stdout, "{} {selector} stdout", case.id);
+            assert_eq!(active.stderr, off.stderr, "{} {selector} stderr", case.id);
+        }
+    }
 }
 
 fn fixture() -> Fixture {
@@ -749,7 +1039,10 @@ fn expected_context(
     fixture: Option<&Fixture>,
     track: Option<&str>,
 ) -> ExpectedContext {
-    let expected_child_actors = if matches!(&setup_expectation, Setup::AttentionActiveUnavailable) {
+    let expected_child_actors = if matches!(
+        &setup_expectation,
+        Setup::FactActiveUnavailable | Setup::AttentionActiveUnavailable
+    ) {
         BTreeMap::from([(Actor::BackgroundMaintenance, 1)])
     } else {
         BTreeMap::new()
@@ -792,6 +1085,33 @@ fn run_success_case(
     let ordinary = run_binary(arguments, env);
     assert_success(case_name, &ordinary);
 
+    run_counted_success_case_against(
+        case_name,
+        arguments,
+        env,
+        &ordinary,
+        expected,
+        receipt_dir,
+        required_phases,
+        forbidden_phases,
+        exhaustive,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_counted_success_case_against(
+    case_name: &str,
+    arguments: &[String],
+    env: &[(&str, &str)],
+    reference: &Output,
+    expected: &ExpectedContext,
+    receipt_dir: &tempfile::TempDir,
+    required_phases: &[Phase],
+    forbidden_phases: &[Phase],
+    exhaustive: bool,
+) -> Receipt {
+    assert_success(case_name, reference);
+
     let receipt_path = receipt_dir.path().join(format!("{case_name}.json"));
     let encoded = encode_request(case_name, expected, &receipt_path);
     let counted_arguments = [
@@ -803,13 +1123,19 @@ fn run_success_case(
 
     assert_eq!(
         counted.status.code(),
-        ordinary.status.code(),
+        reference.status.code(),
         "{case_name} exit parity\nordinary stderr:\n{}\ncounted stderr:\n{}",
-        String::from_utf8_lossy(&ordinary.stderr),
+        String::from_utf8_lossy(&reference.stderr),
         String::from_utf8_lossy(&counted.stderr)
     );
-    assert_eq!(counted.stdout, ordinary.stdout, "{case_name} stdout parity");
-    assert_eq!(counted.stderr, ordinary.stderr, "{case_name} stderr parity");
+    assert_eq!(
+        counted.stdout, reference.stdout,
+        "{case_name} stdout parity"
+    );
+    assert_eq!(
+        counted.stderr, reference.stderr,
+        "{case_name} stderr parity"
+    );
 
     let receipt: Receipt = serde_json::from_slice(
         &fs::read(&receipt_path)
@@ -820,7 +1146,7 @@ fn run_success_case(
         &receipt,
         ReceiptExpectation {
             expected,
-            stdout: &ordinary.stdout,
+            stdout: &reference.stdout,
             required_phases,
             forbidden_phases,
             exhaustive,
@@ -920,29 +1246,37 @@ fn check_case_receipt(
     if receipt.counters.response_bytes != expectation.stdout.len() as u64 {
         return Err("accepted stdout byte count mismatch".to_owned());
     }
-    let phases = receipt
+    if receipt.phases.iter().any(|sample| sample.actor.is_none()) {
+        return Err("phase is missing its execution actor".to_owned());
+    }
+    if receipt.phases.iter().any(|sample| {
+        sample.actor.is_some_and(|actor| {
+            actor != Actor::RequestReader
+                && !expectation
+                    .expected
+                    .expected_child_actors
+                    .contains_key(&actor)
+        })
+    }) {
+        return Err("phase belongs to an unexpected execution actor".to_owned());
+    }
+    let request_phases = receipt
         .phases
         .iter()
+        .filter(|sample| sample.actor == Some(Actor::RequestReader))
         .map(|sample| sample.phase)
         .collect::<Vec<_>>();
-    if receipt
-        .phases
-        .iter()
-        .any(|sample| sample.actor != Some(Actor::RequestReader))
-    {
-        return Err("phase is missing its request_reader actor".to_owned());
-    }
     for required in expectation.required_phases {
-        if !phases.contains(required) {
+        if !request_phases.contains(required) {
             return Err(format!(
-                "missing required phase {required:?}; observed {phases:?}"
+                "missing required request-reader phase {required:?}; observed {request_phases:?}"
             ));
         }
     }
     for forbidden in expectation.forbidden_phases {
-        if phases.contains(forbidden) {
+        if request_phases.contains(forbidden) {
             return Err(format!(
-                "observed forbidden phase {forbidden:?}; observed {phases:?}"
+                "observed forbidden request-reader phase {forbidden:?}; observed {request_phases:?}"
             ));
         }
     }
@@ -1150,19 +1484,22 @@ fn assert_selected_carrier_corruption_fails_closed(
     )
     .expect("corrupt selected fixture carrier");
 
-    let ordinary = run_binary(&expected.arguments, OFF_ENV);
+    let mut expected = expected.clone();
+    expected.setup_expectation = Setup::FactPostSelectionFailure;
+    expected.expected_child_actors.clear();
+    let ordinary = run_binary(&expected.arguments, ACTIVE_ENV);
     assert!(
         !ordinary.status.success(),
         "corrupt carrier must fail closed"
     );
     let receipt_path = receipt_dir.path().join("corrupt-selected-carrier.json");
-    let encoded = encode_request("corrupt-selected-carrier", expected, &receipt_path);
+    let encoded = encode_request("corrupt-selected-carrier", &expected, &receipt_path);
     let counted_arguments = [
         vec!["--longitudinal-counting".to_owned(), encoded],
         expected.arguments.clone(),
     ]
     .concat();
-    let counted = run_binary(&counted_arguments, OFF_ENV);
+    let counted = run_binary(&counted_arguments, ACTIVE_ENV);
 
     assert!(
         !counted.status.success(),
@@ -1174,19 +1511,40 @@ fn assert_selected_carrier_corruption_fails_closed(
         "unexpected corrupt-carrier error: {}",
         String::from_utf8_lossy(&ordinary.stderr)
     );
-    let counted_stderr = String::from_utf8_lossy(&counted.stderr);
-    assert!(
-        counted_stderr.contains(String::from_utf8_lossy(&ordinary.stderr).trim()),
-        "diagnostic path lost the product refusal: {counted_stderr}"
+    assert_eq!(counted.stderr, ordinary.stderr, "counted refusal stderr");
+    let receipt: Receipt = serde_json::from_slice(
+        &fs::read(&receipt_path).expect("terminal diagnostic receipt must be published"),
+    )
+    .expect("terminal diagnostic receipt JSON");
+    check_case_receipt(
+        &receipt,
+        ReceiptExpectation {
+            expected: &expected,
+            stdout: &ordinary.stdout,
+            required_phases: &[
+                Phase::FactSqliteSelection,
+                Phase::FactSelectedCarrierHydrationValidation,
+                Phase::FactSupportCarrierHydrationValidation,
+                Phase::FactWorkflowProjection,
+                Phase::GitContextResolution,
+                Phase::RouteRevisionSelection,
+                Phase::RouteProjectionFold,
+                Phase::RouteBodyHydration,
+                Phase::CarrierValidation,
+            ],
+            forbidden_phases: &INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1,
+            exhaustive: false,
+        },
+    )
+    .expect("terminal diagnostic receipt remains admissible");
+    assert_eq!(
+        receipt.observed.route_state,
+        ObservedState::DerivedSelectionFailedClosed
     );
-    assert!(
-        counted_stderr.contains("observed route state count mismatch"),
-        "diagnostic path must reject an incomplete receipt: {counted_stderr}"
-    );
-    assert!(
-        !receipt_path.exists(),
-        "no partial receipt may be published"
-    );
+    assert!(!receipt.observed.success);
+    assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+    assert_eq!(receipt.counters.full_history_fallbacks, 0);
+    assert!(receipt.children.is_empty());
 }
 
 fn assert_attention_output_lanes(
@@ -1381,6 +1739,34 @@ fn arguments_with_revision_selector(arguments: &[String], selector: &str) -> Vec
         .position(|argument| matches!(argument.as_str(), "--exact-revision" | "--revision"))
         .expect("fixture Revision selector");
     arguments[index + 1] = selector.to_owned();
+    arguments
+}
+
+fn arguments_with_extra(arguments: &[String], extra: &[&str]) -> Vec<String> {
+    arguments
+        .iter()
+        .cloned()
+        .chain(extra.iter().map(|value| (*value).to_owned()))
+        .collect()
+}
+
+fn arguments_with_option_value(arguments: &[String], option: &str, value: &str) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let index = arguments
+        .iter()
+        .position(|argument| argument == option)
+        .unwrap_or_else(|| panic!("fixture option {option}"));
+    arguments[index + 1] = value.to_owned();
+    arguments
+}
+
+fn arguments_without_option_value(arguments: &[String], option: &str) -> Vec<String> {
+    let mut arguments = arguments.to_vec();
+    let index = arguments
+        .iter()
+        .position(|argument| argument == option)
+        .unwrap_or_else(|| panic!("fixture option {option}"));
+    arguments.drain(index..=index + 1);
     arguments
 }
 
