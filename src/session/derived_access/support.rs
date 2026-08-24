@@ -49,7 +49,7 @@ pub(super) struct SupportEventPlan {
 }
 
 impl SupportEventPlan {
-    fn all_event_ids(&self) -> Vec<String> {
+    pub(super) fn all_event_ids(&self) -> Vec<String> {
         self.removal_event_ids
             .iter()
             .chain(&self.signature_event_ids)

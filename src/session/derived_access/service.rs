@@ -577,6 +577,14 @@ impl DerivedAccessService {
         Ok(self.semantic.product_history_read_snapshot(observed)?)
     }
 
+    pub(crate) fn exact_revision_fact_read_snapshot_at(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<super::sqlite::ExactRevisionFactReadSnapshot>, DerivedAccessServiceError>
+    {
+        Ok(self.semantic.exact_revision_fact_read_snapshot(observed)?)
+    }
+
     pub(crate) fn chronological_window(
         &self,
         request: ChronologicalWindowRequest,

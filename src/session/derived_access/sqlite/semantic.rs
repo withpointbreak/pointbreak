@@ -102,6 +102,156 @@ pub(crate) struct MaterializedChangeProjection {
     pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
 }
 
+/// One exact, connection-local fact read snapshot. The transaction owns the
+/// exact locator checkpoint, materialized global diagnostics, exact-Revision
+/// selection, and support planning without constructing a Change projection.
+pub(crate) struct ExactRevisionFactReadSnapshot {
+    pub(crate) connection: rusqlite::Connection,
+    pub(crate) state: SemanticStateSnapshot,
+}
+
+impl ExactRevisionFactReadSnapshot {
+    pub(crate) fn finish(self) -> Result<(), SqliteSemanticError> {
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| sqlite_error("close exact Revision fact read snapshot", error))
+    }
+
+    pub(crate) fn exact_revision_event_ids(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<Vec<String>, SqliteSemanticError> {
+        let checkpoint = read_locator_checkpoint(&self.connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteSemanticError::Metadata(
+                "exact Revision fact selection differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        let (sql, parameters) = exact_revision_event_ids_statement(revision_id, observed)?;
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare exact Revision fact selection", error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| sqlite_error("query exact Revision fact selection", error))?;
+        let event_ids = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read exact Revision fact selection", error))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_fact_sqlite_rows_selected(event_ids.len());
+        Ok(event_ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact_revision_event_query_plan(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<Vec<String>, SqliteSemanticError> {
+        let (sql, parameters) = exact_revision_event_ids_statement(revision_id, observed)?;
+        let mut statement = self
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .map_err(|error| sqlite_error("prepare exact Revision fact query plan", error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
+            .map_err(|error| sqlite_error("query exact Revision fact query plan", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read exact Revision fact query plan", error))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact_revision_event_vm_steps(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<u64, SqliteSemanticError> {
+        let (sql, parameters) = exact_revision_event_ids_statement(revision_id, observed)?;
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare exact Revision fact work probe", error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| sqlite_error("query exact Revision fact work probe", error))?;
+        for row in rows {
+            row.map_err(|error| sqlite_error("read exact Revision fact work probe", error))?;
+        }
+        u64::try_from(statement.get_status(rusqlite::StatementStatus::VmStep)).map_err(|_| {
+            SqliteSemanticError::Metadata(
+                "exact Revision fact VM-step count does not fit u64".to_owned(),
+            )
+        })
+    }
+}
+
+fn exact_revision_event_ids_statement(
+    revision_id: &RevisionId,
+    observed: TruthCursor,
+) -> Result<(String, Vec<rusqlite::types::Value>), SqliteSemanticError> {
+    let epoch = to_i64(observed.epoch, "exact Revision fact epoch")?;
+    let sequence = to_i64(observed.sequence, "exact Revision fact cursor")?;
+    let (predicate, parameters): (&str, Vec<rusqlite::types::Value>) =
+        if let Some((prefix, digest)) = split_canonical_digest(revision_id.as_str()) {
+            (
+                "physical.revision_prefix_id = (
+                     SELECT id FROM semantic_identity_prefix WHERE value = ?1
+                 )
+                 AND physical.revision_digest = ?2
+                 AND physical.revision_raw IS NULL",
+                vec![
+                    prefix.to_owned().into(),
+                    digest.to_vec().into(),
+                    epoch.into(),
+                    sequence.into(),
+                ],
+            )
+        } else {
+            (
+                "physical.revision_prefix_id IS NULL
+                 AND physical.revision_digest IS NULL
+                 AND physical.revision_raw = ?1",
+                vec![
+                    revision_id.as_str().to_owned().into(),
+                    epoch.into(),
+                    sequence.into(),
+                ],
+            )
+        };
+    let epoch_parameter = parameters.len() - 1;
+    let sequence_parameter = parameters.len();
+    Ok((
+        exact_revision_event_ids_query(predicate, epoch_parameter, sequence_parameter),
+        parameters,
+    ))
+}
+
+fn exact_revision_event_ids_query(
+    identity_predicate: &str,
+    epoch_parameter: usize,
+    sequence_parameter: usize,
+) -> String {
+    format!(
+        "SELECT locator.event_id
+         FROM semantic_event_fact AS physical
+           INDEXED BY semantic_event_fact_revision
+         CROSS JOIN locator_event_text AS locator
+         WHERE {identity_predicate}
+           AND locator.sequence = physical.sequence
+           AND locator.epoch = ?{epoch_parameter}
+           AND physical.sequence <= ?{sequence_parameter}
+         ORDER BY locator.replay_key, locator.event_id"
+    )
+}
+
 /// One exact, connection-local product-history read snapshot. The main
 /// database transaction remains open while selection metadata and TEMP support
 /// closure are read, preventing a K response from observing retroactive K+1
@@ -1762,6 +1912,44 @@ impl SqliteSemantic {
         }
         let state = query_materialized_state(&connection)?;
         Ok(LocatorRead::Ready((connection, state)))
+    }
+
+    pub(crate) fn exact_revision_fact_read_snapshot(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<ExactRevisionFactReadSnapshot>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        connection
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(|error| sqlite_error("begin exact Revision fact read snapshot", error))?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        validate_product_history_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied != observed {
+            connection.execute_batch("ROLLBACK").map_err(|error| {
+                sqlite_error("close moved exact Revision fact read snapshot", error)
+            })?;
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state(&connection)?;
+        if u64::try_from(state.event_count).ok() != Some(observed.sequence) {
+            connection.execute_batch("ROLLBACK").map_err(|error| {
+                sqlite_error(
+                    "close inconsistent exact Revision fact read snapshot",
+                    error,
+                )
+            })?;
+            return Err(SqliteSemanticError::Metadata(
+                "exact Revision fact state differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        Ok(LocatorRead::Ready(ExactRevisionFactReadSnapshot {
+            connection,
+            state,
+        }))
     }
 
     /// Open the exact Timeline snapshot selected by an already-pinned reader

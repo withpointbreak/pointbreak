@@ -11,6 +11,7 @@ pub(crate) mod changes;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
+pub(crate) mod fact_reads;
 pub(crate) mod generation;
 pub(crate) mod history;
 mod interaction;
