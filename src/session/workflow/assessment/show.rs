@@ -5,6 +5,8 @@ use super::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
+use crate::session::derived_access::fact_reads::ExactRevisionFactReadRouteV1;
+use crate::session::derived_access::history::DerivedHistoryAccess;
 use crate::session::event::ShoreEvent;
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
@@ -117,16 +119,67 @@ pub fn show_assessments_with_public_read_context(
             reason: "public read context requires the exact qualified assessment shape".to_owned(),
         });
     }
-    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
-    let result = show_assessments_from_events(options, reader.read_store(), reader.events())?;
-    reader.postflight()?;
-    Ok(result)
+    context.require_repository(&options.repo)?;
+    let revision_id = options
+        .exact_revision_id
+        .as_ref()
+        .expect("qualified assessment shape has an exact Revision")
+        .clone();
+    let access = DerivedHistoryAccess::from_public_read_store(context.read_store().clone())
+        .map_err(crate::error::ShoreError::Message)?;
+    match access
+        .exact_revision_fact_read_v1(&revision_id)
+        .map_err(crate::error::ShoreError::Message)?
+    {
+        ExactRevisionFactReadRouteV1::Ready(derived) => {
+            let result = show_assessments_from_event_selection(
+                options,
+                context.read_store(),
+                &derived.events,
+                AssessmentDiagnosticsSource::Materialized(derived.diagnostics),
+            )?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::super::record_derived_current_state();
+            Ok(result)
+        }
+        ExactRevisionFactReadRouteV1::Off | ExactRevisionFactReadRouteV1::Unavailable => {
+            let reader =
+                super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+            let result =
+                show_assessments_from_events(options, reader.read_store(), reader.events())?;
+            reader.postflight()?;
+            Ok(result)
+        }
+    }
 }
 
 fn show_assessments_from_events(
     options: AssessmentShowOptions,
     read_store: &ReadStore,
     events: &[ShoreEvent],
+) -> Result<AssessmentShowResult> {
+    let result = show_assessments_from_event_selection(
+        options,
+        read_store,
+        events,
+        AssessmentDiagnosticsSource::AuthoritativeEvents,
+    )?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    super::super::record_authoritative_replay_state();
+    Ok(result)
+}
+
+enum AssessmentDiagnosticsSource {
+    AuthoritativeEvents,
+    Materialized(Vec<ProjectionDiagnostic>),
+}
+
+fn show_assessments_from_event_selection(
+    options: AssessmentShowOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+    diagnostics_source: AssessmentDiagnosticsSource,
 ) -> Result<AssessmentShowResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
@@ -175,9 +228,12 @@ fn show_assessments_from_events(
             removal_lens: Some(&removal_lens),
         })?
     };
-    #[cfg(any(test, feature = "longitudinal-counting"))]
-    super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
+    let mut diagnostics = match diagnostics_source {
+        AssessmentDiagnosticsSource::AuthoritativeEvents => {
+            SessionState::from_events(events)?.diagnostics
+        }
+        AssessmentDiagnosticsSource::Materialized(diagnostics) => diagnostics,
+    };
     diagnostics.extend(body_content_diagnostics(
         assessments
             .iter()

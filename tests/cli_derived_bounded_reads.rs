@@ -69,6 +69,102 @@ fn bounded_active_documents_preserve_authoritative_domain_content() {
 }
 
 #[test]
+fn exact_revision_assessment_and_open_request_lanes_are_byte_equal_to_explicit_off() {
+    let repo = support::dump_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let capture = pointbreak_env(["capture", "--repo", repo_arg], OFF);
+    assert_success(&capture);
+    let capture = parse_json(&capture.stdout);
+    let revision_id = capture["revision"]["revisionId"].as_str().unwrap();
+    let change_id = capture["changeId"].as_str().unwrap();
+    let first_cursor = capture["reviewCursor"]["token"].as_str().unwrap();
+    let summary = "qualified assessment summary ".repeat(1000);
+
+    let assessment = pointbreak_env(
+        [
+            "assessment",
+            "add",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            first_cursor,
+            "--track",
+            "agent:reviewer",
+            "--assessment",
+            "accepted",
+            "--summary",
+            &summary,
+        ],
+        OFF,
+    );
+    assert_success(&assessment);
+    let cursor = select_cursor(repo_arg, change_id, revision_id);
+    let request = pointbreak_env(
+        [
+            "input-request",
+            "open",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &cursor,
+            "--track",
+            "human:operator",
+            "--title",
+            "qualified open request",
+            "--reason",
+            "manual-decision-required",
+        ],
+        OFF,
+    );
+    assert_success(&request);
+    build(&repo);
+
+    for format in ["json", "json-pretty", "text"] {
+        for args in [
+            vec![
+                "assessment",
+                "show",
+                "--repo",
+                repo_arg,
+                "--exact-revision",
+                revision_id,
+                "--track",
+                "agent:reviewer",
+                "--format",
+                format,
+            ],
+            vec![
+                "assessment",
+                "show",
+                "--repo",
+                repo_arg,
+                "--exact-revision",
+                revision_id,
+                "--track",
+                "agent:reviewer",
+                "--include-summary",
+                "--format",
+                format,
+            ],
+            vec![
+                "input-request",
+                "list",
+                "--repo",
+                repo_arg,
+                "--exact-revision",
+                revision_id,
+                "--format",
+                format,
+            ],
+        ] {
+            let active = pointbreak_env(&args, ACTIVE);
+            let authoritative = pointbreak_env(&args, OFF);
+            assert_output_parity(&args, &active, &authoritative);
+        }
+    }
+}
+
+#[test]
 fn revision_page_cursors_share_a_position_but_bind_the_serving_lane() {
     let (repo, _, _) = superseded_dump_repo();
     build(&repo);
@@ -481,6 +577,36 @@ fn build(repo: &GitRepo) {
         ACTIVE,
     );
     assert_success(&output);
+}
+
+fn select_cursor(repo: &str, change_id: &str, revision_id: &str) -> String {
+    let output = pointbreak_env(
+        [
+            "change",
+            "select",
+            change_id,
+            "--revision",
+            revision_id,
+            "--repo",
+            repo,
+        ],
+        OFF,
+    );
+    assert_success(&output);
+    parse_json(&output.stdout)["token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn assert_output_parity(args: &[&str], active: &Output, authoritative: &Output) {
+    assert_eq!(
+        active.status.code(),
+        authoritative.status.code(),
+        "{args:?}"
+    );
+    assert_eq!(active.stdout, authoritative.stdout, "stdout: {args:?}");
+    assert_eq!(active.stderr, authoritative.stderr, "stderr: {args:?}");
 }
 
 fn pointbreak_env_with_timeout<I, S>(args: I, env: &[(&str, &str)], timeout: Duration) -> Output

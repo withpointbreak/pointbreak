@@ -6,6 +6,8 @@ use super::view::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
+use crate::session::derived_access::fact_reads::ExactRevisionFactReadRouteV1;
+use crate::session::derived_access::history::DerivedHistoryAccess;
 use crate::session::event::{AssertionMode, ShoreEvent};
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
@@ -138,16 +140,67 @@ pub fn list_input_requests_with_public_read_context(
                 .to_owned(),
         });
     }
-    let reader = super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
-    let result = list_input_requests_from_events(options, reader.read_store(), reader.events())?;
-    reader.postflight()?;
-    Ok(result)
+    context.require_repository(&options.repo)?;
+    let revision_id = options
+        .exact_revision_id
+        .as_ref()
+        .expect("qualified input-request shape has an exact Revision")
+        .clone();
+    let access = DerivedHistoryAccess::from_public_read_store(context.read_store().clone())
+        .map_err(crate::error::ShoreError::Message)?;
+    match access
+        .exact_revision_fact_read_v1(&revision_id)
+        .map_err(crate::error::ShoreError::Message)?
+    {
+        ExactRevisionFactReadRouteV1::Ready(derived) => {
+            let result = list_input_requests_from_event_selection(
+                options,
+                context.read_store(),
+                &derived.events,
+                InputRequestDiagnosticsSource::Materialized(derived.diagnostics),
+            )?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::super::record_derived_current_state();
+            Ok(result)
+        }
+        ExactRevisionFactReadRouteV1::Off | ExactRevisionFactReadRouteV1::Unavailable => {
+            let reader =
+                super::super::change_read::public_read_change_reader_v1(context, &options.repo)?;
+            let result =
+                list_input_requests_from_events(options, reader.read_store(), reader.events())?;
+            reader.postflight()?;
+            Ok(result)
+        }
+    }
 }
 
 fn list_input_requests_from_events(
     options: InputRequestListOptions,
     read_store: &ReadStore,
     events: &[ShoreEvent],
+) -> Result<InputRequestListResult> {
+    let result = list_input_requests_from_event_selection(
+        options,
+        read_store,
+        events,
+        InputRequestDiagnosticsSource::AuthoritativeEvents,
+    )?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    super::super::record_authoritative_replay_state();
+    Ok(result)
+}
+
+enum InputRequestDiagnosticsSource {
+    AuthoritativeEvents,
+    Materialized(Vec<ProjectionDiagnostic>),
+}
+
+fn list_input_requests_from_event_selection(
+    options: InputRequestListOptions,
+    read_store: &ReadStore,
+    events: &[ShoreEvent],
+    diagnostics_source: InputRequestDiagnosticsSource,
 ) -> Result<InputRequestListResult> {
     let selection = RevisionSelection::from_revision_options(
         options.revision_id.as_ref(),
@@ -198,9 +251,12 @@ fn list_input_requests_from_events(
             removal_lens: &removal_lens,
         })?
     };
-    #[cfg(any(test, feature = "longitudinal-counting"))]
-    super::super::record_authoritative_replay_state();
-    let mut diagnostics = SessionState::from_events(events)?.diagnostics;
+    let mut diagnostics = match diagnostics_source {
+        InputRequestDiagnosticsSource::AuthoritativeEvents => {
+            SessionState::from_events(events)?.diagnostics
+        }
+        InputRequestDiagnosticsSource::Materialized(diagnostics) => diagnostics,
+    };
     diagnostics.extend(body_content_diagnostics(
         input_requests
             .iter()

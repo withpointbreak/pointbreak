@@ -221,7 +221,13 @@ fn duplicate_diagnostics(
     events: &BTreeMap<(&'static str, String), BTreeSet<String>>,
 ) -> Vec<serde_json::Value> {
     let mut diagnostics = Vec::new();
-    for ((family, semantic_id), event_ids) in events {
+    let mut duplicate_groups = events.iter().collect::<Vec<_>>();
+    duplicate_groups.sort_by(|left, right| {
+        duplicate_family_rank((left.0).0)
+            .cmp(&duplicate_family_rank((right.0).0))
+            .then_with(|| (left.0).1.cmp(&(right.0).1))
+    });
+    for ((family, semantic_id), event_ids) in duplicate_groups {
         if event_ids.len() < 2 {
             continue;
         }
@@ -263,8 +269,8 @@ fn materialized_duplicate_diagnostics(
 ) -> Vec<serde_json::Value> {
     let mut duplicates = duplicates.to_vec();
     duplicates.sort_by(|left, right| {
-        left.family
-            .cmp(&right.family)
+        duplicate_family_rank(&left.family)
+            .cmp(&duplicate_family_rank(&right.family))
             .then_with(|| left.semantic_id.cmp(&right.semantic_id))
     });
     duplicates
@@ -286,6 +292,20 @@ fn materialized_duplicate_diagnostics(
             }))
         })
         .collect()
+}
+
+fn duplicate_family_rank(family: &str) -> u8 {
+    // Match SessionState::finish exactly. Public fact documents inherited this
+    // family order before materialized diagnostics existed, so lexical SQL/model
+    // order would change otherwise byte-identical derived responses.
+    match family {
+        "observation" => 0,
+        "request" => 1,
+        "response" => 2,
+        "assessment" => 3,
+        "validation" => 4,
+        _ => 5,
+    }
 }
 
 fn duplicate_label(family: &str) -> Option<(&'static str, &'static str)> {
@@ -383,4 +403,40 @@ pub(crate) enum FreshnessModelError {
         applied: TruthCursor,
         observed: TruthCursor,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialized_duplicate_diagnostics_follow_authoritative_family_order() {
+        let duplicate = |family: &str| MaterializedSemanticDuplicate {
+            family: family.to_owned(),
+            semantic_id: format!("{family}:sha256:test"),
+            event_ids: vec!["evt:sha256:a".to_owned(), "evt:sha256:b".to_owned()],
+            event_count: 2,
+        };
+        let diagnostics = materialized_duplicate_diagnostics(&[
+            duplicate("validation"),
+            duplicate("assessment"),
+            duplicate("response"),
+            duplicate("request"),
+            duplicate("observation"),
+        ]);
+
+        assert_eq!(
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "duplicate_semantic_observation_event",
+                "duplicate_semantic_input_request_open_event",
+                "duplicate_semantic_input_request_response_event",
+                "duplicate_semantic_assessment_event",
+                "duplicate_semantic_validation_event",
+            ]
+        );
+    }
 }

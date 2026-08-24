@@ -90,6 +90,16 @@ fn record_authoritative_replay_state() {
     }
 }
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_derived_current_state() {
+    if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        scope.record_observed_route_state_once(
+            crate::bench_support::longitudinal::InteractionObservedRouteStateV1::DerivedCurrent,
+        );
+    }
+}
+
 pub use artifact_removal::{
     CompactOptions, CompactResult, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
     SkippedRemoval, SweepOutcome, SweptBlob, compact_store, remove_content,
@@ -268,7 +278,9 @@ mod interaction_attribution_tests {
         InteractionActorV1, InteractionObservedRouteStateV1, LongitudinalCountingScopeV1,
         LongitudinalCountingSnapshotV1, LongitudinalDerivedAccessPhaseV1 as Phase,
     };
-    use crate::crypto::TestEd25519Signer;
+    use crate::crypto::{EventSigner, TestEd25519Signer};
+    use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
+    use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
 
     #[test]
@@ -426,6 +438,365 @@ mod interaction_attribution_tests {
     }
 
     #[test]
+    fn first_three_qualified_fact_cells_use_current_exact_revision_facts_with_parity() {
+        let (repo, revision_id) = captured_repo();
+        let observation = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_title("related observation"),
+        )
+        .unwrap();
+        let open_options = || {
+            InputRequestOpenOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_title("qualified open request")
+                .with_body("request body ".repeat(1000))
+                .with_reason_code(
+                    crate::session::event::InputRequestReasonCode::ManualDecisionRequired,
+                )
+        };
+        let request = open_input_request(open_options().with_idempotency_key("request-a")).unwrap();
+        let answered = open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("human:operator")
+                .with_title("answered advisory request")
+                .with_body("answered body ".repeat(1000))
+                .with_assertion_mode(crate::session::event::AssertionMode::Advisory)
+                .with_reason_code(
+                    crate::session::event::InputRequestReasonCode::InsufficientEvidence,
+                ),
+        )
+        .unwrap();
+        respond_input_request(
+            InputRequestRespondOptions::new(repo.path(), answered.input_request_id)
+                .with_outcome(crate::session::event::InputRequestResponseOutcome::Approved)
+                .with_reason("response reason ".repeat(1000)),
+        )
+        .unwrap();
+        let replaced = record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_assessment(crate::session::event::ReviewAssessment::NeedsChanges)
+                .with_summary("superseded summary"),
+        )
+        .unwrap();
+        record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("human:operator")
+                .with_assessment(crate::session::event::ReviewAssessment::AcceptedWithFollowUp)
+                .with_summary("cross-track replacement")
+                .replacing(replaced.assessment_id),
+        )
+        .unwrap();
+        let assessment_options_for_write = || {
+            AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_assessment(crate::session::event::ReviewAssessment::Accepted)
+                .with_summary("qualified assessment summary ".repeat(1000))
+                .related_observation(observation.observation_id.clone())
+                .related_input_request(request.input_request_id.clone())
+        };
+        let assessment =
+            record_assessment(assessment_options_for_write().with_idempotency_key("assessment-a"))
+                .unwrap();
+        assert!(
+            assessment
+                .assessment_id
+                .as_str()
+                .starts_with("assess:sha256:")
+        );
+        let inline_removal_signer = TestEd25519Signer::from_seed([0x41; 32]);
+        let inline_removal_signer_id = inline_removal_signer.signer_id().clone();
+        remove_content(
+            RemoveOptions::new(repo.path(), RemoveSelector::Revision(revision_id.clone()))
+                .sign_with(inline_removal_signer),
+        )
+        .unwrap();
+        let store_dir = crate::git::git_common_dir(repo.path())
+            .unwrap()
+            .join("pointbreak");
+        let removal_event_id = crate::session::EventStore::open(&store_dir)
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == crate::session::event::EventType::ArtifactRemoved)
+            .unwrap()
+            .event_id;
+        let detached_removal_signer = TestEd25519Signer::from_seed([0x42; 32]);
+        let detached_removal_signer_id = detached_removal_signer.signer_id().clone();
+        record_event_signature(crate::session::EventSignatureRecordOptions::new(
+            repo.path(),
+            removal_event_id,
+            detached_removal_signer,
+        ))
+        .unwrap();
+        let trust = crate::session::event_signature_trust_set(serde_json::json!({
+            "allowedSigners": {
+                "actor:git-email:pointbreak@example.test": [
+                    inline_removal_signer_id.as_str(),
+                    detached_removal_signer_id.as_str()
+                ]
+            }
+        }))
+        .unwrap();
+        std::fs::write(repo.path().join("file.txt"), "three\n").unwrap();
+        let unrelated_revision = capture_worktree_review(
+            CaptureOptions::new(repo.path()).with_supersedes(vec![revision_id.clone()]),
+        )
+        .unwrap();
+        let unrelated_request = open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_exact_revision_id(unrelated_revision.revision_id)
+                .with_track("agent:unrelated")
+                .with_title("unrelated duplicate request")
+                .with_reason_code(
+                    crate::session::event::InputRequestReasonCode::ManualDecisionRequired,
+                ),
+        )
+        .unwrap();
+        migrate_to_ready(repo.path());
+
+        let assessment_options = || {
+            AssessmentShowOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+        };
+        let assessment_summary_options = || {
+            assessment_options()
+                .with_include_summary(true)
+                .with_removal_policy(crate::session::RemovalPolicy::Advisory)
+        };
+        let removed_summary_options = || {
+            assessment_options()
+                .with_include_summary(true)
+                .with_trust_set(trust.clone())
+                .with_removal_policy(crate::session::RemovalPolicy::TrustedStrict)
+        };
+        let request_options = || {
+            InputRequestListOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_trust_set(trust.clone())
+                .with_removal_policy(crate::session::RemovalPolicy::TrustedStrict)
+        };
+        let lifecycle = publish_current_derived_generation(repo.path());
+        append_semantic_duplicate(repo.path(), &lifecycle, &request.event_id, "request-b");
+        append_semantic_duplicate(
+            repo.path(),
+            &lifecycle,
+            &assessment.event_id,
+            "assessment-b",
+        );
+        append_semantic_duplicate(
+            repo.path(),
+            &lifecycle,
+            &unrelated_request.event_id,
+            "unrelated-request-b",
+        );
+
+        let authoritative_context = || {
+            crate::session::prepare_public_read_command_context_v1(repo.path())
+                .unwrap()
+                .with_derived_access_profile_for_test(DerivedAccessProfile::Off)
+        };
+        let authoritative_assessment = show_assessments_with_public_read_context(
+            assessment_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+        let authoritative_summary = show_assessments_with_public_read_context(
+            assessment_summary_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+        let authoritative_removed_summary = show_assessments_with_public_read_context(
+            removed_summary_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+        let authoritative_requests = list_input_requests_with_public_read_context(
+            request_options(),
+            authoritative_context(),
+        )
+        .unwrap();
+
+        let counting = LongitudinalCountingScopeV1::new("d".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let actual_assessment = show_assessments_with_public_read_context(
+            assessment_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_assessment, authoritative_assessment);
+        assert!(actual_assessment.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains(unrelated_request.input_request_id.as_str())
+        }));
+        let snapshot = counting.snapshot();
+        assert_current_fact_route(&snapshot);
+        assert_eq!(snapshot.counters.body_artifact_reads, 0);
+
+        let counting = LongitudinalCountingScopeV1::new("e".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let actual_summary = show_assessments_with_public_read_context(
+            assessment_summary_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_summary, authoritative_summary);
+        let snapshot = counting.snapshot();
+        assert_current_fact_route(&snapshot);
+        assert!(snapshot.counters.body_artifact_reads > 0);
+
+        let counting = LongitudinalCountingScopeV1::new("1".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let actual_removed_summary = show_assessments_with_public_read_context(
+            removed_summary_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_removed_summary, authoritative_removed_summary);
+        assert!(
+            actual_removed_summary
+                .assessments
+                .iter()
+                .any(|assessment| assessment.summary_content_state.is_removed())
+        );
+        let snapshot = counting.snapshot();
+        assert_current_fact_route(&snapshot);
+        assert_eq!(snapshot.counters.body_artifact_reads, 0);
+
+        let counting = LongitudinalCountingScopeV1::new("f".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let actual_requests = list_input_requests_with_public_read_context(
+            request_options(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert_eq!(actual_requests, authoritative_requests);
+        assert!(
+            actual_requests
+                .input_requests
+                .iter()
+                .any(|request| request.body_content_state.is_removed())
+        );
+        let snapshot = counting.snapshot();
+        assert_current_fact_route(&snapshot);
+        assert_eq!(snapshot.counters.body_artifact_reads, 0);
+    }
+
+    fn assert_current_fact_route(snapshot: &LongitudinalCountingSnapshotV1) {
+        assert_eq!(
+            snapshot.observed_route_states,
+            vec![InteractionObservedRouteStateV1::DerivedCurrent]
+        );
+        assert_eq!(snapshot.counters.full_history_fallbacks, 0);
+        assert!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| sample.phase != Phase::WorkflowChangeReaderReplayH3)
+        );
+    }
+
+    #[test]
+    fn current_assessment_summary_corruption_is_ignored_until_requested_and_never_falls_back() {
+        let (repo, revision_id) = captured_repo();
+        let assessment = record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:reviewer")
+                .with_assessment(crate::session::event::ReviewAssessment::Accepted)
+                .with_summary("corruptible summary ".repeat(1000)),
+        )
+        .unwrap();
+        migrate_to_ready(repo.path());
+        publish_current_derived_generation(repo.path());
+
+        let store_dir = crate::git::git_common_dir(repo.path())
+            .unwrap()
+            .join("pointbreak");
+        let assessment_event = crate::session::EventStore::open(&store_dir)
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_id == assessment.event_id)
+            .unwrap();
+        let payload: crate::session::event::ReviewAssessmentRecordedPayload =
+            serde_json::from_value(assessment_event.payload).unwrap();
+        let artifact_path = store_dir.join(payload.summary_artifact_path.unwrap());
+        let mut artifact: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&artifact_path).unwrap()).unwrap();
+        artifact["body"] = serde_json::json!("corrupt summary bytes");
+        std::fs::write(&artifact_path, serde_json::to_vec(&artifact).unwrap()).unwrap();
+
+        let result_only = AssessmentShowOptions::new(repo.path())
+            .with_exact_revision_id(revision_id.clone())
+            .with_track("agent:reviewer");
+        let counting = LongitudinalCountingScopeV1::new("2".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let result = show_assessments_with_public_read_context(
+            result_only.clone(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+        assert!(result.assessments[0].summary.is_none());
+        let snapshot = counting.snapshot();
+        assert_current_fact_route(&snapshot);
+        assert_eq!(snapshot.counters.body_artifact_reads, 0);
+
+        let include_summary = result_only.with_include_summary(true);
+        let counting = LongitudinalCountingScopeV1::new("3".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let guard = counting.enter();
+        let derived_error = show_assessments_with_public_read_context(
+            include_summary.clone(),
+            crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap(),
+        )
+        .unwrap_err()
+        .to_string();
+        drop(guard);
+        let snapshot = counting.snapshot();
+        assert!(
+            snapshot
+                .derived_access_phases
+                .iter()
+                .all(|sample| sample.phase != Phase::WorkflowChangeReaderReplayH3)
+        );
+        assert!(snapshot.observed_route_states.is_empty());
+
+        let authoritative_error = show_assessments_with_public_read_context(
+            include_summary,
+            crate::session::prepare_public_read_command_context_v1(repo.path())
+                .unwrap()
+                .with_derived_access_profile_for_test(DerivedAccessProfile::Off),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(derived_error, authoritative_error);
+        assert!(
+            derived_error.contains("content hash mismatch"),
+            "{derived_error}"
+        );
+    }
+
+    #[test]
     fn qualified_consumers_reject_shape_and_repository_misuse_before_projection() {
         let (repo, revision_id) = captured_repo();
         migrate_to_ready(repo.path());
@@ -553,6 +924,69 @@ mod interaction_attribution_tests {
             .with_derived_enabled(false),
         )
         .unwrap();
+    }
+
+    fn publish_current_derived_generation(repo: &Path) -> DerivedAccessLifecycle {
+        let store_dir = crate::git::git_common_dir(repo).unwrap().join("pointbreak");
+        let store_identity =
+            crate::session::store::resolution::opaque_path_identity("store", &store_dir).unwrap();
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            &store_dir,
+            store_identity,
+        )
+        .unwrap();
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        lifecycle
+    }
+
+    fn append_semantic_duplicate(
+        repo: &Path,
+        lifecycle: &DerivedAccessLifecycle,
+        source_event_id: &crate::model::EventId,
+        idempotency_key: &str,
+    ) {
+        use crate::session::EventStore;
+        use crate::session::derived_access::writer::DerivedWriteCoordinator;
+        use crate::session::event::{
+            EventType, InputRequestOpenedPayload, ReviewAssessmentRecordedPayload, ShoreEvent,
+        };
+
+        let read_store =
+            crate::session::store::resolution::resolve_change_read_backend(repo).unwrap();
+        let original = EventStore::from_backend(read_store.backend())
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| &event.event_id == source_event_id)
+            .unwrap();
+        let mut duplicate = match original.event_type {
+            EventType::ReviewAssessmentRecorded => ShoreEvent::new(
+                original.event_type,
+                idempotency_key,
+                original.target.clone(),
+                original.writer.clone(),
+                serde_json::from_value::<ReviewAssessmentRecordedPayload>(original.payload.clone())
+                    .unwrap(),
+                original.occurred_at.clone(),
+            )
+            .unwrap(),
+            EventType::InputRequestOpened => ShoreEvent::new(
+                original.event_type,
+                idempotency_key,
+                original.target.clone(),
+                original.writer.clone(),
+                serde_json::from_value::<InputRequestOpenedPayload>(original.payload.clone())
+                    .unwrap(),
+                original.occurred_at.clone(),
+            )
+            .unwrap(),
+            other => panic!("unsupported semantic duplicate family: {other:?}"),
+        };
+        duplicate.assertion_mode = original.assertion_mode;
+        let store = EventStore::from_backend(read_store.backend())
+            .with_coordinator(DerivedWriteCoordinator::new(lifecycle.clone()).unwrap());
+        store.record_event_once(&duplicate).unwrap();
     }
 
     fn captured_repo() -> (tempfile::TempDir, crate::model::RevisionId) {
