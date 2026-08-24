@@ -263,6 +263,36 @@ enum InvocationReadRouteV1 {
     AttentionCurrentOrFallback,
 }
 
+impl InvocationReadRouteV1 {
+    const FACT_READS: [Self; 5] = [
+        Self::AssessmentCurrentResult,
+        Self::AssessmentCurrentSummary,
+        Self::InputRequestOpenAllTracks,
+        Self::ObservationReviewerList,
+        Self::ValidationReviewerList,
+    ];
+
+    fn is_fact_read(self) -> bool {
+        Self::FACT_READS.contains(&self)
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    const fn interaction_route_v1(
+        self,
+    ) -> pointbreak::bench_support::longitudinal::InteractionRouteV1 {
+        use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
+
+        match self {
+            Self::AssessmentCurrentResult => Route::AssessmentCurrentResult,
+            Self::AssessmentCurrentSummary => Route::AssessmentCurrentSummary,
+            Self::InputRequestOpenAllTracks => Route::InputRequestOpenAllTracks,
+            Self::ObservationReviewerList => Route::ObservationReviewerList,
+            Self::ValidationReviewerList => Route::ValidationReviewerList,
+            Self::AttentionCurrentOrFallback => Route::AttentionCurrentOrFallback,
+        }
+    }
+}
+
 #[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
 struct QualifiedInvocationReadV1<'a> {
     route: InvocationReadRouteV1,
@@ -339,14 +369,9 @@ fn preflight_public_store_capability(
     }
     if matches!(
         catalog,
-        InvocationReadCatalogV1::Qualified(
-            InvocationReadRouteV1::AssessmentCurrentResult
-                | InvocationReadRouteV1::AssessmentCurrentSummary
-                | InvocationReadRouteV1::InputRequestOpenAllTracks
-                | InvocationReadRouteV1::ObservationReviewerList
-                | InvocationReadRouteV1::ValidationReviewerList
-                | InvocationReadRouteV1::AttentionCurrentOrFallback
-        )
+        InvocationReadCatalogV1::Qualified(route)
+            if route.is_fact_read()
+                || route == InvocationReadRouteV1::AttentionCurrentOrFallback
     ) {
         let qualified = qualified_invocation_read_v1(cli)
             .expect("the typed catalog preserves the qualified read shape");
@@ -618,7 +643,7 @@ mod invocation_read_catalog_tests {
             },
             route: InteractionRouteV1::AssessmentCurrentResult,
             arguments: arguments.clone(),
-            setup_expectation: InteractionSetupExpectationV1::AuthoritativeReplay,
+            setup_expectation: InteractionSetupExpectationV1::FactExplicitOff,
             fixture_identity_sha256: Some("e".repeat(64)),
             revision: Some(revision),
             track: Some("agent:reviewer".to_owned()),
@@ -629,6 +654,17 @@ mod invocation_read_catalog_tests {
         assert_eq!(
             interaction_route_for_arguments(&arguments, &expected).unwrap(),
             InteractionRouteV1::AssessmentCurrentResult,
+        );
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_fact_catalog_is_single_sourced_with_the_product_catalog() {
+        use pointbreak::bench_support::longitudinal::InteractionRouteV1;
+
+        assert_eq!(
+            InvocationReadRouteV1::FACT_READS.map(InvocationReadRouteV1::interaction_route_v1),
+            InteractionRouteV1::FACT_READS,
         );
     }
 }
@@ -858,14 +894,7 @@ fn interaction_route_for_arguments(
         if qualified.explicit_format != Some(output::OutputFormat::Json) {
             return Err("interaction CLI argv is not one of the seven frozen routes".to_owned());
         }
-        let route = match qualified.route {
-            InvocationReadRouteV1::AssessmentCurrentResult => Route::AssessmentCurrentResult,
-            InvocationReadRouteV1::AssessmentCurrentSummary => Route::AssessmentCurrentSummary,
-            InvocationReadRouteV1::InputRequestOpenAllTracks => Route::InputRequestOpenAllTracks,
-            InvocationReadRouteV1::ObservationReviewerList => Route::ObservationReviewerList,
-            InvocationReadRouteV1::ValidationReviewerList => Route::ValidationReviewerList,
-            InvocationReadRouteV1::AttentionCurrentOrFallback => Route::AttentionCurrentOrFallback,
-        };
+        let route = qualified.route.interaction_route_v1();
         (
             route,
             Some(qualified.repo),

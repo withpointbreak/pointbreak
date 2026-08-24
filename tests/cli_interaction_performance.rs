@@ -21,10 +21,11 @@ use pointbreak::bench_support::longitudinal::{
     InteractionActorV1 as Actor, InteractionChildScopeFactV1, InteractionExecutionIdentityV1,
     InteractionObservedRouteStateV1 as ObservedState,
     InteractionPerformanceExpectedContextV1 as ExpectedContext,
-    InteractionPerformanceReceiptV1 as Receipt, InteractionRouteV1 as Route,
-    InteractionScopeCoverageV1 as Coverage, InteractionSetupExpectationV1 as Setup,
-    LongitudinalCounterReceiptV1, LongitudinalCountingScopeV1,
-    LongitudinalDerivedAccessPhaseV1 as Phase,
+    InteractionPerformanceReceiptV1 as Receipt, InteractionPerformanceRoleV1 as PerformanceRole,
+    InteractionRouteV1 as Route, InteractionScopeCoverageV1 as Coverage,
+    InteractionSetupExpectationV1 as Setup, LongitudinalCounterReceiptV1,
+    LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1 as Phase,
+    interaction_route_state_contract_v1,
 };
 use sha2::{Digest, Sha256};
 use support::git_repo::GitRepo;
@@ -190,6 +191,36 @@ fn fact_route_cases(repo: &str, revision: &str) -> [RouteCase; 5] {
 }
 
 #[test]
+fn cli_interaction_fact_matrix_freezes_only_the_five_catalog_routes() {
+    let revision = format!("rev:sha256:{}", "1".repeat(64));
+    assert_eq!(
+        fact_route_cases("/tmp/pointbreak-fact-contract", &revision).map(|case| case.route),
+        Route::FACT_READS,
+    );
+
+    for route in Route::FACT_READS {
+        let current = interaction_route_state_contract_v1(route, Setup::FactActiveCurrent)
+            .expect("current fact contract");
+        assert_eq!(
+            current.performance_role,
+            PerformanceRole::ProvisionalTarget {
+                sample_count: 5,
+                strict_upper_bound_millis: 2_000,
+            }
+        );
+        assert!(current.historical_evidence_unchanged);
+        for setup in [Setup::FactExplicitOff, Setup::FactActiveUnavailable] {
+            assert_eq!(
+                interaction_route_state_contract_v1(route, setup)
+                    .expect("compatibility fact contract")
+                    .performance_role,
+                PerformanceRole::CompatibilityCharacterization,
+            );
+        }
+    }
+}
+
+#[test]
 fn cli_interaction_performance_cases_preserve_semantics() {
     let fixture = fixture();
     let execution = execution_identity();
@@ -206,7 +237,7 @@ fn cli_interaction_performance_cases_preserve_semantics() {
             execution.clone(),
             case.route,
             case.arguments.clone(),
-            Setup::AuthoritativeReplay,
+            Setup::FactExplicitOff,
             Some(&fixture),
             route_track(case.route),
         );

@@ -301,12 +301,29 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     GitContextResolution,
     SqliteSelection,
     CarrierValidation,
+    FactSqliteSelection,
+    FactSelectedCarrierHydrationValidation,
+    FactSupportCarrierHydrationValidation,
+    FactWorkflowProjection,
     SerializationAndOutput,
     CacheAndFallback,
     ReadTransaction,
     CheckpointAndWal,
     GenerationLeaseAndRetention,
 }
+
+pub const INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1: [LongitudinalDerivedAccessPhaseV1; 4] = [
+    LongitudinalDerivedAccessPhaseV1::FactSqliteSelection,
+    LongitudinalDerivedAccessPhaseV1::FactSelectedCarrierHydrationValidation,
+    LongitudinalDerivedAccessPhaseV1::FactSupportCarrierHydrationValidation,
+    LongitudinalDerivedAccessPhaseV1::FactWorkflowProjection,
+];
+
+pub const INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1: [LongitudinalDerivedAccessPhaseV1; 3] = [
+    LongitudinalDerivedAccessPhaseV1::WorkflowChangeReaderReplayH3,
+    LongitudinalDerivedAccessPhaseV1::WorkflowChangeStoreReopenInspection,
+    LongitudinalDerivedAccessPhaseV1::CacheAndFallback,
+];
 
 impl LongitudinalDerivedAccessPhaseV1 {
     pub const fn ownership(self) -> LongitudinalDerivedAccessPhaseOwnershipV1 {
@@ -315,9 +332,12 @@ impl LongitudinalDerivedAccessPhaseV1 {
             Self::ChangePageBodylessSelection
             | Self::ChangePageProposalLocatorExpansion
             | Self::RevisionPageSqlSelection
-            | Self::RevisionPageEventIdExpansion => Ownership::DerivedAccess,
+            | Self::RevisionPageEventIdExpansion
+            | Self::FactSqliteSelection => Ownership::DerivedAccess,
             Self::ChangePageCarrierHydrationValidation
             | Self::RevisionPageCarrierHydrationValidation
+            | Self::FactSelectedCarrierHydrationValidation
+            | Self::FactSupportCarrierHydrationValidation
             | Self::GovernedWriteTruth
             | Self::CliCapabilityPreflightH1
             | Self::OrdinaryReadStoreResolutionH2
@@ -331,6 +351,7 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::RevisionPageOverviewConstruction
             | Self::RevisionPageSnapshotSummaries
             | Self::RouteProjectionFold
+            | Self::FactWorkflowProjection
             | Self::GitContextResolution
             | Self::SerializationAndOutput => Ownership::ProductProjection,
             Self::ChangePageSnapshotAcquisition
@@ -1511,6 +1532,10 @@ fn counter_delta(
         carrier_opens: delta!(carrier_opens),
         carrier_bytes_read: delta!(carrier_bytes_read),
         authority_identity_rows_scanned: delta!(authority_identity_rows_scanned),
+        strict_journal_inspections: delta!(strict_journal_inspections),
+        fact_sqlite_rows_selected: delta!(fact_sqlite_rows_selected),
+        change_semantic_constructions: delta!(change_semantic_constructions),
+        change_projection_constructions: delta!(change_projection_constructions),
         change_candidates: delta!(change_candidates),
         change_candidate_current_revisions: delta!(change_candidate_current_revisions),
         change_capability_carriers_opened: delta!(change_capability_carriers_opened),
@@ -1604,6 +1629,16 @@ pub fn record_authority_identity_rows_scanned(count: usize) {
     });
 }
 
+pub fn record_strict_journal_inspection() {
+    with_active(|state| {
+        add(
+            &mut state.counters.strict_journal_inspections,
+            1,
+            "strict_journal_inspections",
+        );
+    });
+}
+
 macro_rules! change_counter {
     ($name:ident, $field:ident) => {
         pub fn $name(count: usize) {
@@ -1615,6 +1650,7 @@ macro_rules! change_counter {
 }
 
 change_counter!(record_change_candidates, change_candidates);
+change_counter!(record_fact_sqlite_rows_selected, fact_sqlite_rows_selected);
 change_counter!(
     record_change_candidate_current_revisions,
     change_candidate_current_revisions
@@ -1678,6 +1714,26 @@ change_counter!(
     timeline_exhaustive_candidates
 );
 change_counter!(record_timeline_entries_emitted, timeline_entries_emitted);
+
+pub fn record_change_semantic_construction() {
+    with_active(|state| {
+        add(
+            &mut state.counters.change_semantic_constructions,
+            1,
+            "change_semantic_constructions",
+        );
+    });
+}
+
+pub fn record_change_projection_construction() {
+    with_active(|state| {
+        add(
+            &mut state.counters.change_projection_constructions,
+            1,
+            "change_projection_constructions",
+        );
+    });
+}
 
 pub fn record_authoritative_fallback() {
     with_active(|state| {
@@ -2354,6 +2410,10 @@ mod tests {
             LongitudinalDerivedAccessPhaseV1::ReadTransaction,
             LongitudinalDerivedAccessPhaseV1::CheckpointAndWal,
             LongitudinalDerivedAccessPhaseV1::GenerationLeaseAndRetention,
+            LongitudinalDerivedAccessPhaseV1::FactSqliteSelection,
+            LongitudinalDerivedAccessPhaseV1::FactSelectedCarrierHydrationValidation,
+            LongitudinalDerivedAccessPhaseV1::FactSupportCarrierHydrationValidation,
+            LongitudinalDerivedAccessPhaseV1::FactWorkflowProjection,
         ];
         let spellings = phases
             .iter()
@@ -2378,6 +2438,10 @@ mod tests {
                 "read_transaction",
                 "checkpoint_and_wal",
                 "generation_lease_and_retention",
+                "fact_sqlite_selection",
+                "fact_selected_carrier_hydration_validation",
+                "fact_support_carrier_hydration_validation",
+                "fact_workflow_projection",
             ]
             .into_iter()
             .map(serde_json::Value::from)
@@ -2402,8 +2466,29 @@ mod tests {
                 LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
                 LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
                 LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
             ]
         );
+    }
+
+    #[test]
+    fn fact_route_counters_name_bounded_work_and_forbidden_change_construction() {
+        let scope = LongitudinalCountingScopeV1::new(hash('8')).expect("valid scope");
+        let _guard = scope.enter();
+
+        record_strict_journal_inspection();
+        record_fact_sqlite_rows_selected(2);
+        record_change_semantic_construction();
+        record_change_projection_construction();
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.strict_journal_inspections, 1);
+        assert_eq!(counters.fact_sqlite_rows_selected, 2);
+        assert_eq!(counters.change_semantic_constructions, 1);
+        assert_eq!(counters.change_projection_constructions, 1);
     }
 
     #[test]
@@ -2576,6 +2661,10 @@ mod tests {
         record_carrier_read(3);
         record_carrier_read(5);
         record_authority_identity_rows_scanned(6);
+        record_strict_journal_inspection();
+        record_fact_sqlite_rows_selected(59);
+        record_change_semantic_construction();
+        record_change_projection_construction();
         record_change_candidates(71);
         record_change_candidate_current_revisions(73);
         record_change_capability_carriers_opened(79);
@@ -2626,6 +2715,10 @@ mod tests {
                 carrier_opens: 2,
                 carrier_bytes_read: 8,
                 authority_identity_rows_scanned: 6,
+                strict_journal_inspections: 1,
+                fact_sqlite_rows_selected: 59,
+                change_semantic_constructions: 1,
+                change_projection_constructions: 1,
                 change_candidates: 71,
                 change_candidate_current_revisions: 73,
                 change_capability_carriers_opened: 79,

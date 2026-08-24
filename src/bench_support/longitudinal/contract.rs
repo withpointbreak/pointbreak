@@ -3087,6 +3087,14 @@ pub struct LongitudinalCountersV1 {
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub authority_identity_rows_scanned: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub strict_journal_inspections: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub fact_sqlite_rows_selected: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_semantic_constructions: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_projection_constructions: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_candidates: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_candidate_current_revisions: u64,
@@ -3226,11 +3234,30 @@ pub enum InteractionRouteV1 {
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
+impl InteractionRouteV1 {
+    pub const FACT_READS: [Self; 5] = [
+        Self::AssessmentCurrentResult,
+        Self::AssessmentCurrentSummary,
+        Self::InputRequestOpenAllTracks,
+        Self::ObservationReviewerList,
+        Self::ValidationReviewerList,
+    ];
+
+    pub fn is_fact_read(self) -> bool {
+        Self::FACT_READS.contains(&self)
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionSetupExpectationV1 {
     NotApplicable,
     AuthoritativeReplay,
+    FactActiveCurrent,
+    FactExplicitOff,
+    FactActiveUnavailable,
+    FactPostSelectionFailure,
     AttentionDerivedCurrent,
     AttentionColdInactive,
     AttentionActiveUnavailable,
@@ -3243,7 +3270,130 @@ pub enum InteractionObservedRouteStateV1 {
     NotApplicable,
     AuthoritativeReplay,
     DerivedCurrent,
+    UnlabeledFallbackToAuthoritative,
     LabeledFallbackToAuthoritative,
+    DerivedSelectionFailedClosed,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractionPerformanceRoleV1 {
+    ProvisionalTarget {
+        sample_count: u8,
+        strict_upper_bound_millis: u64,
+    },
+    CompatibilityCharacterization,
+    TerminalDiagnostic,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractionFallbackPresentationV1 {
+    None,
+    Unlabeled,
+    LabeledHintBeforeError,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InteractionRouteStateContractV1 {
+    pub observed: InteractionObservedRouteStateV1,
+    pub success: bool,
+    pub performance_role: InteractionPerformanceRoleV1,
+    pub historical_evidence_unchanged: bool,
+    pub fallback_presentation: InteractionFallbackPresentationV1,
+    pub strict_authoritative_snapshots: u8,
+    pub background_maintenance_children: u8,
+    pub authoritative_fallbacks: u8,
+    pub full_history_fallbacks: u8,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub fn interaction_route_state_contract_v1(
+    route: InteractionRouteV1,
+    setup: InteractionSetupExpectationV1,
+) -> Option<InteractionRouteStateContractV1> {
+    use InteractionFallbackPresentationV1 as Fallback;
+    use InteractionObservedRouteStateV1 as Observed;
+    use InteractionPerformanceRoleV1 as Role;
+    use InteractionSetupExpectationV1 as Setup;
+
+    const TARGET: Role = Role::ProvisionalTarget {
+        sample_count: 5,
+        strict_upper_bound_millis: 2_000,
+    };
+
+    const BASE: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::NotApplicable,
+        success: true,
+        performance_role: Role::CompatibilityCharacterization,
+        historical_evidence_unchanged: true,
+        fallback_presentation: Fallback::None,
+        strict_authoritative_snapshots: 0,
+        background_maintenance_children: 0,
+        authoritative_fallbacks: 0,
+        full_history_fallbacks: 0,
+    };
+    const FACT_CURRENT: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::DerivedCurrent,
+        performance_role: TARGET,
+        ..BASE
+    };
+    const AUTHORITATIVE: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::AuthoritativeReplay,
+        strict_authoritative_snapshots: 1,
+        ..BASE
+    };
+    const FACT_UNAVAILABLE: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::UnlabeledFallbackToAuthoritative,
+        fallback_presentation: Fallback::Unlabeled,
+        strict_authoritative_snapshots: 1,
+        background_maintenance_children: 1,
+        authoritative_fallbacks: 1,
+        full_history_fallbacks: 1,
+        ..BASE
+    };
+    const FACT_TERMINAL: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::DerivedSelectionFailedClosed,
+        success: false,
+        performance_role: Role::TerminalDiagnostic,
+        ..BASE
+    };
+    const ATTENTION_CURRENT: InteractionRouteStateContractV1 = InteractionRouteStateContractV1 {
+        observed: Observed::DerivedCurrent,
+        performance_role: TARGET,
+        ..BASE
+    };
+    const ATTENTION_UNAVAILABLE: InteractionRouteStateContractV1 =
+        InteractionRouteStateContractV1 {
+            observed: Observed::LabeledFallbackToAuthoritative,
+            fallback_presentation: Fallback::LabeledHintBeforeError,
+            ..FACT_UNAVAILABLE
+        };
+
+    if route.is_fact_read() {
+        return match setup {
+            Setup::FactActiveCurrent => Some(FACT_CURRENT),
+            Setup::FactExplicitOff | Setup::AuthoritativeReplay => Some(AUTHORITATIVE),
+            Setup::FactActiveUnavailable => Some(FACT_UNAVAILABLE),
+            Setup::FactPostSelectionFailure => Some(FACT_TERMINAL),
+            _ => None,
+        };
+    }
+
+    match (route, setup) {
+        (InteractionRouteV1::VersionJson, Setup::NotApplicable) => Some(BASE),
+        (InteractionRouteV1::AttentionCurrentOrFallback, Setup::AttentionDerivedCurrent) => {
+            Some(ATTENTION_CURRENT)
+        }
+        (InteractionRouteV1::AttentionCurrentOrFallback, Setup::AttentionColdInactive) => {
+            Some(AUTHORITATIVE)
+        }
+        (InteractionRouteV1::AttentionCurrentOrFallback, Setup::AttentionActiveUnavailable) => {
+            Some(ATTENTION_UNAVAILABLE)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -3369,25 +3519,7 @@ impl InteractionPerformanceExpectedContextV1 {
             }
         }
 
-        let setup_is_valid = match self.route {
-            InteractionRouteV1::AssessmentCurrentResult
-            | InteractionRouteV1::AssessmentCurrentSummary
-            | InteractionRouteV1::InputRequestOpenAllTracks
-            | InteractionRouteV1::ObservationReviewerList
-            | InteractionRouteV1::ValidationReviewerList => {
-                self.setup_expectation == InteractionSetupExpectationV1::AuthoritativeReplay
-            }
-            InteractionRouteV1::VersionJson => {
-                self.setup_expectation == InteractionSetupExpectationV1::NotApplicable
-            }
-            InteractionRouteV1::AttentionCurrentOrFallback => matches!(
-                self.setup_expectation,
-                InteractionSetupExpectationV1::AttentionDerivedCurrent
-                    | InteractionSetupExpectationV1::AttentionColdInactive
-                    | InteractionSetupExpectationV1::AttentionActiveUnavailable
-            ),
-        };
-        if !setup_is_valid {
+        if interaction_route_state_contract_v1(self.route, self.setup_expectation).is_none() {
             return Err(LongitudinalContractError::ContractDrift {
                 field: "interaction expected setup",
             });
@@ -3731,6 +3863,7 @@ impl InteractionPerformanceReceiptV1 {
             self.expected.route,
             self.expected.setup_expectation,
             self.observed.route_state,
+            self.observed.success,
         )?;
 
         for (index, phase) in self.phases.iter().enumerate() {
@@ -3827,34 +3960,10 @@ fn validate_interaction_route_state_v1(
     route: InteractionRouteV1,
     setup: InteractionSetupExpectationV1,
     observed: InteractionObservedRouteStateV1,
+    success: bool,
 ) -> Result<(), LongitudinalContractError> {
-    let valid = match route {
-        InteractionRouteV1::AssessmentCurrentResult
-        | InteractionRouteV1::AssessmentCurrentSummary
-        | InteractionRouteV1::InputRequestOpenAllTracks
-        | InteractionRouteV1::ObservationReviewerList
-        | InteractionRouteV1::ValidationReviewerList => {
-            setup == InteractionSetupExpectationV1::AuthoritativeReplay
-                && observed == InteractionObservedRouteStateV1::AuthoritativeReplay
-        }
-        InteractionRouteV1::VersionJson => {
-            setup == InteractionSetupExpectationV1::NotApplicable
-                && observed == InteractionObservedRouteStateV1::NotApplicable
-        }
-        InteractionRouteV1::AttentionCurrentOrFallback => matches!(
-            (setup, observed),
-            (
-                InteractionSetupExpectationV1::AttentionDerivedCurrent,
-                InteractionObservedRouteStateV1::DerivedCurrent,
-            ) | (
-                InteractionSetupExpectationV1::AttentionColdInactive,
-                InteractionObservedRouteStateV1::AuthoritativeReplay,
-            ) | (
-                InteractionSetupExpectationV1::AttentionActiveUnavailable,
-                InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative,
-            )
-        ),
-    };
+    let valid = interaction_route_state_contract_v1(route, setup)
+        .is_some_and(|contract| contract.observed == observed && contract.success == success);
     if !valid {
         return Err(LongitudinalContractError::PairMismatch);
     }
@@ -5989,6 +6098,165 @@ mod contract_tests {
             hold_nanos: Some(11),
         };
         lock.validate().expect("valid lock fact");
+    }
+
+    #[test]
+    fn interaction_contract_freezes_fact_and_attention_state_matrices() {
+        use crate::bench_support::longitudinal::{
+            INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1,
+            INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1, LongitudinalDerivedAccessPhaseV1 as Phase,
+        };
+
+        let target = InteractionPerformanceRoleV1::ProvisionalTarget {
+            sample_count: 5,
+            strict_upper_bound_millis: 2_000,
+        };
+        macro_rules! assert_state {
+            ($route:expr, $setup:expr, $expected:expr) => {{
+                let contract = interaction_route_state_contract_v1($route, $setup).unwrap();
+                assert_eq!(
+                    (
+                        contract.observed,
+                        contract.performance_role,
+                        contract.success,
+                        contract.strict_authoritative_snapshots,
+                        contract.background_maintenance_children,
+                        contract.authoritative_fallbacks,
+                        contract.full_history_fallbacks,
+                        contract.fallback_presentation,
+                    ),
+                    $expected
+                );
+                assert!(contract.historical_evidence_unchanged);
+                contract
+            }};
+        }
+
+        for route in InteractionRouteV1::FACT_READS {
+            assert_state!(
+                route,
+                InteractionSetupExpectationV1::FactActiveCurrent,
+                (
+                    InteractionObservedRouteStateV1::DerivedCurrent,
+                    target,
+                    true,
+                    0,
+                    0,
+                    0,
+                    0,
+                    InteractionFallbackPresentationV1::None,
+                )
+            );
+            for (setup, expected) in [
+                (
+                    InteractionSetupExpectationV1::FactExplicitOff,
+                    (
+                        InteractionObservedRouteStateV1::AuthoritativeReplay,
+                        InteractionPerformanceRoleV1::CompatibilityCharacterization,
+                        true,
+                        1,
+                        0,
+                        0,
+                        0,
+                        InteractionFallbackPresentationV1::None,
+                    ),
+                ),
+                (
+                    InteractionSetupExpectationV1::FactActiveUnavailable,
+                    (
+                        InteractionObservedRouteStateV1::UnlabeledFallbackToAuthoritative,
+                        InteractionPerformanceRoleV1::CompatibilityCharacterization,
+                        true,
+                        1,
+                        1,
+                        1,
+                        1,
+                        InteractionFallbackPresentationV1::Unlabeled,
+                    ),
+                ),
+                (
+                    InteractionSetupExpectationV1::FactPostSelectionFailure,
+                    (
+                        InteractionObservedRouteStateV1::DerivedSelectionFailedClosed,
+                        InteractionPerformanceRoleV1::TerminalDiagnostic,
+                        false,
+                        0,
+                        0,
+                        0,
+                        0,
+                        InteractionFallbackPresentationV1::None,
+                    ),
+                ),
+            ] {
+                assert_state!(route, setup, expected);
+            }
+        }
+
+        assert_eq!(
+            INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1,
+            [
+                Phase::FactSqliteSelection,
+                Phase::FactSelectedCarrierHydrationValidation,
+                Phase::FactSupportCarrierHydrationValidation,
+                Phase::FactWorkflowProjection,
+            ]
+        );
+        assert_eq!(
+            INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1,
+            [
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::WorkflowChangeStoreReopenInspection,
+                Phase::CacheAndFallback,
+            ]
+        );
+
+        for (setup, expected) in [
+            (
+                InteractionSetupExpectationV1::AttentionDerivedCurrent,
+                (
+                    InteractionObservedRouteStateV1::DerivedCurrent,
+                    target,
+                    true,
+                    0,
+                    0,
+                    0,
+                    0,
+                    InteractionFallbackPresentationV1::None,
+                ),
+            ),
+            (
+                InteractionSetupExpectationV1::AttentionColdInactive,
+                (
+                    InteractionObservedRouteStateV1::AuthoritativeReplay,
+                    InteractionPerformanceRoleV1::CompatibilityCharacterization,
+                    true,
+                    1,
+                    0,
+                    0,
+                    0,
+                    InteractionFallbackPresentationV1::None,
+                ),
+            ),
+            (
+                InteractionSetupExpectationV1::AttentionActiveUnavailable,
+                (
+                    InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative,
+                    InteractionPerformanceRoleV1::CompatibilityCharacterization,
+                    true,
+                    1,
+                    1,
+                    1,
+                    1,
+                    InteractionFallbackPresentationV1::LabeledHintBeforeError,
+                ),
+            ),
+        ] {
+            assert_state!(
+                InteractionRouteV1::AttentionCurrentOrFallback,
+                setup,
+                expected
+            );
+        }
     }
 
     #[test]
