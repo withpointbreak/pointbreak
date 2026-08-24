@@ -2153,6 +2153,44 @@ mod tests {
     }
 
     #[test]
+    fn interaction_receipt_preserves_normal_failures_and_terminal_refuses_success() {
+        let normal = LongitudinalCountingScopeV1::new(hash('a')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &normal,
+            InteractionRouteV1::VersionJson,
+            InteractionObservedRouteStateV1::NotApplicable,
+        );
+        lock_state(&normal.state).outcomes = vec![(false, 1)];
+        let receipt = normal
+            .interaction_receipt(interaction_context(
+                InteractionRouteV1::VersionJson,
+                InteractionSetupExpectationV1::NotApplicable,
+            ))
+            .expect("normal setup must preserve a truthful failure receipt");
+        assert!(!receipt.observed.success);
+        assert_eq!(receipt.observed.exit_code, 1);
+
+        let terminal = LongitudinalCountingScopeV1::new(hash('b')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &terminal,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::DerivedSelectionFailedClosed,
+        );
+        let context = interaction_context(
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionSetupExpectationV1::FactPostSelectionFailure,
+        );
+        assert!(
+            terminal.interaction_receipt(context.clone()).is_err(),
+            "terminal setup must reject a claimed success"
+        );
+        lock_state(&terminal.state).outcomes = vec![(false, 1)];
+        terminal
+            .interaction_receipt(context)
+            .expect("terminal setup accepts its required failure outcome");
+    }
+
+    #[test]
     fn interaction_receipt_rejects_duplicate_or_incomplete_source_facts() {
         let scope = LongitudinalCountingScopeV1::new(hash('2')).expect("valid scope");
         record_minimal_interaction_facts(

@@ -3962,8 +3962,13 @@ fn validate_interaction_route_state_v1(
     observed: InteractionObservedRouteStateV1,
     success: bool,
 ) -> Result<(), LongitudinalContractError> {
-    let valid = interaction_route_state_contract_v1(route, setup)
-        .is_some_and(|contract| contract.observed == observed && contract.success == success);
+    let valid = interaction_route_state_contract_v1(route, setup).is_some_and(|contract| {
+        contract.observed == observed
+                // A normal setup's expected success is the gate outcome, not
+                // permission to suppress a truthful product-failure receipt.
+                // A terminal setup must still refuse a claimed success.
+                && (contract.success || !success)
+    });
     if !valid {
         return Err(LongitudinalContractError::PairMismatch);
     }
