@@ -1019,6 +1019,11 @@ mod contract_tests {
     #[test]
     fn postselection_authority_movement_publishes_truthful_terminal_receipt() {
         let fixture = FactFixture::new(0, 1);
+        // Keep the representative interaction's first maintenance worker in
+        // flight without adding store-lock facts to the receipt under test.
+        // NTFS cursor-only maintenance can otherwise finish quickly enough for
+        // the final currentness check to launch a second truthful child.
+        fixture.access.pause_background_worker_for_test();
         let scope = LongitudinalCountingScopeV1::new("f".repeat(64)).unwrap();
         scope.record_observed_route_once(InteractionRouteV1::AssessmentCurrentResult);
         scope.record_execution_actor_once(InteractionActorV1::RequestReader);

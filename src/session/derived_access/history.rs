@@ -297,6 +297,11 @@ impl DerivedHistoryAccess {
         self.runtime.rebuild_worker_joined()
     }
 
+    #[cfg(test)]
+    pub(in crate::session::derived_access) fn pause_background_worker_for_test(&self) {
+        self.runtime.pause_background_worker_for_test();
+    }
+
     pub fn resolve(repo: impl AsRef<Path>) -> Result<Self, String> {
         let profile =
             DerivedAccessProfile::from_environment().map_err(|error| error.to_string())?;

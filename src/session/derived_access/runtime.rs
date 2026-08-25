@@ -1,6 +1,8 @@
 //! Shared process-local runtime for derived-access facades.
 
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -56,6 +58,8 @@ pub(crate) struct DerivedAccessRuntime {
     background_work_state: Arc<AtomicU8>,
     background_rebuild_cancel: Arc<AtomicBool>,
     background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    background_worker_test_gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
 pub(super) enum RuntimeCurrentRead {
@@ -121,6 +125,8 @@ impl DerivedAccessRuntime {
             background_work_state: Arc::new(AtomicU8::new(BackgroundWorkState::Idle as u8)),
             background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             background_rebuild_handle: Mutex::new(None),
+            #[cfg(test)]
+            background_worker_test_gate: Arc::new((Mutex::new(false), Condvar::new())),
         })
     }
 
@@ -259,6 +265,11 @@ impl DerivedAccessRuntime {
     #[cfg(test)]
     pub(super) fn rebuild_worker_joined(&self) -> bool {
         lock(&self.background_rebuild_handle).is_none()
+    }
+
+    #[cfg(test)]
+    pub(in crate::session::derived_access) fn pause_background_worker_for_test(&self) {
+        *lock(&self.background_worker_test_gate.0) = true;
     }
 
     pub(super) fn current(&self) -> Result<RuntimeCurrentRead, String> {
@@ -527,6 +538,8 @@ impl DerivedAccessRuntime {
         }
         let work_state = Arc::clone(&self.background_work_state);
         let cancel = Arc::clone(&self.background_rebuild_cancel);
+        #[cfg(test)]
+        let background_worker_test_gate = Arc::clone(&self.background_worker_test_gate);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let child_reservation = reserve_interaction_child_scope_v1(policy.interaction_actor());
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -539,6 +552,8 @@ impl DerivedAccessRuntime {
                     reservation.enter("derived background worker exited before source completion")
                 });
                 let _guard = BackgroundWorkerGuard(Arc::clone(&work_state));
+                #[cfg(test)]
+                wait_for_background_worker_test_gate(&background_worker_test_gate, &cancel);
                 background_rebuild(lifecycle, policy, &work_state, cancel);
                 #[cfg(any(test, feature = "longitudinal-counting"))]
                 if let Some(child_execution) = child_execution {
@@ -575,6 +590,11 @@ impl DerivedAccessRuntime {
     ) -> Result<(), String> {
         self.background_rebuild_cancel
             .store(true, Ordering::Release);
+        #[cfg(test)]
+        {
+            *lock(&self.background_worker_test_gate.0) = false;
+            self.background_worker_test_gate.1.notify_all();
+        }
         let joined = handle_slot
             .take()
             .map(JoinHandle::join)
@@ -769,6 +789,14 @@ fn wait_or_cancel(cancel: &AtomicBool, duration: Duration) -> bool {
         remaining = remaining.saturating_sub(wait);
     }
     cancel.load(Ordering::Acquire)
+}
+
+#[cfg(test)]
+fn wait_for_background_worker_test_gate(gate: &(Mutex<bool>, Condvar), cancel: &AtomicBool) {
+    let mut paused = lock(&gate.0);
+    while *paused && !cancel.load(Ordering::Acquire) {
+        paused = gate.1.wait(paused).unwrap_or_else(PoisonError::into_inner);
+    }
 }
 
 fn unavailable_lifecycle_status(
