@@ -1105,7 +1105,8 @@ mod contract_tests {
     #[test]
     fn fact_snapshot_rejects_k_state_with_a_k_plus_one_checkpoint() {
         let fixture = FactFixture::new(0, 1);
-        let CurrentRead::Ready(current) = fixture.access.current().unwrap() else {
+        let pinned_access = fixture.fresh_access();
+        let CurrentRead::Ready(current) = pinned_access.current().unwrap() else {
             panic!("fixture generation must be current");
         };
         let observed = current.authority_head();
@@ -1126,6 +1127,9 @@ mod contract_tests {
         );
         assert_eq!(snapshot.state.event_count as u64, observed.sequence);
         snapshot.finish().unwrap();
+        drop(current);
+        drop(pinned_access);
+
         fixture.append_unrelated_change(20_000);
         let fresh_access = fixture.fresh_access();
         let CurrentRead::Ready(fresh_current) = fresh_access.current().unwrap() else {

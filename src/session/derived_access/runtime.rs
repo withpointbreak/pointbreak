@@ -317,12 +317,7 @@ impl DerivedAccessRuntime {
         };
         if let Some(existing) = existing {
             let validation = match lifecycle.validate_cached_current(&existing) {
-                Ok(validation) => {
-                    if validation.authority_maintenance_pending {
-                        self.request_background_rebuild();
-                    }
-                    validation
-                }
+                Ok(validation) => validation,
                 Err(LifecycleError::RebuildRequired(detail)) => {
                     self.request_background_rebuild();
                     return Ok(RuntimeCurrentRead::Unavailable(runtime_status(
@@ -353,7 +348,13 @@ impl DerivedAccessRuntime {
                     "current generation changed while validating the cached reader",
                 )));
             }
+            // Choose one maintenance request from this validation snapshot. A
+            // fast worker can finish before `current` returns, so requesting
+            // once for each stale signal would schedule the same work twice.
             if validation.locator_applied == validation.authority.head.cursor {
+                if validation.authority_maintenance_pending {
+                    self.request_background_rebuild();
+                }
                 return Ok(RuntimeCurrentRead::Ready(existing));
             }
             self.request_background_rebuild();
