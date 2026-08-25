@@ -214,6 +214,8 @@ pub(crate) fn public_read_change_reader_v1(
         let _phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::WorkflowChangeReaderReplayH3,
         );
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_strict_journal_inspection();
         let inspection = inspect_change_reader_journal_records(
             context.read_store().backend().journal().as_ref(),
         )?;
@@ -571,6 +573,8 @@ mod tests {
         let counters = counting.snapshot().counters;
         assert_eq!(counters.body_artifact_reads, 0);
         assert_eq!(counters.object_artifact_reads, 0);
+        assert!(counters.change_semantic_constructions > 0);
+        assert!(counters.change_projection_constructions > 0);
     }
 
     fn external_observation_event(revision_id: RevisionId) -> ShoreEvent {

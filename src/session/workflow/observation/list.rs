@@ -113,6 +113,36 @@ pub fn list_observations_with_public_read_context(
     options: ObservationListOptions,
     context: PublicReadCommandContextV1,
 ) -> Result<ObservationListResult> {
+    list_observations_with_public_read_context_and_fact_reader(
+        options,
+        context,
+        DerivedHistoryAccess::exact_revision_fact_read_v1,
+    )
+}
+
+#[cfg(test)]
+pub(in crate::session::workflow) fn list_observations_with_public_read_context_and_fact_hook(
+    options: ObservationListOptions,
+    context: PublicReadCommandContextV1,
+    fact_hook: impl FnMut(crate::session::derived_access::fact_reads::ExactRevisionFactReadBoundary),
+) -> Result<ObservationListResult> {
+    list_observations_with_public_read_context_and_fact_reader(
+        options,
+        context,
+        move |access, revision_id| {
+            access.exact_revision_fact_read_v1_with_hook(revision_id, fact_hook)
+        },
+    )
+}
+
+fn list_observations_with_public_read_context_and_fact_reader(
+    options: ObservationListOptions,
+    context: PublicReadCommandContextV1,
+    fact_reader: impl FnOnce(
+        &DerivedHistoryAccess,
+        &RevisionId,
+    ) -> std::result::Result<ExactRevisionFactReadRouteV1, String>,
+) -> Result<ObservationListResult> {
     if options.revision_id.is_some()
         || options.exact_revision_id.is_none()
         || options.track.is_none()
@@ -132,10 +162,7 @@ pub fn list_observations_with_public_read_context(
         .clone();
     let access = DerivedHistoryAccess::from_public_read_store(context.read_store().clone())
         .map_err(crate::error::ShoreError::Message)?;
-    match access
-        .exact_revision_fact_read_v1(&revision_id)
-        .map_err(crate::error::ShoreError::Message)?
-    {
+    match fact_reader(&access, &revision_id).map_err(crate::error::ShoreError::Message)? {
         ExactRevisionFactReadRouteV1::Ready(derived) => {
             super::super::complete_current_derived_fact_projection_v1(context, |store| {
                 list_observations_from_event_selection(

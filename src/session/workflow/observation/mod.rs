@@ -7,6 +7,8 @@ mod util;
 mod view;
 
 pub use self::add::{ObservationAddOptions, ObservationAddResult, record_observation};
+#[cfg(test)]
+pub(in crate::session::workflow) use self::list::list_observations_with_public_read_context_and_fact_hook;
 pub use self::list::{
     ObservationListOptions, ObservationListResult, list_observations,
     list_observations_with_public_read_context,

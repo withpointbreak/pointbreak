@@ -1971,6 +1971,16 @@ mod tests {
         scope.record_execution_actor_once(InteractionActorV1::RequestReader);
         scope.record_outcome_once(true, 0);
         scope.record_semantic_result_sha256_once(hash('9'));
+        if matches!(
+            observed_state,
+            InteractionObservedRouteStateV1::AuthoritativeReplay
+                | InteractionObservedRouteStateV1::UnlabeledFallbackToAuthoritative
+                | InteractionObservedRouteStateV1::LabeledFallbackToAuthoritative
+        ) {
+            let guard = scope.enter();
+            record_strict_journal_inspection();
+            drop(guard);
+        }
     }
 
     #[test]
@@ -2062,6 +2072,39 @@ mod tests {
         let v1_json = serde_json::to_value(v1).expect("legacy receipt JSON");
         assert!(v1_json.get("phases").is_none());
         assert!(v1_json.get("observed").is_none());
+    }
+
+    #[test]
+    fn interaction_receipt_requires_the_contract_strict_snapshot_count() {
+        let scope = LongitudinalCountingScopeV1::new(hash('0')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        lock_state(&scope.state).counters.strict_journal_inspections = 0;
+        assert!(
+            scope
+                .interaction_receipt(interaction_context(
+                    InteractionRouteV1::AssessmentCurrentResult,
+                    InteractionSetupExpectationV1::AuthoritativeReplay,
+                ))
+                .is_err(),
+            "an authoritative receipt without its strict snapshot was accepted"
+        );
+
+        let scope = LongitudinalCountingScopeV1::new(hash('8')).expect("valid scope");
+        record_minimal_interaction_facts(
+            &scope,
+            InteractionRouteV1::AssessmentCurrentResult,
+            InteractionObservedRouteStateV1::AuthoritativeReplay,
+        );
+        scope
+            .interaction_receipt(interaction_context(
+                InteractionRouteV1::AssessmentCurrentResult,
+                InteractionSetupExpectationV1::AuthoritativeReplay,
+            ))
+            .expect("one strict snapshot satisfies the authoritative contract");
     }
 
     #[test]

@@ -3866,6 +3866,22 @@ impl InteractionPerformanceReceiptV1 {
             self.observed.route_state,
             self.observed.success,
         )?;
+        let route_state_contract = interaction_route_state_contract_v1(
+            self.expected.route,
+            self.expected.setup_expectation,
+        )
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "interaction expected setup",
+        })?;
+        let expected_strict_snapshots =
+            u64::from(route_state_contract.strict_authoritative_snapshots);
+        if self.counters.strict_journal_inspections != expected_strict_snapshots {
+            return Err(LongitudinalContractError::CountMismatch {
+                field: "interaction strict authoritative snapshots",
+                expected: expected_strict_snapshots,
+                actual: self.counters.strict_journal_inspections,
+            });
+        }
 
         for (index, phase) in self.phases.iter().enumerate() {
             let expected_ordinal =

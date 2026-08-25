@@ -36,7 +36,7 @@ pub(crate) struct ExactRevisionFactReadV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExactRevisionFactReadBoundary {
+pub(in crate::session) enum ExactRevisionFactReadBoundary {
     Selected,
     Hydrated,
     SupportPlanned,
@@ -47,10 +47,19 @@ impl DerivedHistoryAccess {
         &self,
         revision_id: &RevisionId,
     ) -> Result<ExactRevisionFactReadRouteV1, String> {
-        self.exact_revision_fact_read_v1_with_hook(revision_id, |_| {})
+        self.exact_revision_fact_read_v1_inner(revision_id, |_| {})
     }
 
-    fn exact_revision_fact_read_v1_with_hook(
+    #[cfg(test)]
+    pub(in crate::session) fn exact_revision_fact_read_v1_with_hook(
+        &self,
+        revision_id: &RevisionId,
+        hook: impl FnMut(ExactRevisionFactReadBoundary),
+    ) -> Result<ExactRevisionFactReadRouteV1, String> {
+        self.exact_revision_fact_read_v1_inner(revision_id, hook)
+    }
+
+    fn exact_revision_fact_read_v1_inner(
         &self,
         revision_id: &RevisionId,
         mut hook: impl FnMut(ExactRevisionFactReadBoundary),
@@ -346,12 +355,7 @@ mod contract_tests {
                 store_identity.clone(),
             )
             .expect("create fact lifecycle");
-            lifecycle
-                .rebuild(|_| LifecycleControl::Continue)
-                .expect("publish empty fact generation");
-            let coordinator =
-                DerivedWriteCoordinator::new(lifecycle.clone()).expect("admit fact writer");
-            let store = EventStore::from_backend(&backend).with_coordinator(coordinator);
+            let store = EventStore::from_backend(&backend);
             let revision_id = RevisionId::new(format!("rev:sha256:{}", "a".repeat(64)));
             let object_hash = format!("sha256:{}", "1".repeat(64));
             let observation_hash = format!("sha256:{}", "2".repeat(64));
@@ -399,6 +403,12 @@ mod contract_tests {
                 record(&store, &unrelated_change_event(index));
             }
 
+            lifecycle
+                .rebuild(|_| LifecycleControl::Continue)
+                .expect("publish current fact generation");
+            let coordinator =
+                DerivedWriteCoordinator::new(lifecycle.clone()).expect("admit fact writer");
+            let store = EventStore::from_backend(&backend).with_coordinator(coordinator);
             let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
                 lifecycle: lifecycle.clone(),
                 current: Mutex::new(None),
@@ -1092,6 +1102,10 @@ mod contract_tests {
             fixture.selected_count
         );
         fixture.append_unrelated_change(20_000);
+        current
+            .service()
+            .catch_up_to_head(512)
+            .expect("advance the disposable checkpoint to K+1");
         assert_eq!(snapshot.state.event_count as u64, observed.sequence);
         snapshot.finish().unwrap();
         assert!(matches!(

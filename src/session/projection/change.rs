@@ -214,6 +214,8 @@ pub fn project_change_documents(events: &[ShoreEvent]) -> Result<ChangeDocumentP
 pub(crate) fn project_change_documents_from_facts(
     facts: &[ChangeDocumentProjectionFact],
 ) -> Result<ChangeDocumentProjectionV1> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_change_projection_construction();
     let semantic_facts = facts
         .iter()
         .map(|fact| fact.change.clone())
@@ -691,6 +693,8 @@ pub fn project_changes(events: &[ShoreEvent]) -> Result<ChangeProjection> {
 pub(crate) fn project_changes_from_facts(
     facts: &[ChangeProjectionFact],
 ) -> Result<ChangeProjection> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_change_semantic_construction();
     let mut input = FoldInput::default();
     for fact in facts {
         match fact {

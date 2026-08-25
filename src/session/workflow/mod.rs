@@ -1111,19 +1111,27 @@ mod interaction_attribution_tests {
             .into_iter()
             .find(|event| event.event_id == validation.event_id)
             .unwrap();
-        std::fs::write(
-            validation_store.event_path_for_idempotency_key(&validation_event.idempotency_key),
-            br#"{"not":"a valid selected Shore event"}"#,
-        )
-        .unwrap();
+        let validation_path =
+            validation_store.event_path_for_idempotency_key(&validation_event.idempotency_key);
         let validation_counting = LongitudinalCountingScopeV1::new("6".repeat(64)).unwrap();
         validation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
         let guard = validation_counting.enter();
-        let validation_error = list_validation_checks_with_public_read_context(
+        let validation_error = validation::list_validation_checks_with_public_read_context_and_fact_hook(
             ValidationListOptions::new(validation_repo.path())
                 .with_exact_revision_id(validation_revision)
                 .with_track("agent:reviewer"),
             validation_context,
+            |boundary| {
+                if boundary
+                    == crate::session::derived_access::fact_reads::ExactRevisionFactReadBoundary::Selected
+                {
+                    std::fs::write(
+                        &validation_path,
+                        br#"{"not":"a valid selected Shore event"}"#,
+                    )
+                    .unwrap();
+                }
+            },
         )
         .unwrap_err()
         .to_string();
@@ -1164,19 +1172,27 @@ mod interaction_attribution_tests {
                     && event.payload["contentHash"].as_str() == Some(&body_hash)
             })
             .unwrap();
-        std::fs::write(
-            observation_store.event_path_for_idempotency_key(&removal_event.idempotency_key),
-            br#"{"not":"a valid support Shore event"}"#,
-        )
-        .unwrap();
+        let observation_path =
+            observation_store.event_path_for_idempotency_key(&removal_event.idempotency_key);
         let observation_counting = LongitudinalCountingScopeV1::new("7".repeat(64)).unwrap();
         observation_counting.record_execution_actor_once(InteractionActorV1::RequestReader);
         let guard = observation_counting.enter();
-        let observation_error = list_observations_with_public_read_context(
+        let observation_error = observation::list_observations_with_public_read_context_and_fact_hook(
             ObservationListOptions::new(observation_repo.path())
                 .with_exact_revision_id(observation_revision)
                 .with_track("agent:reviewer"),
             observation_context,
+            |boundary| {
+                if boundary
+                    == crate::session::derived_access::fact_reads::ExactRevisionFactReadBoundary::SupportPlanned
+                {
+                    std::fs::write(
+                        &observation_path,
+                        br#"{"not":"a valid support Shore event"}"#,
+                    )
+                    .unwrap();
+                }
+            },
         )
         .unwrap_err()
         .to_string();

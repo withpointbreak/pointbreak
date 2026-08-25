@@ -5,6 +5,8 @@ mod list;
 mod view;
 
 pub use self::add::{ValidationAddOptions, ValidationAddResult, record_validation_check};
+#[cfg(test)]
+pub(in crate::session::workflow) use self::list::list_validation_checks_with_public_read_context_and_fact_hook;
 pub use self::list::{
     ValidationListFilters, ValidationListOptions, ValidationListResult, list_validation_checks,
     list_validation_checks_with_public_read_context,
