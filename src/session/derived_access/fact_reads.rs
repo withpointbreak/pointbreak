@@ -434,6 +434,23 @@ mod contract_tests {
             record(&self.store, &unrelated_change_event(index));
         }
 
+        fn fresh_access(&self) -> DerivedHistoryAccess {
+            let store_identity =
+                opaque_path_identity("store", &self.root).expect("derive fresh fact identity");
+            let lifecycle = DerivedAccessLifecycle::new(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                &self.root,
+                store_identity.clone(),
+            )
+            .expect("reopen fact lifecycle");
+            DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+                lifecycle,
+                current: Mutex::new(None),
+                store_identity,
+                backend: self.backend.clone(),
+            })
+        }
+
         fn carrier_path(&self, idempotency_key: &str) -> PathBuf {
             self.root.join("events").join(format!(
                 "{}.json",
@@ -1030,7 +1047,13 @@ mod contract_tests {
         drop(guard.take());
 
         assert!(appended);
-        assert!(result.unwrap_err().contains("moved"));
+        let error = result.unwrap_err();
+        assert!(error.contains("moved"));
+        let diagnostic = scope.snapshot();
+        eprintln!(
+            "windows postselection diagnostic: error={error:?} child_reservations={:?} child_terminals={:?}",
+            diagnostic.child_reservations, diagnostic.child_terminals
+        );
         let contract = interaction_route_state_contract_v1(
             InteractionRouteV1::AssessmentCurrentResult,
             InteractionSetupExpectationV1::FactPostSelectionFailure,
@@ -1101,15 +1124,21 @@ mod contract_tests {
                 .len(),
             fixture.selected_count
         );
-        fixture.append_unrelated_change(20_000);
-        current
-            .service()
-            .catch_up_to_head(512)
-            .expect("advance the disposable checkpoint to K+1");
         assert_eq!(snapshot.state.event_count as u64, observed.sequence);
         snapshot.finish().unwrap();
+        fixture.append_unrelated_change(20_000);
+        let fresh_access = fixture.fresh_access();
+        let CurrentRead::Ready(fresh_current) = fresh_access.current().unwrap() else {
+            panic!("fresh fixture reader must open the K+1 generation");
+        };
+        let applied = fresh_current
+            .service()
+            .locator_checkpoint()
+            .expect("read the disposable K+1 checkpoint");
+        assert_eq!(applied.epoch, observed.epoch);
+        assert_eq!(applied.sequence, observed.sequence + 1);
         assert!(matches!(
-            current
+            fresh_current
                 .service()
                 .exact_revision_fact_read_snapshot_at(observed)
                 .unwrap(),

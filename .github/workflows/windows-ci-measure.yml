@@ -63,11 +63,12 @@ jobs:
       # spawn-bound signal. `time` writes real/user/sys (including children) to
       # stderr; read those off the run log. This run's `real` is also the
       # pre-change Windows wall baseline.
-      - name: (measure) sys:user split
+      - name: focused derived fact Windows shakedown
         if: ${{ inputs.sys_user }}
         shell: bash
         run: |
-          time just test-ci
+          time cargo +stable nextest run --profile ci --no-tests pass --no-capture \
+            -E 'test(postselection_authority_movement_publishes_truthful_terminal_receipt) | test(fact_snapshot_rejects_k_state_with_a_k_plus_one_checkpoint)'
 
       # --- Defender headroom ----------------------------------------------------
       # Restore the unmitigated posture (real-time monitoring on, drive exclusions
