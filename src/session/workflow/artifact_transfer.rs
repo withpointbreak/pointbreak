@@ -123,6 +123,26 @@ pub fn referenced_artifacts(events: &[ShoreEvent]) -> Result<Vec<ArtifactRef>> {
     Ok(refs.into_values().collect())
 }
 
+/// The content hashes one event references, with exactly
+/// [`referenced_artifacts`] semantics for a single event. Both derive from
+/// `referenced_artifacts_for_event`, so per-event extraction and whole-set
+/// enumeration cannot drift.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the derived-index maintenance writer consumes this; the expectation errors there, forcing its removal"
+    )
+)]
+pub(crate) fn referenced_content_hashes_for_event(event: &ShoreEvent) -> Result<Vec<String>> {
+    let mut refs = BTreeMap::<String, ArtifactRef>::new();
+    referenced_artifacts_for_event(event, &mut refs)?;
+    Ok(refs
+        .into_values()
+        .map(|artifact| artifact.content_hash().to_owned())
+        .collect())
+}
+
 /// Content identities that can pull removal/signature support carriers into a
 /// selected product read.
 ///
@@ -399,6 +419,68 @@ mod tests {
         event.payload = serde_json::json!({ "workObject": "not-an-object" });
 
         assert!(referenced_artifacts(&[event]).is_err());
+    }
+
+    #[test]
+    fn per_event_hashes_match_whole_set_extraction_for_every_family() {
+        let hash = "c".repeat(64);
+        let path = format!("artifacts/notes/{hash}.json");
+        for event_type in EventType::ALL {
+            let mut event = base_event();
+            event.event_type = event_type;
+            event.payload = serde_json::json!({
+                "bodyArtifactPath": path,
+                "reasonArtifactPath": path,
+                "summaryArtifactPath": path,
+            });
+            let whole = referenced_artifacts(std::slice::from_ref(&event)).map(|refs| {
+                refs.into_iter()
+                    .map(|artifact| artifact.content_hash().to_owned())
+                    .collect::<Vec<_>>()
+            });
+            let single = referenced_content_hashes_for_event(&event);
+            match (whole, single) {
+                (Ok(expected), Ok(actual)) => {
+                    assert_eq!(actual, expected, "hash parity for {event_type:?}");
+                }
+                (Err(_), Err(_)) => {}
+                (whole, single) => {
+                    panic!("parity divergence for {event_type:?}: {whole:?} vs {single:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn per_event_extraction_yields_at_most_one_reference_today() {
+        let hash = "d".repeat(64);
+        let path = format!("artifacts/notes/{hash}.json");
+        for event_type in EventType::ALL {
+            let mut event = base_event();
+            event.event_type = event_type;
+            event.payload = serde_json::json!({
+                "bodyArtifactPath": path,
+                "reasonArtifactPath": path,
+                "summaryArtifactPath": path,
+            });
+            if let Ok(hashes) = referenced_content_hashes_for_event(&event) {
+                assert!(
+                    hashes.len() <= 1,
+                    "{event_type:?} yielded {} references",
+                    hashes.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn per_event_extraction_errors_on_a_malformed_body_path() {
+        let mut event = base_event();
+        event.event_type = EventType::ReviewObservationRecorded;
+        event.payload = serde_json::json!({ "bodyArtifactPath": "artifacts/notes/not-hex.json" });
+
+        assert!(referenced_artifacts(std::slice::from_ref(&event)).is_err());
+        assert!(referenced_content_hashes_for_event(&event).is_err());
     }
 
     /// A minimal valid event to clone/overwrite; the enumeration reads only
