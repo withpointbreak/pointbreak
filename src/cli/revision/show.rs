@@ -3,13 +3,14 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Args;
-use pointbreak::documents::revision_show_document;
+use pointbreak::documents::{derived_revision_show_document, revision_show_document};
 use pointbreak::model::{EventId, RevisionId};
 use pointbreak::session::event::AssertionMode;
 use pointbreak::session::{
     CurrentAssessmentStatus, EventVerificationPolicy, EventVerificationStatus, InputRequestStatus,
-    InputRequestView, RemovalPolicy, RevisionShowOptions, RevisionShowResult,
-    diagnose_ref_continuity, effective_integration_ref, enrich_liveness, show_revision,
+    InputRequestView, PublicReadCommandContextV1, PublicReadRevisionShowRouteV1, RemovalPolicy,
+    RevisionShowOptions, RevisionShowResult, diagnose_ref_continuity, effective_integration_ref,
+    enrich_liveness, show_revision, show_revision_with_public_read_context,
 };
 
 use crate::cli::common::{count_label, endpoint_label};
@@ -49,9 +50,86 @@ pub(super) struct ShowArgs {
     format_args: output::FormatArgs,
 }
 
+impl ShowArgs {
+    /// The qualified public-read shape: an index-free full Revision ID
+    /// operand. Any combination of `--track`, `--include-body`,
+    /// `--integration-ref`, and the format lanes stays inside the shape;
+    /// repository and output format are never catalog predicates. The
+    /// omitted operand and every fragment stay on the legacy path.
+    pub(super) fn qualified_invocation_read_v1(
+        &self,
+    ) -> Option<crate::cli::QualifiedInvocationReadV1<'_>> {
+        self.revision
+            .as_deref()
+            .is_some_and(crate::cli::id_resolver::is_index_free_full_revision_id_v1)
+            .then_some(crate::cli::QualifiedInvocationReadV1 {
+                route: crate::cli::InvocationReadRouteV1::RevisionShowDetail,
+                repo: &self.repo,
+                revision: self.revision.as_deref(),
+                track: self.track.as_deref(),
+                explicit_format: self.format_args.explicit(),
+            })
+    }
+}
+
+/// The routed result of one `revision show` read: the two arms differ only in
+/// the D20-A identity block their document builders serialize.
+enum RoutedRevisionShow {
+    Authoritative {
+        result: RevisionShowResult,
+    },
+    Derived {
+        result: RevisionShowResult,
+        projection_stamp: String,
+    },
+}
+
+impl RoutedRevisionShow {
+    fn result(&self) -> &RevisionShowResult {
+        match self {
+            Self::Authoritative { result } | Self::Derived { result, .. } => result,
+        }
+    }
+}
+
 pub(super) fn run(
+    args: ShowArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with(args, stdout, |options| {
+        Ok(RoutedRevisionShow::Authoritative {
+            result: show_revision(options)?,
+        })
+    })
+}
+
+pub(super) fn run_with_public_read_context(
+    args: ShowArgs,
+    context: PublicReadCommandContextV1,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with(args, stdout, |options| {
+        Ok(
+            match show_revision_with_public_read_context(options, context)? {
+                PublicReadRevisionShowRouteV1::Authoritative { result } => {
+                    RoutedRevisionShow::Authoritative { result }
+                }
+                PublicReadRevisionShowRouteV1::Derived {
+                    result,
+                    projection_stamp,
+                } => RoutedRevisionShow::Derived {
+                    result,
+                    projection_stamp,
+                },
+            },
+        )
+    })
+}
+
+fn run_with(
     mut args: ShowArgs,
     stdout: &mut dyn Write,
+    read: impl FnOnce(RevisionShowOptions) -> Result<RoutedRevisionShow, Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let span = tracing::info_span!("shore.revision.show");
     let _entered = span.enter();
@@ -65,14 +143,16 @@ pub(super) fn run(
     args.revision = resolved;
 
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
-    let result = show_revision(show_options(&args))?;
+    let routed = read(show_options(&args))?;
+    let result = routed.result();
 
     // Liveness (merged/live/unreachable/missing per OID + headline) is layered
     // here, outside the git-free document workflow: best-effort, omitted when
-    // reachability is unknown. Narrow by default against the repository's
-    // detected default branch so the block answers "did this land on the
-    // default branch?" (#445); an explicit `--integration-ref` overrides, and
-    // an undetectable default falls back to broad reachability.
+    // reachability is unknown, and identical on both routed arms. Narrow by
+    // default against the repository's detected default branch so the block
+    // answers "did this land on the default branch?" (#445); an explicit
+    // `--integration-ref` overrides, and an undetectable default falls back to
+    // broad reachability.
     let integration_ref = effective_integration_ref(&args.repo, args.integration_ref.as_deref());
     let mut liveness =
         enrich_liveness(&result.commit_range, &args.repo, integration_ref.as_deref()).ok();
@@ -85,12 +165,19 @@ pub(super) fn run(
         liveness.ref_continuity = continuity.refs;
         liveness.diagnostics.extend(continuity.diagnostics);
     }
-    // `revision_show_document` consumes `result` by value; the text digest reads
+    // The document builders consume the result by value; the text digest reads
     // the same result, so clone it only when the text lane will actually render
     // (the machine lanes never pay for the clone — this is the #96 heavy command).
     let digest_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
-    let document = revision_show_document(result);
-    let mut value = serde_json::to_value(&document)?;
+    let mut value = match routed {
+        RoutedRevisionShow::Authoritative { result } => {
+            serde_json::to_value(revision_show_document(result))?
+        }
+        RoutedRevisionShow::Derived {
+            result,
+            projection_stamp,
+        } => serde_json::to_value(derived_revision_show_document(result, projection_stamp))?,
+    };
     if let Some(mut liveness) = liveness {
         // Enrichment-level diagnostics (divergence needs ancestry, so it is
         // liveness-derived) surface in the document's top-level diagnostics —

@@ -105,8 +105,8 @@ pub use reader_profile::{
 };
 pub use revision::{
     RevisionListBody, RevisionShowBody, RevisionShowBodyV3, derived_revision_list_page_document,
-    revision_list_document, revision_list_page_document, revision_show_document,
-    revision_show_document_v3,
+    derived_revision_show_document, revision_list_document, revision_list_page_document,
+    revision_show_document, revision_show_document_v3,
 };
 pub use revision_interdiff::{
     REVISION_INTERDIFF_SCHEMA, RevisionInterdiffAvailabilityV1, RevisionInterdiffDocumentV1,
@@ -567,6 +567,75 @@ mod tests {
             value.get("supersededByRevisions").is_none(),
             "a current check must be byte-identical — the field is skip-when-empty",
         );
+    }
+
+    #[test]
+    fn derived_revision_show_document_substitutes_only_the_identity_block() {
+        use crate::documents::{
+            derived_revision_show_document, revision_show_document, revision_show_document_v3,
+        };
+        use crate::model::RevisionRefV1;
+        use crate::session::{
+            CaptureOptions, RevisionShowOptions, capture_worktree_review, show_revision,
+        };
+
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_read_for_display(true),
+        )
+        .unwrap();
+
+        let authoritative = serde_json::to_value(revision_show_document(result.clone())).unwrap();
+        assert!(
+            authoritative["eventSetHash"].is_string(),
+            "the authoritative lane always serializes eventSetHash"
+        );
+        assert!(authoritative.get("projectionStamp").is_none());
+
+        let derived = serde_json::to_value(derived_revision_show_document(
+            result.clone(),
+            "sha256:fixture-projection-stamp".to_owned(),
+        ))
+        .unwrap();
+        assert_eq!(
+            derived["projectionStamp"],
+            "sha256:fixture-projection-stamp"
+        );
+        assert!(
+            derived.get("eventSetHash").is_none(),
+            "the derived lane never serializes the event-set hash"
+        );
+        let mut authoritative_rest = authoritative.clone();
+        authoritative_rest
+            .as_object_mut()
+            .unwrap()
+            .remove("eventSetHash");
+        let mut derived_rest = derived.clone();
+        derived_rest
+            .as_object_mut()
+            .unwrap()
+            .remove("projectionStamp");
+        assert_eq!(
+            authoritative_rest, derived_rest,
+            "the identity block is the only difference between the builders"
+        );
+
+        // The context-free v3 embedding always takes the authoritative
+        // identity through the shared parts constructor.
+        let revision_ref = RevisionRefV1::new(
+            result.revision.revision_id.clone(),
+            result.revision.object_artifact_content_hash.clone(),
+        )
+        .unwrap();
+        let v3 = serde_json::to_value(
+            revision_show_document_v3(result, revision_ref, Vec::new()).unwrap(),
+        )
+        .unwrap();
+        assert!(v3["exactRevision"]["eventSetHash"].is_string());
+        assert!(v3["exactRevision"].get("projectionStamp").is_none());
     }
 
     #[test]

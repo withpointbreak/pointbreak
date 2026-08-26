@@ -261,6 +261,7 @@ enum InvocationReadRouteV1 {
     ObservationReviewerList,
     ValidationReviewerList,
     AttentionCurrentOrFallback,
+    RevisionShowDetail,
 }
 
 impl InvocationReadRouteV1 {
@@ -289,6 +290,7 @@ impl InvocationReadRouteV1 {
             Self::ObservationReviewerList => Route::ObservationReviewerList,
             Self::ValidationReviewerList => Route::ValidationReviewerList,
             Self::AttentionCurrentOrFallback => Route::AttentionCurrentOrFallback,
+            Self::RevisionShowDetail => Route::RevisionShowDetail,
         }
     }
 }
@@ -347,6 +349,7 @@ fn qualified_invocation_read_v1(cli: &Cli) -> Option<QualifiedInvocationReadV1<'
         Command::Attention(args) => args.qualified_invocation_read_v1(),
         Command::InputRequest(args) => args.qualified_invocation_read_v1(),
         Command::Observation(args) => args.qualified_invocation_read_v1(),
+        Command::Revision(args) => args.qualified_invocation_read_v1(),
         Command::Validation(args) => args.qualified_invocation_read_v1(),
         _ => None,
     }
@@ -372,6 +375,7 @@ fn preflight_public_store_capability(
         InvocationReadCatalogV1::Qualified(route)
             if route.is_fact_read()
                 || route == InvocationReadRouteV1::AttentionCurrentOrFallback
+                || route == InvocationReadRouteV1::RevisionShowDetail
     ) {
         let qualified = qualified_invocation_read_v1(cli)
             .expect("the typed catalog preserves the qualified read shape");
@@ -535,8 +539,9 @@ mod invocation_read_catalog_tests {
                  --integration-ref origin/main --format json-pretty"
             ),
         ] {
-            assert!(
-                matches!(classify(&arguments), Qualified(_)),
+            assert_eq!(
+                classify(&arguments),
+                Qualified(InvocationReadRouteV1::RevisionShowDetail),
                 "{arguments} must classify as the qualified revision detail route"
             );
         }
@@ -972,11 +977,13 @@ fn interaction_route_for_arguments(
     let cli = Cli::try_parse_from(
         std::iter::once("pointbreak").chain(arguments.iter().map(String::as_str)),
     )
-    .map_err(|_| "interaction CLI argv is not one of the seven frozen routes".to_owned())?;
+    .map_err(|_| "interaction CLI argv is not one of the frozen interaction routes".to_owned())?;
     let (route, repo, revision, track) = if let Some(qualified) = qualified_invocation_read_v1(&cli)
     {
         if qualified.explicit_format != Some(output::OutputFormat::Json) {
-            return Err("interaction CLI argv is not one of the seven frozen routes".to_owned());
+            return Err(
+                "interaction CLI argv is not one of the frozen interaction routes".to_owned(),
+            );
         }
         let route = qualified.route.interaction_route_v1();
         (
@@ -990,7 +997,7 @@ fn interaction_route_for_arguments(
     {
         (Route::VersionJson, None, None, None)
     } else {
-        return Err("interaction CLI argv is not one of the seven frozen routes".to_owned());
+        return Err("interaction CLI argv is not one of the frozen interaction routes".to_owned());
     };
     if let Some(repo) = repo
         && !repo.is_absolute()
@@ -1264,7 +1271,10 @@ fn run_cli(
             Some(context) => observation::run_with_public_read_context(*args, context, stdout),
             None => observation::run(*args, stdout, stderr),
         },
-        Command::Revision(args) => revision::run(args, stdout),
+        Command::Revision(args) => match public_read_context.take() {
+            Some(context) => revision::run_with_public_read_context(args, context, stdout),
+            None => revision::run(args, stdout),
+        },
         Command::Store(args) => store::run(args, stdout, stderr),
         Command::Validation(args) => match public_read_context.take() {
             Some(context) => validation::run_with_public_read_context(args, context, stdout),

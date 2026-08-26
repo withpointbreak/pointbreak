@@ -907,6 +907,7 @@ struct RevisionShowFixture {
     home: tempfile::TempDir,
     addressed: String,
     superseded_seed: String,
+    cli_chained_seed: String,
     competing_seed: String,
     competing_heads: (String, String),
     trusted_reused_hash: String,
@@ -1134,6 +1135,7 @@ fn revision_show_fixture() -> RevisionShowFixture {
         home,
         addressed: String::new(),
         superseded_seed: String::new(),
+        cli_chained_seed: String::new(),
         competing_seed: String::new(),
         competing_heads: (String::new(), String::new()),
         trusted_reused_hash: String::new(),
@@ -1671,7 +1673,12 @@ fn revision_show_fixture() -> RevisionShowFixture {
 
     RevisionShowFixture {
         addressed: f_id,
-        superseded_seed: a_id,
+        // B is superseded through the model's event-borne (proposal-payload)
+        // edge F -> B, so the head seed forward-resolves. A's supersession by
+        // B is Change-borne only: the legacy head-seed resolver does not see
+        // it, so A stays its own head and is pinned as the CLI-chained seed.
+        superseded_seed: b_id,
+        cli_chained_seed: a_id,
         competing_seed: p_id,
         competing_heads: (q_id, r_id),
         trusted_reused_hash: e_hash,
@@ -1711,7 +1718,9 @@ fn with_derived_identity(off_document: &serde_json::Value, projection_stamp: &st
         "projectionStamp".to_owned(),
         serde_json::Value::String(projection_stamp.to_owned()),
     );
-    serde_json::to_vec(&substituted).expect("serialize substituted document")
+    let mut bytes = serde_json::to_vec(&substituted).expect("serialize substituted document");
+    bytes.push(b'\n');
+    bytes
 }
 
 fn diagnostic_codes(document: &serde_json::Value) -> Vec<String> {
@@ -1890,8 +1899,9 @@ fn revision_show_derived_current_substitutes_projection_stamp_with_lane_parity()
         "include-body parity except the identity block"
     );
 
-    // Head-seed preservation: the superseded seed forward-resolves to the
-    // consolidation head with the same substitution parity.
+    // Head-seed preservation: the event-borne superseded seed
+    // forward-resolves to the consolidation head with the same substitution
+    // parity.
     let seed_arguments = revision_show_arguments(&fixture, &fixture.superseded_seed);
     let off_seed = run_binary(&seed_arguments, &fixture.off_env());
     assert_success("superseded seed explicit-off", &off_seed);
@@ -1916,6 +1926,35 @@ fn revision_show_derived_current_substitutes_projection_stamp_with_lane_parity()
         active_seed.stdout,
         with_derived_identity(&off_seed_document, &seed_stamp),
         "head-seed parity except the identity block"
+    );
+
+    // A Change-chained seed: its supersession is Change-borne only, so the
+    // legacy resolver keeps it as its own head; the derived lane reproduces
+    // exactly that resolution.
+    let chained_arguments = revision_show_arguments(&fixture, &fixture.cli_chained_seed);
+    let off_chained = run_binary(&chained_arguments, &fixture.off_env());
+    assert_success("chained seed explicit-off", &off_chained);
+    let off_chained_document: serde_json::Value =
+        serde_json::from_slice(&off_chained.stdout).expect("off chained JSON");
+    assert_eq!(
+        off_chained_document["revision"]["revisionId"]
+            .as_str()
+            .unwrap(),
+        fixture.cli_chained_seed,
+        "a Change-borne-only supersession does not forward-resolve the legacy head seed"
+    );
+    let active_chained = run_binary(&chained_arguments, &fixture.active_env());
+    assert_eq!(active_chained.status.code(), off_chained.status.code());
+    let active_chained_document: serde_json::Value =
+        serde_json::from_slice(&active_chained.stdout).expect("active chained JSON");
+    let chained_stamp = active_chained_document["projectionStamp"]
+        .as_str()
+        .expect("chained derived lane carries projectionStamp")
+        .to_owned();
+    assert_eq!(
+        active_chained.stdout,
+        with_derived_identity(&off_chained_document, &chained_stamp),
+        "Change-chained seed parity except the identity block"
     );
 }
 

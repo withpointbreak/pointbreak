@@ -142,20 +142,175 @@ fn load_store_wide_read(read_store: &ReadStore, read_for_display: bool) -> Resul
 }
 
 pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
+    let read_store = resolve_read_store(&options.repo)?;
+    show_revision_from_read_store(options, &read_store)
+}
+
+/// The authoritative-arm producer: the unchanged lenient store-wide read —
+/// skip diagnostics and every store-audit fold preserved — over an
+/// already-resolved store. `show_revision` is exactly `resolve_read_store`
+/// plus this function; the public-read context's explicit-off and
+/// pre-selection unavailable arms flow through it on the context's retained
+/// store with truthful full-replay counters.
+pub(crate) fn show_revision_from_read_store(
+    options: RevisionShowOptions,
+    read_store: &ReadStore,
+) -> Result<RevisionShowResult> {
     #[cfg(any(test, feature = "longitudinal-counting"))]
     crate::bench_support::longitudinal::record_projection_rebuild();
-    let read_store = resolve_read_store(&options.repo)?;
     let StoreWideRead {
         events,
         removal,
         skip_diagnostics,
-    } = load_store_wide_read(&read_store, options.read_for_display)?;
+    } = load_store_wide_read(read_store, options.read_for_display)?;
     show_revision_from_events(
         options,
         read_store.backend(),
         events,
         removal,
         skip_diagnostics,
+    )
+}
+
+/// The hidden public revision-show bridge for one catalog-qualified public
+/// read: `Authoritative` flows through the unchanged lenient complete read on
+/// the context's retained store; `Derived` flows through the component
+/// detail-read producer with the D20-A projection-stamp identity. Both arms
+/// consume the context's mandatory postflight before returning.
+#[doc(hidden)]
+pub enum PublicReadRevisionShowRouteV1 {
+    Authoritative {
+        result: RevisionShowResult,
+    },
+    Derived {
+        result: RevisionShowResult,
+        projection_stamp: String,
+    },
+}
+
+#[doc(hidden)]
+pub fn show_revision_with_public_read_context(
+    options: RevisionShowOptions,
+    context: crate::session::PublicReadCommandContextV1,
+) -> Result<PublicReadRevisionShowRouteV1> {
+    use crate::session::derived_access::detail_reads::ExactRevisionDetailReadRouteV1;
+
+    if options.revision_id.is_none() || options.exact {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "public read context requires the exact qualified revision show shape"
+                .to_owned(),
+        });
+    }
+    context.require_repository(&options.repo)?;
+    let revision_id = options
+        .revision_id
+        .clone()
+        .expect("the qualified revision show shape carries a revision id");
+    let access =
+        crate::session::derived_access::history::DerivedHistoryAccess::from_public_read_store(
+            context.read_store().clone(),
+        )
+        .map_err(crate::error::ShoreError::Message)?;
+    match access
+        .exact_revision_detail_read_v1(&revision_id)
+        .map_err(crate::error::ShoreError::Message)?
+    {
+        ExactRevisionDetailReadRouteV1::Ready(read) => {
+            let projection_stamp = read.projection_stamp.clone();
+            let result = match show_revision_from_derived_detail(
+                options,
+                context.read_store().backend(),
+                *read,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    super::record_derived_selection_failed_closed_state();
+                    return Err(error);
+                }
+            };
+            if let Err(error) = context.postflight() {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                super::record_derived_selection_failed_closed_state();
+                return Err(error);
+            }
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::record_derived_current_state();
+            Ok(PublicReadRevisionShowRouteV1::Derived {
+                result,
+                projection_stamp,
+            })
+        }
+        ExactRevisionDetailReadRouteV1::Off => {
+            let result = show_revision_from_read_store(options, context.read_store())?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::record_authoritative_replay_state();
+            Ok(PublicReadRevisionShowRouteV1::Authoritative { result })
+        }
+        ExactRevisionDetailReadRouteV1::Unavailable => {
+            // Currentness discovery already requested only the existing
+            // post-activation maintenance-only worker (D18-A); the fallback
+            // is one unlabeled authoritative read on the same context.
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::record_fact_authoritative_fallback();
+            let result = show_revision_from_read_store(options, context.read_store())?;
+            context.postflight()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            super::record_unlabeled_authoritative_fallback_state();
+            Ok(PublicReadRevisionShowRouteV1::Authoritative { result })
+        }
+    }
+}
+
+/// Run the existing projection body over the hydrated component closure,
+/// seeding response-wide global state from the materialized detail read and
+/// injecting the two store-wide removal-audit fold results — computed from the
+/// separate audit closure — at their exact legacy diagnostic positions.
+pub(crate) fn show_revision_from_derived_detail(
+    options: RevisionShowOptions,
+    backend: &StoreBackend,
+    read: crate::session::derived_access::detail_reads::ExactRevisionDetailReadV1,
+) -> Result<RevisionShowResult> {
+    let crate::session::derived_access::detail_reads::ExactRevisionDetailReadV1 {
+        events,
+        audit_events,
+        diagnostics,
+        event_count,
+        ..
+    } = read;
+    // The audit folds consume a cosignature index over the selected + support
+    // + audit union, so an audit removal's operative status sees its own
+    // detached signatures even when they live only in the audit set.
+    let mut combined = events.clone();
+    let mut seen: BTreeSet<&str> = events.iter().map(|event| event.event_id.as_str()).collect();
+    for event in &audit_events {
+        if seen.insert(event.event_id.as_str()) {
+            combined.push(event.clone());
+        }
+    }
+    let audit_removal = ArtifactRemovalProjection::from_events(&audit_events)?;
+    let audit_cosig = CosignatureIndex::build(&combined)?;
+    let target_missing = audit_removal.target_missing_diagnostics(&audit_events)?;
+    let identity_reuse = audit_removal.identity_reuse_diagnostics(
+        &audit_events,
+        &options.trust_set,
+        options.removal_policy,
+        &audit_cosig,
+    )?;
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    show_revision_from_events_with_global_state(
+        options,
+        backend,
+        events,
+        removal,
+        Vec::new(),
+        Some(InjectedRevisionGlobalStateV1 {
+            global_diagnostics: diagnostics,
+            event_count,
+            target_missing,
+            identity_reuse,
+        }),
     )
 }
 
@@ -329,12 +484,42 @@ fn select_inspector_revision_events(
         .collect())
 }
 
+/// Response-wide state injected by the derived detail lane: the materialized
+/// global duplicate diagnostics in legacy family rank, the exact full
+/// authoritative event count, and the two store-wide removal-audit fold
+/// results computed from the separate audit closure. Every existing entry
+/// passes `None` and computes the same values locally, byte-identically.
+pub(crate) struct InjectedRevisionGlobalStateV1 {
+    pub(crate) global_diagnostics: Vec<ProjectionDiagnostic>,
+    pub(crate) event_count: usize,
+    pub(crate) target_missing: Vec<String>,
+    pub(crate) identity_reuse: Vec<crate::session::projection::artifact_removal::IdentityReuse>,
+}
+
 fn show_revision_from_events(
     options: RevisionShowOptions,
     backend: &StoreBackend,
     events: Vec<ShoreEvent>,
     removal: ArtifactRemovalProjection,
     skip_diagnostics: Vec<ProjectionDiagnostic>,
+) -> Result<RevisionShowResult> {
+    show_revision_from_events_with_global_state(
+        options,
+        backend,
+        events,
+        removal,
+        skip_diagnostics,
+        None,
+    )
+}
+
+fn show_revision_from_events_with_global_state(
+    options: RevisionShowOptions,
+    backend: &StoreBackend,
+    events: Vec<ShoreEvent>,
+    removal: ArtifactRemovalProjection,
+    skip_diagnostics: Vec<ProjectionDiagnostic>,
+    injected: Option<InjectedRevisionGlobalStateV1>,
 ) -> Result<RevisionShowResult> {
     let track_id = options
         .track
@@ -348,13 +533,24 @@ fn show_revision_from_events(
         (true, Some(id)) => RevisionSelection::Exact(id),
         _ => RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
     };
+    let revision_context = {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = enter_derived_access_phase_v1(Phase::GitContextResolution);
+        CurrentRevisionContext::for_repo(&options.repo)?
+    };
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let selection_phase = enter_derived_access_phase_v1(Phase::RouteRevisionSelection);
     let resolved = resolve_revision(
         &events,
         selection,
-        &CurrentRevisionContext::for_repo(&options.repo)?,
+        &revision_context,
         RevisionScope::default(),
     )?;
     let revision = selected_revision_capture(&events, &resolved)?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(selection_phase);
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let fold_phase = enter_derived_access_phase_v1(Phase::RouteProjectionFold);
     // Built once from the shared read and shared downstream: the suppression
     // decision, the claim diagnostics, and the endorsement readback block all read
     // this one index (do not build a second). It borrows `events`, so it lives on
@@ -502,7 +698,14 @@ fn show_revision_from_events(
         .event_set_hash
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
-    let mut diagnostics = state.diagnostics;
+    // Response-wide global state: computed locally from the complete event set
+    // on every authoritative lane; injected from the materialized snapshot on
+    // the derived lane, where `events` is the selected component closure and a
+    // selected-subset fold would be untruthful.
+    let (mut diagnostics, response_event_count) = match &injected {
+        None => (state.diagnostics, events.len()),
+        Some(injected) => (injected.global_diagnostics.clone(), injected.event_count),
+    };
     diagnostics.extend(skip_diagnostics);
     if let Some(content_hash) = &removed_snapshot_content_hash {
         match snapshot_content_state {
@@ -600,10 +803,24 @@ fn show_revision_from_events(
         | RemovalOperativeStatus::OperativeTrusted => {}
     }
 
-    // Projection-scope removal diagnostics, sharing the hoisted cosig index: a
-    // removal of a never-referenced hash, and a capture re-binding an operatively
-    // removed hash.
-    for content_hash in removal.target_missing_diagnostics(&events)? {
+    // Projection-scope removal diagnostics: a removal of a never-referenced
+    // hash, and a capture re-binding an operatively removed hash. Both classes
+    // describe the complete store, so on the derived lane their fold results
+    // arrive pre-computed from the separate removal-audit closure and are
+    // injected at these exact legacy array positions.
+    let (target_missing, identity_reuse) = match injected {
+        None => (
+            removal.target_missing_diagnostics(&events)?,
+            removal.identity_reuse_diagnostics(
+                &events,
+                &options.trust_set,
+                options.removal_policy,
+                &cosig_index,
+            )?,
+        ),
+        Some(injected) => (injected.target_missing, injected.identity_reuse),
+    };
+    for content_hash in target_missing {
         diagnostics.push(ProjectionDiagnostic {
             code: SNAPSHOT_CONTENT_REMOVED_TARGET_MISSING.to_owned(),
             message: format!(
@@ -611,12 +828,7 @@ fn show_revision_from_events(
             ),
         });
     }
-    for reuse in removal.identity_reuse_diagnostics(
-        &events,
-        &options.trust_set,
-        options.removal_policy,
-        &cosig_index,
-    )? {
+    for reuse in identity_reuse {
         diagnostics.push(ProjectionDiagnostic {
             code: IDENTITY_REUSED_AFTER_REMOVAL.to_owned(),
             message: format!(
@@ -670,6 +882,9 @@ fn show_revision_from_events(
         diagnostics.extend(principal_diagnostics(members, map));
     }
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(fold_phase);
+
     // Reader-relative readback, keyed by event id and computed once over the events
     // already in scope. Presence of a verification policy enables it; advisory render
     // only, never a gate. The document layer attaches it by event id.
@@ -712,7 +927,7 @@ fn show_revision_from_events(
 
     Ok(RevisionShowResult {
         event_set_hash,
-        event_count: events.len(),
+        event_count: response_event_count,
         revision,
         snapshot,
         removed_snapshot_content_hash,
@@ -2975,6 +3190,78 @@ mod tests {
     /// The store a workflow actually lands in for `repo` — the shared common-dir
     /// store by default. Reads that follow a workflow resolve here, not the raw
     /// worktree-local `.pointbreak/data`.
+    #[test]
+    fn public_read_context_postflight_gates_revision_show_output() {
+        use crate::session::store::capabilities::{
+            CapabilityFixtureState, write_capability_fixture_for_test,
+        };
+
+        let repo = modified_repo();
+        let store = resolve_change_read_backend(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let capture = crate::session::capture_worktree_review(crate::session::CaptureOptions::new(
+            repo.path(),
+        ))
+        .unwrap();
+        let context = crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap();
+
+        // An atomic same-bytes replacement of a capability record: the head
+        // marker cannot hide it, and the mandatory postflight must refuse
+        // output on the authoritative arm exactly as on the derived arm.
+        let journal = store.backend().journal();
+        let root_key = "store_capability_activation:review_change_revision_v1:root";
+        let bytes = journal.read_event_bytes(root_key).unwrap().unwrap();
+        journal.insert_raw(root_key, &bytes).unwrap();
+
+        let error = match show_revision_with_public_read_context(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id)
+                .with_read_for_display(true),
+            context,
+        ) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a changed authority must refuse output"),
+        };
+        assert!(
+            error.contains("changed"),
+            "unexpected postflight error: {error}"
+        );
+    }
+
+    #[test]
+    fn public_read_context_refuses_unqualified_revision_show_shapes() {
+        use crate::session::store::capabilities::{
+            CapabilityFixtureState, write_capability_fixture_for_test,
+        };
+
+        let repo = modified_repo();
+        let store = resolve_change_read_backend(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let context = crate::session::prepare_public_read_command_context_v1(repo.path()).unwrap();
+
+        // The omitted-operand (current-capture) shape never enters the
+        // qualified lane; the sibling refuses it before any route work.
+        let error = match show_revision_with_public_read_context(
+            RevisionShowOptions::new(repo.path()).with_read_for_display(true),
+            context,
+        ) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("an unqualified shape must be refused"),
+        };
+        assert!(
+            error.contains("exact qualified revision show shape"),
+            "unexpected refusal: {error}"
+        );
+    }
+
     fn resolved_store_dir(repo: &Path) -> std::path::PathBuf {
         crate::git::git_common_dir(repo).unwrap().join("pointbreak")
     }

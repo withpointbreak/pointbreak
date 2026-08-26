@@ -3408,10 +3408,16 @@ pub fn interaction_route_state_contract_v1(
     if route == InteractionRouteV1::RevisionShowDetail {
         // The two owner-approved revision-show cells. Active-unavailable is
         // characterization-only prose: it carries no catalog cell and no
-        // measurement, so every other setup stays out of the catalog.
+        // measurement, so every other setup stays out of the catalog. The
+        // explicit-off arm keeps the lenient complete read — never the strict
+        // change-reader snapshot — so it expects zero strict authoritative
+        // snapshots, unlike the fact routes.
         return match setup {
             Setup::FactActiveCurrent => Some(FACT_CURRENT),
-            Setup::FactExplicitOff => Some(AUTHORITATIVE),
+            Setup::FactExplicitOff => Some(InteractionRouteStateContractV1 {
+                observed: Observed::AuthoritativeReplay,
+                ..BASE
+            }),
             _ => None,
         };
     }

@@ -18,7 +18,10 @@ use crate::session::{
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionShowBody {
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     revision: ShowRevisionDocument,
     filters: RevisionShowFiltersDocument,
@@ -166,9 +169,23 @@ struct SnapshotOrderDocument {
 
 /// Build the `pointbreak.review-revision` composite document from a show result.
 pub fn revision_show_document(result: RevisionShowResult) -> DiagnosticDocument<RevisionShowBody> {
-    let (body, diagnostics) = revision_show_parts(result);
+    let (body, diagnostics) = revision_show_parts(result, None);
     // Version 2 remains the historical pre-Change document. Capable callers
     // use `revision_show_document_v3` and never infer one scalar Change.
+    DiagnosticDocument::with_version("pointbreak.review-revision", 2, body, diagnostics)
+}
+
+/// Build the same composite document from a validated derived projection.
+/// The derived lane serializes `projectionStamp` and omits `eventSetHash`;
+/// `eventCount` remains the exact full authoritative event count, and the
+/// projection and event-set identities are never relabeled. Every
+/// authoritative lane keeps [`revision_show_document`] byte-identical.
+#[doc(hidden)]
+pub fn derived_revision_show_document(
+    result: RevisionShowResult,
+    projection_stamp: String,
+) -> DiagnosticDocument<RevisionShowBody> {
+    let (body, diagnostics) = revision_show_parts(result, Some(projection_stamp));
     DiagnosticDocument::with_version("pointbreak.review-revision", 2, body, diagnostics)
 }
 
@@ -185,7 +202,8 @@ pub fn revision_show_document_v3(
             "context-free Revision document requires an exact matching RevisionRefV1".to_owned(),
         ));
     }
-    let (exact_revision, diagnostics) = revision_show_parts(result);
+    // The context-free v3 embedding always takes the authoritative identity.
+    let (exact_revision, diagnostics) = revision_show_parts(result, None);
     Ok(DiagnosticDocument::with_version(
         "pointbreak.review-revision",
         3,
@@ -201,13 +219,16 @@ pub fn revision_show_document_v3(
 
 fn revision_show_parts(
     mut result: RevisionShowResult,
+    projection_stamp: Option<String>,
 ) -> (RevisionShowBody, Vec<crate::session::ProjectionDiagnostic>) {
     // The readback side table is keyed by event id; attach it to each member and to
     // the capture identity at the document layer. Take it out before the by-value
     // moves below.
     let readbacks = std::mem::take(&mut result.member_readbacks);
+    let event_set_hash = projection_stamp.is_none().then_some(result.event_set_hash);
     let body = RevisionShowBody {
-        event_set_hash: result.event_set_hash,
+        event_set_hash,
+        projection_stamp,
         event_count: result.event_count,
         revision: ShowRevisionDocument::from(result.revision).with_readback(&readbacks),
         filters: RevisionShowFiltersDocument::from(result.filters),

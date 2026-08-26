@@ -300,14 +300,15 @@ pub use revision_list::{
     UnreachableVisibility, list_revisions, list_units_for_ref,
 };
 pub use revision_projection::{
-    MemberReadback, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionIdentity,
-    RevisionProjectionRow, RevisionProjectionSummary, RevisionRecordInputs, RevisionSearchRecord,
-    RevisionShowFilters, RevisionShowOptions, RevisionShowResult, SnapshotContentState,
-    SnapshotOrder, SnapshotSummaryCache, SnapshotSummaryCounts, ValidationCheckDisposition,
-    ValidationContinuitySummary, ValidationContinuityView, build_revision_search_record,
-    classify_validation_continuity, current_assessment_includes_follow_up, show_revision,
-    show_revision_for_change_reader, show_revision_for_change_reader_ready,
-    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count,
+    MemberReadback, PublicReadRevisionShowRouteV1, RevisionOverview, RevisionOverviewsOptions,
+    RevisionProjectionIdentity, RevisionProjectionRow, RevisionProjectionSummary,
+    RevisionRecordInputs, RevisionSearchRecord, RevisionShowFilters, RevisionShowOptions,
+    RevisionShowResult, SnapshotContentState, SnapshotOrder, SnapshotSummaryCache,
+    SnapshotSummaryCounts, ValidationCheckDisposition, ValidationContinuitySummary,
+    ValidationContinuityView, build_revision_search_record, classify_validation_continuity,
+    current_assessment_includes_follow_up, show_revision, show_revision_for_change_reader,
+    show_revision_for_change_reader_ready, show_revision_for_inspector, show_revision_overviews,
+    show_revision_with_public_read_context, stale_review_fact_count,
 };
 pub(crate) use revision_projection::{
     revision_overviews_from_selected_events, show_revision_from_selected_events,
