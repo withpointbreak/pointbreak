@@ -972,7 +972,7 @@ mod contract_tests {
         assert_eq!(
             audit_ids, fixture.expected_audit_ids,
             "the removal-audit closure is exactly every removal carrier, the detached \
-             signatures targeting them, and the proposals binding a removed hash"
+             signatures targeting them, and every carrier referencing a removed hash"
         );
         let mut renormalized = read.events.clone();
         renormalized.reverse();

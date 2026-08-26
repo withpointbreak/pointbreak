@@ -892,16 +892,19 @@ fn selector_errors_and_excluded_fact_shapes_stay_legacy_and_byte_equal() {
 /// - a synthetic competing-heads component: Q and R both supersede P;
 /// - ordinary unrelated history: a second CLI component D -> E plus a parallel
 ///   member G;
-/// - facts on F: an observation, an answered and an open input request, a
-///   cross-track assessment replacement, validation with a log artifact
-///   reference plus a removal of that log hash, commit/ref associations plus
-///   one withdrawal;
+/// - facts on F: an inline observation, a second observation whose body
+///   exceeds the 4096-byte inline limit and externalizes as a note artifact,
+///   an answered and an open input request, a cross-track assessment
+///   replacement, validation with a log artifact reference plus a removal of
+///   that log hash, commit/ref associations plus one withdrawal;
 /// - store-audit carriers: an unrelated revision H with duplicate assessment
 ///   semantics, a removal of a never-referenced hash, a possession-operative
 ///   removal re-bound in a different component, an ingested removal of E's
 ///   artifact whose operativity turns entirely on its sole trusted detached
-///   endorsement, and an ingested never-endorsed removal of C's artifact whose
-///   re-binding must NOT produce a reuse diagnostic.
+///   endorsement, an ingested never-endorsed removal of C's artifact whose
+///   re-binding must NOT produce a reuse diagnostic, and an ingested removal
+///   claiming the externalized note-body hash, whose only reference is that
+///   body's observation carrier — so it must never surface as target-missing.
 struct RevisionShowFixture {
     repo: GitRepo,
     home: tempfile::TempDir,

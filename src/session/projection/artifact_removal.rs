@@ -666,6 +666,95 @@ mod tests {
         );
     }
 
+    /// A local builder for the one reference-carrier shape the removal folds
+    /// meet outside proposals: an observation whose externalized note body is
+    /// the referenced content.
+    fn observation_with_external_body(content_hash: &str) -> ShoreEvent {
+        use crate::model::{ObservationId, ReviewTargetRef};
+        use crate::session::event::{BodyContentType, ReviewObservationRecordedPayload};
+        let revision_id = RevisionId::new("review-unit:body-carrier");
+        ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            "review_observation_recorded:body-carrier",
+            EventTarget::for_revision(JournalId::new("journal:fixture"), revision_id.clone(), None)
+                .unwrap(),
+            Writer::shore_local("test"),
+            ReviewObservationRecordedPayload {
+                observation_id: ObservationId::new("obs:sha256:body-carrier"),
+                target: ReviewTargetRef::Revision { revision_id },
+                title: "External body".to_owned(),
+                body: None,
+                body_content_type: BodyContentType::TextPlain,
+                body_artifact_path: Some(format!(
+                    "artifacts/notes/{}.json",
+                    content_hash.strip_prefix("sha256:").unwrap()
+                )),
+                body_byte_size: Some(5000),
+                body_content_hash: Some(content_hash.to_owned()),
+                tags: Vec::new(),
+                confidence: None,
+                supersedes_observation_ids: Vec::new(),
+                responds_to_observation_ids: Vec::new(),
+            },
+            "2026-06-19T00:00:00Z",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reference_carriers_perturb_only_target_missing() {
+        // Widening a fold input with a note-body reference carrier changes
+        // exactly one output: the false target-missing entry disappears.
+        // Identity reuse reads only proposal bindings and must not move.
+        let body_hash = format!("sha256:{}", "a".repeat(64));
+        let reuse_hash = "sha256:shared";
+        let narrow = vec![
+            work_object_proposed("review-unit:a", "snap:a", reuse_hash),
+            work_object_proposed("review-unit:b", "snap:a", reuse_hash),
+            removal_event(reuse_hash),
+            removal_event(&body_hash),
+        ];
+        let mut widened = narrow.clone();
+        widened.push(observation_with_external_body(&body_hash));
+
+        let narrow_projection = ArtifactRemovalProjection::from_events(&narrow).unwrap();
+        assert_eq!(
+            narrow_projection
+                .target_missing_diagnostics(&narrow)
+                .unwrap(),
+            vec![body_hash.clone()]
+        );
+        let widened_projection = ArtifactRemovalProjection::from_events(&widened).unwrap();
+        assert!(
+            widened_projection
+                .target_missing_diagnostics(&widened)
+                .unwrap()
+                .is_empty()
+        );
+
+        let reuse_of = |projection: &ArtifactRemovalProjection, events: &[ShoreEvent]| {
+            projection
+                .identity_reuse_diagnostics(
+                    events,
+                    &TrustSet::default(),
+                    RemovalPolicy::PossessionOrTrusted,
+                    &CosignatureIndex::build(events).unwrap(),
+                )
+                .unwrap()
+                .into_iter()
+                .map(|reuse| (reuse.content_hash, reuse.kind))
+                .collect::<Vec<_>>()
+        };
+        let narrow_reuse = reuse_of(&narrow_projection, &narrow);
+        assert_eq!(narrow_reuse, reuse_of(&widened_projection, &widened));
+        assert!(
+            narrow_reuse
+                .iter()
+                .any(|(hash, kind)| hash == reuse_hash
+                    && *kind == IdentityReuseKind::ContentObject)
+        );
+    }
+
     #[test]
     fn identity_reuse_ignores_a_non_operative_removal() {
         // The same shared hash, but the removal is ingested + unsigned → a

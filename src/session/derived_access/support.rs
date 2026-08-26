@@ -9,6 +9,13 @@ use crate::session::event::ShoreEvent;
 
 /// Find the authoritative carriers needed to interpret selected product rows.
 ///
+/// Two reference paths deliberately coexist: this SELECTED support closure
+/// computes references in Rust over the already-hydrated selected carriers,
+/// while the STORE-WIDE removal-audit closure seeks the persisted
+/// `product_history_content_reference` index because its carriers are unknown
+/// before the seek. Both derive reference semantics from the shared per-event
+/// extraction in `session::workflow::artifact_transfer`.
+///
 /// Support closure has three ordered phases:
 ///
 /// 1. Payload extraction retains multi-value references such as validation

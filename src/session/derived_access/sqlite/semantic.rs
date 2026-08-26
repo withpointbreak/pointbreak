@@ -288,17 +288,20 @@ impl ExactRevisionFactReadSnapshot {
 
     /// Select the store-wide removal-audit closure: every `ArtifactRemoved`
     /// carrier at `observed`, the detached signatures targeting those
-    /// carriers, and the revision-proposal carriers binding a removed content
-    /// hash. Removal enumeration is seeded from the `semantic_representative`
+    /// carriers, and every carrier referencing a removed content hash —
+    /// binding proposals and externalized note-body carriers alike. Removal
+    /// enumeration is seeded from the `semantic_representative`
     /// removal-family primary-key range (one row per removed content hash);
     /// each removed hash then takes one `semantic_event_fact_content` index
-    /// seek, which returns every carrier referencing the hash — duplicate
-    /// removal carriers included (`semantic_duplicate_projection` never holds
-    /// removal-family rows, and its carrier list truncates, so the content
-    /// seek is the only complete duplicate-carrier source) — and the binding
-    /// proposals in the same pass. The signature leg seeks the existing
-    /// target index once per removal carrier. Total work is priced by
-    /// administrative-event cardinality, never event-history cardinality.
+    /// seek for its removal carriers — duplicate carriers included
+    /// (`semantic_duplicate_projection` never holds removal-family rows, and
+    /// its carrier list truncates, so the content seek is the only complete
+    /// duplicate-carrier source) — plus one
+    /// `product_history_content_reference_lookup` seek for every referencing
+    /// carrier, so the legacy target-missing fold applied to the hydrated set
+    /// reproduces store-wide truth exactly. The signature leg seeks the
+    /// existing target index once per removal carrier. Total work is priced
+    /// by administrative-event cardinality, never event-history cardinality.
     pub(crate) fn store_removal_audit_event_ids(
         &self,
         observed: TruthCursor,
