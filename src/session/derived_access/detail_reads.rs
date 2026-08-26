@@ -479,7 +479,9 @@ mod contract_tests {
             let request_id = InputRequestId::new("input-request:sha256:detail");
             record(&store, &request_event(&head_revision, &request_id, 5));
             record(&store, &response_event(&head_revision, &request_id, 6));
-            record(&store, &observation_event(&head_revision, &hash("c4"), 7));
+            let observation = observation_event(&head_revision, &hash("c4"), 7);
+            record(&store, &observation);
+            expected_audit_ids.insert(observation.event_id.as_str().to_owned());
             record(
                 &store,
                 &validation_event(&head_revision, vec![hash("c5")], 8),

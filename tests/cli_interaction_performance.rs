@@ -914,6 +914,7 @@ struct RevisionShowFixture {
     possession_reused_hash: String,
     unsigned_reused_hash: String,
     missing_target_hash: String,
+    externalized_body_hash: String,
 }
 
 const REVISION_SHOW_ACTOR: &str = "actor:git-email:kevin@swiber.dev";
@@ -1142,6 +1143,7 @@ fn revision_show_fixture() -> RevisionShowFixture {
         possession_reused_hash: String::new(),
         unsigned_reused_hash: String::new(),
         missing_target_hash: String::new(),
+        externalized_body_hash: String::new(),
     };
 
     let capture = |args: &[&str]| -> serde_json::Value {
@@ -1227,6 +1229,32 @@ fn revision_show_fixture() -> RevisionShowFixture {
             "fixture observation body",
         ],
     );
+    // A second observation whose >4096-byte body externalizes as a note
+    // artifact; a later ingested removal claims exactly that body hash, so
+    // this carrier is the claimed hash's only reference in the store.
+    let externalized_body = "x".repeat(5000);
+    let externalized_observation: serde_json::Value = serde_json::from_slice(&revision_show_cli(
+        &fixture_stub,
+        &[
+            "observation",
+            "add",
+            "--repo",
+            &repo_arg,
+            "--revision",
+            &f_id,
+            "--track",
+            TRACK,
+            "--title",
+            "Fixture externalized observation",
+            "--body",
+            &externalized_body,
+        ],
+    ))
+    .expect("externalized observation JSON");
+    let externalized_body_hash = externalized_observation["bodyContentHash"]
+        .as_str()
+        .expect("a >4096-byte body is stored as a note artifact")
+        .to_owned();
     let answered_request: serde_json::Value = serde_json::from_slice(&revision_show_cli(
         &fixture_stub,
         &[
@@ -1518,6 +1546,20 @@ fn revision_show_fixture() -> RevisionShowFixture {
         ),
         "revision-show-fixture:removal-validation-log",
     );
+    // An ingested (non-operative) removal claiming the externalized
+    // observation body hash: the body carrier is that hash's sole reference,
+    // so target-missing must NOT name it on either lane, and the
+    // non-operative claim leaves `--include-body` rendering untouched.
+    append_raw_fixture_event(
+        &repo_root,
+        &fixture_removal_event(
+            &externalized_body_hash,
+            "revision-show-fixture:removal-observation-body",
+            "2027-01-01T00:00:19Z",
+            true,
+        ),
+        "revision-show-fixture:removal-observation-body",
+    );
 
     // Possession-operative reuse: a proposal binds a hash with no stored
     // bytes, a locally-authored removal (operative by possession) targets it,
@@ -1714,6 +1756,7 @@ fn revision_show_fixture() -> RevisionShowFixture {
         possession_reused_hash,
         unsigned_reused_hash: c_hash,
         missing_target_hash,
+        externalized_body_hash,
         ..fixture_stub
     }
 }
@@ -2014,6 +2057,12 @@ fn revision_show_derived_current_preserves_store_audit_diagnostics() {
             .iter()
             .any(|message| message.contains(&fixture.missing_target_hash)),
         "target-missing names the never-referenced hash"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.contains(&fixture.externalized_body_hash)),
+        "a removed hash referenced by a note-body carrier is not target-missing"
     );
     let reuse_messages: Vec<&String> = messages
         .iter()
