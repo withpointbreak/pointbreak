@@ -39,13 +39,13 @@ use crate::session::projection::change::{
     ChangeDocumentProjectionFact, ChangeProjectionFact, project_change_documents_from_facts,
     project_changes_from_facts,
 };
-use crate::session::workflow::tag_completion_key;
+use crate::session::workflow::{referenced_content_hashes_for_event, tag_completion_key};
 use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION: i64 = 8;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
-const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 4;
+const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -560,6 +560,7 @@ pub(crate) struct ProductHistoryFact {
     pub(crate) membership_withdrawal_claim_id: Option<String>,
     pub(crate) relation_claim: Option<ProductRelationClaimFact>,
     pub(crate) relation_withdrawal_claim_id: Option<String>,
+    pub(crate) content_references: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -945,6 +946,7 @@ impl ProductHistoryFact {
             membership_withdrawal_claim_id,
             relation_claim,
             relation_withdrawal_claim_id,
+            content_references: referenced_content_hashes_for_event(event)?,
         })
     }
 }
@@ -1338,7 +1340,7 @@ impl SqliteSemantic {
                  CREATE TABLE IF NOT EXISTS product_history_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 4),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 5),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -1500,6 +1502,26 @@ impl SqliteSemantic {
                  CREATE INDEX IF NOT EXISTS product_history_change_correlation_support
                      ON product_history_change_correlation(
                          source_kind, source_id, support_sequence, sequence
+                     );
+                 CREATE TABLE IF NOT EXISTS product_history_content_reference (
+                     sequence INTEGER NOT NULL REFERENCES semantic_event_fact(sequence),
+                     content_prefix_id INTEGER REFERENCES semantic_identity_prefix(id),
+                     content_digest BLOB CHECK (length(content_digest) = 32),
+                     content_raw TEXT,
+                     content_key_hash BLOB NOT NULL CHECK (length(content_key_hash) = 32),
+                     CHECK (
+                         (content_prefix_id IS NULL
+                          AND content_digest IS NULL
+                          AND content_raw IS NOT NULL)
+                         OR (content_prefix_id IS NOT NULL
+                             AND content_digest IS NOT NULL
+                             AND content_raw IS NULL)
+                     ),
+                     PRIMARY KEY (sequence, content_key_hash)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_history_content_reference_lookup
+                     ON product_history_content_reference(
+                         content_prefix_id, content_digest, content_raw, sequence
                      );
                  CREATE TABLE IF NOT EXISTS reader_projection_checkpoint (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -2538,6 +2560,7 @@ fn insert_product_history_facts(
                 )
                 .map_err(|error| locator_sqlite_error("insert product history signature", error))?;
         }
+        insert_content_reference_facts(transaction, sequence, &fact.content_references)?;
         if let Some(revision) = &fact.revision {
             candidate_revision_ids.insert(revision.revision_id.clone());
             transaction
@@ -3110,6 +3133,36 @@ fn split_canonical_digest(value: &str) -> Option<(&str, [u8; 32])> {
 
 fn semantic_key_digest(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
+}
+
+/// One row per content hash the event references, in the shared
+/// prefix/digest-or-raw identity encoding. `content_key_hash` is a fixed-width
+/// surrogate for the primary key only — SQLite forbids NULL columns in a
+/// WITHOUT ROWID primary key, and the encoded triple is nullable per branch.
+fn insert_content_reference_facts(
+    transaction: &Transaction<'_>,
+    sequence: i64,
+    content_references: &[String],
+) -> Result<(), SqliteLocatorError> {
+    for content_hash in content_references {
+        let content = encode_identity(transaction, Some(content_hash))?;
+        transaction
+            .execute(
+                "INSERT INTO product_history_content_reference
+                     (sequence, content_prefix_id, content_digest, content_raw,
+                      content_key_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    sequence,
+                    content.prefix_id,
+                    content.digest.as_deref(),
+                    content.raw,
+                    semantic_key_digest(content_hash).as_slice(),
+                ],
+            )
+            .map_err(|error| locator_sqlite_error("insert content reference", error))?;
+    }
+    Ok(())
 }
 
 fn semantic_dimension_id(

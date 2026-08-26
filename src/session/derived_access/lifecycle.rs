@@ -3581,7 +3581,8 @@ mod tests {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE product_history_change_correlation;
+                "DROP TABLE product_history_content_reference;
+                 DROP TABLE product_history_change_correlation;
                  DROP TABLE product_history_relation_withdrawal;
                  DROP TABLE product_history_relation_claim;
                  DROP TABLE product_history_membership_withdrawal;

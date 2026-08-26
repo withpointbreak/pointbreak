@@ -48,7 +48,7 @@ const LOCATOR_SCHEMA_VERSION_V1: u32 = 3;
 const SEMANTIC_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION_V1: u32 = 8;
 const PRODUCT_HISTORY_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-history.v1";
-const PRODUCT_HISTORY_SCHEMA_VERSION_V1: u32 = 4;
+const PRODUCT_HISTORY_SCHEMA_VERSION_V1: u32 = 5;
 const READER_PROJECTOR_VERSIONS_V1: &[(&str, u32)] =
     &[("change-document", 1), ("change-semantic", 2)];
 

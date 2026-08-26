@@ -177,10 +177,12 @@ pub use artifact_removal::{
     CompactOptions, CompactResult, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
     SkippedRemoval, SweepOutcome, SweptBlob, compact_store, remove_content,
 };
-pub(crate) use artifact_transfer::selected_support_content_hashes;
 pub use artifact_transfer::{
     ArtifactKind, ArtifactRef, ImportArtifactOptions, ImportArtifactOutcome, ImportArtifactResult,
     export_artifact, import_artifact, referenced_artifacts,
+};
+pub(crate) use artifact_transfer::{
+    referenced_content_hashes_for_event, selected_support_content_hashes,
 };
 pub use assessment::{
     AssessmentAddOptions, AssessmentAddResult, AssessmentRecordStatus, AssessmentShowFilters,

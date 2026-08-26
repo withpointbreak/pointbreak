@@ -127,13 +127,6 @@ pub fn referenced_artifacts(events: &[ShoreEvent]) -> Result<Vec<ArtifactRef>> {
 /// [`referenced_artifacts`] semantics for a single event. Both derive from
 /// `referenced_artifacts_for_event`, so per-event extraction and whole-set
 /// enumeration cannot drift.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the derived-index maintenance writer consumes this; the expectation errors there, forcing its removal"
-    )
-)]
 pub(crate) fn referenced_content_hashes_for_event(event: &ShoreEvent) -> Result<Vec<String>> {
     let mut refs = BTreeMap::<String, ArtifactRef>::new();
     referenced_artifacts_for_event(event, &mut refs)?;

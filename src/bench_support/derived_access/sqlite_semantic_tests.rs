@@ -1543,7 +1543,7 @@ fn change_capable_timeline_families_and_structured_facets_are_bodyless_and_index
         inventory.product_history_profile_id,
         "pointbreak.sqlite-derived-access-history.v1"
     );
-    assert_eq!(inventory.product_history_schema_version, 4);
+    assert_eq!(inventory.product_history_schema_version, 5);
     let (frozen_profile_id, frozen_schema_version) =
         crate::session::derived_access::semantic::change::frozen_product_history_identity();
     assert_eq!(frozen_profile_id, inventory.product_history_profile_id);
@@ -2957,4 +2957,138 @@ fn full_audits_are_counted_while_selected_materialized_reads_are_not() {
     assert!(audit.projection_rebuilds > 0);
     assert!(audit.state_rebuilds > 0);
     assert!(audit.event_folds > 0);
+}
+
+/// One store shape exercising every content-reference class: a Revision
+/// proposal (raw-form object hash), an externalized observation body
+/// (digest-form note-body hash), an inline observation body, external
+/// validation log hashes, and a removal claim.
+fn content_reference_fixture() -> (tempfile::TempDir, QualificationDerivedAccessAdapter) {
+    let root = tempfile::tempdir().expect("temp root");
+    let adapter = open_adapter(root.path());
+    let subject = revision_id("aa");
+    let body_hex = "f".repeat(64);
+
+    let external_observation = ShoreEvent::new(
+        EventType::ReviewObservationRecorded,
+        "review_observation_recorded:external-body",
+        revision_target(&subject),
+        Writer::shore_local("0.8.0"),
+        ReviewObservationRecordedPayload {
+            observation_id: ObservationId::new("obs:sha256:external-body"),
+            target: ReviewTargetRef::Revision {
+                revision_id: subject.clone(),
+            },
+            title: "Externalized observation".to_owned(),
+            body: None,
+            body_content_type: BodyContentType::TextPlain,
+            body_artifact_path: Some(format!("artifacts/notes/{body_hex}.json")),
+            body_byte_size: Some(5000),
+            body_content_hash: Some(format!("sha256:{body_hex}")),
+            tags: Vec::new(),
+            confidence: None,
+            supersedes_observation_ids: Vec::new(),
+            responds_to_observation_ids: Vec::new(),
+        },
+        "2026-07-27T16:00:12Z",
+    )
+    .expect("externalized observation");
+
+    let logged_validation = ShoreEvent::new(
+        EventType::ValidationCheckRecorded,
+        ValidationCheckRecordedPayload::idempotency_key(
+            &subject,
+            &TrackId::new(TRACK),
+            "content-reference-log",
+        ),
+        revision_target(&subject),
+        Writer::shore_local("0.8.0"),
+        ValidationCheckRecordedPayload {
+            validation_check_id: ValidationCheckId::new("validation:sha256:content-reference"),
+            target: ValidationTarget::Revision {
+                revision_id: subject.clone(),
+            },
+            check_name: "content-reference-log".to_owned(),
+            command: None,
+            status: ValidationStatus::Passed,
+            exit_code: Some(0),
+            trigger: ValidationTrigger::Manual,
+            source_fingerprint: None,
+            summary: None,
+            summary_content_type: BodyContentType::TextPlain,
+            summary_artifact_path: None,
+            summary_byte_size: None,
+            summary_content_hash: None,
+            started_at: None,
+            completed_at: Some("2026-07-27T16:00:13Z".to_owned()),
+            log_artifact_content_hashes: vec![valid_hash('e')],
+        },
+        "2026-07-27T16:00:13Z",
+    )
+    .expect("logged validation");
+
+    for (attempt, event) in [
+        initialized_event(JOURNAL),
+        revision_event("aa", Vec::new(), "2026-07-27T16:00:01Z"),
+        external_observation,
+        observation_event(&subject),
+        logged_validation,
+        removal_event(&format!("sha256:{body_hex}")),
+    ]
+    .iter()
+    .enumerate()
+    {
+        append(&adapter, event, attempt);
+    }
+    (root, adapter)
+}
+
+#[test]
+fn content_reference_rows_cover_every_externalized_reference() {
+    let (root, _adapter) = content_reference_fixture();
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    let rows: std::collections::BTreeSet<(String, String)> = connection
+        .prepare(
+            "SELECT locator.event_id,
+                    coalesce(
+                        reference.content_raw,
+                        prefix.value || lower(hex(reference.content_digest))
+                    ) AS content_hash
+             FROM product_history_content_reference AS reference
+             JOIN locator_event_text AS locator
+               ON locator.sequence = reference.sequence
+             LEFT JOIN semantic_identity_prefix AS prefix
+               ON prefix.id = reference.content_prefix_id",
+        )
+        .expect("prepare content-reference read")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query content references")
+        .collect::<Result<_, _>>()
+        .expect("read content references");
+
+    // Exactly two rows: the proposal's object hash (raw form — the fixture
+    // hash is not a canonical 64-hex digest) and the externalized note-body
+    // hash (digest form). The inline body, the external validation log hash,
+    // and the removal claim itself contribute nothing.
+    let hashes: std::collections::BTreeSet<&str> =
+        rows.iter().map(|(_, hash)| hash.as_str()).collect();
+    assert_eq!(rows.len(), 2, "reference rows: {rows:?}");
+    assert!(hashes.contains("sha256:artifact:aa"), "{hashes:?}");
+    assert!(
+        hashes.contains(format!("sha256:{}", "f".repeat(64)).as_str()),
+        "{hashes:?}"
+    );
+}
+
+#[test]
+fn content_reference_table_retains_no_body_bytes() {
+    let (_root, adapter) = content_reference_fixture();
+
+    let inventory = adapter.semantic_inventory().expect("semantic inventory");
+    assert_eq!(
+        inventory.retained_body_object_bytes, 0,
+        "the content-reference table must hold no body/object bytes"
+    );
 }
