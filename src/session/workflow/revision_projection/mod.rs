@@ -3191,6 +3191,91 @@ mod tests {
     /// store by default. Reads that follow a workflow resolve here, not the raw
     /// worktree-local `.pointbreak/data`.
     #[test]
+    fn active_unavailable_revision_show_takes_one_unlabeled_authoritative_fallback() {
+        use crate::bench_support::longitudinal::{
+            InteractionActorV1, InteractionObservedRouteStateV1, InteractionScopeCoverageV1,
+            LongitudinalCountingScopeV1,
+        };
+        use crate::session::derived_access::product_contract::DerivedAccessProfile;
+        use crate::session::store::capabilities::{
+            CapabilityFixtureState, write_capability_fixture_for_test,
+        };
+
+        let repo = modified_repo();
+        let store = resolve_change_read_backend(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let capture = crate::session::capture_worktree_review(crate::session::CaptureOptions::new(
+            repo.path(),
+        ))
+        .unwrap();
+        let options = || {
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_read_for_display(true)
+        };
+        let baseline = show_revision(options()).unwrap();
+
+        // An active profile with no published generation: the qualified lane
+        // discovers unavailability (requesting only the existing
+        // post-activation maintenance-only worker), then takes exactly one
+        // unlabeled authoritative fallback on the same context.
+        let context = crate::session::prepare_public_read_command_context_v1(repo.path())
+            .unwrap()
+            .with_derived_access_profile_for_test(DerivedAccessProfile::SqliteWalBodylessV1);
+        let scope = LongitudinalCountingScopeV1::new("3".repeat(64)).unwrap();
+        scope.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let routed = {
+            let _guard = scope.enter();
+            show_revision_with_public_read_context(options(), context)
+        };
+        let Ok(PublicReadRevisionShowRouteV1::Authoritative { result }) = routed else {
+            panic!("active-unavailable must fall back authoritatively");
+        };
+        assert_eq!(
+            result, baseline,
+            "the unlabeled fallback reproduces the authoritative result exactly"
+        );
+
+        // The maintenance-only child runs on its own worker thread and reaches
+        // its terminal shortly after the request returns; wait for the
+        // terminal fact rather than the worker's speed (the CLI transport
+        // observes it at process exit the same way).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let snapshot = loop {
+            let snapshot = scope.snapshot();
+            if !snapshot.child_terminals.is_empty() || std::time::Instant::now() > deadline {
+                break snapshot;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(snapshot.counters.authoritative_fallbacks, 1);
+        assert_eq!(snapshot.counters.full_history_fallbacks, 1);
+        assert_eq!(
+            snapshot.observed_route_states,
+            vec![InteractionObservedRouteStateV1::UnlabeledFallbackToAuthoritative],
+        );
+        assert_eq!(
+            snapshot.child_terminals.len(),
+            1,
+            "exactly one complete background maintenance child: terminals={:?} reservations={:?}",
+            snapshot.child_terminals,
+            snapshot.child_reservations
+        );
+        assert_eq!(
+            snapshot.child_terminals[0].actor,
+            InteractionActorV1::BackgroundMaintenance
+        );
+        assert_eq!(
+            snapshot.child_terminals[0].coverage,
+            InteractionScopeCoverageV1::Complete
+        );
+    }
+
+    #[test]
     fn public_read_context_postflight_gates_revision_show_output() {
         use crate::session::store::capabilities::{
             CapabilityFixtureState, write_capability_fixture_for_test,

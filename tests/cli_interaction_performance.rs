@@ -1668,6 +1668,35 @@ fn revision_show_fixture() -> RevisionShowFixture {
             key,
         );
     }
+    // Two unrelated singleton revisions whose digests share an eight-hex
+    // prefix, so an abbreviated selector can be proven ambiguous
+    // deterministically.
+    for (suffix, key, occurred_at) in [
+        (
+            "0",
+            "revision-show-fixture:ambiguous-one",
+            "2027-01-01T00:00:17Z",
+        ),
+        (
+            "1",
+            "revision-show-fixture:ambiguous-two",
+            "2027-01-01T00:00:18Z",
+        ),
+    ] {
+        append_raw_fixture_event(
+            &repo_root,
+            &fixture_proposal_event(
+                &format!("rev:sha256:abcd1234{}", suffix.repeat(56)),
+                &format!("obj:sha256:ab{}", suffix.repeat(62)),
+                &format!("sha256:ac{}", suffix.repeat(62)),
+                &[],
+                key,
+                occurred_at,
+            ),
+            key,
+        );
+    }
+
     // D/E/G remain in the store as ordinary second-component history.
     let _ = (d_id, e_id, g_id);
 
@@ -2105,6 +2134,212 @@ fn revision_show_error_ordering_is_frozen_per_lane() {
     assert_eq!(active_fragment.status.code(), off_fragment.status.code());
     assert_eq!(active_fragment.stdout, off_fragment.stdout);
     assert_eq!(active_fragment.stderr, off_fragment.stderr);
+
+    // An ambiguous fragment lists every candidate and never auto-picks, with
+    // identical bytes on both lanes.
+    let ambiguous_arguments = revision_show_arguments(&fixture, "abcd1234");
+    let off_ambiguous = run_binary(&ambiguous_arguments, &fixture.off_env());
+    assert!(!off_ambiguous.status.success());
+    assert!(
+        String::from_utf8_lossy(&off_ambiguous.stderr).contains("ambiguous"),
+        "ambiguous fragment keeps its candidate-listing error"
+    );
+    let active_ambiguous = run_binary(&ambiguous_arguments, &fixture.active_env());
+    assert_eq!(active_ambiguous.status.code(), off_ambiguous.status.code());
+    assert_eq!(active_ambiguous.stdout, off_ambiguous.stdout);
+    assert_eq!(active_ambiguous.stderr, off_ambiguous.stderr);
+
+    // The omitted operand stays on the legacy current-capture path; on this
+    // multi-revision store that is its existing ambiguity error, byte-equal
+    // on both lanes.
+    let omitted_arguments = strings(&[
+        "revision",
+        "show",
+        "--repo",
+        &fixture.repo_arg(),
+        "--format",
+        "json",
+    ]);
+    let off_omitted = run_binary(&omitted_arguments, &fixture.off_env());
+    assert!(!off_omitted.status.success());
+    assert!(
+        String::from_utf8_lossy(&off_omitted.stderr).contains("multiple captured revisions"),
+        "omitted operand keeps the current-capture ambiguity error"
+    );
+    let active_omitted = run_binary(&omitted_arguments, &fixture.active_env());
+    assert_eq!(active_omitted.status.code(), off_omitted.status.code());
+    assert_eq!(active_omitted.stdout, off_omitted.stdout);
+    assert_eq!(active_omitted.stderr, off_omitted.stderr);
+}
+
+#[test]
+fn revision_show_active_unavailable_stays_unlabeled_authoritative() {
+    let fixture = revision_show_fixture();
+    let arguments = revision_show_arguments(&fixture, &fixture.addressed);
+
+    // No generation was ever built: the qualified lane discovers
+    // unavailability and falls back to one unlabeled authoritative read with
+    // byte-identical output and no derived identity.
+    let off = run_binary(&arguments, &fixture.off_env());
+    assert_success("active-unavailable explicit-off reference", &off);
+    let active = run_binary(&arguments, &fixture.active_env());
+    assert_eq!(active.status.code(), off.status.code());
+    assert_eq!(
+        active.stdout, off.stdout,
+        "unlabeled fallback stdout parity"
+    );
+    assert_eq!(
+        active.stderr, off.stderr,
+        "unlabeled fallback stderr parity"
+    );
+    let document: serde_json::Value = serde_json::from_slice(&active.stdout).expect("JSON");
+    assert!(document.get("projectionStamp").is_none());
+    assert!(document["eventSetHash"].as_str().is_some());
+    assert_eq!(
+        derived_publication_count(fixture.repo.path()),
+        0,
+        "a short-lived request must not publish a request-owned generation"
+    );
+
+    // The counted run keeps truthful fallback counters and no derived rows.
+    let receipt_dir = tempfile::tempdir().expect("temporary receipt directory");
+    let receipt_path = receipt_dir.path().join("revision-show-unavailable.json");
+    let encoded = encode_counter_request("revision-show-active-unavailable", &receipt_path);
+    let counted_arguments = [
+        vec!["--longitudinal-counting".to_owned(), encoded],
+        arguments.clone(),
+    ]
+    .concat();
+    let counted = run_binary(&counted_arguments, &fixture.active_env());
+    assert_eq!(counted.status.code(), active.status.code());
+    assert_eq!(counted.stdout, active.stdout);
+    let receipt: LongitudinalCounterReceiptV1 =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("receipt bytes"))
+            .expect("receipt JSON");
+    receipt.validate().expect("valid counter receipt");
+    assert!(receipt.success);
+    assert_eq!(receipt.counters.authoritative_fallbacks, 1);
+    assert_eq!(receipt.counters.full_history_fallbacks, 1);
+    assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
+    assert_eq!(receipt.counters.strict_journal_inspections, 0);
+    assert!(receipt.counters.event_decodes > 0);
+}
+
+#[test]
+fn revision_show_omitted_and_fragment_selectors_stay_legacy() {
+    // A single-revision store: the omitted operand and a unique fragment both
+    // succeed through the legacy path in every derived state, byte-equal to
+    // the explicit-off lane, with truthful legacy multiplicity counters.
+    let repo = GitRepo::new();
+    repo.write(
+        "src/lib.rs",
+        "pub fn value() -> u32 { 1 }
+",
+    );
+    repo.commit_all("base");
+    repo.write(
+        "src/lib.rs",
+        "pub fn value() -> u32 { 2 }
+",
+    );
+    let repo_arg = repo.path().to_string_lossy().into_owned();
+    let capture = pointbreak_env(["capture", "--repo", &repo_arg], OFF_ENV);
+    assert_success("capture legacy-shape revision", &capture);
+    let capture: serde_json::Value = serde_json::from_slice(&capture.stdout).expect("capture JSON");
+    let revision = capture["revision"]["revisionId"]
+        .as_str()
+        .expect("captured revision id")
+        .to_owned();
+    let digest = revision
+        .rsplit_once("sha256:")
+        .expect("revision digest")
+        .1
+        .to_owned();
+
+    let omitted = strings(&["revision", "show", "--repo", &repo_arg, "--format", "json"]);
+    let fragment = strings(&[
+        "revision",
+        "show",
+        &digest[..8],
+        "--repo",
+        &repo_arg,
+        "--format",
+        "json",
+    ]);
+    let full = strings(&[
+        "revision", "show", &revision, "--repo", &repo_arg, "--format", "json",
+    ]);
+
+    let assert_legacy_parity = |label: &str| {
+        for (name, arguments) in [("omitted", &omitted), ("fragment", &fragment)] {
+            let off = run_binary(arguments, OFF_ENV);
+            assert_success(&format!("{label} {name} explicit-off"), &off);
+            let document: serde_json::Value =
+                serde_json::from_slice(&off.stdout).expect("legacy JSON");
+            assert!(
+                document.get("projectionStamp").is_none(),
+                "{label} {name} must never carry a derived identity"
+            );
+            let active = run_binary(arguments, ACTIVE_ENV);
+            assert_eq!(active.status.code(), off.status.code(), "{label} {name}");
+            assert_eq!(active.stdout, off.stdout, "{label} {name} stdout");
+            assert_eq!(active.stderr, off.stderr, "{label} {name} stderr");
+        }
+    };
+    assert_legacy_parity("unbuilt");
+    build_derived(&repo);
+    assert_legacy_parity("current");
+
+    // One counted successful unique-fragment witness: the legacy lane keeps
+    // its complete-history decode multiplicity even while a current derived
+    // generation exists.
+    // The full-ID shape is the qualified route: under active-current it goes
+    // derived. The fragment stays legacy, so its bytes match the explicit-off
+    // full-selector output.
+    let full_output = run_binary(&full, OFF_ENV);
+    assert_success("full selector reference", &full_output);
+    let full_active = run_binary(&full, ACTIVE_ENV);
+    assert_success("full selector active-current", &full_active);
+    let full_active_document: serde_json::Value =
+        serde_json::from_slice(&full_active.stdout).expect("active full JSON");
+    assert!(
+        full_active_document["projectionStamp"].as_str().is_some(),
+        "the qualified full-ID shape serves the derived identity when current"
+    );
+    let authority = pointbreak::session::store_capability_for_repo(repo.path())
+        .expect("inspect legacy-shape authority")
+        .cursor;
+    let receipt_dir = tempfile::tempdir().expect("temporary receipt directory");
+    let receipt_path = receipt_dir.path().join("revision-show-fragment.json");
+    let encoded = encode_counter_request("revision-show-unique-fragment", &receipt_path);
+    let counted_arguments = [
+        vec!["--longitudinal-counting".to_owned(), encoded],
+        fragment.clone(),
+    ]
+    .concat();
+    let counted = run_binary(&counted_arguments, ACTIVE_ENV);
+    assert_eq!(counted.status.code(), full_output.status.code());
+    assert_eq!(
+        counted.stdout, full_output.stdout,
+        "the unique fragment resolves to the full selector's bytes"
+    );
+    let receipt: LongitudinalCounterReceiptV1 =
+        serde_json::from_slice(&fs::read(&receipt_path).expect("receipt bytes"))
+            .expect("receipt JSON");
+    receipt.validate().expect("valid fragment receipt");
+    assert!(receipt.success);
+    assert_eq!(receipt.counters.strict_journal_inspections, 0);
+    assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
+    assert_eq!(
+        receipt.counters.event_decodes % authority.event_count,
+        0,
+        "legacy decode multiplicity stays a whole number of complete passes"
+    );
+    assert!(
+        receipt.counters.event_decodes >= authority.event_count * 2,
+        "the fragment lane keeps its index build plus complete read"
+    );
+    assert!(receipt.counters.directory_entries_walked >= authority.journal_record_count);
 }
 
 /// Clone one stored event under a fresh idempotency key with the retired
