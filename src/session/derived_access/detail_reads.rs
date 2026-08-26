@@ -29,8 +29,8 @@ use crate::session::ProjectionDiagnostic;
 use crate::session::derived_access::cursor::TruthCursor;
 use crate::session::event::{
     ArtifactRemovedPayload, EventSignatureRecordedPayload, EventType, ShoreEvent,
-    WorkObjectProposal, WorkObjectProposedPayload,
 };
+use crate::session::workflow::referenced_content_hashes_for_event;
 
 #[derive(Debug)]
 pub(crate) enum ExactRevisionDetailReadRouteV1 {
@@ -262,10 +262,12 @@ fn validate_selected_component_events(
     Ok(())
 }
 
-/// The removal-audit closure may contain exactly three carrier families:
-/// `ArtifactRemoved`, detached signatures whose target is one of those
-/// removals (with a matching record hash), and revision proposals binding a
-/// removed content hash. Anything else fails closed.
+/// The removal-audit closure admits `ArtifactRemoved` carriers, detached
+/// signatures whose target is one of those removals (with a matching record
+/// hash), and any carrier that references a removed content hash under the
+/// shared referenced-artifacts semantics — proposals binding a removed object
+/// hash and body-bearing carriers whose externalized note body is the removed
+/// content. Anything else fails closed.
 fn validate_audit_events(events: &[ShoreEvent]) -> Result<(), String> {
     let mut removals: BTreeMap<&str, &ShoreEvent> = BTreeMap::new();
     let mut removed_hashes: BTreeSet<String> = BTreeSet::new();
@@ -311,36 +313,19 @@ fn validate_audit_events(events: &[ShoreEvent]) -> Result<(), String> {
                     ));
                 }
             }
-            EventType::WorkObjectProposed => {
-                let payload: WorkObjectProposedPayload =
-                    serde_json::from_value(event.payload.clone()).map_err(|error| {
-                        format!(
-                            "audit binding event {} is invalid: {error}",
-                            event.event_id.as_str()
-                        )
-                    })?;
-                let WorkObjectProposal::Revision {
-                    object_artifact_content_hash,
-                    ..
-                } = payload.work_object
-                else {
-                    return Err(format!(
-                        "audit binding event {} is not a Revision proposal",
+            _ => {
+                let referenced = referenced_content_hashes_for_event(event).map_err(|error| {
+                    format!(
+                        "audit carrier {} has unreadable content references: {error}",
                         event.event_id.as_str()
-                    ));
-                };
-                if !removed_hashes.contains(&object_artifact_content_hash) {
+                    )
+                })?;
+                if !referenced.iter().any(|hash| removed_hashes.contains(hash)) {
                     return Err(format!(
-                        "audit binding event {} does not bind a removed content hash",
+                        "audit carrier {} does not reference a removed content hash",
                         event.event_id.as_str()
                     ));
                 }
-            }
-            _ => {
-                return Err(format!(
-                    "removal-audit selection returned a non-audit carrier {}",
-                    event.event_id.as_str()
-                ));
             }
         }
     }
@@ -373,7 +358,7 @@ mod contract_tests {
         InputRequestReasonCode, InputRequestRespondedPayload, InputRequestResponseOutcome,
         ReviewAssessment, ReviewAssessmentRecordedPayload, ReviewInitializedPayload,
         ReviewObservationRecordedPayload, Revision, ValidationCheckRecordedPayload,
-        WorkObjectProposedPayload, Writer, build_change_declared,
+        WorkObjectProposal, WorkObjectProposedPayload, Writer, build_change_declared,
         event_signature_pre_authentication_encoding,
     };
     use crate::session::store::backend::StoreBackend;
@@ -1282,19 +1267,64 @@ mod contract_tests {
     fn audit_validation_refuses_non_audit_and_unbound_carriers() {
         let unrelated = unrelated_authoritative_event("non-audit");
         let error = validate_audit_events(std::slice::from_ref(&unrelated)).expect_err("non-audit");
-        assert!(error.contains("non-audit carrier"), "{error}");
+        assert!(
+            error.contains("does not reference a removed content hash"),
+            "{error}"
+        );
 
         let stray_binding = proposal_event(&revision("b9"), "09", &hash("c9"), &[], "stray", 0);
         let error = validate_audit_events(std::slice::from_ref(&stray_binding))
             .expect_err("unbound binding proposal");
         assert!(
-            error.contains("does not bind a removed content hash"),
+            error.contains("does not reference a removed content hash"),
             "{error}"
         );
 
         let removal = removal_event(&hash("c9"), "stray-removal", 1);
-        let bound = vec![removal, stray_binding];
+        let bound = vec![removal.clone(), stray_binding];
         validate_audit_events(&bound).expect("a bound proposal validates");
+
+        // A body-bearing carrier whose externalized note body is the removed
+        // content is an admitted reference carrier.
+        let body_observation = observation_event(&revision("b9"), &hash("c9"), 2);
+        let referenced = vec![removal.clone(), body_observation.clone()];
+        validate_audit_events(&referenced).expect("a referencing body carrier validates");
+        let error = validate_audit_events(std::slice::from_ref(&body_observation))
+            .expect_err("a body carrier without its removal");
+        assert!(
+            error.contains("does not reference a removed content hash"),
+            "{error}"
+        );
+
+        // Signature arms: a signature must target an admitted removal, with
+        // that removal's record hash.
+        let stray_signature = signature_event(&body_observation, "targets-non-removal", 3);
+        let error = validate_audit_events(&[removal.clone(), stray_signature])
+            .expect_err("a signature over a non-removal");
+        assert!(
+            error.contains("does not target a removal carrier"),
+            "{error}"
+        );
+
+        let mut forged = signature_event(&removal, "wrong-record-hash", 4);
+        {
+            let mut payload: EventSignatureRecordedPayload =
+                serde_json::from_value(forged.payload.clone()).expect("decode signature payload");
+            payload.target_event_record_hash = body_observation
+                .event_record_hash()
+                .expect("hash observation");
+            forged.payload = serde_json::to_value(&payload).expect("encode signature payload");
+        }
+        let error = validate_audit_events(&[removal.clone(), forged])
+            .expect_err("a signature with a forged record hash");
+        assert!(
+            error.contains("has the wrong target record hash"),
+            "{error}"
+        );
+
+        let endorsed = signature_event(&removal, "valid-endorsement", 5);
+        validate_audit_events(&[removal, endorsed])
+            .expect("a removal-targeting signature validates");
     }
 
     #[test]
