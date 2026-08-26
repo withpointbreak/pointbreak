@@ -3092,3 +3092,53 @@ fn content_reference_table_retains_no_body_bytes() {
         "the content-reference table must hold no body/object bytes"
     );
 }
+
+#[test]
+fn removal_audit_reference_seek_uses_the_lookup_index() {
+    use crate::session::derived_access::sqlite::removal_audit_reference_seek_sql;
+
+    let (root, _adapter) = content_reference_fixture();
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    for raw in [false, true] {
+        let parameters: Vec<rusqlite::types::Value> = if raw {
+            vec![
+                "sha256:artifact:aa".to_owned().into(),
+                1_i64.into(),
+                64_i64.into(),
+            ]
+        } else {
+            vec![
+                "sha256:".to_owned().into(),
+                vec![0_u8; 32].into(),
+                1_i64.into(),
+                64_i64.into(),
+            ]
+        };
+        let details: Vec<String> = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                removal_audit_reference_seek_sql(raw)
+            ))
+            .expect("prepare reference-seek plan")
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("query reference-seek plan")
+            .collect::<Result<_, _>>()
+            .expect("read reference-seek plan");
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("SEARCH reference")
+                    && detail.contains("INDEX product_history_content_reference_lookup")
+            }),
+            "raw={raw}: the reference seek must use the lookup index: {details:?}"
+        );
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail.contains("SCAN") && detail.contains("reference")),
+            "raw={raw}: the reference table must never be scanned: {details:?}"
+        );
+    }
+}

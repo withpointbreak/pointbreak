@@ -413,21 +413,19 @@ impl ExactRevisionFactReadSnapshot {
             for row in rows {
                 let (event_id, event_type) =
                     row.map_err(|error| sqlite_error("read removal-audit content seek", error))?;
-                match event_type.as_str() {
-                    "artifact_removed" => {
-                        removal_event_ids.insert(event_id.clone());
-                        audit_event_ids.insert(event_id);
-                    }
-                    "work_object_proposed" => {
-                        audit_event_ids.insert(event_id);
-                    }
-                    _ => {}
+                if event_type.as_str() == "artifact_removed" {
+                    removal_event_ids.insert(event_id.clone());
+                    audit_event_ids.insert(event_id);
                 }
             }
             vm_steps = vm_steps.saturating_add(
                 u64::try_from(referencing.get_status(rusqlite::StatementStatus::VmStep))
                     .unwrap_or(0),
             );
+            let (reference_carriers, reference_steps) =
+                self.removal_audit_reference_carriers(removed_hash, epoch, sequence)?;
+            audit_event_ids.extend(reference_carriers);
+            vm_steps = vm_steps.saturating_add(reference_steps);
         }
 
         {
@@ -469,6 +467,94 @@ impl ExactRevisionFactReadSnapshot {
         crate::bench_support::longitudinal::record_fact_sqlite_rows_selected(event_ids.len());
         Ok((event_ids, vm_steps))
     }
+
+    /// Every carrier referencing `removed_hash` through the persisted
+    /// content-reference index, bounded by the pinned cursor. One indexed
+    /// seek per removed hash, so the closure stays priced by removal
+    /// cardinality.
+    fn removal_audit_reference_carriers(
+        &self,
+        removed_hash: &str,
+        epoch: i64,
+        sequence: i64,
+    ) -> Result<(Vec<String>, u64), SqliteSemanticError> {
+        let (sql, parameters): (String, Vec<rusqlite::types::Value>) =
+            if let Some((prefix, digest)) = split_canonical_digest(removed_hash) {
+                (
+                    removal_audit_reference_seek_sql(false),
+                    vec![
+                        prefix.to_owned().into(),
+                        digest.to_vec().into(),
+                        epoch.into(),
+                        sequence.into(),
+                    ],
+                )
+            } else {
+                (
+                    removal_audit_reference_seek_sql(true),
+                    vec![
+                        removed_hash.to_owned().into(),
+                        epoch.into(),
+                        sequence.into(),
+                    ],
+                )
+            };
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare removal-audit reference seek", error))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(parameters), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| sqlite_error("query removal-audit reference seek", error))?;
+        let mut event_ids = Vec::new();
+        for row in rows {
+            event_ids.push(
+                row.map_err(|error| sqlite_error("read removal-audit reference seek", error))?,
+            );
+        }
+        let vm_steps =
+            u64::try_from(statement.get_status(rusqlite::StatementStatus::VmStep)).unwrap_or(0);
+        Ok((event_ids, vm_steps))
+    }
+}
+
+/// The removal-audit reference seek statement, in the two-branch identity
+/// form. The EXPLAIN-plan pin runs exactly this builder's output, so the
+/// tested and production SQL cannot drift. The CROSS JOIN is the same
+/// planner fence as the content seek: the reference-index seek must run
+/// first, or SQLite starts from the bounded-but-large locator range.
+pub(crate) fn removal_audit_reference_seek_sql(raw: bool) -> String {
+    let (predicate, epoch_parameter, sequence_parameter) = if raw {
+        (
+            "reference.content_prefix_id IS NULL
+               AND reference.content_digest IS NULL
+               AND reference.content_raw = ?1",
+            2,
+            3,
+        )
+    } else {
+        (
+            "reference.content_prefix_id = (
+                   SELECT id FROM semantic_identity_prefix WHERE value = ?1
+               )
+               AND reference.content_digest = ?2
+               AND reference.content_raw IS NULL",
+            3,
+            4,
+        )
+    };
+    format!(
+        "SELECT locator.event_id
+         FROM product_history_content_reference AS reference
+           INDEXED BY product_history_content_reference_lookup
+         CROSS JOIN locator_event_text AS locator
+         WHERE {predicate}
+           AND locator.sequence = reference.sequence
+           AND locator.epoch = ?{epoch_parameter}
+           AND reference.sequence <= ?{sequence_parameter}"
+    )
 }
 
 fn exact_revision_event_ids_statement(
