@@ -176,7 +176,7 @@ impl DerivedHistoryAccess {
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
-fn record_derived_selection_failed_closed_state() {
+pub(super) fn record_derived_selection_failed_closed_state() {
     if let Some(scope) = crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
     {
         scope.record_observed_route_state_once(
@@ -186,7 +186,7 @@ fn record_derived_selection_failed_closed_state() {
 }
 
 #[cfg(not(any(test, feature = "longitudinal-counting")))]
-fn record_derived_selection_failed_closed_state() {}
+pub(super) fn record_derived_selection_failed_closed_state() {}
 
 fn validate_selected_events(events: &[ShoreEvent], revision_id: &RevisionId) -> Result<(), String> {
     let mut has_proposal = false;
@@ -208,7 +208,7 @@ fn validate_selected_events(events: &[ShoreEvent], revision_id: &RevisionId) -> 
     Ok(())
 }
 
-fn validate_support_events(
+pub(super) fn validate_support_events(
     plan: &SupportEventPlan,
     selected: &[ShoreEvent],
     support: &[ShoreEvent],
@@ -270,7 +270,7 @@ fn validate_support_events(
     Ok(())
 }
 
-fn normalize_events(events: &mut Vec<ShoreEvent>) {
+pub(super) fn normalize_events(events: &mut Vec<ShoreEvent>) {
     events.sort_by(|left, right| {
         sha256_bytes_hex(left.idempotency_key.as_bytes())
             .cmp(&sha256_bytes_hex(right.idempotency_key.as_bytes()))
@@ -1207,6 +1207,7 @@ mod contract_tests {
         );
 
         let fact_source = include_str!("fact_reads.rs");
+        let detail_source = include_str!("detail_reads.rs");
         let semantic_source = include_str!("sqlite/semantic.rs");
         let constructor_start = semantic_source
             .find("pub(crate) fn exact_revision_fact_read_snapshot(")
@@ -1216,9 +1217,29 @@ mod contract_tests {
             .find("/// Open the exact Timeline snapshot")
             .expect("fact snapshot constructor terminator");
         let constructor = &constructor_tail[..constructor_end];
+        // Second marker slice: the complete `ExactRevisionFactReadSnapshot`
+        // impl, which owns the exact-Revision, component-detail, and
+        // removal-audit selection methods.
+        let snapshot_impl_start = semantic_source
+            .find("impl ExactRevisionFactReadSnapshot {")
+            .expect("fact snapshot impl marker");
+        let snapshot_impl_tail = &semantic_source[snapshot_impl_start..];
+        let snapshot_impl_end = snapshot_impl_tail
+            .find("/// One exact, connection-local product-history read snapshot")
+            .expect("fact snapshot impl terminator");
+        let snapshot_impl = &snapshot_impl_tail[..snapshot_impl_end];
+        assert!(
+            snapshot_impl.contains("fn revision_component_event_ids("),
+            "the component selection method must live inside the guarded impl slice"
+        );
+        assert!(
+            snapshot_impl.contains("fn store_removal_audit_event_ids("),
+            "the removal-audit selection method must live inside the guarded impl slice"
+        );
         let forbidden = [
             ["ProductHistory", "ReadSnapshot"].concat(),
             ["product_history", "_read_snapshot"].concat(),
+            ["product_history", "_read_snapshot_at"].concat(),
             ["product_history", "_connection"].concat(),
             ["facts_for_revision", "_hydrated"].concat(),
             ["query_materialized_change", "_projection"].concat(),
@@ -1233,8 +1254,16 @@ mod contract_tests {
                 "fact producer must not contain {token}"
             );
             assert!(
+                !detail_source.contains(&token),
+                "detail producer must not contain {token}"
+            );
+            assert!(
                 !constructor.contains(&token),
                 "fact snapshot constructor must not contain {token}"
+            );
+            assert!(
+                !snapshot_impl.contains(&token),
+                "fact snapshot impl must not contain {token}"
             );
         }
     }

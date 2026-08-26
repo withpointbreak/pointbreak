@@ -191,6 +191,284 @@ impl ExactRevisionFactReadSnapshot {
             )
         })
     }
+
+    /// Select the addressed Revision's complete fork-tolerant
+    /// supersession-component semantic carriers on this snapshot's one open
+    /// transaction, using the shared fenced component SQL (`CROSS JOIN` order
+    /// and `INDEXED BY` planner fences preserved).
+    pub(crate) fn revision_component_event_ids(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<Vec<String>, SqliteSemanticError> {
+        let checkpoint = read_locator_checkpoint(&self.connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteSemanticError::Metadata(
+                "component detail selection differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        let mut statement = self
+            .connection
+            .prepare(crate::session::derived_access::revisions::REVISION_COMPONENT_EVENT_IDS_SQL)
+            .map_err(|error| sqlite_error("prepare component detail selection", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    to_i64(observed.epoch, "component detail epoch")?,
+                    to_i64(observed.sequence, "component detail cursor")?,
+                    revision_id.as_str(),
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| sqlite_error("query component detail selection", error))?;
+        let event_ids = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read component detail selection", error))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_fact_sqlite_rows_selected(event_ids.len());
+        Ok(event_ids)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revision_component_event_query_plan(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<Vec<String>, SqliteSemanticError> {
+        let mut statement = self
+            .connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::session::derived_access::revisions::REVISION_COMPONENT_EVENT_IDS_SQL
+            ))
+            .map_err(|error| sqlite_error("prepare component detail query plan", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    to_i64(observed.epoch, "component detail epoch")?,
+                    to_i64(observed.sequence, "component detail cursor")?,
+                    revision_id.as_str(),
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .map_err(|error| sqlite_error("query component detail query plan", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read component detail query plan", error))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn revision_component_event_vm_steps(
+        &self,
+        revision_id: &RevisionId,
+        observed: TruthCursor,
+    ) -> Result<u64, SqliteSemanticError> {
+        let mut statement = self
+            .connection
+            .prepare(crate::session::derived_access::revisions::REVISION_COMPONENT_EVENT_IDS_SQL)
+            .map_err(|error| sqlite_error("prepare component detail work probe", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    to_i64(observed.epoch, "component detail epoch")?,
+                    to_i64(observed.sequence, "component detail cursor")?,
+                    revision_id.as_str(),
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| sqlite_error("query component detail work probe", error))?;
+        for row in rows {
+            row.map_err(|error| sqlite_error("read component detail work probe", error))?;
+        }
+        u64::try_from(statement.get_status(rusqlite::StatementStatus::VmStep)).map_err(|_| {
+            SqliteSemanticError::Metadata(
+                "component detail VM-step count does not fit u64".to_owned(),
+            )
+        })
+    }
+
+    /// Select the store-wide removal-audit closure: every `ArtifactRemoved`
+    /// carrier at `observed`, the detached signatures targeting those
+    /// carriers, and the revision-proposal carriers binding a removed content
+    /// hash. Removal enumeration is seeded from the `semantic_representative`
+    /// removal-family primary-key range (one row per removed content hash);
+    /// each removed hash then takes one `semantic_event_fact_content` index
+    /// seek, which returns every carrier referencing the hash — duplicate
+    /// removal carriers included (`semantic_duplicate_projection` never holds
+    /// removal-family rows, and its carrier list truncates, so the content
+    /// seek is the only complete duplicate-carrier source) — and the binding
+    /// proposals in the same pass. The signature leg seeks the existing
+    /// target index once per removal carrier. Total work is priced by
+    /// administrative-event cardinality, never event-history cardinality.
+    pub(crate) fn store_removal_audit_event_ids(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<Vec<String>, SqliteSemanticError> {
+        Ok(self.store_removal_audit_event_ids_inner(observed)?.0)
+    }
+
+    /// Total VM steps across every statement the removal-audit closure runs.
+    /// Used by the boundedness comparison: the total must grow with removal
+    /// cardinality, never with unrelated event-history growth.
+    #[cfg(test)]
+    pub(crate) fn store_removal_audit_vm_steps(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<u64, SqliteSemanticError> {
+        Ok(self.store_removal_audit_event_ids_inner(observed)?.1)
+    }
+
+    fn store_removal_audit_event_ids_inner(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<(Vec<String>, u64), SqliteSemanticError> {
+        let checkpoint = read_locator_checkpoint(&self.connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteSemanticError::Metadata(
+                "removal-audit selection differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        let epoch = to_i64(observed.epoch, "removal-audit epoch")?;
+        let sequence = to_i64(observed.sequence, "removal-audit cursor")?;
+        let mut vm_steps: u64 = 0;
+
+        let mut removed_hashes = BTreeSet::new();
+        {
+            let mut representative = self
+                .connection
+                .prepare(
+                    "SELECT coalesce(
+                                representative.semantic_key_raw,
+                                prefix.value || lower(hex(representative.semantic_key_digest))
+                            ) AS semantic_key
+                     FROM semantic_representative AS representative
+                     LEFT JOIN semantic_identity_prefix AS prefix
+                       ON prefix.id = representative.semantic_key_prefix_id
+                     WHERE representative.family_id = 11
+                       AND representative.sequence <= ?1",
+                )
+                .map_err(|error| sqlite_error("prepare removal-audit enumeration", error))?;
+            let rows = representative
+                .query_map(params![sequence], |row| row.get::<_, String>(0))
+                .map_err(|error| sqlite_error("query removal-audit enumeration", error))?;
+            for row in rows {
+                removed_hashes.insert(
+                    row.map_err(|error| sqlite_error("read removal-audit enumeration", error))?,
+                );
+            }
+            vm_steps = vm_steps.saturating_add(
+                u64::try_from(representative.get_status(rusqlite::StatementStatus::VmStep))
+                    .unwrap_or(0),
+            );
+        }
+
+        let mut removal_event_ids = BTreeSet::new();
+        let mut audit_event_ids = BTreeSet::new();
+        for removed_hash in &removed_hashes {
+            let (predicate, parameters): (&str, Vec<rusqlite::types::Value>) =
+                if let Some((prefix, digest)) = split_canonical_digest(removed_hash) {
+                    (
+                        "event.content_prefix_id = (
+                             SELECT id FROM semantic_identity_prefix WHERE value = ?1
+                         )
+                         AND event.content_digest = ?2
+                         AND event.content_raw IS NULL",
+                        vec![
+                            prefix.to_owned().into(),
+                            digest.to_vec().into(),
+                            epoch.into(),
+                            sequence.into(),
+                        ],
+                    )
+                } else {
+                    (
+                        "event.content_prefix_id IS NULL
+                         AND event.content_digest IS NULL
+                         AND event.content_raw = ?1",
+                        vec![removed_hash.clone().into(), epoch.into(), sequence.into()],
+                    )
+                };
+            let epoch_parameter = parameters.len() - 1;
+            let sequence_parameter = parameters.len();
+            // The CROSS JOIN is a deliberate planner fence: the content
+            // index seek must run first, or SQLite starts from the bounded-
+            // but-large locator range and probes it once per retained event.
+            let sql = format!(
+                "SELECT locator.event_id, locator.event_type
+                 FROM semantic_event_fact AS event INDEXED BY semantic_event_fact_content
+                 CROSS JOIN locator_event_text AS locator
+                 WHERE {predicate}
+                   AND locator.sequence = event.sequence
+                   AND locator.epoch = ?{epoch_parameter}
+                   AND event.sequence <= ?{sequence_parameter}"
+            );
+            let mut referencing = self
+                .connection
+                .prepare(&sql)
+                .map_err(|error| sqlite_error("prepare removal-audit content seek", error))?;
+            let rows = referencing
+                .query_map(rusqlite::params_from_iter(parameters), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|error| sqlite_error("query removal-audit content seek", error))?;
+            for row in rows {
+                let (event_id, event_type) =
+                    row.map_err(|error| sqlite_error("read removal-audit content seek", error))?;
+                match event_type.as_str() {
+                    "artifact_removed" => {
+                        removal_event_ids.insert(event_id.clone());
+                        audit_event_ids.insert(event_id);
+                    }
+                    "work_object_proposed" => {
+                        audit_event_ids.insert(event_id);
+                    }
+                    _ => {}
+                }
+            }
+            vm_steps = vm_steps.saturating_add(
+                u64::try_from(referencing.get_status(rusqlite::StatementStatus::VmStep))
+                    .unwrap_or(0),
+            );
+        }
+
+        {
+            let mut signatures = self
+                .connection
+                .prepare(
+                    // The CROSS JOIN fences the target-index seek ahead of
+                    // the locator join, mirroring the content-seek fence.
+                    "SELECT locator.event_id
+                     FROM product_history_signature AS signature
+                       INDEXED BY product_history_signature_target
+                     CROSS JOIN locator_event_text AS locator
+                     WHERE signature.target_event_id = ?1
+                       AND locator.sequence = signature.sequence
+                       AND locator.epoch = ?2
+                       AND signature.sequence <= ?3",
+                )
+                .map_err(|error| sqlite_error("prepare removal-audit signatures", error))?;
+            for removal_event_id in &removal_event_ids {
+                let rows = signatures
+                    .query_map(params![removal_event_id, epoch, sequence], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .map_err(|error| sqlite_error("query removal-audit signatures", error))?;
+                for row in rows {
+                    audit_event_ids.insert(
+                        row.map_err(|error| sqlite_error("read removal-audit signatures", error))?,
+                    );
+                }
+            }
+            vm_steps = vm_steps.saturating_add(
+                u64::try_from(signatures.get_status(rusqlite::StatementStatus::VmStep))
+                    .unwrap_or(0),
+            );
+        }
+
+        let event_ids: Vec<String> = audit_event_ids.into_iter().collect();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_fact_sqlite_rows_selected(event_ids.len());
+        Ok((event_ids, vm_steps))
+    }
 }
 
 fn exact_revision_event_ids_statement(

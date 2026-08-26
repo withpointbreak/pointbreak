@@ -214,7 +214,8 @@ pub struct DerivedRevisionDetail {
 ///
 /// Do not rewrite these joins as ordinary inner joins without checking the
 /// `EXPLAIN QUERY PLAN` regression below on the bundled SQLite version.
-const REVISION_COMPONENT_EVENT_IDS_SQL: &str = "WITH RECURSIVE component(revision_id) AS (
+pub(super) const REVISION_COMPONENT_EVENT_IDS_SQL: &str =
+    "WITH RECURSIVE component(revision_id) AS (
              SELECT ?3
              UNION
              SELECT edge.superseded_revision_id
