@@ -518,6 +518,62 @@ mod invocation_read_catalog_tests {
     }
 
     #[test]
+    fn revision_show_full_id_shapes_are_the_only_qualified_revision_routes() {
+        use InvocationReadCatalogV1::Qualified;
+
+        for arguments in [
+            format!("revision show {FULL_REVISION}"),
+            format!("revision show {FULL_REVISION} --repo /tmp/a"),
+            format!("revision show {FULL_REVISION} --track agent:r"),
+            format!("revision show {FULL_REVISION} --include-body"),
+            format!("revision show {FULL_REVISION} --integration-ref origin/main"),
+            format!("revision show {FULL_REVISION} --format json"),
+            format!("revision show {FULL_REVISION} --format json-pretty"),
+            format!("revision show {FULL_REVISION} --format text"),
+            format!(
+                "revision show {FULL_REVISION} --repo /tmp/b --track agent:r --include-body \
+                 --integration-ref origin/main --format json-pretty"
+            ),
+        ] {
+            assert!(
+                matches!(classify(&arguments), Qualified(_)),
+                "{arguments} must classify as the qualified revision detail route"
+            );
+        }
+    }
+
+    #[test]
+    fn revision_legacy_shapes_keep_their_unqualified_classification() {
+        use InvocationReadCatalogV1::LegacyPreflight;
+
+        let mut legacy = vec![
+            "revision show".to_owned(),
+            "revision show --repo /tmp/a".to_owned(),
+            "revision list".to_owned(),
+            "revision list --limit 5".to_owned(),
+            "revision list --repo /tmp/a".to_owned(),
+        ];
+        for selector in [
+            "11111111",
+            "rev:11111111",
+            "deadbeef",
+            "abc",
+            "not-hex",
+            "obj:11111111",
+        ] {
+            legacy.push(format!("revision show {selector}"));
+            legacy.push(format!("revision show {selector} --include-body"));
+        }
+        for arguments in legacy {
+            assert_eq!(
+                classify(&arguments),
+                LegacyPreflight(LegacyPreflightKindV1::Unqualified),
+                "{arguments}",
+            );
+        }
+    }
+
+    #[test]
     fn fragments_and_selector_errors_never_enter_the_qualified_lane() {
         use InvocationReadCatalogV1::LegacyPreflight;
 
@@ -1464,6 +1520,57 @@ mod change_reader_cli_tests {
         assert!(error.contains("migration_required"), "{error}");
         let snapshot = counting.snapshot();
         assert!(snapshot.derived_access_phases.is_empty());
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
+        assert_eq!(snapshot.counters.event_decodes, 0);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn qualified_revision_show_l0_refuses_without_entering_legacy_h1() {
+        use pointbreak::bench_support::longitudinal::{
+            InteractionActorV1, LongitudinalCountingScopeV1,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("revision"),
+            OsString::from("show"),
+            OsString::from(format!("rev:sha256:{}", "1".repeat(64))),
+            OsString::from("--repo"),
+            repo.path().as_os_str().to_owned(),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let cli = Cli::try_parse_from(raw_args.clone()).unwrap();
+        let counting = LongitudinalCountingScopeV1::new("6".repeat(64)).unwrap();
+        counting.record_execution_actor_once(InteractionActorV1::RequestReader);
+        let _guard = counting.enter();
+
+        let error = preflight_public_store_capability(&cli, &raw_args)
+            .err()
+            .expect("L0 refusal")
+            .to_string();
+
+        assert!(error.contains("migration_required"), "{error}");
+        let snapshot = counting.snapshot();
+        assert!(
+            snapshot.derived_access_phases.is_empty(),
+            "qualified revision show must not enter the legacy H1 preflight phase: {:?}",
+            snapshot
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(snapshot.counters.directory_entries_walked, 0);
         assert_eq!(snapshot.counters.event_decodes, 0);
     }

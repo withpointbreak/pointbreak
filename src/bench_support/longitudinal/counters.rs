@@ -305,6 +305,10 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     FactSelectedCarrierHydrationValidation,
     FactSupportCarrierHydrationValidation,
     FactWorkflowProjection,
+    RevisionDetailSqlSelection,
+    RevisionDetailSelectedCarrierHydrationValidation,
+    RevisionDetailSupportCarrierHydrationValidation,
+    RevisionDetailAuditCarrierHydrationValidation,
     SerializationAndOutput,
     CacheAndFallback,
     ReadTransaction,
@@ -317,6 +321,18 @@ pub const INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1: [LongitudinalDerivedAcces
     LongitudinalDerivedAccessPhaseV1::FactSelectedCarrierHydrationValidation,
     LongitudinalDerivedAccessPhaseV1::FactSupportCarrierHydrationValidation,
     LongitudinalDerivedAccessPhaseV1::FactWorkflowProjection,
+];
+
+/// The phases the derived-current `revision show` detail lane must own. The
+/// audit phase carries the removal-audit carrier opens/validations so the
+/// selected and support phase counts stay truthful; audit SQL selection is
+/// attributed inside `RevisionDetailSqlSelection`.
+pub const INTERACTION_REVISION_DETAIL_CURRENT_REQUIRED_PHASES_V1:
+    [LongitudinalDerivedAccessPhaseV1; 4] = [
+    LongitudinalDerivedAccessPhaseV1::RevisionDetailSqlSelection,
+    LongitudinalDerivedAccessPhaseV1::RevisionDetailSelectedCarrierHydrationValidation,
+    LongitudinalDerivedAccessPhaseV1::RevisionDetailSupportCarrierHydrationValidation,
+    LongitudinalDerivedAccessPhaseV1::RevisionDetailAuditCarrierHydrationValidation,
 ];
 
 pub const INTERACTION_FACT_CURRENT_FORBIDDEN_PHASES_V1: [LongitudinalDerivedAccessPhaseV1; 3] = [
@@ -333,11 +349,15 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::ChangePageProposalLocatorExpansion
             | Self::RevisionPageSqlSelection
             | Self::RevisionPageEventIdExpansion
-            | Self::FactSqliteSelection => Ownership::DerivedAccess,
+            | Self::FactSqliteSelection
+            | Self::RevisionDetailSqlSelection => Ownership::DerivedAccess,
             Self::ChangePageCarrierHydrationValidation
             | Self::RevisionPageCarrierHydrationValidation
             | Self::FactSelectedCarrierHydrationValidation
             | Self::FactSupportCarrierHydrationValidation
+            | Self::RevisionDetailSelectedCarrierHydrationValidation
+            | Self::RevisionDetailSupportCarrierHydrationValidation
+            | Self::RevisionDetailAuditCarrierHydrationValidation
             | Self::GovernedWriteTruth
             | Self::CliCapabilityPreflightH1
             | Self::OrdinaryReadStoreResolutionH2

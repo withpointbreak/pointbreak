@@ -3231,6 +3231,7 @@ pub enum InteractionRouteV1 {
     ValidationReviewerList,
     VersionJson,
     AttentionCurrentOrFallback,
+    RevisionShowDetail,
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -3247,6 +3248,28 @@ impl InteractionRouteV1 {
         Self::FACT_READS.contains(&self)
     }
 }
+
+/// The two owner-approved `revision show` performance cells: the derived
+/// active-current target and the explicit-off compatibility characterization.
+/// Active-unavailable revision show is characterization-only prose with no
+/// catalog cell and no measurement.
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const INTERACTION_REVISION_SHOW_CELLS_V1: [(
+    &str,
+    InteractionRouteV1,
+    InteractionSetupExpectationV1,
+); 2] = [
+    (
+        "revision_show_current_exact",
+        InteractionRouteV1::RevisionShowDetail,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "revision_show_explicit_off",
+        InteractionRouteV1::RevisionShowDetail,
+        InteractionSetupExpectationV1::FactExplicitOff,
+    ),
+];
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -3378,6 +3401,17 @@ pub fn interaction_route_state_contract_v1(
             Setup::FactExplicitOff | Setup::AuthoritativeReplay => Some(AUTHORITATIVE),
             Setup::FactActiveUnavailable => Some(FACT_UNAVAILABLE),
             Setup::FactPostSelectionFailure => Some(FACT_TERMINAL),
+            _ => None,
+        };
+    }
+
+    if route == InteractionRouteV1::RevisionShowDetail {
+        // The two owner-approved revision-show cells. Active-unavailable is
+        // characterization-only prose: it carries no catalog cell and no
+        // measurement, so every other setup stays out of the catalog.
+        return match setup {
+            Setup::FactActiveCurrent => Some(FACT_CURRENT),
+            Setup::FactExplicitOff => Some(AUTHORITATIVE),
             _ => None,
         };
     }
