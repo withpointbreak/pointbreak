@@ -25,8 +25,9 @@ use crate::canonical_hash::sha256_bytes_hex;
 use crate::documents::{
     ChangeAttentionPresentationDocumentV2, ChangeAttentionPresentationV1,
     ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1, ChangeDocumentFacadeV1,
-    ChangeListPresentationDocumentV1, ChangeQueryUnavailableDocumentV1, ChangeSummaryV1,
-    ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1, attention_presentation_for_change,
+    ChangeListDocumentV1, ChangeListPresentationDocumentV1, ChangeQueryUnavailableDocumentV1,
+    ChangeSummaryV1, ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1,
+    attention_presentation_for_change,
 };
 use crate::error::{Result, ShoreError};
 use crate::model::{ChangeId, RevisionRefV1};
@@ -61,6 +62,17 @@ impl DerivedChangeAccess {
     }
 
     pub fn resolve_for_inspector(repo: impl AsRef<Path>) -> Result<Self> {
+        Self::resolve_for_read(repo)
+    }
+
+    /// CLI-side sibling of [`Self::resolve_for_inspector`]. Both constructors
+    /// share one resolution body; the distinct names keep each caller's
+    /// surface explicit without renaming the shipped Inspector entry point.
+    pub fn resolve_for_command(repo: impl AsRef<Path>) -> Result<Self> {
+        Self::resolve_for_read(repo)
+    }
+
+    fn resolve_for_read(repo: impl AsRef<Path>) -> Result<Self> {
         let profile = DerivedAccessProfile::from_environment()
             .map_err(|error| ShoreError::Message(error.to_string()))?;
         if profile == DerivedAccessProfile::Off {
@@ -247,9 +259,7 @@ impl DerivedChangeAccess {
             .read_page(ChangePageLens::Changes, request, |_| {})?
             .map_ready(|page| match page {
                 PreparedChangePage::Changes(page) => page,
-                PreparedChangePage::Attention(_) => {
-                    unreachable!("Changes lens constructs a Changes page")
-                }
+                _ => unreachable!("Changes lens constructs a Changes page"),
             }))
     }
 
@@ -261,9 +271,42 @@ impl DerivedChangeAccess {
             .read_page(ChangePageLens::Attention, request, |_| {})?
             .map_ready(|page| match page {
                 PreparedChangePage::Attention(page) => page,
-                PreparedChangePage::Changes(_) => {
-                    unreachable!("Attention lens constructs an Attention page")
-                }
+                _ => unreachable!("Attention lens constructs an Attention page"),
+            }))
+    }
+
+    /// Compose the un-paged review-schema Change list over the bare page
+    /// selection, mirroring [`Self::profile`]'s finished-document return
+    /// shape for the CLI.
+    pub fn review_list_document(&self) -> Result<DerivedChangeOutcomeV1<ChangeListDocumentV1>> {
+        Ok(self
+            .read_page_with_hook(
+                ChangePageLens::Changes,
+                ChangeCompositionTarget::Review,
+                &DerivedChangePageRequestV1::Bare,
+                |_| {},
+            )?
+            .map_ready(|page| match page {
+                PreparedChangePage::ReviewList(document) => document,
+                _ => unreachable!("the Review Changes target composes a review list"),
+            }))
+    }
+
+    /// Compose the review-schema Attention document (`inspect = false`) over
+    /// the bare page selection for the CLI.
+    pub fn review_attention_document(
+        &self,
+    ) -> Result<DerivedChangeOutcomeV1<ChangeAttentionPresentationDocumentV2>> {
+        Ok(self
+            .read_page_with_hook(
+                ChangePageLens::Attention,
+                ChangeCompositionTarget::Review,
+                &DerivedChangePageRequestV1::Bare,
+                |_| {},
+            )?
+            .map_ready(|page| match page {
+                PreparedChangePage::ReviewAttention(document) => document,
+                _ => unreachable!("the Review Attention target composes a review document"),
             }))
     }
 
@@ -444,12 +487,13 @@ impl DerivedChangeAccess {
         request: &DerivedChangePageRequestV1,
         hook: impl FnMut(ChangeReadBoundary),
     ) -> Result<DerivedChangeOutcomeV1<PreparedChangePage>> {
-        self.read_page_with_hook(lens, request, hook)
+        self.read_page_with_hook(lens, ChangeCompositionTarget::Inspector, request, hook)
     }
 
     fn read_page_with_hook(
         &self,
         lens: ChangePageLens,
+        target: ChangeCompositionTarget,
         request: &DerivedChangePageRequestV1,
         mut hook: impl FnMut(ChangeReadBoundary),
     ) -> Result<DerivedChangeOutcomeV1<PreparedChangePage>> {
@@ -858,8 +902,22 @@ impl DerivedChangeAccess {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let presentation_phase =
             enter_derived_access_phase_v1(Phase::ChangePagePresentationProjection);
-        let prepared = match lens {
-            ChangePageLens::Changes => facade
+        let prepared = match (lens, target) {
+            (ChangePageLens::Changes, ChangeCompositionTarget::Review) => facade
+                .selected_list_document_with_presentations(
+                    &selection.change_ids,
+                    &proposal_events,
+                    &generation_stamp,
+                )
+                .map(PreparedChangePage::ReviewList),
+            (ChangePageLens::Attention, ChangeCompositionTarget::Review) => facade
+                .selected_attention_document_with_presentations(
+                    &selection.change_ids,
+                    &proposal_events,
+                    &generation_stamp,
+                )
+                .map(PreparedChangePage::ReviewAttention),
+            (ChangePageLens::Changes, ChangeCompositionTarget::Inspector) => facade
                 .selected_list_document_for_inspector_with_presentations(
                     &selection.change_ids,
                     &proposal_events,
@@ -871,7 +929,7 @@ impl DerivedChangeAccess {
                         window: selection.window.clone(),
                     })
                 }),
-            ChangePageLens::Attention => (|| {
+            (ChangePageLens::Attention, ChangeCompositionTarget::Inspector) => (|| {
                 let document = facade
                     .selected_attention_document_for_inspector_with_presentations(
                         &selection.change_ids,
@@ -1435,6 +1493,18 @@ pub type DerivedAttentionReasonPresentationV1 = ChangeAttentionReasonPresentatio
 enum PreparedChangePage {
     Changes(DerivedChangePageV1),
     Attention(DerivedAttentionPageV1),
+    ReviewList(ChangeListDocumentV1),
+    ReviewAttention(ChangeAttentionPresentationDocumentV2),
+}
+
+/// Document family composed at the page boundary. The Inspector target keeps
+/// the shipped page shapes; the Review target composes the CLI review-schema
+/// documents from the same prepared inputs at the same point in the flow, so
+/// the terminal stability re-proof covers both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChangeCompositionTarget {
+    Inspector,
+    Review,
 }
 
 enum ChangeProposalHydrationPlan<'a> {
@@ -5379,6 +5449,156 @@ mod tests {
         assert_eq!(counters.projection_rebuilds, 0);
         assert_eq!(counters.state_rebuilds, 0);
         assert_eq!(counters.full_history_fallbacks, 0);
+    }
+
+    #[test]
+    fn command_resolution_shares_the_inspector_resolution_body() {
+        let repo = TempDir::new().expect("create disposable command repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize disposable command repository")
+                .success()
+        );
+        let resolved = resolve_store(repo.path()).expect("resolve disposable command store");
+        write_capability_fixture_for_test(
+            resolved.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .expect("activate disposable command store");
+        let store_identity = opaque_path_identity("store", resolved.store_dir())
+            .expect("derive disposable command store identity");
+        DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            resolved.store_dir(),
+            store_identity,
+        )
+        .expect("create disposable command lifecycle")
+        .rebuild(|_| LifecycleControl::Continue)
+        .expect("publish disposable command generation");
+
+        let command = DerivedChangeAccess::resolve_for_command(repo.path())
+            .expect("resolve the Change-aware command runtime");
+        let inspector = DerivedChangeAccess::resolve_for_inspector(repo.path())
+            .expect("resolve the Change-aware Inspector runtime");
+        assert!(command.is_active());
+        assert!(inspector.is_active());
+
+        let DerivedChangeOutcomeV1::Ready(command_profile) =
+            command.profile().expect("read the command profile")
+        else {
+            panic!("command resolution must reach the ready derived profile");
+        };
+        let DerivedChangeOutcomeV1::Ready(inspector_profile) =
+            inspector.profile().expect("read the Inspector profile")
+        else {
+            panic!("Inspector resolution must reach the ready derived profile");
+        };
+        assert_eq!(
+            command_profile, inspector_profile,
+            "both constructors resolve the same store root and runtime state"
+        );
+    }
+
+    #[test]
+    fn review_documents_compose_the_cli_schemas_over_the_bare_page() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("review state"), Some("review state")]]);
+
+        let DerivedChangeOutcomeV1::Ready(list) = fixture
+            .access
+            .review_list_document()
+            .expect("read the review list document")
+        else {
+            panic!("review list must be ready on an active-current generation");
+        };
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("read the Inspector page oracle")
+        else {
+            panic!("Inspector page oracle must be ready");
+        };
+        assert_eq!(list.schema, crate::documents::REVIEW_CHANGE_LIST_SCHEMA);
+        assert_eq!(list.version, 1);
+        assert_eq!(
+            list.projection_stamp, page.document.document.projection_stamp,
+            "the review document binds the same generation stamp"
+        );
+        assert_eq!(list.changes, page.document.document.changes);
+        assert_eq!(list.diagnostics, page.document.document.diagnostics);
+
+        let DerivedChangeOutcomeV1::Ready(attention) = fixture
+            .access
+            .review_attention_document()
+            .expect("read the review attention document")
+        else {
+            panic!("review attention must be ready on an active-current generation");
+        };
+        let DerivedChangeOutcomeV1::Ready(attention_page) = fixture
+            .access
+            .attention(&DerivedChangePageRequestV1::Bare)
+            .expect("read the Inspector attention oracle")
+        else {
+            panic!("Inspector attention oracle must be ready");
+        };
+        assert_eq!(
+            attention.document.schema,
+            crate::documents::ATTENTION_LIST_SCHEMA_V2
+        );
+        assert_eq!(attention.document.version, 2);
+        assert_eq!(attention.document.projection_stamp, list.projection_stamp);
+        assert_eq!(
+            attention.document.changes,
+            attention_page.document.document.changes
+        );
+        assert_eq!(
+            attention.presentations,
+            attention_page.document.presentations
+        );
+    }
+
+    #[test]
+    fn review_documents_fail_closed_with_the_profile_outcome_classes() {
+        fn outcome_class<T>(outcome: &DerivedChangeOutcomeV1<T>) -> &'static str {
+            match outcome {
+                DerivedChangeOutcomeV1::Ready(_) => "ready",
+                DerivedChangeOutcomeV1::AuthorityUnavailable(_) => "authority-unavailable",
+                DerivedChangeOutcomeV1::AuthorityConflicted(_) => "authority-conflicted",
+                DerivedChangeOutcomeV1::AuthorityInvalid(_) => "authority-invalid",
+                DerivedChangeOutcomeV1::ReaderUpgradeRequired(_) => "reader-upgrade-required",
+                DerivedChangeOutcomeV1::ProjectionUnavailable(_) => "projection-unavailable",
+                DerivedChangeOutcomeV1::Retryable(_) => "retryable",
+            }
+        }
+
+        let access = DerivedChangeAccess::from_runtime(DerivedAccessRuntime::from_mode(
+            DerivedAccessMode::Off,
+        ));
+        let profile_class = outcome_class(&access.profile().expect("classify the profile outcome"));
+        assert_ne!(
+            profile_class, "ready",
+            "an inactive runtime must not answer a derived read"
+        );
+        assert_eq!(
+            outcome_class(
+                &access
+                    .review_list_document()
+                    .expect("classify the review list outcome")
+            ),
+            profile_class,
+            "the review list fails closed with the profile's outcome class"
+        );
+        assert_eq!(
+            outcome_class(
+                &access
+                    .review_attention_document()
+                    .expect("classify the review attention outcome")
+            ),
+            profile_class,
+            "the review attention fails closed with the profile's outcome class"
+        );
     }
 
     #[test]

@@ -896,16 +896,7 @@ impl ChangeDocumentFacadeV1 {
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
     ) -> Result<ChangeAttentionPresentationDocumentV2> {
-        if selected_change_ids.iter().any(|change_id| {
-            self.semantic
-                .changes
-                .get(change_id)
-                .is_some_and(|view| view.lifecycle == ChangeLifecycleV1::Accepted)
-        }) {
-            return Err(ShoreError::Message(
-                "selected Attention page contains an accepted Change".to_owned(),
-            ));
-        }
+        self.refuse_accepted_attention_selection(selected_change_ids)?;
         let (changes, presentations) = self.selected_page_content_with_presentations(
             selected_change_ids,
             hydrated_proposal_events,
@@ -920,6 +911,71 @@ impl ChangeDocumentFacadeV1 {
             },
             presentations,
         })
+    }
+
+    /// Compose the un-paged review-schema Change list from the same prepared
+    /// selection as the Inspector page. The CLI list carries no presentations
+    /// wrapper; hydration coverage is still validated by the shared core.
+    pub(crate) fn selected_list_document_with_presentations(
+        &self,
+        selected_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        generation_stamp: &str,
+    ) -> Result<ChangeListDocumentV1> {
+        let (changes, _presentations) = self.selected_page_content_with_presentations(
+            selected_change_ids,
+            hydrated_proposal_events,
+            generation_stamp,
+        )?;
+        Ok(ChangeListDocumentV1 {
+            schema: REVIEW_CHANGE_LIST_SCHEMA.to_owned(),
+            version: 1,
+            changes,
+            diagnostics: self.provenance.diagnostics.clone(),
+            projection_stamp: generation_stamp.to_owned(),
+        })
+    }
+
+    /// Compose the review-schema Attention document from the same prepared
+    /// selection as the Inspector page. Accepted Changes remain excluded at
+    /// both the selection and document boundaries.
+    pub(crate) fn selected_attention_document_with_presentations(
+        &self,
+        selected_change_ids: &[ChangeId],
+        hydrated_proposal_events: &[ShoreEvent],
+        generation_stamp: &str,
+    ) -> Result<ChangeAttentionPresentationDocumentV2> {
+        self.refuse_accepted_attention_selection(selected_change_ids)?;
+        let (changes, presentations) = self.selected_page_content_with_presentations(
+            selected_change_ids,
+            hydrated_proposal_events,
+            generation_stamp,
+        )?;
+        Ok(ChangeAttentionPresentationDocumentV2 {
+            document: ChangeAttentionDocumentV2 {
+                schema: ATTENTION_LIST_SCHEMA_V2.to_owned(),
+                version: 2,
+                changes,
+                projection_stamp: generation_stamp.to_owned(),
+            },
+            presentations,
+        })
+    }
+
+    /// Accepted Changes never appear on an Attention surface; a selection
+    /// naming one is a caller defect on every composition target.
+    fn refuse_accepted_attention_selection(&self, selected_change_ids: &[ChangeId]) -> Result<()> {
+        if selected_change_ids.iter().any(|change_id| {
+            self.semantic
+                .changes
+                .get(change_id)
+                .is_some_and(|view| view.lifecycle == ChangeLifecycleV1::Accepted)
+        }) {
+            return Err(ShoreError::Message(
+                "selected Attention page contains an accepted Change".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     /// Search a complete bodyless candidate Change set after every candidate
@@ -3401,6 +3457,114 @@ mod tests {
 
         assert_eq!(actual_list, expected_list);
         assert_eq!(actual_attention, expected_attention);
+    }
+
+    #[test]
+    fn selected_review_documents_mirror_the_inspector_composition_modulo_schema() {
+        let (change_id, revision, facade) = facade();
+        let hydrated = [
+            proposal_event(&revision, Some("review summary"), "proposal:review-one"),
+            proposal_event(&revision, Some("review summary"), "proposal:review-two"),
+        ];
+
+        let inspector_list = facade
+            .selected_list_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        let review_list = facade
+            .selected_list_document_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        assert_eq!(review_list.schema, REVIEW_CHANGE_LIST_SCHEMA);
+        assert_eq!(review_list.version, 1);
+        let mut expected_list = inspector_list.document.clone();
+        expected_list.schema = REVIEW_CHANGE_LIST_SCHEMA.to_owned();
+        assert_eq!(
+            review_list, expected_list,
+            "the review list body matches the Inspector composition modulo schema"
+        );
+
+        let inspector_attention = facade
+            .selected_attention_document_for_inspector_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        let review_attention = facade
+            .selected_attention_document_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .unwrap();
+        assert_eq!(review_attention.document.schema, ATTENTION_LIST_SCHEMA_V2);
+        assert_eq!(review_attention.document.version, 2);
+        let mut expected_attention = inspector_attention.clone();
+        expected_attention.document.schema = ATTENTION_LIST_SCHEMA_V2.to_owned();
+        assert_eq!(
+            review_attention, expected_attention,
+            "the review attention body matches the Inspector composition modulo schema"
+        );
+    }
+
+    #[test]
+    fn selected_review_documents_reject_an_empty_stamp_and_an_accepted_change() {
+        let (change_id, revision, facade) = facade();
+        let hydrated = [proposal_event(
+            &revision,
+            Some("review summary"),
+            "proposal:review-stamp",
+        )];
+
+        for empty_stamp in [
+            facade
+                .selected_list_document_with_presentations(
+                    std::slice::from_ref(&change_id),
+                    &hydrated,
+                    "",
+                )
+                .map(|_| ()),
+            facade
+                .selected_attention_document_with_presentations(
+                    std::slice::from_ref(&change_id),
+                    &hydrated,
+                    "",
+                )
+                .map(|_| ()),
+        ] {
+            assert!(
+                empty_stamp
+                    .expect_err("an empty generation stamp is refused")
+                    .to_string()
+                    .contains("generation stamp"),
+            );
+        }
+
+        let mut semantic = facade.semantic.clone();
+        semantic
+            .changes
+            .get_mut(&change_id)
+            .expect("fixture Change view")
+            .lifecycle = ChangeLifecycleV1::Accepted;
+        let mut provenance = facade.provenance.clone();
+        provenance.projection_stamp =
+            crate::session::change_document_projection_stamp(&semantic, &provenance).unwrap();
+        let accepted_facade = ChangeDocumentFacadeV1::new(semantic, provenance).unwrap();
+        let refused = accepted_facade
+            .selected_attention_document_with_presentations(
+                std::slice::from_ref(&change_id),
+                &hydrated,
+                "sha256:checkpoint-page",
+            )
+            .expect_err("the review attention selection refuses an accepted Change");
+        assert!(refused.to_string().contains("accepted Change"));
     }
 
     #[test]
