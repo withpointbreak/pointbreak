@@ -1,12 +1,11 @@
 //! Characterization floor and route contracts for the three producer-reuse
 //! Change CLI reads: `change profile`, `change list`, and `change attention`.
 //!
-//! The passing tests freeze today's authoritative bytes per format lane; they
-//! are the parity oracle for the derived routing and may only change where the
-//! documented stamp substitution is the specified difference. The ignored
-//! tests are the derived-route contract: they fail while the commands still
-//! replay the complete authoritative fold and become the Green targets when
-//! the reads route through the existing derived producers.
+//! The characterization tests freeze the authoritative bytes per format lane;
+//! they are the parity oracle for the derived routing and may only change
+//! where the documented stamp substitution is the specified difference. The
+//! route-contract tests pin the derived lane itself: the stamp substitution,
+//! carrier-proportional counters, and the fallback states.
 
 mod support;
 

@@ -22,13 +22,13 @@ use pointbreak::session::{
     ChangeCreateOptions, ChangeLinkOptions, ChangeMembershipOptions,
     ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1, ChangeReaderStateV1,
     ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
-    DerivedChangeOutcomeV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1,
-    RevisionShowOptions, SnapshotContentState, WorktreeSpec, assert_change_revision_relation,
-    capture_change_revision, change_reader_state_for_repo, create_change, dry_run_bulk_adoption,
-    join_revision_to_change, link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup,
-    review_source_binding, select_review_cursor, show_revision_for_change_reader_ready,
-    validate_review_cursor_for_write, withdraw_change_revision_relation,
-    withdraw_revision_from_change,
+    DerivedChangeOutcomeV1, DerivedReadSourceV1, ReviewCursorV1, ReviewSourceBindingV1,
+    ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState, WorktreeSpec,
+    assert_change_revision_relation, capture_change_revision, change_reader_state_for_repo,
+    create_change, dry_run_bulk_adoption, join_revision_to_change, link_changes,
+    migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
+    select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
+    withdraw_change_revision_relation, withdraw_revision_from_change,
 };
 
 use crate::cli::{common, output};
@@ -719,13 +719,18 @@ fn run_migration_restore(
 }
 
 fn run_profile(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
-    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::profile) {
-        DerivedChangeAttempt::Answered(document) => {
-            record_change_route_state(ChangeRouteState::DerivedCurrent);
+    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::profile_with_source)
+        .with_truthful_profile_state()
+    {
+        DerivedChangeAttempt::Answered {
+            document: (document, _),
+            state,
+        } => {
+            record_change_route_state(state);
             write(&args.format_args, stdout, &document)
         }
-        DerivedChangeAttempt::Fallback { labeled } => {
-            record_change_route_state(fallback_route_state(labeled));
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
             let state = change_reader_state_for_repo(&args.repo)?;
             write(
                 &args.format_args,
@@ -738,12 +743,12 @@ fn run_profile(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
 
 fn run_list(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_list_document) {
-        DerivedChangeAttempt::Answered(document) => {
-            record_change_route_state(ChangeRouteState::DerivedCurrent);
+        DerivedChangeAttempt::Answered { document, state } => {
+            record_change_route_state(state);
             write(&args.format_args, stdout, &serde_json::to_value(document)?)
         }
-        DerivedChangeAttempt::Fallback { labeled } => {
-            record_change_route_state(fallback_route_state(labeled));
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
                 Ok(serde_json::to_value(facade.list_document())?)
             })
@@ -756,12 +761,12 @@ fn run_attention(
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_attention_document) {
-        DerivedChangeAttempt::Answered(document) => {
-            record_change_route_state(ChangeRouteState::DerivedCurrent);
+        DerivedChangeAttempt::Answered { document, state } => {
+            record_change_route_state(state);
             write(&args.format_args, stdout, &serde_json::to_value(document)?)
         }
-        DerivedChangeAttempt::Fallback { labeled } => {
-            record_change_route_state(fallback_route_state(labeled));
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
                 Ok(serde_json::to_value(
                     facade.attention_document_with_presentations(false)?,
@@ -772,40 +777,76 @@ fn run_attention(
 }
 
 enum DerivedChangeAttempt<T> {
-    Answered(T),
+    Answered {
+        document: T,
+        state: ChangeRouteState,
+    },
     Fallback {
-        #[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
-        labeled: bool,
+        state: ChangeRouteState,
     },
 }
 
-/// Attempt one derived producer for a Change read. The derived lane answers
-/// only when command resolution succeeds and the producer reaches `Ready`
-/// (which includes its capability-carrier control path for non-L2 stores);
-/// every other outcome falls back to the caller's exact existing
-/// authoritative arm, labeled through the route-state counter rather than
-/// through any output byte.
-fn fallback_route_state(labeled: bool) -> ChangeRouteState {
-    if labeled {
-        ChangeRouteState::LabeledFallbackToAuthoritative
-    } else {
-        ChangeRouteState::AuthoritativeReplay
+impl DerivedChangeAttempt<(ReaderProfileDocumentV1, DerivedReadSourceV1)> {
+    /// A profile answered through the capability control path is a read of
+    /// the authoritative journal's capability carriers, not a derived
+    /// generation serving the request; label it truthfully.
+    fn with_truthful_profile_state(self) -> Self {
+        match self {
+            Self::Answered {
+                document: (document, DerivedReadSourceV1::CapabilityControlPath),
+                ..
+            } => Self::Answered {
+                document: (document, DerivedReadSourceV1::CapabilityControlPath),
+                state: ChangeRouteState::AuthoritativeReplay,
+            },
+            other => other,
+        }
     }
 }
 
+/// Attempt one derived producer for a Change read. The derived lane answers
+/// only when command resolution succeeds and the producer reaches `Ready`;
+/// every other outcome falls back to the caller's exact existing
+/// authoritative arm, labeled through the route-state counter rather than
+/// through any output byte. Resolution failure and explicit off are the
+/// ordinary authoritative path; unavailable, catching-up, and
+/// rebuild-required outcomes arrive before any derived selection is consumed
+/// and fall back unlabeled; the labeled state is reserved for post-selection
+/// failure outcomes.
 fn attempt_derived_change_read<T, E>(
     repo: &std::path::Path,
     produce: impl FnOnce(&DerivedChangeAccess) -> Result<DerivedChangeOutcomeV1<T>, E>,
 ) -> DerivedChangeAttempt<T> {
     let Ok(access) = DerivedChangeAccess::resolve_for_command(repo) else {
-        return DerivedChangeAttempt::Fallback { labeled: false };
+        return DerivedChangeAttempt::Fallback {
+            state: ChangeRouteState::AuthoritativeReplay,
+        };
     };
     if !access.is_active() {
-        return DerivedChangeAttempt::Fallback { labeled: false };
+        return DerivedChangeAttempt::Fallback {
+            state: ChangeRouteState::AuthoritativeReplay,
+        };
     }
     match produce(&access) {
-        Ok(DerivedChangeOutcomeV1::Ready(document)) => DerivedChangeAttempt::Answered(document),
-        Ok(_) | Err(_) => DerivedChangeAttempt::Fallback { labeled: true },
+        Ok(DerivedChangeOutcomeV1::Ready(document)) => DerivedChangeAttempt::Answered {
+            document,
+            state: ChangeRouteState::DerivedCurrent,
+        },
+        Ok(
+            DerivedChangeOutcomeV1::AuthorityUnavailable(_)
+            | DerivedChangeOutcomeV1::ProjectionUnavailable(_)
+            | DerivedChangeOutcomeV1::Retryable(_),
+        ) => DerivedChangeAttempt::Fallback {
+            state: ChangeRouteState::UnlabeledFallbackToAuthoritative,
+        },
+        Ok(
+            DerivedChangeOutcomeV1::AuthorityConflicted(_)
+            | DerivedChangeOutcomeV1::AuthorityInvalid(_)
+            | DerivedChangeOutcomeV1::ReaderUpgradeRequired(_),
+        )
+        | Err(_) => DerivedChangeAttempt::Fallback {
+            state: ChangeRouteState::LabeledFallbackToAuthoritative,
+        },
     }
 }
 
@@ -813,10 +854,11 @@ fn attempt_derived_change_read<T, E>(
 use pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1 as ChangeRouteState;
 
 #[cfg(not(feature = "longitudinal-counting"))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChangeRouteState {
     DerivedCurrent,
     AuthoritativeReplay,
+    UnlabeledFallbackToAuthoritative,
     LabeledFallbackToAuthoritative,
 }
 
@@ -1432,5 +1474,96 @@ mod tests {
             unavailable_content_availability(&[]),
             ContentAvailabilityV1::Missing
         );
+    }
+
+    fn store_fixture(event_assets: &[(&str, &[u8])]) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("create disposable store fixture");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize disposable store fixture")
+                .success()
+        );
+        std::fs::create_dir_all(repo.path().join(".pointbreak")).expect("create store dotdir");
+        std::fs::write(
+            repo.path().join(".pointbreak/store.local.json"),
+            b"{\"schema\":\"shore.store-config\",\"version\":1,\"mode\":\"ephemeral\"}\n",
+        )
+        .expect("write disposable store configuration");
+        let events = repo.path().join(".pointbreak/data/events");
+        std::fs::create_dir_all(&events).expect("create disposable event directory");
+        for (name, bytes) in event_assets {
+            std::fs::write(events.join(name), bytes).expect("install capability fixture event");
+        }
+        repo
+    }
+
+    /// The route-state labels are truthful per store state: a profile answered
+    /// from the capability control path is an authoritative replay, not a
+    /// derived-current read, and a selected-but-unbuilt generation is an
+    /// unlabeled fallback, not a labeled post-selection failure.
+    #[test]
+    fn derived_attempt_states_are_truthful_for_non_generation_stores() {
+        let m1 = store_fixture(&[(
+            "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+            include_bytes!(
+                "../../tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+            ),
+        )]);
+        match attempt_derived_change_read(m1.path(), DerivedChangeAccess::profile_with_source)
+            .with_truthful_profile_state()
+        {
+            DerivedChangeAttempt::Answered {
+                document: (document, source),
+                state,
+            } => {
+                assert_eq!(
+                    document.availability,
+                    pointbreak::documents::ReaderProfileAvailabilityV1::MigrationInProgress
+                );
+                assert_eq!(
+                    source,
+                    pointbreak::session::DerivedReadSourceV1::CapabilityControlPath
+                );
+                assert_eq!(
+                    state,
+                    ChangeRouteState::AuthoritativeReplay,
+                    "a control-path answer is an authoritative replay"
+                );
+            }
+            DerivedChangeAttempt::Fallback { .. } => {
+                panic!("the M1 control path answers with the typed profile document")
+            }
+        }
+
+        let unbuilt = store_fixture(&[
+            (
+                "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+                include_bytes!(
+                    "../../tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+                ),
+            ),
+            (
+                "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
+                include_bytes!(
+                    "../../tests/support/assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+                ),
+            ),
+        ]);
+        match attempt_derived_change_read(unbuilt.path(), DerivedChangeAccess::review_list_document)
+        {
+            DerivedChangeAttempt::Fallback { state } => {
+                assert_eq!(
+                    state,
+                    ChangeRouteState::UnlabeledFallbackToAuthoritative,
+                    "an unavailable generation falls back unlabeled, before any selection"
+                );
+            }
+            DerivedChangeAttempt::Answered { .. } => {
+                panic!("an unbuilt generation cannot answer a derived page read")
+            }
+        }
     }
 }

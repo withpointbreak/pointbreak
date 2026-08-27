@@ -88,10 +88,24 @@ impl DerivedChangeAccess {
     }
 
     pub fn profile(&self) -> Result<DerivedChangeOutcomeV1<ReaderProfileDocumentV1>> {
+        Ok(self
+            .profile_with_source()?
+            .map_ready(|(document, _)| document))
+    }
+
+    /// [`Self::profile`] plus where a Ready answer came from, so a caller that
+    /// labels its route can tell the proven-current generation apart from the
+    /// authoritative capability control path (non-L2 stores).
+    pub fn profile_with_source(
+        &self,
+    ) -> Result<DerivedChangeOutcomeV1<(ReaderProfileDocumentV1, DerivedReadSourceV1)>> {
+        let control = |outcome: DerivedChangeOutcomeV1<ReaderProfileDocumentV1>| {
+            outcome.map_ready(|document| (document, DerivedReadSourceV1::CapabilityControlPath))
+        };
         let current = match self.runtime.current() {
             Ok(RuntimeCurrentRead::Ready(current)) => current,
             Ok(RuntimeCurrentRead::Unavailable(status)) => {
-                return Ok(self.profile_control_outcome(status));
+                return Ok(control(self.profile_control_outcome(status)));
             }
             Err(error) => {
                 return Ok(DerivedChangeOutcomeV1::projection_unavailable(
@@ -103,11 +117,11 @@ impl DerivedChangeAccess {
         let generation_id = current.generation_id().to_owned();
         let checkpoint = match current.pin_change_reader_checkpoint() {
             Ok(checkpoint) => checkpoint,
-            Err(error) => return Ok(self.profile_receipt_failure_outcome(error)),
+            Err(error) => return Ok(control(self.profile_receipt_failure_outcome(error))),
         };
         let document = match current.reader_profile_document(&checkpoint) {
             Ok(document) => document,
-            Err(error) => return Ok(self.profile_receipt_failure_outcome(error)),
+            Err(error) => return Ok(control(self.profile_receipt_failure_outcome(error))),
         };
 
         let final_current = match self.runtime.current() {
@@ -141,7 +155,10 @@ impl DerivedChangeAccess {
                 "derived Change profile checkpoint changed before response completion",
             ));
         }
-        Ok(DerivedChangeOutcomeV1::Ready(document))
+        Ok(DerivedChangeOutcomeV1::Ready((
+            document,
+            DerivedReadSourceV1::Generation,
+        )))
     }
 
     fn profile_control_outcome(
@@ -259,7 +276,11 @@ impl DerivedChangeAccess {
             .read_page(ChangePageLens::Changes, request, |_| {})?
             .map_ready(|page| match page {
                 PreparedChangePage::Changes(page) => page,
-                _ => unreachable!("Changes lens constructs a Changes page"),
+                PreparedChangePage::Attention(_)
+                | PreparedChangePage::ReviewList(_)
+                | PreparedChangePage::ReviewAttention(_) => {
+                    unreachable!("Changes lens constructs a Changes page")
+                }
             }))
     }
 
@@ -271,7 +292,11 @@ impl DerivedChangeAccess {
             .read_page(ChangePageLens::Attention, request, |_| {})?
             .map_ready(|page| match page {
                 PreparedChangePage::Attention(page) => page,
-                _ => unreachable!("Attention lens constructs an Attention page"),
+                PreparedChangePage::Changes(_)
+                | PreparedChangePage::ReviewList(_)
+                | PreparedChangePage::ReviewAttention(_) => {
+                    unreachable!("Attention lens constructs an Attention page")
+                }
             }))
     }
 
@@ -288,7 +313,11 @@ impl DerivedChangeAccess {
             )?
             .map_ready(|page| match page {
                 PreparedChangePage::ReviewList(document) => document,
-                _ => unreachable!("the Review Changes target composes a review list"),
+                PreparedChangePage::Changes(_)
+                | PreparedChangePage::Attention(_)
+                | PreparedChangePage::ReviewAttention(_) => {
+                    unreachable!("the Review Changes target composes a review list")
+                }
             }))
     }
 
@@ -306,7 +335,11 @@ impl DerivedChangeAccess {
             )?
             .map_ready(|page| match page {
                 PreparedChangePage::ReviewAttention(document) => document,
-                _ => unreachable!("the Review Attention target composes a review document"),
+                PreparedChangePage::Changes(_)
+                | PreparedChangePage::Attention(_)
+                | PreparedChangePage::ReviewList(_) => {
+                    unreachable!("the Review Attention target composes a review document")
+                }
             }))
     }
 
@@ -1505,6 +1538,17 @@ enum PreparedChangePage {
 enum ChangeCompositionTarget {
     Inspector,
     Review,
+}
+
+/// Where a Ready derived answer came from: the proven-current generation, or
+/// the authoritative capability-carrier control path a non-L2 store answers
+/// through. Callers that label their route use this to keep the route-state
+/// counters truthful.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DerivedReadSourceV1 {
+    Generation,
+    CapabilityControlPath,
 }
 
 enum ChangeProposalHydrationPlan<'a> {
@@ -5557,6 +5601,55 @@ mod tests {
             attention.presentations,
             attention_page.document.presentations
         );
+    }
+
+    #[test]
+    fn profile_source_distinguishes_the_generation_from_the_control_path() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("source state"), Some("source state")]]);
+        let DerivedChangeOutcomeV1::Ready((document, source)) = fixture
+            .access
+            .profile_with_source()
+            .expect("read the sourced profile")
+        else {
+            panic!("an active-current generation answers the sourced profile");
+        };
+        assert_eq!(document.availability, ReaderProfileAvailabilityV1::Ready);
+        assert_eq!(source, DerivedReadSourceV1::Generation);
+        let DerivedChangeOutcomeV1::Ready(unsourced) =
+            fixture.access.profile().expect("read the plain profile")
+        else {
+            panic!("the plain profile mirrors the sourced read");
+        };
+        assert_eq!(unsourced, document);
+
+        let control = TempDir::new().expect("create disposable control-path repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(control.path())
+                .status()
+                .expect("initialize disposable control-path repository")
+                .success()
+        );
+        let resolved = resolve_store(control.path()).expect("resolve disposable control store");
+        write_capability_fixture_for_test(
+            resolved.backend().journal().as_ref(),
+            CapabilityFixtureState::M1,
+        )
+        .expect("install the M1 capability fixture");
+        let access = DerivedChangeAccess::resolve_for_command(control.path())
+            .expect("resolve the M1 command runtime");
+        let DerivedChangeOutcomeV1::Ready((document, source)) = access
+            .profile_with_source()
+            .expect("read the M1 sourced profile")
+        else {
+            panic!("the M1 control path answers with the typed profile document");
+        };
+        assert_eq!(
+            document.availability,
+            ReaderProfileAvailabilityV1::MigrationInProgress
+        );
+        assert_eq!(source, DerivedReadSourceV1::CapabilityControlPath);
     }
 
     #[test]

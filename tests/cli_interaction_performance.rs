@@ -1961,7 +1961,7 @@ fn change_read_cell_catalog_freezes_the_four_approved_cells() {
 }
 
 #[test]
-fn change_read_cells_run_counted_with_byte_parity() {
+fn change_read_cells_run_counted_with_plain_run_parity() {
     let fixture = fixture();
     let repo = fixture.repo.path().to_string_lossy().into_owned();
     let execution = execution_identity();
