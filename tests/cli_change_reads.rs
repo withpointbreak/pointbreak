@@ -453,6 +453,100 @@ fn assert_typed_capability_documents(repo_arg: &str, state: &str) {
 }
 
 #[test]
+fn change_list_and_attention_bytes_are_identical_while_derived_is_unavailable() {
+    let fixture = change_reads_fixture();
+
+    for command in ["list", "attention"] {
+        for lane in FORMAT_LANES {
+            assert_derived_lane_byte_parity(&fixture, command, lane, "unavailable");
+        }
+    }
+}
+
+/// With the derived generation active-current, the derived lane preserves the
+/// characterization floor's domain properties: ChangeId-ascending changes,
+/// RevisionId-ascending current revision refs, the accepted-Change exclusion
+/// on attention, and the list diagnostics vocabulary.
+#[test]
+fn change_list_and_attention_active_current_preserve_ordering_and_exclusion() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let list_output = pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], ACTIVE);
+    assert_success(&list_output);
+    let list = parse_json(&list_output.stdout);
+    let off_output = pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF);
+    assert_success(&off_output);
+    assert_ne!(
+        list["projectionStamp"],
+        parse_json(&off_output.stdout)["projectionStamp"],
+        "the derived lane must be serving before its ordering is meaningful"
+    );
+
+    let changes = list["changes"].as_array().expect("changes array");
+    let ids = changes
+        .iter()
+        .map(|change| change["changeId"].as_str().expect("change id"))
+        .collect::<Vec<_>>();
+    let mut sorted_ids = ids.clone();
+    sorted_ids.sort_unstable();
+    assert_eq!(ids, sorted_ids, "derived changes are ChangeId-ascending");
+    let parallel = changes
+        .iter()
+        .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
+        .expect("parallel Change summary");
+    let current_ids = parallel["currentRevisionRefs"]
+        .as_array()
+        .expect("current revision refs")
+        .iter()
+        .map(|reference| reference["revisionId"].as_str().expect("revision id"))
+        .collect::<Vec<_>>();
+    let mut sorted_current = current_ids.clone();
+    sorted_current.sort_unstable();
+    assert_eq!(
+        current_ids, sorted_current,
+        "derived current revision refs are RevisionId-ascending"
+    );
+    assert_eq!(current_ids.len(), 2);
+    assert!(
+        list["diagnostics"]
+            .as_array()
+            .expect("list diagnostics")
+            .iter()
+            .any(|value| {
+                value.as_str().expect("diagnostic string")
+                    == format!(
+                        "change_membership_withdrawal_claim_missing:{}",
+                        fixture.withdrawn_claim_id
+                    )
+            }),
+        "derived list carries the withdrawal diagnostic"
+    );
+
+    let attention_output = pointbreak_env(
+        ["change", "attention", "--repo", fixture.repo_arg()],
+        ACTIVE,
+    );
+    assert_success(&attention_output);
+    let attention = parse_json(&attention_output.stdout);
+    let attention_ids = attention["changes"]
+        .as_array()
+        .expect("attention changes")
+        .iter()
+        .map(|change| change["changeId"].as_str().expect("change id"))
+        .collect::<Vec<_>>();
+    assert!(attention_ids.contains(&fixture.parallel_change_id.as_str()));
+    assert!(
+        !attention_ids.contains(&fixture.accepted_change_id.as_str()),
+        "the derived attention lane excludes the accepted Change"
+    );
+    assert!(
+        attention.get("diagnostics").is_none(),
+        "attention keeps no top-level diagnostics field on the derived lane"
+    );
+}
+
+#[test]
 fn change_profile_bytes_are_identical_across_derived_states() {
     let fixture = change_reads_fixture();
 
@@ -508,7 +602,6 @@ fn assert_derived_lane_byte_parity(
 /// presentation-fold stamp; every other byte matches the explicit-off lane,
 /// and both derived documents at one store state share one stamp value.
 #[test]
-#[ignore = "red until the change reads route through the derived producers"]
 fn change_list_and_attention_active_current_substitute_one_derived_stamp() {
     let fixture = change_reads_fixture();
     fixture.build_derived();
@@ -670,7 +763,6 @@ mod counted {
     /// the decode count nor the carrier-open count, and the existing
     /// Change-page counters are recorded.
     #[test]
-    #[ignore = "red until the change reads route through the derived producers"]
     fn change_list_and_attention_active_current_stay_carrier_proportional() {
         let fixture = change_reads_fixture();
         fixture.build_derived();

@@ -378,18 +378,8 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
         ChangeCommand::Profile(args) => run_profile(&args, stdout),
-        ChangeCommand::List(args) => {
-            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
-                Ok(serde_json::to_value(facade.list_document())?)
-            })
-        }
-        ChangeCommand::Attention(args) => {
-            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
-                Ok(serde_json::to_value(
-                    facade.attention_document_with_presentations(false)?,
-                )?)
-            })
-        }
+        ChangeCommand::List(args) => run_list(&args, stdout),
+        ChangeCommand::Attention(args) => run_attention(&args, stdout),
         ChangeCommand::Show(args) => {
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
                 Ok(serde_json::to_value(
@@ -711,17 +701,48 @@ fn run_profile(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
             write(&args.format_args, stdout, &document)
         }
         DerivedChangeAttempt::Fallback { labeled } => {
-            record_change_route_state(if labeled {
-                ChangeRouteState::LabeledFallbackToAuthoritative
-            } else {
-                ChangeRouteState::AuthoritativeReplay
-            });
+            record_change_route_state(fallback_route_state(labeled));
             let state = change_reader_state_for_repo(&args.repo)?;
             write(
                 &args.format_args,
                 stdout,
                 &ReaderProfileDocumentV1::from(&state.capability),
             )
+        }
+    }
+}
+
+fn run_list(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_list_document) {
+        DerivedChangeAttempt::Answered(document) => {
+            record_change_route_state(ChangeRouteState::DerivedCurrent);
+            write(&args.format_args, stdout, &serde_json::to_value(document)?)
+        }
+        DerivedChangeAttempt::Fallback { labeled } => {
+            record_change_route_state(fallback_route_state(labeled));
+            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
+                Ok(serde_json::to_value(facade.list_document())?)
+            })
+        }
+    }
+}
+
+fn run_attention(
+    args: &ReadArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_attention_document) {
+        DerivedChangeAttempt::Answered(document) => {
+            record_change_route_state(ChangeRouteState::DerivedCurrent);
+            write(&args.format_args, stdout, &serde_json::to_value(document)?)
+        }
+        DerivedChangeAttempt::Fallback { labeled } => {
+            record_change_route_state(fallback_route_state(labeled));
+            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
+                Ok(serde_json::to_value(
+                    facade.attention_document_with_presentations(false)?,
+                )?)
+            })
         }
     }
 }
@@ -740,6 +761,14 @@ enum DerivedChangeAttempt<T> {
 /// every other outcome falls back to the caller's exact existing
 /// authoritative arm, labeled through the route-state counter rather than
 /// through any output byte.
+fn fallback_route_state(labeled: bool) -> ChangeRouteState {
+    if labeled {
+        ChangeRouteState::LabeledFallbackToAuthoritative
+    } else {
+        ChangeRouteState::AuthoritativeReplay
+    }
+}
+
 fn attempt_derived_change_read<T, E>(
     repo: &std::path::Path,
     produce: impl FnOnce(&DerivedChangeAccess) -> Result<DerivedChangeOutcomeV1<T>, E>,
