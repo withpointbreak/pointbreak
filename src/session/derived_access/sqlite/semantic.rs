@@ -1094,6 +1094,37 @@ pub(crate) enum SqliteSemanticError {
     CarrierMismatch(TruthCursor),
 }
 
+/// The batch step of the selected exact-Revision proposal locator read.
+///
+/// The `CROSS JOIN` order and the `INDEXED BY` clause are deliberate planner
+/// fences: the read must advance from the selected TEMP set through the exact
+/// proposal index, then point-read the locator and receipt rows by sequence.
+/// With ordinary inner joins SQLite is free to begin from the
+/// bounded-but-large locator range and, because `INDEXED BY` forbids the
+/// proposal table's sequence key, rescan the whole proposal index once per
+/// event row — `O(journal * proposals)` for a selected set of any size. Do
+/// not rewrite these joins as ordinary inner joins without checking the
+/// `EXPLAIN QUERY PLAN` regression on the bundled SQLite version.
+pub(crate) const PROPOSAL_CARRIER_LOCATOR_BATCH_SQL: &str =
+    "SELECT receipt.epoch, proposal.sequence,
+            receipt.logical_reread_key_hash, locator.replay_key,
+            locator.event_id, locator.event_type, locator.payload_hash,
+            receipt.validation_witness, proposal.revision_id,
+            proposal.object_artifact_content_hash
+     FROM temp.pointbreak_proposal_exact_lookup AS selected
+     CROSS JOIN semantic_revision_proposal_carrier AS proposal
+          INDEXED BY semantic_revision_proposal_exact
+     CROSS JOIN locator_event_text AS locator
+     CROSS JOIN cursor_receipt_text AS receipt
+     WHERE proposal.revision_id = selected.revision_id
+       AND proposal.object_artifact_content_hash =
+           selected.object_artifact_content_hash
+       AND locator.sequence = proposal.sequence
+       AND receipt.sequence = proposal.sequence
+       AND locator.epoch = ?1
+       AND proposal.sequence <= ?2
+     ORDER BY proposal.sequence";
+
 impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
         Self::open_inner(locator, true)
@@ -2059,6 +2090,9 @@ impl SqliteSemantic {
     /// entry for every selected exact Revision, including explicit empty
     /// groups, and every duplicate carrier remains independently ordered by
     /// its truth sequence for subsequent authoritative hydration.
+    ///
+    /// [`PROPOSAL_CARRIER_LOCATOR_BATCH_SQL`] carries the planner fence for
+    /// the batch step; see its comment before touching the join shape.
     pub(crate) fn proposal_carrier_locators_for_exact_revisions(
         &self,
         selected: &BTreeSet<RevisionRefV1>,
@@ -2119,26 +2153,7 @@ impl SqliteSemantic {
         }
         {
             let mut statement = transaction
-                .prepare(
-                    "SELECT receipt.epoch, proposal.sequence,
-                            receipt.logical_reread_key_hash, locator.replay_key,
-                            locator.event_id, locator.event_type, locator.payload_hash,
-                            receipt.validation_witness, proposal.revision_id,
-                            proposal.object_artifact_content_hash
-                     FROM temp.pointbreak_proposal_exact_lookup AS selected
-                     JOIN semantic_revision_proposal_carrier AS proposal
-                          INDEXED BY semantic_revision_proposal_exact
-                       ON proposal.revision_id = selected.revision_id
-                      AND proposal.object_artifact_content_hash =
-                          selected.object_artifact_content_hash
-                     JOIN locator_event_text AS locator
-                       ON locator.sequence = proposal.sequence
-                     JOIN cursor_receipt_text AS receipt
-                       ON receipt.sequence = proposal.sequence
-                     WHERE locator.epoch = ?1
-                       AND proposal.sequence <= ?2
-                     ORDER BY proposal.sequence",
-                )
+                .prepare(PROPOSAL_CARRIER_LOCATOR_BATCH_SQL)
                 .map_err(|error| sqlite_error("prepare proposal carrier locator batch", error))?;
             let rows = statement
                 .query_map(

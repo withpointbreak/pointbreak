@@ -2262,6 +2262,91 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
     }
 }
 
+/// The batch locator read must advance from the selected TEMP set through the
+/// exact proposal index and point-read locator and receipt rows by sequence.
+/// The inverted plan — locator range outermost with a full proposal-index
+/// rescan per event row — is `O(journal * proposals)` and turns the bodyless
+/// Change page into minutes of work at retained scale while every
+/// small-fixture correctness matrix stays green.
+#[test]
+fn proposal_carrier_locator_batch_plan_advances_from_the_selected_set() {
+    use crate::bench_support::derived_access::sqlite_locator::PROPOSAL_CARRIER_LOCATOR_BATCH_SQL;
+
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let exact = RevisionRefV1::new(
+        revision_id("proposal-batch-plan"),
+        format!("sha256:{}", "d".repeat(64)),
+    )
+    .expect("exact Revision");
+    append(
+        &adapter,
+        &proposal_carrier_event(
+            &exact,
+            None,
+            "work_object_proposed:proposal-carrier:batch-plan",
+            "2026-08-04T00:04:01Z",
+        ),
+        0,
+    );
+    drop(adapter);
+
+    let database = derived_database(root.path());
+    let query_connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open batch plan evidence");
+    query_connection
+        .execute_batch(
+            "CREATE TEMP TABLE pointbreak_proposal_exact_lookup (
+                 revision_id TEXT NOT NULL,
+                 object_artifact_content_hash TEXT NOT NULL,
+                 PRIMARY KEY (revision_id, object_artifact_content_hash)
+             ) STRICT, WITHOUT ROWID;",
+        )
+        .expect("create selected exact-Revision TEMP relation");
+    let mut plan = query_connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {PROPOSAL_CARRIER_LOCATOR_BATCH_SQL}"
+        ))
+        .expect("prepare batch plan evidence");
+    let plan_details = plan
+        .query_map(rusqlite::params![1_i64, 1_i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("query batch plan evidence")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read batch plan evidence");
+    assert!(
+        plan_details
+            .first()
+            .is_some_and(|detail| detail.contains("SCAN selected")),
+        "batch locator read must begin from the selected TEMP set: {plan_details:?}"
+    );
+    assert!(
+        plan_details.iter().any(|detail| {
+            detail.contains("SEARCH proposal")
+                && detail.contains("semantic_revision_proposal_exact")
+                && detail.contains("revision_id=?")
+        }),
+        "batch locator read must probe the exact proposal index: {plan_details:?}"
+    );
+    assert!(
+        !plan_details
+            .iter()
+            .any(|detail| detail.contains("SCAN proposal")),
+        "batch locator read must never rescan the proposal index per row: {plan_details:?}"
+    );
+    for point_read in ["SEARCH locator USING", "SEARCH cursor_receipt USING"] {
+        assert!(
+            plan_details.iter().any(|detail| detail.contains(point_read)
+                && detail.contains("INTEGER PRIMARY KEY")),
+            "batch locator read must point-read by sequence: {plan_details:?}"
+        );
+    }
+}
+
 #[test]
 fn selected_engagement_retains_store_wide_change_semantics() {
     let root = tempfile::tempdir().expect("root");
