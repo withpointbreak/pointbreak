@@ -756,6 +756,80 @@ mod invocation_read_catalog_tests {
             InteractionRouteV1::FACT_READS,
         );
     }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn diagnostic_classifier_recognizes_the_change_read_shapes_without_posture_change() {
+        use std::collections::BTreeMap;
+
+        use pointbreak::bench_support::longitudinal::{
+            InteractionExecutionIdentityV1, InteractionPerformanceExpectedContextV1,
+            InteractionRouteV1, InteractionSetupExpectationV1,
+        };
+
+        for (subcommand, route) in [
+            ("profile", InteractionRouteV1::ChangeProfileRead),
+            ("list", InteractionRouteV1::ChangeListRead),
+            ("attention", InteractionRouteV1::ChangeAttentionRead),
+        ] {
+            let arguments = vec![
+                "change".to_owned(),
+                subcommand.to_owned(),
+                "--repo".to_owned(),
+                "/tmp/change-read-contract".to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+            ];
+            let expected = InteractionPerformanceExpectedContextV1 {
+                execution: InteractionExecutionIdentityV1 {
+                    source_commit: "a".repeat(40),
+                    source_tree: "b".repeat(40),
+                    cargo_lock_sha256: "c".repeat(64),
+                    binary_path: "/tmp/pointbreak".to_owned(),
+                    binary_sha256: "d".repeat(64),
+                    build_profile: "debug".to_owned(),
+                    rustc_version: "rustc test".to_owned(),
+                    features: vec!["longitudinal-counting".to_owned()],
+                },
+                route,
+                arguments: arguments.clone(),
+                setup_expectation: InteractionSetupExpectationV1::FactActiveCurrent,
+                fixture_identity_sha256: None,
+                revision: None,
+                track: None,
+                domain_actor: None,
+                expected_child_actors: BTreeMap::new(),
+            };
+
+            assert_eq!(
+                interaction_route_for_arguments(&arguments, &expected).unwrap(),
+                route,
+                "change {subcommand} counted shape resolves its route with an empty selector"
+            );
+            // The counted recognizer is harness plumbing: the invocation
+            // catalog posture is unchanged.
+            assert_eq!(
+                classify(&arguments.join(" ")),
+                InvocationReadCatalogV1::Exempt(InvocationReadExemptV1::OwnCapabilityBoundary),
+                "change {subcommand} stays exempt"
+            );
+            // A non-JSON explicit format is not a counted shape.
+            let text_arguments = arguments
+                .iter()
+                .map(|argument| {
+                    if argument == "json" {
+                        "text".to_owned()
+                    } else {
+                        argument.clone()
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                interaction_route_for_arguments(&text_arguments, &expected).is_err(),
+                "change {subcommand} text lane is rejected before dispatch"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -996,6 +1070,12 @@ fn interaction_route_for_arguments(
         && args.explicit_format_v1() == Some(output::OutputFormat::Json)
     {
         (Route::VersionJson, None, None, None)
+    } else if let Command::Change(args) = &cli.command
+        && let Some((route, repo)) = args.interaction_route_v1()
+    {
+        // The three approved change-read shapes carry no Revision or track
+        // selector; the family's exempt invocation posture is unchanged.
+        (route, Some(repo), None, None)
     } else {
         return Err("interaction CLI argv is not one of the frozen interaction routes".to_owned());
     };

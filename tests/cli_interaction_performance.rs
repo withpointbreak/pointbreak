@@ -1877,6 +1877,216 @@ fn revision_show_cell_catalog_freezes_the_two_approved_cells() {
 }
 
 #[test]
+fn change_read_cell_catalog_freezes_the_four_approved_cells() {
+    use pointbreak::bench_support::longitudinal::INTERACTION_CHANGE_READ_CELLS_V1;
+
+    assert_eq!(
+        INTERACTION_CHANGE_READ_CELLS_V1.map(|(cell, _, _)| cell),
+        [
+            "change_profile_current",
+            "change_list_current",
+            "change_attention_current",
+            "change_list_explicit_off",
+        ],
+    );
+    assert_eq!(
+        INTERACTION_CHANGE_READ_CELLS_V1.map(|(_, route, _)| route),
+        [
+            Route::ChangeProfileRead,
+            Route::ChangeListRead,
+            Route::ChangeAttentionRead,
+            Route::ChangeListRead,
+        ],
+    );
+
+    for route in [
+        Route::ChangeProfileRead,
+        Route::ChangeListRead,
+        Route::ChangeAttentionRead,
+    ] {
+        let target = interaction_route_state_contract_v1(route, Setup::FactActiveCurrent)
+            .expect("active-current change-read cell");
+        assert_eq!(target.observed, ObservedState::DerivedCurrent);
+        assert_eq!(
+            target.performance_role,
+            PerformanceRole::ProvisionalTarget {
+                sample_count: 5,
+                strict_upper_bound_millis: 2_000,
+            }
+        );
+        assert!(target.historical_evidence_unchanged);
+    }
+
+    let characterization =
+        interaction_route_state_contract_v1(Route::ChangeListRead, Setup::FactExplicitOff)
+            .expect("change_list_explicit_off cell");
+    assert_eq!(
+        characterization.observed,
+        ObservedState::AuthoritativeReplay
+    );
+    assert_eq!(
+        characterization.performance_role,
+        PerformanceRole::CompatibilityCharacterization
+    );
+    assert_eq!(characterization.strict_authoritative_snapshots, 0);
+
+    // Only the change list has an explicit-off characterization cell, and no
+    // change read has an unavailable or terminal catalog cell.
+    for route in [
+        Route::ChangeProfileRead,
+        Route::ChangeListRead,
+        Route::ChangeAttentionRead,
+    ] {
+        for setup in [
+            Setup::NotApplicable,
+            Setup::AuthoritativeReplay,
+            Setup::FactActiveUnavailable,
+            Setup::FactPostSelectionFailure,
+            Setup::AttentionDerivedCurrent,
+            Setup::AttentionColdInactive,
+            Setup::AttentionActiveUnavailable,
+        ] {
+            assert!(
+                interaction_route_state_contract_v1(route, setup).is_none(),
+                "{setup:?} must not be a change-read catalog cell"
+            );
+        }
+    }
+    for route in [Route::ChangeProfileRead, Route::ChangeAttentionRead] {
+        assert!(
+            interaction_route_state_contract_v1(route, Setup::FactExplicitOff).is_none(),
+            "only the change list carries the explicit-off characterization cell"
+        );
+    }
+}
+
+#[test]
+fn change_read_cells_run_counted_with_byte_parity() {
+    let fixture = fixture();
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    let execution = execution_identity();
+    let receipt_dir = tempfile::tempdir().expect("temporary change-read receipt directory");
+
+    let list_arguments = strings(&["change", "list", "--repo", &repo, "--format", "json"]);
+    let off_expected = expected_context(
+        execution.clone(),
+        Route::ChangeListRead,
+        list_arguments.clone(),
+        Setup::FactExplicitOff,
+        Some(&fixture),
+        None,
+    );
+    let off_receipt = run_success_case(
+        "change-list-explicit-off",
+        &list_arguments,
+        OFF_ENV,
+        &off_expected,
+        &receipt_dir,
+        &[Phase::SerializationAndOutput],
+        &[
+            Phase::CliCapabilityPreflightH1,
+            Phase::ChangePageSnapshotAcquisition,
+            Phase::ChangePageBodylessSelection,
+            Phase::ChangePagePresentationProjection,
+        ],
+        true,
+    );
+    assert_eq!(
+        off_receipt.observed.route_state,
+        ObservedState::AuthoritativeReplay
+    );
+    assert_eq!(off_receipt.counters.strict_journal_inspections, 0);
+    assert_eq!(off_receipt.counters.body_artifact_reads, 0);
+    assert_eq!(off_receipt.counters.object_artifact_reads, 0);
+    assert!(off_receipt.counters.change_semantic_constructions > 0);
+
+    build_derived(&fixture.repo);
+    for (case_name, subcommand, route, forbidden) in [
+        (
+            "change-profile-current",
+            "profile",
+            Route::ChangeProfileRead,
+            [
+                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::ChangePageSnapshotAcquisition,
+                Phase::RouteBodyHydration,
+            ]
+            .as_slice(),
+        ),
+        (
+            "change-list-current",
+            "list",
+            Route::ChangeListRead,
+            [
+                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::RouteBodyHydration,
+            ]
+            .as_slice(),
+        ),
+        (
+            "change-attention-current",
+            "attention",
+            Route::ChangeAttentionRead,
+            [
+                Phase::CliCapabilityPreflightH1,
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::RouteBodyHydration,
+            ]
+            .as_slice(),
+        ),
+    ] {
+        let arguments = strings(&["change", subcommand, "--repo", &repo, "--format", "json"]);
+        let expected = expected_context(
+            execution.clone(),
+            route,
+            arguments.clone(),
+            Setup::FactActiveCurrent,
+            Some(&fixture),
+            None,
+        );
+        let mut required = vec![Phase::SerializationAndOutput];
+        if route != Route::ChangeProfileRead {
+            required.extend([
+                Phase::ChangePageSnapshotAcquisition,
+                Phase::ChangePageBodylessSelection,
+                Phase::ChangePageProposalLocatorExpansion,
+                Phase::ChangePageCarrierHydrationValidation,
+                Phase::ChangePageSupportExpansion,
+                Phase::ChangePagePresentationProjection,
+            ]);
+        }
+        let receipt = run_success_case(
+            case_name,
+            &arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &required,
+            forbidden,
+            false,
+        );
+        assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
+        assert_eq!(receipt.counters.strict_journal_inspections, 0);
+        assert_eq!(receipt.counters.body_artifact_reads, 0);
+        assert_eq!(receipt.counters.object_artifact_reads, 0);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
+        if route == Route::ChangeProfileRead {
+            assert_eq!(receipt.counters.event_decodes, 0);
+            assert_eq!(receipt.counters.change_proposal_carriers_opened, 0);
+            assert_eq!(receipt.counters.change_support_carriers_opened, 0);
+        } else {
+            assert!(receipt.counters.change_candidates > 0);
+            assert!(receipt.counters.change_proposal_carriers_opened > 0);
+            assert!(receipt.counters.change_rows_emitted > 0);
+        }
+        assert!(receipt.children.is_empty());
+    }
+}
+
+#[test]
 fn revision_show_derived_current_substitutes_projection_stamp_with_lane_parity() {
     let fixture = revision_show_fixture();
     build_derived(&fixture.repo);
@@ -2776,7 +2986,13 @@ fn expected_context(
         arguments,
         setup_expectation,
         fixture_identity_sha256: fixture.map(|fixture| fixture.fixture_identity_sha256.clone()),
-        revision: fixture.map(|fixture| fixture.revision.clone()),
+        revision: fixture.and_then(|fixture| {
+            let carries_revision_selector = !matches!(
+                route,
+                Route::ChangeProfileRead | Route::ChangeListRead | Route::ChangeAttentionRead
+            );
+            carries_revision_selector.then(|| fixture.revision.clone())
+        }),
         track: track.map(str::to_owned),
         domain_actor: fixture.map(|_| DOMAIN_ACTOR.to_owned()),
         expected_child_actors,

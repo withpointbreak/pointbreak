@@ -3232,6 +3232,9 @@ pub enum InteractionRouteV1 {
     VersionJson,
     AttentionCurrentOrFallback,
     RevisionShowDetail,
+    ChangeProfileRead,
+    ChangeListRead,
+    ChangeAttentionRead,
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -3267,6 +3270,37 @@ pub const INTERACTION_REVISION_SHOW_CELLS_V1: [(
     (
         "revision_show_explicit_off",
         InteractionRouteV1::RevisionShowDetail,
+        InteractionSetupExpectationV1::FactExplicitOff,
+    ),
+];
+
+/// The four owner-approved change-read cells: three derived active-current
+/// targets plus the change list explicit-off compatibility characterization.
+/// No change read has an unavailable or terminal catalog cell.
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const INTERACTION_CHANGE_READ_CELLS_V1: [(
+    &str,
+    InteractionRouteV1,
+    InteractionSetupExpectationV1,
+); 4] = [
+    (
+        "change_profile_current",
+        InteractionRouteV1::ChangeProfileRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_list_current",
+        InteractionRouteV1::ChangeListRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_attention_current",
+        InteractionRouteV1::ChangeAttentionRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_list_explicit_off",
+        InteractionRouteV1::ChangeListRead,
         InteractionSetupExpectationV1::FactExplicitOff,
     ),
 ];
@@ -3422,6 +3456,29 @@ pub fn interaction_route_state_contract_v1(
         };
     }
 
+    if matches!(
+        route,
+        InteractionRouteV1::ChangeProfileRead
+            | InteractionRouteV1::ChangeListRead
+            | InteractionRouteV1::ChangeAttentionRead
+    ) {
+        // The owner-approved change-read cells: three active-current targets
+        // plus the change list explicit-off characterization control. The
+        // change family records no strict authoritative snapshot on either
+        // lane, and profile/attention have no explicit-off cell; every other
+        // setup stays out of the catalog.
+        return match setup {
+            Setup::FactActiveCurrent => Some(FACT_CURRENT),
+            Setup::FactExplicitOff if route == InteractionRouteV1::ChangeListRead => {
+                Some(InteractionRouteStateContractV1 {
+                    observed: Observed::AuthoritativeReplay,
+                    ..BASE
+                })
+            }
+            _ => None,
+        };
+    }
+
     match (route, setup) {
         (InteractionRouteV1::VersionJson, Setup::NotApplicable) => Some(BASE),
         (InteractionRouteV1::AttentionCurrentOrFallback, Setup::AttentionDerivedCurrent) => {
@@ -3519,7 +3576,15 @@ impl InteractionPerformanceExpectedContextV1 {
             }
         }
 
-        let requires_revision = self.route != InteractionRouteV1::VersionJson;
+        // The change-read routes take no Revision selector (their argv is
+        // repo-plus-format only), so their expected context carries none.
+        let requires_revision = !matches!(
+            self.route,
+            InteractionRouteV1::VersionJson
+                | InteractionRouteV1::ChangeProfileRead
+                | InteractionRouteV1::ChangeListRead
+                | InteractionRouteV1::ChangeAttentionRead
+        );
         match (&self.revision, requires_revision) {
             (Some(revision), true) => {
                 validate_prefixed_hash(revision, "rev:sha256:", "interaction Revision")?

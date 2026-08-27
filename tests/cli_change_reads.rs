@@ -546,6 +546,172 @@ fn change_list_and_attention_active_current_preserve_ordering_and_exclusion() {
     );
 }
 
+/// The accepted mixed-lane interim: while `change show` remains
+/// authoritative, a derived `list`/`attention` document and an authoritative
+/// `show` document at the same store state deliberately carry different
+/// `projectionStamp` values — the derived lane binds the generation stamp,
+/// the authoritative facade its presentation-fold stamp — and each lane stays
+/// internally consistent. A later derived `show` route closes this gap.
+#[test]
+fn derived_list_and_authoritative_show_carry_distinct_consistent_stamps() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let list = parse_json(
+        &pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], ACTIVE).stdout,
+    );
+    let attention = parse_json(
+        &pointbreak_env(
+            ["change", "attention", "--repo", fixture.repo_arg()],
+            ACTIVE,
+        )
+        .stdout,
+    );
+    let show = parse_json(
+        &pointbreak_env(
+            [
+                "change",
+                "show",
+                &fixture.parallel_change_id,
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            ACTIVE,
+        )
+        .stdout,
+    );
+
+    let derived_stamp = list["projectionStamp"].as_str().expect("derived stamp");
+    assert_eq!(
+        derived_stamp,
+        attention["projectionStamp"]
+            .as_str()
+            .expect("attention stamp"),
+        "the derived lane shares one generation stamp"
+    );
+    for summary in list["changes"].as_array().expect("list changes") {
+        assert_eq!(
+            summary["projectionStamp"].as_str().expect("summary stamp"),
+            derived_stamp,
+            "every derived summary carries the shared generation stamp"
+        );
+    }
+    let show_stamp = show["projectionStamp"].as_str().expect("show stamp");
+    assert_ne!(
+        derived_stamp, show_stamp,
+        "the authoritative show facade stamp differs from the derived generation stamp"
+    );
+    let off_list =
+        parse_json(&pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF).stdout);
+    assert_eq!(
+        show_stamp,
+        off_list["projectionStamp"].as_str().expect("off stamp"),
+        "the authoritative lane stays internally consistent"
+    );
+}
+
+/// The other change subcommands never consult the derived lane: their output
+/// stays byte-identical between the derived-selected and explicit-off lanes
+/// at the same store state, including with an active-current generation.
+#[test]
+fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let list =
+        parse_json(&pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF).stdout);
+    let accepted = list["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|change| change["changeId"] == fixture.accepted_change_id.as_str())
+        .expect("accepted Change summary");
+    let accepted_ref = &accepted["currentRevisionRefs"][0];
+    let accepted_revision = accepted_ref["revisionId"].as_str().expect("revision id");
+    let accepted_hash = accepted_ref["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact hash");
+    let parallel = list["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
+        .expect("parallel Change summary");
+    let heads = parallel["currentRevisionRefs"]
+        .as_array()
+        .expect("parallel heads");
+    let (first_head, second_head) = (&heads[0], &heads[1]);
+
+    let show = vec!["show".to_owned(), fixture.accepted_change_id.clone()];
+    let select = vec![
+        "select".to_owned(),
+        fixture.accepted_change_id.clone(),
+        "--revision".to_owned(),
+        accepted_revision.to_owned(),
+    ];
+    let revision = vec![
+        "revision".to_owned(),
+        fixture.accepted_change_id.clone(),
+        accepted_revision.to_owned(),
+        "--artifact-hash".to_owned(),
+        accepted_hash.to_owned(),
+    ];
+    let resource = vec![
+        "resource".to_owned(),
+        fixture.accepted_change_id.clone(),
+        accepted_revision.to_owned(),
+        "--artifact-hash".to_owned(),
+        accepted_hash.to_owned(),
+    ];
+    let interdiff = vec![
+        "interdiff".to_owned(),
+        fixture.parallel_change_id.clone(),
+        first_head["revisionId"]
+            .as_str()
+            .expect("first head id")
+            .to_owned(),
+        second_head["revisionId"]
+            .as_str()
+            .expect("second head id")
+            .to_owned(),
+        "--from-artifact-hash".to_owned(),
+        first_head["objectArtifactContentHash"]
+            .as_str()
+            .expect("first head hash")
+            .to_owned(),
+        "--to-artifact-hash".to_owned(),
+        second_head["objectArtifactContentHash"]
+            .as_str()
+            .expect("second head hash")
+            .to_owned(),
+    ];
+
+    for subcommand in [show, select, revision, resource, interdiff] {
+        let mut args = vec!["change".to_owned()];
+        args.extend(subcommand.clone());
+        args.extend(["--repo".to_owned(), fixture.repo_arg().to_owned()]);
+        let active = pointbreak_env(&args, ACTIVE);
+        let off = pointbreak_env(&args, OFF);
+        assert_eq!(
+            active.status.code(),
+            off.status.code(),
+            "change {}: exit parity",
+            subcommand[0]
+        );
+        assert_eq!(
+            active.stdout, off.stdout,
+            "change {}: stdout parity",
+            subcommand[0]
+        );
+        assert_eq!(
+            active.stderr, off.stderr,
+            "change {}: stderr parity",
+            subcommand[0]
+        );
+        assert_success(&active);
+    }
+}
+
 #[test]
 fn change_profile_bytes_are_identical_across_derived_states() {
     let fixture = change_reads_fixture();

@@ -39,6 +39,30 @@ pub(super) struct ChangeArgs {
     command: ChangeCommand,
 }
 
+impl ChangeArgs {
+    /// The counted-harness recognizer for exactly the three approved
+    /// change-read shapes (explicit JSON format, no selector). Harness
+    /// plumbing only: the invocation-read catalog posture is untouched.
+    #[cfg(feature = "longitudinal-counting")]
+    pub(super) fn interaction_route_v1(
+        &self,
+    ) -> Option<(
+        pointbreak::bench_support::longitudinal::InteractionRouteV1,
+        &std::path::Path,
+    )> {
+        use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
+
+        let (route, read) = match &self.command {
+            ChangeCommand::Profile(read) => (Route::ChangeProfileRead, read),
+            ChangeCommand::List(read) => (Route::ChangeListRead, read),
+            ChangeCommand::Attention(read) => (Route::ChangeAttentionRead, read),
+            _ => return None,
+        };
+        (read.format_args.explicit() == Some(output::OutputFormat::Json))
+            .then_some((route, read.repo.as_path()))
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum ChangeCommand {
     /// Report the store capability before any Change payload is read
