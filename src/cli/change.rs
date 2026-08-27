@@ -21,13 +21,14 @@ use pointbreak::session::{
     BulkAdoptionOwnerDecisionManifestV1, CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions,
     ChangeCreateOptions, ChangeLinkOptions, ChangeMembershipOptions,
     ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1, ChangeReaderStateV1,
-    ChangeRelationOptions, ChangeRelationWithdrawalOptions, ReviewCursorV1, ReviewSourceBindingV1,
-    ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState, WorktreeSpec,
-    assert_change_revision_relation, capture_change_revision, change_reader_state_for_repo,
-    create_change, dry_run_bulk_adoption, join_revision_to_change, link_changes,
-    migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
-    select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
-    withdraw_change_revision_relation, withdraw_revision_from_change,
+    ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
+    DerivedChangeOutcomeV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1,
+    RevisionShowOptions, SnapshotContentState, WorktreeSpec, assert_change_revision_relation,
+    capture_change_revision, change_reader_state_for_repo, create_change, dry_run_bulk_adoption,
+    join_revision_to_change, link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup,
+    review_source_binding, select_review_cursor, show_revision_for_change_reader_ready,
+    validate_review_cursor_for_write, withdraw_change_revision_relation,
+    withdraw_revision_from_change,
 };
 
 use crate::cli::{common, output};
@@ -376,14 +377,7 @@ pub(super) fn run(
     stderr: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
-        ChangeCommand::Profile(args) => {
-            let state = change_reader_state_for_repo(&args.repo)?;
-            write(
-                &args.format_args,
-                stdout,
-                &ReaderProfileDocumentV1::from(&state.capability),
-            )
-        }
+        ChangeCommand::Profile(args) => run_profile(&args, stdout),
         ChangeCommand::List(args) => {
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
                 Ok(serde_json::to_value(facade.list_document())?)
@@ -709,6 +703,81 @@ fn run_migration_restore(
         &restore_bulk_adoption_backup(&args.backup, &args.target_repo)?,
     )
 }
+
+fn run_profile(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::profile) {
+        DerivedChangeAttempt::Answered(document) => {
+            record_change_route_state(ChangeRouteState::DerivedCurrent);
+            write(&args.format_args, stdout, &document)
+        }
+        DerivedChangeAttempt::Fallback { labeled } => {
+            record_change_route_state(if labeled {
+                ChangeRouteState::LabeledFallbackToAuthoritative
+            } else {
+                ChangeRouteState::AuthoritativeReplay
+            });
+            let state = change_reader_state_for_repo(&args.repo)?;
+            write(
+                &args.format_args,
+                stdout,
+                &ReaderProfileDocumentV1::from(&state.capability),
+            )
+        }
+    }
+}
+
+enum DerivedChangeAttempt<T> {
+    Answered(T),
+    Fallback {
+        #[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
+        labeled: bool,
+    },
+}
+
+/// Attempt one derived producer for a Change read. The derived lane answers
+/// only when command resolution succeeds and the producer reaches `Ready`
+/// (which includes its capability-carrier control path for non-L2 stores);
+/// every other outcome falls back to the caller's exact existing
+/// authoritative arm, labeled through the route-state counter rather than
+/// through any output byte.
+fn attempt_derived_change_read<T, E>(
+    repo: &std::path::Path,
+    produce: impl FnOnce(&DerivedChangeAccess) -> Result<DerivedChangeOutcomeV1<T>, E>,
+) -> DerivedChangeAttempt<T> {
+    let Ok(access) = DerivedChangeAccess::resolve_for_command(repo) else {
+        return DerivedChangeAttempt::Fallback { labeled: false };
+    };
+    if !access.is_active() {
+        return DerivedChangeAttempt::Fallback { labeled: false };
+    }
+    match produce(&access) {
+        Ok(DerivedChangeOutcomeV1::Ready(document)) => DerivedChangeAttempt::Answered(document),
+        Ok(_) | Err(_) => DerivedChangeAttempt::Fallback { labeled: true },
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+use pointbreak::bench_support::longitudinal::InteractionObservedRouteStateV1 as ChangeRouteState;
+
+#[cfg(not(feature = "longitudinal-counting"))]
+#[derive(Clone, Copy)]
+enum ChangeRouteState {
+    DerivedCurrent,
+    AuthoritativeReplay,
+    LabeledFallbackToAuthoritative,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn record_change_route_state(state: ChangeRouteState) {
+    if let Some(counting) =
+        pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::current()
+    {
+        counting.record_observed_route_state_once(state);
+    }
+}
+
+#[cfg(not(feature = "longitudinal-counting"))]
+fn record_change_route_state(_state: ChangeRouteState) {}
 
 fn with_facade(
     repo: &std::path::Path,

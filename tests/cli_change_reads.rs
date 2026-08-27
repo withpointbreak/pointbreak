@@ -452,6 +452,53 @@ fn assert_typed_capability_documents(repo_arg: &str, state: &str) {
     }
 }
 
+#[test]
+fn change_profile_bytes_are_identical_across_derived_states() {
+    let fixture = change_reads_fixture();
+
+    for lane in FORMAT_LANES {
+        assert_derived_lane_byte_parity(&fixture, "profile", lane, "unavailable");
+    }
+    fixture.build_derived();
+    for lane in FORMAT_LANES {
+        assert_derived_lane_byte_parity(&fixture, "profile", lane, "active-current");
+    }
+}
+
+/// The derived-selected lane and the explicit-off lane answer byte-identically
+/// (exit, stdout, stderr) for one command and format lane at the current
+/// store state.
+fn assert_derived_lane_byte_parity(
+    fixture: &ChangeReadsFixture,
+    command: &str,
+    lane: &str,
+    state: &str,
+) {
+    let args = [
+        "change",
+        command,
+        "--repo",
+        fixture.repo_arg(),
+        "--format",
+        lane,
+    ];
+    let active = pointbreak_env(args, ACTIVE);
+    let off = pointbreak_env(args, OFF);
+    assert_eq!(
+        active.status.code(),
+        off.status.code(),
+        "change {command} ({lane}, {state}): exit parity"
+    );
+    assert_eq!(
+        active.stdout, off.stdout,
+        "change {command} ({lane}, {state}): stdout parity"
+    );
+    assert_eq!(
+        active.stderr, off.stderr,
+        "change {command} ({lane}, {state}): stderr parity"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Route contracts (red until the reads route through the derived producers)
 // ---------------------------------------------------------------------------
@@ -593,7 +640,6 @@ mod counted {
     /// capability carriers: no event decode, no proposal or support carrier
     /// open, even with unrelated history present.
     #[test]
-    #[ignore = "red until the change reads route through the derived producers"]
     fn change_profile_active_current_opens_only_capability_carriers() {
         let fixture = change_reads_fixture();
         fixture.grow_unrelated_history(UNRELATED_EVENTS);
