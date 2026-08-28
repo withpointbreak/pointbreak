@@ -2392,6 +2392,19 @@ mod counted {
         receipt_dir: &Path,
         ordinal: u64,
     ) -> Value {
+        let (output, counters) = counted_outcome_for(fixture, subcommand, receipt_dir, ordinal);
+        assert_success(&output);
+        counters
+    }
+
+    /// Like [`counted_counters_for`], but tolerates a failing exit: the
+    /// eligibility falsifier asserts seek counters on refused shapes too.
+    fn counted_outcome_for(
+        fixture: &ChangeReadsFixture,
+        subcommand: &[&str],
+        receipt_dir: &Path,
+        ordinal: u64,
+    ) -> (std::process::Output, Value) {
         let receipt_path = receipt_dir.join(format!("receipt-{ordinal}.json"));
         let request = serde_json::json!({
             "runIdentity": format!("{:064x}", ordinal + 1),
@@ -2414,8 +2427,10 @@ mod counted {
         arguments.extend_from_slice(subcommand);
         arguments.extend_from_slice(&["--repo", fixture.repo_arg()]);
         let output = pointbreak_env(&arguments, ACTIVE);
-        assert_success(&output);
-        parse_json(&std::fs::read(receipt_path).expect("read counted receipt"))["counters"].clone()
+        let counters =
+            parse_json(&std::fs::read(receipt_path).expect("read counted receipt"))["counters"]
+                .clone();
+        (output, counters)
     }
 
     fn counter(counters: &Value, name: &str) -> u64 {
@@ -2609,6 +2624,138 @@ mod counted {
                 counter(&counters, "changeSeekFactRowsSelected"),
                 before[ordinal],
                 "{label}: selected fact rows are invariant under unrelated growth"
+            );
+        }
+    }
+
+    /// The R08 eligibility gate's falsifier: every ineligible `select` shape
+    /// records zero seek rows under the counted harness — byte parity alone
+    /// cannot catch a regression that widens eligibility, because both lanes
+    /// share one pure selection helper. The eligible captured shapes record
+    /// seek rows as the positive contrast.
+    #[test]
+    fn ineligible_select_shapes_never_touch_the_seek() {
+        let fixture = change_reads_fixture();
+
+        // A Change whose capture matches the live worktree, so a
+        // worktree-bound cursor can be minted.
+        fixture
+            .repo
+            .write("src/lib.rs", "pub fn value() -> u32 { 50 }\n");
+        let fresh = super::capture(&["capture", "--repo", fixture.repo_arg()]);
+        let fresh_change = fresh["changeId"]
+            .as_str()
+            .expect("fresh change id")
+            .to_owned();
+        let worktree_bound = pointbreak_env(
+            [
+                "change",
+                "select",
+                &fresh_change,
+                "--source",
+                "worktree",
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            super::OFF,
+        );
+        assert_success(&worktree_bound);
+        let worktree_token = parse_json(&worktree_bound.stdout)["token"]
+            .as_str()
+            .expect("worktree-bound token")
+            .to_owned();
+        fixture.build_derived();
+        let captured_token = parse_json(
+            &pointbreak_env(
+                [
+                    "change",
+                    "select",
+                    &fixture.accepted_change_id,
+                    "--repo",
+                    fixture.repo_arg(),
+                ],
+                super::OFF,
+            )
+            .stdout,
+        )["token"]
+            .as_str()
+            .expect("captured-bound token")
+            .to_owned();
+        let receipt_dir = tempfile::tempdir().expect("receipt directory");
+
+        for (ordinal, eligible) in [
+            vec!["select", fixture.accepted_change_id.as_str()],
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--cursor",
+                captured_token.as_str(),
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let counters =
+                counted_counters_for(&fixture, &eligible, receipt_dir.path(), ordinal as u64);
+            assert!(
+                counter(&counters, "changeSeekFactRowsSelected") > 0,
+                "{eligible:?}: the eligible captured shape reads through the seek"
+            );
+        }
+
+        for (ordinal, ineligible) in [
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--source",
+                "worktree",
+            ],
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--source",
+                "commit:HEAD",
+            ],
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--source",
+                "bogus",
+            ],
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--cursor",
+                "not-a-token",
+            ],
+            vec![
+                "select",
+                fresh_change.as_str(),
+                "--cursor",
+                worktree_token.as_str(),
+            ],
+            vec![
+                "select",
+                fresh_change.as_str(),
+                "--cursor",
+                worktree_token.as_str(),
+                "--source",
+                "captured",
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_output, counters) = counted_outcome_for(
+                &fixture,
+                &ineligible,
+                receipt_dir.path(),
+                10 + ordinal as u64,
+            );
+            assert_eq!(
+                counter(&counters, "changeSeekFactRowsSelected"),
+                0,
+                "{ineligible:?}: an ineligible shape must never touch the seek"
             );
         }
     }

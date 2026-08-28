@@ -7,6 +7,14 @@
 //! facade composes the documents. No authoritative carrier is opened, no
 //! event is decoded, no body or presentation is hydrated, and no eager
 //! complete-Change scan runs on this path.
+//!
+//! Known correlation limitation (owner-triaged): a review-domain
+//! `InputRequestResponded` carrier with `revision_id: None` — writable only
+//! by pre-2026-07 builds or peer ingest of their events; the current writer
+//! always sets the field — receives no Change correlation, so the seek
+//! cannot select it and a still-open operative obligation would survive on
+//! this lane while the authoritative fold clears it. The eager page reads
+//! are unaffected (they scan every Change fact row).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::changes::{
