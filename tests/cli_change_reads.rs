@@ -2191,9 +2191,15 @@ fn mutable_sources_and_mutable_bound_cursors_never_enter_the_derived_lane() {
         &[&fixture.accepted_change_id, "--source", "worktree"],
         "--source worktree",
     );
-    // The fixture worktree moved past the accepted capture, so the worktree
-    // arm errors; the parity above is the contract, the message is context.
-    assert!(!active.status.success() || !active.stdout.is_empty());
+    // The fixture worktree still matches the accepted capture, so the
+    // worktree arm succeeds authoritatively on both lanes and emits a
+    // worktree-bound cursor; the parity above is the contract.
+    assert_success(&active);
+    assert_eq!(
+        parse_json(&active.stdout)["cursor"]["sourceBinding"]["kind"],
+        "worktree_match_v1",
+        "the worktree arm emits a worktree-bound cursor"
+    );
     assert_select_parity(
         &fixture,
         &[&fixture.accepted_change_id, "--source", "commit:HEAD"],
@@ -2358,6 +2364,66 @@ fn invalid_source_errors_surface_in_their_existing_position() {
         String::from_utf8_lossy(&active.stderr).contains("invalid Review cursor token"),
         "the cursor decode error surfaces before the source parse error"
     );
+}
+
+/// The `--allow-historical` SUCCESS document is byte-identical across lanes
+/// (the floor pinned only the refusal path cross-lane).
+#[test]
+fn derived_allow_historical_success_is_byte_identical() {
+    let repo = support::dump_repo();
+    let repo_arg = repo
+        .path()
+        .to_str()
+        .expect("fixture path is UTF-8")
+        .to_owned();
+    let first = capture(&["capture", "--repo", &repo_arg]);
+    let change_id = first["changeId"].as_str().expect("change id").to_owned();
+    let historical_revision = first["revision"]["revisionId"]
+        .as_str()
+        .expect("first revision id")
+        .to_owned();
+    let cursor = first["reviewCursor"]["token"]
+        .as_str()
+        .expect("first review cursor")
+        .to_owned();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    capture(&[
+        "capture",
+        "--repo",
+        &repo_arg,
+        "--review-cursor",
+        &cursor,
+        "--advance",
+        "replace",
+    ]);
+    let build = pointbreak_env(["store", "derived", "build", "--repo", &repo_arg], ACTIVE);
+    assert_success(&build);
+
+    for lane in FORMAT_LANES {
+        let args = [
+            "change",
+            "select",
+            &change_id,
+            "--revision",
+            &historical_revision,
+            "--allow-historical",
+            "--repo",
+            &repo_arg,
+            "--format",
+            lane,
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_success(&active);
+        assert_eq!(
+            active.stdout, off.stdout,
+            "allow-historical ({lane}): full stdout byte parity"
+        );
+        assert_eq!(
+            active.stderr, off.stderr,
+            "allow-historical ({lane}): stderr parity"
+        );
+    }
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -2632,7 +2698,10 @@ mod counted {
     /// records zero seek rows under the counted harness — byte parity alone
     /// cannot catch a regression that widens eligibility, because both lanes
     /// share one pure selection helper. The eligible captured shapes record
-    /// seek rows as the positive contrast.
+    /// seek rows as the positive contrast, which also proves the generation
+    /// is active-current before the zero assertions run. The counter sums
+    /// selected rows, so the exact guarantee is "no seek rows were read";
+    /// both target Changes demonstrably have rows, which the contrast pins.
     #[test]
     fn ineligible_select_shapes_never_touch_the_seek() {
         let fixture = change_reads_fixture();
