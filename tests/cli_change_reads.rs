@@ -580,12 +580,14 @@ fn change_list_and_attention_active_current_preserve_ordering_and_exclusion() {
     );
 }
 
-/// The accepted mixed-lane interim: while `change show` remains
-/// authoritative, a derived `list`/`attention` document and an authoritative
-/// `show` document at the same store state deliberately carry different
+/// A derived `list`/`attention` document and an authoritative `show`
+/// document at the same store state deliberately carry different
 /// `projectionStamp` values — the derived lane binds the generation stamp,
 /// the authoritative facade its presentation-fold stamp — and each lane stays
-/// internally consistent. A later derived `show` route closes this gap.
+/// internally consistent. The derived `show` route binds its own seek stamp,
+/// pinned three-way in
+/// [`mixed_lane_stamps_are_three_way_distinct_and_internally_consistent`];
+/// the authoritative facade stamp is read on the explicit-off lane here.
 #[test]
 fn derived_list_and_authoritative_show_carry_distinct_consistent_stamps() {
     let fixture = change_reads_fixture();
@@ -610,7 +612,7 @@ fn derived_list_and_authoritative_show_carry_distinct_consistent_stamps() {
                 "--repo",
                 fixture.repo_arg(),
             ],
-            ACTIVE,
+            OFF,
         )
         .stdout,
     );
@@ -676,7 +678,6 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
         .expect("parallel heads");
     let (first_head, second_head) = (&heads[0], &heads[1]);
 
-    let show = vec!["show".to_owned(), fixture.accepted_change_id.clone()];
     let select = vec![
         "select".to_owned(),
         fixture.accepted_change_id.clone(),
@@ -720,7 +721,9 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
             .to_owned(),
     ];
 
-    for subcommand in [show, select, revision, resource, interdiff] {
+    // `show` left the neighbor set when its derived route landed; `select`
+    // and `interdiff` leave with theirs.
+    for subcommand in [select, revision, resource, interdiff] {
         let mut args = vec!["change".to_owned()];
         args.extend(subcommand.clone());
         args.extend(["--repo".to_owned(), fixture.repo_arg().to_owned()]);
@@ -1494,6 +1497,135 @@ fn change_list_and_attention_active_current_substitute_one_derived_stamp() {
             "{lane}: derived list and attention share one stamp at one store state"
         );
     }
+}
+
+/// With the derived generation active and exactly current, `change show`
+/// substitutes the seek-scoped stamp value for the authoritative
+/// presentation-fold stamp; every other byte matches the explicit-off lane
+/// per format lane.
+#[test]
+fn derived_change_show_is_byte_identical_modulo_the_seek_stamp() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    for lane in FORMAT_LANES {
+        for change_id in [&fixture.parallel_change_id, &fixture.accepted_change_id] {
+            let args = [
+                "change",
+                "show",
+                change_id,
+                "--repo",
+                fixture.repo_arg(),
+                "--format",
+                lane,
+            ];
+            let active = pointbreak_env(args, ACTIVE);
+            let off = pointbreak_env(args, OFF);
+            assert_success(&active);
+            assert_success(&off);
+
+            let active_stamp = parse_json(&active.stdout)["projectionStamp"]
+                .as_str()
+                .expect("active projection stamp")
+                .to_owned();
+            let off_stamp = parse_json(&off.stdout)["projectionStamp"]
+                .as_str()
+                .expect("authoritative projection stamp")
+                .to_owned();
+            assert_ne!(
+                active_stamp, off_stamp,
+                "change show ({lane}): the derived lane substitutes the seek stamp"
+            );
+            // One stamp VALUE appears at two JSON paths (`projectionStamp`
+            // and `summary.projectionStamp`); the value replacement covers
+            // both.
+            let normalized = String::from_utf8(active.stdout.clone())
+                .expect("active stdout is UTF-8")
+                .replace(&active_stamp, &off_stamp);
+            assert_eq!(
+                normalized.into_bytes(),
+                off.stdout,
+                "change show ({lane}): byte parity modulo the stamp substitution"
+            );
+            assert_eq!(
+                active.stderr, off.stderr,
+                "change show ({lane}): stderr parity"
+            );
+        }
+    }
+}
+
+/// Unknown and malformed Change ids produce byte-identical outcomes on both
+/// lanes: a lookup miss is never a derived-lane hazard.
+#[test]
+fn derived_show_unknown_and_malformed_change_match_the_authoritative_lane() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let unknown = format!("change:sha256:{}", "f".repeat(64));
+    for selector in [unknown.as_str(), "not-a-change-id"] {
+        let args = ["change", "show", selector, "--repo", fixture.repo_arg()];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_eq!(
+            active.status.code(),
+            off.status.code(),
+            "show {selector}: exit parity"
+        );
+        assert!(!off.status.success(), "show {selector} must fail");
+        assert_eq!(active.stdout, off.stdout, "show {selector}: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "show {selector}: stderr parity");
+        assert!(
+            String::from_utf8_lossy(&off.stderr)
+                .contains(&format!("Change {selector} is unavailable")),
+            "show {selector}: authoritative message"
+        );
+    }
+}
+
+/// The three stamp families at one store state are pairwise distinct and each
+/// internally consistent: the authoritative facade stamp, the derived page
+/// (generation) stamp, and the derived seek stamp.
+#[test]
+fn mixed_lane_stamps_are_three_way_distinct_and_internally_consistent() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let stamp = |output: &Output| {
+        parse_json(&output.stdout)["projectionStamp"]
+            .as_str()
+            .expect("projection stamp")
+            .to_owned()
+    };
+    let list_args = ["change", "list", "--repo", fixture.repo_arg()];
+    let show_args = [
+        "change",
+        "show",
+        &fixture.parallel_change_id,
+        "--repo",
+        fixture.repo_arg(),
+    ];
+    let page_stamp = stamp(&pointbreak_env(list_args, ACTIVE));
+    let seek_stamp = stamp(&pointbreak_env(show_args, ACTIVE));
+    let facade_stamp = stamp(&pointbreak_env(show_args, OFF));
+
+    assert_ne!(
+        facade_stamp, page_stamp,
+        "facade stamp != derived page stamp"
+    );
+    assert_ne!(
+        facade_stamp, seek_stamp,
+        "facade stamp != derived seek stamp"
+    );
+    assert_ne!(
+        page_stamp, seek_stamp,
+        "derived page stamp != derived seek stamp"
+    );
+    assert_eq!(
+        seek_stamp,
+        stamp(&pointbreak_env(show_args, ACTIVE)),
+        "two derived show reads at one store state agree"
+    );
 }
 
 #[cfg(feature = "longitudinal-counting")]

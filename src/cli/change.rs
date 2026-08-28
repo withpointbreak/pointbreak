@@ -404,13 +404,7 @@ pub(super) fn run(
         ChangeCommand::Profile(args) => run_profile(&args, stdout),
         ChangeCommand::List(args) => run_list(&args, stdout),
         ChangeCommand::Attention(args) => run_attention(&args, stdout),
-        ChangeCommand::Show(args) => {
-            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
-                Ok(serde_json::to_value(
-                    facade.detail_document(&ChangeId::new(args.change))?,
-                )?)
-            })
-        }
+        ChangeCommand::Show(args) => run_show(args, stdout),
         ChangeCommand::Select(args) => run_select(args, stdout),
         ChangeCommand::Revision(args) => run_exact(args, stdout, true),
         ChangeCommand::Resource(args) => run_exact(args, stdout, false),
@@ -897,6 +891,29 @@ fn ready(state: &ChangeReaderStateV1) -> Result<&ChangeReaderReadyV1, Box<dyn st
     state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".into())
+}
+
+fn run_show(
+    args: ChangeReadArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let change_id = ChangeId::new(args.change.clone());
+    match attempt_derived_change_read(&args.repo, |access| {
+        access.review_detail_document(&change_id)
+    }) {
+        DerivedChangeAttempt::Answered { document, state } => {
+            record_change_route_state(state);
+            write(&args.format_args, stdout, &serde_json::to_value(document)?)
+        }
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
+            with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
+                Ok(serde_json::to_value(
+                    facade.detail_document(&ChangeId::new(args.change))?,
+                )?)
+            })
+        }
+    }
 }
 
 fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
