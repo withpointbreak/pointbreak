@@ -3111,6 +3111,8 @@ pub struct LongitudinalCountersV1 {
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub change_rows_emitted: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub change_seek_fact_rows_selected: u64,
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub timeline_sqlite_candidates: u64,
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub timeline_sqlite_window_rows: u64,

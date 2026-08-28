@@ -3227,3 +3227,309 @@ fn removal_audit_reference_seek_uses_the_lookup_index() {
         );
     }
 }
+
+/// Two Changes sharing one member Revision, plus an explicit link between
+/// them. The correlation closure for either Change selects its own
+/// declaration and membership plus the shared link carrier — never the
+/// sibling Change's own carriers, even through the shared member.
+struct ChangeSeekFixture {
+    adapter: QualificationDerivedAccessAdapter,
+    root: tempfile::TempDir,
+    observed: TruthCursor,
+    first_change: crate::model::ChangeId,
+    second_change: crate::model::ChangeId,
+    first_event_ids: Vec<String>,
+    second_event_ids: Vec<String>,
+}
+
+fn change_seek_fixture() -> ChangeSeekFixture {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let shared_member = revision_id("seek-shared-member");
+    let first_declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([71; 32]), [72; 32])
+            .expect("first declaration");
+    let first_membership =
+        build_membership_asserted(&first_declaration.change_id, &shared_member, [73; 32])
+            .expect("first membership");
+    let second_declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([74; 32]), [75; 32])
+            .expect("second declaration");
+    let second_membership =
+        build_membership_asserted(&second_declaration.change_id, &shared_member, [76; 32])
+            .expect("second membership");
+    let link = build_change_link_asserted(
+        &first_declaration.change_id,
+        &second_declaration.change_id,
+        crate::session::event::ChangeLinkRelationV1::RelatedWork,
+        [77; 32],
+    )
+    .expect("link");
+    let first_change = first_declaration.change_id.clone();
+    let second_change = second_declaration.change_id.clone();
+    let schedule = [
+        revision_event("seek-shared-member", Vec::new(), "2026-08-04T00:05:00Z"),
+        change_event(21, first_declaration),
+        change_event(22, first_membership),
+        change_event(23, second_declaration),
+        change_event(24, second_membership),
+        change_event(25, link),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    // The shared member's proposal carrier correlates historically into BOTH
+    // Changes (a revision-family fact follows its memberships); each Change's
+    // closure is its declaration, its membership, the shared link, and the
+    // shared member's proposal carrier — never the sibling's own carriers.
+    let event_id = |index: usize| schedule[index].event_id.as_str().to_owned();
+    ChangeSeekFixture {
+        adapter,
+        root,
+        observed: TruthCursor::new(1, schedule.len() as u64),
+        first_change,
+        second_change,
+        first_event_ids: vec![event_id(0), event_id(1), event_id(2), event_id(5)],
+        second_event_ids: vec![event_id(0), event_id(3), event_id(4), event_id(5)],
+    }
+}
+
+#[test]
+fn change_fact_seek_returns_the_ordered_subset_for_one_change() {
+    let fixture = change_seek_fixture();
+    let eager = ready(
+        fixture
+            .adapter
+            .semantic_materialized_change_document_facts_at(fixture.observed)
+            .expect("eager Change document facts"),
+    );
+    assert_eq!(eager.len(), 6, "six Change-family carriers materialize");
+
+    for (change, expected_ids, sibling_ids) in [
+        (
+            &fixture.first_change,
+            &fixture.first_event_ids,
+            &fixture.second_event_ids,
+        ),
+        (
+            &fixture.second_change,
+            &fixture.second_event_ids,
+            &fixture.first_event_ids,
+        ),
+    ] {
+        let seek = ready(
+            fixture
+                .adapter
+                .semantic_change_seek_facts_at(change, fixture.observed)
+                .expect("seek Change document facts"),
+        );
+        let expected = eager
+            .iter()
+            .filter(|fact| {
+                expected_ids
+                    .iter()
+                    .any(|id| id == fact.support.event_id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 4, "four carriers correlate to the Change");
+        assert_eq!(
+            seek, expected,
+            "the seek returns the eager scan's correlated subset in eager order"
+        );
+        let sibling_exclusive = sibling_ids
+            .iter()
+            .filter(|id| !expected_ids.contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(sibling_exclusive.len(), 2);
+        assert!(
+            seek.iter().all(|fact| {
+                !sibling_exclusive
+                    .iter()
+                    .any(|id| id.as_str() == fact.support.event_id.as_str())
+            }),
+            "the sibling Change's own carriers never leak through the shared member"
+        );
+    }
+
+    let absent = ready(
+        fixture
+            .adapter
+            .semantic_change_seek_facts_at(
+                &crate::model::ChangeId::new(format!("change:sha256:{}", "a".repeat(64))),
+                fixture.observed,
+            )
+            .expect("absent-Change seek"),
+    );
+    assert!(absent.is_empty(), "an unknown Change selects no fact rows");
+}
+
+#[test]
+fn change_correlated_sequence_seek_plan_uses_the_change_index() {
+    use crate::bench_support::derived_access::sqlite_locator::CHANGE_CORRELATED_SEQUENCE_SEEK_SQL;
+
+    let fixture = change_seek_fixture();
+    let ChangeSeekFixture { adapter, root, .. } = fixture;
+    drop(adapter);
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open correlated-seek plan evidence");
+    let plan_details: Vec<String> = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {CHANGE_CORRELATED_SEQUENCE_SEEK_SQL}"
+        ))
+        .expect("prepare correlated-seek plan")
+        .query_map(
+            rusqlite::params![1_i64, 1_i64, "change:sha256:plan"],
+            |row| row.get::<_, String>(3),
+        )
+        .expect("query correlated-seek plan")
+        .collect::<Result<_, _>>()
+        .expect("read correlated-seek plan");
+    assert!(
+        plan_details.first().is_some_and(|detail| {
+            detail.contains("SEARCH")
+                && detail.contains("product_history_change_correlation_change")
+                && detail.contains("change_id=?")
+        }),
+        "the correlated-sequence seek must probe the Change index first: {plan_details:?}"
+    );
+    assert!(
+        !plan_details
+            .iter()
+            .any(|detail| detail.contains("SCAN correlation")),
+        "the correlated-sequence seek must never scan the correlation table: {plan_details:?}"
+    );
+}
+
+#[test]
+fn change_fact_seek_batch_plan_advances_from_the_selected_set() {
+    use crate::bench_support::derived_access::sqlite_locator::CHANGE_FACT_SEEK_BATCH_SQL;
+
+    let fixture = change_seek_fixture();
+    let ChangeSeekFixture { adapter, root, .. } = fixture;
+    drop(adapter);
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open fact-seek plan evidence");
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE pointbreak_change_seek_sequence (
+                 sequence INTEGER NOT NULL PRIMARY KEY
+             ) STRICT, WITHOUT ROWID;",
+        )
+        .expect("create selected sequence TEMP relation");
+    let plan_details: Vec<String> = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {CHANGE_FACT_SEEK_BATCH_SQL}"))
+        .expect("prepare fact-seek plan")
+        .query_map(rusqlite::params![1_i64, 1_i64], |row| {
+            row.get::<_, String>(3)
+        })
+        .expect("query fact-seek plan")
+        .collect::<Result<_, _>>()
+        .expect("read fact-seek plan");
+    // The sequence bound propagates into the TEMP set's own primary key on
+    // the bundled SQLite, so the outermost step reads as `SEARCH selected`
+    // rather than `SCAN selected`; the fenced invariant is that the plan
+    // begins from the selected set either way.
+    assert!(
+        plan_details
+            .first()
+            .is_some_and(|detail| detail.contains("selected")),
+        "the fact-seek batch must begin from the selected TEMP set: {plan_details:?}"
+    );
+    for advanced in ["change_fact", "locator", "cursor_receipt", "event"] {
+        assert!(
+            plan_details.iter().any(|detail| detail.contains("SEARCH")
+                && detail.contains(advanced)
+                && detail.contains("INTEGER PRIMARY KEY")),
+            "the fact-seek batch must point-read {advanced} by sequence: {plan_details:?}"
+        );
+        assert!(
+            !plan_details
+                .iter()
+                .any(|detail| detail.contains(&format!("SCAN {advanced}"))),
+            "the fact-seek batch must never scan {advanced}: {plan_details:?}"
+        );
+    }
+}
+
+#[test]
+fn change_fact_seek_row_count_is_invariant_under_unrelated_growth() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let target_member = revision_id("seek-growth-member");
+    let target_declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([81; 32]), [82; 32])
+            .expect("target declaration");
+    let target_membership =
+        build_membership_asserted(&target_declaration.change_id, &target_member, [83; 32])
+            .expect("target membership");
+    let target_change = target_declaration.change_id.clone();
+    let schedule = [
+        revision_event("seek-growth-member", Vec::new(), "2026-08-04T00:07:00Z"),
+        change_event(31, target_declaration),
+        change_event(32, target_membership),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let baseline = ready(
+        adapter
+            .semantic_change_seek_facts_at(&target_change, TruthCursor::new(1, 3))
+            .expect("baseline seek"),
+    );
+    assert_eq!(
+        baseline.len(),
+        3,
+        "the target Change correlates its declaration, membership, and the \
+         member's proposal carrier"
+    );
+
+    let mut appended = 3_u64;
+    let mut attempt = schedule.len();
+    for ordinal in 0..4_u8 {
+        let unrelated_member = revision_id(&format!("seek-growth-unrelated-{ordinal}"));
+        let declaration = build_change_declared(
+            ChangeIdentityDescriptorV1::opaque_nonce([100 + ordinal; 32]),
+            [110 + ordinal; 32],
+        )
+        .expect("unrelated declaration");
+        let membership = build_membership_asserted(
+            &declaration.change_id,
+            &unrelated_member,
+            [120 + ordinal; 32],
+        )
+        .expect("unrelated membership");
+        for event in [
+            revision_event_for_engagement(
+                &format!("seek-growth-unrelated-{ordinal}"),
+                Vec::new(),
+                "2026-08-04T00:08:00Z",
+                ENGAGEMENT,
+            ),
+            change_event(40 + usize::from(ordinal) * 2, declaration),
+            change_event(41 + usize::from(ordinal) * 2, membership),
+        ] {
+            append(&adapter, &event, attempt);
+            attempt += 1;
+            appended += 1;
+        }
+    }
+
+    let grown = ready(
+        adapter
+            .semantic_change_seek_facts_at(&target_change, TruthCursor::new(1, appended))
+            .expect("post-growth seek"),
+    );
+    assert_eq!(
+        grown, baseline,
+        "the selected fact rows for the target Change are invariant under unrelated growth"
+    );
+}

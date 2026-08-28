@@ -1564,6 +1564,7 @@ fn counter_delta(
         change_support_carriers_opened: delta!(change_support_carriers_opened),
         change_matches: delta!(change_matches),
         change_rows_emitted: delta!(change_rows_emitted),
+        change_seek_fact_rows_selected: delta!(change_seek_fact_rows_selected),
         timeline_sqlite_candidates: delta!(timeline_sqlite_candidates),
         timeline_sqlite_window_rows: delta!(timeline_sqlite_window_rows),
         timeline_sqlite_facet_rows: delta!(timeline_sqlite_facet_rows),
@@ -1693,6 +1694,10 @@ change_counter!(
 );
 change_counter!(record_change_matches, change_matches);
 change_counter!(record_change_rows_emitted, change_rows_emitted);
+change_counter!(
+    record_change_seek_fact_rows_selected,
+    change_seek_fact_rows_selected
+);
 change_counter!(
     record_timeline_sqlite_candidates,
     timeline_sqlite_candidates
@@ -2774,6 +2779,7 @@ mod tests {
         record_change_support_carriers_opened(97);
         record_change_matches(101);
         record_change_rows_emitted(103);
+        record_change_seek_fact_rows_selected(211);
         record_timeline_sqlite_candidates(107);
         record_timeline_sqlite_window_rows(109);
         record_timeline_sqlite_facet_rows(113);
@@ -2828,6 +2834,7 @@ mod tests {
                 change_support_carriers_opened: 97,
                 change_matches: 101,
                 change_rows_emitted: 103,
+                change_seek_fact_rows_selected: 211,
                 timeline_sqlite_candidates: 107,
                 timeline_sqlite_window_rows: 109,
                 timeline_sqlite_facet_rows: 113,

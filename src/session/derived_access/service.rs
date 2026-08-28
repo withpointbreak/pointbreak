@@ -675,6 +675,45 @@ impl DerivedAccessService {
         Ok(self.semantic.materialized_change_projection(observed)?)
     }
 
+    /// Select one Change's correlated materialized fact rows through the
+    /// per-Change seek snapshot: an ordered subset of the eager
+    /// complete-Change scan's rows, with the snapshot closed on every path
+    /// and catch-up propagated unchanged.
+    pub(crate) fn semantic_change_seek_facts_at(
+        &self,
+        change_id: &crate::model::ChangeId,
+        observed: TruthCursor,
+    ) -> Result<
+        LocatorRead<Vec<crate::session::projection::change::ChangeDocumentProjectionFact>>,
+        DerivedAccessServiceError,
+    > {
+        match self.semantic.change_seek_read_snapshot(observed)? {
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                Ok(LocatorRead::CatchUpRequired { applied, observed })
+            }
+            LocatorRead::Ready(snapshot) => {
+                let facts = snapshot.change_document_facts_for_change(change_id, observed);
+                let finished = snapshot.finish();
+                let facts = facts?;
+                finished?;
+                Ok(LocatorRead::Ready(facts))
+            }
+        }
+    }
+
+    /// Test-only eager complete-Change fact probe: the seek regression's
+    /// comparison oracle.
+    #[cfg(test)]
+    pub(crate) fn semantic_materialized_change_document_facts_at(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<
+        LocatorRead<Vec<crate::session::projection::change::ChangeDocumentProjectionFact>>,
+        DerivedAccessServiceError,
+    > {
+        Ok(self.semantic.materialized_change_document_facts(observed)?)
+    }
+
     pub(crate) fn proposal_carrier_locators(
         &self,
         exact: &RevisionRefV1,

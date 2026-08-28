@@ -8,7 +8,9 @@ use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
-use crate::model::{ActorId, EventId, ReviewTargetRef, RevisionId, RevisionRefV1, TrackId};
+use crate::model::{
+    ActorId, ChangeId, EventId, ReviewTargetRef, RevisionId, RevisionRefV1, TrackId,
+};
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
@@ -520,6 +522,118 @@ impl ExactRevisionFactReadSnapshot {
         let vm_steps =
             u64::try_from(statement.get_status(rusqlite::StatementStatus::VmStep)).unwrap_or(0);
         Ok((event_ids, vm_steps))
+    }
+}
+
+/// One exact, connection-local per-Change seek read snapshot. The transaction
+/// owns the exact locator checkpoint while the correlated-sequence selection
+/// and the fenced fact batch run, so a governed append can never rewrite
+/// correlation rows between the two statements. The constructor validates the
+/// materialized state against the pinned checkpoint but does not retain it:
+/// the seek reads fact rows only.
+pub(crate) struct ChangeSeekReadSnapshot {
+    pub(crate) connection: rusqlite::Connection,
+}
+
+impl ChangeSeekReadSnapshot {
+    pub(crate) fn finish(self) -> Result<(), SqliteSemanticError> {
+        self.connection
+            .execute_batch("ROLLBACK")
+            .map_err(|error| sqlite_error("close Change seek read snapshot", error))
+    }
+
+    /// Select the one Change's correlated fact rows: the correlated-sequence
+    /// seek fills a connection-local TEMP set, then the fenced batch returns
+    /// an ordered subset of the eager complete-Change scan's rows. Both
+    /// statements run on this snapshot's one open transaction.
+    pub(crate) fn change_document_facts_for_change(
+        &self,
+        change_id: &ChangeId,
+        observed: TruthCursor,
+    ) -> Result<Vec<ChangeDocumentProjectionFact>, SqliteSemanticError> {
+        let checkpoint = read_locator_checkpoint(&self.connection)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteSemanticError::Metadata(
+                "Change seek selection differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        let epoch = to_i64(observed.epoch, "Change seek epoch")?;
+        let sequence = to_i64(observed.sequence, "Change seek cursor")?;
+
+        self.connection
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS pointbreak_change_seek_sequence (
+                     sequence INTEGER NOT NULL PRIMARY KEY
+                 ) STRICT, WITHOUT ROWID;
+                 DELETE FROM temp.pointbreak_change_seek_sequence;",
+            )
+            .map_err(|error| sqlite_error("prepare Change seek sequence set", error))?;
+        let correlated = {
+            let mut statement = self
+                .connection
+                .prepare(CHANGE_CORRELATED_SEQUENCE_SEEK_SQL)
+                .map_err(|error| sqlite_error("prepare Change seek correlation", error))?;
+            let rows = statement
+                .query_map(params![epoch, sequence, change_id.as_str()], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| sqlite_error("query Change seek correlation", error))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|error| sqlite_error("read Change seek correlation", error))?
+        };
+        {
+            let mut insert = self
+                .connection
+                .prepare(
+                    "INSERT INTO temp.pointbreak_change_seek_sequence (sequence)
+                     VALUES (?1)",
+                )
+                .map_err(|error| sqlite_error("prepare Change seek sequence member", error))?;
+            for selected in &correlated {
+                insert
+                    .execute(params![selected])
+                    .map_err(|error| sqlite_error("insert Change seek sequence member", error))?;
+            }
+        }
+
+        let mut statement = self
+            .connection
+            .prepare(CHANGE_FACT_SEEK_BATCH_SQL)
+            .map_err(|error| sqlite_error("prepare Change seek fact batch", error))?;
+        let rows = statement
+            .query_map(params![epoch, sequence], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|error| sqlite_error("query Change seek fact batch", error))?;
+        let mut facts = Vec::new();
+        for row in rows {
+            let (json, event_id, actor_id, track_id, locator_epoch, receipt_epoch) =
+                row.map_err(|error| sqlite_error("read Change seek fact batch", error))?;
+            if locator_epoch != epoch || receipt_epoch != locator_epoch {
+                return Err(SqliteSemanticError::Metadata(format!(
+                    "Change seek fact {event_id} receipt epoch {receipt_epoch} does not match \
+                     locator epoch {locator_epoch} at expected epoch {}",
+                    observed.epoch
+                )));
+            }
+            facts.push(ChangeDocumentProjectionFact::new(
+                serde_json::from_str::<ChangeProjectionFact>(&json)
+                    .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Json(error)))?,
+                EventId::new(event_id),
+                ActorId::new(actor_id),
+                track_id.map(TrackId::new),
+            ));
+        }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_change_seek_fact_rows_selected(facts.len());
+        Ok(facts)
     }
 }
 
@@ -1124,6 +1238,48 @@ pub(crate) const PROPOSAL_CARRIER_LOCATOR_BATCH_SQL: &str =
        AND locator.epoch = ?1
        AND proposal.sequence <= ?2
      ORDER BY proposal.sequence";
+
+/// The correlated-sequence step of the per-Change seek read.
+///
+/// The `INDEXED BY` clause is a deliberate planner fence: the seek must probe
+/// the Change-keyed correlation index, whose key leads with `change_id`. The
+/// table's `WITHOUT ROWID` primary key leads with `sequence`, so without the
+/// fence SQLite may satisfy the predicate with a full correlation scan whose
+/// cost grows with total correlated history rather than the one selected
+/// Change. Parameter order is shared with the batch step: `?1` epoch (unused
+/// here — correlation rows are not epoch-tagged), `?2` sequence bound,
+/// `?3` Change id.
+pub(crate) const CHANGE_CORRELATED_SEQUENCE_SEEK_SQL: &str = "SELECT DISTINCT correlation.sequence
+     FROM product_history_change_correlation AS correlation
+          INDEXED BY product_history_change_correlation_change
+     WHERE correlation.change_id = ?3
+       AND correlation.sequence <= ?2";
+
+/// The fenced batch step of the per-Change seek read.
+///
+/// The `CROSS JOIN` order fences the plan to advance from the selected TEMP
+/// sequence set; every subsequent join is an `INTEGER PRIMARY KEY` point read
+/// by sequence, so no `INDEXED BY` belongs on them — forcing a secondary
+/// index onto an ordinary point-read join is exactly the shape that inverts a
+/// plan into a per-row rescan. The select list and `ORDER BY` are
+/// character-identical to the eager complete-Change scan so the returned rows
+/// are an ordered subset of the eager scan's rows.
+pub(crate) const CHANGE_FACT_SEEK_BATCH_SQL: &str =
+    "SELECT change_fact.fact_json, locator.event_id,
+            event.actor_id, locator.track_id,
+            locator.epoch, receipt.epoch
+     FROM temp.pointbreak_change_seek_sequence AS selected
+     CROSS JOIN semantic_change_fact AS change_fact
+     CROSS JOIN semantic_event_fact_text AS event
+     CROSS JOIN locator_event_text AS locator
+     CROSS JOIN cursor_receipt_text AS receipt
+     WHERE change_fact.sequence = selected.sequence
+       AND event.sequence = change_fact.sequence
+       AND locator.sequence = change_fact.sequence
+       AND receipt.sequence = change_fact.sequence
+       AND locator.epoch = ?1
+       AND change_fact.sequence <= ?2
+     ORDER BY locator.replay_key, receipt.logical_reread_key_hash";
 
 impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
@@ -2063,6 +2219,34 @@ impl SqliteSemantic {
         }))
     }
 
+    /// Test-only eager complete-Change scan probe: the ordered-subset seek
+    /// regression compares the seek's output against exactly this production
+    /// row source.
+    #[cfg(test)]
+    pub(crate) fn materialized_change_document_facts(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<ChangeDocumentProjectionFact>>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        Ok(LocatorRead::Ready(
+            query_materialized_change_document_facts(
+                &connection,
+                observed.epoch,
+                observed.sequence,
+            )?,
+        ))
+    }
+
     /// Select every proposal carrier for one exact Revision without opening
     /// authoritative bytes. The caller must hydrate and validate each returned
     /// identity before presenting proposal prose.
@@ -2354,6 +2538,38 @@ impl SqliteSemantic {
             connection,
             state,
         }))
+    }
+
+    pub(crate) fn change_seek_read_snapshot(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<ChangeSeekReadSnapshot>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        connection
+            .execute_batch("BEGIN DEFERRED TRANSACTION")
+            .map_err(|error| sqlite_error("begin Change seek read snapshot", error))?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        validate_product_history_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied != observed {
+            connection
+                .execute_batch("ROLLBACK")
+                .map_err(|error| sqlite_error("close moved Change seek read snapshot", error))?;
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state(&connection)?;
+        if u64::try_from(state.event_count).ok() != Some(observed.sequence) {
+            connection.execute_batch("ROLLBACK").map_err(|error| {
+                sqlite_error("close inconsistent Change seek read snapshot", error)
+            })?;
+            return Err(SqliteSemanticError::Metadata(
+                "Change seek state differs from its pinned checkpoint".to_owned(),
+            ));
+        }
+        Ok(LocatorRead::Ready(ChangeSeekReadSnapshot { connection }))
     }
 
     /// Open the exact Timeline snapshot selected by an already-pinned reader
