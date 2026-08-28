@@ -1,5 +1,7 @@
-//! Characterization floor and route contracts for the three producer-reuse
-//! Change CLI reads: `change profile`, `change list`, and `change attention`.
+//! Characterization floor and route contracts for the Change CLI reads: the
+//! producer-reuse pages (`change profile`, `change list`, `change attention`)
+//! and the per-Change selector reads (`change show`, `change interdiff`,
+//! captured `change select`).
 //!
 //! The characterization tests freeze the authoritative bytes per format lane;
 //! they are the parity oracle for the derived routing and may only change
@@ -414,11 +416,44 @@ fn change_reads_on_m1_emit_the_typed_documents_identically_on_both_lanes() {
 }
 
 /// Both non-L2 states answer with typed stdout documents and exit success on
-/// the explicit-off and the derived-selected lanes, byte-identically.
+/// the explicit-off and the derived-selected lanes, byte-identically. The
+/// selector-taking reads answer the same way before any selector is resolved.
 fn assert_typed_capability_documents(repo_arg: &str, state: &str) {
-    for command in ["profile", "list", "attention"] {
-        let off = pointbreak_unprepared_env(["change", command, "--repo", repo_arg], OFF);
-        let active = pointbreak_unprepared_env(["change", command, "--repo", repo_arg], ACTIVE);
+    let placeholder_change = format!("change:sha256:{}", "0".repeat(64));
+    let placeholder_revision = format!("revision:sha256:{}", "1".repeat(64));
+    let placeholder_hash = format!("sha256:{}", "2".repeat(64));
+    let commands: Vec<(&str, Vec<&str>)> = vec![
+        ("profile", vec!["change", "profile", "--repo", repo_arg]),
+        ("list", vec!["change", "list", "--repo", repo_arg]),
+        ("attention", vec!["change", "attention", "--repo", repo_arg]),
+        (
+            "show",
+            vec!["change", "show", &placeholder_change, "--repo", repo_arg],
+        ),
+        (
+            "select",
+            vec!["change", "select", &placeholder_change, "--repo", repo_arg],
+        ),
+        (
+            "interdiff",
+            vec![
+                "change",
+                "interdiff",
+                &placeholder_change,
+                &placeholder_revision,
+                &placeholder_revision,
+                "--from-artifact-hash",
+                &placeholder_hash,
+                "--to-artifact-hash",
+                &placeholder_hash,
+                "--repo",
+                repo_arg,
+            ],
+        ),
+    ];
+    for (command, args) in commands {
+        let off = pointbreak_unprepared_env(&args, OFF);
+        let active = pointbreak_unprepared_env(&args, ACTIVE);
         for (lane, output) in [("off", &off), ("active", &active)] {
             assert!(
                 output.status.success(),
@@ -755,6 +790,645 @@ fn assert_derived_lane_byte_parity(
     assert_eq!(
         active.stderr, off.stderr,
         "change {command} ({lane}, {state}): stderr parity"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Characterization floor: per-Change seek reads (show / interdiff / select)
+// ---------------------------------------------------------------------------
+
+/// Extend the shared fixture with a replacement edge inside the accepted
+/// Change and an explicit link between the two Changes, so a detail document
+/// carries members, claims, an effective supersedes pair, a link, and a
+/// qualification entry. Returns the replacement Revision id.
+fn enriched_detail_fixture() -> (ChangeReadsFixture, String) {
+    let fixture = change_reads_fixture();
+
+    let link = pointbreak_env(
+        [
+            "change",
+            "link",
+            &fixture.parallel_change_id,
+            &fixture.accepted_change_id,
+            "--relation",
+            "same-work",
+            "--repo",
+            fixture.repo_arg(),
+            "--operation-id",
+            "change-operation:detail-floor-link",
+        ],
+        OFF,
+    );
+    assert_success(&link);
+
+    let select = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--repo",
+            fixture.repo_arg(),
+        ],
+        OFF,
+    );
+    assert_success(&select);
+    let token = parse_json(&select.stdout)["token"]
+        .as_str()
+        .expect("selection token")
+        .to_owned();
+    fixture
+        .repo
+        .write("src/lib.rs", "pub fn value() -> u32 { 5 }\n");
+    let replaced = capture(&[
+        "capture",
+        "--repo",
+        fixture.repo_arg(),
+        "--review-cursor",
+        &token,
+        "--advance",
+        "replace",
+    ]);
+    let replacement_revision = replaced["revision"]["revisionId"]
+        .as_str()
+        .expect("replacement revision id")
+        .to_owned();
+    (fixture, replacement_revision)
+}
+
+fn change_show(fixture: &ChangeReadsFixture, change_id: &str, lane: &str) -> Value {
+    let output = pointbreak_env(
+        [
+            "change",
+            "show",
+            change_id,
+            "--repo",
+            fixture.repo_arg(),
+            "--format",
+            lane,
+        ],
+        OFF,
+    );
+    assert_success(&output);
+    assert!(output.stderr.is_empty(), "show ({lane}) wrote stderr");
+    parse_json(&output.stdout)
+}
+
+fn ascending_strings(values: &[&str], label: &str) {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    assert_eq!(values, sorted.as_slice(), "{label} is ascending");
+}
+
+#[test]
+fn change_show_reports_one_change_detail_in_each_format_lane() {
+    let (fixture, replacement_revision) = enriched_detail_fixture();
+
+    const DETAIL_FIELDS: &[&str] = &[
+        "summary",
+        "memberRevisions",
+        "unavailableMemberRevisions",
+        "membershipClaims",
+        "membershipWithdrawals",
+        "relationClaims",
+        "relationWithdrawals",
+        "links",
+        "effectiveSupersedes",
+        "pendingOrConflictingEdges",
+        "currentRevisionRefs",
+        "perCurrentRevisionQualification",
+        "operativeObligations",
+        "diagnostics",
+        "projectionStamp",
+    ];
+
+    for lane in FORMAT_LANES {
+        for change_id in [&fixture.parallel_change_id, &fixture.accepted_change_id] {
+            let json = change_show(&fixture, change_id, lane);
+            assert_eq!(json["schema"], "pointbreak.review-change", "{lane}");
+            assert_eq!(json["version"], 1, "{lane}");
+            for field in DETAIL_FIELDS {
+                assert!(
+                    json.get(field).is_some(),
+                    "{lane}: change {change_id} detail field {field} missing: {json:#}"
+                );
+            }
+            assert_eq!(json["summary"]["changeId"], change_id.as_str(), "{lane}");
+            assert!(
+                !json["projectionStamp"]
+                    .as_str()
+                    .expect("show projection stamp")
+                    .is_empty(),
+                "{lane}"
+            );
+
+            let members = json["memberRevisions"]
+                .as_array()
+                .expect("member revisions")
+                .iter()
+                .map(|member| {
+                    member["revision"]["revisionId"]
+                        .as_str()
+                        .expect("member revision id")
+                })
+                .collect::<Vec<_>>();
+            ascending_strings(&members, &format!("{lane}: memberRevisions"));
+            let claims = json["membershipClaims"]
+                .as_array()
+                .expect("membership claims")
+                .iter()
+                .map(|claim| claim["claimId"].as_str().expect("claim id"))
+                .collect::<Vec<_>>();
+            ascending_strings(&claims, &format!("{lane}: membershipClaims"));
+            let supersedes = json["effectiveSupersedes"]
+                .as_array()
+                .expect("effective supersedes")
+                .iter()
+                .map(|pair| {
+                    pair[0]["revisionId"]
+                        .as_str()
+                        .expect("successor revision id")
+                })
+                .collect::<Vec<_>>();
+            ascending_strings(&supersedes, &format!("{lane}: effectiveSupersedes"));
+            let current = json["currentRevisionRefs"]
+                .as_array()
+                .expect("current revision refs")
+                .iter()
+                .map(|reference| reference["revisionId"].as_str().expect("revision id"))
+                .collect::<Vec<_>>();
+            ascending_strings(&current, &format!("{lane}: currentRevisionRefs"));
+        }
+
+        let parallel = change_show(&fixture, &fixture.parallel_change_id, lane);
+        assert_eq!(
+            parallel["memberRevisions"]
+                .as_array()
+                .expect("parallel members")
+                .len(),
+            2,
+            "{lane}: both parallel members are exact"
+        );
+        assert_eq!(
+            parallel["currentRevisionRefs"]
+                .as_array()
+                .expect("parallel current")
+                .len(),
+            2,
+            "{lane}: both parallel heads stay current"
+        );
+
+        let accepted = change_show(&fixture, &fixture.accepted_change_id, lane);
+        let supersedes = accepted["effectiveSupersedes"]
+            .as_array()
+            .expect("accepted supersedes");
+        assert_eq!(supersedes.len(), 1, "{lane}: one effective replacement");
+        assert_eq!(
+            supersedes[0][0]["revisionId"], replacement_revision,
+            "{lane}: replacement Revision is the successor"
+        );
+        assert_eq!(
+            supersedes[0][1]["revisionId"], fixture.accepted_revision_id,
+            "{lane}: replaced Revision is the predecessor"
+        );
+        let current = accepted["currentRevisionRefs"]
+            .as_array()
+            .expect("accepted current");
+        assert_eq!(current.len(), 1, "{lane}");
+        assert_eq!(current[0]["revisionId"], replacement_revision, "{lane}");
+        // Link endpoints are canonically ordered (left < right), not
+        // argument-ordered.
+        let mut endpoints = [
+            fixture.parallel_change_id.as_str(),
+            fixture.accepted_change_id.as_str(),
+        ];
+        endpoints.sort_unstable();
+        for change_document in [&parallel, &accepted] {
+            let links = change_document["links"].as_array().expect("links");
+            assert_eq!(links.len(), 1, "{lane}: the explicit link is present");
+            assert_eq!(links[0]["leftChangeId"], endpoints[0], "{lane}");
+            assert_eq!(links[0]["rightChangeId"], endpoints[1], "{lane}");
+            assert_eq!(links[0]["relation"], "same_work", "{lane}");
+        }
+        let qualification = accepted["perCurrentRevisionQualification"]
+            .as_array()
+            .expect("qualification entries");
+        assert_eq!(qualification.len(), 1, "{lane}");
+        assert_eq!(
+            qualification[0]["revision"]["revisionId"], replacement_revision,
+            "{lane}: qualification tracks the current Revision"
+        );
+    }
+}
+
+#[test]
+fn change_show_unknown_change_fails_with_the_authoritative_message() {
+    let fixture = change_reads_fixture();
+    let missing = format!("change:sha256:{}", "f".repeat(64));
+
+    let output = pointbreak_env(
+        ["change", "show", &missing, "--repo", fixture.repo_arg()],
+        OFF,
+    );
+    assert!(!output.status.success(), "unknown Change must fail");
+    assert!(
+        output.stdout.is_empty(),
+        "unknown Change writes no document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("Change {missing} is unavailable")),
+        "authoritative unknown-Change message missing: {stderr}"
+    );
+}
+
+/// The detail document's `diagnostics` field carries the per-Change
+/// vocabulary only; the store-scoped withdrawal diagnostic stays a list
+/// document concern and never leaks into `show`.
+#[test]
+fn change_show_diagnostics_are_the_per_change_vocabulary() {
+    let fixture = change_reads_fixture();
+
+    let withdrawal_diagnostic = format!(
+        "change_membership_withdrawal_claim_missing:{}",
+        fixture.withdrawn_claim_id
+    );
+    for change_id in [&fixture.parallel_change_id, &fixture.accepted_change_id] {
+        let json = change_show(&fixture, change_id, "json");
+        let diagnostics = json["diagnostics"]
+            .as_array()
+            .expect("detail diagnostics")
+            .iter()
+            .map(|value| value.as_str().expect("diagnostic string"))
+            .collect::<Vec<_>>();
+        assert!(
+            !diagnostics.contains(&withdrawal_diagnostic.as_str()),
+            "store-scoped withdrawal diagnostic leaked into change {change_id}: {diagnostics:?}"
+        );
+    }
+
+    let list =
+        parse_json(&pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF).stdout);
+    assert!(
+        list["diagnostics"]
+            .as_array()
+            .expect("list diagnostics")
+            .iter()
+            .any(|value| value.as_str() == Some(withdrawal_diagnostic.as_str())),
+        "the withdrawal diagnostic stays a store-scoped list concern"
+    );
+}
+
+/// Two exact parallel heads of one Change, with their authoritative artifact
+/// hashes, straight from the list document.
+fn parallel_heads(fixture: &ChangeReadsFixture) -> (Value, Value) {
+    let list =
+        parse_json(&pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF).stdout);
+    let parallel = list["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
+        .expect("parallel Change summary")
+        .clone();
+    let heads = parallel["currentRevisionRefs"]
+        .as_array()
+        .expect("parallel heads");
+    assert_eq!(heads.len(), 2, "both parallel heads stay current");
+    (heads[0].clone(), heads[1].clone())
+}
+
+#[test]
+fn change_interdiff_emits_the_unavailable_first_cohort_contract_in_each_format_lane() {
+    let fixture = change_reads_fixture();
+    let (from, to) = parallel_heads(&fixture);
+
+    for lane in FORMAT_LANES {
+        let output = pointbreak_env(
+            [
+                "change",
+                "interdiff",
+                &fixture.parallel_change_id,
+                from["revisionId"].as_str().expect("from revision id"),
+                to["revisionId"].as_str().expect("to revision id"),
+                "--from-artifact-hash",
+                from["objectArtifactContentHash"]
+                    .as_str()
+                    .expect("from hash"),
+                "--to-artifact-hash",
+                to["objectArtifactContentHash"].as_str().expect("to hash"),
+                "--repo",
+                fixture.repo_arg(),
+                "--format",
+                lane,
+            ],
+            OFF,
+        );
+        assert_success(&output);
+        assert!(output.stderr.is_empty(), "interdiff ({lane}) wrote stderr");
+        let json = parse_json(&output.stdout);
+        assert_eq!(
+            json["schema"], "pointbreak.review-revision-interdiff",
+            "{lane}"
+        );
+        assert_eq!(json["version"], 1, "{lane}");
+        assert!(
+            json.get("projectionStamp").is_none(),
+            "{lane}: the cold CLI interdiff document carries no stamp"
+        );
+        assert_eq!(json["interdiff"]["from"], from, "{lane}");
+        assert_eq!(json["interdiff"]["to"], to, "{lane}");
+        assert_eq!(json["interdiff"]["algorithmVersion"], "unavailable-v1");
+        assert_eq!(
+            json["interdiff"]["scope"],
+            Value::Array(Vec::new()),
+            "{lane}"
+        );
+        assert_eq!(json["availability"], "unavailable", "{lane}");
+        assert!(
+            json.get("comparison").is_none(),
+            "{lane}: no comparison material in the first cohort"
+        );
+        assert_eq!(
+            json["diagnostics"],
+            serde_json::json!(["revision_interdiff_not_available"]),
+            "{lane}"
+        );
+        assert!(
+            !json["cacheKey"].as_str().expect("cache key").is_empty(),
+            "{lane}"
+        );
+    }
+}
+
+/// Endpoint validation order is observable: an invalid `from` surfaces its
+/// error even when `to` is also invalid with a different failure class.
+#[test]
+fn change_interdiff_validates_from_before_to() {
+    let fixture = change_reads_fixture();
+    let (first_head, second_head) = parallel_heads(&fixture);
+
+    let output = pointbreak_env(
+        [
+            "change",
+            "interdiff",
+            &fixture.parallel_change_id,
+            // Not a member of the parallel Change: the accepted Change's head.
+            &fixture.accepted_revision_id,
+            second_head["revisionId"].as_str().expect("to revision id"),
+            "--from-artifact-hash",
+            first_head["objectArtifactContentHash"]
+                .as_str()
+                .expect("borrowed hash"),
+            "--to-artifact-hash",
+            // Mismatched hash: the other head's artifact hash.
+            first_head["objectArtifactContentHash"]
+                .as_str()
+                .expect("mismatched hash"),
+            "--repo",
+            fixture.repo_arg(),
+        ],
+        OFF,
+    );
+    assert!(!output.status.success(), "invalid endpoints must fail");
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("exact Revision is not an active member of the Change"),
+        "the from endpoint's failure surfaces first: {stderr}"
+    );
+    assert!(
+        !stderr.contains("does not match authoritative state"),
+        "the to endpoint is not validated before from: {stderr}"
+    );
+}
+
+fn decode_cursor_token(token: &str) -> Value {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token)
+        .expect("cursor token is url-safe base64");
+    serde_json::from_slice(&bytes).expect("cursor token wire JSON")
+}
+
+#[test]
+fn change_select_captured_emits_a_cursor_in_each_format_lane() {
+    let fixture = change_reads_fixture();
+
+    for lane in FORMAT_LANES {
+        let output = pointbreak_env(
+            [
+                "change",
+                "select",
+                &fixture.accepted_change_id,
+                "--source",
+                "captured",
+                "--repo",
+                fixture.repo_arg(),
+                "--format",
+                lane,
+            ],
+            OFF,
+        );
+        assert_success(&output);
+        assert!(output.stderr.is_empty(), "select ({lane}) wrote stderr");
+        let json = parse_json(&output.stdout);
+        let cursor = &json["cursor"];
+        assert_eq!(cursor["schema"], "pointbreak.review-cursor.v1", "{lane}");
+        assert_eq!(cursor["changeId"], fixture.accepted_change_id, "{lane}");
+        assert_eq!(
+            cursor["revision"]["revisionId"], fixture.accepted_revision_id,
+            "{lane}"
+        );
+        assert_eq!(cursor["sourceBinding"]["kind"], "captured", "{lane}");
+        assert_eq!(
+            cursor["blockingDiagnostics"],
+            Value::Array(Vec::new()),
+            "{lane}"
+        );
+        assert_eq!(
+            cursor["selectedCurrentRevisions"]
+                .as_array()
+                .expect("selected current revisions")
+                .len(),
+            1,
+            "{lane}"
+        );
+
+        let token = json["token"].as_str().expect("selection token");
+        let wire = decode_cursor_token(token);
+        assert_eq!(wire["cursor"], *cursor, "{lane}: token binds the cursor");
+        assert!(
+            !wire["selfHash"].as_str().expect("self hash").is_empty(),
+            "{lane}"
+        );
+    }
+}
+
+#[test]
+fn change_select_refusals_are_json_on_stderr_with_nonzero_exit() {
+    let fixture = change_reads_fixture();
+
+    let output = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.parallel_change_id,
+            "--repo",
+            fixture.repo_arg(),
+        ],
+        OFF,
+    );
+    assert!(
+        !output.status.success(),
+        "a parallel-current Change refuses implicit selection"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a refusal writes no stdout document: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let refusal = parse_json(&output.stderr);
+    assert_eq!(refusal["code"], "explicit_revision_required");
+    assert!(
+        !refusal["message"].as_str().expect("message").is_empty(),
+        "{refusal:#}"
+    );
+    assert_eq!(
+        refusal["exactCandidates"]
+            .as_array()
+            .expect("exact candidates")
+            .len(),
+        2,
+        "both parallel heads are exact candidates"
+    );
+    assert_eq!(refusal["diagnostics"], Value::Array(Vec::new()));
+}
+
+#[test]
+fn change_select_cursor_revalidation_round_trips_through_the_cli() {
+    let fixture = change_reads_fixture();
+
+    let first = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--repo",
+            fixture.repo_arg(),
+        ],
+        OFF,
+    );
+    assert_success(&first);
+    let first_json = parse_json(&first.stdout);
+    let first_token = first_json["token"].as_str().expect("first token");
+
+    let second = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--cursor",
+            first_token,
+            "--repo",
+            fixture.repo_arg(),
+        ],
+        OFF,
+    );
+    assert_success(&second);
+    let second_json = parse_json(&second.stdout);
+    assert_eq!(
+        second_json["cursor"], first_json["cursor"],
+        "revalidation at an unchanged graph reissues the identical cursor"
+    );
+    assert_eq!(
+        second_json["token"].as_str().expect("second token"),
+        first_token,
+        "the reissued token is byte-identical"
+    );
+}
+
+#[test]
+fn change_select_allow_historical_admits_a_non_current_member() {
+    let repo = support::dump_repo();
+    let repo_arg = repo
+        .path()
+        .to_str()
+        .expect("fixture path is UTF-8")
+        .to_owned();
+    let first = capture(&["capture", "--repo", &repo_arg]);
+    let change_id = first["changeId"].as_str().expect("change id").to_owned();
+    let historical_revision = first["revision"]["revisionId"]
+        .as_str()
+        .expect("first revision id")
+        .to_owned();
+    let cursor = first["reviewCursor"]["token"]
+        .as_str()
+        .expect("first review cursor")
+        .to_owned();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = capture(&[
+        "capture",
+        "--repo",
+        &repo_arg,
+        "--review-cursor",
+        &cursor,
+        "--advance",
+        "replace",
+    ]);
+    let current_revision = second["revision"]["revisionId"]
+        .as_str()
+        .expect("replacement revision id")
+        .to_owned();
+
+    let refused = pointbreak_env(
+        [
+            "change",
+            "select",
+            &change_id,
+            "--revision",
+            &historical_revision,
+            "--repo",
+            &repo_arg,
+        ],
+        OFF,
+    );
+    assert!(
+        !refused.status.success(),
+        "a historical member requires --allow-historical"
+    );
+    assert_eq!(
+        parse_json(&refused.stderr)["code"],
+        "historical_revision_not_authorable"
+    );
+
+    let output = pointbreak_env(
+        [
+            "change",
+            "select",
+            &change_id,
+            "--revision",
+            &historical_revision,
+            "--allow-historical",
+            "--repo",
+            &repo_arg,
+        ],
+        OFF,
+    );
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!(
+        json["cursor"]["revision"]["revisionId"],
+        historical_revision
+    );
+    assert_eq!(json["cursor"]["sourceBinding"]["kind"], "captured");
+    let selected = json["cursor"]["selectedCurrentRevisions"]
+        .as_array()
+        .expect("selected current revisions");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        selected[0]["revisionId"], current_revision,
+        "the current set names the replacement, not the historical member"
     );
 }
 
