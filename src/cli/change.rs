@@ -917,64 +917,113 @@ fn run_show(
 }
 
 fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    if select_is_derived_eligible(&args) {
+        let change_id = ChangeId::new(args.change.clone());
+        match attempt_derived_change_read(&args.repo, |access| access.change_seek(&change_id)) {
+            DerivedChangeAttempt::Answered {
+                document: seek,
+                state,
+            } => {
+                record_change_route_state(state);
+                let document = select_cursor_document(
+                    &args.repo,
+                    &args,
+                    seek.change_view(),
+                    seek.document_projection(),
+                )?;
+                return write(&args.format_args, stdout, &document);
+            }
+            DerivedChangeAttempt::Fallback { state } => {
+                record_change_route_state(state);
+            }
+        }
+    } else {
+        record_change_route_state(ChangeRouteState::AuthoritativeReplay);
+    }
     with_facade(&args.repo, &args.format_args, stdout, |_facade, ready| {
-        let change_id = ChangeId::new(args.change);
+        let change_id = ChangeId::new(args.change.clone());
         let change = ready
             .projection
             .changes
             .get(&change_id)
             .ok_or_else(|| format!("Change {} is unavailable", change_id.as_str()))?;
-        let previous = args
-            .cursor
-            .as_deref()
-            .map(ReviewCursorV1::decode_token)
-            .transpose()?;
-        if let (Some(token), Some(previous)) = (args.cursor.as_deref(), previous.as_ref()) {
-            let current_binding = review_source_binding(
-                &args.repo,
-                &previous.revision,
-                source_request_from_binding(&previous.source_binding),
-            )?;
-            validate_review_cursor_for_write(
-                token,
-                change,
-                &ready.document_projection,
-                &current_binding,
-            )
-            .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        }
-        let revision_id = args.revision.map(RevisionId::new).or_else(|| {
-            previous
-                .as_ref()
-                .map(|cursor| cursor.revision.revision_id.clone())
-        });
-        let provisional = select_review_cursor(
-            change,
-            &ready.document_projection,
-            revision_id.as_ref(),
-            args.allow_historical,
-            ReviewSourceBindingV1::Captured,
-        )
-        .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        let source_request = match args.source.as_deref() {
-            Some(source) => parse_source_request(source)?,
-            None => previous
-                .as_ref()
-                .map(|cursor| source_request_from_binding(&cursor.source_binding))
-                .unwrap_or(ReviewSourceRequestV1::Captured),
-        };
-        let source_binding =
-            review_source_binding(&args.repo, &provisional.cursor.revision, source_request)?;
-        let selected = select_review_cursor(
-            change,
-            &ready.document_projection,
-            revision_id.as_ref(),
-            args.allow_historical,
-            source_binding,
-        )
-        .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
-        Ok(serde_json::to_value(selected)?)
+        select_cursor_document(&args.repo, &args, change, &ready.document_projection)
     })
+}
+
+/// R08: the derived lane admits only invocations that are captured end to
+/// end, decided purely before any store access. A `--source` parse failure,
+/// a worktree or commit source, an undecodable prior cursor, or a
+/// mutable-bound prior cursor — even with an explicit `--source captured` —
+/// takes the authoritative arm untouched, so every error surfaces in its
+/// existing position.
+fn select_is_derived_eligible(args: &SelectArgs) -> bool {
+    match args.source.as_deref().map(parse_source_request) {
+        None | Some(Ok(ReviewSourceRequestV1::Captured)) => {}
+        Some(_) => return false,
+    }
+    match args.cursor.as_deref() {
+        None => true,
+        Some(token) => ReviewCursorV1::decode_token(token)
+            .map(|cursor| cursor.source_binding == ReviewSourceBindingV1::Captured)
+            .unwrap_or(false),
+    }
+}
+
+/// The pure selection sequence shared verbatim by the derived and
+/// authoritative lanes, so lane divergence is structurally impossible: cursor
+/// revalidation, provisional captured selection, source resolution, and the
+/// final selection, with refusals serialized to their existing JSON form.
+fn select_cursor_document(
+    repo: &std::path::Path,
+    args: &SelectArgs,
+    change: &pointbreak::session::ChangeView,
+    document_projection: &ChangeDocumentProjectionV1,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let previous = args
+        .cursor
+        .as_deref()
+        .map(ReviewCursorV1::decode_token)
+        .transpose()?;
+    if let (Some(token), Some(previous)) = (args.cursor.as_deref(), previous.as_ref()) {
+        let current_binding = review_source_binding(
+            repo,
+            &previous.revision,
+            source_request_from_binding(&previous.source_binding),
+        )?;
+        validate_review_cursor_for_write(token, change, document_projection, &current_binding)
+            .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+    }
+    let revision_id = args.revision.clone().map(RevisionId::new).or_else(|| {
+        previous
+            .as_ref()
+            .map(|cursor| cursor.revision.revision_id.clone())
+    });
+    let provisional = select_review_cursor(
+        change,
+        document_projection,
+        revision_id.as_ref(),
+        args.allow_historical,
+        ReviewSourceBindingV1::Captured,
+    )
+    .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+    let source_request = match args.source.as_deref() {
+        Some(source) => parse_source_request(source)?,
+        None => previous
+            .as_ref()
+            .map(|cursor| source_request_from_binding(&cursor.source_binding))
+            .unwrap_or(ReviewSourceRequestV1::Captured),
+    };
+    let source_binding = review_source_binding(repo, &provisional.cursor.revision, source_request)?;
+    let selected = select_review_cursor(
+        change,
+        document_projection,
+        revision_id.as_ref(),
+        args.allow_historical,
+        source_binding,
+    )
+    .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+    Ok(serde_json::to_value(selected)?)
 }
 
 fn parse_source_request(source: &str) -> Result<ReviewSourceRequestV1, Box<dyn std::error::Error>> {

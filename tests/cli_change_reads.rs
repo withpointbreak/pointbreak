@@ -221,14 +221,109 @@ fn append_withdrawal_of_missing_claim(repo_root: &Path, claim_id: &str) {
         "2027-01-01T00:00:01Z",
     )
     .expect("build raw withdrawal fixture event");
+    append_raw_event(repo_root, &event);
+}
+
+/// Append one raw event file to the store, bypassing the ordinary writer.
+/// The derived generation is behind afterwards; call
+/// [`ChangeReadsFixture::build_derived`] before derived-lane reads.
+fn append_raw_event(repo_root: &Path, event: &pointbreak::session::event::ShoreEvent) {
+    use sha2::{Digest, Sha256};
+
     let events_dir = common_dir_store(repo_root).join("events");
     std::fs::create_dir_all(&events_dir).expect("create fixture events directory");
-    let stem = format!("{:x}", Sha256::digest(idempotency_key.as_bytes()));
+    let stem = format!("{:x}", Sha256::digest(event.idempotency_key.as_bytes()));
     std::fs::write(
         events_dir.join(format!("{stem}.json")),
-        serde_json::to_vec(&event).expect("serialize fixture event"),
+        serde_json::to_vec(event).expect("serialize fixture event"),
     )
     .expect("write fixture event");
+}
+
+/// Append a raw second proposal carrier binding `revision_id` to a different
+/// object artifact hash, so the Revision's exact reference set becomes
+/// conflicted.
+fn append_conflicting_proposal(repo_root: &Path, revision_id: &str, artifact_hash: &str) {
+    use pointbreak::model::{
+        EngagementId, EngagementType, JournalId, ObjectId, ReviewTargetRef, RevisionId, TargetRef,
+    };
+    use pointbreak::session::event::{
+        EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal,
+        WorkObjectProposedPayload, Writer,
+    };
+
+    let revision_id = RevisionId::new(revision_id);
+    let event = ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        format!("change-reads-fixture:conflicting-proposal:{artifact_hash}"),
+        EventTarget::for_generative_move(
+            JournalId::new("journal:default"),
+            EngagementType::Review,
+            TargetRef::Review(ReviewTargetRef::Revision {
+                revision_id: revision_id.clone(),
+            }),
+            None,
+        )
+        .expect("proposal target"),
+        Writer::shore_local("change-reads-fixture"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(format!("engagement:sha256:{}", "b6".repeat(32))),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id,
+                    object_id: ObjectId::new(format!("obj:sha256:{}", "c6".repeat(32))),
+                    git_provenance: None,
+                },
+                summary: None,
+                object_artifact_content_hash: artifact_hash.to_owned(),
+                supersedes: Vec::new(),
+            },
+        },
+        "2027-01-01T00:00:02Z",
+    )
+    .expect("build conflicting proposal fixture event");
+    append_raw_event(repo_root, &event);
+}
+
+/// Append a raw membership claim binding a fabricated, never-proposed
+/// Revision into `change_id`, so the member has no exact reference at all.
+fn append_membership_of_unproposed_revision(repo_root: &Path, change_id: &str, revision_id: &str) {
+    use pointbreak::model::{ChangeId, ChangeMembershipClaimId, JournalId, RevisionId};
+    use pointbreak::session::event::{
+        ChangeMembershipAssertedPayload, EventTarget, EventType, ShoreEvent, Writer,
+    };
+    use sha2::{Digest, Sha256};
+
+    let claim_nonce = "d7".repeat(32);
+    // The payload validator re-derives the claim id from (change, revision,
+    // nonce) over canonical key-sorted compact JSON.
+    let claim_preimage = serde_json::json!({
+        "family": "change_membership_asserted_v1",
+        "changeId": change_id,
+        "revisionId": revision_id,
+        "claimNonce": claim_nonce,
+    });
+    let claim_id = format!(
+        "change-membership:sha256:{:x}",
+        Sha256::digest(serde_json::to_vec(&claim_preimage).expect("encode claim preimage"))
+    );
+    let event = ShoreEvent::new(
+        EventType::ChangeMembershipAsserted,
+        "change-reads-fixture:membership-unproposed",
+        EventTarget::for_journal(JournalId::new("journal:default")),
+        Writer::shore_local("change-reads-fixture"),
+        ChangeMembershipAssertedPayload {
+            schema: "pointbreak.change-membership-asserted".to_owned(),
+            version: 1,
+            membership_claim_id: ChangeMembershipClaimId::new(claim_id),
+            change_id: ChangeId::new(change_id),
+            revision_id: RevisionId::new(revision_id),
+            claim_nonce,
+        },
+        "2027-01-01T00:00:03Z",
+    )
+    .expect("build unproposed membership fixture event");
+    append_raw_event(repo_root, &event);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,12 +776,6 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
         2
     );
 
-    let select = vec![
-        "select".to_owned(),
-        fixture.accepted_change_id.clone(),
-        "--revision".to_owned(),
-        accepted_revision.to_owned(),
-    ];
     let revision = vec![
         "revision".to_owned(),
         fixture.accepted_change_id.clone(),
@@ -701,9 +790,10 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
         "--artifact-hash".to_owned(),
         accepted_hash.to_owned(),
     ];
-    // `show` and `interdiff` left the neighbor set when their derived routes
-    // landed; `select` leaves with its own.
-    for subcommand in [select, revision, resource] {
+    // Deliberate, reviewed narrowing: `show`, `select`, and `interdiff` are
+    // now derived-routed, so the untouched-neighbor set is exactly the two
+    // commands the derived lane must never consult.
+    for subcommand in [revision, resource] {
         let mut args = vec!["change".to_owned()];
         args.extend(subcommand.clone());
         args.extend(["--repo".to_owned(), fixture.repo_arg().to_owned()]);
@@ -1692,6 +1782,581 @@ fn derived_interdiff_validates_from_before_to() {
         String::from_utf8_lossy(&active.stderr)
             .contains("exact Revision is not an active member of the Change"),
         "the from endpoint's failure surfaces first on the derived lane"
+    );
+}
+
+fn assert_select_parity(
+    fixture: &ChangeReadsFixture,
+    extra: &[&str],
+    label: &str,
+) -> (Output, Output) {
+    let mut args = vec!["change", "select"];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--repo", fixture.repo_arg()]);
+    let active = pointbreak_env(&args, ACTIVE);
+    let off = pointbreak_env(&args, OFF);
+    assert_eq!(
+        active.status.code(),
+        off.status.code(),
+        "{label}: exit parity"
+    );
+    assert_eq!(active.stdout, off.stdout, "{label}: stdout parity");
+    assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
+    (active, off)
+}
+
+/// The captured cursor document binds `change_graph_token`, per-Change and
+/// lane-identical — no projection stamp — so the derived lane is full byte
+/// parity, and tokens round-trip across lanes.
+#[test]
+fn derived_captured_select_output_is_fully_byte_identical() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let mut tokens = Vec::new();
+    for lane in FORMAT_LANES {
+        let args = [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--repo",
+            fixture.repo_arg(),
+            "--format",
+            lane,
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_success(&active);
+        assert_eq!(
+            active.stdout, off.stdout,
+            "select ({lane}): full stdout byte parity"
+        );
+        assert_eq!(active.stderr, off.stderr, "select ({lane}): stderr parity");
+        tokens.push(
+            parse_json(&off.stdout)["token"]
+                .as_str()
+                .expect("selection token")
+                .to_owned(),
+        );
+    }
+
+    // A token minted on either lane revalidates identically on both.
+    let token = tokens[0].as_str();
+    let (revalidated_active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--cursor", token],
+        "cursor revalidation",
+    );
+    assert_success(&revalidated_active);
+    assert_eq!(
+        parse_json(&revalidated_active.stdout)["token"]
+            .as_str()
+            .expect("revalidated token"),
+        token,
+        "revalidation at an unchanged graph reissues the identical token"
+    );
+}
+
+/// Every refusal code reachable on the derived captured arm is byte-identical
+/// JSON on stderr with a non-zero exit on both lanes.
+#[test]
+fn derived_select_refusals_are_byte_identical_json_on_stderr() {
+    let refusal_code = |output: &Output| {
+        assert!(!output.status.success(), "refusal exits non-zero");
+        assert!(
+            output.stdout.is_empty(),
+            "refusal writes no stdout document"
+        );
+        parse_json(&output.stderr)["code"]
+            .as_str()
+            .expect("refusal code")
+            .to_owned()
+    };
+
+    // explicit_revision_required + revision_not_a_change_member on the shared
+    // fixture's parallel Change.
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.parallel_change_id],
+        "explicit_revision_required",
+    );
+    assert_eq!(refusal_code(&active), "explicit_revision_required");
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[
+            &fixture.parallel_change_id,
+            "--revision",
+            &fixture.accepted_revision_id,
+        ],
+        "revision_not_a_change_member",
+    );
+    assert_eq!(refusal_code(&active), "revision_not_a_change_member");
+
+    // historical_revision_not_authorable: a replaced member without
+    // --allow-historical.
+    let historical = {
+        let repo = support::dump_repo();
+        let repo_arg = repo
+            .path()
+            .to_str()
+            .expect("fixture path is UTF-8")
+            .to_owned();
+        let first = capture(&["capture", "--repo", &repo_arg]);
+        let change_id = first["changeId"].as_str().expect("change id").to_owned();
+        let historical_revision = first["revision"]["revisionId"]
+            .as_str()
+            .expect("first revision id")
+            .to_owned();
+        let cursor = first["reviewCursor"]["token"]
+            .as_str()
+            .expect("first review cursor")
+            .to_owned();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        capture(&[
+            "capture",
+            "--repo",
+            &repo_arg,
+            "--review-cursor",
+            &cursor,
+            "--advance",
+            "replace",
+        ]);
+        (repo, change_id, historical_revision)
+    };
+    let build = pointbreak_env(
+        [
+            "store",
+            "derived",
+            "build",
+            "--repo",
+            historical.0.path().to_str().unwrap(),
+        ],
+        ACTIVE,
+    );
+    assert_success(&build);
+    let args = [
+        "change",
+        "select",
+        &historical.1,
+        "--revision",
+        &historical.2,
+        "--repo",
+        historical.0.path().to_str().unwrap(),
+    ];
+    let active = pointbreak_env(args, ACTIVE);
+    let off = pointbreak_env(args, OFF);
+    assert_eq!(active.stderr, off.stderr, "historical: stderr parity");
+    assert_eq!(active.status.code(), off.status.code());
+    assert_eq!(refusal_code(&active), "historical_revision_not_authorable");
+
+    // change_graph_stale: a captured-bound token minted before the graph
+    // changed stays eligible and refuses identically.
+    let fixture = change_reads_fixture();
+    let stale_token = parse_json(
+        &pointbreak_env(
+            [
+                "change",
+                "select",
+                &fixture.accepted_change_id,
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            OFF,
+        )
+        .stdout,
+    )["token"]
+        .as_str()
+        .expect("pre-advance token")
+        .to_owned();
+    fixture
+        .repo
+        .write("src/lib.rs", "pub fn value() -> u32 { 6 }\n");
+    capture(&[
+        "capture",
+        "--repo",
+        fixture.repo_arg(),
+        "--review-cursor",
+        &stale_token,
+        "--advance",
+        "parallel",
+    ]);
+    fixture.build_derived();
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--cursor", &stale_token],
+        "change_graph_stale",
+    );
+    assert_eq!(refusal_code(&active), "change_graph_stale");
+
+    // review_cursor_selection_stale: a crafted captured-bound token whose
+    // graph token still matches but whose recorded selection differs.
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    let selection = parse_json(
+        &pointbreak_env(
+            [
+                "change",
+                "select",
+                &fixture.parallel_change_id,
+                "--revision",
+                &fixture.parallel_revision_ids.0,
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            OFF,
+        )
+        .stdout,
+    );
+    let token = selection["token"].as_str().expect("parallel token");
+    let mut crafted =
+        pointbreak::session::ReviewCursorV1::decode_token(token).expect("decode parallel token");
+    assert_eq!(crafted.selected_current_revisions.len(), 2);
+    crafted.selected_current_revisions.truncate(1);
+    let crafted_token = crafted.encode_token().expect("re-encode crafted token");
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[
+            &fixture.parallel_change_id,
+            "--revision",
+            &fixture.parallel_revision_ids.0,
+            "--cursor",
+            &crafted_token,
+        ],
+        "review_cursor_selection_stale",
+    );
+    assert_eq!(refusal_code(&active), "review_cursor_selection_stale");
+
+    // change_state_unresolved: replacement divergence — two successors
+    // asserted for one predecessor through the low-level relation command.
+    {
+        let repo = support::dump_repo();
+        let repo_arg = repo
+            .path()
+            .to_str()
+            .expect("fixture path is UTF-8")
+            .to_owned();
+        let first = capture(&["capture", "--repo", &repo_arg]);
+        let change_id = first["changeId"].as_str().expect("change id").to_owned();
+        let replaced = first["revision"]["revisionId"]
+            .as_str()
+            .expect("first revision id")
+            .to_owned();
+        let first_cursor = first["reviewCursor"]["token"]
+            .as_str()
+            .expect("first cursor")
+            .to_owned();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 21 }\n");
+        let second = capture(&[
+            "capture",
+            "--repo",
+            &repo_arg,
+            "--review-cursor",
+            &first_cursor,
+            "--advance",
+            "replace",
+        ]);
+        let second_cursor = second["reviewCursor"]["token"]
+            .as_str()
+            .expect("second cursor")
+            .to_owned();
+        let second_revision = second["revision"]["revisionId"]
+            .as_str()
+            .expect("second revision id")
+            .to_owned();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 22 }\n");
+        let third = capture(&[
+            "capture",
+            "--repo",
+            &repo_arg,
+            "--review-cursor",
+            &second_cursor,
+            "--advance",
+            "parallel",
+        ]);
+        let third_revision = third["revision"]["revisionId"]
+            .as_str()
+            .expect("third revision id")
+            .to_owned();
+
+        let show = parse_json(
+            &pointbreak_env(["change", "show", &change_id, "--repo", &repo_arg], OFF).stdout,
+        );
+        let hash_of = |revision: &str| {
+            show["memberRevisions"]
+                .as_array()
+                .expect("member revisions")
+                .iter()
+                .find(|member| member["revision"]["revisionId"] == revision)
+                .expect("member present")["revision"]["objectArtifactContentHash"]
+                .as_str()
+                .expect("artifact hash")
+                .to_owned()
+        };
+        let diverging = pointbreak_env(
+            [
+                "change",
+                "assert-relation",
+                &change_id,
+                &third_revision,
+                &replaced,
+                "--successor-artifact-hash",
+                &hash_of(&third_revision),
+                "--predecessor-artifact-hash",
+                &hash_of(&replaced),
+                "--repo",
+                &repo_arg,
+                "--operation-id",
+                "change-operation:divergence",
+            ],
+            OFF,
+        );
+        assert_success(&diverging);
+        let build = pointbreak_env(["store", "derived", "build", "--repo", &repo_arg], ACTIVE);
+        assert_success(&build);
+        let args = [
+            "change",
+            "select",
+            &change_id,
+            "--revision",
+            &second_revision,
+            "--repo",
+            &repo_arg,
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_eq!(active.status.code(), off.status.code(), "unresolved");
+        assert_eq!(active.stdout, off.stdout, "unresolved: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "unresolved: stderr parity");
+        assert_eq!(refusal_code(&active), "change_state_unresolved");
+    }
+
+    // revision_artifact_conflicted: a raw second proposal carrier binds a
+    // current member to a second artifact hash. A store holding this shape
+    // fails the derived build's strict verification, and no governed writer
+    // produces it, so a derived-current generation cannot observe it: the
+    // generation here is built BEFORE the carrier arrives, the active lane
+    // falls back behind the moved truth, and both lanes stay byte-identical.
+    // The derived arm shares the one pure selection helper, so the refusal
+    // itself cannot diverge structurally.
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    append_conflicting_proposal(
+        fixture.repo.path(),
+        &fixture.accepted_revision_id,
+        &format!("sha256:{}", "9c".repeat(32)),
+    );
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id],
+        "revision_artifact_conflicted",
+    );
+    assert_eq!(refusal_code(&active), "revision_artifact_conflicted");
+
+    // revision_artifact_missing: a raw membership claim plus a proposal whose
+    // artifact hash is not a canonical reference — the member resolves into
+    // the unavailable set, so its exact reference is absent.
+    // As with the conflicted carrier, a raw proposal fails the derived
+    // build's strict verification, so the generation is built first and the
+    // active lane falls back behind the moved truth, byte-identically.
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    let fabricated = format!("rev:sha256:{}", "8d".repeat(32));
+    append_membership_of_unproposed_revision(
+        fixture.repo.path(),
+        &fixture.accepted_change_id,
+        &fabricated,
+    );
+    append_conflicting_proposal(fixture.repo.path(), &fabricated, "not-a-canonical-hash");
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id],
+        "revision_artifact_missing",
+    );
+    assert_eq!(refusal_code(&active), "revision_artifact_missing");
+}
+
+/// Mutable sources and mutable-bound prior cursors never enter the derived
+/// lane: their bytes and error ordering are today's authoritative behavior,
+/// including under an explicit `--source captured` override.
+#[test]
+fn mutable_sources_and_mutable_bound_cursors_never_enter_the_derived_lane() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    // Explicit mutable sources.
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--source", "worktree"],
+        "--source worktree",
+    );
+    // The fixture worktree moved past the accepted capture, so the worktree
+    // arm errors; the parity above is the contract, the message is context.
+    assert!(!active.status.success() || !active.stdout.is_empty());
+    assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--source", "commit:HEAD"],
+        "--source commit:HEAD",
+    );
+
+    // A worktree-bound prior cursor: mint one on a fresh capture whose
+    // worktree still matches.
+    let repo = support::dump_repo();
+    let repo_arg = repo
+        .path()
+        .to_str()
+        .expect("fixture path is UTF-8")
+        .to_owned();
+    let first = capture(&["capture", "--repo", &repo_arg]);
+    let change_id = first["changeId"].as_str().expect("change id").to_owned();
+    let bound = pointbreak_env(
+        [
+            "change", "select", &change_id, "--source", "worktree", "--repo", &repo_arg,
+        ],
+        OFF,
+    );
+    assert_success(&bound);
+    let worktree_token = parse_json(&bound.stdout)["token"]
+        .as_str()
+        .expect("worktree-bound token")
+        .to_owned();
+    let build = pointbreak_env(["store", "derived", "build", "--repo", &repo_arg], ACTIVE);
+    assert_success(&build);
+    for (label, extra) in [
+        (
+            "worktree-bound cursor",
+            vec![change_id.as_str(), "--cursor", worktree_token.as_str()],
+        ),
+        (
+            "worktree-bound cursor with explicit --source captured",
+            vec![
+                change_id.as_str(),
+                "--cursor",
+                worktree_token.as_str(),
+                "--source",
+                "captured",
+            ],
+        ),
+    ] {
+        let mut args = vec!["change", "select"];
+        args.extend_from_slice(&extra);
+        args.extend_from_slice(&["--repo", &repo_arg]);
+        let active = pointbreak_env(&args, ACTIVE);
+        let off = pointbreak_env(&args, OFF);
+        assert_eq!(active.status.code(), off.status.code(), "{label}");
+        assert_eq!(active.stdout, off.stdout, "{label}: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
+    }
+
+    // A mutable-bound cursor whose worktree moved: today's authoritative
+    // error form, identical on both lanes (source_binding_mismatch is not
+    // derived-reachable).
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 9 }\n");
+    let args = [
+        "change",
+        "select",
+        &change_id,
+        "--cursor",
+        &worktree_token,
+        "--repo",
+        &repo_arg,
+    ];
+    let active = pointbreak_env(args, ACTIVE);
+    let off = pointbreak_env(args, OFF);
+    assert!(!off.status.success());
+    assert_eq!(active.status.code(), off.status.code());
+    assert_eq!(active.stdout, off.stdout);
+    assert_eq!(active.stderr, off.stderr);
+
+    // An undecodable cursor is ineligible; the authoritative decode error
+    // surfaces in place (invalid_review_cursor is not derived-reachable as a
+    // selection refusal).
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--cursor", "not-a-token"],
+        "undecodable cursor",
+    );
+    assert!(!active.status.success());
+    assert!(
+        String::from_utf8_lossy(&active.stderr).contains("invalid Review cursor token"),
+        "the in-facade decode error surfaces in its existing position"
+    );
+}
+
+/// The R08 ordering pins: capability documents precede cursor decoding on
+/// L0, and a bad `--source` value surfaces from the authoritative arm in its
+/// existing position — after a bad cursor, never earlier.
+#[test]
+fn l0_with_a_malformed_cursor_still_emits_the_typed_document() {
+    let repo = tempfile::tempdir().expect("temporary L0 repository");
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo.path())
+            .status()
+            .expect("run git init")
+            .success()
+    );
+    let repo_arg = repo.path().to_str().expect("L0 path is UTF-8");
+
+    for extra in [
+        vec!["--cursor", "not-a-token"],
+        vec!["--source", "bogus"],
+        vec!["--cursor", "not-a-token", "--source", "bogus"],
+    ] {
+        let mut args = vec!["change", "select", "change:sha256:l0-selector"];
+        args.extend_from_slice(&extra);
+        args.extend_from_slice(&["--repo", repo_arg]);
+        let active = pointbreak_unprepared_env(&args, ACTIVE);
+        let off = pointbreak_unprepared_env(&args, OFF);
+        assert!(
+            off.status.success(),
+            "L0 select answers with the typed document: {}",
+            String::from_utf8_lossy(&off.stderr)
+        );
+        assert_eq!(active.stdout, off.stdout, "{extra:?}: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "{extra:?}: stderr parity");
+        let json = parse_json(&off.stdout);
+        assert_eq!(json["schema"], "pointbreak.store-migration-required");
+    }
+}
+
+/// A bad `--source` value surfaces from the authoritative arm in its
+/// existing position on a live store; combined with a bad cursor, the
+/// in-facade cursor decode error stays first.
+#[test]
+fn invalid_source_errors_surface_in_their_existing_position() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[&fixture.accepted_change_id, "--source", "bogus"],
+        "bad source",
+    );
+    assert!(!active.status.success());
+    assert!(
+        String::from_utf8_lossy(&active.stderr)
+            .contains("--source must be captured, worktree, or commit:<rev>"),
+        "the parse error surfaces in its existing position"
+    );
+
+    let (active, _) = assert_select_parity(
+        &fixture,
+        &[
+            &fixture.accepted_change_id,
+            "--cursor",
+            "not-a-token",
+            "--source",
+            "bogus",
+        ],
+        "bad cursor + bad source",
+    );
+    assert!(!active.status.success());
+    assert!(
+        String::from_utf8_lossy(&active.stderr).contains("invalid Review cursor token"),
+        "the cursor decode error surfaces before the source parse error"
     );
 }
 
