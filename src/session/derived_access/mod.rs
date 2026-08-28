@@ -7,6 +7,7 @@
 #![cfg_attr(not(all(test, feature = "bench")), allow(dead_code))]
 
 pub(crate) mod attention;
+pub(crate) mod change_seek_reads;
 pub(crate) mod changes;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;

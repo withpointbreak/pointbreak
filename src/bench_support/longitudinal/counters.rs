@@ -275,6 +275,10 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     ChangePageExhaustiveProposalSearch,
     ChangePageSupportExpansion,
     ChangePagePresentationProjection,
+    ChangeSeekSnapshotAcquisition,
+    ChangeSeekCorrelatedSelection,
+    ChangeSeekProjectionFold,
+    ChangeSeekComposition,
     RevisionPageSqlSelection,
     RevisionPageEventIdExpansion,
     RevisionPageCarrierHydrationValidation,
@@ -347,6 +351,7 @@ impl LongitudinalDerivedAccessPhaseV1 {
         match self {
             Self::ChangePageBodylessSelection
             | Self::ChangePageProposalLocatorExpansion
+            | Self::ChangeSeekCorrelatedSelection
             | Self::RevisionPageSqlSelection
             | Self::RevisionPageEventIdExpansion
             | Self::FactSqliteSelection
@@ -367,6 +372,8 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::CarrierValidation => Ownership::AuthoritativeTruth,
             Self::ChangePagePresentationProjection
             | Self::ChangePageExhaustiveProposalSearch
+            | Self::ChangeSeekProjectionFold
+            | Self::ChangeSeekComposition
             | Self::RevisionPageListProjection
             | Self::RevisionPageOverviewConstruction
             | Self::RevisionPageSnapshotSummaries
@@ -375,6 +382,7 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::GitContextResolution
             | Self::SerializationAndOutput => Ownership::ProductProjection,
             Self::ChangePageSnapshotAcquisition
+            | Self::ChangeSeekSnapshotAcquisition
             | Self::ChangePageSupportExpansion
             | Self::RevisionPageSupersederSupportExpansion
             | Self::BootstrapPopulation
@@ -2520,6 +2528,10 @@ mod tests {
             LongitudinalDerivedAccessPhaseV1::FactSelectedCarrierHydrationValidation,
             LongitudinalDerivedAccessPhaseV1::FactSupportCarrierHydrationValidation,
             LongitudinalDerivedAccessPhaseV1::FactWorkflowProjection,
+            LongitudinalDerivedAccessPhaseV1::ChangeSeekSnapshotAcquisition,
+            LongitudinalDerivedAccessPhaseV1::ChangeSeekCorrelatedSelection,
+            LongitudinalDerivedAccessPhaseV1::ChangeSeekProjectionFold,
+            LongitudinalDerivedAccessPhaseV1::ChangeSeekComposition,
         ];
         let spellings = phases
             .iter()
@@ -2548,6 +2560,10 @@ mod tests {
                 "fact_selected_carrier_hydration_validation",
                 "fact_support_carrier_hydration_validation",
                 "fact_workflow_projection",
+                "change_seek_snapshot_acquisition",
+                "change_seek_correlated_selection",
+                "change_seek_projection_fold",
+                "change_seek_composition",
             ]
             .into_iter()
             .map(serde_json::Value::from)
@@ -2575,6 +2591,10 @@ mod tests {
                 LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
                 LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
                 LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
+                LongitudinalDerivedAccessPhaseOwnershipV1::MixedDerivedAndTruth,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
                 LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
             ]
         );

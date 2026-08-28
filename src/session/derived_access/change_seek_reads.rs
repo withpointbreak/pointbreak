@@ -1,0 +1,248 @@
+//! Derived per-Change seek read producer.
+//!
+//! Answers `change show`, `change interdiff`, and captured `change select`
+//! from the materialized fact tables through one Change-scoped seek: the
+//! correlated-sequence selection narrows the fact rows to the target Change,
+//! the existing folds rebuild the narrowed projections, and the existing
+//! facade composes the documents. No authoritative carrier is opened, no
+//! event is decoded, no body or presentation is hydrated, and no eager
+//! complete-Change scan runs on this path.
+#![cfg_attr(not(test), allow(dead_code))]
+
+use super::changes::{
+    DerivedChangeAccess, DerivedChangeOutcomeV1, DerivedChangeSeekV1,
+    DerivedProjectionFailureCodeV1, lifecycle_failure_outcome,
+};
+use super::lifecycle::LifecycleError;
+use super::locator::LocatorRead;
+use super::runtime::RuntimeCurrentRead;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+};
+use crate::documents::{ChangeDetailDocumentV1, ChangeDocumentFacadeV1};
+use crate::error::{Result, ShoreError};
+use crate::model::ChangeId;
+use crate::session::ChangeProjection;
+use crate::session::projection::change::{
+    project_change_documents_from_facts, project_changes_from_facts,
+};
+
+/// Which composed carrier a seek read produces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChangeSeekCompositionTarget {
+    Detail,
+    Selector,
+}
+
+/// One composed seek answer, matched exhaustively by the thin delegates.
+pub(crate) enum PreparedChangeSeek {
+    Detail(Box<ChangeDetailDocumentV1>),
+    Selector(Box<DerivedChangeSeekV1>),
+}
+
+/// Observable read boundaries for deterministic drift tests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChangeSeekReadBoundary {
+    SnapshotPinned,
+    Composed,
+}
+
+/// The narrowed fold must stay inside the seek scope: any foreign Change view
+/// is cross-Change leakage, and selected rows without the target view mean
+/// the correlation and the fold disagree. Both fail closed — never a partial
+/// answer.
+pub(crate) fn validate_narrowed_seek_scope(
+    change_id: &ChangeId,
+    narrowed: &ChangeProjection,
+    selected_fact_rows: usize,
+) -> std::result::Result<(), String> {
+    if let Some(foreign) = narrowed.changes.keys().find(|key| *key != change_id) {
+        return Err(format!(
+            "derived Change seek folded foreign Change {}",
+            foreign.as_str()
+        ));
+    }
+    if selected_fact_rows > 0 && !narrowed.changes.contains_key(change_id) {
+        return Err(
+            "derived Change seek selected fact rows without the target Change view".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn change_seek_read_v1_inner(
+    access: &DerivedChangeAccess,
+    change_id: &ChangeId,
+    target: ChangeSeekCompositionTarget,
+) -> Result<DerivedChangeOutcomeV1<PreparedChangeSeek>> {
+    change_seek_read_v1_inner_with_hook(access, change_id, target, |_| {})
+}
+
+pub(crate) fn change_seek_read_v1_inner_with_hook(
+    access: &DerivedChangeAccess,
+    change_id: &ChangeId,
+    target: ChangeSeekCompositionTarget,
+    mut hook: impl FnMut(ChangeSeekReadBoundary),
+) -> Result<DerivedChangeOutcomeV1<PreparedChangeSeek>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let snapshot_phase = enter_derived_access_phase_v1(Phase::ChangeSeekSnapshotAcquisition);
+    let current = match access.runtime().current() {
+        Ok(RuntimeCurrentRead::Ready(current)) => current,
+        Ok(RuntimeCurrentRead::Unavailable(status)) => {
+            return Ok(access.page_control_outcome(status));
+        }
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error,
+            ));
+        }
+    };
+    let generation_id = current.generation_id().to_owned();
+    let checkpoint = match current.pin_change_reader_checkpoint() {
+        Ok(checkpoint) => checkpoint,
+        Err(error) => return Ok(access.page_receipt_failure_outcome(error)),
+    };
+    if let Err(error) = current.reader_profile_document(&checkpoint) {
+        return Ok(access.page_receipt_failure_outcome(error));
+    }
+    let as_of = checkpoint.truth_cursor;
+    hook(ChangeSeekReadBoundary::SnapshotPinned);
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(snapshot_phase);
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let selection_phase = enter_derived_access_phase_v1(Phase::ChangeSeekCorrelatedSelection);
+    let facts = match current
+        .service()
+        .semantic_change_seek_facts_at(change_id, as_of)
+    {
+        Ok(LocatorRead::Ready(facts)) => facts,
+        Ok(LocatorRead::CatchUpRequired { .. }) => {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionStale,
+                "derived Change seek moved while its checkpoint was pinned",
+            ));
+        }
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+    };
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(selection_phase);
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let fold_phase = enter_derived_access_phase_v1(Phase::ChangeSeekProjectionFold);
+    let narrowed_semantic = match project_changes_from_facts(
+        &facts
+            .iter()
+            .map(|fact| fact.change.clone())
+            .collect::<Vec<_>>(),
+    ) {
+        Ok(projection) => projection,
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+    };
+    let narrowed_document = match project_change_documents_from_facts(&facts) {
+        Ok(projection) => projection,
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+    };
+    if let Err(message) = validate_narrowed_seek_scope(change_id, &narrowed_semantic, facts.len()) {
+        return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+            message,
+        ));
+    }
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(fold_phase);
+
+    // An unknown or malformed Change id is a lookup miss with zero correlated
+    // rows: surface the authoritative refusal so the caller's fallback lane
+    // answers with the identical bytes on the identical path.
+    let Some(view) = narrowed_semantic.changes.get(change_id).cloned() else {
+        return Err(ShoreError::Message(format!(
+            "Change {} is unavailable",
+            change_id.as_str()
+        )));
+    };
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let composition_phase = enter_derived_access_phase_v1(Phase::ChangeSeekComposition);
+    let stamp = match current.change_seek_stamp(
+        &checkpoint,
+        change_id,
+        &narrowed_semantic,
+        &narrowed_document,
+    ) {
+        Ok(stamp) => stamp,
+        Err(error) => return Ok(lifecycle_failure_outcome(error)),
+    };
+    let facade = match ChangeDocumentFacadeV1::new(narrowed_semantic, narrowed_document.clone())
+        .and_then(|facade| facade.with_generation_stamp(stamp.clone()))
+    {
+        Ok(facade) => facade,
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+    };
+    let prepared = match target {
+        ChangeSeekCompositionTarget::Detail => {
+            PreparedChangeSeek::Detail(Box::new(facade.detail_document(change_id)?))
+        }
+        ChangeSeekCompositionTarget::Selector => PreparedChangeSeek::Selector(Box::new(
+            DerivedChangeSeekV1::new(view, narrowed_document, stamp),
+        )),
+    };
+    hook(ChangeSeekReadBoundary::Composed);
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    drop(composition_phase);
+
+    let final_current = match access.runtime().current() {
+        Ok(RuntimeCurrentRead::Ready(current)) => current,
+        Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change seek moved before response completion",
+            ));
+        }
+    };
+    if final_current.generation_id() != generation_id {
+        return Ok(DerivedChangeOutcomeV1::retryable(
+            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+            "derived Change seek generation changed before response completion",
+        ));
+    }
+    let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
+        Ok(checkpoint) => checkpoint,
+        Err(LifecycleError::TruthChanged) => {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change seek checkpoint moved before response completion",
+            ));
+        }
+        Err(error) => return Ok(lifecycle_failure_outcome(error)),
+    };
+    if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
+        return Ok(DerivedChangeOutcomeV1::retryable(
+            DerivedProjectionFailureCodeV1::ProjectionUnstable,
+            "derived Change seek checkpoint changed before response completion",
+        ));
+    }
+    Ok(DerivedChangeOutcomeV1::Ready(prepared))
+}

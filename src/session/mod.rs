@@ -27,7 +27,7 @@ pub use derived_access::changes::{
     DerivedChangeAccess, DerivedChangeAttentionFilterV1, DerivedChangeAvailabilityFilterV1,
     DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1, DerivedChangePageContinuationV1,
     DerivedChangePageRequestV1, DerivedChangePageSelectionV1, DerivedChangePageV1,
-    DerivedChangePageWindowV1, DerivedProjectionFailureCodeV1,
+    DerivedChangePageWindowV1, DerivedChangeSeekV1, DerivedProjectionFailureCodeV1,
     DerivedProjectionUnavailableDocumentV1, DerivedReadSourceV1, StrictChangeStampBinder,
     StrictChangeStampBindingV1,
 };

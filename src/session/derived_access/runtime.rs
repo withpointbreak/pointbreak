@@ -67,7 +67,7 @@ pub(super) enum RuntimeCurrentRead {
     Unavailable(RuntimeCurrentStatus),
 }
 
-pub(super) struct RuntimeCurrentStatus {
+pub(crate) struct RuntimeCurrentStatus {
     pub(super) availability: DerivedAccessAvailability,
     pub(super) detail: Option<String>,
 }

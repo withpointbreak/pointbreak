@@ -199,11 +199,17 @@ impl DerivedChangeAccess {
         }
     }
 
-    fn page_control_outcome<T>(&self, status: RuntimeCurrentStatus) -> DerivedChangeOutcomeV1<T> {
+    pub(crate) fn page_control_outcome<T>(
+        &self,
+        status: RuntimeCurrentStatus,
+    ) -> DerivedChangeOutcomeV1<T> {
         self.capability_unavailable_or(status)
     }
 
-    fn page_receipt_failure_outcome<T>(&self, error: LifecycleError) -> DerivedChangeOutcomeV1<T> {
+    pub(crate) fn page_receipt_failure_outcome<T>(
+        &self,
+        error: LifecycleError,
+    ) -> DerivedChangeOutcomeV1<T> {
         match self.change_cohort_is_activated() {
             Ok(true) => lifecycle_failure_outcome(error),
             Ok(false) => match self.control_path_capability() {
@@ -266,6 +272,51 @@ impl DerivedChangeAccess {
     #[doc(hidden)]
     pub fn is_active(&self) -> bool {
         self.runtime.is_active()
+    }
+
+    pub(crate) fn runtime(&self) -> &DerivedAccessRuntime {
+        &self.runtime
+    }
+
+    /// Compose one Change's review-schema detail document through the
+    /// per-Change seek, mirroring [`Self::review_list_document`]'s finished
+    /// return shape for the CLI.
+    pub fn review_detail_document(
+        &self,
+        change: &ChangeId,
+    ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
+        use super::change_seek_reads::{
+            ChangeSeekCompositionTarget, PreparedChangeSeek, change_seek_read_v1_inner,
+        };
+        Ok(
+            change_seek_read_v1_inner(self, change, ChangeSeekCompositionTarget::Detail)?
+                .map_ready(|prepared| match prepared {
+                    PreparedChangeSeek::Detail(document) => *document,
+                    PreparedChangeSeek::Selector(_) => {
+                        unreachable!("the Detail target composes a detail document")
+                    }
+                }),
+        )
+    }
+
+    /// Select one Change's narrowed view, exact references, and seek stamp
+    /// through the per-Change seek, for the selector-consuming commands.
+    pub fn change_seek(
+        &self,
+        change: &ChangeId,
+    ) -> Result<DerivedChangeOutcomeV1<DerivedChangeSeekV1>> {
+        use super::change_seek_reads::{
+            ChangeSeekCompositionTarget, PreparedChangeSeek, change_seek_read_v1_inner,
+        };
+        Ok(
+            change_seek_read_v1_inner(self, change, ChangeSeekCompositionTarget::Selector)?
+                .map_ready(|prepared| match prepared {
+                    PreparedChangeSeek::Selector(seek) => *seek,
+                    PreparedChangeSeek::Detail(_) => {
+                        unreachable!("the Selector target composes a seek carrier")
+                    }
+                }),
+        )
     }
 
     pub fn changes(
@@ -1157,6 +1208,48 @@ fn bind_strict_change_stamp_with_hook(
     Ok(StrictChangeStampBindingV1::Bound(stamp))
 }
 
+/// One Change's narrowed seek result for the selector-consuming CLI reads.
+///
+/// Accessors only: `document_projection().diagnostics` is the narrowed
+/// store-scoped diagnostics field and must never be read or serialized by a
+/// product surface — documents read the per-Change `view.diagnostics`
+/// vocabulary instead.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct DerivedChangeSeekV1 {
+    view: crate::session::ChangeView,
+    document_projection: ChangeDocumentProjectionV1,
+    stamp: String,
+}
+
+impl DerivedChangeSeekV1 {
+    /// The producer lives in the sibling `change_seek_reads` module and
+    /// cannot build a private-field struct without this constructor.
+    pub(crate) fn new(
+        view: crate::session::ChangeView,
+        document_projection: ChangeDocumentProjectionV1,
+        stamp: String,
+    ) -> Self {
+        Self {
+            view,
+            document_projection,
+            stamp,
+        }
+    }
+
+    pub fn change_view(&self) -> &crate::session::ChangeView {
+        &self.view
+    }
+
+    pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
+        &self.document_projection
+    }
+
+    pub fn stamp(&self) -> &str {
+        &self.stamp
+    }
+}
+
 /// Independent authority, compatibility, and projection outcomes.
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1606,7 +1699,7 @@ fn runtime_unavailable_outcome<T>(status: RuntimeCurrentStatus) -> DerivedChange
     }
 }
 
-fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChangeOutcomeV1<T> {
+pub(crate) fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChangeOutcomeV1<T> {
     let detail = error.to_string();
     match error {
         LifecycleError::TruthChanged
@@ -5866,6 +5959,214 @@ mod tests {
                 )
                 .unwrap(),
             "the seek stamp never equals the whole-generation stamp"
+        );
+    }
+
+    fn narrowed_seek_folds(
+        current: &Arc<super::super::lifecycle::CurrentGeneration>,
+        change_id: &ChangeId,
+        as_of: super::super::cursor::TruthCursor,
+    ) -> (ChangeProjection, ChangeDocumentProjectionV1) {
+        let LocatorRead::Ready(facts) = current
+            .service()
+            .semantic_change_seek_facts_at(change_id, as_of)
+            .unwrap()
+        else {
+            panic!("fixture seek must be caught up");
+        };
+        let semantic = crate::session::projection::change::project_changes_from_facts(
+            &facts
+                .iter()
+                .map(|fact| fact.change.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let document =
+            crate::session::projection::change::project_change_documents_from_facts(&facts)
+                .unwrap();
+        (semantic, document)
+    }
+
+    #[test]
+    fn review_detail_document_returns_ready_detail_on_an_active_current_generation() {
+        let fixture = ActiveChangeFixture::new(&[&[None]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(detail) =
+            fixture.access.review_detail_document(&change_id).unwrap()
+        else {
+            panic!("active-current detail must be ready");
+        };
+
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("fixture generation must remain current");
+        };
+        let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+        let LocatorRead::Ready(materialized) = current
+            .service()
+            .semantic_materialized_change_projection_at(checkpoint.truth_cursor)
+            .unwrap()
+        else {
+            panic!("fixture projection must be caught up");
+        };
+        let authoritative =
+            ChangeDocumentFacadeV1::new(materialized.projection, materialized.document_projection)
+                .unwrap();
+        let mut expected = authoritative.detail_document(&change_id).unwrap();
+        let mut actual = detail.clone();
+        assert_ne!(
+            actual.detail.projection_stamp, expected.detail.projection_stamp,
+            "the derived detail substitutes the seek stamp"
+        );
+        let (narrowed_semantic, narrowed_document) =
+            narrowed_seek_folds(&current, &change_id, checkpoint.truth_cursor);
+        assert_eq!(
+            actual.detail.projection_stamp,
+            current
+                .change_seek_stamp(
+                    &checkpoint,
+                    &change_id,
+                    &narrowed_semantic,
+                    &narrowed_document
+                )
+                .unwrap(),
+            "the bound stamp is the lifecycle carrier's seek stamp"
+        );
+        expected.detail.projection_stamp = String::new();
+        expected.detail.summary.projection_stamp = String::new();
+        actual.detail.projection_stamp = String::new();
+        actual.detail.summary.projection_stamp = String::new();
+        assert_eq!(
+            actual, expected,
+            "every other detail byte equals the authoritative composition"
+        );
+    }
+
+    #[test]
+    fn change_seek_returns_the_narrowed_view_and_refs() {
+        let fixture = ActiveChangeFixture::new(&[&[None], &[None]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(seek) = fixture.access.change_seek(&change_id).unwrap()
+        else {
+            panic!("active-current seek must be ready");
+        };
+
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("fixture generation must remain current");
+        };
+        let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+        let LocatorRead::Ready(materialized) = current
+            .service()
+            .semantic_materialized_change_projection_at(checkpoint.truth_cursor)
+            .unwrap()
+        else {
+            panic!("fixture projection must be caught up");
+        };
+        let authoritative_view = &materialized.projection.changes[&change_id];
+        assert_eq!(seek.change_view(), authoritative_view);
+        for member in &authoritative_view.members {
+            assert_eq!(
+                seek.document_projection().revision_refs.get(member),
+                materialized.document_projection.revision_refs.get(member),
+                "member {member:?} resolves the authoritative exact reference"
+            );
+        }
+        assert!(!seek.stamp().is_empty());
+    }
+
+    #[test]
+    fn seek_producer_maps_an_unknown_change_to_the_authoritative_refusal_path() {
+        let fixture = ActiveChangeFixture::new(&[&[None]]);
+        let missing = ChangeId::new(format!("change:sha256:{}", "f".repeat(64)));
+        let expected = format!("Change {} is unavailable", missing.as_str());
+
+        let error = fixture.access.review_detail_document(&missing).unwrap_err();
+        assert!(
+            error.to_string().contains(&expected),
+            "detail refusal must carry the authoritative message: {error}"
+        );
+        let error = fixture.access.change_seek(&missing).unwrap_err();
+        assert!(
+            error.to_string().contains(&expected),
+            "selector refusal must carry the authoritative message: {error}"
+        );
+    }
+
+    #[test]
+    fn seek_producer_reproves_stability_and_retries_on_drift() {
+        use crate::session::derived_access::change_seek_reads::{
+            ChangeSeekCompositionTarget, ChangeSeekReadBoundary,
+            change_seek_read_v1_inner_with_hook,
+        };
+
+        let fixture = ActiveChangeFixture::new(&[&[None]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let outcome = change_seek_read_v1_inner_with_hook(
+            &fixture.access,
+            &change_id,
+            ChangeSeekCompositionTarget::Detail,
+            |boundary| {
+                if boundary == ChangeSeekReadBoundary::Composed {
+                    let declaration = build_change_declared(
+                        ChangeIdentityDescriptorV1::opaque_nonce([201; 32]),
+                        [202; 32],
+                    )
+                    .expect("build drift declaration");
+                    record_fixture_event(
+                        &fixture.store,
+                        ShoreEvent::new(
+                            EventType::ChangeDeclared,
+                            "fixture:change-declared:drift",
+                            EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                            Writer::shore_local("change-endpoint-test"),
+                            declaration,
+                            "2026-08-10T02:00:00Z",
+                        )
+                        .expect("build drift declaration event"),
+                    );
+                }
+            },
+        )
+        .unwrap();
+        let DerivedChangeOutcomeV1::Retryable(document) = outcome else {
+            panic!("post-composition drift must be retryable, got a different outcome");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+    }
+
+    #[test]
+    fn seek_producer_validates_narrowed_keys() {
+        use crate::session::derived_access::change_seek_reads::validate_narrowed_seek_scope;
+
+        let target = ChangeId::new(format!("change:sha256:{}", "1".repeat(64)));
+        let foreign = ChangeId::new(format!("change:sha256:{}", "2".repeat(64)));
+        let empty = ChangeProjection::default();
+        assert!(validate_narrowed_seek_scope(&target, &empty, 0).is_ok());
+        assert!(
+            validate_narrowed_seek_scope(&target, &empty, 3).is_err(),
+            "selected rows without the target view fail closed"
+        );
+
+        let mut foreign_projection = ChangeProjection::default();
+        foreign_projection.changes.insert(
+            foreign.clone(),
+            crate::session::ChangeView {
+                change_id: foreign,
+                members: BTreeSet::new(),
+                current_revisions: BTreeSet::new(),
+                supersedes: BTreeSet::new(),
+                topology: ChangeTopologyV1::Initial,
+                lifecycle: ChangeLifecycleV1::Incomplete,
+                qualified_current_revisions: BTreeSet::new(),
+                operative_obligations: BTreeSet::new(),
+                diagnostics: Vec::new(),
+            },
+        );
+        assert!(
+            validate_narrowed_seek_scope(&target, &foreign_projection, 1).is_err(),
+            "a foreign folded Change fails closed"
         );
     }
 }
