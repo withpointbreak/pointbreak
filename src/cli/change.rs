@@ -19,8 +19,8 @@ use pointbreak::session::event::{ChangeLinkRelationV1, FactRefV1};
 use pointbreak::session::{
     BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions, BulkAdoptionMigrationOptions,
     BulkAdoptionOwnerDecisionManifestV1, CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions,
-    ChangeCreateOptions, ChangeLinkOptions, ChangeMembershipOptions,
-    ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1, ChangeReaderStateV1,
+    ChangeCreateOptions, ChangeDocumentProjectionV1, ChangeLinkOptions, ChangeMembershipOptions,
+    ChangeMembershipWithdrawalOptions, ChangeProjection, ChangeReaderReadyV1, ChangeReaderStateV1,
     ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
     DerivedChangeOutcomeV1, DerivedReadSourceV1, ReviewCursorV1, ReviewSourceBindingV1,
     ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState, WorktreeSpec,
@@ -1046,17 +1046,43 @@ fn run_interdiff(
     args: InterdiffArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    with_facade(&args.repo, &args.format_args, stdout, |_facade, ready| {
-        let change_id = ChangeId::new(args.change);
-        Ok(serde_json::to_value(build_interdiff(
-            ready,
-            &change_id,
-            &RevisionId::new(args.from),
-            &args.from_artifact_hash,
-            &RevisionId::new(args.to),
-            &args.to_artifact_hash,
-        )?)?)
-    })
+    let change_id = ChangeId::new(args.change.clone());
+    match attempt_derived_change_read(&args.repo, |access| access.change_seek(&change_id)) {
+        DerivedChangeAttempt::Answered {
+            document: seek,
+            state,
+        } => {
+            record_change_route_state(state);
+            let projection = ChangeProjection {
+                changes: std::iter::once((change_id.clone(), seek.change_view().clone())).collect(),
+                links: Vec::new(),
+            };
+            let document = build_interdiff_from_projections(
+                &projection,
+                seek.document_projection(),
+                &change_id,
+                &RevisionId::new(args.from),
+                &args.from_artifact_hash,
+                &RevisionId::new(args.to),
+                &args.to_artifact_hash,
+            )?;
+            write(&args.format_args, stdout, &serde_json::to_value(document)?)
+        }
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
+            with_facade(&args.repo, &args.format_args, stdout, |_facade, ready| {
+                let change_id = ChangeId::new(args.change);
+                Ok(serde_json::to_value(build_interdiff(
+                    ready,
+                    &change_id,
+                    &RevisionId::new(args.from),
+                    &args.from_artifact_hash,
+                    &RevisionId::new(args.to),
+                    &args.to_artifact_hash,
+                )?)?)
+            })
+        }
+    }
 }
 
 pub(crate) fn build_interdiff(
@@ -1067,8 +1093,41 @@ pub(crate) fn build_interdiff(
     to_revision_id: &RevisionId,
     to_artifact_hash: &str,
 ) -> Result<RevisionInterdiffDocumentV1, Box<dyn std::error::Error>> {
-    let from = exact_ref(ready, change_id, from_revision_id, from_artifact_hash)?;
-    let to = exact_ref(ready, change_id, to_revision_id, to_artifact_hash)?;
+    build_interdiff_from_projections(
+        &ready.projection,
+        &ready.document_projection,
+        change_id,
+        from_revision_id,
+        from_artifact_hash,
+        to_revision_id,
+        to_artifact_hash,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_interdiff_from_projections(
+    projection: &ChangeProjection,
+    document_projection: &ChangeDocumentProjectionV1,
+    change_id: &ChangeId,
+    from_revision_id: &RevisionId,
+    from_artifact_hash: &str,
+    to_revision_id: &RevisionId,
+    to_artifact_hash: &str,
+) -> Result<RevisionInterdiffDocumentV1, Box<dyn std::error::Error>> {
+    let from = exact_ref_from_projections(
+        projection,
+        document_projection,
+        change_id,
+        from_revision_id,
+        from_artifact_hash,
+    )?;
+    let to = exact_ref_from_projections(
+        projection,
+        document_projection,
+        change_id,
+        to_revision_id,
+        to_artifact_hash,
+    )?;
     Ok(RevisionInterdiffDocumentV1::new(
         RevisionInterdiffRefV1 {
             from,
@@ -1088,8 +1147,23 @@ pub(crate) fn exact_ref(
     revision_id: &RevisionId,
     artifact_hash: &str,
 ) -> Result<RevisionRefV1, Box<dyn std::error::Error>> {
-    let change = ready
-        .projection
+    exact_ref_from_projections(
+        &ready.projection,
+        &ready.document_projection,
+        change_id,
+        revision_id,
+        artifact_hash,
+    )
+}
+
+pub(crate) fn exact_ref_from_projections(
+    projection: &ChangeProjection,
+    document_projection: &ChangeDocumentProjectionV1,
+    change_id: &ChangeId,
+    revision_id: &RevisionId,
+    artifact_hash: &str,
+) -> Result<RevisionRefV1, Box<dyn std::error::Error>> {
+    let change = projection
         .changes
         .get(change_id)
         .ok_or_else(|| format!("Change {} is unavailable", change_id.as_str()))?;
@@ -1097,8 +1171,7 @@ pub(crate) fn exact_ref(
         return Err("exact Revision is not an active member of the Change".into());
     }
     let candidate = RevisionRefV1::new(revision_id.clone(), artifact_hash.to_owned())?;
-    if !ready
-        .document_projection
+    if !document_projection
         .revision_refs
         .get(revision_id)
         .is_some_and(|references| references.contains(&candidate))
@@ -1580,6 +1653,217 @@ mod tests {
             }
             DerivedChangeAttempt::Answered { .. } => {
                 panic!("an unbuilt generation cannot answer a derived page read")
+            }
+        }
+    }
+
+    /// A ready L2 store with one Change, one member Revision, and one exact
+    /// proposal reference, produced by a real initial Change capture over the
+    /// frozen empty-L2 capability records.
+    fn ready_change_store() -> (tempfile::TempDir, ChangeId, RevisionId, String) {
+        let repo = store_fixture(&[
+            (
+                "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+                include_bytes!(
+                    "../../tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+                ),
+            ),
+            (
+                "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
+                include_bytes!(
+                    "../../tests/support/assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+                ),
+            ),
+        ]);
+        let git = |arguments: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(arguments)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git in the delegation fixture")
+                    .success()
+            );
+        };
+        std::fs::write(repo.path().join("lib.rs"), "pub fn value() -> u32 { 1 }\n")
+            .expect("write fixture source");
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=Delegation Fixture",
+            "-c",
+            "user.email=delegation@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "base",
+        ]);
+        std::fs::write(repo.path().join("lib.rs"), "pub fn value() -> u32 { 2 }\n")
+            .expect("modify fixture source");
+
+        let receipt = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:delegation-fixture",
+            CaptureOptions::new(repo.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([171; 32]),
+        ))
+        .expect("capture the delegation fixture Revision");
+        let change_id = receipt.change_id.clone();
+        let revision_id = receipt.revision.revision_id.clone();
+        let artifact_hash = receipt
+            .review_cursor
+            .cursor
+            .revision
+            .object_artifact_content_hash
+            .clone();
+        (repo, change_id, revision_id, artifact_hash)
+    }
+
+    fn differential_error(
+        via_ready: Result<RevisionRefV1, Box<dyn std::error::Error>>,
+        via_projections: Result<RevisionRefV1, Box<dyn std::error::Error>>,
+        label: &str,
+    ) {
+        match (via_ready, via_projections) {
+            (Ok(ready_value), Ok(projection_value)) => {
+                assert_eq!(ready_value, projection_value, "{label}: success parity");
+            }
+            (Err(ready_error), Err(projection_error)) => {
+                assert_eq!(
+                    ready_error.to_string(),
+                    projection_error.to_string(),
+                    "{label}: error-text parity"
+                );
+            }
+            (ready_outcome, projection_outcome) => panic!(
+                "{label}: outcome mismatch: ready={ready}, projections={projections}",
+                ready = ready_outcome.is_ok(),
+                projections = projection_outcome.is_ok()
+            ),
+        }
+    }
+
+    /// The Inspector-called helper and its projection-keyed sibling are one
+    /// behavior: all four failure modes and the success path produce the
+    /// identical outcome and error text through both entry points.
+    #[test]
+    fn exact_ref_delegation_is_behaviorally_identical() {
+        let (repo, change_id, revision_id, artifact_hash) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+
+        let unknown_change = ChangeId::new(format!("change:sha256:{}", "f".repeat(64)));
+        let non_member = RevisionId::new(format!("rev:sha256:{}", "e".repeat(64)));
+        let mismatched_hash = format!("sha256:{}", "d".repeat(64));
+        let cases: [(&str, &ChangeId, &RevisionId, &str); 5] = [
+            ("success", &change_id, &revision_id, artifact_hash.as_str()),
+            (
+                "unknown change",
+                &unknown_change,
+                &revision_id,
+                artifact_hash.as_str(),
+            ),
+            (
+                "non-member revision",
+                &change_id,
+                &non_member,
+                artifact_hash.as_str(),
+            ),
+            (
+                "malformed artifact hash",
+                &change_id,
+                &revision_id,
+                "not-a-hash",
+            ),
+            (
+                "selector mismatch",
+                &change_id,
+                &revision_id,
+                mismatched_hash.as_str(),
+            ),
+        ];
+        for (label, case_change, case_revision, case_hash) in cases {
+            differential_error(
+                exact_ref(ready, case_change, case_revision, case_hash),
+                exact_ref_from_projections(
+                    &ready.projection,
+                    &ready.document_projection,
+                    case_change,
+                    case_revision,
+                    case_hash,
+                ),
+                label,
+            );
+        }
+    }
+
+    /// Endpoint failures surface in from-then-to order and the constant
+    /// unavailable document is identical through both entry points.
+    #[test]
+    fn build_interdiff_delegation_is_behaviorally_identical() {
+        let (repo, change_id, revision_id, artifact_hash) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let non_member = RevisionId::new(format!("rev:sha256:{}", "e".repeat(64)));
+        let mismatched_hash = format!("sha256:{}", "d".repeat(64));
+
+        let cases: [(&str, &RevisionId, &str, &RevisionId, &str); 3] = [
+            (
+                "success",
+                &revision_id,
+                artifact_hash.as_str(),
+                &revision_id,
+                artifact_hash.as_str(),
+            ),
+            (
+                "from endpoint fails first",
+                &non_member,
+                artifact_hash.as_str(),
+                &revision_id,
+                mismatched_hash.as_str(),
+            ),
+            (
+                "to endpoint fails second",
+                &revision_id,
+                artifact_hash.as_str(),
+                &revision_id,
+                mismatched_hash.as_str(),
+            ),
+        ];
+        for (label, from, from_hash, to, to_hash) in cases {
+            let via_ready = build_interdiff(ready, &change_id, from, from_hash, to, to_hash);
+            let via_projections = build_interdiff_from_projections(
+                &ready.projection,
+                &ready.document_projection,
+                &change_id,
+                from,
+                from_hash,
+                to,
+                to_hash,
+            );
+            match (via_ready, via_projections) {
+                (Ok(ready_document), Ok(projection_document)) => {
+                    assert_eq!(ready_document, projection_document, "{label}");
+                }
+                (Err(ready_error), Err(projection_error)) => {
+                    assert_eq!(
+                        ready_error.to_string(),
+                        projection_error.to_string(),
+                        "{label}"
+                    );
+                    if label == "from endpoint fails first" {
+                        assert!(
+                            ready_error
+                                .to_string()
+                                .contains("not an active member of the Change"),
+                            "{label}: the from endpoint's failure surfaces"
+                        );
+                    }
+                }
+                (ready_outcome, projection_outcome) => panic!(
+                    "{label}: outcome mismatch: ready={ready}, projections={projections}",
+                    ready = ready_outcome.is_ok(),
+                    projections = projection_outcome.is_ok()
+                ),
             }
         }
     }

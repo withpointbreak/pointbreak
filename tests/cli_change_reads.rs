@@ -673,10 +673,13 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
         .iter()
         .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
         .expect("parallel Change summary");
-    let heads = parallel["currentRevisionRefs"]
-        .as_array()
-        .expect("parallel heads");
-    let (first_head, second_head) = (&heads[0], &heads[1]);
+    assert_eq!(
+        parallel["currentRevisionRefs"]
+            .as_array()
+            .expect("parallel heads")
+            .len(),
+        2
+    );
 
     let select = vec![
         "select".to_owned(),
@@ -698,32 +701,9 @@ fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
         "--artifact-hash".to_owned(),
         accepted_hash.to_owned(),
     ];
-    let interdiff = vec![
-        "interdiff".to_owned(),
-        fixture.parallel_change_id.clone(),
-        first_head["revisionId"]
-            .as_str()
-            .expect("first head id")
-            .to_owned(),
-        second_head["revisionId"]
-            .as_str()
-            .expect("second head id")
-            .to_owned(),
-        "--from-artifact-hash".to_owned(),
-        first_head["objectArtifactContentHash"]
-            .as_str()
-            .expect("first head hash")
-            .to_owned(),
-        "--to-artifact-hash".to_owned(),
-        second_head["objectArtifactContentHash"]
-            .as_str()
-            .expect("second head hash")
-            .to_owned(),
-    ];
-
-    // `show` left the neighbor set when its derived route landed; `select`
-    // and `interdiff` leave with theirs.
-    for subcommand in [select, revision, resource, interdiff] {
+    // `show` and `interdiff` left the neighbor set when their derived routes
+    // landed; `select` leaves with its own.
+    for subcommand in [select, revision, resource] {
         let mut args = vec!["change".to_owned()];
         args.extend(subcommand.clone());
         args.extend(["--repo".to_owned(), fixture.repo_arg().to_owned()]);
@@ -1625,6 +1605,93 @@ fn mixed_lane_stamps_are_three_way_distinct_and_internally_consistent() {
         seek_stamp,
         stamp(&pointbreak_env(show_args, ACTIVE)),
         "two derived show reads at one store state agree"
+    );
+}
+
+/// The interdiff CLI document carries no stamp field, so the derived lane is
+/// full byte parity with the explicit-off lane — no substitution.
+#[test]
+fn derived_change_interdiff_is_byte_identical_modulo_no_stamp() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    let (from, to) = parallel_heads(&fixture);
+
+    for lane in FORMAT_LANES {
+        let args = [
+            "change",
+            "interdiff",
+            &fixture.parallel_change_id,
+            from["revisionId"].as_str().expect("from revision id"),
+            to["revisionId"].as_str().expect("to revision id"),
+            "--from-artifact-hash",
+            from["objectArtifactContentHash"]
+                .as_str()
+                .expect("from hash"),
+            "--to-artifact-hash",
+            to["objectArtifactContentHash"].as_str().expect("to hash"),
+            "--repo",
+            fixture.repo_arg(),
+            "--format",
+            lane,
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_success(&active);
+        assert_eq!(
+            active.status.code(),
+            off.status.code(),
+            "interdiff ({lane}): exit parity"
+        );
+        assert_eq!(
+            active.stdout, off.stdout,
+            "interdiff ({lane}): full stdout byte parity"
+        );
+        assert_eq!(
+            active.stderr, off.stderr,
+            "interdiff ({lane}): stderr parity"
+        );
+        assert!(
+            parse_json(&active.stdout).get("projectionStamp").is_none(),
+            "interdiff ({lane}): the CLI document carries no stamp"
+        );
+    }
+}
+
+/// The floor's endpoint-ordering contract holds unchanged on the derived
+/// lane, byte-identically.
+#[test]
+fn derived_interdiff_validates_from_before_to() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+    let (first_head, second_head) = parallel_heads(&fixture);
+
+    let args = [
+        "change",
+        "interdiff",
+        &fixture.parallel_change_id,
+        &fixture.accepted_revision_id,
+        second_head["revisionId"].as_str().expect("to revision id"),
+        "--from-artifact-hash",
+        first_head["objectArtifactContentHash"]
+            .as_str()
+            .expect("borrowed hash"),
+        "--to-artifact-hash",
+        first_head["objectArtifactContentHash"]
+            .as_str()
+            .expect("mismatched hash"),
+        "--repo",
+        fixture.repo_arg(),
+    ];
+    let active = pointbreak_env(args, ACTIVE);
+    let off = pointbreak_env(args, OFF);
+    assert!(!active.status.success());
+    assert_eq!(active.status.code(), off.status.code());
+    assert_eq!(active.stdout, off.stdout);
+    assert_eq!(active.stderr, off.stderr);
+    assert!(
+        String::from_utf8_lossy(&active.stderr)
+            .contains("exact Revision is not an active member of the Change"),
+        "the from endpoint's failure surfaces first on the derived lane"
     );
 }
 
