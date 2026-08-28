@@ -3533,3 +3533,552 @@ fn change_fact_seek_row_count_is_invariant_under_unrelated_growth() {
         "the selected fact rows for the target Change are invariant under unrelated growth"
     );
 }
+
+/// Every `ChangeProjectionFact` family at least once, across two Changes with
+/// a shared member: proposals (Revision), declarations, memberships (asserted,
+/// withdrawn with an arrived claim, and one orphan withdrawal with no arrived
+/// claim), relations (asserted and withdrawn), a link with both endpoints, an
+/// assessment, an open operative request, an answered request, and a
+/// fact port with explicit cross-Change context.
+struct ClosureMatrixFixture {
+    adapter: QualificationDerivedAccessAdapter,
+    #[allow(dead_code)]
+    root: tempfile::TempDir,
+    observed: TruthCursor,
+    alpha: crate::model::ChangeId,
+    beta: crate::model::ChangeId,
+    orphan_claim: ChangeMembershipClaimId,
+    open_request: InputRequestId,
+    accepted_revision: RevisionId,
+}
+
+use crate::model::ChangeMembershipClaimId;
+
+fn closure_matrix_fixture() -> ClosureMatrixFixture {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+
+    let rev_a = revision_id("closure-a");
+    let rev_b = revision_id("closure-b");
+    let rev_c = revision_id("closure-c");
+    let rev_s = revision_id("closure-shared");
+    let exact_a = RevisionRefV1::new(rev_a.clone(), valid_hash('a')).expect("exact a");
+    let exact_b = RevisionRefV1::new(rev_b.clone(), valid_hash('b')).expect("exact b");
+    let exact_c = RevisionRefV1::new(rev_c.clone(), valid_hash('c')).expect("exact c");
+    let exact_s = RevisionRefV1::new(rev_s.clone(), valid_hash('d')).expect("exact shared");
+
+    let alpha = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([131; 32]),
+        [132; 32],
+    )
+    .expect("alpha declaration");
+    let m_a = build_membership_asserted(&alpha.change_id, &rev_a, [133; 32]).expect("m_a");
+    let m_b = build_membership_asserted(&alpha.change_id, &rev_b, [134; 32]).expect("m_b");
+    let m_c = build_membership_asserted(&alpha.change_id, &rev_c, [135; 32]).expect("m_c");
+    let m_s = build_membership_asserted(&alpha.change_id, &rev_s, [136; 32]).expect("m_s");
+    let m_a_second = build_membership_asserted(&alpha.change_id, &rev_a, [137; 32]).expect("m_a2");
+    let withdraw_a_second =
+        build_membership_withdrawn(&m_a_second.membership_claim_id, [138; 32]).expect("w_a2");
+    let relation_replace = build_revision_relation_asserted(
+        &alpha.change_id,
+        exact_b.clone(),
+        exact_a.clone(),
+        [139; 32],
+    )
+    .expect("rel1");
+    let relation_withdrawn_claim = build_revision_relation_asserted(
+        &alpha.change_id,
+        exact_c.clone(),
+        exact_a.clone(),
+        [140; 32],
+    )
+    .expect("rel2");
+    let withdraw_relation =
+        build_revision_relation_withdrawn(&relation_withdrawn_claim.relation_claim_id, [141; 32])
+            .expect("w_rel2");
+    let beta = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([142; 32]),
+        [143; 32],
+    )
+    .expect("beta declaration");
+    let m_beta_s = build_membership_asserted(&beta.change_id, &rev_s, [144; 32]).expect("m_beta_s");
+    let link = build_change_link_asserted(
+        &alpha.change_id,
+        &beta.change_id,
+        crate::session::event::ChangeLinkRelationV1::RelatedWork,
+        [145; 32],
+    )
+    .expect("link");
+    // An orphan withdrawal: its claim is never asserted anywhere in the store.
+    let orphan_membership =
+        build_membership_asserted(&alpha.change_id, &rev_a, [146; 32]).expect("orphan claim");
+    let orphan_withdrawal =
+        build_membership_withdrawn(&orphan_membership.membership_claim_id, [147; 32])
+            .expect("orphan withdrawal");
+
+    let track_id = TrackId::new(TRACK);
+    let writer = Writer::shore_local("0.9.0");
+    let fact_port = build_review_fact_ported(
+        ReviewFactPortDraftV1 {
+            origin_revision: exact_b.clone(),
+            origin_fact: FactRefV1::Observation {
+                observation_id: ObservationId::new("obs:sha256:closure-origin"),
+            },
+            target_revision: exact_c.clone(),
+            relation: FactPortRelationV1::ContextOnly,
+            target_fact: None,
+            rationale_content_hash: None,
+            context_change_id: Some(alpha.change_id.clone()),
+        },
+        &writer.actor_id,
+        &track_id,
+    )
+    .expect("fact port");
+    let fact_port_event = ShoreEvent::new(
+        EventType::ReviewFactPorted,
+        "review_fact_ported:closure-matrix",
+        EventTarget::for_revision(JournalId::new(JOURNAL), rev_b.clone(), Some(track_id))
+            .expect("fact port target"),
+        writer,
+        fact_port,
+        "2026-08-04T00:01:00Z",
+    )
+    .expect("fact port event");
+
+    let open_request = InputRequestId::new("input-request:sha256:closure-open");
+    let answered_request = InputRequestId::new("input-request:sha256:closure-answered");
+
+    let schedule = [
+        proposal_carrier_event(&exact_a, None, "wop:closure-a", "2026-08-04T00:00:01Z"),
+        proposal_carrier_event(&exact_b, None, "wop:closure-b", "2026-08-04T00:00:02Z"),
+        proposal_carrier_event(&exact_c, None, "wop:closure-c", "2026-08-04T00:00:03Z"),
+        proposal_carrier_event(&exact_s, None, "wop:closure-shared", "2026-08-04T00:00:04Z"),
+        change_event(10, alpha.clone()),
+        change_event(11, m_a),
+        change_event(12, m_b),
+        change_event(13, m_c),
+        change_event(14, m_s),
+        change_event(15, m_a_second),
+        change_event(16, withdraw_a_second),
+        change_event(17, relation_replace),
+        change_event(18, relation_withdrawn_claim),
+        change_event(19, withdraw_relation),
+        change_event(20, beta.clone()),
+        change_event(21, m_beta_s),
+        change_event(22, link),
+        change_event(23, orphan_withdrawal),
+        fact_port_event,
+        request_opened(&rev_c, &open_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_opened(&rev_b, &answered_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_responded(&rev_b, &answered_request),
+        assessment_event(
+            &rev_b,
+            "closure-accept",
+            "assess:sha256:closure-accept",
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            None,
+            "2026-08-04T00:02:00Z",
+        ),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    ClosureMatrixFixture {
+        adapter,
+        root,
+        observed: TruthCursor::new(1, schedule.len() as u64),
+        alpha: alpha.change_id,
+        beta: beta.change_id,
+        orphan_claim: orphan_membership.membership_claim_id,
+        open_request,
+        accepted_revision: rev_b,
+    }
+}
+
+/// Fold one Change's seek rows and the whole store's eager rows through the
+/// production fact folds, returning `(narrowed semantic, narrowed provenance,
+/// whole semantic, whole provenance)`.
+#[allow(clippy::type_complexity)]
+fn narrowed_and_whole_folds(
+    adapter: &QualificationDerivedAccessAdapter,
+    change_id: &crate::model::ChangeId,
+    observed: TruthCursor,
+) -> (
+    crate::session::ChangeProjection,
+    crate::session::ChangeDocumentProjectionV1,
+    crate::session::ChangeProjection,
+    crate::session::ChangeDocumentProjectionV1,
+) {
+    use crate::session::{project_change_documents_from_facts, project_changes_from_facts};
+
+    let seek_facts = ready(
+        adapter
+            .semantic_change_seek_facts_at(change_id, observed)
+            .expect("seek facts"),
+    );
+    let whole_facts = ready(
+        adapter
+            .semantic_materialized_change_document_facts_at(observed)
+            .expect("whole facts"),
+    );
+    let narrowed_semantic = project_changes_from_facts(
+        &seek_facts
+            .iter()
+            .map(|fact| fact.change.clone())
+            .collect::<Vec<_>>(),
+    )
+    .expect("narrowed semantic fold");
+    let narrowed_provenance =
+        project_change_documents_from_facts(&seek_facts).expect("narrowed document fold");
+    let whole_semantic = project_changes_from_facts(
+        &whole_facts
+            .iter()
+            .map(|fact| fact.change.clone())
+            .collect::<Vec<_>>(),
+    )
+    .expect("whole semantic fold");
+    let whole_provenance =
+        project_change_documents_from_facts(&whole_facts).expect("whole document fold");
+    (
+        narrowed_semantic,
+        narrowed_provenance,
+        whole_semantic,
+        whole_provenance,
+    )
+}
+
+#[test]
+fn narrowed_fold_equals_the_authoritative_fold_restricted_to_the_change() {
+    use crate::documents::ChangeDocumentFacadeV1;
+
+    let fixture = closure_matrix_fixture();
+    for change_id in [&fixture.alpha, &fixture.beta] {
+        let (narrowed_semantic, narrowed_provenance, whole_semantic, whole_provenance) =
+            narrowed_and_whole_folds(&fixture.adapter, change_id, fixture.observed);
+
+        assert_eq!(
+            narrowed_semantic.changes.keys().collect::<Vec<_>>(),
+            vec![change_id],
+            "the narrowed fold declares exactly the target Change"
+        );
+        assert_eq!(
+            narrowed_semantic.changes[change_id], whole_semantic.changes[change_id],
+            "the narrowed ChangeView equals the authoritative view"
+        );
+
+        let expected_membership = whole_provenance
+            .membership_claims
+            .iter()
+            .filter(|claim| &claim.change_id == change_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            narrowed_provenance.membership_claims, expected_membership,
+            "narrowed membership claims equal the authoritative claims for the Change"
+        );
+        let expected_relations = whole_provenance
+            .relation_claims
+            .iter()
+            .filter(|claim| &claim.change_id == change_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            narrowed_provenance.relation_claims, expected_relations,
+            "narrowed relation claims equal the authoritative claims for the Change"
+        );
+        for member in &narrowed_semantic.changes[change_id].members {
+            assert_eq!(
+                narrowed_provenance.revision_refs.get(member),
+                whole_provenance.revision_refs.get(member),
+                "member {member:?} resolves the same exact reference on both folds"
+            );
+        }
+
+        let narrowed_facade = ChangeDocumentFacadeV1::new(narrowed_semantic, narrowed_provenance)
+            .expect("narrowed facade");
+        let whole_facade =
+            ChangeDocumentFacadeV1::new(whole_semantic, whole_provenance).expect("whole facade");
+        let mut narrowed_detail = narrowed_facade
+            .detail_document(change_id)
+            .expect("narrowed detail");
+        let mut whole_detail = whole_facade
+            .detail_document(change_id)
+            .expect("whole detail");
+        // Stamps differ by design: the folds digest different inputs. Every
+        // other detail byte must agree.
+        narrowed_detail.detail.projection_stamp = String::new();
+        whole_detail.detail.projection_stamp = String::new();
+        narrowed_detail.detail.summary.projection_stamp = String::new();
+        whole_detail.detail.summary.projection_stamp = String::new();
+        assert_eq!(
+            narrowed_detail, whole_detail,
+            "the narrowed detail document equals the authoritative detail modulo the stamp"
+        );
+    }
+}
+
+#[test]
+fn task_domain_response_does_not_alter_seek_operative_obligations() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let member = revision_id("task-gap-member");
+    let exact = RevisionRefV1::new(member.clone(), valid_hash('e')).expect("exact member");
+    let declaration = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([151; 32]),
+        [152; 32],
+    )
+    .expect("declaration");
+    let membership =
+        build_membership_asserted(&declaration.change_id, &member, [153; 32]).expect("membership");
+    let change_id = declaration.change_id.clone();
+    let open_request = InputRequestId::new("input-request:sha256:task-gap-open");
+
+    // A task-domain response: `revision_id: None`, task-addressed. It never
+    // correlates into any Change, and its request never became an operative
+    // obligation, so both lanes must agree.
+    let task = WorkObjectId::new("task-attempt:sha256:task-gap");
+    let task_request = InputRequestId::new("input-request:sha256:task-gap-task");
+    let response_id = InputRequestResponseId::new("input-response:sha256:task-gap");
+    let task_response = ShoreEvent::new(
+        EventType::InputRequestResponded,
+        InputRequestRespondedPayload::idempotency_key(&task_request, response_id.as_str()),
+        EventTarget::for_subject(
+            JournalId::new(JOURNAL),
+            TargetRef::Task(TaskTargetRef::TaskAttempt {
+                task_attempt_id: task.clone(),
+            }),
+            None,
+        )
+        .expect("task response target"),
+        Writer::shore_local("0.9.0"),
+        InputRequestRespondedPayload {
+            input_request_response_id: response_id,
+            input_request_id: task_request.clone(),
+            revision_id: None,
+            task_target: Some(TaskTargetRef::TaskAttempt {
+                task_attempt_id: task,
+            }),
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: BodyContentType::TextPlain,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: None,
+        },
+        "2026-08-04T00:03:00Z",
+    )
+    .expect("task-domain response");
+
+    let schedule = [
+        proposal_carrier_event(&exact, None, "wop:task-gap", "2026-08-04T00:00:01Z"),
+        change_event(10, declaration),
+        change_event(11, membership),
+        request_opened(&member, &open_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        task_response,
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let observed = TruthCursor::new(1, schedule.len() as u64);
+
+    let seek_facts = ready(
+        adapter
+            .semantic_change_seek_facts_at(&change_id, observed)
+            .expect("seek facts"),
+    );
+    let whole_facts = ready(
+        adapter
+            .semantic_materialized_change_document_facts_at(observed)
+            .expect("whole facts"),
+    );
+    use crate::session::ChangeProjectionFact;
+    let is_task_response = |fact: &crate::session::ChangeDocumentProjectionFact| {
+        matches!(
+            &fact.change,
+            ChangeProjectionFact::RequestResponse { request_id } if request_id == &task_request
+        )
+    };
+    assert!(
+        whole_facts.iter().any(is_task_response),
+        "the eager scan materializes the task-domain response row"
+    );
+    assert!(
+        !seek_facts.iter().any(is_task_response),
+        "the uncorrelated task-domain response never enters the seek"
+    );
+
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&adapter, &change_id, observed);
+    let narrowed_view = &narrowed_semantic.changes[&change_id];
+    let whole_view = &whole_semantic.changes[&change_id];
+    assert_eq!(
+        narrowed_view.operative_obligations,
+        std::collections::BTreeSet::from([open_request]),
+        "the open operative request stays an obligation"
+    );
+    assert_eq!(
+        narrowed_view.operative_obligations, whole_view.operative_obligations,
+        "both lanes agree on operative obligations"
+    );
+    assert_eq!(
+        narrowed_view.lifecycle, whole_view.lifecycle,
+        "both lanes agree on lifecycle"
+    );
+}
+
+#[test]
+fn assessment_correlation_keys_on_the_reconstructed_subject() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let member = revision_id("assessment-subject-member");
+    let exact = RevisionRefV1::new(member.clone(), valid_hash('f')).expect("exact member");
+    let declaration = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([161; 32]),
+        [162; 32],
+    )
+    .expect("declaration");
+    let membership =
+        build_membership_asserted(&declaration.change_id, &member, [163; 32]).expect("membership");
+    let change_id = declaration.change_id.clone();
+
+    // A file-scoped assessment: the correlation reconstructs the subject
+    // Revision from the payload, and the fold keys on the same target
+    // Revision. This agreement is what admits the assessment into the seek.
+    let assessment_id = AssessmentId::new("assess:sha256:subject-agreement");
+    let file_target = ReviewTargetRef::File {
+        revision_id: member.clone(),
+        file_path: "src/lib.rs".to_owned(),
+    };
+    let file_assessment = ShoreEvent::new(
+        EventType::ReviewAssessmentRecorded,
+        ReviewAssessmentRecordedPayload::idempotency_key(
+            &member,
+            &TrackId::new(TRACK),
+            "subject-agreement",
+        ),
+        EventTarget::for_subject(
+            JournalId::new(JOURNAL),
+            TargetRef::Review(file_target.clone()),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("file assessment target"),
+        Writer::shore_local("0.9.0"),
+        ReviewAssessmentRecordedPayload {
+            assessment_id: assessment_id.clone(),
+            target: file_target,
+            assessment: ReviewAssessment::Accepted,
+            summary: None,
+            summary_content_type: BodyContentType::TextPlain,
+            summary_artifact_path: None,
+            summary_byte_size: None,
+            summary_content_hash: None,
+            replaces_assessment_ids: Vec::new(),
+            related_observation_ids: Vec::new(),
+            related_input_request_ids: Vec::new(),
+        },
+        "2026-08-04T00:04:00Z",
+    )
+    .expect("file assessment");
+    assert_eq!(
+        file_assessment
+            .subject_revision_id()
+            .expect("reconstruct assessment subject"),
+        Some(member.clone()),
+        "the correlation's reconstructed subject and the fold's target key agree"
+    );
+
+    let schedule = [
+        proposal_carrier_event(
+            &exact,
+            None,
+            "wop:assessment-subject",
+            "2026-08-04T00:00:01Z",
+        ),
+        change_event(10, declaration),
+        change_event(11, membership),
+        file_assessment,
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let observed = TruthCursor::new(1, schedule.len() as u64);
+
+    let seek_facts = ready(
+        adapter
+            .semantic_change_seek_facts_at(&change_id, observed)
+            .expect("seek facts"),
+    );
+    use crate::session::ChangeProjectionFact;
+    assert!(
+        seek_facts.iter().any(|fact| matches!(
+            &fact.change,
+            ChangeProjectionFact::Assessment { assessment_id: seen, .. } if seen == &assessment_id
+        )),
+        "the seek includes the assessment through its reconstructed subject"
+    );
+
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&adapter, &change_id, observed);
+    assert_eq!(
+        narrowed_semantic.changes[&change_id].qualified_current_revisions,
+        std::collections::BTreeSet::from([member]),
+        "the accepted assessment qualifies the current Revision"
+    );
+    assert_eq!(
+        narrowed_semantic.changes[&change_id].qualified_current_revisions,
+        whole_semantic.changes[&change_id].qualified_current_revisions,
+        "both lanes agree on qualification"
+    );
+}
+
+#[test]
+fn orphan_withdrawal_narrowing_never_reaches_a_serialized_surface() {
+    use crate::documents::ChangeDocumentFacadeV1;
+
+    let fixture = closure_matrix_fixture();
+    let orphan_code = format!(
+        "change_membership_withdrawal_claim_missing:{}",
+        fixture.orphan_claim.as_str()
+    );
+
+    let (narrowed_semantic, narrowed_provenance, _, whole_provenance) =
+        narrowed_and_whole_folds(&fixture.adapter, &fixture.alpha, fixture.observed);
+    assert!(
+        whole_provenance
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic == &orphan_code),
+        "the authoritative store-scoped diagnostics carry the orphan withdrawal"
+    );
+    assert!(
+        !narrowed_provenance
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic == &orphan_code),
+        "the narrowed store-scoped diagnostics omit the uncorrelated orphan withdrawal"
+    );
+
+    let facade = ChangeDocumentFacadeV1::new(narrowed_semantic, narrowed_provenance)
+        .expect("narrowed facade");
+    let detail = facade
+        .detail_document(&fixture.alpha)
+        .expect("narrowed detail");
+    let serialized = serde_json::to_string(&detail).expect("serialize detail");
+    assert!(
+        !serialized.contains("change_membership_withdrawal_claim_missing"),
+        "no seek-composed document surface serializes the store-scoped withdrawal diagnostic"
+    );
+    // The matrix fixture also proves the fixture's own machinery: the open
+    // request and accepted Revision are live in the narrowed view.
+    let (narrowed_semantic, ..) =
+        narrowed_and_whole_folds(&fixture.adapter, &fixture.alpha, fixture.observed);
+    let view = &narrowed_semantic.changes[&fixture.alpha];
+    assert!(view.operative_obligations.contains(&fixture.open_request));
+    assert!(view.members.contains(&fixture.accepted_revision));
+}

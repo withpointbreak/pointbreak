@@ -82,6 +82,13 @@ pub use identity::{
     principal_view_for, resolve_writer_actor_id, stage_actor_attributes, stage_delegation,
 };
 pub(crate) use identity::{IngestClock, SystemIngestClock, current_timestamp, writer_from_options};
+// The qualification seek regressions fold seek rows through the production
+// fact folds; `projection` is otherwise private to this module.
+#[cfg(all(test, feature = "bench"))]
+pub(crate) use projection::change::{
+    ChangeDocumentProjectionFact, ChangeProjectionFact, project_change_documents_from_facts,
+    project_changes_from_facts,
+};
 pub use projection::cosignature::{
     EndorsementClassification, EndorsementReadback, EndorserAttributesView,
 };
