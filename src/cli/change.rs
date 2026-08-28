@@ -40,9 +40,13 @@ pub(super) struct ChangeArgs {
 }
 
 impl ChangeArgs {
-    /// The counted-harness recognizer for exactly the three approved
-    /// change-read shapes (explicit JSON format, no selector). Harness
-    /// plumbing only: the invocation-read catalog posture is untouched.
+    /// The counted-harness recognizer for exactly the six approved
+    /// change-read shapes (explicit JSON format). Harness plumbing only: the
+    /// invocation-read catalog posture is untouched. The captured `select`
+    /// arm matches only argv with no `--cursor` and source absent or
+    /// explicitly `captured` — a cursor-inherited worktree or commit binding
+    /// must never be mislabeled as a captured derived read, and the
+    /// recognizer never decodes tokens.
     #[cfg(feature = "longitudinal-counting")]
     pub(super) fn interaction_route_v1(
         &self,
@@ -52,14 +56,45 @@ impl ChangeArgs {
     )> {
         use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
 
-        let (route, read) = match &self.command {
-            ChangeCommand::Profile(read) => (Route::ChangeProfileRead, read),
-            ChangeCommand::List(read) => (Route::ChangeListRead, read),
-            ChangeCommand::Attention(read) => (Route::ChangeAttentionRead, read),
+        let (route, repo, format) = match &self.command {
+            ChangeCommand::Profile(read) => (
+                Route::ChangeProfileRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+            ),
+            ChangeCommand::List(read) => (
+                Route::ChangeListRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+            ),
+            ChangeCommand::Attention(read) => (
+                Route::ChangeAttentionRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+            ),
+            ChangeCommand::Show(read) => (
+                Route::ChangeShowRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+            ),
+            ChangeCommand::Select(read)
+                if read.cursor.is_none()
+                    && matches!(read.source.as_deref(), None | Some("captured")) =>
+            {
+                (
+                    Route::ChangeSelectCapturedRead,
+                    read.repo.as_path(),
+                    read.format_args.explicit(),
+                )
+            }
+            ChangeCommand::Interdiff(read) => (
+                Route::ChangeInterdiffRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+            ),
             _ => return None,
         };
-        (read.format_args.explicit() == Some(output::OutputFormat::Json))
-            .then_some((route, read.repo.as_path()))
+        (format == Some(output::OutputFormat::Json)).then_some((route, repo))
     }
 }
 
@@ -1914,6 +1949,104 @@ mod tests {
                     projections = projection_outcome.is_ok()
                 ),
             }
+        }
+    }
+
+    /// D35-A recognizer discipline: the captured `select` arm matches only
+    /// cursor-free argv with source absent or explicitly `captured`, and the
+    /// recognizer never decodes tokens — every `--cursor`-bearing shape and
+    /// every mutable source returns no Change route.
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn counted_select_recognizer_matches_only_cursorless_captured_shapes() {
+        use clap::Parser;
+        use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
+
+        #[derive(Parser)]
+        struct Harness {
+            #[command(flatten)]
+            args: ChangeArgs,
+        }
+
+        let route = |argv: &[&str]| {
+            let mut full = vec!["pointbreak"];
+            full.extend_from_slice(argv);
+            Harness::try_parse_from(full)
+                .expect("parse recognizer harness argv")
+                .args
+                .interaction_route_v1()
+                .map(|(route, _)| route)
+        };
+
+        assert_eq!(
+            route(&["select", "change:x", "--format", "json"]),
+            Some(Route::ChangeSelectCapturedRead)
+        );
+        assert_eq!(
+            route(&[
+                "select", "change:x", "--source", "captured", "--format", "json"
+            ]),
+            Some(Route::ChangeSelectCapturedRead)
+        );
+        assert_eq!(
+            route(&["show", "change:x", "--format", "json"]),
+            Some(Route::ChangeShowRead)
+        );
+        assert_eq!(
+            route(&[
+                "interdiff",
+                "change:x",
+                "rev:a",
+                "rev:b",
+                "--from-artifact-hash",
+                "h",
+                "--to-artifact-hash",
+                "h",
+                "--format",
+                "json"
+            ]),
+            Some(Route::ChangeInterdiffRead)
+        );
+
+        for excluded in [
+            vec![
+                "select", "change:x", "--source", "worktree", "--format", "json",
+            ],
+            vec![
+                "select",
+                "change:x",
+                "--source",
+                "commit:abc",
+                "--format",
+                "json",
+            ],
+            vec![
+                "select",
+                "change:x",
+                "--cursor",
+                "any-token",
+                "--format",
+                "json",
+            ],
+            vec![
+                "select",
+                "change:x",
+                "--cursor",
+                "any-token",
+                "--source",
+                "captured",
+                "--format",
+                "json",
+            ],
+            // No explicit JSON format: no shape is recognized.
+            vec!["select", "change:x"],
+            vec!["show", "change:x"],
+        ] {
+            assert_eq!(
+                route(&excluded),
+                None,
+                "{excluded:?} must not be recognized"
+            );
         }
     }
 }

@@ -2383,6 +2383,15 @@ mod counted {
         receipt_dir: &Path,
         ordinal: u64,
     ) -> Value {
+        counted_counters_for(fixture, &[subcommand], receipt_dir, ordinal)
+    }
+
+    fn counted_counters_for(
+        fixture: &ChangeReadsFixture,
+        subcommand: &[&str],
+        receipt_dir: &Path,
+        ordinal: u64,
+    ) -> Value {
         let receipt_path = receipt_dir.join(format!("receipt-{ordinal}.json"));
         let request = serde_json::json!({
             "runIdentity": format!("{:064x}", ordinal + 1),
@@ -2401,17 +2410,10 @@ mod counted {
             "receiptPath": receipt_path,
         });
         let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("encode request"));
-        let output = pointbreak_env(
-            [
-                "--longitudinal-counting",
-                &encoded,
-                "change",
-                subcommand,
-                "--repo",
-                fixture.repo_arg(),
-            ],
-            ACTIVE,
-        );
+        let mut arguments = vec!["--longitudinal-counting", &encoded, "change"];
+        arguments.extend_from_slice(subcommand);
+        arguments.extend_from_slice(&["--repo", fixture.repo_arg()]);
+        let output = pointbreak_env(&arguments, ACTIVE);
         assert_success(&output);
         parse_json(&std::fs::read(receipt_path).expect("read counted receipt"))["counters"].clone()
     }
@@ -2498,6 +2500,158 @@ mod counted {
             }
             assert_route_pins(&after, subcommand);
         }
+    }
+
+    /// The R05 seek falsifier: with unrelated history and unrelated Changes
+    /// present, the derived seek lane opens zero authoritative material —
+    /// no event decode, no proposal/support carrier, no body or object
+    /// artifact, no strict journal inspection — and its one honest counter,
+    /// `changeSeekFactRowsSelected`, is proportional to the target Change's
+    /// correlated fact rows and invariant as unrelated Changes and history
+    /// grow. Zero-construction assertions are deliberately absent (the
+    /// narrowed fold still constructs), and `factSqliteRowsSelected` belongs
+    /// to exact-Revision selections, never asserted here.
+    #[test]
+    fn change_seek_reads_active_current_stay_zero_pin_and_row_invariant() {
+        let fixture = change_reads_fixture();
+        fixture.build_derived();
+        let receipt_dir = tempfile::tempdir().expect("receipt directory");
+
+        let list = super::parse_json(
+            &pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], ACTIVE).stdout,
+        );
+        let parallel = list["changes"]
+            .as_array()
+            .expect("changes array")
+            .iter()
+            .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
+            .expect("parallel Change summary")
+            .clone();
+        let heads = parallel["currentRevisionRefs"]
+            .as_array()
+            .expect("parallel heads")
+            .clone();
+
+        let show: Vec<String> = vec!["show".into(), fixture.accepted_change_id.clone()];
+        let select: Vec<String> = vec!["select".into(), fixture.accepted_change_id.clone()];
+        let interdiff: Vec<String> = vec![
+            "interdiff".into(),
+            fixture.parallel_change_id.clone(),
+            heads[0]["revisionId"].as_str().expect("head id").into(),
+            heads[1]["revisionId"].as_str().expect("head id").into(),
+            "--from-artifact-hash".into(),
+            heads[0]["objectArtifactContentHash"]
+                .as_str()
+                .expect("head hash")
+                .into(),
+            "--to-artifact-hash".into(),
+            heads[1]["objectArtifactContentHash"]
+                .as_str()
+                .expect("head hash")
+                .into(),
+        ];
+        let shapes: [(&str, &[String]); 3] = [
+            ("show", &show),
+            ("select", &select),
+            ("interdiff", &interdiff),
+        ];
+
+        let assert_seek_pins = |counters: &Value, label: &str| {
+            for pin in [
+                "eventDecodes",
+                "changeProposalCarriersOpened",
+                "changeProposalCarriersValidated",
+                "changeSupportCarriersOpened",
+                "bodyArtifactReads",
+                "objectArtifactReads",
+                "strictJournalInspections",
+            ] {
+                assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+            }
+            assert!(
+                counter(counters, "changeSeekFactRowsSelected") > 0,
+                "{label}: the seek records its selected fact rows"
+            );
+        };
+
+        let mut before = Vec::new();
+        for (ordinal, (label, shape)) in shapes.iter().enumerate() {
+            let arguments = shape.iter().map(String::as_str).collect::<Vec<_>>();
+            let counters =
+                counted_counters_for(&fixture, &arguments, receipt_dir.path(), ordinal as u64);
+            assert_seek_pins(&counters, label);
+            before.push(counter(&counters, "changeSeekFactRowsSelected"));
+        }
+
+        // Unrelated growth: review facts on an existing member plus two whole
+        // unrelated Changes with their own captures.
+        fixture.grow_unrelated_history(UNRELATED_EVENTS);
+        for ordinal in 0..2 {
+            fixture.repo.write(
+                "src/lib.rs",
+                format!("pub fn value() -> u32 {{ {} }}\n", 40 + ordinal),
+            );
+            let unrelated = pointbreak_env(["capture", "--repo", fixture.repo_arg()], super::OFF);
+            super::assert_success(&unrelated);
+        }
+        fixture.build_derived();
+
+        for (ordinal, (label, shape)) in shapes.iter().enumerate() {
+            let arguments = shape.iter().map(String::as_str).collect::<Vec<_>>();
+            let counters = counted_counters_for(
+                &fixture,
+                &arguments,
+                receipt_dir.path(),
+                10 + ordinal as u64,
+            );
+            assert_seek_pins(&counters, label);
+            assert_eq!(
+                counter(&counters, "changeSeekFactRowsSelected"),
+                before[ordinal],
+                "{label}: selected fact rows are invariant under unrelated growth"
+            );
+        }
+    }
+
+    /// The first catching-up CLI fallback case: with the generation behind a
+    /// raw append, the derived lane answers nothing — zero seek rows, the
+    /// authoritative replay decodes events — and the output stays
+    /// byte-identical to the explicit-off lane.
+    #[test]
+    fn change_show_catching_up_falls_back_with_authoritative_bytes() {
+        let fixture = change_reads_fixture();
+        fixture.build_derived();
+        super::append_membership_of_unproposed_revision(
+            fixture.repo.path(),
+            &fixture.accepted_change_id,
+            &format!("rev:sha256:{}", "7e".repeat(32)),
+        );
+
+        let args = [
+            "change",
+            "show",
+            &fixture.parallel_change_id,
+            "--repo",
+            fixture.repo_arg(),
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, super::OFF);
+        super::assert_success(&active);
+        assert_eq!(active.stdout, off.stdout, "catching-up show stdout parity");
+        assert_eq!(active.stderr, off.stderr, "catching-up show stderr parity");
+
+        let receipt_dir = tempfile::tempdir().expect("receipt directory");
+        let show: Vec<&str> = vec!["show", &fixture.parallel_change_id];
+        let counters = counted_counters_for(&fixture, &show, receipt_dir.path(), 0);
+        assert_eq!(
+            counter(&counters, "changeSeekFactRowsSelected"),
+            0,
+            "the seek selects nothing behind a moved truth"
+        );
+        assert!(
+            counter(&counters, "eventDecodes") > 0,
+            "the authoritative replay serves the catching-up read"
+        );
     }
 }
 

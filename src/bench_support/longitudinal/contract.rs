@@ -3237,6 +3237,9 @@ pub enum InteractionRouteV1 {
     ChangeProfileRead,
     ChangeListRead,
     ChangeAttentionRead,
+    ChangeShowRead,
+    ChangeSelectCapturedRead,
+    ChangeInterdiffRead,
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -3303,6 +3306,38 @@ pub const INTERACTION_CHANGE_READ_CELLS_V1: [(
     (
         "change_list_explicit_off",
         InteractionRouteV1::ChangeListRead,
+        InteractionSetupExpectationV1::FactExplicitOff,
+    ),
+];
+
+/// The four owner-approved per-Change seek cells: three derived
+/// active-current targets plus the change show explicit-off
+/// characterization control. No seek read has an unavailable or terminal
+/// catalog cell.
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const INTERACTION_CHANGE_SEEK_CELLS_V1: [(
+    &str,
+    InteractionRouteV1,
+    InteractionSetupExpectationV1,
+); 4] = [
+    (
+        "change_show_current_exact",
+        InteractionRouteV1::ChangeShowRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_select_captured_current",
+        InteractionRouteV1::ChangeSelectCapturedRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_interdiff_current",
+        InteractionRouteV1::ChangeInterdiffRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_show_explicit_off",
+        InteractionRouteV1::ChangeShowRead,
         InteractionSetupExpectationV1::FactExplicitOff,
     ),
 ];
@@ -3481,6 +3516,28 @@ pub fn interaction_route_state_contract_v1(
         };
     }
 
+    if matches!(
+        route,
+        InteractionRouteV1::ChangeShowRead
+            | InteractionRouteV1::ChangeSelectCapturedRead
+            | InteractionRouteV1::ChangeInterdiffRead
+    ) {
+        // The owner-approved per-Change seek cells: three active-current
+        // targets plus the change show explicit-off characterization
+        // control. Only show carries the control cell; every other setup
+        // stays out of the catalog.
+        return match setup {
+            Setup::FactActiveCurrent => Some(FACT_CURRENT),
+            Setup::FactExplicitOff if route == InteractionRouteV1::ChangeShowRead => {
+                Some(InteractionRouteStateContractV1 {
+                    observed: Observed::AuthoritativeReplay,
+                    ..BASE
+                })
+            }
+            _ => None,
+        };
+    }
+
     match (route, setup) {
         (InteractionRouteV1::VersionJson, Setup::NotApplicable) => Some(BASE),
         (InteractionRouteV1::AttentionCurrentOrFallback, Setup::AttentionDerivedCurrent) => {
@@ -3580,12 +3637,19 @@ impl InteractionPerformanceExpectedContextV1 {
 
         // The change-read routes take no Revision selector (their argv is
         // repo-plus-format only), so their expected context carries none.
+        // The seek routes carry none either: `show`'s selector is a Change,
+        // captured `select` pins its Change through the validated arguments,
+        // and `interdiff` addresses an ordered Revision pair positionally,
+        // which a single-Revision field cannot represent.
         let requires_revision = !matches!(
             self.route,
             InteractionRouteV1::VersionJson
                 | InteractionRouteV1::ChangeProfileRead
                 | InteractionRouteV1::ChangeListRead
                 | InteractionRouteV1::ChangeAttentionRead
+                | InteractionRouteV1::ChangeShowRead
+                | InteractionRouteV1::ChangeSelectCapturedRead
+                | InteractionRouteV1::ChangeInterdiffRead
         );
         match (&self.revision, requires_revision) {
             (Some(revision), true) => {

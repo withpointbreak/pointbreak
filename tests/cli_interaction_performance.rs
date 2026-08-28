@@ -2087,6 +2087,239 @@ fn change_read_cells_run_counted_with_plain_run_parity() {
 }
 
 #[test]
+fn change_seek_cell_catalog_freezes_the_four_approved_cells() {
+    use pointbreak::bench_support::longitudinal::INTERACTION_CHANGE_SEEK_CELLS_V1;
+
+    assert_eq!(
+        INTERACTION_CHANGE_SEEK_CELLS_V1.map(|(cell, _, _)| cell),
+        [
+            "change_show_current_exact",
+            "change_select_captured_current",
+            "change_interdiff_current",
+            "change_show_explicit_off",
+        ],
+    );
+    assert_eq!(
+        INTERACTION_CHANGE_SEEK_CELLS_V1.map(|(_, route, _)| route),
+        [
+            Route::ChangeShowRead,
+            Route::ChangeSelectCapturedRead,
+            Route::ChangeInterdiffRead,
+            Route::ChangeShowRead,
+        ],
+    );
+
+    for route in [
+        Route::ChangeShowRead,
+        Route::ChangeSelectCapturedRead,
+        Route::ChangeInterdiffRead,
+    ] {
+        let target = interaction_route_state_contract_v1(route, Setup::FactActiveCurrent)
+            .expect("active-current change-seek cell");
+        assert_eq!(target.observed, ObservedState::DerivedCurrent);
+        assert_eq!(
+            target.performance_role,
+            PerformanceRole::ProvisionalTarget {
+                sample_count: 5,
+                strict_upper_bound_millis: 2_000,
+            }
+        );
+        assert!(target.historical_evidence_unchanged);
+    }
+
+    let control =
+        interaction_route_state_contract_v1(Route::ChangeShowRead, Setup::FactExplicitOff)
+            .expect("change_show_explicit_off cell");
+    assert_eq!(control.observed, ObservedState::AuthoritativeReplay);
+    assert_eq!(
+        control.performance_role,
+        PerformanceRole::CompatibilityCharacterization
+    );
+    assert_eq!(control.strict_authoritative_snapshots, 0);
+
+    // Only change show carries the explicit-off control, and no seek read has
+    // an unavailable or terminal catalog cell.
+    for route in [
+        Route::ChangeShowRead,
+        Route::ChangeSelectCapturedRead,
+        Route::ChangeInterdiffRead,
+    ] {
+        for setup in [
+            Setup::NotApplicable,
+            Setup::AuthoritativeReplay,
+            Setup::FactActiveUnavailable,
+            Setup::FactPostSelectionFailure,
+            Setup::AttentionDerivedCurrent,
+            Setup::AttentionColdInactive,
+            Setup::AttentionActiveUnavailable,
+        ] {
+            assert!(
+                interaction_route_state_contract_v1(route, setup).is_none(),
+                "{setup:?} must not be a change-seek catalog cell"
+            );
+        }
+    }
+    for route in [Route::ChangeSelectCapturedRead, Route::ChangeInterdiffRead] {
+        assert!(
+            interaction_route_state_contract_v1(route, Setup::FactExplicitOff).is_none(),
+            "only change show carries the explicit-off control cell"
+        );
+    }
+    // The Slice 1 list control stays accepted beside the new show control.
+    assert!(
+        interaction_route_state_contract_v1(Route::ChangeListRead, Setup::FactExplicitOff)
+            .is_some(),
+        "the change list explicit-off cell stays in the catalog"
+    );
+}
+
+const CHANGE_SEEK_PHASES: [Phase; 4] = [
+    Phase::ChangeSeekSnapshotAcquisition,
+    Phase::ChangeSeekCorrelatedSelection,
+    Phase::ChangeSeekProjectionFold,
+    Phase::ChangeSeekComposition,
+];
+
+const CHANGE_PAGE_PHASES: [Phase; 6] = [
+    Phase::ChangePageSnapshotAcquisition,
+    Phase::ChangePageBodylessSelection,
+    Phase::ChangePageProposalLocatorExpansion,
+    Phase::ChangePageCarrierHydrationValidation,
+    Phase::ChangePageSupportExpansion,
+    Phase::ChangePagePresentationProjection,
+];
+
+#[test]
+fn change_seek_cells_run_counted_with_plain_run_parity() {
+    let fixture = fixture();
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    let execution = execution_identity();
+    let receipt_dir = tempfile::tempdir().expect("temporary change-seek receipt directory");
+
+    let list = run_binary(
+        strings(&["change", "list", "--repo", &repo, "--format", "json"]).as_slice(),
+        OFF_ENV,
+    );
+    assert_success("list the fixture Change", &list);
+    let list: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list JSON");
+    let summary = &list["changes"][0];
+    let change_id = summary["changeId"].as_str().expect("change id").to_owned();
+    let head = &summary["currentRevisionRefs"][0];
+    let head_revision = head["revisionId"]
+        .as_str()
+        .expect("head revision")
+        .to_owned();
+    let head_hash = head["objectArtifactContentHash"]
+        .as_str()
+        .expect("head hash")
+        .to_owned();
+
+    let show_arguments = strings(&[
+        "change", "show", &change_id, "--repo", &repo, "--format", "json",
+    ]);
+    let off_expected = expected_context(
+        execution.clone(),
+        Route::ChangeShowRead,
+        show_arguments.clone(),
+        Setup::FactExplicitOff,
+        Some(&fixture),
+        None,
+    );
+    let off_receipt = run_success_case(
+        "change-show-explicit-off",
+        &show_arguments,
+        OFF_ENV,
+        &off_expected,
+        &receipt_dir,
+        &[Phase::SerializationAndOutput],
+        &CHANGE_SEEK_PHASES,
+        true,
+    );
+    assert_eq!(
+        off_receipt.observed.route_state,
+        ObservedState::AuthoritativeReplay
+    );
+    assert_eq!(off_receipt.counters.strict_journal_inspections, 0);
+    assert_eq!(off_receipt.counters.change_seek_fact_rows_selected, 0);
+    assert!(off_receipt.counters.change_semantic_constructions > 0);
+
+    build_derived(&fixture.repo);
+    let select_arguments = strings(&[
+        "change", "select", &change_id, "--repo", &repo, "--format", "json",
+    ]);
+    let interdiff_arguments = strings(&[
+        "change",
+        "interdiff",
+        &change_id,
+        &head_revision,
+        &head_revision,
+        "--from-artifact-hash",
+        &head_hash,
+        "--to-artifact-hash",
+        &head_hash,
+        "--repo",
+        &repo,
+        "--format",
+        "json",
+    ]);
+    for (case_name, arguments, route) in [
+        (
+            "change-show-current-exact",
+            show_arguments.clone(),
+            Route::ChangeShowRead,
+        ),
+        (
+            "change-select-captured-current",
+            select_arguments,
+            Route::ChangeSelectCapturedRead,
+        ),
+        (
+            "change-interdiff-current",
+            interdiff_arguments,
+            Route::ChangeInterdiffRead,
+        ),
+    ] {
+        let expected = expected_context(
+            execution.clone(),
+            route,
+            arguments.clone(),
+            Setup::FactActiveCurrent,
+            Some(&fixture),
+            None,
+        );
+        let mut required = vec![Phase::SerializationAndOutput];
+        required.extend(CHANGE_SEEK_PHASES);
+        let mut forbidden = vec![
+            Phase::CliCapabilityPreflightH1,
+            Phase::WorkflowChangeReaderReplayH3,
+            Phase::RouteBodyHydration,
+        ];
+        forbidden.extend(CHANGE_PAGE_PHASES);
+        let receipt = run_success_case(
+            case_name,
+            &arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &required,
+            &forbidden,
+            false,
+        );
+        assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
+        assert_eq!(receipt.counters.strict_journal_inspections, 0);
+        assert_eq!(receipt.counters.body_artifact_reads, 0);
+        assert_eq!(receipt.counters.object_artifact_reads, 0);
+        assert_eq!(receipt.counters.event_decodes, 0);
+        assert_eq!(receipt.counters.change_proposal_carriers_opened, 0);
+        assert_eq!(receipt.counters.change_support_carriers_opened, 0);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
+        assert!(receipt.counters.change_seek_fact_rows_selected > 0);
+        assert!(receipt.children.is_empty());
+    }
+}
+
+#[test]
 fn revision_show_derived_current_substitutes_projection_stamp_with_lane_parity() {
     let fixture = revision_show_fixture();
     build_derived(&fixture.repo);
@@ -2989,7 +3222,12 @@ fn expected_context(
         revision: fixture.and_then(|fixture| {
             let carries_revision_selector = !matches!(
                 route,
-                Route::ChangeProfileRead | Route::ChangeListRead | Route::ChangeAttentionRead
+                Route::ChangeProfileRead
+                    | Route::ChangeListRead
+                    | Route::ChangeAttentionRead
+                    | Route::ChangeShowRead
+                    | Route::ChangeSelectCapturedRead
+                    | Route::ChangeInterdiffRead
             );
             carries_revision_selector.then(|| fixture.revision.clone())
         }),

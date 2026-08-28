@@ -1236,7 +1236,23 @@ mod contract_tests {
             snapshot_impl.contains("fn store_removal_audit_event_ids("),
             "the removal-audit selection method must live inside the guarded impl slice"
         );
-        let forbidden = [
+        // The seek snapshot's marker slice: the fifth region legitimately
+        // calls the narrowed folds, so its token list omits them; the eager
+        // materialized reads and the authoritative snapshots stay forbidden.
+        let seek_snapshot_start = semantic_source
+            .find("impl ChangeSeekReadSnapshot {")
+            .expect("seek snapshot impl marker");
+        let seek_snapshot_tail = &semantic_source[seek_snapshot_start..];
+        let seek_snapshot_end = seek_snapshot_tail
+            .find("/// The removal-audit reference seek statement")
+            .expect("seek snapshot impl terminator");
+        let seek_snapshot_impl = &seek_snapshot_tail[..seek_snapshot_end];
+        assert!(
+            seek_snapshot_impl.contains("fn change_document_facts_for_change("),
+            "the per-Change selection method must live inside the seek snapshot impl slice"
+        );
+
+        let page_tokens: [String; 10] = [
             ["ProductHistory", "ReadSnapshot"].concat(),
             ["product_history", "_read_snapshot"].concat(),
             ["product_history", "_read_snapshot_at"].concat(),
@@ -1248,23 +1264,30 @@ mod contract_tests {
             ["project_changes", "_from_facts"].concat(),
             ["project_change_documents", "_from_facts"].concat(),
         ];
-        for token in forbidden {
-            assert!(
-                !fact_source.contains(&token),
-                "fact producer must not contain {token}"
-            );
-            assert!(
-                !detail_source.contains(&token),
-                "detail producer must not contain {token}"
-            );
-            assert!(
-                !constructor.contains(&token),
-                "fact snapshot constructor must not contain {token}"
-            );
-            assert!(
-                !snapshot_impl.contains(&token),
-                "fact snapshot impl must not contain {token}"
-            );
+        let seek_tokens: [String; 9] = [
+            ["ProductHistory", "ReadSnapshot"].concat(),
+            ["product_history", "_read_snapshot"].concat(),
+            ["product_history", "_read_snapshot_at"].concat(),
+            ["product_history", "_connection"].concat(),
+            ["facts_for_revision", "_hydrated"].concat(),
+            ["query_materialized_change", "_projection"].concat(),
+            ["query_materialized_change", "_projections"].concat(),
+            ["query_materialized_change_document", "_facts"].concat(),
+            // Also catches every `*materialized_change_projection*` accessor.
+            ["materialized_change", "_projection"].concat(),
+        ];
+        let seek_source = include_str!("change_seek_reads.rs");
+        let regions: [(&str, &str, &[String]); 5] = [
+            ("fact producer", fact_source, &page_tokens),
+            ("detail producer", detail_source, &page_tokens),
+            ("fact snapshot constructor", constructor, &page_tokens),
+            ("fact snapshot impl", snapshot_impl, &page_tokens),
+            ("change seek producer", seek_source, &seek_tokens),
+        ];
+        for (region, source, tokens) in regions {
+            for token in tokens {
+                assert!(!source.contains(token), "{region} must not contain {token}");
+            }
         }
     }
 }
