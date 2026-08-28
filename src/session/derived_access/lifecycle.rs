@@ -16,8 +16,8 @@ use super::semantic::change::{
     ChangeReaderProfileReceiptProbeV1, ChangeReaderProfileReceiptV3, ReaderProjectionCheckpointV1,
     RuntimeTrustIdentityV1, build_change_reader_profile_receipt_v3,
     change_generation_stamp_sha256_v1, derived_change_generation_stamp_v1,
-    initial_reader_projection_checkpoint_v1, probe_change_reader_profile_receipt,
-    strict_change_generation_stamp_preimage_v1,
+    derived_change_seek_stamp_v1, initial_reader_projection_checkpoint_v1,
+    probe_change_reader_profile_receipt, strict_change_generation_stamp_preimage_v1,
 };
 use super::service::{
     BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError,
@@ -1774,6 +1774,31 @@ impl CurrentGeneration {
             checkpoint,
             semantic_projection,
             document_projection,
+        )
+        .map_err(change_reader_contract_lifecycle_error)
+    }
+
+    /// Mint the seek-scoped stamp for one per-Change seek read. The private
+    /// reader receipt never leaves this boundary; the producer calls this
+    /// method, never the raw assembly.
+    pub(crate) fn change_seek_stamp(
+        &self,
+        checkpoint: &ReaderProjectionCheckpointV1,
+        change_id: &crate::model::ChangeId,
+        narrowed_semantic: &crate::session::ChangeProjection,
+        narrowed_document: &crate::session::ChangeDocumentProjectionV1,
+    ) -> Result<String, LifecycleError> {
+        let receipt = self.reader_receipt.as_ref().ok_or_else(|| {
+            LifecycleError::RebuildRequired(
+                "current generation has no Change reader-profile receipt".to_owned(),
+            )
+        })?;
+        derived_change_seek_stamp_v1(
+            receipt,
+            checkpoint,
+            change_id,
+            narrowed_semantic,
+            narrowed_document,
         )
         .map_err(change_reader_contract_lifecycle_error)
     }

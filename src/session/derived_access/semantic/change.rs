@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::{ActorId, EventId, TrackId};
+use crate::model::{ActorId, ChangeId, EventId, TrackId};
 use crate::session::derived_access::cursor::TruthCursor;
 use crate::session::derived_access::generation::{
     GenerationDescriptor, GenerationLayout, GenerationPublication,
@@ -39,6 +39,7 @@ pub(crate) const READER_PROJECTION_CHECKPOINT_SCHEMA_V1: &str =
     "pointbreak.derived-change-reader-projection-checkpoint.v1";
 pub(crate) const CHANGE_GENERATION_STAMP_SCHEMA_V1: &str =
     "pointbreak.derived-change-generation-stamp.v1";
+pub(crate) const CHANGE_SEEK_STAMP_SCHEMA_V1: &str = "pointbreak.derived-change-seek-stamp.v1";
 const CHANGE_SEMANTIC_RESOURCE: &str = "change-semantic.json";
 pub(crate) const CHANGE_READER_PROFILE_RESOURCE_V3: &str = "change-reader-profile.json";
 const CURSOR_PROFILE_ID_V1: &str = "pointbreak.sqlite-derived-access-cursor.v1";
@@ -506,6 +507,21 @@ pub(crate) struct ChangeGenerationStampPreimageV1 {
     pub(crate) runtime_trust_identity: RuntimeTrustIdentityV1,
 }
 
+/// Preimage for the per-Change seek stamp. Deliberately its own type: the
+/// generation preimage's digest fields are contractually whole-generation and
+/// must never carry narrowed digests.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ChangeSeekStampPreimageV1 {
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) reader_receipt_sha256: String,
+    pub(crate) reader_checkpoint: ReaderProjectionCheckpointV1,
+    pub(crate) change_id: ChangeId,
+    pub(crate) narrowed_semantic_sha256: String,
+    pub(crate) narrowed_document_sha256: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ChangeReaderProfileReceiptProbeV1 {
     Current(Box<ChangeReaderProfileReceiptV3>),
@@ -909,6 +925,62 @@ pub(crate) fn derived_change_generation_stamp_v1(
         RuntimeTrustIdentityV1::NotApplicable,
     )?;
     change_generation_stamp_sha256_v1(&preimage)
+}
+
+pub(crate) fn change_seek_stamp_sha256_v1(
+    preimage: &ChangeSeekStampPreimageV1,
+) -> ChangeReaderContractResult<String> {
+    if preimage.schema != CHANGE_SEEK_STAMP_SCHEMA_V1 || preimage.version != 1 {
+        return Err(ChangeReaderContractError::invalid(
+            "incompatible Change seek-stamp preimage schema",
+        ));
+    }
+    validate_prefixed_sha256("seek-stamp reader receipt", &preimage.reader_receipt_sha256)?;
+    preimage.reader_checkpoint.validate_self()?;
+    if preimage.reader_receipt_sha256 != preimage.reader_checkpoint.reader_receipt_sha256 {
+        return Err(ChangeReaderContractError::invalid(
+            "seek-stamp receipt anchor mismatch",
+        ));
+    }
+    for (name, value) in [
+        (
+            "seek-stamp narrowed semantic projection",
+            &preimage.narrowed_semantic_sha256,
+        ),
+        (
+            "seek-stamp narrowed document projection",
+            &preimage.narrowed_document_sha256,
+        ),
+    ] {
+        validate_prefixed_sha256(name, value)?;
+    }
+    contract_sha256(preimage)
+}
+
+/// Mint the seek-scoped stamp for one per-Change seek read: generation
+/// identity (receipt and validated checkpoint), the seek scope (the Change
+/// id), and the narrowed content digests. Two seeks of one Change at one
+/// store state agree; a seek stamp deliberately never equals the
+/// whole-generation stamp the page reads bind.
+pub(crate) fn derived_change_seek_stamp_v1(
+    receipt: &ChangeReaderProfileReceiptV3,
+    checkpoint: &ReaderProjectionCheckpointV1,
+    change_id: &ChangeId,
+    narrowed_semantic: &ChangeProjection,
+    narrowed_document: &ChangeDocumentProjectionV1,
+) -> ChangeReaderContractResult<String> {
+    receipt.validate()?;
+    checkpoint.validate_for_receipt(receipt)?;
+    let preimage = ChangeSeekStampPreimageV1 {
+        schema: CHANGE_SEEK_STAMP_SCHEMA_V1.to_owned(),
+        version: 1,
+        reader_receipt_sha256: receipt.receipt_sha256.clone(),
+        reader_checkpoint: checkpoint.clone(),
+        change_id: change_id.clone(),
+        narrowed_semantic_sha256: contract_sha256(narrowed_semantic)?,
+        narrowed_document_sha256: contract_sha256(narrowed_document)?,
+    };
+    change_seek_stamp_sha256_v1(&preimage)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2877,6 +2949,139 @@ mod tests {
         assert_eq!(
             fallback.document_projection.unavailable_revision_refs.len(),
             1
+        );
+    }
+
+    #[test]
+    fn seek_stamp_binds_generation_scope_and_narrowed_content() {
+        let receipt = contract_receipt(7);
+        let checkpoint = contract_live_checkpoint(&receipt);
+        let change = ChangeId::new(format!("change:sha256:{}", "1".repeat(64)));
+        let other_change = ChangeId::new(format!("change:sha256:{}", "2".repeat(64)));
+        let semantic = ChangeProjection::default();
+        let document = ChangeDocumentProjectionV1::default();
+        let mut other_semantic = ChangeProjection::default();
+        other_semantic.links.push(crate::session::ChangeLinkView {
+            left_change_id: change.clone(),
+            right_change_id: other_change.clone(),
+            relation: crate::session::event::ChangeLinkRelationV1::SameWork,
+        });
+        let mut other_document = ChangeDocumentProjectionV1::default();
+        other_document
+            .diagnostics
+            .push("seek-stamp-content-probe".to_owned());
+
+        let base =
+            derived_change_seek_stamp_v1(&receipt, &checkpoint, &change, &semantic, &document)
+                .unwrap();
+        assert_ne!(
+            base,
+            derived_change_seek_stamp_v1(
+                &receipt,
+                &checkpoint,
+                &other_change,
+                &semantic,
+                &document
+            )
+            .unwrap(),
+            "the seek stamp binds the seek scope"
+        );
+        assert_ne!(
+            base,
+            derived_change_seek_stamp_v1(
+                &receipt,
+                &checkpoint,
+                &change,
+                &other_semantic,
+                &document
+            )
+            .unwrap(),
+            "the seek stamp binds the narrowed semantic content"
+        );
+        assert_ne!(
+            base,
+            derived_change_seek_stamp_v1(
+                &receipt,
+                &checkpoint,
+                &change,
+                &semantic,
+                &other_document
+            )
+            .unwrap(),
+            "the seek stamp binds the narrowed document content"
+        );
+        let other_receipt = contract_receipt(9);
+        let other_checkpoint = contract_live_checkpoint(&other_receipt);
+        assert_ne!(
+            base,
+            derived_change_seek_stamp_v1(
+                &other_receipt,
+                &other_checkpoint,
+                &change,
+                &semantic,
+                &document
+            )
+            .unwrap(),
+            "the seek stamp binds the generation identity"
+        );
+    }
+
+    #[test]
+    fn seek_stamp_schema_is_distinct_from_the_generation_stamp() {
+        assert_ne!(
+            CHANGE_SEEK_STAMP_SCHEMA_V1,
+            CHANGE_GENERATION_STAMP_SCHEMA_V1
+        );
+
+        let receipt = contract_receipt(7);
+        let checkpoint = contract_live_checkpoint(&receipt);
+        let change = ChangeId::new(format!("change:sha256:{}", "1".repeat(64)));
+        let semantic = ChangeProjection::default();
+        // The generation stamp folds the document projection stamp in as its
+        // presentation identity, so give the fixture document a canonical one.
+        let document = ChangeDocumentProjectionV1 {
+            projection_stamp: contract_hash('d'),
+            ..Default::default()
+        };
+        let seek =
+            derived_change_seek_stamp_v1(&receipt, &checkpoint, &change, &semantic, &document)
+                .unwrap();
+        let generation =
+            derived_change_generation_stamp_v1(&receipt, &checkpoint, &semantic, &document)
+                .unwrap();
+        assert_ne!(
+            seek, generation,
+            "the seek stamp never collides with the whole-generation contract"
+        );
+
+        let preimage = ChangeSeekStampPreimageV1 {
+            schema: CHANGE_GENERATION_STAMP_SCHEMA_V1.to_owned(),
+            version: 1,
+            reader_receipt_sha256: receipt.receipt_sha256.clone(),
+            reader_checkpoint: checkpoint,
+            change_id: change,
+            narrowed_semantic_sha256: contract_sha256(&semantic).unwrap(),
+            narrowed_document_sha256: contract_sha256(&document).unwrap(),
+        };
+        assert!(
+            change_seek_stamp_sha256_v1(&preimage).is_err(),
+            "the seek assembly rejects a foreign preimage schema"
+        );
+    }
+
+    #[test]
+    fn seek_stamps_agree_across_invocations_at_one_store_state() {
+        let receipt = contract_receipt(7);
+        let checkpoint = contract_live_checkpoint(&receipt);
+        let change = ChangeId::new(format!("change:sha256:{}", "1".repeat(64)));
+        let semantic = ChangeProjection::default();
+        let document = ChangeDocumentProjectionV1::default();
+        assert_eq!(
+            derived_change_seek_stamp_v1(&receipt, &checkpoint, &change, &semantic, &document)
+                .unwrap(),
+            derived_change_seek_stamp_v1(&receipt, &checkpoint, &change, &semantic, &document)
+                .unwrap(),
+            "two assemblies at one store state agree"
         );
     }
 }

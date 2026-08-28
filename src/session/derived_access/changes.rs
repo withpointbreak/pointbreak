@@ -5797,4 +5797,75 @@ mod tests {
                 .any(|(schema, _)| *schema == PROJECTION_ERROR_SCHEMA)
         );
     }
+
+    #[test]
+    fn change_seek_stamp_is_seek_scoped_and_distinct_from_the_generation_stamp() {
+        let fixture = ActiveChangeFixture::new(&[&[None], &[None]]);
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("fixture generation must remain current");
+        };
+        let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+        let LocatorRead::Ready(materialized) = current
+            .service()
+            .semantic_materialized_change_projection_at(checkpoint.truth_cursor)
+            .unwrap()
+        else {
+            panic!("fixture projection must be caught up");
+        };
+
+        let narrowed = |change_id: &ChangeId| {
+            let LocatorRead::Ready(facts) = current
+                .service()
+                .semantic_change_seek_facts_at(change_id, checkpoint.truth_cursor)
+                .unwrap()
+            else {
+                panic!("fixture seek must be caught up");
+            };
+            let semantic = crate::session::projection::change::project_changes_from_facts(
+                &facts
+                    .iter()
+                    .map(|fact| fact.change.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let document =
+                crate::session::projection::change::project_change_documents_from_facts(&facts)
+                    .unwrap();
+            (semantic, document)
+        };
+
+        let first = &fixture.changes[0].change_id;
+        let second = &fixture.changes[1].change_id;
+        let (first_semantic, first_document) = narrowed(first);
+        let (second_semantic, second_document) = narrowed(second);
+
+        let first_stamp = current
+            .change_seek_stamp(&checkpoint, first, &first_semantic, &first_document)
+            .unwrap();
+        assert_eq!(
+            first_stamp,
+            current
+                .change_seek_stamp(&checkpoint, first, &first_semantic, &first_document)
+                .unwrap(),
+            "two seek invocations at one store state agree"
+        );
+        assert_ne!(
+            first_stamp,
+            current
+                .change_seek_stamp(&checkpoint, second, &second_semantic, &second_document)
+                .unwrap(),
+            "seek stamps are scoped to their Change"
+        );
+        assert_ne!(
+            first_stamp,
+            current
+                .change_generation_stamp(
+                    &checkpoint,
+                    &materialized.projection,
+                    &materialized.document_projection,
+                )
+                .unwrap(),
+            "the seek stamp never equals the whole-generation stamp"
+        );
+    }
 }
