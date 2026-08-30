@@ -325,6 +325,44 @@ impl DerivedChangeAccess {
         self.review_generation_with_hook(|| {})
     }
 
+    /// Compose one Change's review-schema detail document from the complete
+    /// materialized generation and bind it to that generation's stamp.
+    pub fn review_generation_detail_document(
+        &self,
+        change: &ChangeId,
+    ) -> Result<DerivedChangeOutcomeV1<crate::documents::ChangeDetailDocumentV1>> {
+        let generation = self.review_generation()?;
+        Ok(match generation {
+            DerivedChangeOutcomeV1::Ready(generation) => {
+                let document = ChangeDocumentFacadeV1::new(
+                    generation.projection().clone(),
+                    generation.document_projection().clone(),
+                )?
+                .with_generation_stamp(generation.stamp().to_owned())?
+                .detail_document(change)?;
+                DerivedChangeOutcomeV1::Ready(document)
+            }
+            DerivedChangeOutcomeV1::AuthorityUnavailable(document) => {
+                DerivedChangeOutcomeV1::AuthorityUnavailable(document)
+            }
+            DerivedChangeOutcomeV1::AuthorityConflicted(document) => {
+                DerivedChangeOutcomeV1::AuthorityConflicted(document)
+            }
+            DerivedChangeOutcomeV1::AuthorityInvalid(document) => {
+                DerivedChangeOutcomeV1::AuthorityInvalid(document)
+            }
+            DerivedChangeOutcomeV1::ReaderUpgradeRequired(document) => {
+                DerivedChangeOutcomeV1::ReaderUpgradeRequired(document)
+            }
+            DerivedChangeOutcomeV1::ProjectionUnavailable(document) => {
+                DerivedChangeOutcomeV1::ProjectionUnavailable(document)
+            }
+            DerivedChangeOutcomeV1::Retryable(document) => {
+                DerivedChangeOutcomeV1::Retryable(document)
+            }
+        })
+    }
+
     fn review_generation_with_hook(
         &self,
         hook: impl FnOnce(),
@@ -3925,6 +3963,57 @@ mod tests {
             DerivedProjectionFailureCodeV1::ProjectionUnstable
         );
         assert!(document.is_retryable());
+    }
+
+    #[test]
+    fn review_generation_detail_document_matches_the_page_stamp_and_strict_detail() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("whole generation detail"),
+            Some("whole generation detail"),
+        ]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("read the staged Change page")
+        else {
+            panic!("the staged Change page must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(detail) = fixture
+            .access
+            .review_generation_detail_document(&change_id)
+            .expect("read the whole-generation detail")
+        else {
+            panic!("the whole-generation detail must be ready");
+        };
+
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection =
+            crate::session::project_changes(&events).expect("project strict Changes");
+        let strict_documents = crate::session::project_change_documents(&events)
+            .expect("project strict Change documents");
+        let expected = ChangeDocumentFacadeV1::new(strict_projection, strict_documents)
+            .expect("build strict Change facade")
+            .with_generation_stamp(page.document.document.projection_stamp.clone())
+            .expect("bind the staged generation stamp")
+            .detail_document(&change_id)
+            .expect("compose strict Change detail");
+        assert_eq!(detail, expected);
+        assert_eq!(
+            detail.detail.projection_stamp,
+            page.document.document.projection_stamp
+        );
+
+        let missing = ChangeId::new(format!("change:sha256:{}", "f".repeat(64)));
+        let generation_error = fixture
+            .access
+            .review_generation_detail_document(&missing)
+            .expect_err("the whole-generation detail must reject an unknown Change");
+        let seek_error = fixture
+            .access
+            .review_detail_document(&missing)
+            .expect_err("the seek detail must reject an unknown Change");
+        assert_eq!(generation_error.to_string(), seek_error.to_string());
     }
 
     #[test]

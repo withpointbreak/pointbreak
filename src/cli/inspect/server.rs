@@ -1304,12 +1304,21 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
         return exact_selection_error_response("invalid Change route identity");
     };
     match segments.as_slice() {
-        [change_id] => change_v2_response(api::change_detail_v2_json(
-            repo,
-            cache,
-            stamp_binder,
-            change_id,
-        )),
+        [change_id] => {
+            if state.derived_changes.is_active() {
+                change_v2_response(api::derived_change_detail_v2_json(
+                    &state.derived_changes,
+                    change_id,
+                ))
+            } else {
+                change_v2_response(api::change_detail_v2_json(
+                    repo,
+                    cache,
+                    stamp_binder,
+                    change_id,
+                ))
+            }
+        }
         [change_id, revisions, revision_id] if revisions == "revisions" => {
             let artifact_hash = match exact_selector_values(query, &["artifactHash"]) {
                 Ok(mut values) => values.remove(0),
@@ -2271,6 +2280,163 @@ mod tests {
         route(&state, true, "GET", path, Some(query))
     }
 
+    struct ExactChangeFixture {
+        _repo: tempfile::TempDir,
+        state: InspectState,
+        change_id: String,
+        revision_id: String,
+        artifact_hash: String,
+    }
+
+    fn exact_change_fixture(rebuild: bool) -> ExactChangeFixture {
+        let repo = tempfile::tempdir().expect("exact Change repository");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Pointbreak Test"],
+            vec!["config", "user.email", "pointbreak@example.test"],
+            vec!["config", "commit.gpgsign", "false"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "before\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "sample.txt"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.path().join("sample.txt"), "after\n").unwrap();
+        let events = repo.path().join(".git/pointbreak/events");
+        std::fs::create_dir_all(&events).expect("create exact Change fixture authority");
+        for (name, bytes) in [
+            (
+                "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+                include_bytes!(
+                    "../../../tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+                )
+                .as_slice(),
+            ),
+            (
+                "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
+                include_bytes!(
+                    "../../../tests/support/assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+                )
+                .as_slice(),
+            ),
+        ] {
+            std::fs::write(events.join(name), bytes)
+                .expect("write exact Change fixture authority record");
+        }
+        let capture = pointbreak::session::capture_change_revision(
+            pointbreak::session::ChangeCaptureOptions::initial(
+                "change-operation:exact-change-route-fixture",
+                pointbreak::session::CaptureOptions::new(repo.path()),
+                pointbreak::model::ChangeIdentityDescriptorV1::opaque_nonce([0x84; 32]),
+            ),
+        )
+        .expect("capture exact Change fixture");
+
+        let state =
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap();
+        if rebuild {
+            state
+                .derived_changes
+                .recovery_access()
+                .rebuild(|_| pointbreak::session::DerivedHistoryControl::Continue)
+                .expect("publish the fixture's derived generation through the public recovery API");
+            assert!(
+                state.derived_changes.is_active(),
+                "the rebuilt product access must be active"
+            );
+            let pointbreak::session::DerivedChangeOutcomeV1::Ready(current) = state
+                .derived_changes
+                .review_generation()
+                .expect("select the rebuilt generation through the product access")
+            else {
+                panic!("the rebuilt product access must select a current generation");
+            };
+            assert!(
+                !current.stamp().is_empty(),
+                "the selected current generation must carry its stamp"
+            );
+        }
+
+        let change_id = capture.change_id.as_str().to_owned();
+        let revision_id = capture.revision.revision_id.as_str().to_owned();
+        let artifact_hash = capture.revision.object_artifact_content_hash;
+
+        ExactChangeFixture {
+            _repo: repo,
+            state,
+            change_id,
+            revision_id,
+            artifact_hash,
+        }
+    }
+
+    fn change_v2_json_parts(
+        result: Result<api::ChangeV2Json, String>,
+    ) -> Result<(&'static str, String), String> {
+        result.map(|outcome| match outcome {
+            api::ChangeV2Json::Ok(body) => ("ok", body),
+            api::ChangeV2Json::Unavailable(body) => ("unavailable", body),
+            api::ChangeV2Json::UpgradeRequired(body) => ("upgrade-required", body),
+            api::ChangeV2Json::Invalid(body) => ("invalid", body),
+            api::ChangeV2Json::Stale(body) => ("stale", body),
+            api::ChangeV2Json::Retryable(body) => ("retryable", body),
+        })
+    }
+
+    fn assert_active_but_unready_exact_read_posture(
+        fixture: &ExactChangeFixture,
+        requests: &[(String, Option<String>)],
+    ) {
+        assert!(fixture.state.derived_changes.is_active());
+        assert!(
+            !matches!(
+                fixture.state.derived_changes.review_generation(),
+                Ok(pointbreak::session::DerivedChangeOutcomeV1::Ready(_))
+            ),
+            "the refusal fixture must not carry a current generation"
+        );
+        for (path, query) in requests {
+            let response = route_change_v2(&fixture.state, path, query.as_deref());
+            assert!(
+                matches!(response.status, "409 Conflict" | "503 Service Unavailable"),
+                "{path} silently fell back instead of following the derived lens posture: {}",
+                response.status
+            );
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert!(
+                matches!(
+                    body["schema"].as_str(),
+                    Some("pointbreak.store-migration-required")
+                        | Some("pointbreak.store-migration-in-progress")
+                        | Some("pointbreak.inspect-change-authority-error")
+                        | Some("pointbreak.inspect-change-projection-error")
+                ),
+                "{path}: {body}"
+            );
+        }
+    }
+
     #[test]
     fn bounded_change_routes_share_typed_query_errors() {
         for path in ["/api/v2/changes", "/api/v2/attention"] {
@@ -2376,6 +2542,46 @@ mod tests {
         assert_eq!(invalid.status, "400 Bad Request");
         assert_eq!(stale.status, "409 Conflict");
         assert_eq!(moving.status, "503 Service Unavailable");
+    }
+
+    #[test]
+    fn derived_change_detail_bytes_equal_the_authoritative_arm() {
+        let fixture = exact_change_fixture(true);
+        let authoritative = change_v2_json_parts(api::change_detail_v2_json(
+            &fixture.state.repo,
+            &fixture.state.change_reader_cache,
+            &fixture.state.strict_change_stamp,
+            &fixture.change_id,
+        ));
+        let derived = change_v2_json_parts(api::derived_change_detail_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.change_id,
+        ));
+        assert_eq!(derived, authoritative, "success bytes including stamps");
+
+        let missing = format!("change:sha256:{}", "f".repeat(64));
+        let authoritative = change_v2_json_parts(api::change_detail_v2_json(
+            &fixture.state.repo,
+            &fixture.state.change_reader_cache,
+            &fixture.state.strict_change_stamp,
+            &missing,
+        ));
+        let derived = change_v2_json_parts(api::derived_change_detail_v2_json(
+            &fixture.state.derived_changes,
+            &missing,
+        ));
+        assert_eq!(derived, authoritative, "unknown-Change outcome parity");
+    }
+
+    #[test]
+    fn active_but_unready_exact_reads_follow_the_owner_posture() {
+        let fixture = exact_change_fixture(false);
+        assert!(!fixture.revision_id.is_empty());
+        assert!(!fixture.artifact_hash.is_empty());
+        assert_active_but_unready_exact_read_posture(
+            &fixture,
+            &[(format!("/api/v2/changes/{}", fixture.change_id), None)],
+        );
     }
 
     #[test]

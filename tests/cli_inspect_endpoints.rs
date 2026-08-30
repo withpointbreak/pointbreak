@@ -484,6 +484,38 @@ fn exact_route_selector_refusals_stay_typed_and_pre_store() {
 }
 
 #[test]
+fn derived_exact_change_detail_preserves_the_characterization_floor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+
+    assert_eq!(detail["schema"], "pointbreak.review-change");
+    assert_eq!(detail["version"], 1);
+    assert_eq!(detail["summary"]["changeId"], change_id);
+    assert_eq!(detail["projectionStamp"], changes["projectionStamp"]);
+    assert!(
+        detail["inspectorPresentation"]["revisionGraph"].is_object(),
+        "the derived route preserves the Inspector-private graph splice: {detail}"
+    );
+}
+
+#[test]
 fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

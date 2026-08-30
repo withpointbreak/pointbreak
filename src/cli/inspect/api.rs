@@ -584,6 +584,27 @@ pub(super) fn change_detail_v2_json(
     })
 }
 
+pub(super) fn derived_change_detail_v2_json(
+    access: &DerivedChangeAccess,
+    change_id: &str,
+) -> Result<ChangeV2Json, String> {
+    derived_change_outcome_json(
+        access
+            .review_generation_detail_document(&ChangeId::new(change_id))
+            .map_err(|error| error.to_string())?,
+        |document| {
+            let graph = change_revision_graph(&document.detail)?;
+            let mut value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+            if let Some(graph) = graph {
+                splice_inspector_presentation(&mut value, "revisionGraph", graph)?;
+            }
+            serde_json::to_string(&value)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
 pub(super) fn change_revision_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
