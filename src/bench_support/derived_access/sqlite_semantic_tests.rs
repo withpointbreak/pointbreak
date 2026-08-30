@@ -302,6 +302,54 @@ fn request_responded(revision_id: &RevisionId, request_id: &InputRequestId) -> S
     .expect("response event")
 }
 
+/// Generalizes `request_responded` for the divergence shapes: `subject` is the
+/// payload `revision_id` the response claims for itself (a foreign revision
+/// for #726's shape, `None` for #723's); `envelope_revision` picks the
+/// envelope — `Some` builds the review-domain input-request subject envelope,
+/// `None` the journal-target envelope so no subject is implied and the
+/// reconstruction is payload-only. The caller-supplied `response_id` keeps
+/// semantic response identities unique across a fixture.
+fn request_responded_with_subject(
+    subject: Option<&RevisionId>,
+    envelope_revision: Option<&RevisionId>,
+    request_id: &InputRequestId,
+    response_id: &InputRequestResponseId,
+) -> ShoreEvent {
+    let target = match envelope_revision {
+        Some(revision) => EventTarget::for_subject(
+            JournalId::new(JOURNAL),
+            TargetRef::Review(ReviewTargetRef::InputRequest {
+                revision_id: revision.clone(),
+                input_request_id: request_id.clone(),
+            }),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("response target"),
+        None => EventTarget::for_journal(JournalId::new(JOURNAL)),
+    };
+    ShoreEvent::new(
+        EventType::InputRequestResponded,
+        InputRequestRespondedPayload::idempotency_key(request_id, response_id.as_str()),
+        target,
+        Writer::shore_local("0.9.0"),
+        InputRequestRespondedPayload {
+            input_request_response_id: response_id.clone(),
+            input_request_id: request_id.clone(),
+            revision_id: subject.cloned(),
+            task_target: None,
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: BodyContentType::TextPlain,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: None,
+        },
+        "2026-08-04T00:03:00Z",
+    )
+    .expect("subject-bearing response event")
+}
+
 fn validation_event(revision_id: &RevisionId) -> ShoreEvent {
     ShoreEvent::new(
         EventType::ValidationCheckRecorded,
@@ -3461,6 +3509,85 @@ fn change_fact_seek_batch_plan_advances_from_the_selected_set() {
 }
 
 #[test]
+fn change_seek_response_closure_plan_uses_the_response_request_index() {
+    use crate::bench_support::derived_access::sqlite_locator::{
+        CHANGE_SEEK_REQUEST_IDENTITY_SQL, CHANGE_SEEK_RESPONSE_CLOSURE_SQL,
+    };
+
+    let fixture = change_seek_fixture();
+    let ChangeSeekFixture { adapter, root, .. } = fixture;
+    drop(adapter);
+    let database = derived_database(root.path());
+    let connection = rusqlite::Connection::open(&database).expect("open closure plan evidence");
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE pointbreak_change_seek_sequence (
+                 sequence INTEGER NOT NULL PRIMARY KEY
+             ) STRICT, WITHOUT ROWID;
+             CREATE TEMP TABLE pointbreak_change_seek_request (
+                 request_id TEXT PRIMARY KEY
+             ) STRICT, WITHOUT ROWID;",
+        )
+        .expect("create seek TEMP relations");
+
+    let identity_plan: Vec<String> = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {CHANGE_SEEK_REQUEST_IDENTITY_SQL}"
+        ))
+        .expect("prepare request-identity plan")
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query request-identity plan")
+        .collect::<Result<_, _>>()
+        .expect("read request-identity plan");
+    assert!(
+        identity_plan
+            .first()
+            .is_some_and(|detail| detail.contains("selected")),
+        "the request-identity step must begin from the selected TEMP set: {identity_plan:?}"
+    );
+    for advanced in ["request", "event"] {
+        assert!(
+            identity_plan.iter().any(|detail| detail.contains("SEARCH")
+                && detail.contains(advanced)
+                && detail.contains("INTEGER PRIMARY KEY")),
+            "the request-identity step must point-read {advanced} by sequence: {identity_plan:?}"
+        );
+        assert!(
+            !identity_plan
+                .iter()
+                .any(|detail| detail.contains(&format!("SCAN {advanced}"))),
+            "the request-identity step must never scan {advanced}: {identity_plan:?}"
+        );
+    }
+
+    let closure_plan: Vec<String> = connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {CHANGE_SEEK_RESPONSE_CLOSURE_SQL}"
+        ))
+        .expect("prepare response-closure plan")
+        .query_map(rusqlite::params![1_i64], |row| row.get::<_, String>(3))
+        .expect("query response-closure plan")
+        .collect::<Result<_, _>>()
+        .expect("read response-closure plan");
+    assert!(
+        closure_plan.first().is_some_and(|detail| detail.contains("request")),
+        "the response closure must begin from the collected request set: {closure_plan:?}"
+    );
+    assert!(
+        closure_plan.iter().any(|detail| detail.contains("SEARCH")
+            && detail.contains("response")
+            && detail.contains("semantic_response_request")),
+        "the response closure must probe the response request-id index: {closure_plan:?}"
+    );
+    assert!(
+        !closure_plan
+            .iter()
+            .any(|detail| detail.contains("SCAN response")),
+        "the response closure must never scan the response table: {closure_plan:?}"
+    );
+}
+
+#[test]
 fn change_fact_seek_row_count_is_invariant_under_unrelated_growth() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
@@ -3562,10 +3689,12 @@ fn closure_matrix_fixture() -> ClosureMatrixFixture {
     let rev_b = revision_id("closure-b");
     let rev_c = revision_id("closure-c");
     let rev_s = revision_id("closure-shared");
+    let rev_f = revision_id("closure-foreign");
     let exact_a = RevisionRefV1::new(rev_a.clone(), valid_hash('a')).expect("exact a");
     let exact_b = RevisionRefV1::new(rev_b.clone(), valid_hash('b')).expect("exact b");
     let exact_c = RevisionRefV1::new(rev_c.clone(), valid_hash('c')).expect("exact c");
     let exact_s = RevisionRefV1::new(rev_s.clone(), valid_hash('d')).expect("exact shared");
+    let exact_f = RevisionRefV1::new(rev_f.clone(), valid_hash('e')).expect("exact foreign");
 
     let alpha = build_change_declared(
         ChangeIdentityDescriptorV1::opaque_nonce([131; 32]),
@@ -3602,6 +3731,9 @@ fn closure_matrix_fixture() -> ClosureMatrixFixture {
     )
     .expect("beta declaration");
     let m_beta_s = build_membership_asserted(&beta.change_id, &rev_s, [144; 32]).expect("m_beta_s");
+    // A β-only member: foreign to α, so a response claiming it as its own
+    // subject correlates away from the α Change that hosts its request.
+    let m_beta_f = build_membership_asserted(&beta.change_id, &rev_f, [148; 32]).expect("m_beta_f");
     let link = build_change_link_asserted(
         &alpha.change_id,
         &beta.change_id,
@@ -3647,12 +3779,21 @@ fn closure_matrix_fixture() -> ClosureMatrixFixture {
 
     let open_request = InputRequestId::new("input-request:sha256:closure-open");
     let answered_request = InputRequestId::new("input-request:sha256:closure-answered");
+    // The two divergence-shape pairs: α-hosted operative requests answered by
+    // a foreign-revision response (#726's shape) and a revision-less response
+    // (#723's shape). The controls above stay untouched: `open_request` stays
+    // open and `answered_request` keeps exactly one response.
+    let foreign_answered_request = InputRequestId::new("input-request:sha256:closure-foreign");
+    let foreign_response_id = InputRequestResponseId::new("input-response:sha256:closure-foreign");
+    let void_answered_request = InputRequestId::new("input-request:sha256:closure-void");
+    let void_response_id = InputRequestResponseId::new("input-response:sha256:closure-void");
 
     let schedule = [
         proposal_carrier_event(&exact_a, None, "wop:closure-a", "2026-08-04T00:00:01Z"),
         proposal_carrier_event(&exact_b, None, "wop:closure-b", "2026-08-04T00:00:02Z"),
         proposal_carrier_event(&exact_c, None, "wop:closure-c", "2026-08-04T00:00:03Z"),
         proposal_carrier_event(&exact_s, None, "wop:closure-shared", "2026-08-04T00:00:04Z"),
+        proposal_carrier_event(&exact_f, None, "wop:closure-foreign", "2026-08-04T00:00:05Z"),
         change_event(10, alpha.clone()),
         change_event(11, m_a),
         change_event(12, m_b),
@@ -3667,12 +3808,24 @@ fn closure_matrix_fixture() -> ClosureMatrixFixture {
         change_event(21, m_beta_s),
         change_event(22, link),
         change_event(23, orphan_withdrawal),
+        change_event(24, m_beta_f),
         fact_port_event,
         request_opened(&rev_c, &open_request)
             .with_assertion_mode(crate::session::event::AssertionMode::Operative),
         request_opened(&rev_b, &answered_request)
             .with_assertion_mode(crate::session::event::AssertionMode::Operative),
         request_responded(&rev_b, &answered_request),
+        request_opened(&rev_a, &foreign_answered_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_responded_with_subject(
+            Some(&rev_f),
+            Some(&rev_f),
+            &foreign_answered_request,
+            &foreign_response_id,
+        ),
+        request_opened(&rev_c, &void_answered_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_responded_with_subject(None, None, &void_answered_request, &void_response_id),
         assessment_event(
             &rev_b,
             "closure-accept",
@@ -4089,27 +4242,7 @@ fn revision_less_review_response(
     request_id: &InputRequestId,
     response_id: &InputRequestResponseId,
 ) -> ShoreEvent {
-    ShoreEvent::new(
-        EventType::InputRequestResponded,
-        InputRequestRespondedPayload::idempotency_key(request_id, response_id.as_str()),
-        EventTarget::for_journal(JournalId::new(JOURNAL)),
-        Writer::shore_local("0.9.0"),
-        InputRequestRespondedPayload {
-            input_request_response_id: response_id.clone(),
-            input_request_id: request_id.clone(),
-            revision_id: None,
-            task_target: None,
-            outcome: InputRequestResponseOutcome::Approved,
-            reason: None,
-            reason_content_type: BodyContentType::TextPlain,
-            reason_artifact_path: None,
-            reason_byte_size: None,
-            reason_content_hash: None,
-            target_fingerprint: None,
-        },
-        "2026-08-04T00:03:00Z",
-    )
-    .expect("revision-less review response")
+    request_responded_with_subject(None, None, request_id, response_id)
 }
 
 #[test]
@@ -4211,35 +4344,7 @@ fn foreign_revision_response_fixture() -> ForeignRevisionResponseFixture {
     // revision as its own subject (issue #726's shape), so the correlation
     // keys it to β and α's seek never selects it.
     let response_id = InputRequestResponseId::new("input-response:sha256:foreign");
-    let response = ShoreEvent::new(
-        EventType::InputRequestResponded,
-        InputRequestRespondedPayload::idempotency_key(&request, response_id.as_str()),
-        EventTarget::for_subject(
-            JournalId::new(JOURNAL),
-            TargetRef::Review(ReviewTargetRef::InputRequest {
-                revision_id: rev_f.clone(),
-                input_request_id: request.clone(),
-            }),
-            Some(TrackId::new(TRACK)),
-        )
-        .expect("foreign response target"),
-        Writer::shore_local("0.9.0"),
-        InputRequestRespondedPayload {
-            input_request_response_id: response_id,
-            input_request_id: request.clone(),
-            revision_id: Some(rev_f.clone()),
-            task_target: None,
-            outcome: InputRequestResponseOutcome::Approved,
-            reason: None,
-            reason_content_type: BodyContentType::TextPlain,
-            reason_artifact_path: None,
-            reason_byte_size: None,
-            reason_content_hash: None,
-            target_fingerprint: None,
-        },
-        "2026-08-04T00:03:00Z",
-    )
-    .expect("foreign-revision response");
+    let response = request_responded_with_subject(Some(&rev_f), Some(&rev_f), &request, &response_id);
 
     let schedule = [
         proposal_carrier_event(&exact_a, None, "wop:foreign-host", "2026-08-04T00:00:01Z"),
@@ -4284,6 +4389,12 @@ fn foreign_revision_response_divergence_is_closed() {
         narrowed_semantic.changes[&fixture.alpha].operative_obligations,
         whole_semantic.changes[&fixture.alpha].operative_obligations,
         "the seek selects the foreign-revision response through the request-identity closure"
+    );
+    assert!(
+        !narrowed_semantic.changes[&fixture.alpha]
+            .operative_obligations
+            .contains(&fixture.request),
+        "the pre-fix open obligation is cleared on the narrowed lane"
     );
 }
 
