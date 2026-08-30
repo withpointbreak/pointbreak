@@ -85,7 +85,7 @@ impl SemanticStateSnapshot {
 
     pub(crate) fn from_facts(facts: &[SemanticFact]) -> Result<Self, SemanticModelError> {
         let mut journal_id = DEFAULT_JOURNAL_ID.to_owned();
-        let mut captures = BTreeMap::<String, String>::new();
+        let mut captures = BTreeMap::<String, (String, String)>::new();
         let mut semantic_events = BTreeMap::<(&str, String), BTreeSet<String>>::new();
         let mut request_modes = BTreeMap::<String, AssertionMode>::new();
         let mut responded_requests = BTreeSet::<String>::new();
@@ -98,10 +98,19 @@ impl SemanticStateSnapshot {
             }
             match &fact.kind {
                 SemanticFactKind::Revision(revision) => {
-                    captures.insert(
-                        required(&fact.revision_id, "revision_id")?.to_owned(),
-                        revision.object_id.clone(),
-                    );
+                    // Keep the canonical earlier event_id's object id so this
+                    // fold matches the incremental representative rule.
+                    let revision_id = required(&fact.revision_id, "revision_id")?.to_owned();
+                    match captures.entry(revision_id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert((fact.event_id.clone(), revision.object_id.clone()));
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            if fact.event_id < entry.get().0 {
+                                entry.insert((fact.event_id.clone(), revision.object_id.clone()));
+                            }
+                        }
+                    }
                 }
                 SemanticFactKind::Observation => {
                     insert_semantic(&mut semantic_events, "observation", fact)?;
@@ -144,7 +153,7 @@ impl SemanticStateSnapshot {
         Ok(Self {
             journal_id,
             current_revision_id: current.map(|(id, _)| id.clone()),
-            current_object_id: current.map(|(_, id)| id.clone()),
+            current_object_id: current.map(|(_, (_, id))| id.clone()),
             revision_count: captures.len(),
             event_count: facts.len(),
             event_set_hash: Some(event_set_hash(facts)?),
@@ -438,5 +447,68 @@ mod tests {
                 "duplicate_semantic_validation_event",
             ]
         );
+    }
+
+    #[test]
+    fn from_facts_keeps_canonical_event_id_object_for_duplicate_revision_proposals() {
+        use crate::model::{EngagementId, JournalId, ObjectId, RevisionId};
+        use crate::session::event::{
+            EventTarget, EventType, Revision, WorkObjectProposal, WorkObjectProposedPayload, Writer,
+        };
+
+        fn proposal(source: &str, object: &str) -> ShoreEvent {
+            ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                format!("work_object_proposed:{source}"),
+                EventTarget::for_revision(
+                    JournalId::new("journal:default"),
+                    RevisionId::new("rev:one"),
+                    None,
+                )
+                .unwrap(),
+                Writer::shore_local("test"),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new("engagement:sha256:one"),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: Revision {
+                            id: RevisionId::new("rev:one"),
+                            object_id: ObjectId::new(object),
+                            git_provenance: None,
+                        },
+                        summary: None,
+                        object_artifact_content_hash: "sha256:artifact".to_owned(),
+                        supersedes: vec![],
+                    },
+                },
+                "2026-08-30T00:00:00Z",
+            )
+            .unwrap()
+        }
+
+        let first = proposal("capture", "obj:first");
+        let second = proposal("duplicate", "obj:second");
+        let expected = if first.event_id < second.event_id {
+            "obj:first"
+        } else {
+            "obj:second"
+        };
+        let witness = "a".repeat(64);
+        let facts = [
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 1),
+                &first,
+                witness.clone(),
+            )
+            .unwrap(),
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 2),
+                &second,
+                witness,
+            )
+            .unwrap(),
+        ];
+        let snapshot = SemanticStateSnapshot::from_facts(&facts).unwrap();
+        assert_eq!(snapshot.revision_count, 1);
+        assert_eq!(snapshot.current_object_id.as_deref(), Some(expected));
     }
 }

@@ -101,9 +101,15 @@ pub struct ProjectionDiagnostic {
 }
 
 #[derive(Debug)]
+struct CapturedRevision {
+    event_id: EventId,
+    object_id: ObjectId,
+}
+
+#[derive(Debug)]
 struct StateReducer {
     journal_id: JournalId,
-    captured_revisions: BTreeMap<RevisionId, ObjectId>,
+    captured_revisions: BTreeMap<RevisionId, CapturedRevision>,
     observation_events: BTreeMap<ObservationId, BTreeSet<EventId>>,
     assessment_events: BTreeMap<AssessmentId, BTreeSet<EventId>>,
     validation_check_events: BTreeMap<ValidationCheckId, BTreeSet<EventId>>,
@@ -195,8 +201,26 @@ impl StateReducer {
     fn apply_work_object_proposed(&mut self, event: &ShoreEvent) -> Result<()> {
         let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
         if let WorkObjectProposal::Revision { revision, .. } = payload.work_object {
-            self.captured_revisions
-                .insert(revision.id, revision.object_id);
+            // Duplicate proposals for one Revision keep the canonical
+            // (lexicographically earlier event_id) object id. The incremental
+            // materializer uses the same representative rule; last-write would
+            // disagree on current_object_id and refuse derived publication.
+            match self.captured_revisions.entry(revision.id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(CapturedRevision {
+                        event_id: event.event_id.clone(),
+                        object_id: revision.object_id,
+                    });
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if event.event_id < entry.get().event_id {
+                        entry.insert(CapturedRevision {
+                            event_id: event.event_id.clone(),
+                            object_id: revision.object_id,
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -263,7 +287,7 @@ impl StateReducer {
             _ => None,
         };
         let current_revision_id = current_revision.map(|(revision_id, _)| revision_id.clone());
-        let current_object_id = current_revision.map(|(_, object_id)| object_id.clone());
+        let current_object_id = current_revision.map(|(_, captured)| captured.object_id.clone());
         let open_input_request_count = self
             .input_request_modes
             .keys()
@@ -484,6 +508,31 @@ mod tests {
             "snap:one"
         );
         assert_eq!(state.revision_count, 1);
+    }
+
+    #[test]
+    fn projection_keeps_canonical_event_id_object_for_duplicate_revision_proposals() {
+        let first = revision_captured_event_with_source("rev:one", "snap:first", "capture");
+        let second = revision_captured_event_with_source("rev:one", "snap:second", "duplicate");
+        let expected_object_id = if first.event_id < second.event_id {
+            "snap:first"
+        } else {
+            "snap:second"
+        };
+
+        let forward = SessionState::from_events(&[first.clone(), second.clone()]).unwrap();
+        let reversed = SessionState::from_events(&[second, first]).unwrap();
+
+        assert_eq!(forward.revision_count, 1);
+        assert_eq!(reversed.revision_count, 1);
+        assert_eq!(
+            forward.current_object_id.as_ref().unwrap().as_str(),
+            expected_object_id
+        );
+        assert_eq!(
+            reversed.current_object_id.as_ref().unwrap().as_str(),
+            expected_object_id
+        );
     }
 
     #[test]
@@ -867,11 +916,19 @@ mod tests {
     }
 
     fn revision_captured_event(revision_id: &str, object_id: &str) -> ShoreEvent {
+        revision_captured_event_with_source(revision_id, object_id, revision_id)
+    }
+
+    fn revision_captured_event_with_source(
+        revision_id: &str,
+        object_id: &str,
+        source_key: &str,
+    ) -> ShoreEvent {
         // The envelope subject addresses the same revision the payload proposes,
         // mirroring how a real capture stamps both from one minted revision id.
         ShoreEvent::new(
             EventType::WorkObjectProposed,
-            format!("work_object_proposed:{revision_id}"),
+            format!("work_object_proposed:{source_key}"),
             EventTarget::for_revision(
                 JournalId::new("journal:default"),
                 RevisionId::new(revision_id),

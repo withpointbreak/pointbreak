@@ -98,6 +98,54 @@ fn revision_event(suffix: &str, supersedes: Vec<RevisionId>, occurred_at: &str) 
     revision_event_for_engagement(suffix, supersedes, occurred_at, ENGAGEMENT)
 }
 
+fn revision_event_with_object(
+    suffix: &str,
+    object_id: &str,
+    idempotency_key: &str,
+    occurred_at: &str,
+) -> ShoreEvent {
+    let revision_id = revision_id(suffix);
+    ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        idempotency_key,
+        EventTarget::for_revision(
+            JournalId::new(JOURNAL),
+            revision_id.clone(),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("revision target"),
+        Writer::shore_local("0.8.0"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(ENGAGEMENT),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id,
+                    object_id: ObjectId::new(object_id),
+                    git_provenance: Some(GitProvenance {
+                        source: RevisionSource::GitWorktree {
+                            mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                            include_untracked: true,
+                            pathspecs: Vec::new(),
+                        },
+                        base: ReviewEndpoint::GitCommit {
+                            commit_oid: "base".to_owned(),
+                            tree_oid: "base-tree".to_owned(),
+                        },
+                        target: ReviewEndpoint::GitWorkingTree {
+                            worktree_root: "/repo".to_owned(),
+                        },
+                    }),
+                },
+                summary: None,
+                object_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                supersedes: Vec::new(),
+            },
+        },
+        occurred_at,
+    )
+    .expect("revision event")
+}
+
 fn revision_event_for_engagement(
     suffix: &str,
     supersedes: Vec<RevisionId>,
@@ -2507,6 +2555,51 @@ fn materialized_journal_identity_follows_canonical_replay_order() {
             strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
         assert_eq!(candidate, strict, "materialized prefix {}", attempt + 1);
     }
+}
+
+#[test]
+fn duplicate_revision_proposals_with_differing_object_ids_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let capture = revision_event_with_object(
+        "duplicate-object",
+        "obj:sha256:capture-a",
+        "work_object_proposed:duplicate-object-capture",
+        "2026-08-30T00:00:01Z",
+    );
+    let duplicate = revision_event_with_object(
+        "duplicate-object",
+        "obj:sha256:capture-b",
+        "work_object_proposed:duplicate-object-bare",
+        "2026-08-30T00:00:02Z",
+    );
+    assert_ne!(
+        capture.event_id, duplicate.event_id,
+        "the two carriers must be distinct events"
+    );
+    assert_ne!(
+        capture.payload["workObject"]["revision"]["objectId"],
+        duplicate.payload["workObject"]["revision"]["objectId"],
+        "the two carriers must disagree on object id"
+    );
+
+    let stored = [capture, duplicate];
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+    assert_eq!(
+        candidate.state.current_object_id, strict.state.current_object_id,
+        "incremental and strict folds must agree on current_object_id"
+    );
+    assert_eq!(candidate, strict);
 }
 
 #[test]
