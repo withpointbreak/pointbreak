@@ -101,13 +101,19 @@ pub struct ProjectionDiagnostic {
 }
 
 #[derive(Debug)]
+struct RequestMode {
+    event_id: EventId,
+    mode: AssertionMode,
+}
+
+#[derive(Debug)]
 struct StateReducer {
     journal_id: JournalId,
     captured_revisions: BTreeMap<RevisionId, ObjectId>,
     observation_events: BTreeMap<ObservationId, BTreeSet<EventId>>,
     assessment_events: BTreeMap<AssessmentId, BTreeSet<EventId>>,
     validation_check_events: BTreeMap<ValidationCheckId, BTreeSet<EventId>>,
-    input_request_modes: BTreeMap<InputRequestId, AssertionMode>,
+    input_request_modes: BTreeMap<InputRequestId, RequestMode>,
     input_request_open_events: BTreeMap<InputRequestId, BTreeSet<EventId>>,
     input_request_response_events: BTreeMap<InputRequestResponseId, BTreeSet<EventId>>,
     responded_input_request_ids: BTreeSet<InputRequestId>,
@@ -238,9 +244,26 @@ impl StateReducer {
             .entry(input_request_id.clone())
             .or_default()
             .insert(event.event_id.clone());
-        self.input_request_modes
-            .entry(input_request_id)
-            .or_insert(event.assertion_mode);
+        // Duplicate opens for one request keep the canonical (lexicographically
+        // earlier event_id) assertion mode. The incremental materializer uses
+        // the same representative rule; first-seen would disagree on
+        // open_operative_input_request_count and refuse derived publication.
+        match self.input_request_modes.entry(input_request_id) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(RequestMode {
+                    event_id: event.event_id.clone(),
+                    mode: event.assertion_mode,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if event.event_id < entry.get().event_id {
+                    entry.insert(RequestMode {
+                        event_id: event.event_id.clone(),
+                        mode: event.assertion_mode,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -274,8 +297,8 @@ impl StateReducer {
         let open_operative_input_request_count = self
             .input_request_modes
             .iter()
-            .filter(|(input_request_id, mode)| {
-                **mode == AssertionMode::Operative
+            .filter(|(input_request_id, request)| {
+                request.mode == AssertionMode::Operative
                     && !self.responded_input_request_ids.contains(*input_request_id)
             })
             .count();
@@ -812,6 +835,41 @@ mod tests {
                     .message
                     .contains("input-request-response:sha256:same")
         }));
+    }
+
+    #[test]
+    fn projection_keeps_canonical_event_id_assertion_mode_for_duplicate_input_requests() {
+        let operative = input_request_opened_event_with_assertion_mode(
+            "retry-a",
+            "input-request:sha256:same",
+            AssertionMode::Operative,
+        );
+        let advisory = input_request_opened_event_with_assertion_mode(
+            "retry-b",
+            "input-request:sha256:same",
+            AssertionMode::Advisory,
+        );
+        let expected_operative = if operative.event_id < advisory.event_id {
+            1
+        } else {
+            0
+        };
+
+        let forward = SessionState::from_events(&[operative.clone(), advisory.clone()]).unwrap();
+        let reversed = SessionState::from_events(&[advisory, operative]).unwrap();
+
+        assert_eq!(forward.input_request_count, 1);
+        assert_eq!(reversed.input_request_count, 1);
+        assert_eq!(forward.open_input_request_count, 1);
+        assert_eq!(reversed.open_input_request_count, 1);
+        assert_eq!(
+            forward.open_operative_input_request_count,
+            expected_operative
+        );
+        assert_eq!(
+            reversed.open_operative_input_request_count,
+            expected_operative
+        );
     }
 
     #[test]

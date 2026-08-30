@@ -20,7 +20,7 @@ use crate::session::derived_access::oracle::{
     strict_bodyless_semantic_snapshot,
 };
 use crate::session::event::{
-    ArtifactRemovedPayload, BodyContentType, EventPayload, EventSignature,
+    ArtifactRemovedPayload, AssertionMode, BodyContentType, EventPayload, EventSignature,
     EventSignatureRecordedPayload, EventTarget, EventType, FactPortRelationV1, FactRefV1,
     GitProvenance, InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
     InputRequestResponseOutcome, RelationProofStatusV1, ReviewAssessment,
@@ -240,13 +240,29 @@ fn assessment_event(
 }
 
 fn request_opened(revision_id: &RevisionId, request_id: &InputRequestId) -> ShoreEvent {
-    ShoreEvent::new(
-        EventType::InputRequestOpened,
+    request_opened_with(
+        revision_id,
+        request_id,
         InputRequestOpenedPayload::idempotency_key(
             revision_id,
             &TrackId::new(TRACK),
             request_id.as_str(),
         ),
+        AssertionMode::Advisory,
+        "2026-07-27T16:00:04Z",
+    )
+}
+
+fn request_opened_with(
+    revision_id: &RevisionId,
+    request_id: &InputRequestId,
+    idempotency_key: impl Into<String>,
+    assertion_mode: AssertionMode,
+    occurred_at: &str,
+) -> ShoreEvent {
+    ShoreEvent::new(
+        EventType::InputRequestOpened,
+        idempotency_key,
         revision_target(revision_id),
         Writer::shore_local("0.8.0"),
         InputRequestOpenedPayload {
@@ -264,9 +280,10 @@ fn request_opened(revision_id: &RevisionId, request_id: &InputRequestId) -> Shor
             body_content_hash: None,
             target_fingerprint: None,
         },
-        "2026-07-27T16:00:04Z",
+        occurred_at,
     )
     .expect("request event")
+    .with_assertion_mode(assertion_mode)
 }
 
 fn request_responded(revision_id: &RevisionId, request_id: &InputRequestId) -> ShoreEvent {
@@ -2507,6 +2524,57 @@ fn materialized_journal_identity_follows_canonical_replay_order() {
             strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
         assert_eq!(candidate, strict, "materialized prefix {}", attempt + 1);
     }
+}
+
+#[test]
+fn duplicate_input_requests_with_differing_assertion_modes_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_event("duplicate-request", Vec::new(), "2026-08-30T00:00:00Z");
+    let revision_id = revision_id("duplicate-request");
+    let request_id = InputRequestId::new("input-request:sha256:duplicate-mode");
+    let operative = request_opened_with(
+        &revision_id,
+        &request_id,
+        "input_request_opened:duplicate-mode-operative",
+        AssertionMode::Operative,
+        "2026-08-30T00:00:01Z",
+    );
+    let advisory = request_opened_with(
+        &revision_id,
+        &request_id,
+        "input_request_opened:duplicate-mode-advisory",
+        AssertionMode::Advisory,
+        "2026-08-30T00:00:02Z",
+    );
+    assert_ne!(
+        operative.event_id, advisory.event_id,
+        "the two carriers must be distinct events"
+    );
+    assert_ne!(
+        operative.assertion_mode, advisory.assertion_mode,
+        "the two carriers must disagree on assertion mode"
+    );
+
+    let mut stored = vec![revision, operative, advisory];
+    stored[1..].sort_by(|left, right| right.event_id.cmp(&left.event_id));
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+    assert_eq!(
+        candidate.state.open_operative_input_request_count,
+        strict.state.open_operative_input_request_count,
+        "incremental and strict folds must agree on open_operative_input_request_count"
+    );
+    assert_eq!(candidate, strict);
 }
 
 #[test]

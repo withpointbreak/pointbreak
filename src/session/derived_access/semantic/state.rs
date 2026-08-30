@@ -87,7 +87,7 @@ impl SemanticStateSnapshot {
         let mut journal_id = DEFAULT_JOURNAL_ID.to_owned();
         let mut captures = BTreeMap::<String, String>::new();
         let mut semantic_events = BTreeMap::<(&str, String), BTreeSet<String>>::new();
-        let mut request_modes = BTreeMap::<String, AssertionMode>::new();
+        let mut request_modes = BTreeMap::<String, (String, AssertionMode)>::new();
         let mut responded_requests = BTreeSet::<String>::new();
 
         for fact in facts {
@@ -111,9 +111,19 @@ impl SemanticStateSnapshot {
                 }
                 SemanticFactKind::InputRequestOpened(_) => {
                     insert_semantic(&mut semantic_events, "request", fact)?;
-                    request_modes
-                        .entry(required(&fact.semantic_id, "semantic_id")?.to_owned())
-                        .or_insert(fact.assertion_mode);
+                    // Keep the canonical earlier event_id's assertion mode so
+                    // this fold matches the incremental representative rule.
+                    let request_id = required(&fact.semantic_id, "semantic_id")?.to_owned();
+                    match request_modes.entry(request_id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert((fact.event_id.clone(), fact.assertion_mode));
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            if fact.event_id < entry.get().0 {
+                                entry.insert((fact.event_id.clone(), fact.assertion_mode));
+                            }
+                        }
+                    }
                 }
                 SemanticFactKind::InputRequestResponded(response) => {
                     insert_semantic(&mut semantic_events, "response", fact)?;
@@ -135,8 +145,8 @@ impl SemanticStateSnapshot {
             .count();
         let open_operative_input_request_count = request_modes
             .iter()
-            .filter(|(id, mode)| {
-                **mode == AssertionMode::Operative && !responded_requests.contains(*id)
+            .filter(|(id, (_, mode))| {
+                *mode == AssertionMode::Operative && !responded_requests.contains(*id)
             })
             .count();
         let diagnostics = duplicate_diagnostics(&semantic_events);
@@ -437,6 +447,86 @@ mod tests {
                 "duplicate_semantic_assessment_event",
                 "duplicate_semantic_validation_event",
             ]
+        );
+    }
+
+    #[test]
+    fn from_facts_keeps_canonical_event_id_assertion_mode_for_duplicate_input_requests() {
+        use crate::model::{InputRequestId, JournalId, RevisionId, TrackId};
+        use crate::session::event::{
+            EventTarget, EventType, InputRequestOpenedPayload, InputRequestReasonCode, ShoreEvent,
+            Writer,
+        };
+
+        fn opened(source: &str, mode: AssertionMode) -> ShoreEvent {
+            ShoreEvent::new(
+                EventType::InputRequestOpened,
+                format!("input_request_opened:{source}"),
+                EventTarget::for_revision(
+                    JournalId::new("journal:default"),
+                    RevisionId::new("rev:one"),
+                    Some(TrackId::new("agent:test")),
+                )
+                .unwrap(),
+                Writer::shore_local("test"),
+                InputRequestOpenedPayload {
+                    input_request_id: InputRequestId::new("input-request:sha256:same"),
+                    target: crate::model::ReviewTargetRef::Revision {
+                        revision_id: RevisionId::new("rev:one"),
+                    },
+                    reason_code: InputRequestReasonCode::ManualDecisionRequired,
+                    title: "Need input".to_owned(),
+                    body: None,
+                    body_content_type: Default::default(),
+                    body_artifact_path: None,
+                    body_byte_size: None,
+                    body_content_hash: None,
+                    target_fingerprint: None,
+                    task_target: None,
+                },
+                "2026-08-30T00:00:00Z",
+            )
+            .unwrap()
+            .with_assertion_mode(mode)
+        }
+
+        let operative = opened("retry-a", AssertionMode::Operative);
+        let advisory = opened("retry-b", AssertionMode::Advisory);
+        let expected_operative = if operative.event_id < advisory.event_id {
+            1
+        } else {
+            0
+        };
+        let witness = "a".repeat(64);
+        let facts = [
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 1),
+                &operative,
+                witness.clone(),
+            )
+            .unwrap(),
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 2),
+                &advisory,
+                witness,
+            )
+            .unwrap(),
+        ];
+        let forward = SemanticStateSnapshot::from_facts(&facts).unwrap();
+        let reversed =
+            SemanticStateSnapshot::from_facts(&[facts[1].clone(), facts[0].clone()]).unwrap();
+
+        assert_eq!(forward.input_request_count, 1);
+        assert_eq!(reversed.input_request_count, 1);
+        assert_eq!(forward.open_input_request_count, 1);
+        assert_eq!(reversed.open_input_request_count, 1);
+        assert_eq!(
+            forward.open_operative_input_request_count,
+            expected_operative
+        );
+        assert_eq!(
+            reversed.open_operative_input_request_count,
+            expected_operative
         );
     }
 }
