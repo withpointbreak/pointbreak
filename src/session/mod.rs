@@ -25,11 +25,11 @@ pub use derived_access::changes::{
     DerivedAttentionPageV1, DerivedAttentionPresentationV1, DerivedAttentionReasonPresentationV1,
     DerivedAttentionReasonV1, DerivedAuthorityFailureCodeV1, DerivedAuthorityFailureDocumentV1,
     DerivedChangeAccess, DerivedChangeAttentionFilterV1, DerivedChangeAvailabilityFilterV1,
-    DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1, DerivedChangePageContinuationV1,
-    DerivedChangePageRequestV1, DerivedChangePageSelectionV1, DerivedChangePageV1,
-    DerivedChangePageWindowV1, DerivedChangeSeekV1, DerivedProjectionFailureCodeV1,
-    DerivedProjectionUnavailableDocumentV1, DerivedReadSourceV1, StrictChangeStampBinder,
-    StrictChangeStampBindingV1,
+    DerivedChangeGenerationV1, DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1,
+    DerivedChangePageContinuationV1, DerivedChangePageRequestV1, DerivedChangePageSelectionV1,
+    DerivedChangePageV1, DerivedChangePageWindowV1, DerivedChangeSeekV1,
+    DerivedProjectionFailureCodeV1, DerivedProjectionUnavailableDocumentV1, DerivedReadSourceV1,
+    StrictChangeStampBinder, StrictChangeStampBindingV1,
 };
 #[doc(hidden)]
 pub use derived_access::history::{

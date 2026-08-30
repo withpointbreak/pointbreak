@@ -319,6 +319,110 @@ impl DerivedChangeAccess {
         )
     }
 
+    /// Read the complete materialized Change generation at one proven-current
+    /// checkpoint for exact document composition.
+    pub fn review_generation(&self) -> Result<DerivedChangeOutcomeV1<DerivedChangeGenerationV1>> {
+        self.review_generation_with_hook(|| {})
+    }
+
+    fn review_generation_with_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<DerivedChangeOutcomeV1<DerivedChangeGenerationV1>> {
+        // Keep this acquisition and terminal re-proof aligned with the sibling
+        // Change page producer while their composition targets remain distinct.
+        let current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(status)) => {
+                return Ok(self.page_control_outcome(status));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error,
+                ));
+            }
+        };
+        let generation_id = current.generation_id().to_owned();
+        let checkpoint = match current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => return Ok(self.page_receipt_failure_outcome(error)),
+        };
+        if let Err(error) = current.reader_profile_document(&checkpoint) {
+            return Ok(self.page_receipt_failure_outcome(error));
+        }
+        let as_of = checkpoint.truth_cursor;
+        let materialized = match current
+            .service()
+            .semantic_materialized_change_projection_at(as_of)
+        {
+            Ok(LocatorRead::Ready(materialized)) => materialized,
+            Ok(LocatorRead::CatchUpRequired { .. }) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionStale,
+                    "derived Change projection moved while its checkpoint was pinned",
+                ));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Some(outcome) = generation_checkpoint_mismatch_outcome(as_of, materialized.as_of) {
+            return Ok(outcome);
+        }
+        let stamp = match current.change_generation_stamp(
+            &checkpoint,
+            &materialized.projection,
+            &materialized.document_projection,
+        ) {
+            Ok(stamp) => stamp,
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        let generation = DerivedChangeGenerationV1 {
+            projection: materialized.projection,
+            document_projection: materialized.document_projection,
+            stamp,
+        };
+
+        hook();
+
+        let final_current = match self.runtime.current() {
+            Ok(RuntimeCurrentRead::Ready(current)) => current,
+            Ok(RuntimeCurrentRead::Unavailable(_)) | Err(_) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Change generation moved before response completion",
+                ));
+            }
+        };
+        if final_current.generation_id() != generation_id {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change generation changed before response completion",
+            ));
+        }
+        let final_checkpoint = match final_current.pin_change_reader_checkpoint() {
+            Ok(checkpoint) => checkpoint,
+            Err(LifecycleError::TruthChanged) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                    "derived Change checkpoint moved before response completion",
+                ));
+            }
+            Err(error) => return Ok(lifecycle_failure_outcome(error)),
+        };
+        if final_checkpoint.checkpoint_sha256 != checkpoint.checkpoint_sha256 {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionUnstable,
+                "derived Change checkpoint changed before response completion",
+            ));
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(generation))
+    }
+
     pub fn changes(
         &self,
         request: &DerivedChangePageRequestV1,
@@ -1088,6 +1192,18 @@ impl DerivedChangeAccess {
     }
 }
 
+fn generation_checkpoint_mismatch_outcome(
+    expected: super::cursor::TruthCursor,
+    materialized: super::cursor::TruthCursor,
+) -> Option<DerivedChangeOutcomeV1<DerivedChangeGenerationV1>> {
+    (materialized != expected).then(|| {
+        DerivedChangeOutcomeV1::projection_unavailable(
+            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+            "materialized Change projection has the wrong live checkpoint",
+        )
+    })
+}
+
 /// Metadata-only bridge between strict Change content and one cached reader
 /// checkpoint. The strict projections remain the complete content authority.
 #[doc(hidden)]
@@ -1206,6 +1322,33 @@ fn bind_strict_change_stamp_with_hook(
         Err(_) => return Ok(StrictChangeStampBindingV1::Unavailable),
     }
     Ok(StrictChangeStampBindingV1::Bound(stamp))
+}
+
+/// One complete materialized Change generation for exact document reads.
+///
+/// Accessors only: `document_projection().diagnostics` is store-scoped and
+/// must never be read or serialized by a product surface. Documents read the
+/// per-Change `view.diagnostics` vocabulary instead.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct DerivedChangeGenerationV1 {
+    projection: ChangeProjection,
+    document_projection: ChangeDocumentProjectionV1,
+    stamp: String,
+}
+
+impl DerivedChangeGenerationV1 {
+    pub fn projection(&self) -> &ChangeProjection {
+        &self.projection
+    }
+
+    pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
+        &self.document_projection
+    }
+
+    pub fn stamp(&self) -> &str {
+        &self.stamp
+    }
 }
 
 /// One Change's narrowed seek result for the selector-consuming CLI reads.
@@ -2428,6 +2571,18 @@ mod tests {
         }
     }
 
+    fn derived_change_outcome_class<T>(outcome: &DerivedChangeOutcomeV1<T>) -> &'static str {
+        match outcome {
+            DerivedChangeOutcomeV1::Ready(_) => "ready",
+            DerivedChangeOutcomeV1::AuthorityUnavailable(_) => "authority-unavailable",
+            DerivedChangeOutcomeV1::AuthorityConflicted(_) => "authority-conflicted",
+            DerivedChangeOutcomeV1::AuthorityInvalid(_) => "authority-invalid",
+            DerivedChangeOutcomeV1::ReaderUpgradeRequired(_) => "reader-upgrade-required",
+            DerivedChangeOutcomeV1::ProjectionUnavailable(_) => "projection-unavailable",
+            DerivedChangeOutcomeV1::Retryable(_) => "retryable",
+        }
+    }
+
     fn assert_projection_invalid<T>(outcome: DerivedChangeOutcomeV1<T>, expected: &str) {
         let DerivedChangeOutcomeV1::ProjectionUnavailable(document) = outcome else {
             panic!("invalid selected carrier state must fail the complete response");
@@ -3594,6 +3749,182 @@ mod tests {
                 .is_err(),
             "invalid strict projection input must not be mistaken for cached metadata absence"
         );
+    }
+
+    #[test]
+    fn review_generation_matches_the_page_stamp_and_full_projections() {
+        let fixture = ActiveChangeFixture::new(&[
+            &[
+                Some("first generation state"),
+                Some("first generation state"),
+            ],
+            &[
+                Some("second generation state"),
+                Some("second generation state"),
+            ],
+        ]);
+        let DerivedChangeOutcomeV1::Ready(page) = fixture
+            .access
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("read the Change page")
+        else {
+            panic!("the fixture Change page must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(generation) = fixture
+            .access
+            .review_generation()
+            .expect("read the whole Change generation")
+        else {
+            panic!("the fixture Change generation must be ready");
+        };
+
+        let events = fixture.store.list_events().expect("read strict events");
+        let strict_projection =
+            crate::session::project_changes(&events).expect("project strict Changes");
+        let strict_documents = crate::session::project_change_documents(&events)
+            .expect("project strict Change documents");
+        assert_eq!(generation.projection(), &strict_projection);
+        assert_eq!(generation.document_projection(), &strict_documents);
+        assert_eq!(
+            generation.stamp(),
+            page.document.document.projection_stamp,
+            "the carrier and staged page must bind the same whole generation"
+        );
+
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("the fixture generation must remain current");
+        };
+        let checkpoint = current
+            .pin_change_reader_checkpoint()
+            .expect("pin the current generation");
+        let mut invalid_documents = strict_documents;
+        invalid_documents.projection_stamp = "not-a-projection-hash".to_owned();
+        assert!(
+            current
+                .change_generation_stamp(&checkpoint, &strict_projection, &invalid_documents)
+                .is_err(),
+            "invalid projection input must not be mistaken for absent generation metadata"
+        );
+    }
+
+    #[test]
+    fn review_generation_decodes_no_events_and_opens_no_carriers() {
+        let fixture = ActiveChangeFixture::new(&[
+            &[Some("first counted state"), Some("first counted state")],
+            &[Some("second counted state"), Some("second counted state")],
+        ]);
+        fixture
+            .runtime
+            .current()
+            .expect("warm the current generation before counting");
+        let scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = fixture
+            .access
+            .review_generation()
+            .expect("read the counted Change generation");
+        drop(guard);
+        assert!(matches!(outcome, DerivedChangeOutcomeV1::Ready(_)));
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.event_decodes, 0);
+        assert_eq!(counters.carrier_opens, 0);
+        assert_eq!(counters.change_proposal_carriers_opened, 0);
+        assert_eq!(counters.change_support_carriers_opened, 0);
+        assert_eq!(counters.body_artifact_reads, 0);
+        assert_eq!(counters.object_artifact_reads, 0);
+    }
+
+    #[test]
+    fn review_generation_maps_lifecycle_failures_to_outcomes() {
+        let inactive = DerivedChangeAccess::from_runtime(DerivedAccessRuntime::from_mode(
+            DerivedAccessMode::Off,
+        ));
+        let inactive_page = inactive
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("classify the inactive page read");
+        let inactive_generation = inactive
+            .review_generation()
+            .expect("classify the inactive generation read");
+        assert_ne!(derived_change_outcome_class(&inactive_page), "ready");
+        assert_eq!(
+            derived_change_outcome_class(&inactive_generation),
+            derived_change_outcome_class(&inactive_page)
+        );
+
+        let temp = TempDir::new().expect("create an unpublished Change root");
+        let backend = StoreBackend::Local(temp.path().to_path_buf());
+        write_capability_fixture_for_test(
+            backend.journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .expect("activate the unpublished Change root");
+        let store_identity =
+            opaque_path_identity("store", temp.path()).expect("derive unpublished store identity");
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            store_identity.clone(),
+        )
+        .expect("create unpublished Change lifecycle");
+        let empty = DerivedChangeAccess::from_runtime(DerivedAccessRuntime::from_mode(
+            DerivedAccessMode::Active {
+                lifecycle,
+                current: Mutex::new(None),
+                store_identity,
+                backend,
+            },
+        ));
+        let empty_page = empty
+            .changes(&DerivedChangePageRequestV1::Bare)
+            .expect("classify the unpublished page read");
+        let empty_generation = empty
+            .review_generation()
+            .expect("classify the unpublished generation read");
+        assert_ne!(derived_change_outcome_class(&empty_page), "ready");
+        assert_eq!(
+            derived_change_outcome_class(&empty_generation),
+            derived_change_outcome_class(&empty_page)
+        );
+
+        let mismatch = generation_checkpoint_mismatch_outcome(
+            super::super::cursor::TruthCursor::new(7, 11),
+            super::super::cursor::TruthCursor::new(7, 10),
+        )
+        .expect("the post-load checkpoint mismatch must map to an outcome");
+        let DerivedChangeOutcomeV1::ProjectionUnavailable(document) = mismatch else {
+            panic!("a wrong materialized checkpoint must fail the generation read");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionInvalid
+        );
+        assert!(!document.is_retryable());
+    }
+
+    #[test]
+    fn review_generation_maps_terminal_repin_drift_to_retryable() {
+        let fixture = ActiveChangeFixture::new(&[&[
+            Some("moving generation state"),
+            Some("moving generation state"),
+        ]]);
+        let mut appended = false;
+        let outcome = fixture
+            .access
+            .review_generation_with_hook(|| {
+                fixture.append_unrelated("review-generation-movement");
+                appended = true;
+            })
+            .expect("read across generation movement");
+        assert!(appended, "the terminal re-pin hook must run");
+        let DerivedChangeOutcomeV1::Retryable(document) = outcome else {
+            panic!("terminal checkpoint movement must be retryable");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+        assert!(document.is_retryable());
     }
 
     #[test]
