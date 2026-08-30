@@ -2511,6 +2511,7 @@ mod tests {
             ),
             "the refusal fixture must not carry a current generation"
         );
+        let mut exact_responses = Vec::with_capacity(requests.len());
         for (path, query) in requests {
             let response = route_change_v2(&fixture.state, path, query.as_deref());
             assert!(
@@ -2529,7 +2530,18 @@ mod tests {
                 ),
                 "{path}: {body}"
             );
+            exact_responses.push((path.as_str(), response.status, response.body));
         }
+        let [detail, interdiff] = exact_responses.as_slice() else {
+            panic!("the posture comparison requires detail and interdiff responses");
+        };
+        assert_eq!(
+            (detail.1, detail.2.as_slice()),
+            (interdiff.1, interdiff.2.as_slice()),
+            "{} and {} must follow the same refusal posture",
+            detail.0,
+            interdiff.0
+        );
     }
 
     #[test]
