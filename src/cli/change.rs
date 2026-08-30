@@ -1335,6 +1335,10 @@ fn exact_fact_relationships(
     relationships
 }
 
+/// Compose one authoritative exact-Revision read shared by the Change CLI and
+/// Inspector. Derived arms compose through projection-keyed reads instead. A
+/// future derived exact-Revision producer belongs library-side, without the
+/// store-wide removal-audit closure, behind an input seam usable by both callers.
 pub(crate) fn build_exact_read(
     repo: &std::path::Path,
     ready: &ChangeReaderReadyV1,
@@ -1389,10 +1393,13 @@ pub(crate) fn build_exact_read(
     })
 }
 
-/// Hydrate one contextual exact Revision from the same facade generation used
-/// by the cold CLI and Inspector. The base exact read stays Revision-local;
-/// explicit port authority determines which origin-owned facts may be added as
-/// context, and no port relation is collapsed into the fact row itself.
+/// Hydrate one contextual authoritative exact Revision from the same facade
+/// generation shared by the Change CLI and Inspector. The base exact read stays
+/// Revision-local; explicit port authority determines which origin-owned facts
+/// may be added as context, and no port relation is collapsed into the fact row
+/// itself. Derived arms compose through projection-keyed reads instead. A future
+/// derived exact-Revision producer belongs library-side, without the store-wide
+/// removal-audit closure, behind an input seam usable by both callers.
 pub(crate) fn build_contextual_exact_read(
     repo: &std::path::Path,
     ready: &ChangeReaderReadyV1,
@@ -1744,7 +1751,7 @@ mod tests {
     /// A ready L2 store with one Change, one member Revision, and one exact
     /// proposal reference, produced by a real initial Change capture over the
     /// frozen empty-L2 capability records.
-    fn ready_change_store() -> (tempfile::TempDir, ChangeId, RevisionId, String) {
+    fn ready_change_store() -> (tempfile::TempDir, ChangeId, RevisionId, String, String) {
         let repo = store_fixture(&[
             (
                 "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
@@ -1799,7 +1806,340 @@ mod tests {
             .revision
             .object_artifact_content_hash
             .clone();
-        (repo, change_id, revision_id, artifact_hash)
+        let review_cursor = receipt.review_cursor.token.clone();
+        (repo, change_id, revision_id, artifact_hash, review_cursor)
+    }
+
+    fn assert_exact_reads_equal(left: &ExactRead, right: &ExactRead, label: &str) {
+        assert_eq!(left.resource, right.resource, "{label}: resource");
+        assert_eq!(left.facts, right.facts, "{label}: facts");
+        assert_eq!(left.fact_content, right.fact_content, "{label}: content");
+        assert_eq!(
+            left.associations, right.associations,
+            "{label}: associations"
+        );
+        assert_eq!(
+            left.fact_relationships, right.fact_relationships,
+            "{label}: relationships"
+        );
+    }
+
+    fn record_helper_observation(
+        repo: &std::path::Path,
+        revision_id: &RevisionId,
+        title: &str,
+    ) -> pointbreak::session::ObservationAddResult {
+        pointbreak::session::record_observation(
+            pointbreak::session::ObservationAddOptions::new(repo)
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:exact-helper-test")
+                .with_title(title)
+                .with_body(format!("body for {title}"))
+                .with_actor_id(ActorId::new("actor:agent:exact-helper-test")),
+        )
+        .expect("record helper observation")
+    }
+
+    fn capture_parallel_member(
+        repo: &std::path::Path,
+        review_cursor: &str,
+        value: u32,
+    ) -> RevisionRefV1 {
+        std::fs::write(
+            repo.join("lib.rs"),
+            format!("pub fn value() -> u32 {{ {value} }}\n"),
+        )
+        .expect("modify helper fixture source");
+        capture_change_revision(ChangeCaptureOptions::advance(
+            format!("change-operation:exact-helper-parallel-{value}"),
+            CaptureOptions::new(repo),
+            review_cursor,
+            ChangeAdvanceV1::Parallel,
+        ))
+        .expect("capture parallel helper Revision")
+        .revision
+        .exact_ref()
+    }
+
+    fn cursor_for_revision(
+        repo: &std::path::Path,
+        change_id: &ChangeId,
+        revision_id: &RevisionId,
+    ) -> String {
+        let state = change_reader_state_for_repo(repo).expect("read helper Change state");
+        let ready = state.ready().expect("helper Change store is ready");
+        select_review_cursor(
+            &ready.projection.changes[change_id],
+            &ready.document_projection,
+            Some(revision_id),
+            false,
+            ReviewSourceBindingV1::Captured,
+        )
+        .expect("select helper Review cursor")
+        .token
+    }
+
+    struct ContextualPortFixture {
+        repo: tempfile::TempDir,
+        change_id: ChangeId,
+        target: RevisionRefV1,
+        origin: RevisionRefV1,
+        early_ready: ChangeReaderReadyV1,
+        later_facade: ChangeDocumentFacadeV1,
+        target_fact_id: Option<String>,
+    }
+
+    fn contextual_port_fixture(with_target_fact: bool, value: u32) -> ContextualPortFixture {
+        let (repo, change_id, target_id, target_hash, review_cursor) = ready_change_store();
+        let early_state = change_reader_state_for_repo(repo.path()).expect("read early state");
+        let early_ready = early_state.ready().expect("early store is ready").clone();
+        let target = RevisionRefV1::new(target_id, target_hash).unwrap();
+        let origin = capture_parallel_member(repo.path(), &review_cursor, value);
+        let target_observation = with_target_fact.then(|| {
+            record_helper_observation(repo.path(), &target.revision_id, "later target observation")
+        });
+        let origin_observation =
+            record_helper_observation(repo.path(), &origin.revision_id, "later origin observation");
+        let target_cursor = cursor_for_revision(repo.path(), &change_id, &target.revision_id);
+        let relation = if with_target_fact {
+            pointbreak::session::event::FactPortRelationV1::ReanchoredAs
+        } else {
+            pointbreak::session::event::FactPortRelationV1::ContextOnly
+        };
+        let mut options = pointbreak::session::FactPortOptions::new(
+            repo.path(),
+            origin.clone(),
+            FactRefV1::Observation {
+                observation_id: origin_observation.observation_id,
+            },
+            target_cursor,
+            relation,
+            "agent:exact-helper-test",
+        )
+        .with_actor_id(ActorId::new("actor:agent:exact-helper-test"));
+        if let Some(observation) = &target_observation {
+            options = options.with_target_fact(FactRefV1::Observation {
+                observation_id: observation.observation_id.clone(),
+            });
+        }
+        pointbreak::session::port_review_fact(options).expect("record helper fact port");
+        let later_state = change_reader_state_for_repo(repo.path()).expect("read later state");
+        let later_facade = later_state
+            .ready()
+            .expect("later store is ready")
+            .document_facade()
+            .expect("later document facade");
+        ContextualPortFixture {
+            repo,
+            change_id,
+            target,
+            origin,
+            early_ready,
+            later_facade,
+            target_fact_id: target_observation
+                .map(|observation| observation.observation_id.as_str().to_owned()),
+        }
+    }
+
+    #[test]
+    fn build_exact_read_pins_resource_availability_variants() {
+        let (repo, _change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let exact = RevisionRefV1::new(revision_id.clone(), artifact_hash).unwrap();
+
+        let with_body = build_exact_read(repo.path(), ready, &exact, true).unwrap();
+        assert_eq!(
+            with_body.resource.availability,
+            ContentAvailabilityV1::Available
+        );
+        assert!(with_body.resource.captured_document.is_some());
+        assert!(with_body.resource.captured_document_hash.is_some());
+        assert!(with_body.resource.projection.include_body);
+
+        let mismatched =
+            RevisionRefV1::new(revision_id, format!("sha256:{}", "d".repeat(64))).unwrap();
+        let Err(error) = build_exact_read(repo.path(), ready, &mismatched, true) else {
+            panic!("a mismatched selector must fail");
+        };
+        assert_eq!(
+            error.to_string(),
+            "exact Revision projection returned a different artifact hash"
+        );
+
+        let bodyless = build_exact_read(repo.path(), ready, &exact, false).unwrap();
+        assert_eq!(
+            bodyless.resource.availability,
+            ContentAvailabilityV1::Available
+        );
+        assert!(!bodyless.resource.projection.include_body);
+    }
+
+    #[test]
+    fn build_contextual_exact_read_pins_port_fan_out_and_filtering() {
+        let (repo, change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let facade = ready.document_facade().expect("fixture document facade");
+        let exact = RevisionRefV1::new(revision_id, artifact_hash).unwrap();
+        let base = build_exact_read(repo.path(), ready, &exact, true).unwrap();
+        let contextual =
+            build_contextual_exact_read(repo.path(), ready, &facade, &change_id, &exact, true)
+                .unwrap();
+        assert_exact_reads_equal(&contextual, &base, "no applicable ports");
+
+        for (label, fixture) in [
+            (
+                "unmaterialized target fact",
+                contextual_port_fixture(true, 3),
+            ),
+            ("unreadable origin", contextual_port_fixture(false, 4)),
+        ] {
+            let ports = fixture
+                .later_facade
+                .fact_port_presentations(&fixture.change_id, &fixture.target)
+                .expect("helper fact ports");
+            assert_eq!(ports.len(), 1, "{label}");
+            assert_eq!(
+                ports[0].applicability,
+                FactPortApplicabilityV1::Applicable,
+                "{label}"
+            );
+            assert_eq!(
+                ports[0].target_fact.is_some(),
+                fixture.target_fact_id.is_some(),
+                "{label}"
+            );
+
+            let base = build_exact_read(
+                fixture.repo.path(),
+                &fixture.early_ready,
+                &fixture.target,
+                true,
+            )
+            .unwrap();
+            if let Some(target_fact_id) = &fixture.target_fact_id {
+                assert!(
+                    !base
+                        .facts
+                        .iter()
+                        .any(|fact| &fact.fact_id == target_fact_id),
+                    "the early generation must not materialize the later target fact"
+                );
+            } else {
+                let origin_read = show_revision_for_change_reader_ready(
+                    RevisionShowOptions::new(fixture.repo.path())
+                        .with_revision_id(fixture.origin.revision_id.clone())
+                        .with_exact(true)
+                        .with_include_body(true)
+                        .with_read_for_display(true),
+                    &fixture.early_ready,
+                );
+                assert!(
+                    origin_read.is_err(),
+                    "the early generation must be unable to read the later origin"
+                );
+            }
+            let contextual = build_contextual_exact_read(
+                fixture.repo.path(),
+                &fixture.early_ready,
+                &fixture.later_facade,
+                &fixture.change_id,
+                &fixture.target,
+                true,
+            )
+            .expect("filtered context remains a successful exact read");
+            assert_exact_reads_equal(&contextual, &base, label);
+        }
+    }
+
+    #[test]
+    fn exact_fact_relationships_orders_deterministically() {
+        let (repo, _change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
+        let first = record_helper_observation(repo.path(), &revision_id, "first observation");
+        let second = record_helper_observation(repo.path(), &revision_id, "second observation");
+        let successor = pointbreak::session::record_observation(
+            pointbreak::session::ObservationAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:exact-helper-test")
+                .with_title("successor observation")
+                .with_actor_id(ActorId::new("actor:agent:exact-helper-test"))
+                .superseding(second.observation_id.clone())
+                .superseding(first.observation_id.clone()),
+        )
+        .expect("record superseding observation");
+        let assessment = pointbreak::session::record_assessment(
+            pointbreak::session::AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:exact-helper-test")
+                .with_assessment(pointbreak::session::event::ReviewAssessment::NeedsChanges)
+                .with_summary("base assessment")
+                .with_actor_id(ActorId::new("actor:agent:exact-helper-test")),
+        )
+        .expect("record base assessment");
+        let replacement = pointbreak::session::record_assessment(
+            pointbreak::session::AssessmentAddOptions::new(repo.path())
+                .with_exact_revision_id(revision_id.clone())
+                .with_track("agent:exact-helper-test")
+                .with_assessment(pointbreak::session::event::ReviewAssessment::Accepted)
+                .with_summary("replacement assessment")
+                .with_actor_id(ActorId::new("actor:agent:exact-helper-test"))
+                .replacing(assessment.assessment_id.clone()),
+        )
+        .expect("record replacement assessment");
+
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let exact = RevisionRefV1::new(revision_id.clone(), artifact_hash).unwrap();
+        let mut result = show_revision_for_change_reader_ready(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(revision_id)
+                .with_exact(true)
+                .with_include_body(true)
+                .with_read_for_display(true),
+            ready,
+        )
+        .expect("show exact helper Revision");
+        result.observations.reverse();
+        result.assessments.reverse();
+        for observation in &mut result.observations {
+            observation.supersedes.reverse();
+        }
+        for assessment in &mut result.assessments {
+            assessment.replaces.reverse();
+        }
+
+        let mut superseded = [
+            first.observation_id.as_str().to_owned(),
+            second.observation_id.as_str().to_owned(),
+        ];
+        superseded.sort();
+        assert_eq!(
+            exact_fact_relationships(&result, &exact),
+            vec![
+                ExactFactRelationship {
+                    origin_revision: exact.clone(),
+                    from_fact_id: replacement.assessment_id.as_str().to_owned(),
+                    to_fact_id: assessment.assessment_id.as_str().to_owned(),
+                    family: "assessment",
+                    kind: ExactFactRelationshipKind::AssessmentReplaces,
+                },
+                ExactFactRelationship {
+                    origin_revision: exact.clone(),
+                    from_fact_id: successor.observation_id.as_str().to_owned(),
+                    to_fact_id: superseded[0].clone(),
+                    family: "observation",
+                    kind: ExactFactRelationshipKind::ObservationSupersedes,
+                },
+                ExactFactRelationship {
+                    origin_revision: exact,
+                    from_fact_id: successor.observation_id.as_str().to_owned(),
+                    to_fact_id: superseded[1].clone(),
+                    family: "observation",
+                    kind: ExactFactRelationshipKind::ObservationSupersedes,
+                },
+            ]
+        );
     }
 
     fn differential_error(
@@ -1831,7 +2171,7 @@ mod tests {
     /// identical outcome and error text through both entry points.
     #[test]
     fn exact_ref_delegation_is_behaviorally_identical() {
-        let (repo, change_id, revision_id, artifact_hash) = ready_change_store();
+        let (repo, change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
         let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
         let ready = state.ready().expect("fixture store is ready");
 
@@ -1884,7 +2224,7 @@ mod tests {
     /// unavailable document is identical through both entry points.
     #[test]
     fn build_interdiff_delegation_is_behaviorally_identical() {
-        let (repo, change_id, revision_id, artifact_hash) = ready_change_store();
+        let (repo, change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
         let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
         let ready = state.ready().expect("fixture store is ready");
         let non_member = RevisionId::new(format!("rev:sha256:{}", "e".repeat(64)));
