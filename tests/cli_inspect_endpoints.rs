@@ -112,6 +112,10 @@ fn served_asset_inspector() -> (GitRepo, Inspector) {
     (repo, inspector)
 }
 
+fn canonical_json(value: &Value) -> String {
+    serde_json::to_string(value).expect("serialize canonical JSON")
+}
+
 /// Smoke: the shared harness spawns the real `pointbreak inspect --port 0` server and
 /// serves a well-formed history payload for a minimal store.
 #[test]
@@ -261,6 +265,222 @@ fn change_attention_serves_a_bounded_empty_ready_page() {
             .is_none_or(|presentations| presentations == &serde_json::json!({})),
         "empty Attention page carried nonempty presentations: {attention}"
     );
+}
+
+#[test]
+fn exact_route_floor_pins_success_bytes_and_stamp_equality() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = change["currentRevisionRefs"]
+        .as_array()
+        .expect("current Revision refs")
+        .iter()
+        .find(|reference| reference["revisionId"].as_str() == Some(store.revision_id.as_str()))
+        .expect("representative exact Revision");
+    let revision_id = exact["revisionId"].as_str().expect("Revision identity");
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+
+    let detail = inspector.get_json(&format!("/api/v2/changes/{}", urlencode(change_id)));
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash)
+    ));
+    let resource = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash)
+    ));
+    let interdiff = inspector.get_json(&format!(
+        "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash),
+        urlencode(artifact_hash)
+    ));
+
+    for (route, document) in [
+        ("detail", &detail),
+        ("revision", &revision),
+        ("resource", &resource),
+        ("interdiff", &interdiff),
+    ] {
+        assert_eq!(
+            document["projectionStamp"], changes["projectionStamp"],
+            "{route} must bind the staged Change generation"
+        );
+    }
+    assert_eq!(
+        canonical_json(&resource),
+        canonical_json(&revision["exactRevisionDocument"]),
+        "the resource route must equal the exact Revision's nested resource bytes"
+    );
+    assert_eq!(interdiff["schema"], "pointbreak.review-revision-interdiff");
+    assert_eq!(interdiff["version"], 1);
+    assert_eq!(interdiff["interdiff"]["from"], *exact);
+    assert_eq!(interdiff["interdiff"]["to"], *exact);
+    assert_eq!(interdiff["interdiff"]["algorithmVersion"], "unavailable-v1");
+    assert_eq!(interdiff["interdiff"]["scope"], serde_json::json!([]));
+    assert_eq!(interdiff["availability"], "unavailable");
+    assert!(
+        interdiff.get("comparison").is_none(),
+        "the first interdiff cohort is bodyless: {interdiff}"
+    );
+    assert_eq!(
+        interdiff["diagnostics"],
+        serde_json::json!(["revision_interdiff_not_available"])
+    );
+}
+
+#[test]
+fn exact_routes_refuse_l0_with_the_typed_unavailable_document() {
+    let repo = GitRepo::new();
+    let inspector = Inspector::spawn_current_unready(repo.path());
+    let change_id = format!("change:sha256:{}", "1".repeat(64));
+    let revision_id = format!("rev:sha256:{}", "2".repeat(64));
+    let artifact_hash = format!("sha256:{}", "3".repeat(64));
+    let paths = [
+        format!("/api/v2/changes/{}", urlencode(&change_id)),
+        format!(
+            "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+            urlencode(&change_id),
+            urlencode(&revision_id),
+            urlencode(&artifact_hash)
+        ),
+        format!(
+            "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+            urlencode(&change_id),
+            urlencode(&revision_id),
+            urlencode(&artifact_hash)
+        ),
+        format!(
+            "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+            urlencode(&change_id),
+            urlencode(&revision_id),
+            urlencode(&revision_id),
+            urlencode(&artifact_hash),
+            urlencode(&artifact_hash)
+        ),
+    ];
+    let mut first_body = None;
+
+    for path in paths {
+        let (status, body) = inspector.raw_get(&path);
+        assert!(status.contains("409 Conflict"), "{path}: {status}");
+        let unavailable: pointbreak::documents::ChangeQueryUnavailableDocumentV1 =
+            serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("{path}: invalid unavailable document: {error}"));
+        assert!(
+            matches!(
+                unavailable,
+                pointbreak::documents::ChangeQueryUnavailableDocumentV1::MigrationRequired {
+                    ref schema,
+                    version: 1,
+                    ..
+                } if schema == "pointbreak.store-migration-required"
+            ),
+            "{path}: unexpected unavailable document: {unavailable:?}"
+        );
+        if let Some(first_body) = &first_body {
+            assert_eq!(
+                &body, first_body,
+                "every exact route must serve the same L0 refusal bytes"
+            );
+        } else {
+            first_body = Some(body);
+        }
+    }
+}
+
+#[test]
+fn exact_route_selector_refusals_stay_typed_and_pre_store() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = &changes["changes"][0];
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = &change["currentRevisionRefs"][0];
+    let revision_id = exact["revisionId"].as_str().expect("Revision identity");
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+    let missing_change = format!("change:sha256:{}", "f".repeat(64));
+    let nonmember_revision = format!("rev:sha256:{}", "e".repeat(64));
+    let cases = [
+        (
+            format!(
+                "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+                urlencode(&missing_change),
+                urlencode(revision_id),
+                urlencode(artifact_hash)
+            ),
+            format!("Change {missing_change} is unavailable"),
+        ),
+        (
+            format!(
+                "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+                urlencode(change_id),
+                urlencode(&nonmember_revision),
+                urlencode(artifact_hash)
+            ),
+            "exact Revision is not an active member of the Change".to_owned(),
+        ),
+        (
+            format!(
+                "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+                urlencode(&missing_change),
+                urlencode(revision_id),
+                urlencode(revision_id),
+                urlencode(artifact_hash),
+                urlencode(artifact_hash)
+            ),
+            format!("Change {missing_change} is unavailable"),
+        ),
+        (
+            format!(
+                "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+                urlencode(change_id),
+                urlencode(&nonmember_revision),
+                urlencode(revision_id),
+                urlencode(artifact_hash),
+                urlencode(artifact_hash)
+            ),
+            "exact Revision is not an active member of the Change".to_owned(),
+        ),
+    ];
+
+    for (path, expected_message) in cases {
+        let (status, body) = inspector.get_error(&path);
+        assert!(status.contains("400 Bad Request"), "{path}: {status}");
+        assert_eq!(
+            body["schema"], "pointbreak.inspect-change-selection-error",
+            "{path}: {body}"
+        );
+        assert_eq!(body["version"], 1, "{path}: {body}");
+        assert_eq!(body["code"], "invalid_exact_selection", "{path}: {body}");
+        assert_eq!(body["message"], expected_message, "{path}: {body}");
+    }
 }
 
 #[test]
