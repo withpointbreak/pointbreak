@@ -326,6 +326,106 @@ fn append_membership_of_unproposed_revision(repo_root: &Path, change_id: &str, r
     append_raw_event(repo_root, &event);
 }
 
+/// Append a raw review-domain response to `request_id`. The ordinary writer
+/// refuses both shapes this builder produces — it always reconstructs the
+/// response's revision from the opened request's subject — so the carrier is
+/// appended raw. `subject_revision_id: Some(..)` claims that revision as the
+/// response's own subject (the foreign-revision shape); `None` claims no
+/// subject at all (the revision-less shape).
+fn append_raw_input_request_response(
+    repo_root: &Path,
+    request_id: &str,
+    subject_revision_id: Option<&str>,
+) {
+    use pointbreak::model::{
+        InputRequestId, InputRequestResponseId, JournalId, ReviewTargetRef, RevisionId, TargetRef,
+    };
+    use pointbreak::session::event::{
+        BodyContentType, EventTarget, EventType, InputRequestRespondedPayload,
+        InputRequestResponseOutcome, ShoreEvent, Writer,
+    };
+    use sha2::{Digest, Sha256};
+
+    let request_id = InputRequestId::new(request_id);
+    let response_id = InputRequestResponseId::new(format!(
+        "input-response:sha256:{:x}",
+        Sha256::digest(format!("change-reads-fixture:response:{}", request_id.as_str()).as_bytes())
+    ));
+    let target = match subject_revision_id {
+        Some(revision_id) => EventTarget::for_subject(
+            JournalId::new("journal:default"),
+            TargetRef::Review(ReviewTargetRef::InputRequest {
+                revision_id: RevisionId::new(revision_id),
+                input_request_id: request_id.clone(),
+            }),
+            None,
+        )
+        .expect("raw response target"),
+        None => EventTarget::for_journal(JournalId::new("journal:default")),
+    };
+    let event = ShoreEvent::new(
+        EventType::InputRequestResponded,
+        InputRequestRespondedPayload::idempotency_key(&request_id, response_id.as_str()),
+        target,
+        Writer::shore_local("change-reads-fixture"),
+        InputRequestRespondedPayload {
+            input_request_response_id: response_id,
+            input_request_id: request_id,
+            revision_id: subject_revision_id.map(RevisionId::new),
+            task_target: None,
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: BodyContentType::TextPlain,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: None,
+        },
+        "2027-01-01T00:00:04Z",
+    )
+    .expect("build raw response fixture event");
+    append_raw_event(repo_root, &event);
+}
+
+/// A response answering the request through a revision outside the Change
+/// hosting it (issue #726's shape).
+fn append_foreign_revision_response(repo_root: &Path, request_id: &str, foreign_revision_id: &str) {
+    append_raw_input_request_response(repo_root, request_id, Some(foreign_revision_id));
+}
+
+/// A response carrying neither a revision nor a task target (issue #723's
+/// shape).
+fn append_revision_less_response(repo_root: &Path, request_id: &str) {
+    append_raw_input_request_response(repo_root, request_id, None);
+}
+
+/// Open an operative review-domain input request on `revision_id` through the
+/// real writer path, returning the opened request's id.
+fn open_operative_request(fixture: &ChangeReadsFixture, revision_id: &str) -> String {
+    let output = pointbreak_env(
+        [
+            "input-request",
+            "open",
+            "--repo",
+            fixture.repo_arg(),
+            "--exact-revision",
+            revision_id,
+            "--track",
+            REVIEW_TRACK,
+            "--title",
+            "closure parity request",
+            "--reason",
+            "manual-decision-required",
+        ],
+        OFF,
+    );
+    assert_success(&output);
+    parse_json(&output.stdout)["inputRequestId"]
+        .as_str()
+        .expect("input request open returns id")
+        .to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // Characterization floor (must pass on current bytes)
 // ---------------------------------------------------------------------------
@@ -1623,6 +1723,96 @@ fn derived_change_show_is_byte_identical_modulo_the_seek_stamp() {
             );
         }
     }
+}
+
+/// One Change's `change show` under ACTIVE vs OFF: byte-identical modulo the
+/// documented stamp substitution, with `operativeObligations` empty on both
+/// lanes — the end-to-end shape both response-closure parity tests assert.
+fn assert_show_obligations_cleared_on_both_lanes(fixture: &ChangeReadsFixture, change_id: &str) {
+    for lane in FORMAT_LANES {
+        let args = [
+            "change",
+            "show",
+            change_id,
+            "--repo",
+            fixture.repo_arg(),
+            "--format",
+            lane,
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert_success(&active);
+        assert_success(&off);
+
+        let active_json = parse_json(&active.stdout);
+        let off_json = parse_json(&off.stdout);
+        assert_eq!(
+            off_json["operativeObligations"]
+                .as_array()
+                .expect("authoritative operative obligations"),
+            &Vec::<Value>::new(),
+            "change show ({lane}): the authoritative lane clears the answered obligation"
+        );
+        assert_eq!(
+            active_json["operativeObligations"], off_json["operativeObligations"],
+            "change show ({lane}): both lanes agree on operative obligations"
+        );
+
+        let active_stamp = active_json["projectionStamp"]
+            .as_str()
+            .expect("active projection stamp")
+            .to_owned();
+        let off_stamp = off_json["projectionStamp"]
+            .as_str()
+            .expect("authoritative projection stamp")
+            .to_owned();
+        assert_ne!(
+            active_stamp, off_stamp,
+            "change show ({lane}): the derived lane substitutes the seek stamp"
+        );
+        let normalized = String::from_utf8(active.stdout.clone())
+            .expect("active stdout is UTF-8")
+            .replace(&active_stamp, &off_stamp);
+        assert_eq!(
+            normalized.into_bytes(),
+            off.stdout,
+            "change show ({lane}): byte parity modulo the stamp substitution"
+        );
+        assert_eq!(
+            active.stderr, off.stderr,
+            "change show ({lane}): stderr parity"
+        );
+    }
+}
+
+/// End-to-end #726 parity: an operative request opened through the real
+/// writer, answered by a raw response bound to another Change's revision,
+/// reads identically on the derived and authoritative lanes.
+#[test]
+fn derived_change_show_matches_authoritative_obligations_for_a_foreign_revision_response() {
+    let fixture = change_reads_fixture();
+    let request_id = open_operative_request(&fixture, &fixture.parallel_revision_ids.0);
+    append_foreign_revision_response(
+        fixture.repo.path(),
+        &request_id,
+        &fixture.accepted_revision_id,
+    );
+    fixture.build_derived();
+
+    assert_show_obligations_cleared_on_both_lanes(&fixture, &fixture.parallel_change_id);
+}
+
+/// End-to-end #723 parity: the same arrangement with a revision-less
+/// response. Pre-fix this store could not even build a derived generation
+/// (the shape quarantined the apply); now it builds and both lanes agree.
+#[test]
+fn derived_change_show_matches_authoritative_obligations_for_a_revision_less_response() {
+    let fixture = change_reads_fixture();
+    let request_id = open_operative_request(&fixture, &fixture.parallel_revision_ids.0);
+    append_revision_less_response(fixture.repo.path(), &request_id);
+    fixture.build_derived();
+
+    assert_show_obligations_cleared_on_both_lanes(&fixture, &fixture.parallel_change_id);
 }
 
 /// Unknown and malformed Change ids produce byte-identical outcomes on both

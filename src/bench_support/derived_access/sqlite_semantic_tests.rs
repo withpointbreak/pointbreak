@@ -3570,7 +3570,9 @@ fn change_seek_response_closure_plan_uses_the_response_request_index() {
         .collect::<Result<_, _>>()
         .expect("read response-closure plan");
     assert!(
-        closure_plan.first().is_some_and(|detail| detail.contains("request")),
+        closure_plan
+            .first()
+            .is_some_and(|detail| detail.contains("request")),
         "the response closure must begin from the collected request set: {closure_plan:?}"
     );
     assert!(
@@ -3793,7 +3795,12 @@ fn closure_matrix_fixture() -> ClosureMatrixFixture {
         proposal_carrier_event(&exact_b, None, "wop:closure-b", "2026-08-04T00:00:02Z"),
         proposal_carrier_event(&exact_c, None, "wop:closure-c", "2026-08-04T00:00:03Z"),
         proposal_carrier_event(&exact_s, None, "wop:closure-shared", "2026-08-04T00:00:04Z"),
-        proposal_carrier_event(&exact_f, None, "wop:closure-foreign", "2026-08-04T00:00:05Z"),
+        proposal_carrier_event(
+            &exact_f,
+            None,
+            "wop:closure-foreign",
+            "2026-08-04T00:00:05Z",
+        ),
         change_event(10, alpha.clone()),
         change_event(11, m_a),
         change_event(12, m_b),
@@ -4344,7 +4351,8 @@ fn foreign_revision_response_fixture() -> ForeignRevisionResponseFixture {
     // revision as its own subject (issue #726's shape), so the correlation
     // keys it to β and α's seek never selects it.
     let response_id = InputRequestResponseId::new("input-response:sha256:foreign");
-    let response = request_responded_with_subject(Some(&rev_f), Some(&rev_f), &request, &response_id);
+    let response =
+        request_responded_with_subject(Some(&rev_f), Some(&rev_f), &request, &response_id);
 
     let schedule = [
         proposal_carrier_event(&exact_a, None, "wop:foreign-host", "2026-08-04T00:00:01Z"),
@@ -4491,8 +4499,18 @@ fn seek_response_closure_selects_only_responses_to_this_changes_requests() {
     let beta_request = InputRequestId::new("input-request:sha256:closure-scope-beta");
 
     let schedule = [
-        proposal_carrier_event(&exact_a, None, "wop:closure-scope-a", "2026-08-04T00:00:01Z"),
-        proposal_carrier_event(&exact_b, None, "wop:closure-scope-b", "2026-08-04T00:00:02Z"),
+        proposal_carrier_event(
+            &exact_a,
+            None,
+            "wop:closure-scope-a",
+            "2026-08-04T00:00:01Z",
+        ),
+        proposal_carrier_event(
+            &exact_b,
+            None,
+            "wop:closure-scope-b",
+            "2026-08-04T00:00:02Z",
+        ),
         change_event(10, alpha),
         change_event(11, m_alpha),
         change_event(12, beta),
