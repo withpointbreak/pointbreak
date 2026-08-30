@@ -712,6 +712,55 @@ pub(super) fn change_interdiff_v2_json(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn derived_change_interdiff_v2_json(
+    access: &DerivedChangeAccess,
+    change_id: &str,
+    from_revision_id: &str,
+    from_artifact_hash: &str,
+    to_revision_id: &str,
+    to_artifact_hash: &str,
+) -> Result<ChangeV2Json, String> {
+    derived_change_outcome_json(
+        access
+            .review_generation()
+            .map_err(|error| error.to_string())?,
+        |generation| {
+            let change_id = ChangeId::new(change_id);
+            for (revision_id, artifact_hash) in [
+                (from_revision_id, from_artifact_hash),
+                (to_revision_id, to_artifact_hash),
+            ] {
+                if let Err(error) = crate::cli::change::exact_ref_from_projections(
+                    generation.projection(),
+                    generation.document_projection(),
+                    &change_id,
+                    &RevisionId::new(revision_id),
+                    artifact_hash,
+                ) {
+                    return Ok(ChangeV2Json::Invalid(exact_selection_error_json(
+                        &error.to_string(),
+                    )));
+                }
+            }
+            let document = crate::cli::change::build_interdiff_from_projections(
+                generation.projection(),
+                generation.document_projection(),
+                &change_id,
+                &RevisionId::new(from_revision_id),
+                from_artifact_hash,
+                &RevisionId::new(to_revision_id),
+                to_artifact_hash,
+            )
+            .map_err(|error| error.to_string())?
+            .with_projection_stamp(generation.stamp().to_owned());
+            serde_json::to_string(&document)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
 fn with_change_v2(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,

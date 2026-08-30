@@ -1357,16 +1357,27 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
                 Ok(values) => values,
                 Err(message) => return exact_selection_error_response(&message),
             };
-            change_v2_response(api::change_interdiff_v2_json(
-                repo,
-                cache,
-                stamp_binder,
-                change_id,
-                from_revision_id,
-                &values[0],
-                to_revision_id,
-                &values[1],
-            ))
+            if state.derived_changes.is_active() {
+                change_v2_response(api::derived_change_interdiff_v2_json(
+                    &state.derived_changes,
+                    change_id,
+                    from_revision_id,
+                    &values[0],
+                    to_revision_id,
+                    &values[1],
+                ))
+            } else {
+                change_v2_response(api::change_interdiff_v2_json(
+                    repo,
+                    cache,
+                    stamp_binder,
+                    change_id,
+                    from_revision_id,
+                    &values[0],
+                    to_revision_id,
+                    &values[1],
+                ))
+            }
         }
         _ => Response::json_error("404 Not Found", "no such route"),
     }
@@ -2574,13 +2585,63 @@ mod tests {
     }
 
     #[test]
+    fn derived_change_interdiff_bytes_equal_the_authoritative_arm() {
+        let fixture = exact_change_fixture(true);
+        let missing_from = format!("rev:sha256:{}", "e".repeat(64));
+        let missing_to = format!("rev:sha256:{}", "d".repeat(64));
+        for (case, from_revision_id, to_revision_id) in [
+            (
+                "success",
+                fixture.revision_id.as_str(),
+                fixture.revision_id.as_str(),
+            ),
+            ("bad from wins", missing_from.as_str(), missing_to.as_str()),
+            (
+                "bad to follows valid from",
+                fixture.revision_id.as_str(),
+                missing_to.as_str(),
+            ),
+        ] {
+            let authoritative = change_v2_json_parts(api::change_interdiff_v2_json(
+                &fixture.state.repo,
+                &fixture.state.change_reader_cache,
+                &fixture.state.strict_change_stamp,
+                &fixture.change_id,
+                from_revision_id,
+                &fixture.artifact_hash,
+                to_revision_id,
+                &fixture.artifact_hash,
+            ));
+            let derived = change_v2_json_parts(api::derived_change_interdiff_v2_json(
+                &fixture.state.derived_changes,
+                &fixture.change_id,
+                from_revision_id,
+                &fixture.artifact_hash,
+                to_revision_id,
+                &fixture.artifact_hash,
+            ));
+            assert_eq!(derived, authoritative, "{case} byte parity");
+        }
+    }
+
+    #[test]
     fn active_but_unready_exact_reads_follow_the_owner_posture() {
         let fixture = exact_change_fixture(false);
-        assert!(!fixture.revision_id.is_empty());
-        assert!(!fixture.artifact_hash.is_empty());
         assert_active_but_unready_exact_read_posture(
             &fixture,
-            &[(format!("/api/v2/changes/{}", fixture.change_id), None)],
+            &[
+                (format!("/api/v2/changes/{}", fixture.change_id), None),
+                (
+                    format!(
+                        "/api/v2/changes/{}/interdiff/{}/{}",
+                        fixture.change_id, fixture.revision_id, fixture.revision_id
+                    ),
+                    Some(format!(
+                        "fromArtifactHash={}&toArtifactHash={}",
+                        fixture.artifact_hash, fixture.artifact_hash
+                    )),
+                ),
+            ],
         );
     }
 

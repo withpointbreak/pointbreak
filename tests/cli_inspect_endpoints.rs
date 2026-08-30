@@ -516,6 +516,60 @@ fn derived_exact_change_detail_preserves_the_characterization_floor() {
 }
 
 #[test]
+fn derived_exact_interdiff_preserves_the_characterization_floor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = change["currentRevisionRefs"]
+        .as_array()
+        .expect("current Revision refs")
+        .iter()
+        .find(|reference| reference["revisionId"].as_str() == Some(store.revision_id.as_str()))
+        .expect("representative exact Revision");
+    let revision_id = exact["revisionId"].as_str().expect("Revision identity");
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+    let interdiff = inspector.get_json(&format!(
+        "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash),
+        urlencode(artifact_hash)
+    ));
+
+    assert_eq!(interdiff["schema"], "pointbreak.review-revision-interdiff");
+    assert_eq!(interdiff["version"], 1);
+    assert_eq!(interdiff["projectionStamp"], changes["projectionStamp"]);
+    assert_eq!(interdiff["interdiff"]["from"], *exact);
+    assert_eq!(interdiff["interdiff"]["to"], *exact);
+    assert_eq!(interdiff["interdiff"]["algorithmVersion"], "unavailable-v1");
+    assert_eq!(interdiff["interdiff"]["scope"], serde_json::json!([]));
+    assert_eq!(interdiff["availability"], "unavailable");
+    assert!(interdiff.get("comparison").is_none());
+    assert_eq!(
+        interdiff["diagnostics"],
+        serde_json::json!(["revision_interdiff_not_available"])
+    );
+}
+
+#[test]
 fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
