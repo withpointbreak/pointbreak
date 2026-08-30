@@ -2556,6 +2556,58 @@ mod tests {
     }
 
     #[test]
+    fn moving_journal_during_exact_load_is_a_typed_retryable_503() {
+        let exact = api::with_change_v2_outcome_from_loaded(
+            Err(ChangeReaderLoadError::MovingJournal),
+            None,
+            |_, _| unreachable!("a moving load cannot compose an exact response"),
+        )
+        .expect("a moving exact load has a typed response");
+        let api::ChangeV2Json::Retryable(exact_body) = exact else {
+            panic!("a moving exact load must remain retryable");
+        };
+
+        let repo = tempfile::tempdir().expect("moving-load comparison repository");
+        let signer = super::super::page_token::PageTokenSigner::from_seed([9_u8; 32]);
+        let request = super::super::event_history_page::parse_signed(None, &signer)
+            .expect("bare Timeline request is valid");
+        let timeline = api::authoritative_event_history_v2_from_loaded(
+            repo.path(),
+            request,
+            &signer,
+            None,
+            &pointbreak::session::TrustSet::default(),
+            Err(ChangeReaderLoadError::MovingJournal),
+        )
+        .expect("a moving Timeline load has a typed response");
+        let api::ChangeV2Json::Retryable(timeline_body) = timeline else {
+            panic!("a moving Timeline load must remain retryable");
+        };
+
+        assert_eq!(exact_body, timeline_body);
+        let document: serde_json::Value = serde_json::from_str(&exact_body).unwrap();
+        assert_eq!(document["code"], "moving_journal");
+        assert_eq!(document["retryable"], true);
+        assert_eq!(
+            change_v2_response(Ok(api::ChangeV2Json::Retryable(exact_body))).status,
+            "503 Service Unavailable"
+        );
+    }
+
+    #[test]
+    fn other_exact_load_errors_keep_the_500_class() {
+        let message = "exact Change load failed";
+        let Err(error) = api::with_change_v2_outcome_from_loaded(
+            Err(ChangeReaderLoadError::Other(message.to_owned())),
+            None,
+            |_, _| unreachable!("a failed load cannot compose an exact response"),
+        ) else {
+            panic!("other load failures keep the server error path");
+        };
+        assert_eq!(error, message);
+    }
+
+    #[test]
     fn derived_change_detail_bytes_equal_the_authoritative_arm() {
         let fixture = exact_change_fixture(true);
         let authoritative = change_v2_json_parts(api::change_detail_v2_json(

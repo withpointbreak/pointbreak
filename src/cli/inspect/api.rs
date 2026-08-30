@@ -784,9 +784,28 @@ fn with_change_v2_outcome(
         &pointbreak::session::ChangeReaderReadyV1,
     ) -> Result<ChangeV2Json, String>,
 ) -> Result<ChangeV2Json, String> {
-    let generation = cache
-        .load_changes(repo)
-        .map_err(|error| error.to_string())?;
+    with_change_v2_outcome_from_loaded(cache.load_changes(repo), stamp_binder, build)
+}
+
+pub(super) fn with_change_v2_outcome_from_loaded(
+    loaded: Result<super::server::ChangeReaderGeneration, super::server::ChangeReaderLoadError>,
+    stamp_binder: Option<&StrictChangeStampBinder>,
+    build: impl FnOnce(
+        &ChangeDocumentFacadeV1,
+        &pointbreak::session::ChangeReaderReadyV1,
+    ) -> Result<ChangeV2Json, String>,
+) -> Result<ChangeV2Json, String> {
+    let generation = match loaded {
+        Ok(generation) => generation,
+        Err(super::server::ChangeReaderLoadError::MovingJournal) => {
+            return Ok(ChangeV2Json::Retryable(event_history_error_json(
+                "moving_journal",
+                "Journal changed while the Timeline generation was loading; retry",
+                true,
+            )));
+        }
+        Err(super::server::ChangeReaderLoadError::Other(message)) => return Err(message),
+    };
     if let Some(unavailable) =
         ChangeQueryUnavailableDocumentV1::for_inspection(&generation.state.capability)
     {
