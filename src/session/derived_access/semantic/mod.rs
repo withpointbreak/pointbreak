@@ -524,7 +524,6 @@ fn classify_event(event: &ShoreEvent) -> Result<ClassifiedFact, SemanticModelErr
         EventType::ReviewObservationRecorded
         | EventType::ReviewAssessmentRecorded
         | EventType::InputRequestOpened
-        | EventType::InputRequestResponded
         | EventType::RevisionRefAssociated
         | EventType::RevisionRefWithdrawn
         | EventType::RevisionCommitAssociated
@@ -532,6 +531,11 @@ fn classify_event(event: &ShoreEvent) -> Result<ClassifiedFact, SemanticModelErr
         | EventType::ValidationCheckRecorded => event
             .subject_revision_id()?
             .map(|id| id.as_str().to_owned()),
+        // `InputRequestResponded` reads its payload `revision_id` in its own
+        // arm below: a review-domain response may carry neither a revision nor
+        // a task target (a legacy/ingested shape), and reconstructing a
+        // subject from that shape errors where a subject-less fact row is the
+        // correct materialization.
         _ => None,
     };
     let mut semantic_id = None;
@@ -621,9 +625,7 @@ fn classify_event(event: &ShoreEvent) -> Result<ClassifiedFact, SemanticModelErr
         EventType::InputRequestResponded => {
             let payload: InputRequestRespondedPayload =
                 serde_json::from_value(event.payload.clone())?;
-            if revision_id.is_none() {
-                revision_id = payload.revision_id.map(|id| id.as_str().to_owned());
-            }
+            revision_id = payload.revision_id.map(|id| id.as_str().to_owned());
             semantic_id = Some(payload.input_request_response_id.as_str().to_owned());
             SemanticFactKind::InputRequestResponded(InputResponseFact {
                 request_id: payload.input_request_id.as_str().to_owned(),

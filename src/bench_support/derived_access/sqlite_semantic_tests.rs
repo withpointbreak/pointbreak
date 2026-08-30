@@ -4113,7 +4113,7 @@ fn revision_less_review_response(
 }
 
 #[test]
-fn revision_less_review_response_quarantines_the_generation_today() {
+fn revision_less_review_response_materializes_without_a_subject_revision() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
     let member = revision_id("revision-less-member");
@@ -4125,6 +4125,7 @@ fn revision_less_review_response_quarantines_the_generation_today() {
     .expect("declaration");
     let membership =
         build_membership_asserted(&declaration.change_id, &member, [173; 32]).expect("membership");
+    let change_id = declaration.change_id.clone();
     let open_request = InputRequestId::new("input-request:sha256:revision-less-open");
 
     let schedule = [
@@ -4140,15 +4141,36 @@ fn revision_less_review_response_quarantines_the_generation_today() {
 
     let response_id = InputRequestResponseId::new("input-response:sha256:revision-less");
     let response = revision_less_review_response(&open_request, &response_id);
-    let error = adapter
-        .append_event(&response, "semantic-attempt:revision-less")
-        .expect_err("the revision-less review response quarantines the derived apply today");
-    assert!(
-        error.to_string().contains(
-            "input_request_responded payload carries neither a revision_id (review) nor a \
-             task_target (task)"
-        ),
-        "unexpected quarantine error: {error}"
+    append(&adapter, &response, schedule.len());
+    let observed = TruthCursor::new(1, schedule.len() as u64 + 1);
+
+    ready(
+        adapter
+            .semantic_change_seek_facts_at(&change_id, observed)
+            .expect("the revision-less shape must not quarantine the seek read"),
+    );
+
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    let (revision_id, product_rows) = connection
+        .query_row(
+            "SELECT event.revision_id,
+                    (SELECT count(*) FROM product_history_event AS product
+                     WHERE product.sequence = event.sequence)
+             FROM semantic_event_fact_text AS event
+             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+             WHERE locator.event_id = ?1",
+            [response.event_id.as_str()],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .expect("the revision-less response materializes a semantic event fact row");
+    assert_eq!(
+        revision_id, None,
+        "the subject-less response's semantic fact row carries no revision"
+    );
+    assert_eq!(
+        product_rows, 0,
+        "the subject-less response never enters the Timeline relation"
     );
 }
 
