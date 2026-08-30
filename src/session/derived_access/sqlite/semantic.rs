@@ -565,7 +565,11 @@ impl ChangeSeekReadSnapshot {
                 "CREATE TEMP TABLE IF NOT EXISTS pointbreak_change_seek_sequence (
                      sequence INTEGER NOT NULL PRIMARY KEY
                  ) STRICT, WITHOUT ROWID;
-                 DELETE FROM temp.pointbreak_change_seek_sequence;",
+                 DELETE FROM temp.pointbreak_change_seek_sequence;
+                 CREATE TEMP TABLE IF NOT EXISTS pointbreak_change_seek_request (
+                     request_id TEXT PRIMARY KEY
+                 ) STRICT, WITHOUT ROWID;
+                 DELETE FROM temp.pointbreak_change_seek_request;",
             )
             .map_err(|error| sqlite_error("prepare Change seek sequence set", error))?;
         let correlated = {
@@ -595,6 +599,12 @@ impl ChangeSeekReadSnapshot {
                     .map_err(|error| sqlite_error("insert Change seek sequence member", error))?;
             }
         }
+        self.connection
+            .execute(CHANGE_SEEK_REQUEST_IDENTITY_SQL, [])
+            .map_err(|error| sqlite_error("collect Change seek request identities", error))?;
+        self.connection
+            .execute(CHANGE_SEEK_RESPONSE_CLOSURE_SQL, params![sequence])
+            .map_err(|error| sqlite_error("close Change seek over responses", error))?;
 
         let mut statement = self
             .connection
@@ -1280,6 +1290,47 @@ pub(crate) const CHANGE_FACT_SEEK_BATCH_SQL: &str =
        AND locator.epoch = ?1
        AND change_fact.sequence <= ?2
      ORDER BY locator.replay_key, receipt.logical_reread_key_hash";
+
+/// The request-identity step of the per-Change seek's response closure.
+///
+/// Collects the request ids of every input request already selected by the
+/// correlated-sequence seek. Both joins are `CROSS JOIN` fences with NO
+/// `INDEXED BY`: they are point reads by sequence against an
+/// `INTEGER PRIMARY KEY` table and a view over one — a lone `INDEXED BY`
+/// without its `CROSS JOIN` fence is exactly the shape that inverts a plan
+/// into a per-row rescan on the bundled SQLite. The statement takes no
+/// parameters: its sequence bound is inherited structurally from the TEMP
+/// sequence set, which the correlated seek populated under its own bound.
+pub(crate) const CHANGE_SEEK_REQUEST_IDENTITY_SQL: &str = "\
+INSERT OR IGNORE INTO temp.pointbreak_change_seek_request (request_id)
+SELECT event.semantic_id
+FROM temp.pointbreak_change_seek_sequence AS selected
+CROSS JOIN semantic_request_fact AS request
+CROSS JOIN semantic_event_fact_text AS event
+WHERE request.sequence = selected.sequence
+  AND event.sequence = selected.sequence
+  AND event.semantic_id IS NOT NULL";
+
+/// The response-union step of the per-Change seek's response closure.
+///
+/// Unions into the seek's sequence set every response answering one of the
+/// selected requests, regardless of the revision the response itself carries:
+/// the authoritative Change fold clears operative obligations by request
+/// identity over the global stream, so a response bound to a foreign revision
+/// or to no revision at all must still reach the narrowed fold. `INDEXED BY
+/// semantic_response_request` fences the response join onto the request-id
+/// index (the table's rowid key leads with sequence, so without the fence
+/// SQLite may satisfy the predicate with a full response scan). `?1` is the
+/// seek's sequence bound: response rows are unioned in directly, so the
+/// pinned-checkpoint guarantee depends on this explicit bound.
+pub(crate) const CHANGE_SEEK_RESPONSE_CLOSURE_SQL: &str = "\
+INSERT OR IGNORE INTO temp.pointbreak_change_seek_sequence (sequence)
+SELECT response.sequence
+FROM temp.pointbreak_change_seek_request AS request
+CROSS JOIN semantic_response_fact AS response
+     INDEXED BY semantic_response_request
+WHERE response.request_id = request.request_id
+  AND response.sequence <= ?1";
 
 impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {

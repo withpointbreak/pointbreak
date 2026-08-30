@@ -4174,8 +4174,18 @@ fn revision_less_review_response_materializes_without_a_subject_revision() {
     );
 }
 
-#[test]
-fn foreign_revision_response_leaves_the_seek_obligation_open_today() {
+/// The #726 arrangement: Change α hosts an operative request whose response
+/// carries Change β's member revision as its own subject.
+struct ForeignRevisionResponseFixture {
+    adapter: QualificationDerivedAccessAdapter,
+    #[allow(dead_code)]
+    root: tempfile::TempDir,
+    observed: TruthCursor,
+    alpha: crate::model::ChangeId,
+    request: InputRequestId,
+}
+
+fn foreign_revision_response_fixture() -> ForeignRevisionResponseFixture {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
     let rev_a = revision_id("foreign-host-member");
@@ -4246,18 +4256,171 @@ fn foreign_revision_response_leaves_the_seek_obligation_open_today() {
         append(&adapter, event, attempt);
     }
     let observed = TruthCursor::new(1, schedule.len() as u64);
+    ForeignRevisionResponseFixture {
+        adapter,
+        root,
+        observed,
+        alpha: alpha_id,
+        request,
+    }
+}
 
+/// Pre-fix this test pinned the #726 divergence: the whole fold cleared the
+/// obligation by request identity while the seek — keyed on the response's
+/// own (foreign) revision — never selected the response and left it open.
+/// The seek response closure inverts the narrowed assertion.
+#[test]
+fn foreign_revision_response_divergence_is_closed() {
+    let fixture = foreign_revision_response_fixture();
     let (narrowed_semantic, _, whole_semantic, _) =
-        narrowed_and_whole_folds(&adapter, &alpha_id, observed);
+        narrowed_and_whole_folds(&fixture.adapter, &fixture.alpha, fixture.observed);
     assert!(
-        whole_semantic.changes[&alpha_id]
+        whole_semantic.changes[&fixture.alpha]
             .operative_obligations
             .is_empty(),
         "the authoritative fold clears the obligation by request identity"
     );
     assert_eq!(
+        narrowed_semantic.changes[&fixture.alpha].operative_obligations,
+        whole_semantic.changes[&fixture.alpha].operative_obligations,
+        "the seek selects the foreign-revision response through the request-identity closure"
+    );
+}
+
+#[test]
+fn foreign_revision_response_clears_the_seek_obligation_like_the_authoritative_fold() {
+    let fixture = foreign_revision_response_fixture();
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&fixture.adapter, &fixture.alpha, fixture.observed);
+    assert_eq!(
+        narrowed_semantic.changes[&fixture.alpha].operative_obligations,
+        whole_semantic.changes[&fixture.alpha].operative_obligations,
+        "both lanes agree on operative obligations for the foreign-revision shape"
+    );
+    assert!(
+        narrowed_semantic.changes[&fixture.alpha]
+            .operative_obligations
+            .is_empty(),
+        "the answered obligation is cleared on both lanes"
+    );
+}
+
+#[test]
+fn revision_less_response_clears_the_seek_obligation_like_the_authoritative_fold() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let member = revision_id("closure-revision-less-member");
+    let exact = RevisionRefV1::new(member.clone(), valid_hash('a')).expect("exact member");
+    let declaration = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([191; 32]),
+        [192; 32],
+    )
+    .expect("declaration");
+    let membership =
+        build_membership_asserted(&declaration.change_id, &member, [193; 32]).expect("membership");
+    let change_id = declaration.change_id.clone();
+    let request = InputRequestId::new("input-request:sha256:closure-revision-less");
+    let response_id = InputRequestResponseId::new("input-response:sha256:closure-revision-less");
+
+    let schedule = [
+        proposal_carrier_event(
+            &exact,
+            None,
+            "wop:closure-revision-less",
+            "2026-08-04T00:00:01Z",
+        ),
+        change_event(10, declaration),
+        change_event(11, membership),
+        request_opened(&member, &request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        revision_less_review_response(&request, &response_id),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let observed = TruthCursor::new(1, schedule.len() as u64);
+
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&adapter, &change_id, observed);
+    assert_eq!(
+        narrowed_semantic.changes[&change_id].operative_obligations,
+        whole_semantic.changes[&change_id].operative_obligations,
+        "both lanes agree on operative obligations for the revision-less shape"
+    );
+    assert!(
+        narrowed_semantic.changes[&change_id]
+            .operative_obligations
+            .is_empty(),
+        "the answered obligation is cleared on both lanes"
+    );
+}
+
+#[test]
+fn seek_response_closure_selects_only_responses_to_this_changes_requests() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let rev_a = revision_id("closure-scope-alpha-member");
+    let rev_b = revision_id("closure-scope-beta-member");
+    let exact_a = RevisionRefV1::new(rev_a.clone(), valid_hash('a')).expect("exact alpha");
+    let exact_b = RevisionRefV1::new(rev_b.clone(), valid_hash('b')).expect("exact beta");
+    let alpha = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([201; 32]),
+        [202; 32],
+    )
+    .expect("alpha declaration");
+    let m_alpha = build_membership_asserted(&alpha.change_id, &rev_a, [203; 32]).expect("m_alpha");
+    let beta = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([204; 32]),
+        [205; 32],
+    )
+    .expect("beta declaration");
+    let m_beta = build_membership_asserted(&beta.change_id, &rev_b, [206; 32]).expect("m_beta");
+    let alpha_id = alpha.change_id.clone();
+    let alpha_request = InputRequestId::new("input-request:sha256:closure-scope-alpha");
+    let beta_request = InputRequestId::new("input-request:sha256:closure-scope-beta");
+
+    let schedule = [
+        proposal_carrier_event(&exact_a, None, "wop:closure-scope-a", "2026-08-04T00:00:01Z"),
+        proposal_carrier_event(&exact_b, None, "wop:closure-scope-b", "2026-08-04T00:00:02Z"),
+        change_event(10, alpha),
+        change_event(11, m_alpha),
+        change_event(12, beta),
+        change_event(13, m_beta),
+        request_opened(&rev_a, &alpha_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_opened(&rev_b, &beta_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        request_responded(&rev_b, &beta_request),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let observed = TruthCursor::new(1, schedule.len() as u64);
+
+    let seek_facts = ready(
+        adapter
+            .semantic_change_seek_facts_at(&alpha_id, observed)
+            .expect("seek facts"),
+    );
+    use crate::session::ChangeProjectionFact;
+    assert!(
+        !seek_facts.iter().any(|fact| matches!(
+            &fact.change,
+            ChangeProjectionFact::RequestResponse { request_id } if request_id == &beta_request
+        )),
+        "a response answering another Change's request never enters this Change's seek"
+    );
+
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&adapter, &alpha_id, observed);
+    assert_eq!(
         narrowed_semantic.changes[&alpha_id].operative_obligations,
-        std::collections::BTreeSet::from([request]),
-        "the seek misses the foreign-revision response and leaves the obligation open today"
+        std::collections::BTreeSet::from([alpha_request]),
+        "the target Change's own open obligation is unchanged"
+    );
+    assert_eq!(
+        narrowed_semantic.changes[&alpha_id].operative_obligations,
+        whole_semantic.changes[&alpha_id].operative_obligations,
+        "both lanes agree on the target Change's obligations"
     );
 }
