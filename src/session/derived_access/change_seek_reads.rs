@@ -8,13 +8,27 @@
 //! event is decoded, no body or presentation is hydrated, and no eager
 //! complete-Change scan runs on this path.
 //!
-//! Known correlation limitation (owner-triaged): a review-domain
-//! `InputRequestResponded` carrier with `revision_id: None` — writable only
-//! by pre-2026-07 builds or peer ingest of their events; the current writer
-//! always sets the field — receives no Change correlation, so the seek
-//! cannot select it and a still-open operative obligation would survive on
-//! this lane while the authoritative fold clears it. The eager page reads
-//! are unaffected (they scan every Change fact row).
+//! Response closure: the correlated-sequence seek keys on each fact's own
+//! revision, but the authoritative Change fold clears operative obligations
+//! by request identity over the global stream, so a response bound to a
+//! foreign revision (issue #726) or to no revision at all (issue #723 —
+//! writable only by pre-2026-07 builds or peer ingest; the current writer
+//! always reconstructs the request's revision) would never be selected and
+//! its obligation would survive on this lane alone. After the correlated
+//! seek, the snapshot therefore collects the selected requests' identities
+//! and unions in every response answering them — read-side and
+//! order-independent, so existing generations are fixed without rebuild.
+//!
+//! Residual Timeline-lane gaps (issues #723/#726 — the closure fixes this
+//! seek, not the Timeline relation): `inspect event-history --change <C>`
+//! still does not list a foreign-revision response under the Change whose
+//! obligation it clears, and a revision-less response stays entirely absent
+//! from the Timeline relation (its subject-less shape is deliberately kept
+//! out of `product_history_event`). The intended long-term endpoint is a
+//! completed correlation index built at materialization time (recorded on
+//! both issues), at which point the closure statements become pure no-ops
+//! and are removed. The eager page reads are unaffected (they scan every
+//! Change fact row).
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::changes::{
