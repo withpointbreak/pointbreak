@@ -4082,3 +4082,160 @@ fn orphan_withdrawal_narrowing_never_reaches_a_serialized_surface() {
     assert!(view.operative_obligations.contains(&fixture.open_request));
     assert!(view.members.contains(&fixture.accepted_revision));
 }
+
+/// A review-domain response with neither a `revision_id` nor a `task_target`
+/// (issue #723's shape) has no reconstructable subject.
+fn revision_less_review_response(
+    request_id: &InputRequestId,
+    response_id: &InputRequestResponseId,
+) -> ShoreEvent {
+    ShoreEvent::new(
+        EventType::InputRequestResponded,
+        InputRequestRespondedPayload::idempotency_key(request_id, response_id.as_str()),
+        EventTarget::for_journal(JournalId::new(JOURNAL)),
+        Writer::shore_local("0.9.0"),
+        InputRequestRespondedPayload {
+            input_request_response_id: response_id.clone(),
+            input_request_id: request_id.clone(),
+            revision_id: None,
+            task_target: None,
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: BodyContentType::TextPlain,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: None,
+        },
+        "2026-08-04T00:03:00Z",
+    )
+    .expect("revision-less review response")
+}
+
+#[test]
+fn revision_less_review_response_quarantines_the_generation_today() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let member = revision_id("revision-less-member");
+    let exact = RevisionRefV1::new(member.clone(), valid_hash('a')).expect("exact member");
+    let declaration = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([171; 32]),
+        [172; 32],
+    )
+    .expect("declaration");
+    let membership =
+        build_membership_asserted(&declaration.change_id, &member, [173; 32]).expect("membership");
+    let open_request = InputRequestId::new("input-request:sha256:revision-less-open");
+
+    let schedule = [
+        proposal_carrier_event(&exact, None, "wop:revision-less", "2026-08-04T00:00:01Z"),
+        change_event(10, declaration),
+        change_event(11, membership),
+        request_opened(&member, &open_request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let response_id = InputRequestResponseId::new("input-response:sha256:revision-less");
+    let response = revision_less_review_response(&open_request, &response_id);
+    let error = adapter
+        .append_event(&response, "semantic-attempt:revision-less")
+        .expect_err("the revision-less review response quarantines the derived apply today");
+    assert!(
+        error.to_string().contains(
+            "input_request_responded payload carries neither a revision_id (review) nor a \
+             task_target (task)"
+        ),
+        "unexpected quarantine error: {error}"
+    );
+}
+
+#[test]
+fn foreign_revision_response_leaves_the_seek_obligation_open_today() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let rev_a = revision_id("foreign-host-member");
+    let rev_f = revision_id("foreign-answer-member");
+    let exact_a = RevisionRefV1::new(rev_a.clone(), valid_hash('a')).expect("exact host");
+    let exact_f = RevisionRefV1::new(rev_f.clone(), valid_hash('b')).expect("exact foreign");
+    let alpha = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([181; 32]),
+        [182; 32],
+    )
+    .expect("alpha declaration");
+    let m_alpha = build_membership_asserted(&alpha.change_id, &rev_a, [183; 32]).expect("m_alpha");
+    let beta = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([184; 32]),
+        [185; 32],
+    )
+    .expect("beta declaration");
+    let m_beta = build_membership_asserted(&beta.change_id, &rev_f, [186; 32]).expect("m_beta");
+    let alpha_id = alpha.change_id.clone();
+    let request = InputRequestId::new("input-request:sha256:foreign-open");
+
+    // The response answers α's operative request R but carries β's member
+    // revision as its own subject (issue #726's shape), so the correlation
+    // keys it to β and α's seek never selects it.
+    let response_id = InputRequestResponseId::new("input-response:sha256:foreign");
+    let response = ShoreEvent::new(
+        EventType::InputRequestResponded,
+        InputRequestRespondedPayload::idempotency_key(&request, response_id.as_str()),
+        EventTarget::for_subject(
+            JournalId::new(JOURNAL),
+            TargetRef::Review(ReviewTargetRef::InputRequest {
+                revision_id: rev_f.clone(),
+                input_request_id: request.clone(),
+            }),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("foreign response target"),
+        Writer::shore_local("0.9.0"),
+        InputRequestRespondedPayload {
+            input_request_response_id: response_id,
+            input_request_id: request.clone(),
+            revision_id: Some(rev_f.clone()),
+            task_target: None,
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: BodyContentType::TextPlain,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: None,
+        },
+        "2026-08-04T00:03:00Z",
+    )
+    .expect("foreign-revision response");
+
+    let schedule = [
+        proposal_carrier_event(&exact_a, None, "wop:foreign-host", "2026-08-04T00:00:01Z"),
+        proposal_carrier_event(&exact_f, None, "wop:foreign-answer", "2026-08-04T00:00:02Z"),
+        change_event(10, alpha),
+        change_event(11, m_alpha),
+        change_event(12, beta),
+        change_event(13, m_beta),
+        request_opened(&rev_a, &request)
+            .with_assertion_mode(crate::session::event::AssertionMode::Operative),
+        response,
+    ];
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+    let observed = TruthCursor::new(1, schedule.len() as u64);
+
+    let (narrowed_semantic, _, whole_semantic, _) =
+        narrowed_and_whole_folds(&adapter, &alpha_id, observed);
+    assert!(
+        whole_semantic.changes[&alpha_id]
+            .operative_obligations
+            .is_empty(),
+        "the authoritative fold clears the obligation by request identity"
+    );
+    assert_eq!(
+        narrowed_semantic.changes[&alpha_id].operative_obligations,
+        std::collections::BTreeSet::from([request]),
+        "the seek misses the foreign-revision response and leaves the obligation open today"
+    );
+}
