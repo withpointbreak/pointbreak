@@ -2011,6 +2011,7 @@ mod tests {
         assert!(controls.contains("state.derived_history.cancel_background_rebuild()"));
     }
 
+    /// Post-Green source-shape verification for the route ownership split.
     #[test]
     fn routes_split_derived_collections_and_timeline_from_explicit_off_and_exact_reads() {
         let route = source_between(SERVER_SOURCE, "fn route(", "fn route_change_v2(");
@@ -2112,7 +2113,63 @@ mod tests {
         );
         assert!(exact.contains("let cache = &state.change_reader_cache"));
         assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
-        assert!(!exact.contains("state.derived_changes"));
+        let detail = source_between(
+            exact,
+            "[change_id] => {",
+            "[change_id, revisions, revision_id] if revisions == \"revisions\" => {",
+        );
+        let revision = source_between(
+            exact,
+            "[change_id, revisions, revision_id] if revisions == \"revisions\" => {",
+            "[change_id, revisions, revision_id, resource]",
+        );
+        let resource = source_between(
+            exact,
+            "[change_id, revisions, revision_id, resource]",
+            "[change_id, interdiff, from_revision_id, to_revision_id]",
+        );
+        let interdiff = source_between(
+            exact,
+            "[change_id, interdiff, from_revision_id, to_revision_id]",
+            "_ => Response::json_error",
+        );
+        for (name, derived_route, producer) in [
+            ("detail", detail, "api::derived_change_detail_v2_json"),
+            (
+                "interdiff",
+                interdiff,
+                "api::derived_change_interdiff_v2_json",
+            ),
+        ] {
+            assert!(
+                derived_route.contains("state.derived_changes.is_active()"),
+                "{name} must gate the derived producer on active mode"
+            );
+            assert!(
+                derived_route.contains(producer),
+                "{name} must dispatch to its derived producer"
+            );
+            assert!(
+                !derived_route.contains("change_reader_cache"),
+                "{name} derived dispatch must not name the replay cache"
+            );
+        }
+        for (name, cache_route) in [("revision", revision), ("resource", resource)] {
+            assert!(
+                cache_route.contains("cache,\n                stamp_binder,"),
+                "{name} must retain the cache and strict stamp binder pair"
+            );
+            for forbidden in [
+                "derived_change_detail",
+                "derived_change_interdiff",
+                "review_generation",
+            ] {
+                assert!(
+                    !cache_route.contains(forbidden),
+                    "{name} must not enter derived producer `{forbidden}`"
+                );
+            }
+        }
 
         let profile_api = source_between(
             API_SOURCE,
@@ -2159,6 +2216,33 @@ mod tests {
         assert!(authoritative_timeline_api.contains("ChangeReaderCache"));
         assert!(authoritative_timeline_api.contains("StrictChangeStampBinder"));
         assert!(!authoritative_timeline_api.contains("DerivedChangeAccess"));
+    }
+
+    /// Post-Green source-shape verification for the frozen exact-read helpers.
+    #[test]
+    fn derived_exact_producers_use_projection_native_builders() {
+        let detail = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_change_detail_v2_json(",
+            "pub(super) fn change_revision_v2_json(",
+        );
+        let interdiff = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_change_interdiff_v2_json(",
+            "fn with_change_v2(",
+        );
+
+        assert!(detail.contains("review_generation_detail_document"));
+        assert!(interdiff.contains("exact_ref_from_projections"));
+        assert!(interdiff.contains("build_interdiff_from_projections"));
+        for (name, producer) in [("detail", detail), ("interdiff", interdiff)] {
+            for forbidden in ["build_exact_read", "build_contextual_exact_read"] {
+                assert!(
+                    !producer.contains(forbidden),
+                    "{name} must not reference frozen helper `{forbidden}`"
+                );
+            }
+        }
     }
 
     #[test]

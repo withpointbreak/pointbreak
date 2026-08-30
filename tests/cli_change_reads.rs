@@ -2622,8 +2622,14 @@ mod counted {
 
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use pointbreak::bench_support::longitudinal::{
+        LONGITUDINAL_COUNTER_RECEIPT_HEADER_V1, LONGITUDINAL_COUNTING_REQUEST_HEADER_V1,
+        LongitudinalCounterReceiptV1,
+    };
     use serde_json::Value;
+    use sha2::{Digest as _, Sha256};
 
+    use super::support::inspect::{Inspector, urlencode};
     use super::{
         ACTIVE, ChangeReadsFixture, assert_success, change_reads_fixture, parse_json,
         pointbreak_env,
@@ -2695,6 +2701,64 @@ mod counted {
             .map_or(0, |value| value.as_u64().expect("counter is a u64"))
     }
 
+    fn counted_http_get(
+        inspector: &Inspector,
+        path: &str,
+        ordinal: u64,
+    ) -> (String, LongitudinalCounterReceiptV1) {
+        let baseline = inspector.get_text(path);
+        let semantic_result_sha256 = format!("{:x}", Sha256::digest(baseline.as_bytes()));
+        let request = serde_json::json!({
+            "runIdentity": format!("{:064x}", ordinal + 1),
+            "context": {
+                "rootIdentity": "2".repeat(64),
+                "operation": "EXACT_CHANGE_HTTP",
+                "phase": format!("case-{ordinal}"),
+                "baseExecutionIdentitySha256": "3".repeat(64),
+                "derivativeExecutionIdentitySha256": "4".repeat(64),
+                "manifestSha256": "5".repeat(64),
+                "scheduleSha256": "6".repeat(64),
+                "success": true,
+                "semanticResultSha256": semantic_result_sha256,
+                "includeCapacityOwnership": false
+            }
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("encode request"));
+        let authorization = format!(
+            "Bearer {}",
+            inspector.token().expect("authenticated Inspector token")
+        );
+        let (head, body) = inspector.raw_request(
+            "GET",
+            path,
+            &[
+                ("Host", inspector.canonical_host()),
+                ("Authorization", &authorization),
+                (LONGITUDINAL_COUNTING_REQUEST_HEADER_V1, &encoded),
+            ],
+        );
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}: {body}");
+        assert_eq!(body, baseline, "counting must not change response bytes");
+        let encoded_receipt = head
+            .lines()
+            .skip(1)
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case(LONGITUDINAL_COUNTER_RECEIPT_HEADER_V1)
+                    .then(|| value.trim())
+            })
+            .expect("counted response receipt header");
+        let receipt: LongitudinalCounterReceiptV1 = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(encoded_receipt)
+                .expect("decode counter receipt"),
+        )
+        .expect("parse counter receipt");
+        receipt.validate().expect("valid counter receipt");
+        assert_eq!(receipt.semantic_result_sha256, semantic_result_sha256);
+        (body, receipt)
+    }
+
     fn assert_route_pins(counters: &Value, label: &str) {
         for pin in [
             "strictJournalInspections",
@@ -2702,6 +2766,65 @@ mod counted {
             "objectArtifactReads",
         ] {
             assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+        }
+    }
+
+    /// Post-Green end-to-end verification of the exact derived HTTP dispatch.
+    #[test]
+    fn exact_inspector_derived_routes_open_no_authoritative_carriers() {
+        let fixture = change_reads_fixture();
+        fixture.build_derived();
+        let inspector = Inspector::spawn_current(fixture.repo.path());
+        let changes = inspector.get_json("/api/v2/changes");
+        let change = changes["changes"]
+            .as_array()
+            .expect("Change list")
+            .iter()
+            .find(|change| change["changeId"] == fixture.parallel_change_id)
+            .expect("parallel Change summary");
+        let heads = change["currentRevisionRefs"]
+            .as_array()
+            .expect("parallel current Revisions");
+        assert_eq!(heads.len(), 2, "fixture keeps two parallel heads");
+
+        let detail_path = format!("/api/v2/changes/{}", urlencode(&fixture.parallel_change_id));
+        let interdiff_path = format!(
+            "/api/v2/changes/{}/interdiff/{}/{}?fromArtifactHash={}&toArtifactHash={}",
+            urlencode(&fixture.parallel_change_id),
+            urlencode(heads[0]["revisionId"].as_str().expect("first Revision id")),
+            urlencode(heads[1]["revisionId"].as_str().expect("second Revision id")),
+            urlencode(
+                heads[0]["objectArtifactContentHash"]
+                    .as_str()
+                    .expect("first artifact hash")
+            ),
+            urlencode(
+                heads[1]["objectArtifactContentHash"]
+                    .as_str()
+                    .expect("second artifact hash")
+            ),
+        );
+
+        for (ordinal, (label, path)) in [
+            ("detail", detail_path.as_str()),
+            ("interdiff", interdiff_path.as_str()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_, receipt) = counted_http_get(&inspector, path, 100 + ordinal as u64);
+            assert_eq!(
+                receipt.counters.event_decodes, 0,
+                "{label} decodes no event"
+            );
+            assert_eq!(
+                receipt.counters.change_proposal_carriers_opened, 0,
+                "{label} opens no proposal carrier"
+            );
+            assert_eq!(
+                receipt.counters.change_support_carriers_opened, 0,
+                "{label} opens no support carrier"
+            );
         }
     }
 
