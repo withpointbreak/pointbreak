@@ -242,6 +242,16 @@ pub(crate) struct LongitudinalL2ChangeWriteReceiptV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LongitudinalL2ChangeWriteReceiptV2 {
+    pub(crate) events_created: u64,
+    pub(crate) events_existing: u64,
+    pub(crate) final_event_count: u64,
+    pub(crate) change_count: u64,
+    pub(crate) membership_count: u64,
+    pub(crate) relation_count: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LongitudinalRemovalRewriteV1 {
     pub(crate) relative_path: String,
     pub(crate) event_id: String,
@@ -1663,6 +1673,354 @@ pub(crate) fn prepare_longitudinal_l2_change_events_v1(
         )));
     }
     Ok(events)
+}
+
+/// The lifecycle class the versioned V2 mixed population assigns one
+/// deterministic Revision group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LongitudinalChangeLifecycleV1 {
+    /// The frozen 21-event divergent shape the V1 preparer emits: all ten
+    /// Revisions are members and two replacement heads stay current, so
+    /// `change select` refuses without an explicit Revision.
+    Divergent,
+    /// An 8-event resolved shape: a four-member supersession chain with one
+    /// current tip, so `change select` succeeds with no explicit Revision.
+    Resolved,
+}
+
+/// Assign a lifecycle to one group ordinal of the V2 mixed population.
+///
+/// The population is mixed so witness-scale `change select` evidence has
+/// cleanly selectable single-current-ref Changes to select against alongside
+/// the divergent shape the V1 fixture froze. Receipt count expectations are
+/// derived from this selector cross-module (`evidence.rs`) — never
+/// hand-patched — so the selector is the single source of the V2 proportions.
+pub(crate) fn longitudinal_l2_group_lifecycle_v1(
+    group_ordinal: usize,
+) -> LongitudinalChangeLifecycleV1 {
+    if group_ordinal.is_multiple_of(3) {
+        LongitudinalChangeLifecycleV1::Resolved
+    } else {
+        LongitudinalChangeLifecycleV1::Divergent
+    }
+}
+
+/// Revision groups per frozen L100-O10K record (the constant the V1 pins
+/// encode as 1,000 Changes for 100 records).
+pub(crate) const LONGITUDINAL_L2_GROUPS_PER_RECORD_V1: usize = 10;
+
+/// The selector-derived membership count one group contributes.
+pub(crate) fn longitudinal_l2_group_membership_count_v1(
+    lifecycle: LongitudinalChangeLifecycleV1,
+) -> u64 {
+    match lifecycle {
+        // Every group Revision is a member.
+        LongitudinalChangeLifecycleV1::Divergent => 10,
+        // The four supersession-chain members.
+        LongitudinalChangeLifecycleV1::Resolved => 4,
+    }
+}
+
+/// The selector-derived relation count one group contributes.
+pub(crate) fn longitudinal_l2_group_relation_count_v1(
+    lifecycle: LongitudinalChangeLifecycleV1,
+) -> u64 {
+    match lifecycle {
+        // Every supersession edge of the frozen group shape.
+        LongitudinalChangeLifecycleV1::Divergent => 10,
+        // The three chain edges.
+        LongitudinalChangeLifecycleV1::Resolved => 3,
+    }
+}
+
+/// The selector-derived authority event count one group contributes: its
+/// declaration plus its memberships and relations.
+pub(crate) fn longitudinal_l2_group_event_count_v1(
+    lifecycle: LongitudinalChangeLifecycleV1,
+) -> u64 {
+    1 + longitudinal_l2_group_membership_count_v1(lifecycle)
+        + longitudinal_l2_group_relation_count_v1(lifecycle)
+}
+
+/// Derive the versioned V2 mixed-lifecycle Change authority for deterministic
+/// longitudinal Revision groups. Beside — never in place of — the frozen V1
+/// preparer: V1's 210-events-per-record output is receipt-pinned, so the mixed
+/// population is a new versioned surface with its own V2 receipt contract.
+pub(crate) fn prepare_longitudinal_l2_change_events_v2(
+    records: &[PreparedLongitudinalRecordV1],
+) -> Result<Vec<ShoreEvent>> {
+    let writer = Writer {
+        actor_id: ActorId::new("actor:agent:longitudinal-l2-materializer"),
+        producer: WriterProducer {
+            name: "pointbreak".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    };
+    let mut events = Vec::new();
+    let mut expected = 0_u64;
+    for record in records {
+        if record.spec.shape != LongitudinalRecordShapeV1::CapacityL100O10K {
+            return Err(ShoreError::Message(
+                "L2 capacity authority requires the frozen L100-O10K record shape".to_owned(),
+            ));
+        }
+        let mut groups = BTreeMap::<EngagementId, Vec<&RevisionFixtureV1>>::new();
+        for revision in &record.revisions {
+            groups
+                .entry(revision.engagement_id.clone())
+                .or_default()
+                .push(revision);
+        }
+        for (group_ordinal, revisions) in groups.values_mut().enumerate() {
+            revisions.sort_by(|left, right| left.revision_id.cmp(&right.revision_id));
+            let lifecycle = longitudinal_l2_group_lifecycle_v1(group_ordinal);
+            expected = expected
+                .checked_add(longitudinal_l2_group_event_count_v1(lifecycle))
+                .ok_or_else(|| {
+                    ShoreError::Message("L2 capacity event count overflowed".to_owned())
+                })?;
+            let root = revisions
+                .iter()
+                .find(|revision| revision.supersedes.is_empty())
+                .ok_or_else(|| {
+                    ShoreError::Message(
+                        "L2 capacity Change group omitted its root Revision".to_owned(),
+                    )
+                })?;
+
+            // Resolved groups keep only a four-member supersession chain,
+            // selected by supersession-graph order (the lexicographic sort
+            // above erases fixture local ordinals): from the root, repeatedly
+            // step to the lexicographically-smallest revision id among those
+            // superseding the current tip.
+            let selected: Vec<&RevisionFixtureV1> = match lifecycle {
+                LongitudinalChangeLifecycleV1::Divergent => revisions.clone(),
+                LongitudinalChangeLifecycleV1::Resolved => {
+                    let mut chain = vec![*root];
+                    while chain.len() < 4 {
+                        let tip = &chain.last().expect("chain tip").revision_id;
+                        let next = revisions
+                            .iter()
+                            .filter(|revision| revision.supersedes.contains(tip))
+                            .min_by(|left, right| left.revision_id.cmp(&right.revision_id))
+                            .ok_or_else(|| {
+                                ShoreError::Message(
+                                    "L2 capacity Resolved chain ended before four members"
+                                        .to_owned(),
+                                )
+                            })?;
+                        chain.push(next);
+                    }
+                    chain
+                }
+            };
+
+            let declaration = build_change_declared(
+                ChangeIdentityDescriptorV1::root_revision(root.revision_id.clone()),
+                longitudinal_l2_claim_nonce(record.spec, group_ordinal, "declaration", 0)?,
+            )?;
+            let change_id = declaration.change_id.clone();
+            events.push(longitudinal_l2_change_event(
+                &record.journal_id,
+                &writer,
+                declaration,
+            )?);
+
+            let revision_refs = selected
+                .iter()
+                .map(|revision| {
+                    Ok((
+                        revision.revision_id.clone(),
+                        RevisionRefV1::new(
+                            revision.revision_id.clone(),
+                            revision.object_content_hash.clone(),
+                        )?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            for (ordinal, revision_id) in revision_refs.keys().enumerate() {
+                let membership = build_membership_asserted(
+                    &change_id,
+                    revision_id,
+                    longitudinal_l2_claim_nonce(record.spec, group_ordinal, "membership", ordinal)?,
+                )?;
+                events.push(longitudinal_l2_change_event(
+                    &record.journal_id,
+                    &writer,
+                    membership,
+                )?);
+            }
+
+            // Relations stay within the selected member set: the divergent
+            // shape asserts every supersession edge (as V1 does); the resolved
+            // chain asserts exactly its three chain edges.
+            let relations = match lifecycle {
+                LongitudinalChangeLifecycleV1::Divergent => selected
+                    .iter()
+                    .flat_map(|revision| {
+                        revision
+                            .supersedes
+                            .iter()
+                            .cloned()
+                            .map(move |predecessor| (revision.revision_id.clone(), predecessor))
+                    })
+                    .collect::<BTreeSet<_>>(),
+                LongitudinalChangeLifecycleV1::Resolved => selected
+                    .windows(2)
+                    .map(|edge| (edge[1].revision_id.clone(), edge[0].revision_id.clone()))
+                    .collect::<BTreeSet<_>>(),
+            };
+            for (ordinal, (successor, predecessor)) in relations.into_iter().enumerate() {
+                let relation = build_revision_relation_asserted(
+                    &change_id,
+                    revision_refs
+                        .get(&successor)
+                        .ok_or_else(|| {
+                            ShoreError::Message(
+                                "L2 capacity relation omitted its successor Revision".to_owned(),
+                            )
+                        })?
+                        .clone(),
+                    revision_refs
+                        .get(&predecessor)
+                        .ok_or_else(|| {
+                            ShoreError::Message(
+                                "L2 capacity relation omitted its predecessor Revision".to_owned(),
+                            )
+                        })?
+                        .clone(),
+                    longitudinal_l2_claim_nonce(record.spec, group_ordinal, "relation", ordinal)?,
+                )?;
+                events.push(longitudinal_l2_change_event(
+                    &record.journal_id,
+                    &writer,
+                    relation,
+                )?);
+            }
+        }
+    }
+    events.sort_by(|left, right| left.idempotency_key.cmp(&right.idempotency_key));
+    if events.len() as u64 != expected {
+        return Err(ShoreError::Message(format!(
+            "L2 capacity mixed Change authority drifted: expected {expected}, got {}",
+            events.len()
+        )));
+    }
+    Ok(events)
+}
+
+/// Append the versioned V2 mixed-lifecycle Change authority for the base
+/// blocks already written into `repo`. Fully self-contained beside the V1
+/// writer: V2 needs no exact-resume arm, so the inner takes no resume flag
+/// and returns no preflight.
+pub(crate) fn write_generated_longitudinal_l2_change_events_v2(
+    repo: &Path,
+    block_count: u64,
+) -> Result<LongitudinalL2ChangeWriteReceiptV2> {
+    write_generated_longitudinal_l2_change_events_inner_v2(repo, block_count)
+}
+
+fn write_generated_longitudinal_l2_change_events_inner_v2(
+    repo: &Path,
+    block_count: u64,
+) -> Result<LongitudinalL2ChangeWriteReceiptV2> {
+    let write_store = resolve_write_store(repo)?;
+    let storage = LocalStorage::new(write_store.store_dir());
+    prepare_write_landing(&write_store, &storage)?;
+    let trust = longitudinal_trust_set()?;
+    let event_store = write_store.event_store()?;
+    let mut ingest = IngestBatchSession::begin(&event_store, write_store.worktree_root(), &trust)?;
+    let mut attempted = 0_u64;
+    let mut change_count = 0_u64;
+    let mut membership_count = 0_u64;
+    let mut relation_count = 0_u64;
+    let mut write_error = None;
+    for block in 0..block_count {
+        let record = match prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            block,
+        )) {
+            Ok(record) => record,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        let events = match prepare_longitudinal_l2_change_events_v2(std::slice::from_ref(&record)) {
+            Ok(events) => events,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        if events.iter().any(|event| {
+            !matches!(
+                event.event_type,
+                EventType::ChangeDeclared
+                    | EventType::ChangeMembershipAsserted
+                    | EventType::ChangeRevisionRelationAsserted
+            )
+        }) {
+            write_error = Some(ShoreError::Message(
+                "L2 capacity write included a non-Change authority event".to_owned(),
+            ));
+            break;
+        }
+        let (events, mut verification) = match prepare_events_for_ingest(
+            &events,
+            EventVerificationPolicy::advisory(),
+            &trust,
+            LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                write_error = Some(error);
+                break;
+            }
+        };
+        change_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeDeclared)
+            .count() as u64;
+        membership_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeMembershipAsserted)
+            .count() as u64;
+        relation_count += events
+            .iter()
+            .filter(|event| event.event_type == EventType::ChangeRevisionRelationAsserted)
+            .count() as u64;
+        attempted += events.len() as u64;
+        if let Err(error) = ingest.record_verified_events(&events, &mut verification) {
+            write_error = Some(error);
+            break;
+        }
+    }
+    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    if let Some(error) = write_error {
+        return Err(error);
+    }
+    let per_record: u64 = (0..LONGITUDINAL_L2_GROUPS_PER_RECORD_V1)
+        .map(|ordinal| {
+            longitudinal_l2_group_event_count_v1(longitudinal_l2_group_lifecycle_v1(ordinal))
+        })
+        .sum();
+    let expected = block_count
+        .checked_mul(per_record)
+        .ok_or_else(|| ShoreError::Message("L2 capacity event count overflowed".to_owned()))?;
+    if attempted != expected {
+        return Err(ShoreError::Message(format!(
+            "L2 capacity mixed Change authority drifted: expected {expected}, got {attempted}"
+        )));
+    }
+    Ok(LongitudinalL2ChangeWriteReceiptV2 {
+        events_created: completed.events_created as u64,
+        events_existing: completed.events_existing as u64,
+        final_event_count: completed.events.len() as u64,
+        change_count,
+        membership_count,
+        relation_count,
+    })
 }
 
 pub(crate) fn write_generated_longitudinal_l2_change_events_v1(
@@ -4016,6 +4374,226 @@ mod tests {
             100
         );
         assert_record_identity_is_unique(&events);
+    }
+
+    #[test]
+    fn longitudinal_l2_v2_superblock_mixes_resolved_and_divergent_changes() {
+        use crate::session::{ReviewSourceBindingV1, select_review_cursor};
+
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            0,
+        ))
+        .unwrap();
+        let events =
+            prepare_longitudinal_l2_change_events_v2(std::slice::from_ref(&record)).unwrap();
+
+        // Every expectation below derives from the lifecycle selector — never
+        // hand-patched counts.
+        let mut groups = BTreeMap::<EngagementId, Vec<&RevisionFixtureV1>>::new();
+        for revision in &record.revisions {
+            groups
+                .entry(revision.engagement_id.clone())
+                .or_default()
+                .push(revision);
+        }
+        let mut expected_events = 0_usize;
+        let mut expected_memberships = 0_usize;
+        let mut expected_relations = 0_usize;
+        let mut resolved_roots = Vec::new();
+        let mut divergent_roots = Vec::new();
+        let mut expected_chains = BTreeMap::new();
+        for (group_ordinal, revisions) in groups.values().enumerate() {
+            let root = revisions
+                .iter()
+                .find(|revision| revision.supersedes.is_empty())
+                .expect("group root");
+            match longitudinal_l2_group_lifecycle_v1(group_ordinal) {
+                LongitudinalChangeLifecycleV1::Resolved => {
+                    expected_events += 8;
+                    expected_memberships += 4;
+                    expected_relations += 3;
+                    resolved_roots.push(root.revision_id.clone());
+                    // Independent oracle for the supersession-graph chain walk:
+                    // from the root, step to the lexicographically-smallest
+                    // superseding revision, four members total.
+                    let mut chain = vec![root.revision_id.clone()];
+                    while chain.len() < 4 {
+                        let tip = chain.last().expect("chain tip");
+                        let next = revisions
+                            .iter()
+                            .filter(|revision| revision.supersedes.contains(tip))
+                            .map(|revision| revision.revision_id.clone())
+                            .min()
+                            .expect("chain successor");
+                        chain.push(next);
+                    }
+                    expected_chains.insert(root.revision_id.clone(), chain);
+                }
+                LongitudinalChangeLifecycleV1::Divergent => {
+                    expected_events += 21;
+                    expected_memberships += 10;
+                    expected_relations += 10;
+                    divergent_roots.push(root.revision_id.clone());
+                }
+            }
+        }
+        assert!(
+            !resolved_roots.is_empty() && !divergent_roots.is_empty(),
+            "both lifecycle classes appear in the mixed population"
+        );
+        assert_eq!(events.len(), expected_events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeDeclared)
+                .count(),
+            groups.len()
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeMembershipAsserted)
+                .count(),
+            expected_memberships
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == EventType::ChangeRevisionRelationAsserted)
+                .count(),
+            expected_relations
+        );
+        assert_record_identity_is_unique(&events);
+
+        // Authority-only folds mark memberships missing: fold the base record
+        // events (they carry the revision proposals) together with the V2
+        // authority events.
+        let mut folded = record.events.clone();
+        folded.extend(events.iter().cloned());
+        let semantic = crate::session::project_changes(&folded).unwrap();
+        let documents = crate::session::project_change_documents(&folded).unwrap();
+        assert_eq!(semantic.changes.len(), groups.len());
+
+        let change_id_for_root = |root: &RevisionId| {
+            crate::model::derive_change_id(&ChangeIdentityDescriptorV1::root_revision(root.clone()))
+                .expect("derive change id")
+        };
+        for root in &resolved_roots {
+            let view = &semantic.changes[&change_id_for_root(root)];
+            let chain = &expected_chains[root];
+            assert_eq!(
+                view.members,
+                chain.iter().cloned().collect::<BTreeSet<_>>(),
+                "a Resolved Change's members are exactly the chain walk"
+            );
+            assert_eq!(
+                view.current_revisions,
+                BTreeSet::from([chain.last().expect("chain tip").clone()]),
+                "a Resolved Change has exactly one current revision: the chain tip"
+            );
+
+            // Selectability proof through the real `change select` eligibility
+            // path: the cursor selects the chain tip's exact reference.
+            let selection = select_review_cursor(
+                view,
+                &documents,
+                None,
+                false,
+                ReviewSourceBindingV1::Captured,
+            )
+            .expect("a Resolved Change selects a review cursor");
+            assert_eq!(
+                &selection.cursor.revision.revision_id,
+                chain.last().expect("chain tip")
+            );
+            assert_eq!(
+                Some(&selection.cursor.revision),
+                documents
+                    .revision_refs
+                    .get(&selection.cursor.revision.revision_id)
+                    .and_then(|refs| refs.first()),
+                "the cursor carries the chain tip's exact reference"
+            );
+        }
+        for root in &divergent_roots {
+            let view = &semantic.changes[&change_id_for_root(root)];
+            assert_eq!(
+                view.current_revisions.len(),
+                2,
+                "a Divergent Change keeps its two current revisions"
+            );
+            select_review_cursor(
+                view,
+                &documents,
+                None,
+                false,
+                ReviewSourceBindingV1::Captured,
+            )
+            .expect_err("a Divergent Change refuses cursor selection");
+        }
+    }
+
+    #[test]
+    fn write_generated_longitudinal_l2_change_events_v2_appends_the_mixed_population() {
+        use crate::session::{ReviewSourceBindingV1, select_review_cursor};
+
+        let repo = initialized_repo();
+        crate::session::activate_empty_store_for_qualification(
+            repo.path(),
+            "longitudinal-l100-o10k-l2-mixed-v2".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &crate::crypto::TestEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+        let base = write_generated_longitudinal_records_v1(
+            repo.path(),
+            LongitudinalRecordShapeV1::CapacityL100O10K,
+            1,
+        )
+        .unwrap();
+        assert_eq!((base.events_created, base.events_existing), (1_024, 0));
+
+        let write = write_generated_longitudinal_l2_change_events_v2(repo.path(), 1).unwrap();
+        let expected_authority: u64 = (0..10)
+            .map(|ordinal| {
+                longitudinal_l2_group_event_count_v1(longitudinal_l2_group_lifecycle_v1(ordinal))
+            })
+            .sum();
+        assert_eq!(
+            (write.events_created, write.events_existing),
+            (expected_authority, 0)
+        );
+        assert_eq!(write.final_event_count, 1_024 + expected_authority);
+        assert_eq!(write.change_count, 10);
+        assert_eq!(
+            write.membership_count + write.relation_count + write.change_count,
+            expected_authority
+        );
+
+        // Fold the full store and prove one Resolved group is present and
+        // selectable with a single current reference.
+        let events = crate::session::read_events(repo.path()).unwrap();
+        let semantic = crate::session::project_changes(&events).unwrap();
+        let documents = crate::session::project_change_documents(&events).unwrap();
+        let resolved = semantic
+            .changes
+            .values()
+            .find(|view| view.current_revisions.len() == 1)
+            .expect("a Resolved Change is present in the mixed population");
+        let selection = select_review_cursor(
+            resolved,
+            &documents,
+            None,
+            false,
+            ReviewSourceBindingV1::Captured,
+        )
+        .expect("the Resolved Change selects a review cursor");
+        assert_eq!(
+            &selection.cursor.revision.revision_id,
+            resolved.current_revisions.iter().next().expect("current"),
+        );
     }
 
     #[test]

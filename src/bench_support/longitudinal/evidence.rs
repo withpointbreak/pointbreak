@@ -44,9 +44,12 @@ use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::keys::FileEd25519Signer;
 use crate::model::ObjectId;
 use crate::session::benchmark::{
-    append_longitudinal_contention_writer_v1, append_longitudinal_event_slice_v1,
+    LONGITUDINAL_L2_GROUPS_PER_RECORD_V1, append_longitudinal_contention_writer_v1,
+    append_longitudinal_event_slice_v1, longitudinal_l2_group_lifecycle_v1,
+    longitudinal_l2_group_membership_count_v1, longitudinal_l2_group_relation_count_v1,
     read_longitudinal_carrier_by_key_v1, resume_longitudinal_l2_capacity_stages_v1,
     stage_longitudinal_append_records_v1, write_generated_longitudinal_l2_change_events_v1,
+    write_generated_longitudinal_l2_change_events_v2,
 };
 use crate::session::{
     AuthorityCursorV2, SessionState, StoreCapabilityStatus, StoreMode,
@@ -72,6 +75,8 @@ pub const LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_FILE_V1: &str =
 const LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_FILE_V1: &str = "package-receipt.json";
 pub const LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-l2-capacity-materialization-receipt.v1";
+pub const LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V2: &str =
+    "pointbreak.longitudinal-l2-capacity-materialization-receipt.v2";
 
 const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 4] = [
     "POINTBREAK_QUALIFICATION_CORPUS",
@@ -229,6 +234,140 @@ impl LongitudinalL2CapacityMaterializationReceiptV1 {
 pub struct LongitudinalL2CapacityMaterializationArtifactsV1 {
     pub source_materialization: LongitudinalCapacityMaterializationReceiptV1,
     pub l2_materialization: LongitudinalL2CapacityMaterializationReceiptV1,
+}
+
+/// Frozen base workload events per L100-O10K record (the constant the V1
+/// pins encode as 102,400 events for 100 records).
+const LONGITUDINAL_L2_BASE_EVENTS_PER_RECORD: u64 = 1_024;
+
+/// The selector-derived V2 Change authority counts for `record_count`
+/// records: `(change_count, membership_count, relation_count)`. Derived from
+/// `longitudinal_l2_group_lifecycle_v1` — the single source of the mixed
+/// population's proportions — never hand-patched.
+fn expected_v2_change_counts(record_count: u64) -> Option<(u64, u64, u64)> {
+    let mut change = 0_u64;
+    let mut membership = 0_u64;
+    let mut relation = 0_u64;
+    for ordinal in 0..LONGITUDINAL_L2_GROUPS_PER_RECORD_V1 {
+        let lifecycle = longitudinal_l2_group_lifecycle_v1(ordinal);
+        change = change.checked_add(1)?;
+        membership =
+            membership.checked_add(longitudinal_l2_group_membership_count_v1(lifecycle))?;
+        relation = relation.checked_add(longitudinal_l2_group_relation_count_v1(lifecycle))?;
+    }
+    Some((
+        change.checked_mul(record_count)?,
+        membership.checked_mul(record_count)?,
+        relation.checked_mul(record_count)?,
+    ))
+}
+
+/// The V2 mixed-lifecycle successor receipt. Identical in shape to the V1
+/// receipt plus a serialized `record_count`; validation is count-aware —
+/// every expected count derives from the serialized `record_count` via the
+/// lifecycle selector, where the V1 receipt hardcodes the frozen V1 numbers
+/// and rejects V2 shapes.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalL2CapacityMaterializationReceiptV2 {
+    pub schema: String,
+    pub profile: LongitudinalCapacityProfileV1,
+    pub record_count: u64,
+    pub root_identity: String,
+    pub source_manifest_sha256: String,
+    pub source_materialization_sha256: String,
+    pub base_authority_cursor: AuthorityCursorV2,
+    pub final_authority_cursor: AuthorityCursorV2,
+    pub minimum_reader_profile: String,
+    pub activation_id: String,
+    pub capability_manifest_hash: String,
+    pub completion_id: String,
+    pub change_count: u64,
+    pub membership_count: u64,
+    pub relation_count: u64,
+    pub change_authority_event_count: u64,
+    pub final_inventory: LongitudinalStoreDataInventoryV1,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalL2CapacityMaterializationReceiptV2 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalEvidenceError> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        canonical_sha256(&preimage)
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalEvidenceError> {
+        let (expected_change, expected_membership, expected_relation) =
+            expected_v2_change_counts(self.record_count)
+                .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        let expected_change_authority = expected_change
+            .checked_add(expected_membership)
+            .and_then(|count| count.checked_add(expected_relation))
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        let expected_base_events = self
+            .record_count
+            .checked_mul(LONGITUDINAL_L2_BASE_EVENTS_PER_RECORD)
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        let expected_base_records = expected_base_events
+            .checked_add(2)
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        let expected_final_events = expected_base_events
+            .checked_add(expected_change_authority)
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        let expected_final_records = expected_base_records
+            .checked_add(expected_change_authority)
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+        if self.schema != LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V2
+            || self.profile != LongitudinalCapacityProfileV1::L100O10K
+            || self.record_count == 0
+            || self.base_authority_cursor.event_count != expected_base_events
+            || self.base_authority_cursor.journal_record_count != expected_base_records
+            || self.change_count != expected_change
+            || self.membership_count != expected_membership
+            || self.relation_count != expected_relation
+            || self.change_authority_event_count != expected_change_authority
+            || self.final_authority_cursor.event_count != expected_final_events
+            || self.final_authority_cursor.journal_record_count != expected_final_records
+            || self.base_authority_cursor.capability_set_hash
+                != self.final_authority_cursor.capability_set_hash
+            || self.minimum_reader_profile != "review_change_revision_v1"
+            || !is_unprefixed_sha256(&self.root_identity)
+            || !is_unprefixed_sha256(&self.source_manifest_sha256)
+            || !is_unprefixed_sha256(&self.source_materialization_sha256)
+            || !valid_authority_cursor(&self.base_authority_cursor)
+            || !valid_authority_cursor(&self.final_authority_cursor)
+            || !valid_identity_hash(&self.activation_id, "capability-activation:sha256:")
+            || !valid_identity_hash(&self.capability_manifest_hash, "sha256:")
+            || !valid_identity_hash(&self.completion_id, "bulk-adoption-completion:sha256:")
+            || self.final_inventory.validate().is_err()
+            || !is_unprefixed_sha256(&self.receipt_sha256)
+            || self.receipt_sha256 != self.canonical_sha256()?
+        {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+        Ok(())
+    }
+}
+
+/// The V2 artifacts pair: the base workload stays the frozen V1 workload, so
+/// the source receipt keeps the V1 type; the L2 receipt is the count-aware V2
+/// type.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalL2CapacityMaterializationArtifactsV2 {
+    pub source_materialization: LongitudinalCapacityMaterializationReceiptV1,
+    pub l2_materialization: LongitudinalL2CapacityMaterializationReceiptV2,
+}
+
+/// What the injected V2 source step hands back to the materializer inner:
+/// the base workload's expected authority counts plus the source receipt
+/// value. The inner never re-validates the receipt — source validation
+/// belongs to the source step itself.
+pub struct LongitudinalSourceBaseV2 {
+    pub base_event_count: u64,
+    pub base_journal_record_count: u64,
+    pub source_materialization: LongitudinalCapacityMaterializationReceiptV1,
 }
 
 fn is_unprefixed_sha256(value: &str) -> bool {
@@ -817,6 +956,153 @@ pub fn materialize_longitudinal_l2_capacity_evidence_root_v1(
     l2_materialization.validate()?;
     Ok(LongitudinalL2CapacityMaterializationArtifactsV1 {
         source_materialization,
+        l2_materialization,
+    })
+}
+
+/// Initialize an empty current-capability store, materialize the frozen
+/// L100-O10K source workload unchanged, then append the versioned V2
+/// mixed-lifecycle Change authority for its Revision groups.
+///
+/// A distinct successor fixture beside — never in place of — the V1 route:
+/// the V1 materializer chain and its receipt pins stay byte-untouched.
+pub fn materialize_longitudinal_l2_capacity_evidence_root_v2(
+    options: LongitudinalCapacityEvidenceMaterializeOptionsV1,
+) -> Result<LongitudinalL2CapacityMaterializationArtifactsV2, LongitudinalEvidenceError> {
+    if options.subject
+        != LongitudinalCapacitySubjectV1::Companion(LongitudinalCapacityProfileV1::L100O10K)
+        || options.c524_gate.is_some()
+        || options.c524_gate_inputs.is_some()
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    validate_materialization_boundary(
+        &options.root,
+        &options.source_root,
+        &options.runner,
+        &options.execution,
+    )?;
+    let execution = options.execution.clone();
+    materialize_longitudinal_l2_capacity_evidence_root_v2_inner(options, 100, move |root| {
+        let source_materialization = materialize_longitudinal_capacity_v1(
+            super::LongitudinalCapacityMaterializeOptionsV1::new(
+                root,
+                LongitudinalCapacityProfileV1::L100O10K,
+                execution,
+            ),
+        )
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+        Ok(LongitudinalSourceBaseV2 {
+            base_event_count: 102_400,
+            base_journal_record_count: 102_402,
+            source_materialization,
+        })
+    })
+}
+
+/// The injected-source V2 materializer chain. The base source
+/// materialization is hardcoded L100 in the public wrapper (the underlying
+/// builder rejects other counts), so the source step arrives as a closure
+/// and the inner never re-validates the injected source receipt.
+fn materialize_longitudinal_l2_capacity_evidence_root_v2_inner(
+    options: LongitudinalCapacityEvidenceMaterializeOptionsV1,
+    record_count: u64,
+    source: impl FnOnce(&Path) -> Result<LongitudinalSourceBaseV2, LongitudinalEvidenceError>,
+) -> Result<LongitudinalL2CapacityMaterializationArtifactsV2, LongitudinalEvidenceError> {
+    initialize_evidence_root(&options.root)?;
+    let activation = activate_empty_store_for_qualification(
+        &options.root,
+        "longitudinal-l100-o10k-l2-mixed-v2".to_owned(),
+        "2026-08-22T00:00:00Z".to_owned(),
+        "2026-08-22T00:00:01Z".to_owned(),
+        &FileEd25519Signer::from_seed([0x62; 32]),
+    )
+    .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let (activation_id, capability_manifest_hash, completion_id) = match &activation.status {
+        StoreCapabilityStatus::Ready {
+            activation_id,
+            manifest_hash,
+            completion_id,
+        } => (
+            activation_id.clone(),
+            manifest_hash.clone(),
+            completion_id.clone(),
+        ),
+        _ => return Err(LongitudinalEvidenceError::InvalidReceipt),
+    };
+    let minimum_reader_profile = activation
+        .minimum_reader_profile
+        .clone()
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+    let expected_status = StoreCapabilityStatus::Ready {
+        activation_id: activation_id.clone(),
+        manifest_hash: capability_manifest_hash.clone(),
+        completion_id: completion_id.clone(),
+    };
+    let source_base = source(&options.root)?;
+    let base_authority = crate::session::store_capability_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if base_authority.status != expected_status
+        || base_authority.minimum_reader_profile.as_deref() != Some(minimum_reader_profile.as_str())
+        || base_authority.cursor.event_count != source_base.base_event_count
+        || base_authority.cursor.journal_record_count != source_base.base_journal_record_count
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let write = write_generated_longitudinal_l2_change_events_v2(&options.root, record_count)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let change_count = write.change_count;
+    let membership_count = write.membership_count;
+    let relation_count = write.relation_count;
+    let change_authority_event_count = change_count
+        .checked_add(membership_count)
+        .and_then(|count| count.checked_add(relation_count))
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+    if write.events_created != change_authority_event_count || write.events_existing != 0 {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let final_authority = crate::session::store_capability_for_repo(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if final_authority.status != expected_status
+        || final_authority.minimum_reader_profile.as_deref()
+            != Some(minimum_reader_profile.as_str())
+        || write.final_event_count != final_authority.cursor.event_count
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let final_inventory = longitudinal_authoritative_store_data_inventory_v1(&options.root)
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let mut l2_materialization = LongitudinalL2CapacityMaterializationReceiptV2 {
+        schema: LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V2.to_owned(),
+        profile: LongitudinalCapacityProfileV1::L100O10K,
+        record_count,
+        root_identity: source_base.source_materialization.root_identity.clone(),
+        source_manifest_sha256: source_base
+            .source_materialization
+            .manifest
+            .manifest_sha256
+            .clone(),
+        source_materialization_sha256: source_base
+            .source_materialization
+            .materialization_sha256
+            .clone(),
+        base_authority_cursor: base_authority.cursor,
+        final_authority_cursor: final_authority.cursor,
+        minimum_reader_profile,
+        activation_id,
+        capability_manifest_hash,
+        completion_id,
+        change_count,
+        membership_count,
+        relation_count,
+        change_authority_event_count,
+        final_inventory,
+        receipt_sha256: String::new(),
+    };
+    l2_materialization.receipt_sha256 = l2_materialization.canonical_sha256()?;
+    l2_materialization.validate()?;
+    Ok(LongitudinalL2CapacityMaterializationArtifactsV2 {
+        source_materialization: source_base.source_materialization,
         l2_materialization,
     })
 }
@@ -3060,8 +3346,10 @@ fn io_error(error: impl std::fmt::Display) -> LongitudinalEvidenceError {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1, LongitudinalCapacitySelectorsV1,
-        LongitudinalContractError, LongitudinalPackagePurposeV1, LongitudinalRawFileV1,
+        LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1,
+        LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1, LongitudinalCapacityManifestV1,
+        LongitudinalCapacitySelectorsV1, LongitudinalCapacitySubjectV1, LongitudinalContractError,
+        LongitudinalPackagePurposeV1, LongitudinalRawFileV1, LongitudinalStrictSemanticReceiptV1,
     };
     use super::*;
     use crate::bench_support::EventType;
@@ -3120,6 +3408,198 @@ mod tests {
         };
         receipt.receipt_sha256 = receipt.canonical_sha256().unwrap();
         receipt
+    }
+
+    fn l2_capacity_receipt_v2(record_count: u64) -> LongitudinalL2CapacityMaterializationReceiptV2 {
+        let (change, membership, relation) = expected_v2_change_counts(record_count).unwrap();
+        let authority = change + membership + relation;
+        let base_events = record_count * LONGITUDINAL_L2_BASE_EVENTS_PER_RECORD;
+        let base_records = base_events + 2;
+        let mut receipt = LongitudinalL2CapacityMaterializationReceiptV2 {
+            schema: LONGITUDINAL_L2_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V2.to_owned(),
+            profile: LongitudinalCapacityProfileV1::L100O10K,
+            record_count,
+            root_identity: sha256_bytes_hex(b"l2-mixed-root"),
+            source_manifest_sha256: sha256_bytes_hex(b"mixed-source-manifest"),
+            source_materialization_sha256: sha256_bytes_hex(b"mixed-source-materialization"),
+            base_authority_cursor: l2_cursor(base_events, base_records, "mixed-base"),
+            final_authority_cursor: l2_cursor(
+                base_events + authority,
+                base_records + authority,
+                "mixed-final",
+            ),
+            minimum_reader_profile: "review_change_revision_v1".to_owned(),
+            activation_id: format!(
+                "capability-activation:sha256:{}",
+                sha256_bytes_hex(b"mixed-activation")
+            ),
+            capability_manifest_hash: format!("sha256:{}", sha256_bytes_hex(b"mixed-manifest")),
+            completion_id: format!(
+                "bulk-adoption-completion:sha256:{}",
+                sha256_bytes_hex(b"mixed-completion")
+            ),
+            change_count: change,
+            membership_count: membership,
+            relation_count: relation,
+            change_authority_event_count: authority,
+            final_inventory: LongitudinalStoreDataInventoryV1 {
+                file_count: 1_000,
+                byte_count: 1_000_000,
+                inventory_sha256: sha256_bytes_hex(b"mixed-final-inventory"),
+            },
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().unwrap();
+        receipt
+    }
+
+    #[test]
+    fn v2_materialization_receipt_contract_validates_the_selector_derived_counts() {
+        let l100 = l2_capacity_receipt_v2(100);
+        assert_eq!(
+            (
+                l100.change_authority_event_count,
+                l100.final_authority_cursor.event_count,
+            ),
+            (15_800, 118_200),
+            "the selector derives the L100 mixed-population counts"
+        );
+        l100.validate().unwrap();
+
+        let single = l2_capacity_receipt_v2(1);
+        assert_eq!(
+            (
+                single.change_authority_event_count,
+                single.final_authority_cursor.event_count,
+            ),
+            (158, 1_182),
+            "the selector derives the single-record mixed-population counts"
+        );
+        single.validate().unwrap();
+
+        // The V1 numbers are rejected under either record count.
+        let mut v1_shaped = l2_capacity_receipt_v2(100);
+        v1_shaped.change_count = 1_000;
+        v1_shaped.membership_count = 10_000;
+        v1_shaped.relation_count = 10_000;
+        v1_shaped.change_authority_event_count = 21_000;
+        v1_shaped.receipt_sha256 = v1_shaped.canonical_sha256().unwrap();
+        v1_shaped.validate().unwrap_err();
+
+        let mut v1_single = l2_capacity_receipt_v2(1);
+        v1_single.membership_count = 100;
+        v1_single.relation_count = 100;
+        v1_single.change_authority_event_count = 210;
+        v1_single.receipt_sha256 = v1_single.canonical_sha256().unwrap();
+        v1_single.validate().unwrap_err();
+    }
+
+    #[test]
+    fn v2_materializer_route_wires_the_v2_label_writer_receipt_and_artifacts() {
+        use crate::session::benchmark::{
+            LongitudinalRecordShapeV1, write_generated_longitudinal_records_v1,
+        };
+
+        let synthetic_source_receipt = || LongitudinalCapacityMaterializationReceiptV1 {
+            schema: LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
+            root_identity: sha256_bytes_hex(b"mixed-wiring-root"),
+            manifest: LongitudinalCapacityManifestV1 {
+                schema: "synthetic".to_owned(),
+                contract_sha256: sha256_bytes_hex(b"contract"),
+                execution: smoke_execution_identity(),
+                public_seed_hex: sha256_bytes_hex(b"seed"),
+                subject: LongitudinalCapacitySubjectV1::Companion(
+                    LongitudinalCapacityProfileV1::L100O10K,
+                ),
+                event_count: 1_024,
+                revision_count: 100,
+                object_artifact_count: 100,
+                task_attempt_count: 0,
+                body_fact_count: 0,
+                external_body_count: 0,
+                decoded_body_bytes: 0,
+                decoded_object_target_bytes: 0,
+                ordered_events: Vec::new(),
+                event_carriers: Vec::new(),
+                content_inventory: Vec::new(),
+                removed_content_sha256: Vec::new(),
+                selectors: LongitudinalCapacitySelectorsV1 {
+                    carrier_hit_key: String::new(),
+                    carrier_hit_event_id: String::new(),
+                    carrier_miss_key: String::new(),
+                    semantic_revision_id: String::new(),
+                    semantic_object_id: String::new(),
+                    semantic_missing_revision_id: String::new(),
+                    semantic_missing_object_id: String::new(),
+                    object_detail_object_id: String::new(),
+                    object_detail_content_hash: String::new(),
+                    chronological_window_size: 0,
+                    chronological_head_start: 0,
+                    chronological_middle_start: 0,
+                    chronological_tail_start: 0,
+                    selectors_sha256: sha256_bytes_hex(b"selectors"),
+                },
+                probe_schedule: Vec::new(),
+                schedule_sha256: sha256_bytes_hex(b"schedule"),
+                manifest_sha256: sha256_bytes_hex(b"manifest"),
+            },
+            strict: LongitudinalStrictSemanticReceiptV1 {
+                event_set_sha256: sha256_bytes_hex(b"events"),
+                ordered_journal_sha256: sha256_bytes_hex(b"journal"),
+                state_sha256: sha256_bytes_hex(b"state"),
+                projection_sha256: sha256_bytes_hex(b"projection"),
+                content_inventory_sha256: sha256_bytes_hex(b"content"),
+            },
+            materialization_sha256: sha256_bytes_hex(b"materialization"),
+        };
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("mixed-v2-root");
+        let options = LongitudinalCapacityEvidenceMaterializeOptionsV1::new(
+            &root,
+            parent.path(),
+            parent.path(),
+            LongitudinalCapacitySubjectV1::Companion(LongitudinalCapacityProfileV1::L100O10K),
+            smoke_execution_identity(),
+        );
+        // Focused non-L100 wiring proof: the fixed L100 base materializer is
+        // never invoked; the injected step builds a 1-block base through the
+        // count-aware base writer and supplies the source receipt value
+        // without invoking V1 source validation (it rejects non-L100 counts).
+        let artifacts =
+            materialize_longitudinal_l2_capacity_evidence_root_v2_inner(options, 1, |repo| {
+                let base = write_generated_longitudinal_records_v1(
+                    repo,
+                    LongitudinalRecordShapeV1::CapacityL100O10K,
+                    1,
+                )
+                .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+                assert_eq!((base.events_created, base.events_existing), (1_024, 0));
+                Ok(LongitudinalSourceBaseV2 {
+                    base_event_count: 1_024,
+                    base_journal_record_count: 1_026,
+                    source_materialization: synthetic_source_receipt(),
+                })
+            })
+            .unwrap();
+
+        // The store activation label is exactly the pinned V2 label.
+        let expected_status = expected_empty_store_qualification_status(
+            "longitudinal-l100-o10k-l2-mixed-v2".to_owned(),
+            "2026-08-22T00:00:00Z".to_owned(),
+            "2026-08-22T00:00:01Z".to_owned(),
+            &FileEd25519Signer::from_seed([0x62; 32]),
+        )
+        .unwrap();
+        let authority = crate::session::store_capability_for_repo(&root).unwrap();
+        assert_eq!(authority.status, expected_status);
+
+        let receipt = &artifacts.l2_materialization;
+        assert_eq!(receipt.record_count, 1);
+        assert_eq!(receipt.change_authority_event_count, 158);
+        assert_eq!(receipt.final_authority_cursor.event_count, 1_182);
+        receipt.validate().unwrap();
+        assert_eq!(artifacts.source_materialization, synthetic_source_receipt());
     }
 
     #[test]
