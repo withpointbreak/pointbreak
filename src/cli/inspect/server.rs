@@ -2236,6 +2236,11 @@ mod tests {
             "pub(super) fn derived_change_detail_v2_json(",
             "pub(super) fn change_revision_v2_json(",
         );
+        let revision = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_change_revision_v2_json(",
+            "pub(super) fn change_interdiff_v2_json(",
+        );
         let interdiff = source_between(
             API_SOURCE,
             "pub(super) fn derived_change_interdiff_v2_json(",
@@ -2243,6 +2248,18 @@ mod tests {
         );
 
         assert!(detail.contains("review_generation_detail_document"));
+        for required in [
+            "review_generation",
+            "exact_ref_from_projections",
+            "exact_revision_session",
+            "exact_read_from_shown",
+            "contextual_exact_read_from_derived",
+        ] {
+            assert!(
+                revision.contains(required),
+                "exact Revision producer must reference `{required}`"
+            );
+        }
         assert!(interdiff.contains("exact_ref_from_projections"));
         assert!(interdiff.contains("build_interdiff_from_projections"));
         for (name, producer) in [("detail", detail), ("interdiff", interdiff)] {
@@ -2252,6 +2269,17 @@ mod tests {
                     "{name} must not reference frozen helper `{forbidden}`"
                 );
             }
+        }
+        for forbidden in [
+            "build_exact_read",
+            "build_contextual_exact_read",
+            "ChangeReaderCache",
+            "StrictChangeStampBinder",
+        ] {
+            assert!(
+                !revision.contains(forbidden),
+                "exact Revision producer must not reference `{forbidden}`"
+            );
         }
     }
 
@@ -2618,16 +2646,18 @@ mod tests {
             );
             exact_responses.push((path.as_str(), response.status, response.body));
         }
-        let [detail, interdiff] = exact_responses.as_slice() else {
-            panic!("the posture comparison requires detail and interdiff responses");
+        let [detail, revision, resource, interdiff] = exact_responses.as_slice() else {
+            panic!("the posture comparison requires all four exact-route responses");
         };
-        assert_eq!(
-            (detail.1, detail.2.as_slice()),
-            (interdiff.1, interdiff.2.as_slice()),
-            "{} and {} must follow the same refusal posture",
-            detail.0,
-            interdiff.0
-        );
+        for response in [revision, resource, interdiff] {
+            assert_eq!(
+                (detail.1, detail.2.as_slice()),
+                (response.1, response.2.as_slice()),
+                "{} and {} must follow the same refusal posture",
+                detail.0,
+                response.0
+            );
+        }
     }
 
     #[test]
@@ -2980,6 +3010,8 @@ mod tests {
         }
     }
 
+    /// Post-Green verification that every derived-gated exact route shares the
+    /// same fail-closed response while the active runtime has no current generation.
     #[test]
     fn active_but_unready_exact_reads_follow_the_owner_posture() {
         let fixture = exact_change_fixture(false);
@@ -2987,6 +3019,20 @@ mod tests {
             &fixture,
             &[
                 (format!("/api/v2/changes/{}", fixture.change_id), None),
+                (
+                    format!(
+                        "/api/v2/changes/{}/revisions/{}",
+                        fixture.change_id, fixture.revision_id
+                    ),
+                    Some(format!("artifactHash={}", fixture.artifact_hash)),
+                ),
+                (
+                    format!(
+                        "/api/v2/changes/{}/revisions/{}/resource",
+                        fixture.change_id, fixture.revision_id
+                    ),
+                    Some(format!("artifactHash={}", fixture.artifact_hash)),
+                ),
                 (
                     format!(
                         "/api/v2/changes/{}/interdiff/{}/{}",
@@ -2998,6 +3044,43 @@ mod tests {
                     )),
                 ),
             ],
+        );
+    }
+
+    /// Post-Green in-process verification that the Inspector exact producer
+    /// enters bounded revision-detail selection and never the removal-audit phase.
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn derived_exact_revision_producer_skips_audit_hydration() {
+        use pointbreak::bench_support::longitudinal::{
+            LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1 as Phase,
+        };
+
+        let fixture = exact_change_fixture(true);
+        let scope = LongitudinalCountingScopeV1::new("b".repeat(64)).expect("counting scope");
+        let _guard = scope.enter();
+        let (outcome, _) = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            false,
+        ))
+        .expect("derived exact Revision response");
+        assert_eq!(outcome, "ok");
+
+        let phases = scope.snapshot().derived_access_phases;
+        assert!(
+            phases
+                .iter()
+                .any(|sample| sample.phase == Phase::RevisionDetailSqlSelection),
+            "the exact producer must enter revision-detail SQL selection: {phases:#?}"
+        );
+        assert!(
+            phases.iter().all(|sample| {
+                sample.phase != Phase::RevisionDetailAuditCarrierHydrationValidation
+            }),
+            "the exact producer must never enter removal-audit hydration: {phases:#?}"
         );
     }
 

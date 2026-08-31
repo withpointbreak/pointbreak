@@ -3721,6 +3721,52 @@ mod counted {
         }
     }
 
+    /// Post-Green counted-HTTP verification that each derived exact route
+    /// decodes only carriers selected for the Change seek and revision components.
+    #[test]
+    fn exact_inspector_derived_revision_routes_stay_component_bounded() {
+        let fixture = exact_read_fixture();
+        fixture.build_derived();
+        let inspector = Inspector::spawn_current(fixture.repo.path());
+        let revision_path = format!(
+            "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+            urlencode(&fixture.accepted_change_id),
+            urlencode(&fixture.accepted_revision_id),
+            urlencode(&fixture.accepted_artifact_hash)
+        );
+        let resource_path = format!(
+            "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+            urlencode(&fixture.accepted_change_id),
+            urlencode(&fixture.accepted_revision_id),
+            urlencode(&fixture.accepted_artifact_hash)
+        );
+
+        for (ordinal, (label, path)) in [
+            ("revision", revision_path.as_str()),
+            ("resource", resource_path.as_str()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_, receipt) = counted_http_get(&inspector, path, 120 + ordinal as u64);
+            let counters = &receipt.counters;
+            assert_eq!(
+                counters.strict_journal_inspections, 0,
+                "{label}: no strict Journal inspection"
+            );
+            assert!(
+                counters.event_decodes > 0,
+                "{label}: selected exact-read carriers are decoded"
+            );
+            assert!(
+                counters.event_decodes
+                    <= counters.change_seek_fact_rows_selected + counters.fact_sqlite_rows_selected,
+                "{label}: carrier decodes stay bounded by selected Change and component rows; \
+                 counters={counters:#?}"
+            );
+        }
+    }
+
     /// The derived profile answers from the pinned checkpoint plus the two
     /// capability carriers: no event decode, no proposal or support carrier
     /// open, even with unrelated history present.

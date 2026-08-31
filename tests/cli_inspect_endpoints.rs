@@ -116,6 +116,16 @@ fn canonical_json(value: &Value) -> String {
     serde_json::to_string(value).expect("serialize canonical JSON")
 }
 
+fn exact_selection_error_bytes(message: &str) -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-change-selection-error",
+        "version": 1,
+        "code": "invalid_exact_selection",
+        "message": message,
+    })
+    .to_string()
+}
+
 struct ExactRevisionFloorFixture {
     repo: GitRepo,
     change_id: String,
@@ -1176,6 +1186,132 @@ fn derived_exact_revision_composes_applicable_fact_ports() {
         Some(1),
         "the applicable port must remain in the graph: {graph}"
     );
+}
+
+/// Post-Green verification that derived exact dispatch preserves the frozen
+/// selector-refusal bytes and leaves malformed route/query rejection pre-store.
+#[test]
+fn derived_exact_route_refusals_match_the_frozen_selection_bytes() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = change["currentRevisionRefs"]
+        .as_array()
+        .expect("current Revision refs")
+        .iter()
+        .find(|reference| reference["revisionId"].as_str() == Some(store.revision_id.as_str()))
+        .expect("representative exact Revision");
+    let revision_id = exact["revisionId"].as_str().expect("Revision identity");
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+    let missing_change = format!("change:sha256:{}", "f".repeat(64));
+    let nonmember_revision = format!("rev:sha256:{}", "e".repeat(64));
+    let mismatched_hash = format!("sha256:{}", "d".repeat(64));
+
+    for (label, selected_change, selected_revision, selected_hash, expected_message) in [
+        (
+            "unknown Change",
+            missing_change.as_str(),
+            revision_id,
+            artifact_hash,
+            format!("Change {missing_change} is unavailable"),
+        ),
+        (
+            "nonmember Revision",
+            change_id,
+            nonmember_revision.as_str(),
+            artifact_hash,
+            "exact Revision is not an active member of the Change".to_owned(),
+        ),
+        (
+            "malformed artifact hash",
+            change_id,
+            revision_id,
+            "not-an-artifact-hash",
+            "RevisionRefV1 requires a lowercase sha256 object artifact hash".to_owned(),
+        ),
+        (
+            "mismatched artifact hash",
+            change_id,
+            revision_id,
+            mismatched_hash.as_str(),
+            "exact Revision/hash selector does not match authoritative state".to_owned(),
+        ),
+    ] {
+        for route in ["revision", "resource"] {
+            let suffix = if route == "resource" { "/resource" } else { "" };
+            let path = format!(
+                "/api/v2/changes/{}/revisions/{}{}?artifactHash={}",
+                urlencode(selected_change),
+                urlencode(selected_revision),
+                suffix,
+                urlencode(selected_hash)
+            );
+            let (status, body) = inspector.raw_get(&path);
+            assert!(
+                status.contains("400 Bad Request"),
+                "{route} {label}: {status}"
+            );
+            assert_eq!(
+                body,
+                exact_selection_error_bytes(&expected_message),
+                "{route} {label}: selection-refusal bytes"
+            );
+        }
+    }
+
+    let unready_repo = GitRepo::new();
+    let unready = Inspector::spawn_current_unready(unready_repo.path());
+    let placeholder_change = format!("change:sha256:{}", "1".repeat(64));
+    let placeholder_revision = format!("rev:sha256:{}", "2".repeat(64));
+    for (path, expected_message) in [
+        (
+            format!(
+                "/api/v2/changes/{}/revisions/{}",
+                urlencode(&placeholder_change),
+                urlencode(&placeholder_revision)
+            ),
+            "missing artifactHash".to_owned(),
+        ),
+        (
+            format!(
+                "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}&artifactHash={}",
+                urlencode(&placeholder_change),
+                urlencode(&placeholder_revision),
+                urlencode(artifact_hash),
+                urlencode(artifact_hash)
+            ),
+            "duplicate exact selector query member: artifactHash".to_owned(),
+        ),
+        (
+            "/api/v2/changes/%ZZ".to_owned(),
+            "invalid Change route identity".to_owned(),
+        ),
+    ] {
+        let (status, body) = unready.raw_get(&path);
+        assert!(status.contains("400 Bad Request"), "{path}: {status}");
+        assert_eq!(
+            body,
+            exact_selection_error_bytes(&expected_message),
+            "{path}"
+        );
+    }
 }
 
 #[test]
