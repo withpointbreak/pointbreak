@@ -292,7 +292,8 @@ pub use review_cursor::{
     CommitProofStateV1, CommitSourceStateV1, REVIEW_CURSOR_SCHEMA_V1, ReviewCursorRefusalV1,
     ReviewCursorSelectionV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceFingerprintV1,
     ReviewSourcePathStateV1, ReviewSourceRequestV1, WorktreeSourceStateV1, change_graph_token,
-    review_source_binding, select_review_cursor, validate_review_cursor_for_write,
+    review_source_binding, review_source_binding_from_shown, select_review_cursor,
+    validate_review_cursor_for_write,
 };
 pub(crate) use review_cursor::{
     exact_revision_from_review_cursor, exact_revision_from_transition_cursor,

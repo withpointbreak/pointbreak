@@ -496,6 +496,25 @@ pub fn review_source_binding(
     }
 }
 
+/// Compute a source binding from an exact Revision result the caller already
+/// holds, without replaying the authoritative Revision read.
+pub fn review_source_binding_from_shown(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    request: ReviewSourceRequestV1,
+    shown: &crate::session::RevisionShowResult,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    match request {
+        ReviewSourceRequestV1::Captured => Ok(ReviewSourceBindingV1::Captured),
+        ReviewSourceRequestV1::Worktree => {
+            worktree_source_binding_from_shown(repo, revision, shown)
+        }
+        ReviewSourceRequestV1::Commit(revision_spec) => {
+            commit_source_binding_from_shown(repo, revision, &revision_spec, shown)
+        }
+    }
+}
+
 fn current_review_source_binding(
     repo: &std::path::Path,
     cursor: &ReviewCursorV1,
@@ -516,6 +535,15 @@ fn worktree_source_binding(
     revision: &RevisionRefV1,
 ) -> crate::error::Result<ReviewSourceBindingV1> {
     let shown = exact_revision_source(repo, revision)?;
+    worktree_source_binding_from_shown(repo, revision, &shown)
+}
+
+fn worktree_source_binding_from_shown(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    shown: &crate::session::RevisionShowResult,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    ensure_exact_revision_artifact(shown, revision)?;
     let provenance = shown.revision.git_provenance.as_ref().ok_or_else(|| {
         crate::error::ShoreError::WorkflowInputInvalid {
             reason: "the exact Revision has no Git source to compare with the worktree".to_owned(),
@@ -542,6 +570,16 @@ fn commit_source_binding(
     commit_spec: &str,
 ) -> crate::error::Result<ReviewSourceBindingV1> {
     let shown = exact_revision_source(repo, revision)?;
+    commit_source_binding_from_shown(repo, revision, commit_spec, &shown)
+}
+
+fn commit_source_binding_from_shown(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    commit_spec: &str,
+    shown: &crate::session::RevisionShowResult,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    ensure_exact_revision_artifact(shown, revision)?;
     let provenance = shown.revision.git_provenance.as_ref().ok_or_else(|| {
         crate::error::ShoreError::WorkflowInputInvalid {
             reason: "the exact Revision has no Git source to compare with a commit".to_owned(),
@@ -593,18 +631,24 @@ fn exact_revision_source(
     repo: &std::path::Path,
     revision: &RevisionRefV1,
 ) -> crate::error::Result<crate::session::RevisionShowResult> {
-    let shown = crate::session::show_revision_for_change_reader(
+    crate::session::show_revision_for_change_reader(
         crate::session::RevisionShowOptions::new(repo)
             .with_revision_id(revision.revision_id.clone())
             .with_exact(true),
-    )?;
+    )
+}
+
+fn ensure_exact_revision_artifact(
+    shown: &crate::session::RevisionShowResult,
+    revision: &RevisionRefV1,
+) -> crate::error::Result<()> {
     if shown.revision.object_artifact_content_hash != revision.object_artifact_content_hash {
         return Err(crate::error::ShoreError::WorkflowInputInvalid {
             reason: "review_cursor_artifact_mismatch: the exact Revision artifact binding changed"
                 .to_owned(),
         });
     }
-    Ok(shown)
+    Ok(())
 }
 
 fn capture_mode_label(source: &RevisionSource) -> crate::error::Result<String> {
@@ -739,7 +783,24 @@ fn internal_refusal(error: crate::error::ShoreError) -> ReviewCursorRefusalV1 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::model::{EngagementId, JournalId, ObjectId, ReviewId, WorktreeCaptureMode};
+    use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
+    use crate::session::derived_access::product_contract::DerivedAccessProfile;
+    use crate::session::derived_access::writer::DerivedWriteCoordinator;
+    use crate::session::event::{
+        EventTarget, EventType, GitProvenance, Revision, ShoreEvent, WorkObjectProposal,
+        WorkObjectProposedPayload, Writer,
+    };
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
+    use crate::session::store::resolution::{opaque_path_identity, resolve_store};
     use crate::session::{ChangeLifecycleV1, ChangeTopologyV1};
 
     fn reference(name: &str, byte: char) -> RevisionRefV1 {
@@ -807,6 +868,252 @@ mod tests {
                     tracked: true,
                 },
             ],
+        }
+    }
+
+    struct BindingFixture {
+        root: TempDir,
+        revision: RevisionRefV1,
+        shown: crate::session::RevisionShowResult,
+    }
+
+    impl BindingFixture {
+        fn new(with_git_provenance: bool) -> Self {
+            let root = TempDir::new().expect("create source-binding repository");
+            git(root.path(), &["init", "--quiet"]);
+            git(root.path(), &["config", "user.name", "Pointbreak Test"]);
+            git(
+                root.path(),
+                &["config", "user.email", "pointbreak@example.test"],
+            );
+            git(root.path(), &["config", "commit.gpgsign", "false"]);
+            fs::write(root.path().join("source.txt"), "before\n")
+                .expect("write source-binding base");
+            git(root.path(), &["add", "source.txt"]);
+            git(root.path(), &["commit", "--quiet", "-m", "base"]);
+            fs::write(root.path().join("source.txt"), "after\n")
+                .expect("write source-binding candidate");
+
+            let resolved = resolve_store(root.path()).expect("resolve source-binding store");
+            let backend = resolved.backend().clone();
+            write_capability_fixture_for_test(
+                backend.journal().as_ref(),
+                CapabilityFixtureState::EmptyL2,
+            )
+            .expect("activate source-binding store");
+            let store_identity = opaque_path_identity("store", resolved.store_dir())
+                .expect("derive source-binding store identity");
+            let lifecycle = DerivedAccessLifecycle::new(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                resolved.store_dir(),
+                store_identity,
+            )
+            .expect("create source-binding lifecycle");
+            lifecycle
+                .rebuild(|_| LifecycleControl::Continue)
+                .expect("publish source-binding generation");
+            let coordinator = DerivedWriteCoordinator::new(lifecycle)
+                .expect("admit source-binding derived writer");
+            let store =
+                crate::session::EventStore::from_backend(&backend).with_coordinator(coordinator);
+
+            let worktree_root = crate::git::git_worktree_root(root.path())
+                .expect("resolve source-binding worktree")
+                .display()
+                .to_string();
+            let placeholder = GitProvenance {
+                source: RevisionSource::GitWorktree {
+                    mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                    include_untracked: false,
+                    pathspecs: Vec::new(),
+                },
+                base: ReviewEndpoint::GitWorkingTree {
+                    worktree_root: worktree_root.clone(),
+                },
+                target: ReviewEndpoint::GitWorkingTree { worktree_root },
+            };
+            let (files, fingerprint) =
+                super::super::capture::prepare_mutable_source_for_provenance(
+                    root.path(),
+                    &placeholder,
+                )
+                .expect("prepare source-binding capture");
+            let artifact =
+                crate::session::build_object_artifact_v2(crate::model::DiffSnapshot::new(
+                    ReviewId::new("review:source-binding"),
+                    fingerprint.object_id.clone(),
+                    files,
+                ))
+                .expect("build source-binding object artifact");
+            let artifact = crate::session::object_artifact::write_prepared_object_artifact_to(
+                &backend,
+                &fingerprint,
+                artifact,
+            )
+            .expect("store source-binding object artifact");
+            let revision = RevisionRefV1::new(
+                fingerprint.revision_id.clone(),
+                artifact.content_hash.clone(),
+            )
+            .expect("build exact source-binding Revision");
+            let event = ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                if with_git_provenance {
+                    "fixture:source-binding:git"
+                } else {
+                    "fixture:source-binding:no-git"
+                },
+                EventTarget::for_revision(
+                    JournalId::new("journal:source-binding"),
+                    fingerprint.revision_id.clone(),
+                    None,
+                )
+                .expect("build source-binding proposal target"),
+                Writer::shore_local("source-binding-test"),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new(format!(
+                        "engagement:sha256:{}",
+                        if with_git_provenance { "1" } else { "2" }.repeat(64)
+                    )),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: Revision {
+                            id: fingerprint.revision_id.clone(),
+                            object_id: ObjectId::new(fingerprint.object_id.as_str()),
+                            git_provenance: with_git_provenance
+                                .then(|| fingerprint.git_provenance()),
+                        },
+                        summary: None,
+                        object_artifact_content_hash: artifact.content_hash,
+                        supersedes: Vec::new(),
+                    },
+                },
+                "2026-08-31T02:45:00Z",
+            )
+            .expect("build source-binding proposal");
+            assert_eq!(
+                store
+                    .record_event_once(&event)
+                    .expect("record source-binding proposal"),
+                crate::session::EventWriteOutcome::Created
+            );
+            let shown = crate::session::show_revision_for_change_reader(
+                crate::session::RevisionShowOptions::new(root.path())
+                    .with_revision_id(revision.revision_id.clone())
+                    .with_exact(true),
+            )
+            .expect("show exact source-binding Revision");
+            Self {
+                root,
+                revision,
+                shown,
+            }
+        }
+
+        fn commit_candidate(&self) {
+            git(self.root.path(), &["add", "source.txt"]);
+            git(self.root.path(), &["commit", "--quiet", "-m", "candidate"]);
+        }
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run Git for source-binding fixture");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_binding_parity(fixture: &BindingFixture, request: ReviewSourceRequestV1) {
+        let cold = review_source_binding(fixture.root.path(), &fixture.revision, request.clone());
+        let shown = review_source_binding_from_shown(
+            fixture.root.path(),
+            &fixture.revision,
+            request,
+            &fixture.shown,
+        );
+        match (cold, shown) {
+            (Ok(cold), Ok(shown)) => assert_eq!(shown, cold),
+            (Err(cold), Err(shown)) => assert_eq!(shown.to_string(), cold.to_string()),
+            (cold, shown) => panic!("cold/shown binding outcome mismatch: {cold:?} / {shown:?}"),
+        }
+    }
+
+    #[test]
+    fn binding_from_shown_matches_cold_binding_for_every_source_class() {
+        let fixture = BindingFixture::new(true);
+
+        assert_binding_parity(&fixture, ReviewSourceRequestV1::Captured);
+        assert_binding_parity(&fixture, ReviewSourceRequestV1::Worktree);
+        assert_binding_parity(&fixture, ReviewSourceRequestV1::Commit("HEAD".to_owned()));
+        assert_binding_parity(
+            &fixture,
+            ReviewSourceRequestV1::Commit("definitely-unknown".to_owned()),
+        );
+
+        let wrong_revision = RevisionRefV1::new(
+            fixture.revision.revision_id.clone(),
+            format!("sha256:{}", "f".repeat(64)),
+        )
+        .expect("build mismatched exact Revision reference");
+        for request in [
+            ReviewSourceRequestV1::Worktree,
+            ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        ] {
+            let cold = review_source_binding(fixture.root.path(), &wrong_revision, request.clone());
+            let shown = review_source_binding_from_shown(
+                fixture.root.path(),
+                &wrong_revision,
+                request,
+                &fixture.shown,
+            );
+            assert_eq!(
+                shown.unwrap_err().to_string(),
+                cold.unwrap_err().to_string()
+            );
+        }
+
+        fixture.commit_candidate();
+        assert_binding_parity(&fixture, ReviewSourceRequestV1::Worktree);
+        assert_binding_parity(&fixture, ReviewSourceRequestV1::Commit("HEAD".to_owned()));
+
+        let without_git = BindingFixture::new(false);
+        assert_binding_parity(&without_git, ReviewSourceRequestV1::Worktree);
+        assert_binding_parity(
+            &without_git,
+            ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        );
+    }
+
+    #[test]
+    fn artifact_mismatch_precedes_missing_provenance() {
+        let fixture = BindingFixture::new(false);
+        let wrong_revision = RevisionRefV1::new(
+            fixture.revision.revision_id.clone(),
+            format!("sha256:{}", "f".repeat(64)),
+        )
+        .expect("build mismatched exact Revision reference");
+
+        for request in [
+            ReviewSourceRequestV1::Worktree,
+            ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        ] {
+            assert_eq!(
+                review_source_binding_from_shown(
+                    fixture.root.path(),
+                    &wrong_revision,
+                    request,
+                    &fixture.shown,
+                )
+                .unwrap_err()
+                .to_string(),
+                "review_cursor_artifact_mismatch: the exact Revision artifact binding changed"
+            );
         }
     }
 
@@ -981,6 +1288,12 @@ mod tests {
         for mutation in mutations {
             assert_ne!(ReviewSourceBindingV1::commit(mutation).unwrap(), original);
         }
+    }
+
+    #[test]
+    fn binding_from_shown_seam_is_available_to_product_callers() {
+        let seam = review_source_binding_from_shown;
+        let _ = seam;
     }
 
     #[test]

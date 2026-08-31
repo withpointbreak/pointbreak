@@ -224,13 +224,14 @@ pub use workflow::{
     parse_search_query_for, port_review_fact, preview_link_to_family, record_assessment,
     record_event_signature, record_observation, record_validation_check, redact_history_bodies,
     referenced_artifacts, remove_content, resolve_default_integration_ref, respond_input_request,
-    restore_bulk_adoption_backup, review_history, review_source_binding, select_review_cursor,
-    show_assessments, show_assessments_with_public_read_context, show_revision,
-    show_revision_for_change_reader, show_revision_for_change_reader_ready,
-    show_revision_for_inspector, show_revision_overviews, show_revision_with_public_read_context,
-    stale_review_fact_count, store_identity, store_status, unlink_store_from_family,
-    validate_review_cursor_for_write, validated_track_id, withdraw_change_revision_relation,
-    withdraw_commit, withdraw_ref, withdraw_revision_from_change,
+    restore_bulk_adoption_backup, review_history, review_source_binding,
+    review_source_binding_from_shown, select_review_cursor, show_assessments,
+    show_assessments_with_public_read_context, show_revision, show_revision_for_change_reader,
+    show_revision_for_change_reader_ready, show_revision_for_inspector, show_revision_overviews,
+    show_revision_with_public_read_context, stale_review_fact_count, store_identity, store_status,
+    unlink_store_from_family, validate_review_cursor_for_write, validated_track_id,
+    withdraw_change_revision_relation, withdraw_commit, withdraw_ref,
+    withdraw_revision_from_change,
 };
 #[cfg(feature = "bench")]
 pub(crate) use workflow::{
