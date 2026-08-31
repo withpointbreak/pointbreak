@@ -931,6 +931,254 @@ fn derived_exact_resource_preserves_the_characterization_floor() {
 }
 
 #[test]
+fn derived_exact_revision_preserves_the_characterization_floor() {
+    let fixture = exact_revision_floor_fixture();
+    let inspector = Inspector::spawn_current(fixture.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let revision_body = inspector.get_text(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(&fixture.change_id),
+        urlencode(&fixture.revision_id),
+        urlencode(&fixture.artifact_hash)
+    ));
+    let revision: Value = serde_json::from_str(&revision_body).unwrap();
+    let resource = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+        urlencode(&fixture.change_id),
+        urlencode(&fixture.revision_id),
+        urlencode(&fixture.artifact_hash)
+    ));
+
+    assert_eq!(revision["projectionStamp"], changes["projectionStamp"]);
+    assert_eq!(
+        revision["exactRevisionDocument"]["projectionStamp"],
+        changes["projectionStamp"]
+    );
+    assert_eq!(resource["projectionStamp"], changes["projectionStamp"]);
+    assert_eq!(
+        canonical_json(&resource),
+        canonical_json(&revision["exactRevisionDocument"])
+    );
+
+    let ports = revision["factPorts"].as_array().expect("fact ports");
+    assert_eq!(ports.len(), 1, "one applicable fact port: {revision}");
+    assert_eq!(
+        ports[0]["sourceEventIds"],
+        serde_json::json!([fixture.port_event_id])
+    );
+    assert_eq!(ports[0]["actorId"], "actor:agent:floor-port");
+    assert_eq!(ports[0]["trackId"], "agent:floor-port");
+
+    let mut presentation_keys = revision["factPresentations"]
+        .as_array()
+        .expect("fact presentations")
+        .iter()
+        .map(|fact| fact["factId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    presentation_keys.sort_unstable();
+    let mut expected_fact_keys = vec![
+        fixture.origin_fact_id.as_str(),
+        fixture.target_fact_id.as_str(),
+    ];
+    expected_fact_keys.sort_unstable();
+    assert_eq!(presentation_keys, expected_fact_keys);
+    assert_eq!(
+        revision["factContentPresentations"]
+            .as_object()
+            .expect("fact content presentations")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected_fact_keys
+    );
+
+    let exact = pointbreak::model::RevisionRefV1::new(
+        pointbreak::model::RevisionId::new(fixture.revision_id.clone()),
+        fixture.artifact_hash.clone(),
+    )
+    .unwrap();
+    let expected_associations = fixture
+        .associations
+        .iter()
+        .map(|(association_id, commit_oid)| {
+            pointbreak::documents::AssociationComparisonDocumentV1::new(
+                pointbreak::documents::AssociationComparisonRefV1 {
+                    revision: exact.clone(),
+                    association_id: pointbreak::model::CommitAssociationId::new(
+                        association_id.clone(),
+                    ),
+                    commit_oid: commit_oid.clone(),
+                    comparison_base: "captured_revision".to_owned(),
+                    view_kind: "landing".to_owned(),
+                    proof_ref: None,
+                },
+                pointbreak::documents::AssociationComparisonStateV1::Unknown,
+                pointbreak::documents::AssociationProofAvailabilityV1::NotRequested,
+                vec!["comparison_proof_not_requested".to_owned()],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected_association_bytes = canonical_json(
+        &serde_json::to_value(&expected_associations).expect("serialize expected associations"),
+    );
+    assert!(
+        revision_body.contains(&format!("\"associations\":{expected_association_bytes}")),
+        "association array bytes or commit-oid order changed: {revision_body}"
+    );
+
+    let graph = &revision["inspectorPresentation"]["factGraph"];
+    assert!(
+        graph.is_object(),
+        "the exact Revision must splice its fact graph"
+    );
+    assert_eq!(
+        graph["factPorts"].as_array().map(Vec::len),
+        Some(1),
+        "the graph must carry the applicable fact-port edge: {graph}"
+    );
+    assert!(
+        graph["nodes"]
+            .as_array()
+            .is_some_and(|nodes| nodes.len() == 2),
+        "the graph must materialize the origin and target facts: {graph}"
+    );
+}
+
+#[test]
+fn derived_exact_revision_composes_applicable_fact_ports() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let first_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(first_output.status.success());
+    let first: Value = serde_json::from_slice(&first_output.stdout).unwrap();
+    let first_exact = &first["reviewCursor"]["cursor"]["revision"];
+    let first_revision = first_exact["revisionId"].as_str().unwrap();
+
+    let old_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        first_revision,
+        "--track",
+        "agent:graph-contract",
+        "--title",
+        "old unported endpoint",
+    ]);
+    assert!(old_output.status.success());
+    let old: Value = serde_json::from_slice(&old_output.stdout).unwrap();
+    let current_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        first_revision,
+        "--track",
+        "agent:graph-contract",
+        "--title",
+        "ported current endpoint",
+        "--supersedes",
+        old["observationId"].as_str().unwrap(),
+    ]);
+    assert!(current_output.status.success());
+    let current: Value = serde_json::from_slice(&current_output.stdout).unwrap();
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_output = support::pointbreak([
+        "capture",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        first["reviewCursor"]["token"].as_str().unwrap(),
+        "--advance",
+        "replace",
+    ]);
+    assert!(second_output.status.success());
+    let second: Value = serde_json::from_slice(&second_output.stdout).unwrap();
+    let second_exact = &second["reviewCursor"]["cursor"]["revision"];
+    let origin = format!(
+        "{}@{}",
+        first_revision,
+        first_exact["objectArtifactContentHash"].as_str().unwrap()
+    );
+    let port_output = pointbreak_env(
+        [
+            "fact",
+            "port",
+            "--repo",
+            repo_arg,
+            "--origin-revision",
+            &origin,
+            "--origin-fact",
+            current["observationId"].as_str().unwrap(),
+            "--review-cursor",
+            second["reviewCursor"]["token"].as_str().unwrap(),
+            "--relation",
+            "context-only",
+            "--track",
+            "agent:floor-port",
+        ],
+        &[("POINTBREAK_ACTOR_ID", "actor:agent:floor-port")],
+    );
+    assert!(
+        port_output.status.success(),
+        "fact port failed:\n{}",
+        String::from_utf8_lossy(&port_output.stderr)
+    );
+    let port: Value = serde_json::from_slice(&port_output.stdout).unwrap();
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(second["changeId"].as_str().unwrap()),
+        urlencode(second_exact["revisionId"].as_str().unwrap()),
+        urlencode(second_exact["objectArtifactContentHash"].as_str().unwrap())
+    ));
+    let ports = revision["factPorts"].as_array().expect("fact ports");
+    assert_eq!(ports.len(), 1, "one applicable fact port: {revision}");
+    assert_eq!(
+        ports[0]["sourceEventIds"],
+        serde_json::json!([port["eventId"].as_str().unwrap()])
+    );
+    assert_eq!(ports[0]["actorId"], "actor:agent:floor-port");
+    assert_eq!(ports[0]["trackId"], "agent:floor-port");
+
+    let facts = revision["factPresentations"]
+        .as_array()
+        .expect("fact presentations");
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact["factId"] == current["observationId"]),
+        "the derived read must fan out to the ported origin fact: {revision}"
+    );
+    assert!(
+        facts
+            .iter()
+            .all(|fact| fact["factId"] != old["observationId"]),
+        "an unported relationship endpoint must not materialize: {revision}"
+    );
+    let graph = &revision["inspectorPresentation"]["factGraph"];
+    assert!(
+        graph["observationSupersedes"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a relationship with an unmaterialized endpoint must be filtered: {graph}"
+    );
+    assert_eq!(
+        graph["factPorts"].as_array().map(Vec::len),
+        Some(1),
+        "the applicable port must remain in the graph: {graph}"
+    );
+}
+
+#[test]
 fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

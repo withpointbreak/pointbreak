@@ -716,24 +716,55 @@ pub(super) fn derived_change_revision_v2_json(
                             })
                             .map_err(|error| error.to_string())?,
                         |read| {
-                            if !resource_only {
-                                return Err(
-                                    "derived contextual exact Revision composition is unavailable"
-                                        .to_owned(),
-                                );
-                            }
-                            let result = read.result(&exact).ok_or_else(|| {
-                                "derived exact read did not include the selected Revision"
-                                    .to_owned()
-                            })?;
-                            let resource =
+                            let mut exact_read = if resource_only {
+                                let result = read.result(&exact).ok_or_else(|| {
+                                    "derived exact read did not include the selected Revision"
+                                        .to_owned()
+                                })?;
                                 crate::cli::change::exact_read_from_shown(result, &exact, true)
-                                    .map_err(|error| error.to_string())?
-                                    .resource
-                                    .with_projection_stamp(generation.stamp().to_owned());
-                            serde_json::to_string(&resource)
-                                .map(ChangeV2Json::Ok)
-                                .map_err(|error| error.to_string())
+                            } else {
+                                crate::cli::change::contextual_exact_read_from_derived(
+                                    &read, &change_id, &exact, true,
+                                )
+                            }
+                            .map_err(|error| error.to_string())?;
+                            exact_read.resource = exact_read
+                                .resource
+                                .with_projection_stamp(generation.stamp().to_owned());
+                            if resource_only {
+                                serde_json::to_string(&exact_read.resource)
+                                    .map(ChangeV2Json::Ok)
+                                    .map_err(|error| error.to_string())
+                            } else {
+                                let fact_relationships = exact_read.fact_relationships.clone();
+                                let facade = read
+                                    .facade()
+                                    .clone()
+                                    .with_generation_stamp(generation.stamp().to_owned())
+                                    .map_err(|error| error.to_string())?;
+                                let document = facade
+                                    .contextual_revision_document_with_fact_content(
+                                        &change_id,
+                                        &exact,
+                                        exact_read.resource,
+                                        exact_read.facts,
+                                        exact_read.associations,
+                                        exact_read.fact_content,
+                                    )
+                                    .map_err(|error| error.to_string())?;
+                                let graph = fact_relationship_graph(
+                                    &document.document.detail,
+                                    &fact_relationships,
+                                )?;
+                                let mut value = serde_json::to_value(document)
+                                    .map_err(|error| error.to_string())?;
+                                if let Some(graph) = graph {
+                                    splice_inspector_presentation(&mut value, "factGraph", graph)?;
+                                }
+                                serde_json::to_string(&value)
+                                    .map(ChangeV2Json::Ok)
+                                    .map_err(|error| error.to_string())
+                            }
                         },
                     )
                 },

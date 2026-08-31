@@ -1324,15 +1324,25 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
                 Ok(mut values) => values.remove(0),
                 Err(message) => return exact_selection_error_response(&message),
             };
-            change_v2_response(api::change_revision_v2_json(
-                repo,
-                cache,
-                stamp_binder,
-                change_id,
-                revision_id,
-                &artifact_hash,
-                false,
-            ))
+            if state.derived_changes.is_active() {
+                change_v2_response(api::derived_change_revision_v2_json(
+                    &state.derived_changes,
+                    change_id,
+                    revision_id,
+                    &artifact_hash,
+                    false,
+                ))
+            } else {
+                change_v2_response(api::change_revision_v2_json(
+                    repo,
+                    cache,
+                    stamp_binder,
+                    change_id,
+                    revision_id,
+                    &artifact_hash,
+                    false,
+                ))
+            }
         }
         [change_id, revisions, revision_id, resource]
             if revisions == "revisions" && resource == "resource" =>
@@ -2145,6 +2155,7 @@ mod tests {
         );
         for (name, derived_route, producer) in [
             ("detail", detail, "api::derived_change_detail_v2_json"),
+            ("revision", revision, "api::derived_change_revision_v2_json"),
             ("resource", resource, "api::derived_change_revision_v2_json"),
             (
                 "interdiff",
@@ -2168,23 +2179,6 @@ mod tests {
                 derived_route.contains("cache,\n                    stamp_binder,"),
                 "{name} inactive dispatch must retain the cache and strict stamp binder pair"
             );
-        }
-        for (name, cache_route) in [("revision", revision)] {
-            assert!(
-                cache_route.contains("cache,\n                stamp_binder,"),
-                "{name} must retain the cache and strict stamp binder pair"
-            );
-            for forbidden in [
-                "derived_change_detail",
-                "derived_change_interdiff",
-                "derived_change_revision",
-                "review_generation",
-            ] {
-                assert!(
-                    !cache_route.contains(forbidden),
-                    "{name} must not enter derived producer `{forbidden}`"
-                );
-            }
         }
 
         let profile_api = source_between(
@@ -2500,6 +2494,82 @@ mod tests {
             revision_id,
             artifact_hash,
         }
+    }
+
+    fn exact_change_fixture_with_fact_port() -> ExactChangeFixture {
+        let mut fixture = exact_change_fixture(false);
+        let repo = fixture._repo.path();
+        let change_id = pointbreak::model::ChangeId::new(fixture.change_id.clone());
+        let origin_revision = pointbreak::model::RevisionId::new(fixture.revision_id.clone());
+        let origin = pointbreak::model::RevisionRefV1::new(
+            origin_revision.clone(),
+            fixture.artifact_hash.clone(),
+        )
+        .unwrap();
+        let observation = pointbreak::session::record_observation(
+            pointbreak::session::ObservationAddOptions::new(repo)
+                .with_exact_revision_id(origin_revision.clone())
+                .with_track("agent:route-parity")
+                .with_title("ported route parity observation")
+                .with_actor_id(pointbreak::model::ActorId::new("actor:agent:route-parity")),
+        )
+        .expect("record the ported fixture fact");
+        let state = pointbreak::session::change_reader_state_for_repo(repo)
+            .expect("read ported fixture Change state");
+        let ready = state.ready().expect("ported fixture Change store is ready");
+        let review_cursor = pointbreak::session::select_review_cursor(
+            &ready.projection.changes[&change_id],
+            &ready.document_projection,
+            Some(&origin_revision),
+            false,
+            pointbreak::session::ReviewSourceBindingV1::Captured,
+        )
+        .expect("select the ported fixture Review cursor")
+        .token;
+
+        std::fs::write(repo.join("sample.txt"), "after replacement\n").unwrap();
+        let replacement = pointbreak::session::capture_change_revision(
+            pointbreak::session::ChangeCaptureOptions::advance(
+                "change-operation:exact-change-route-port",
+                pointbreak::session::CaptureOptions::new(repo),
+                review_cursor,
+                pointbreak::session::ChangeAdvanceV1::Replace,
+            ),
+        )
+        .expect("capture the ported fixture replacement");
+        pointbreak::session::port_review_fact(
+            pointbreak::session::FactPortOptions::new(
+                repo,
+                origin,
+                pointbreak::session::event::FactRefV1::Observation {
+                    observation_id: observation.observation_id,
+                },
+                replacement.review_cursor.token.clone(),
+                pointbreak::session::event::FactPortRelationV1::ContextOnly,
+                "agent:route-parity",
+            )
+            .with_actor_id(pointbreak::model::ActorId::new("actor:agent:route-parity")),
+        )
+        .expect("port the fixture fact into the replacement");
+        fixture
+            .state
+            .derived_changes
+            .recovery_access()
+            .rebuild(|_| pointbreak::session::DerivedHistoryControl::Continue)
+            .expect("publish the ported fixture's derived generation");
+        let pointbreak::session::DerivedChangeOutcomeV1::Ready(_) = fixture
+            .state
+            .derived_changes
+            .review_generation()
+            .expect("select the ported fixture's derived generation")
+        else {
+            panic!("the ported fixture must select a current generation");
+        };
+
+        fixture.change_id = replacement.change_id.as_str().to_owned();
+        fixture.revision_id = replacement.revision.revision_id.as_str().to_owned();
+        fixture.artifact_hash = replacement.revision.object_artifact_content_hash;
+        fixture
     }
 
     fn change_v2_json_parts(
@@ -2843,6 +2913,70 @@ mod tests {
                 true,
             ));
             assert_eq!(derived, authoritative, "{case} resource byte parity");
+        }
+
+        let fixture = exact_change_fixture_with_fact_port();
+        let missing_change = format!("change:sha256:{}", "f".repeat(64));
+        let missing_revision = format!("rev:sha256:{}", "e".repeat(64));
+        let mismatched_hash = format!("sha256:{}", "d".repeat(64));
+        for (case, change_id, revision_id, artifact_hash) in [
+            (
+                "success",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "unknown Change",
+                missing_change.as_str(),
+                fixture.revision_id.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "nonmember Revision",
+                fixture.change_id.as_str(),
+                missing_revision.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "malformed artifact hash",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                "not-an-artifact-hash",
+            ),
+            (
+                "mismatched artifact hash",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                mismatched_hash.as_str(),
+            ),
+        ] {
+            let authoritative = change_v2_json_parts(api::change_revision_v2_json(
+                &fixture.state.repo,
+                &fixture.state.change_reader_cache,
+                &fixture.state.strict_change_stamp,
+                change_id,
+                revision_id,
+                artifact_hash,
+                false,
+            ));
+            if case == "success" {
+                let (_, body) = authoritative.as_ref().expect("authoritative success");
+                let document: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(
+                    document["factPorts"].as_array().map(Vec::len),
+                    Some(1),
+                    "contextual parity must include the applicable fact port"
+                );
+            }
+            let derived = change_v2_json_parts(api::derived_change_revision_v2_json(
+                &fixture.state.derived_changes,
+                change_id,
+                revision_id,
+                artifact_hash,
+                false,
+            ));
+            assert_eq!(derived, authoritative, "{case} contextual byte parity");
         }
     }
 
