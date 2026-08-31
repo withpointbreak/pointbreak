@@ -22,11 +22,11 @@ use pointbreak::session::{
     ChangeCreateOptions, ChangeDocumentProjectionV1, ChangeLinkOptions, ChangeMembershipOptions,
     ChangeMembershipWithdrawalOptions, ChangeProjection, ChangeReaderReadyV1, ChangeReaderStateV1,
     ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
-    DerivedChangeOutcomeV1, DerivedReadSourceV1, ReviewCursorV1, ReviewSourceBindingV1,
-    ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState, WorktreeSpec,
-    assert_change_revision_relation, capture_change_revision, change_reader_state_for_repo,
-    create_change, dry_run_bulk_adoption, join_revision_to_change, link_changes,
-    migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
+    DerivedChangeOutcomeV1, DerivedExactRevisionReadV1, DerivedReadSourceV1, ReviewCursorV1,
+    ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState,
+    WorktreeSpec, assert_change_revision_relation, capture_change_revision,
+    change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
+    link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
     select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
     withdraw_change_revision_relation, withdraw_revision_from_change,
 };
@@ -1550,6 +1550,189 @@ pub(crate) fn build_contextual_exact_read(
     Ok(exact_read)
 }
 
+pub(crate) fn exact_read_from_shown(
+    result: &pointbreak::session::RevisionShowResult,
+    exact: &RevisionRefV1,
+    include_body: bool,
+) -> Result<ExactRead, Box<dyn std::error::Error>> {
+    if result.revision.object_artifact_content_hash != exact.object_artifact_content_hash {
+        return Err("exact Revision projection returned a different artifact hash".into());
+    }
+    let (facts, fact_content) = pointbreak::documents::normalize_fact_presentations(result, exact);
+    let fact_relationships = exact_fact_relationships(result, exact);
+    let associations = association_documents(result, exact)?;
+    let resource_ref = RevisionResourceRefV1 {
+        revision: exact.clone(),
+        object_id: result.revision.object_id.clone(),
+    };
+    let projection = RevisionResourceProjectionV1 {
+        track_id: result.filters.track_id.clone(),
+        include_body,
+    };
+    let state = result.snapshot_content_state;
+    let unavailable = unavailable_content_availability(&result.diagnostics);
+    let resource = match state {
+        SnapshotContentState::Present => {
+            RevisionResourceDocumentV1::available(resource_ref, projection, &result.snapshot)?
+        }
+        SnapshotContentState::SuppressedPresent | SnapshotContentState::PhysicallyRemoved => {
+            RevisionResourceDocumentV1::unavailable(
+                resource_ref,
+                projection,
+                ContentAvailabilityV1::Removed,
+            )?
+        }
+        SnapshotContentState::Unavailable => {
+            RevisionResourceDocumentV1::unavailable(resource_ref, projection, unavailable)?
+        }
+    };
+    Ok(ExactRead {
+        resource,
+        facts,
+        fact_content,
+        associations,
+        fact_relationships,
+    })
+}
+
+pub(crate) fn contextual_exact_read_from_derived(
+    read: &DerivedExactRevisionReadV1,
+    change_id: &ChangeId,
+    exact: &RevisionRefV1,
+    include_body: bool,
+) -> Result<ExactRead, Box<dyn std::error::Error>> {
+    let base = read
+        .result(exact)
+        .ok_or("derived exact read did not include the selected Revision")?;
+    let mut exact_read = exact_read_from_shown(base, exact, include_body)?;
+    let ports = read.facade().fact_port_presentations(change_id, exact)?;
+    let mut origin_cache = BTreeMap::<
+        String,
+        (
+            Vec<FactPresentationV1>,
+            BTreeMap<String, FactContentPresentationV1>,
+            Vec<ExactFactRelationship>,
+        ),
+    >::new();
+    let mut contextual_facts = BTreeMap::<String, FactPresentationV1>::new();
+    let mut contextual_content = BTreeMap::<String, FactContentPresentationV1>::new();
+
+    for port in &ports {
+        if port.applicability != FactPortApplicabilityV1::Applicable {
+            continue;
+        }
+        if let Some(target_fact) = &port.target_fact
+            && !exact_read.facts.iter().any(|fact| {
+                fact.origin_revision == *exact
+                    && fact.fact_id == fact_ref_id(target_fact)
+                    && fact.family == fact_ref_family(target_fact)
+            })
+        {
+            continue;
+        }
+
+        let cache_key = format!(
+            "{}@{}",
+            port.origin_revision.revision_id.as_str(),
+            port.origin_revision.object_artifact_content_hash
+        );
+        if !origin_cache.contains_key(&cache_key) {
+            let Some(origin_result) = read.result(&port.origin_revision) else {
+                continue;
+            };
+            let (facts, content) = pointbreak::documents::normalize_fact_presentations(
+                origin_result,
+                &port.origin_revision,
+            );
+            origin_cache.insert(
+                cache_key.clone(),
+                (
+                    facts,
+                    content,
+                    exact_fact_relationships(origin_result, &port.origin_revision),
+                ),
+            );
+        }
+        let Some((facts, content, _relationships)) = origin_cache.get(&cache_key) else {
+            continue;
+        };
+        let origin_fact_id = fact_ref_id(&port.origin_fact);
+        let Some(origin_fact) = facts.iter().find(|fact| {
+            fact.fact_id == origin_fact_id && fact.family == fact_ref_family(&port.origin_fact)
+        }) else {
+            continue;
+        };
+        let Some(origin_content) = content.get(origin_fact_id) else {
+            continue;
+        };
+        let mut contextual = origin_fact.clone();
+        contextual.presented_in_revision = Some(exact.clone());
+        contextual.port_relation = None;
+        match contextual_facts.entry(origin_fact_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(contextual);
+                contextual_content.insert(origin_fact_id.to_owned(), origin_content.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get() == &contextual
+                    && contextual_content.get(origin_fact_id) == Some(origin_content) => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                contextual_facts.remove(origin_fact_id);
+                contextual_content.remove(origin_fact_id);
+            }
+        }
+    }
+
+    exact_read.facts.extend(contextual_facts.into_values());
+    exact_read
+        .facts
+        .sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+    exact_read.fact_content.extend(contextual_content);
+    let materialized_fact_keys = exact_read
+        .facts
+        .iter()
+        .map(|fact| {
+            (
+                fact.origin_revision.clone(),
+                fact.family.clone(),
+                fact.fact_id.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    exact_read.fact_relationships.extend(
+        origin_cache
+            .into_values()
+            .flat_map(|(_, _, relationships)| relationships)
+            .filter(|relationship| {
+                [&relationship.from_fact_id, &relationship.to_fact_id]
+                    .into_iter()
+                    .all(|fact_id| {
+                        materialized_fact_keys.contains(&(
+                            relationship.origin_revision.clone(),
+                            relationship.family.to_owned(),
+                            fact_id.clone(),
+                        ))
+                    })
+            }),
+    );
+    exact_read.fact_relationships.sort_by(|left, right| {
+        (
+            left.family,
+            &left.from_fact_id,
+            &left.to_fact_id,
+            &left.origin_revision,
+        )
+            .cmp(&(
+                right.family,
+                &right.from_fact_id,
+                &right.to_fact_id,
+                &right.origin_revision,
+            ))
+    });
+    exact_read.fact_relationships.dedup();
+    Ok(exact_read)
+}
+
 fn fact_ref_id(fact: &FactRefV1) -> &str {
     match fact {
         FactRefV1::Observation { observation_id } => observation_id.as_str(),
@@ -1824,6 +2007,136 @@ mod tests {
         );
     }
 
+    fn derived_exact_read(
+        repo: &std::path::Path,
+        change_id: &ChangeId,
+        exact: &RevisionRefV1,
+        include_body: bool,
+        fact_port_context: Option<RevisionRefV1>,
+    ) -> pointbreak::session::DerivedExactRevisionReadV1 {
+        rebuild_derived_exact_fixture(repo);
+        derived_exact_read_from_current(repo, change_id, exact, include_body, fact_port_context)
+    }
+
+    fn rebuild_derived_exact_fixture(repo: &std::path::Path) -> String {
+        let access = DerivedChangeAccess::resolve_for_command(repo)
+            .expect("resolve derived exact-read fixture");
+        let receipt = access
+            .recovery_access()
+            .rebuild(|_| pointbreak::session::DerivedHistoryControl::Continue)
+            .expect("publish current derived exact-read fixture generation");
+        drop(access);
+        receipt
+            .generation_id
+            .expect("rebuilt exact-read fixture has a generation identity")
+    }
+
+    fn derived_exact_read_from_current(
+        repo: &std::path::Path,
+        change_id: &ChangeId,
+        exact: &RevisionRefV1,
+        include_body: bool,
+        fact_port_context: Option<RevisionRefV1>,
+    ) -> pointbreak::session::DerivedExactRevisionReadV1 {
+        let access = DerivedChangeAccess::resolve_for_command(repo)
+            .expect("resolve rebuilt derived exact-read fixture");
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(change_id)
+            .expect("prepare derived exact-read session")
+        else {
+            panic!("derived exact-read fixture session must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(read) = session
+            .read(&pointbreak::session::ExactRevisionReadPlanV1 {
+                revisions: vec![exact.clone()],
+                include_body,
+                read_for_display: true,
+                fact_port_context,
+            })
+            .expect("consume derived exact-read session")
+        else {
+            panic!("derived exact-read fixture must be ready");
+        };
+        read
+    }
+
+    fn mutate_derived_database(
+        repo: &std::path::Path,
+        generation_id: &str,
+        mutate: impl FnOnce(&rusqlite::Connection),
+    ) {
+        let database = find_generation_database(repo, generation_id)
+            .expect("locate rebuilt exact-read fixture database");
+        let connection =
+            rusqlite::Connection::open(database).expect("open exact-read fixture database");
+        mutate(&connection);
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .expect("checkpoint exact-read fixture mutation");
+    }
+
+    fn find_generation_database(
+        root: &std::path::Path,
+        generation_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let entries = std::fs::read_dir(directory).ok()?;
+            for entry in entries {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.file_name().and_then(|name| name.to_str()) == Some("cursor.sqlite3")
+                    && path
+                        .parent()
+                        .and_then(std::path::Path::file_name)
+                        .and_then(|name| name.to_str())
+                        == Some(generation_id)
+                {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    }
+
+    fn canonical_json_sha256(value: &serde_json::Value) -> String {
+        use sha2::{Digest as _, Sha256};
+
+        fn canonical(value: &serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Array(values) => {
+                    serde_json::Value::Array(values.iter().map(canonical).collect())
+                }
+                serde_json::Value::Object(fields) => {
+                    let mut keys = fields.keys().collect::<Vec<_>>();
+                    keys.sort_unstable();
+                    let mut canonical_fields = serde_json::Map::new();
+                    for key in keys {
+                        canonical_fields.insert(
+                            key.clone(),
+                            canonical(fields.get(key).expect("canonical key remains present")),
+                        );
+                    }
+                    serde_json::Value::Object(canonical_fields)
+                }
+                _ => value.clone(),
+            }
+        }
+
+        let bytes =
+            serde_json::to_vec(&canonical(value)).expect("serialize canonical fixture JSON");
+        let digest = Sha256::digest(bytes);
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("sha256:{hex}")
+    }
+
     fn record_helper_observation(
         repo: &std::path::Path,
         revision_id: &RevisionId,
@@ -1885,8 +2198,11 @@ mod tests {
         target: RevisionRefV1,
         origin: RevisionRefV1,
         early_ready: ChangeReaderReadyV1,
+        later_ready: ChangeReaderReadyV1,
         later_facade: ChangeDocumentFacadeV1,
         target_fact_id: Option<String>,
+        target_fact_event_id: Option<String>,
+        port_event_id: String,
     }
 
     fn contextual_port_fixture(with_target_fact: bool, value: u32) -> ContextualPortFixture {
@@ -1922,11 +2238,10 @@ mod tests {
                 observation_id: observation.observation_id.clone(),
             });
         }
-        pointbreak::session::port_review_fact(options).expect("record helper fact port");
+        let port = pointbreak::session::port_review_fact(options).expect("record helper fact port");
         let later_state = change_reader_state_for_repo(repo.path()).expect("read later state");
-        let later_facade = later_state
-            .ready()
-            .expect("later store is ready")
+        let later_ready = later_state.ready().expect("later store is ready").clone();
+        let later_facade = later_ready
             .document_facade()
             .expect("later document facade");
         ContextualPortFixture {
@@ -1935,9 +2250,14 @@ mod tests {
             target,
             origin,
             early_ready,
+            later_ready,
             later_facade,
             target_fact_id: target_observation
+                .as_ref()
                 .map(|observation| observation.observation_id.as_str().to_owned()),
+            target_fact_event_id: target_observation
+                .map(|observation| observation.event_id.as_str().to_owned()),
+            port_event_id: port.event_id.as_str().to_owned(),
         }
     }
 
@@ -1973,6 +2293,308 @@ mod tests {
             ContentAvailabilityV1::Available
         );
         assert!(!bodyless.resource.projection.include_body);
+    }
+
+    #[test]
+    fn exact_read_from_shown_equals_the_frozen_helper() {
+        let (repo, _change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let exact = RevisionRefV1::new(revision_id.clone(), artifact_hash).unwrap();
+
+        for include_body in [false, true] {
+            let shown = show_revision_for_change_reader_ready(
+                RevisionShowOptions::new(repo.path())
+                    .with_revision_id(exact.revision_id.clone())
+                    .with_exact(true)
+                    .with_include_body(include_body)
+                    .with_read_for_display(true),
+                ready,
+            )
+            .expect("show exact Revision for the composition sibling");
+            assert_exact_reads_equal(
+                &exact_read_from_shown(&shown, &exact, include_body).unwrap(),
+                &build_exact_read(repo.path(), ready, &exact, include_body).unwrap(),
+                &format!("shown exact read include_body={include_body}"),
+            );
+
+            let mismatched =
+                RevisionRefV1::new(revision_id.clone(), format!("sha256:{}", "d".repeat(64)))
+                    .unwrap();
+            let sibling_error = match exact_read_from_shown(&shown, &mismatched, include_body) {
+                Ok(_) => panic!("the sibling must reject a mismatched selector"),
+                Err(error) => error.to_string(),
+            };
+            let frozen_error = match build_exact_read(repo.path(), ready, &mismatched, include_body)
+            {
+                Ok(_) => panic!("the frozen helper must reject a mismatched selector"),
+                Err(error) => error.to_string(),
+            };
+            assert_eq!(
+                sibling_error, frozen_error,
+                "mismatched selector include_body={include_body}",
+            );
+        }
+
+        let (removed_repo, _change_id, removed_id, removed_hash, _review_cursor) =
+            ready_change_store();
+        pointbreak::session::remove_content(
+            pointbreak::session::RemoveOptions::new(
+                removed_repo.path(),
+                pointbreak::session::RemoveSelector::Revision(removed_id.clone()),
+            )
+            .with_actor_id(ActorId::new("actor:agent:exact-helper-test")),
+        )
+        .expect("remove exact-read fixture content");
+        let removed_state =
+            change_reader_state_for_repo(removed_repo.path()).expect("read removed fixture state");
+        let removed_ready = removed_state.ready().expect("removed fixture is ready");
+        let removed_exact = RevisionRefV1::new(removed_id, removed_hash).unwrap();
+        for include_body in [false, true] {
+            let shown = show_revision_for_change_reader_ready(
+                RevisionShowOptions::new(removed_repo.path())
+                    .with_revision_id(removed_exact.revision_id.clone())
+                    .with_exact(true)
+                    .with_include_body(include_body)
+                    .with_read_for_display(true),
+                removed_ready,
+            )
+            .expect("show removed exact Revision for the composition sibling");
+            let sibling = exact_read_from_shown(&shown, &removed_exact, include_body).unwrap();
+            let frozen = build_exact_read(
+                removed_repo.path(),
+                removed_ready,
+                &removed_exact,
+                include_body,
+            )
+            .unwrap();
+            assert_eq!(
+                sibling.resource.availability,
+                ContentAvailabilityV1::Removed
+            );
+            assert_exact_reads_equal(
+                &sibling,
+                &frozen,
+                &format!("removed exact read include_body={include_body}"),
+            );
+        }
+    }
+
+    #[test]
+    fn contextual_exact_read_from_derived_equals_the_frozen_helper() {
+        let (repo, change_id, revision_id, artifact_hash, _review_cursor) = ready_change_store();
+        let state = change_reader_state_for_repo(repo.path()).expect("read fixture state");
+        let ready = state.ready().expect("fixture store is ready");
+        let facade = ready.document_facade().expect("fixture document facade");
+        let exact = RevisionRefV1::new(revision_id, artifact_hash).unwrap();
+        for include_body in [false, true] {
+            let read = derived_exact_read(
+                repo.path(),
+                &change_id,
+                &exact,
+                include_body,
+                Some(exact.clone()),
+            );
+            assert_exact_reads_equal(
+                &contextual_exact_read_from_derived(&read, &change_id, &exact, include_body)
+                    .unwrap(),
+                &build_contextual_exact_read(
+                    repo.path(),
+                    ready,
+                    &facade,
+                    &change_id,
+                    &exact,
+                    include_body,
+                )
+                .unwrap(),
+                &format!("no-port contextual exact read include_body={include_body}"),
+            );
+        }
+
+        let applicable = contextual_port_fixture(false, 5);
+        let read = derived_exact_read(
+            applicable.repo.path(),
+            &applicable.change_id,
+            &applicable.target,
+            true,
+            Some(applicable.target.clone()),
+        );
+        assert!(read.result(&applicable.origin).is_some());
+        assert_exact_reads_equal(
+            &contextual_exact_read_from_derived(
+                &read,
+                &applicable.change_id,
+                &applicable.target,
+                true,
+            )
+            .unwrap(),
+            &build_contextual_exact_read(
+                applicable.repo.path(),
+                &applicable.later_ready,
+                read.facade(),
+                &applicable.change_id,
+                &applicable.target,
+                true,
+            )
+            .unwrap(),
+            "one applicable contextual fact port",
+        );
+
+        let unmaterialized = contextual_port_fixture(true, 6);
+        let generation = rebuild_derived_exact_fixture(unmaterialized.repo.path());
+        let target_fact_event_id = unmaterialized
+            .target_fact_event_id
+            .as_deref()
+            .expect("unmaterialized fixture has a target fact event");
+        mutate_derived_database(unmaterialized.repo.path(), &generation, |connection| {
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE semantic_event_fact
+                         SET revision_prefix_id = NULL,
+                             revision_digest = NULL,
+                             revision_raw = NULL
+                         WHERE sequence = (
+                             SELECT sequence FROM locator_event_text WHERE event_id = ?1
+                         )",
+                        [target_fact_event_id],
+                    )
+                    .expect("hide target fact from the exact component"),
+                1,
+            );
+        });
+        let read = derived_exact_read_from_current(
+            unmaterialized.repo.path(),
+            &unmaterialized.change_id,
+            &unmaterialized.target,
+            true,
+            Some(unmaterialized.target.clone()),
+        );
+        assert!(read.result(&unmaterialized.origin).is_none());
+        assert_exact_reads_equal(
+            &contextual_exact_read_from_derived(
+                &read,
+                &unmaterialized.change_id,
+                &unmaterialized.target,
+                true,
+            )
+            .unwrap(),
+            &build_contextual_exact_read(
+                unmaterialized.repo.path(),
+                &unmaterialized.early_ready,
+                read.facade(),
+                &unmaterialized.change_id,
+                &unmaterialized.target,
+                true,
+            )
+            .unwrap(),
+            "unmaterialized target fact",
+        );
+
+        let mismatched = contextual_port_fixture(false, 7);
+        let generation = rebuild_derived_exact_fixture(mismatched.repo.path());
+        let wrong_hash = format!("sha256:{}", "f".repeat(64));
+        mutate_derived_database(mismatched.repo.path(), &generation, |connection| {
+            let (fact_json, actor_id, track_id): (String, String, String) = connection
+                .query_row(
+                    "SELECT change_fact.fact_json, event.actor_id, locator.track_id
+                     FROM semantic_change_fact AS change_fact
+                     JOIN semantic_event_fact_text AS event
+                       ON event.sequence = change_fact.sequence
+                     JOIN locator_event_text AS locator
+                       ON locator.sequence = change_fact.sequence
+                     WHERE locator.event_id = ?1",
+                    [mismatched.port_event_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("read materialized fact-port carrier");
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE semantic_change_fact
+                         SET fact_json = replace(fact_json, ?1, ?2)
+                         WHERE json_extract(fact_json, '$.kind') = 'revision'
+                           AND instr(fact_json, ?1) > 0",
+                        rusqlite::params![
+                            mismatched.origin.object_artifact_content_hash,
+                            wrong_hash,
+                        ],
+                    )
+                    .expect("inject mismatched materialized origin hash"),
+                1,
+            );
+
+            let mut fact: serde_json::Value =
+                serde_json::from_str(&fact_json).expect("decode materialized fact port");
+            let port = fact
+                .get_mut("port")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("fact-port payload is an object");
+            port.get_mut("originRevision")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("origin Revision is an object")
+                .insert(
+                    "objectArtifactContentHash".to_owned(),
+                    serde_json::Value::String(wrong_hash.clone()),
+                );
+            port.remove("portId");
+            let port_id = format!(
+                "fact-port:{}",
+                canonical_json_sha256(&serde_json::json!({
+                    "payload": serde_json::Value::Object(port.clone()),
+                    "actorId": actor_id,
+                    "trackId": track_id,
+                }))
+            );
+            port.insert("portId".to_owned(), serde_json::Value::String(port_id));
+            assert_eq!(
+                connection
+                    .execute(
+                        "UPDATE semantic_change_fact
+                         SET fact_json = ?1
+                         WHERE sequence = (
+                             SELECT sequence FROM locator_event_text WHERE event_id = ?2
+                         )",
+                        rusqlite::params![fact.to_string(), mismatched.port_event_id],
+                    )
+                    .expect("bind fact port to mismatched materialized origin"),
+                1,
+            );
+        });
+        let read = derived_exact_read_from_current(
+            mismatched.repo.path(),
+            &mismatched.change_id,
+            &mismatched.target,
+            true,
+            Some(mismatched.target.clone()),
+        );
+        let mismatched_origin =
+            RevisionRefV1::new(mismatched.origin.revision_id.clone(), wrong_hash).unwrap();
+        assert!(read.result(&mismatched_origin).is_none());
+        let authoritative_state = change_reader_state_for_repo(mismatched.repo.path())
+            .expect("read mismatched-origin authoritative state");
+        let authoritative_ready = authoritative_state
+            .ready()
+            .expect("mismatched-origin authoritative state is ready");
+        assert_exact_reads_equal(
+            &contextual_exact_read_from_derived(
+                &read,
+                &mismatched.change_id,
+                &mismatched.target,
+                true,
+            )
+            .unwrap(),
+            &build_contextual_exact_read(
+                mismatched.repo.path(),
+                authoritative_ready,
+                read.facade(),
+                &mismatched.change_id,
+                &mismatched.target,
+                true,
+            )
+            .unwrap(),
+            "mismatched origin artifact",
+        );
     }
 
     #[test]
