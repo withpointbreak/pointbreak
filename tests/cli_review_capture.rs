@@ -181,7 +181,7 @@ fn change_select_rechecks_worktree_and_commit_source_bindings() {
 }
 
 #[test]
-fn change_select_bound_arms_pin_error_order() {
+fn derived_bound_select_matches_the_floor_bytes_and_error_order() {
     // (a) The worktree comparison reports live source drift before selection.
     {
         let repo = modified_repo();

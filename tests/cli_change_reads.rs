@@ -3340,11 +3340,11 @@ fn derived_select_refusals_are_byte_identical_json_on_stderr() {
     assert_eq!(refusal_code(&active), "revision_artifact_missing");
 }
 
-/// Mutable sources and mutable-bound prior cursors never enter the derived
-/// lane: their bytes and error ordering are today's authoritative behavior,
-/// including under an explicit `--source captured` override.
+/// Every parseable mutable source and decodable mutable-bound prior cursor is
+/// derived-eligible, while the shared selection sequence preserves the floor's
+/// bytes and error ordering, including under an explicit captured override.
 #[test]
-fn mutable_sources_and_mutable_bound_cursors_never_enter_the_derived_lane() {
+fn derived_bound_select_preserves_mutable_source_bytes_and_error_order() {
     let fixture = change_reads_fixture();
     fixture.build_derived();
 
@@ -3355,8 +3355,7 @@ fn mutable_sources_and_mutable_bound_cursors_never_enter_the_derived_lane() {
         "--source worktree",
     );
     // The fixture worktree still matches the accepted capture, so the
-    // worktree arm succeeds authoritatively on both lanes and emits a
-    // worktree-bound cursor; the parity above is the contract.
+    // derived arm emits the same worktree-bound cursor as the floor.
     assert_success(&active);
     assert_eq!(
         parse_json(&active.stdout)["cursor"]["sourceBinding"]["kind"],
@@ -3418,9 +3417,8 @@ fn mutable_sources_and_mutable_bound_cursors_never_enter_the_derived_lane() {
         assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
     }
 
-    // A mutable-bound cursor whose worktree moved: today's authoritative
-    // error form, identical on both lanes (source_binding_mismatch is not
-    // derived-reachable).
+    // A mutable-bound cursor whose worktree moved retains the floor's error
+    // form and position on the derived resolver.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 9 }\n");
     let args = [
         "change",

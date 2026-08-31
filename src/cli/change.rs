@@ -27,9 +27,9 @@ use pointbreak::session::{
     RevisionShowOptions, SnapshotContentState, WorktreeSpec, assert_change_revision_relation,
     capture_change_revision, change_reader_state_for_repo, create_change, dry_run_bulk_adoption,
     join_revision_to_change, link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup,
-    review_source_binding, select_review_cursor, show_revision_for_change_reader_ready,
-    validate_review_cursor_for_write, withdraw_change_revision_relation,
-    withdraw_revision_from_change,
+    review_source_binding, review_source_binding_from_shown, select_review_cursor,
+    show_revision_for_change_reader_ready, validate_review_cursor_for_write,
+    withdraw_change_revision_relation, withdraw_revision_from_change,
 };
 
 use crate::cli::{common, output};
@@ -955,17 +955,55 @@ fn run_show(
 fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     if select_is_derived_eligible(&args) {
         let change_id = ChangeId::new(args.change.clone());
-        match attempt_derived_change_read(&args.repo, |access| access.change_seek(&change_id)) {
+        match attempt_derived_change_read(&args.repo, |access| {
+            let session = match access.exact_revision_session(&change_id)? {
+                DerivedChangeOutcomeV1::Ready(session) => session,
+                other => {
+                    return Ok(other.map_ready(|_| {
+                        unreachable!("non-Ready exact-session outcomes carry no session")
+                    }));
+                }
+            };
+            let previous = args
+                .cursor
+                .as_deref()
+                .map(ReviewCursorV1::decode_token)
+                .transpose()?;
+            let revisions = plan_select_revisions(
+                &args,
+                previous.as_ref(),
+                session.change_view(),
+                session.document_projection(),
+            );
+            session.read(&ExactRevisionReadPlanV1 {
+                revisions,
+                include_body: false,
+                read_for_display: false,
+                fact_port_context: None,
+            })
+        }) {
             DerivedChangeAttempt::Answered {
-                document: seek,
+                document: read,
                 state,
             } => {
                 record_change_route_state(state);
+                let bind = |revision: &RevisionRefV1, request: ReviewSourceRequestV1| {
+                    if request == ReviewSourceRequestV1::Captured {
+                        return Ok(ReviewSourceBindingV1::Captured);
+                    }
+                    let shown = read.result(revision).ok_or_else(|| {
+                        pointbreak::error::ShoreError::Message(
+                            "derived select read did not plan the requested Revision".to_owned(),
+                        )
+                    })?;
+                    review_source_binding_from_shown(&args.repo, revision, request, shown)
+                };
                 let document = select_cursor_document(
                     &args.repo,
                     &args,
-                    seek.change_view(),
-                    seek.document_projection(),
+                    read.change_view(),
+                    read.document_projection(),
+                    &bind,
                 )?;
                 return write(&args.format_args, stdout, &document);
             }
@@ -983,38 +1021,77 @@ fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
             .changes
             .get(&change_id)
             .ok_or_else(|| format!("Change {} is unavailable", change_id.as_str()))?;
-        select_cursor_document(&args.repo, &args, change, &ready.document_projection)
+        let bind = |revision: &RevisionRefV1, request: ReviewSourceRequestV1| {
+            review_source_binding(&args.repo, revision, request)
+        };
+        select_cursor_document(&args.repo, &args, change, &ready.document_projection, &bind)
     })
 }
 
-/// R08: the derived lane admits only invocations that are captured end to
-/// end, decided purely before any store access. A `--source` parse failure,
-/// a worktree or commit source, an undecodable prior cursor, or a
-/// mutable-bound prior cursor — even with an explicit `--source captured` —
-/// takes the authoritative arm untouched, so every error surfaces in its
-/// existing position.
+/// S5: every invocation whose source parses and whose prior cursor decodes is
+/// eligible for one snapshot-bound derived read. Parse and decode failures
+/// stay on the authoritative arm so capability documents and the existing
+/// error positions remain unchanged.
 fn select_is_derived_eligible(args: &SelectArgs) -> bool {
-    match args.source.as_deref().map(parse_source_request) {
-        None | Some(Ok(ReviewSourceRequestV1::Captured)) => {}
-        Some(_) => return false,
+    if let Some(source) = args.source.as_deref()
+        && parse_source_request(source).is_err()
+    {
+        return false;
     }
-    match args.cursor.as_deref() {
-        None => true,
-        Some(token) => ReviewCursorV1::decode_token(token)
-            .map(|cursor| cursor.source_binding == ReviewSourceBindingV1::Captured)
-            .unwrap_or(false),
-    }
+    args.cursor
+        .as_deref()
+        .is_none_or(|token| ReviewCursorV1::decode_token(token).is_ok())
 }
+
+/// Purely enumerate every exact Revision for which the shared selection
+/// sequence can request mutable source resolution. Selection refusals remain
+/// owned by `select_cursor_document` and are never emitted while planning.
+fn plan_select_revisions(
+    args: &SelectArgs,
+    previous: Option<&ReviewCursorV1>,
+    change: &pointbreak::session::ChangeView,
+    document_projection: &ChangeDocumentProjectionV1,
+) -> Vec<RevisionRefV1> {
+    let mut planned = Vec::new();
+    if let Some(previous) = previous
+        && previous.source_binding != ReviewSourceBindingV1::Captured
+    {
+        planned.push(previous.revision.clone());
+    }
+    let revision_id = args.revision.clone().map(RevisionId::new).or_else(|| {
+        previous
+            .as_ref()
+            .map(|cursor| cursor.revision.revision_id.clone())
+    });
+    if let Ok(provisional) = select_review_cursor(
+        change,
+        document_projection,
+        revision_id.as_ref(),
+        args.allow_historical,
+        ReviewSourceBindingV1::Captured,
+    ) {
+        planned.push(provisional.cursor.revision);
+    }
+    planned.sort();
+    planned.dedup();
+    planned
+}
+
+type BindFn<'a> = &'a dyn Fn(
+    &RevisionRefV1,
+    ReviewSourceRequestV1,
+) -> pointbreak::error::Result<ReviewSourceBindingV1>;
 
 /// The pure selection sequence shared verbatim by the derived and
 /// authoritative lanes, so lane divergence is structurally impossible: cursor
 /// revalidation, provisional captured selection, source resolution, and the
 /// final selection, with refusals serialized to their existing JSON form.
 fn select_cursor_document(
-    repo: &std::path::Path,
+    _repo: &std::path::Path,
     args: &SelectArgs,
     change: &pointbreak::session::ChangeView,
     document_projection: &ChangeDocumentProjectionV1,
+    bind: BindFn<'_>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let previous = args
         .cursor
@@ -1022,8 +1099,7 @@ fn select_cursor_document(
         .map(ReviewCursorV1::decode_token)
         .transpose()?;
     if let (Some(token), Some(previous)) = (args.cursor.as_deref(), previous.as_ref()) {
-        let current_binding = review_source_binding(
-            repo,
+        let current_binding = bind(
             &previous.revision,
             source_request_from_binding(&previous.source_binding),
         )?;
@@ -1050,7 +1126,7 @@ fn select_cursor_document(
             .map(|cursor| source_request_from_binding(&cursor.source_binding))
             .unwrap_or(ReviewSourceRequestV1::Captured),
     };
-    let source_binding = review_source_binding(repo, &provisional.cursor.revision, source_request)?;
+    let source_binding = bind(&provisional.cursor.revision, source_request)?;
     let selected = select_review_cursor(
         change,
         document_projection,
@@ -1914,6 +1990,253 @@ fn write<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn select_args(source: Option<&str>, cursor: Option<&str>) -> SelectArgs {
+        SelectArgs {
+            change: "change:sha256:eligibility".to_owned(),
+            revision: None,
+            allow_historical: false,
+            cursor: cursor.map(str::to_owned),
+            source: source.map(str::to_owned),
+            repo: PathBuf::from("."),
+            format_args: output::FormatArgs::default(),
+        }
+    }
+
+    #[test]
+    fn select_eligibility_admits_bound_shapes_and_rejects_unparseable_ones() {
+        let (_repo, _change_id, _revision_id, _artifact_hash, captured_token) =
+            ready_change_store();
+        let mut mutable = ReviewCursorV1::decode_token(&captured_token).unwrap();
+        mutable.source_binding =
+            ReviewSourceBindingV1::worktree(pointbreak::session::WorktreeSourceStateV1 {
+                capture_mode: "working_tree".to_owned(),
+                base: None,
+                path_scope: Vec::new(),
+                paths: Vec::new(),
+            })
+            .unwrap();
+        let mutable_token = mutable.encode_token().unwrap();
+
+        for args in [
+            select_args(Some("worktree"), None),
+            select_args(Some("commit:HEAD"), None),
+            select_args(None, Some(&mutable_token)),
+            select_args(Some("captured"), Some(&mutable_token)),
+        ] {
+            assert!(select_is_derived_eligible(&args), "{args:?}");
+        }
+        for args in [
+            select_args(Some("bogus"), None),
+            select_args(None, Some("not-a-token")),
+        ] {
+            assert!(!select_is_derived_eligible(&args), "{args:?}");
+        }
+    }
+
+    fn select_plan_ref(marker: char) -> RevisionRefV1 {
+        RevisionRefV1::new(
+            RevisionId::new(format!("rev:sha256:{}", marker.to_string().repeat(64))),
+            format!(
+                "sha256:{}",
+                marker.to_ascii_uppercase().to_string().repeat(64)
+            ),
+        )
+        .unwrap()
+    }
+
+    fn select_plan_view(
+        change_id: &ChangeId,
+        members: &[&RevisionRefV1],
+        current: &[&RevisionRefV1],
+        topology: pointbreak::session::ChangeTopologyV1,
+    ) -> pointbreak::session::ChangeView {
+        pointbreak::session::ChangeView {
+            change_id: change_id.clone(),
+            members: members
+                .iter()
+                .map(|reference| reference.revision_id.clone())
+                .collect(),
+            current_revisions: current
+                .iter()
+                .map(|reference| reference.revision_id.clone())
+                .collect(),
+            supersedes: BTreeSet::new(),
+            topology,
+            lifecycle: pointbreak::session::ChangeLifecycleV1::InProgress,
+            qualified_current_revisions: BTreeSet::new(),
+            operative_obligations: BTreeSet::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn select_plan_cursor(
+        change: &pointbreak::session::ChangeView,
+        projection: &ChangeDocumentProjectionV1,
+        revision: &RevisionRefV1,
+        source_binding: ReviewSourceBindingV1,
+    ) -> String {
+        select_review_cursor(
+            change,
+            projection,
+            Some(&revision.revision_id),
+            true,
+            source_binding,
+        )
+        .unwrap()
+        .token
+    }
+
+    #[test]
+    fn select_plan_set_covers_every_resolver_request() {
+        use std::cell::RefCell;
+
+        let first = select_plan_ref('1');
+        let second = select_plan_ref('2');
+        let foreign = select_plan_ref('3');
+        let change_id = ChangeId::new(format!("change:sha256:{}", "4".repeat(64)));
+        let foreign_change_id = ChangeId::new(format!("change:sha256:{}", "5".repeat(64)));
+        let regular = select_plan_view(
+            &change_id,
+            &[&first, &second],
+            &[&second],
+            pointbreak::session::ChangeTopologyV1::Replacement,
+        );
+        let ambiguous = select_plan_view(
+            &change_id,
+            &[&first, &second],
+            &[&first, &second],
+            pointbreak::session::ChangeTopologyV1::ParallelCurrent,
+        );
+        let old = select_plan_view(
+            &change_id,
+            &[&first],
+            &[&first],
+            pointbreak::session::ChangeTopologyV1::Initial,
+        );
+        let foreign_view = select_plan_view(
+            &foreign_change_id,
+            &[&foreign],
+            &[&foreign],
+            pointbreak::session::ChangeTopologyV1::Initial,
+        );
+        let mut projection = ChangeDocumentProjectionV1 {
+            projection_stamp: format!("sha256:{}", "6".repeat(64)),
+            ..ChangeDocumentProjectionV1::default()
+        };
+        for reference in [&first, &second, &foreign] {
+            projection
+                .revision_refs
+                .insert(reference.revision_id.clone(), vec![reference.clone()]);
+        }
+
+        let worktree_binding =
+            ReviewSourceBindingV1::worktree(pointbreak::session::WorktreeSourceStateV1 {
+                capture_mode: "working_tree".to_owned(),
+                base: None,
+                path_scope: Vec::new(),
+                paths: Vec::new(),
+            })
+            .unwrap();
+        let commit_binding =
+            ReviewSourceBindingV1::commit(pointbreak::session::CommitSourceStateV1 {
+                commit_oid: "7".repeat(40),
+                tree_oid: "8".repeat(40),
+                comparison_base: "9".repeat(40),
+                path_scope: Vec::new(),
+                proof_state: pointbreak::session::CommitProofStateV1::Exact,
+                proof_ref: None,
+            })
+            .unwrap();
+        let captured_cursor = select_plan_cursor(
+            &regular,
+            &projection,
+            &second,
+            ReviewSourceBindingV1::Captured,
+        );
+        let worktree_cursor =
+            select_plan_cursor(&regular, &projection, &second, worktree_binding.clone());
+        let commit_cursor =
+            select_plan_cursor(&regular, &projection, &second, commit_binding.clone());
+        let foreign_cursor = select_plan_cursor(
+            &foreign_view,
+            &projection,
+            &foreign,
+            worktree_binding.clone(),
+        );
+        let stale_cursor = select_plan_cursor(&old, &projection, &first, worktree_binding.clone());
+        let cursor_cases = [
+            ("no cursor", None),
+            ("captured cursor", Some(captured_cursor.as_str())),
+            ("worktree cursor", Some(worktree_cursor.as_str())),
+            ("commit cursor", Some(commit_cursor.as_str())),
+            ("foreign cursor", Some(foreign_cursor.as_str())),
+            ("stale cursor", Some(stale_cursor.as_str())),
+        ];
+        let selection_cases = [
+            ("implicit", &regular, None, false),
+            ("same member", &regular, Some(&second), false),
+            ("other member", &regular, Some(&first), true),
+            ("ambiguous Change", &ambiguous, None, false),
+        ];
+
+        for (cursor_label, cursor) in cursor_cases {
+            for source in [
+                None,
+                Some("captured"),
+                Some("worktree"),
+                Some("commit:HEAD"),
+            ] {
+                for (selection_label, change, explicit, allow_historical) in selection_cases {
+                    let args = SelectArgs {
+                        change: change.change_id.as_str().to_owned(),
+                        revision: explicit
+                            .map(|reference| reference.revision_id.as_str().to_owned()),
+                        allow_historical,
+                        cursor: cursor.map(str::to_owned),
+                        source: source.map(str::to_owned),
+                        repo: PathBuf::from("."),
+                        format_args: output::FormatArgs::default(),
+                    };
+                    let previous = cursor
+                        .map(ReviewCursorV1::decode_token)
+                        .transpose()
+                        .unwrap();
+                    let planned =
+                        plan_select_revisions(&args, previous.as_ref(), change, &projection);
+                    let requests = RefCell::new(Vec::new());
+                    let bind = |revision: &RevisionRefV1, request: ReviewSourceRequestV1| {
+                        requests
+                            .borrow_mut()
+                            .push((revision.clone(), request.clone()));
+                        if request != ReviewSourceRequestV1::Captured {
+                            assert!(
+                                planned.contains(revision),
+                                "{cursor_label}, source={source:?}, {selection_label}: mutable resolver request {revision:?} was not planned in {planned:?}",
+                            );
+                        }
+                        Ok(match request {
+                            ReviewSourceRequestV1::Captured => ReviewSourceBindingV1::Captured,
+                            ReviewSourceRequestV1::Worktree => worktree_binding.clone(),
+                            ReviewSourceRequestV1::Commit(_) => commit_binding.clone(),
+                        })
+                    };
+                    let _ = select_cursor_document(
+                        std::path::Path::new("."),
+                        &args,
+                        change,
+                        &projection,
+                        &bind,
+                    );
+                    for (revision, request) in requests.into_inner() {
+                        if request != ReviewSourceRequestV1::Captured {
+                            assert!(planned.contains(&revision));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn unavailable_content_preserves_distinct_typed_states() {
