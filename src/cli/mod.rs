@@ -1063,7 +1063,7 @@ fn interaction_route_for_arguments(
         (
             route,
             Some(qualified.repo),
-            qualified.revision,
+            qualified.revision.map(str::to_owned),
             qualified.track,
         )
     } else if let Command::Version(args) = &cli.command
@@ -1071,11 +1071,18 @@ fn interaction_route_for_arguments(
     {
         (Route::VersionJson, None, None, None)
     } else if let Command::Change(args) = &cli.command
-        && let Some((route, repo)) = args.interaction_route_v1()
+        && let Some((route, repo, revision)) = args.interaction_route_v1()
     {
-        // The three approved change-read shapes carry no Revision or track
-        // selector; the family's exempt invocation posture is unchanged.
-        (route, Some(repo), None, None)
+        // The exact Change-read routes carry one positional Revision through
+        // the expected context; the other six carry none. No Change route
+        // carries a track selector, and the exempt invocation posture stays
+        // unchanged.
+        (
+            route,
+            Some(repo),
+            revision.map(|revision| revision.as_str().to_owned()),
+            None,
+        )
     } else {
         return Err("interaction CLI argv is not one of the frozen interaction routes".to_owned());
     };
@@ -1087,7 +1094,7 @@ fn interaction_route_for_arguments(
     if route != expected.route {
         return Ok(route);
     }
-    if revision != expected.revision.as_deref() {
+    if revision.as_deref() != expected.revision.as_deref() {
         return Err("interaction route Revision does not match expected context".to_owned());
     }
     if track != expected.track.as_deref() {

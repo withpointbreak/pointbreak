@@ -1738,84 +1738,6 @@ fn derived_list_and_authoritative_show_carry_distinct_consistent_stamps() {
     );
 }
 
-/// The other change subcommands never consult the derived lane: their output
-/// stays byte-identical between the derived-selected and explicit-off lanes
-/// at the same store state, including with an active-current generation.
-#[test]
-fn neighbor_change_subcommands_are_untouched_by_the_derived_routing() {
-    let fixture = change_reads_fixture();
-    fixture.build_derived();
-
-    let list =
-        parse_json(&pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF).stdout);
-    let accepted = list["changes"]
-        .as_array()
-        .expect("changes array")
-        .iter()
-        .find(|change| change["changeId"] == fixture.accepted_change_id.as_str())
-        .expect("accepted Change summary");
-    let accepted_ref = &accepted["currentRevisionRefs"][0];
-    let accepted_revision = accepted_ref["revisionId"].as_str().expect("revision id");
-    let accepted_hash = accepted_ref["objectArtifactContentHash"]
-        .as_str()
-        .expect("artifact hash");
-    let parallel = list["changes"]
-        .as_array()
-        .expect("changes array")
-        .iter()
-        .find(|change| change["changeId"] == fixture.parallel_change_id.as_str())
-        .expect("parallel Change summary");
-    assert_eq!(
-        parallel["currentRevisionRefs"]
-            .as_array()
-            .expect("parallel heads")
-            .len(),
-        2
-    );
-
-    let revision = vec![
-        "revision".to_owned(),
-        fixture.accepted_change_id.clone(),
-        accepted_revision.to_owned(),
-        "--artifact-hash".to_owned(),
-        accepted_hash.to_owned(),
-    ];
-    let resource = vec![
-        "resource".to_owned(),
-        fixture.accepted_change_id.clone(),
-        accepted_revision.to_owned(),
-        "--artifact-hash".to_owned(),
-        accepted_hash.to_owned(),
-    ];
-    // Deliberate, reviewed narrowing: `show`, `select`, and `interdiff` are
-    // now derived-routed, so the untouched-neighbor set is exactly the two
-    // commands the derived lane must never consult.
-    for subcommand in [revision, resource] {
-        let mut args = vec!["change".to_owned()];
-        args.extend(subcommand.clone());
-        args.extend(["--repo".to_owned(), fixture.repo_arg().to_owned()]);
-        let active = pointbreak_env(&args, ACTIVE);
-        let off = pointbreak_env(&args, OFF);
-        assert_eq!(
-            active.status.code(),
-            off.status.code(),
-            "change {}: exit parity",
-            subcommand[0]
-        );
-        assert_eq!(
-            active.stdout, off.stdout,
-            "change {}: stdout parity",
-            subcommand[0]
-        );
-        assert_eq!(
-            active.stderr, off.stderr,
-            "change {}: stderr parity",
-            subcommand[0]
-        );
-        assert_success(&active);
-    }
-}
-
 #[test]
 fn change_profile_bytes_are_identical_across_derived_states() {
     let fixture = change_reads_fixture();
@@ -3602,8 +3524,8 @@ mod counted {
 
     use super::support::inspect::{Inspector, urlencode};
     use super::{
-        ACTIVE, ChangeReadsFixture, assert_success, change_reads_fixture, parse_json,
-        pointbreak_env,
+        ACTIVE, ChangeReadsFixture, assert_success, change_reads_fixture, exact_read_fixture,
+        parse_json, pointbreak_env,
     };
 
     /// Distinct proposal-independent history large enough that a complete
@@ -3868,14 +3790,12 @@ mod counted {
     }
 
     /// The R05 seek falsifier: with unrelated history and unrelated Changes
-    /// present, the derived seek lane opens zero authoritative material —
-    /// no event decode, no proposal/support carrier, no body or object
-    /// artifact, no strict journal inspection — and its one honest counter,
-    /// `changeSeekFactRowsSelected`, is proportional to the target Change's
-    /// correlated fact rows and invariant as unrelated Changes and history
-    /// grow. Zero-construction assertions are deliberately absent (the
-    /// narrowed fold still constructs), and `factSqliteRowsSelected` belongs
-    /// to exact-Revision selections, never asserted here.
+    /// present, show/interdiff open no authoritative material, while bound
+    /// select reads exactly its planned provisional Revision through the
+    /// Task 3.3 exact-session seam. Both the Change seek rows and select's
+    /// component work stay invariant as unrelated Changes and history grow.
+    /// Zero-construction assertions are deliberately absent because the
+    /// narrowed fold still constructs.
     #[test]
     fn change_seek_reads_active_current_stay_zero_pin_and_row_invariant() {
         let fixture = change_reads_fixture();
@@ -3923,15 +3843,36 @@ mod counted {
 
         let assert_seek_pins = |counters: &Value, label: &str| {
             for pin in [
-                "eventDecodes",
                 "changeProposalCarriersOpened",
                 "changeProposalCarriersValidated",
                 "changeSupportCarriersOpened",
                 "bodyArtifactReads",
-                "objectArtifactReads",
                 "strictJournalInspections",
             ] {
                 assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+            }
+            if label == "select" {
+                assert_eq!(
+                    counter(counters, "objectArtifactReads"),
+                    1,
+                    "select: one planned provisional Revision object"
+                );
+                assert!(
+                    counter(counters, "eventDecodes") > 0,
+                    "select: planned component carriers are decoded"
+                );
+                assert!(
+                    counter(counters, "factSqliteRowsSelected") > 0,
+                    "select: planned component rows are selected"
+                );
+            } else {
+                for pin in [
+                    "eventDecodes",
+                    "factSqliteRowsSelected",
+                    "objectArtifactReads",
+                ] {
+                    assert_eq!(counter(counters, pin), 0, "{label}: {pin} stays zero");
+                }
             }
             assert!(
                 counter(counters, "changeSeekFactRowsSelected") > 0,
@@ -3945,7 +3886,7 @@ mod counted {
             let counters =
                 counted_counters_for(&fixture, &arguments, receipt_dir.path(), ordinal as u64);
             assert_seek_pins(&counters, label);
-            before.push(counter(&counters, "changeSeekFactRowsSelected"));
+            before.push(counters);
         }
 
         // Unrelated growth: review facts on an existing member plus two whole
@@ -3972,22 +3913,160 @@ mod counted {
             assert_seek_pins(&counters, label);
             assert_eq!(
                 counter(&counters, "changeSeekFactRowsSelected"),
-                before[ordinal],
-                "{label}: selected fact rows are invariant under unrelated growth"
+                counter(&before[ordinal], "changeSeekFactRowsSelected"),
+                "{label}: Change seek rows are invariant under unrelated Change-fact growth"
             );
         }
     }
 
-    /// The R08 eligibility gate's falsifier: every ineligible `select` shape
-    /// records zero seek rows under the counted harness — byte parity alone
-    /// cannot catch a regression that widens eligibility, because both lanes
-    /// share one pure selection helper. The eligible captured shapes record
-    /// seek rows as the positive contrast, which also proves the generation
-    /// is active-current before the zero assertions run. The counter sums
-    /// selected rows, so the exact guarantee is "no seek rows were read";
-    /// both target Changes demonstrably have rows, which the contrast pins.
+    /// The S7 exact-read falsifier: the target Change has one applicable
+    /// fact-port origin, while unrelated review history and whole Changes grow
+    /// around it. Both exact routes stay priced by the selected Change and
+    /// Revision components rather than repository history.
     #[test]
-    fn ineligible_select_shapes_never_touch_the_seek() {
+    fn derived_exact_reads_pin_component_proportional_counters() {
+        let fixture = exact_read_fixture();
+        let receipt_dir = tempfile::tempdir().expect("receipt directory");
+
+        let grow_unrelated_changes = |first_value: u32| {
+            for value in first_value..first_value + 3 {
+                fixture.repo.write(
+                    "src/lib.rs",
+                    format!("pub fn value() -> u32 {{ {value} }}\n"),
+                );
+                let unrelated =
+                    pointbreak_env(["capture", "--repo", fixture.repo_arg()], super::OFF);
+                assert_success(&unrelated);
+            }
+        };
+        let grow_unrelated_history = |first_ordinal: usize| {
+            for ordinal in first_ordinal..first_ordinal + UNRELATED_EVENTS {
+                let title = format!("exact-read unrelated growth {ordinal}");
+                let output = pointbreak_env(
+                    [
+                        "observation",
+                        "add",
+                        "--repo",
+                        fixture.repo_arg(),
+                        "--exact-revision",
+                        &fixture.parallel_revision_ids.0,
+                        "--track",
+                        super::REVIEW_TRACK,
+                        "--title",
+                        &title,
+                        "--body",
+                        "outside the exact-read target and origin components",
+                    ],
+                    super::OFF,
+                );
+                assert_success(&output);
+            }
+        };
+
+        grow_unrelated_history(0);
+        grow_unrelated_changes(60);
+        fixture.build_derived();
+
+        let revision = vec![
+            "revision".to_owned(),
+            fixture.accepted_change_id.clone(),
+            fixture.accepted_revision_id.clone(),
+            "--artifact-hash".to_owned(),
+            fixture.accepted_artifact_hash.clone(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        let resource = vec![
+            "resource".to_owned(),
+            fixture.accepted_change_id.clone(),
+            fixture.accepted_revision_id.clone(),
+            "--artifact-hash".to_owned(),
+            fixture.accepted_artifact_hash.clone(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        let shapes: [(&str, &[String]); 2] = [("revision", &revision), ("resource", &resource)];
+
+        let assert_exact_pins = |counters: &Value, label: &str| {
+            let expected_components = if label == "revision" { 2 } else { 1 };
+            assert_eq!(
+                counter(counters, "strictJournalInspections"),
+                0,
+                "{label}: no strict Journal inspection"
+            );
+            assert!(
+                counter(counters, "changeSeekFactRowsSelected") > 0,
+                "{label}: the Change seek selects target-local rows"
+            );
+            assert!(
+                counter(counters, "factSqliteRowsSelected") >= expected_components,
+                "{label}: target and applicable-origin component rows are selected"
+            );
+            assert!(
+                counter(counters, "eventDecodes") > 0,
+                "{label}: selected component carriers are decoded"
+            );
+            assert!(
+                counter(counters, "eventDecodes")
+                    <= counter(counters, "changeSeekFactRowsSelected")
+                        + counter(counters, "factSqliteRowsSelected"),
+                "{label}: carrier decodes stay bounded by selected Change and component rows; \
+                 counters={counters:#}"
+            );
+            assert_eq!(
+                counter(counters, "bodyArtifactReads"),
+                0,
+                "{label}: the catalog shape is bodyless"
+            );
+            assert_eq!(
+                counter(counters, "objectArtifactReads"),
+                expected_components,
+                "{label}: object reads equal the target plus applicable origins for revision, \
+                 and only the target for resource"
+            );
+        };
+
+        let mut before = Vec::new();
+        for (ordinal, (label, shape)) in shapes.iter().enumerate() {
+            let arguments = shape.iter().map(String::as_str).collect::<Vec<_>>();
+            let counters =
+                counted_counters_for(&fixture, &arguments, receipt_dir.path(), ordinal as u64);
+            assert_exact_pins(&counters, label);
+            before.push(counters);
+        }
+        grow_unrelated_history(UNRELATED_EVENTS);
+        grow_unrelated_changes(80);
+        fixture.build_derived();
+
+        for (ordinal, (label, shape)) in shapes.iter().enumerate() {
+            let arguments = shape.iter().map(String::as_str).collect::<Vec<_>>();
+            let after = counted_counters_for(
+                &fixture,
+                &arguments,
+                receipt_dir.path(),
+                10 + ordinal as u64,
+            );
+            assert_exact_pins(&after, label);
+            for invariant in [
+                "changeSeekFactRowsSelected",
+                "factSqliteRowsSelected",
+                "eventDecodes",
+            ] {
+                assert_eq!(
+                    counter(&after, invariant),
+                    counter(&before[ordinal], invariant),
+                    "{label}: {invariant} stays invariant under doubled unrelated growth"
+                );
+            }
+        }
+    }
+
+    /// The R08 eligibility falsifier: parseable sources and decodable cursors
+    /// may enter the shared pure seek even when a later binding check refuses
+    /// the selection. Only malformed source/cursor inputs are rejected before
+    /// the seek. The counted outcome, not command success, is the boundary.
+    #[test]
+    fn select_eligibility_controls_seek_access() {
         let fixture = change_reads_fixture();
 
         // A Change whose capture matches the live worktree, so a
@@ -4044,19 +4123,6 @@ mod counted {
                 "--cursor",
                 captured_token.as_str(),
             ],
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let counters =
-                counted_counters_for(&fixture, &eligible, receipt_dir.path(), ordinal as u64);
-            assert!(
-                counter(&counters, "changeSeekFactRowsSelected") > 0,
-                "{eligible:?}: the eligible captured shape reads through the seek"
-            );
-        }
-
-        for (ordinal, ineligible) in [
             vec![
                 "select",
                 fixture.accepted_change_id.as_str(),
@@ -4071,18 +4137,6 @@ mod counted {
             ],
             vec![
                 "select",
-                fixture.accepted_change_id.as_str(),
-                "--source",
-                "bogus",
-            ],
-            vec![
-                "select",
-                fixture.accepted_change_id.as_str(),
-                "--cursor",
-                "not-a-token",
-            ],
-            vec![
-                "select",
                 fresh_change.as_str(),
                 "--cursor",
                 worktree_token.as_str(),
@@ -4094,6 +4148,31 @@ mod counted {
                 worktree_token.as_str(),
                 "--source",
                 "captured",
+            ],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_output, counters) =
+                counted_outcome_for(&fixture, &eligible, receipt_dir.path(), ordinal as u64);
+            assert!(
+                counter(&counters, "changeSeekFactRowsSelected") > 0,
+                "{eligible:?}: a parseable/decodable shape reads through the seek"
+            );
+        }
+
+        for (ordinal, ineligible) in [
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--source",
+                "bogus",
+            ],
+            vec![
+                "select",
+                fixture.accepted_change_id.as_str(),
+                "--cursor",
+                "not-a-token",
             ],
         ]
         .into_iter()

@@ -3240,6 +3240,8 @@ pub enum InteractionRouteV1 {
     ChangeShowRead,
     ChangeSelectCapturedRead,
     ChangeInterdiffRead,
+    ChangeRevisionRead,
+    ChangeResourceRead,
 }
 
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -3338,6 +3340,32 @@ pub const INTERACTION_CHANGE_SEEK_CELLS_V1: [(
     (
         "change_show_explicit_off",
         InteractionRouteV1::ChangeShowRead,
+        InteractionSetupExpectationV1::FactExplicitOff,
+    ),
+];
+
+/// The three owner-approved exact Change-read cells: two derived
+/// active-current targets plus the contextual Revision explicit-off
+/// characterization control. Resource has no explicit-off catalog cell.
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const INTERACTION_CHANGE_EXACT_READ_CELLS_V1: [(
+    &str,
+    InteractionRouteV1,
+    InteractionSetupExpectationV1,
+); 3] = [
+    (
+        "change_revision_current_exact",
+        InteractionRouteV1::ChangeRevisionRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_resource_current_exact",
+        InteractionRouteV1::ChangeResourceRead,
+        InteractionSetupExpectationV1::FactActiveCurrent,
+    ),
+    (
+        "change_revision_explicit_off",
+        InteractionRouteV1::ChangeRevisionRead,
         InteractionSetupExpectationV1::FactExplicitOff,
     ),
 ];
@@ -3521,14 +3549,20 @@ pub fn interaction_route_state_contract_v1(
         InteractionRouteV1::ChangeShowRead
             | InteractionRouteV1::ChangeSelectCapturedRead
             | InteractionRouteV1::ChangeInterdiffRead
+            | InteractionRouteV1::ChangeRevisionRead
+            | InteractionRouteV1::ChangeResourceRead
     ) {
-        // The owner-approved per-Change seek cells: three active-current
-        // targets plus the change show explicit-off characterization
-        // control. Only show carries the control cell; every other setup
-        // stays out of the catalog.
+        // The owner-approved per-Change seek and exact-read cells: five
+        // active-current targets plus the show and contextual Revision
+        // explicit-off controls. Every other setup stays out of the catalog.
         return match setup {
             Setup::FactActiveCurrent => Some(FACT_CURRENT),
-            Setup::FactExplicitOff if route == InteractionRouteV1::ChangeShowRead => {
+            Setup::FactExplicitOff
+                if matches!(
+                    route,
+                    InteractionRouteV1::ChangeShowRead | InteractionRouteV1::ChangeRevisionRead
+                ) =>
+            {
                 Some(InteractionRouteStateContractV1 {
                     observed: Observed::AuthoritativeReplay,
                     ..BASE
@@ -3635,12 +3669,13 @@ impl InteractionPerformanceExpectedContextV1 {
             }
         }
 
-        // The change-read routes take no Revision selector (their argv is
-        // repo-plus-format only), so their expected context carries none.
-        // The seek routes carry none either: `show`'s selector is a Change,
-        // captured `select` pins its Change through the validated arguments,
-        // and `interdiff` addresses an ordered Revision pair positionally,
-        // which a single-Revision field cannot represent.
+        // The page routes take no Revision selector (their argv is
+        // repo-plus-format only), and the seek-only routes carry none either:
+        // `show`'s selector is a Change, captured `select` pins its Change
+        // through the validated arguments, and `interdiff` addresses an
+        // ordered Revision pair that one field cannot represent. The exact
+        // Change reads are deliberately absent from this exclusion because
+        // each carries one positional Revision selector.
         let requires_revision = !matches!(
             self.route,
             InteractionRouteV1::VersionJson

@@ -41,42 +41,47 @@ pub(super) struct ChangeArgs {
 }
 
 impl ChangeArgs {
-    /// The counted-harness recognizer for exactly the six approved
-    /// change-read shapes (explicit JSON format). Harness plumbing only: the
-    /// invocation-read catalog posture is untouched. The captured `select`
-    /// arm matches only argv with no `--cursor` and source absent or
-    /// explicitly `captured` — a cursor-inherited worktree or commit binding
-    /// must never be mislabeled as a captured derived read, and the
-    /// recognizer never decodes tokens.
+    /// The counted-harness recognizer for exactly the eight approved
+    /// change-read shapes (explicit JSON format). The two exact-read shapes
+    /// also return their positional Revision selector and exclude body
+    /// hydration. Harness plumbing only: the invocation-read catalog posture
+    /// is untouched. The captured `select` arm matches only argv with no
+    /// `--cursor` and source absent or explicitly `captured`; bound selection
+    /// has no catalog route, and the recognizer never decodes tokens.
     #[cfg(feature = "longitudinal-counting")]
     pub(super) fn interaction_route_v1(
         &self,
     ) -> Option<(
         pointbreak::bench_support::longitudinal::InteractionRouteV1,
         &std::path::Path,
+        Option<RevisionId>,
     )> {
         use pointbreak::bench_support::longitudinal::InteractionRouteV1 as Route;
 
-        let (route, repo, format) = match &self.command {
+        let (route, repo, format, revision) = match &self.command {
             ChangeCommand::Profile(read) => (
                 Route::ChangeProfileRead,
                 read.repo.as_path(),
                 read.format_args.explicit(),
+                None,
             ),
             ChangeCommand::List(read) => (
                 Route::ChangeListRead,
                 read.repo.as_path(),
                 read.format_args.explicit(),
+                None,
             ),
             ChangeCommand::Attention(read) => (
                 Route::ChangeAttentionRead,
                 read.repo.as_path(),
                 read.format_args.explicit(),
+                None,
             ),
             ChangeCommand::Show(read) => (
                 Route::ChangeShowRead,
                 read.repo.as_path(),
                 read.format_args.explicit(),
+                None,
             ),
             ChangeCommand::Select(read)
                 if read.cursor.is_none()
@@ -86,16 +91,30 @@ impl ChangeArgs {
                     Route::ChangeSelectCapturedRead,
                     read.repo.as_path(),
                     read.format_args.explicit(),
+                    None,
                 )
             }
             ChangeCommand::Interdiff(read) => (
                 Route::ChangeInterdiffRead,
                 read.repo.as_path(),
                 read.format_args.explicit(),
+                None,
+            ),
+            ChangeCommand::Revision(read) if !read.include_body => (
+                Route::ChangeRevisionRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+                Some(RevisionId::new(read.revision.clone())),
+            ),
+            ChangeCommand::Resource(read) if !read.include_body => (
+                Route::ChangeResourceRead,
+                read.repo.as_path(),
+                read.format_args.explicit(),
+                Some(RevisionId::new(read.revision.clone())),
             ),
             _ => return None,
         };
-        (format == Some(output::OutputFormat::Json)).then_some((route, repo))
+        (format == Some(output::OutputFormat::Json)).then_some((route, repo, revision))
     }
 }
 
@@ -3337,10 +3356,10 @@ mod tests {
         }
     }
 
-    /// D35-A recognizer discipline: the captured `select` arm matches only
-    /// cursor-free argv with source absent or explicitly `captured`, and the
-    /// recognizer never decodes tokens — every `--cursor`-bearing shape and
-    /// every mutable source returns no Change route.
+    /// D35-A/D51-A recognizer discipline: captured `select` remains
+    /// cursor-free and immutable, while bodyless exact reads carry their one
+    /// positional Revision. Bound selection and bodyful exact reads have no
+    /// catalog route.
     #[cfg(feature = "longitudinal-counting")]
     #[test]
     fn counted_select_recognizer_matches_only_cursorless_captured_shapes() {
@@ -3353,15 +3372,18 @@ mod tests {
             args: ChangeArgs,
         }
 
-        let route = |argv: &[&str]| {
+        let recognized = |argv: &[&str]| {
             let mut full = vec!["pointbreak"];
             full.extend_from_slice(argv);
             Harness::try_parse_from(full)
                 .expect("parse recognizer harness argv")
                 .args
                 .interaction_route_v1()
-                .map(|(route, _)| route)
+                .map(|(route, _, revision)| {
+                    (route, revision.map(|revision| revision.as_str().to_owned()))
+                })
         };
+        let route = |argv: &[&str]| recognized(argv).map(|(route, _)| route);
 
         assert_eq!(
             route(&["select", "change:x", "--format", "json"]),
@@ -3392,6 +3414,25 @@ mod tests {
             ]),
             Some(Route::ChangeInterdiffRead)
         );
+        let revision = format!("rev:sha256:{}", "1".repeat(64));
+        let artifact_hash = format!("sha256:{}", "2".repeat(64));
+        for (command, expected_route) in [
+            ("revision", Route::ChangeRevisionRead),
+            ("resource", Route::ChangeResourceRead),
+        ] {
+            assert_eq!(
+                recognized(&[
+                    command,
+                    "change:x",
+                    &revision,
+                    "--artifact-hash",
+                    &artifact_hash,
+                    "--format",
+                    "json",
+                ]),
+                Some((expected_route, Some(revision.clone()))),
+            );
+        }
 
         for excluded in [
             vec![
@@ -3420,6 +3461,26 @@ mod tests {
                 "any-token",
                 "--source",
                 "captured",
+                "--format",
+                "json",
+            ],
+            vec![
+                "revision",
+                "change:x",
+                &revision,
+                "--artifact-hash",
+                &artifact_hash,
+                "--include-body",
+                "--format",
+                "json",
+            ],
+            vec![
+                "resource",
+                "change:x",
+                &revision,
+                "--artifact-hash",
+                &artifact_hash,
+                "--include-body",
                 "--format",
                 "json",
             ],

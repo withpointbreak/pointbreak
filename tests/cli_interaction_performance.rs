@@ -2070,7 +2070,10 @@ fn change_read_cells_run_counted_with_plain_run_parity() {
         assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
         assert_eq!(receipt.counters.strict_journal_inspections, 0);
         assert_eq!(receipt.counters.body_artifact_reads, 0);
-        assert_eq!(receipt.counters.object_artifact_reads, 0);
+        assert_eq!(
+            receipt.counters.object_artifact_reads, 0,
+            "{case_name}: page reads must not open object artifacts"
+        );
         assert_eq!(receipt.counters.authoritative_fallbacks, 0);
         assert_eq!(receipt.counters.full_history_fallbacks, 0);
         if route == Route::ChangeProfileRead {
@@ -2170,6 +2173,72 @@ fn change_seek_cell_catalog_freezes_the_four_approved_cells() {
         interaction_route_state_contract_v1(Route::ChangeListRead, Setup::FactExplicitOff)
             .is_some(),
         "the change list explicit-off cell stays in the catalog"
+    );
+}
+
+#[test]
+fn change_exact_read_cell_catalog_freezes_the_three_approved_cells() {
+    use pointbreak::bench_support::longitudinal::INTERACTION_CHANGE_EXACT_READ_CELLS_V1;
+
+    assert_eq!(
+        INTERACTION_CHANGE_EXACT_READ_CELLS_V1.map(|(cell, _, _)| cell),
+        [
+            "change_revision_current_exact",
+            "change_resource_current_exact",
+            "change_revision_explicit_off",
+        ],
+    );
+    assert_eq!(
+        INTERACTION_CHANGE_EXACT_READ_CELLS_V1.map(|(_, route, _)| route),
+        [
+            Route::ChangeRevisionRead,
+            Route::ChangeResourceRead,
+            Route::ChangeRevisionRead,
+        ],
+    );
+
+    for route in [Route::ChangeRevisionRead, Route::ChangeResourceRead] {
+        let target = interaction_route_state_contract_v1(route, Setup::FactActiveCurrent)
+            .expect("active-current exact Change-read cell");
+        assert_eq!(target.observed, ObservedState::DerivedCurrent);
+        assert_eq!(
+            target.performance_role,
+            PerformanceRole::ProvisionalTarget {
+                sample_count: 5,
+                strict_upper_bound_millis: 2_000,
+            }
+        );
+        assert!(target.historical_evidence_unchanged);
+
+        for setup in [
+            Setup::NotApplicable,
+            Setup::AuthoritativeReplay,
+            Setup::FactActiveUnavailable,
+            Setup::FactPostSelectionFailure,
+            Setup::AttentionDerivedCurrent,
+            Setup::AttentionColdInactive,
+            Setup::AttentionActiveUnavailable,
+        ] {
+            assert!(
+                interaction_route_state_contract_v1(route, setup).is_none(),
+                "{setup:?} must not be an exact Change-read catalog cell"
+            );
+        }
+    }
+
+    let control =
+        interaction_route_state_contract_v1(Route::ChangeRevisionRead, Setup::FactExplicitOff)
+            .expect("change_revision_explicit_off cell");
+    assert_eq!(control.observed, ObservedState::AuthoritativeReplay);
+    assert_eq!(
+        control.performance_role,
+        PerformanceRole::CompatibilityCharacterization
+    );
+    assert_eq!(control.strict_authoritative_snapshots, 0);
+    assert!(
+        interaction_route_state_contract_v1(Route::ChangeResourceRead, Setup::FactExplicitOff)
+            .is_none(),
+        "resource has no explicit-off catalog cell"
     );
 }
 
@@ -2308,14 +2377,296 @@ fn change_seek_cells_run_counted_with_plain_run_parity() {
         assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
         assert_eq!(receipt.counters.strict_journal_inspections, 0);
         assert_eq!(receipt.counters.body_artifact_reads, 0);
-        assert_eq!(receipt.counters.object_artifact_reads, 0);
-        assert_eq!(receipt.counters.event_decodes, 0);
+        if route == Route::ChangeSelectCapturedRead {
+            assert_eq!(
+                receipt.counters.object_artifact_reads, 1,
+                "{case_name}: bound selection plans its one provisional Revision"
+            );
+            assert!(receipt.counters.event_decodes > 0);
+            assert!(receipt.counters.fact_sqlite_rows_selected > 0);
+        } else {
+            assert_eq!(
+                receipt.counters.object_artifact_reads, 0,
+                "{case_name}: pure Change seeks do not open object artifacts"
+            );
+            assert_eq!(receipt.counters.event_decodes, 0);
+            assert_eq!(receipt.counters.fact_sqlite_rows_selected, 0);
+        }
         assert_eq!(receipt.counters.change_proposal_carriers_opened, 0);
         assert_eq!(receipt.counters.change_support_carriers_opened, 0);
         assert_eq!(receipt.counters.authoritative_fallbacks, 0);
         assert_eq!(receipt.counters.full_history_fallbacks, 0);
         assert!(receipt.counters.change_seek_fact_rows_selected > 0);
         assert!(receipt.children.is_empty());
+    }
+}
+
+#[test]
+fn change_exact_read_cells_run_counted_with_plain_run_parity() {
+    let fixture = fixture();
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    let execution = execution_identity();
+    let receipt_dir = tempfile::tempdir().expect("temporary exact-read receipt directory");
+
+    let list = run_binary(
+        strings(&["change", "list", "--repo", &repo, "--format", "json"]).as_slice(),
+        OFF_ENV,
+    );
+    assert_success("list the exact-read fixture Change", &list);
+    let list: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list JSON");
+    let summary = &list["changes"][0];
+    let change_id = summary["changeId"].as_str().expect("change id").to_owned();
+    let head = &summary["currentRevisionRefs"][0];
+    let revision = head["revisionId"]
+        .as_str()
+        .expect("head revision")
+        .to_owned();
+    let artifact_hash = head["objectArtifactContentHash"]
+        .as_str()
+        .expect("head hash")
+        .to_owned();
+    assert_eq!(revision, fixture.revision);
+
+    let revision_arguments = strings(&[
+        "change",
+        "revision",
+        &change_id,
+        &revision,
+        "--artifact-hash",
+        &artifact_hash,
+        "--repo",
+        &repo,
+        "--format",
+        "json",
+    ]);
+    let off_expected = expected_context(
+        execution.clone(),
+        Route::ChangeRevisionRead,
+        revision_arguments.clone(),
+        Setup::FactExplicitOff,
+        Some(&fixture),
+        None,
+    );
+    let off_receipt = run_success_case(
+        "change-revision-explicit-off",
+        &revision_arguments,
+        OFF_ENV,
+        &off_expected,
+        &receipt_dir,
+        &[Phase::SerializationAndOutput],
+        &[
+            Phase::RevisionDetailSqlSelection,
+            Phase::RevisionDetailSelectedCarrierHydrationValidation,
+            Phase::RevisionDetailSupportCarrierHydrationValidation,
+            Phase::RevisionDetailAuditCarrierHydrationValidation,
+        ],
+        true,
+    );
+    assert_eq!(
+        off_receipt.observed.route_state,
+        ObservedState::AuthoritativeReplay
+    );
+    assert_eq!(off_receipt.counters.strict_journal_inspections, 0);
+    assert_eq!(off_receipt.counters.fact_sqlite_rows_selected, 0);
+    assert!(off_receipt.counters.event_decodes > 0);
+
+    build_derived(&fixture.repo);
+    let resource_arguments = strings(&[
+        "change",
+        "resource",
+        &change_id,
+        &revision,
+        "--artifact-hash",
+        &artifact_hash,
+        "--repo",
+        &repo,
+        "--format",
+        "json",
+    ]);
+    for (case_name, arguments, route) in [
+        (
+            "change-revision-current-exact",
+            revision_arguments,
+            Route::ChangeRevisionRead,
+        ),
+        (
+            "change-resource-current-exact",
+            resource_arguments,
+            Route::ChangeResourceRead,
+        ),
+    ] {
+        let expected = expected_context(
+            execution.clone(),
+            route,
+            arguments.clone(),
+            Setup::FactActiveCurrent,
+            Some(&fixture),
+            None,
+        );
+        let receipt = run_success_case(
+            case_name,
+            &arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &[
+                Phase::RevisionDetailSqlSelection,
+                Phase::RevisionDetailSelectedCarrierHydrationValidation,
+                Phase::RevisionDetailSupportCarrierHydrationValidation,
+                Phase::SerializationAndOutput,
+            ],
+            &[
+                Phase::WorkflowChangeReaderReplayH3,
+                Phase::RevisionDetailAuditCarrierHydrationValidation,
+                Phase::RouteBodyHydration,
+            ],
+            false,
+        );
+        assert_eq!(receipt.observed.route_state, ObservedState::DerivedCurrent);
+        assert_eq!(receipt.counters.strict_journal_inspections, 0);
+        assert!(receipt.counters.change_seek_fact_rows_selected > 0);
+        assert!(receipt.counters.fact_sqlite_rows_selected > 0);
+        assert!(receipt.counters.event_decodes > 0);
+        assert_eq!(receipt.counters.object_artifact_reads, 1);
+        assert_eq!(receipt.counters.authoritative_fallbacks, 0);
+        assert_eq!(receipt.counters.full_history_fallbacks, 0);
+        assert!(receipt.children.is_empty());
+    }
+}
+
+#[test]
+fn every_change_read_arm_records_a_derived_route_state() {
+    let fixture = fixture();
+    let repo = fixture.repo.path().to_string_lossy().into_owned();
+    let execution = execution_identity();
+    let receipt_dir = tempfile::tempdir().expect("temporary all-change-route receipt directory");
+
+    let list = run_binary(
+        strings(&["change", "list", "--repo", &repo, "--format", "json"]).as_slice(),
+        OFF_ENV,
+    );
+    assert_success("list all-route fixture Change", &list);
+    let list: serde_json::Value = serde_json::from_slice(&list.stdout).expect("list JSON");
+    let summary = &list["changes"][0];
+    let change_id = summary["changeId"].as_str().expect("change id").to_owned();
+    let head = &summary["currentRevisionRefs"][0];
+    let revision = head["revisionId"]
+        .as_str()
+        .expect("head revision")
+        .to_owned();
+    let artifact_hash = head["objectArtifactContentHash"]
+        .as_str()
+        .expect("head hash")
+        .to_owned();
+    build_derived(&fixture.repo);
+
+    let cases = [
+        (
+            "all-change-profile",
+            Route::ChangeProfileRead,
+            strings(&["change", "profile", "--repo", &repo, "--format", "json"]),
+        ),
+        (
+            "all-change-list",
+            Route::ChangeListRead,
+            strings(&["change", "list", "--repo", &repo, "--format", "json"]),
+        ),
+        (
+            "all-change-attention",
+            Route::ChangeAttentionRead,
+            strings(&["change", "attention", "--repo", &repo, "--format", "json"]),
+        ),
+        (
+            "all-change-show",
+            Route::ChangeShowRead,
+            strings(&[
+                "change", "show", &change_id, "--repo", &repo, "--format", "json",
+            ]),
+        ),
+        (
+            "all-change-select",
+            Route::ChangeSelectCapturedRead,
+            strings(&[
+                "change", "select", &change_id, "--repo", &repo, "--format", "json",
+            ]),
+        ),
+        (
+            "all-change-interdiff",
+            Route::ChangeInterdiffRead,
+            strings(&[
+                "change",
+                "interdiff",
+                &change_id,
+                &revision,
+                &revision,
+                "--from-artifact-hash",
+                &artifact_hash,
+                "--to-artifact-hash",
+                &artifact_hash,
+                "--repo",
+                &repo,
+                "--format",
+                "json",
+            ]),
+        ),
+        (
+            "all-change-revision",
+            Route::ChangeRevisionRead,
+            strings(&[
+                "change",
+                "revision",
+                &change_id,
+                &revision,
+                "--artifact-hash",
+                &artifact_hash,
+                "--repo",
+                &repo,
+                "--format",
+                "json",
+            ]),
+        ),
+        (
+            "all-change-resource",
+            Route::ChangeResourceRead,
+            strings(&[
+                "change",
+                "resource",
+                &change_id,
+                &revision,
+                "--artifact-hash",
+                &artifact_hash,
+                "--repo",
+                &repo,
+                "--format",
+                "json",
+            ]),
+        ),
+    ];
+
+    for (case_name, route, arguments) in cases {
+        let expected = expected_context(
+            execution.clone(),
+            route,
+            arguments.clone(),
+            Setup::FactActiveCurrent,
+            Some(&fixture),
+            None,
+        );
+        let receipt = run_success_case(
+            case_name,
+            &arguments,
+            ACTIVE_ENV,
+            &expected,
+            &receipt_dir,
+            &[Phase::SerializationAndOutput],
+            &[],
+            false,
+        );
+        assert_eq!(
+            receipt.observed.route_state,
+            ObservedState::DerivedCurrent,
+            "{case_name} must record the derived-current route state"
+        );
     }
 }
 
