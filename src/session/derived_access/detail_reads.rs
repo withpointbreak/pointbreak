@@ -222,7 +222,7 @@ impl DerivedHistoryAccess {
 /// Every selected event must carry a Revision binding, and every component
 /// revision that appears must be represented by its proposal carrier — the
 /// closure is complete per component member, never a partial fact slice.
-fn validate_selected_component_events(
+pub(super) fn validate_selected_component_events(
     events: &[ShoreEvent],
     revision_id: &RevisionId,
 ) -> Result<(), String> {

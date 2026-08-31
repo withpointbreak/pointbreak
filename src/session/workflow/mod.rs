@@ -233,6 +233,8 @@ pub use change_migration::{
 pub(crate) use change_migration::{
     activate_empty_store_for_qualification, expected_empty_store_qualification_status,
 };
+#[cfg(test)]
+pub(in crate::session) use change_read::change_reader_state_from_backend_for_test;
 pub use change_read::{
     ChangeReaderPresentationV1, ChangeReaderReadyV1, ChangeReaderStateV1,
     change_reader_state_for_repo,

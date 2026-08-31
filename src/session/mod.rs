@@ -28,7 +28,8 @@ pub use derived_access::changes::{
     DerivedChangeGenerationV1, DerivedChangeOutcomeV1, DerivedChangePageBoundaryV1,
     DerivedChangePageContinuationV1, DerivedChangePageRequestV1, DerivedChangePageSelectionV1,
     DerivedChangePageV1, DerivedChangePageWindowV1, DerivedChangeSeekV1,
-    DerivedProjectionFailureCodeV1, DerivedProjectionUnavailableDocumentV1, DerivedReadSourceV1,
+    DerivedExactRevisionReadV1, DerivedExactRevisionSessionV1, DerivedProjectionFailureCodeV1,
+    DerivedProjectionUnavailableDocumentV1, DerivedReadSourceV1, ExactRevisionReadPlanV1,
     StrictChangeStampBinder, StrictChangeStampBindingV1,
 };
 #[doc(hidden)]

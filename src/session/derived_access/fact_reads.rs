@@ -1208,6 +1208,7 @@ mod contract_tests {
 
         let fact_source = include_str!("fact_reads.rs");
         let detail_source = include_str!("detail_reads.rs");
+        let change_revision_source = include_str!("change_revision_reads.rs");
         let semantic_source = include_str!("sqlite/semantic.rs");
         let constructor_start = semantic_source
             .find("pub(crate) fn exact_revision_fact_read_snapshot(")
@@ -1277,17 +1278,34 @@ mod contract_tests {
             ["materialized_change", "_projection"].concat(),
         ];
         let seek_source = include_str!("change_seek_reads.rs");
-        let regions: [(&str, &str, &[String]); 5] = [
+        let regions: [(&str, &str, &[String]); 6] = [
             ("fact producer", fact_source, &page_tokens),
             ("detail producer", detail_source, &page_tokens),
             ("fact snapshot constructor", constructor, &page_tokens),
             ("fact snapshot impl", snapshot_impl, &page_tokens),
             ("change seek producer", seek_source, &seek_tokens),
+            (
+                "change revision producer",
+                change_revision_source,
+                &page_tokens,
+            ),
         ];
         for (region, source, tokens) in regions {
             for token in tokens {
                 assert!(!source.contains(token), "{region} must not contain {token}");
             }
         }
+        assert!(
+            change_revision_source.contains("fn exact_revision_read_v1_inner("),
+            "the Change exact-Revision producer marker must remain present"
+        );
+        assert!(
+            !change_revision_source.contains(&["store_removal", "_audit_event_ids"].concat()),
+            "the Change exact-Revision producer must not select the removal audit closure"
+        );
+        assert!(
+            !change_revision_source.contains(&["validate_", "audit_events"].concat()),
+            "the Change exact-Revision producer must not validate the removal audit closure"
+        );
     }
 }

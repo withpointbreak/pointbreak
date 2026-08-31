@@ -3,12 +3,13 @@
 #![deny(private_bounds, private_interfaces)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::lifecycle::LifecycleError;
+use super::change_seek_reads::PreparedNarrowedFacadeV1;
+use super::lifecycle::{CurrentGeneration, LifecycleError};
 use super::locator::LocatorRead;
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use super::runtime::{
@@ -39,7 +40,7 @@ use crate::session::store::capabilities::{
 use crate::session::store::resolution::resolve_change_read_backend;
 use crate::session::{
     AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeProjection,
-    ChangeTopologyV1,
+    ChangeTopologyV1, ChangeView, RevisionShowResult,
 };
 
 const AUTHORITY_ERROR_SCHEMA: &str = "pointbreak.inspect-change-authority-error";
@@ -54,11 +55,15 @@ const MAXIMUM_SUMMARY_QUERY_BYTES: usize = 256;
 #[derive(Clone)]
 pub struct DerivedChangeAccess {
     runtime: Arc<DerivedAccessRuntime>,
+    repo: Option<PathBuf>,
 }
 
 impl DerivedChangeAccess {
     pub(crate) fn from_runtime(runtime: Arc<DerivedAccessRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            runtime,
+            repo: None,
+        }
     }
 
     pub fn resolve_for_inspector(repo: impl AsRef<Path>) -> Result<Self> {
@@ -73,18 +78,23 @@ impl DerivedChangeAccess {
     }
 
     fn resolve_for_read(repo: impl AsRef<Path>) -> Result<Self> {
+        let repo = repo.as_ref().to_path_buf();
         let profile = DerivedAccessProfile::from_environment()
             .map_err(|error| ShoreError::Message(error.to_string()))?;
         if profile == DerivedAccessProfile::Off {
-            return Ok(Self::from_runtime(DerivedAccessRuntime::from_mode(
-                DerivedAccessMode::Off,
-            )));
+            return Ok(Self {
+                runtime: DerivedAccessRuntime::from_mode(DerivedAccessMode::Off),
+                repo: Some(repo),
+            });
         }
-        let read_store = resolve_change_read_backend(repo)
+        let read_store = resolve_change_read_backend(&repo)
             .map_err(|error| ShoreError::Message(error.to_string()))?;
         let runtime =
             DerivedAccessRuntime::from_read_store(read_store).map_err(ShoreError::Message)?;
-        Ok(Self::from_runtime(runtime))
+        Ok(Self {
+            runtime,
+            repo: Some(repo),
+        })
     }
 
     pub fn profile(&self) -> Result<DerivedChangeOutcomeV1<ReaderProfileDocumentV1>> {
@@ -278,6 +288,10 @@ impl DerivedChangeAccess {
         &self.runtime
     }
 
+    pub(crate) fn repo(&self) -> Option<&Path> {
+        self.repo.as_deref()
+    }
+
     /// Compose one Change's review-schema detail document through the
     /// per-Change seek, mirroring [`Self::review_list_document`]'s finished
     /// return shape for the CLI.
@@ -317,6 +331,16 @@ impl DerivedChangeAccess {
                     }
                 }),
         )
+    }
+
+    /// Prepare one Change-scoped exact-Revision session without opening its
+    /// fact snapshot. [`DerivedExactRevisionSessionV1::read`] owns that one
+    /// snapshot and its terminal currentness proof.
+    pub fn exact_revision_session(
+        &self,
+        change: &ChangeId,
+    ) -> Result<DerivedChangeOutcomeV1<DerivedExactRevisionSessionV1<'_>>> {
+        super::change_revision_reads::exact_revision_session_v1_inner(self, change, |_| {})
     }
 
     /// Read the complete materialized Change generation at one proven-current
@@ -1431,6 +1455,135 @@ impl DerivedChangeSeekV1 {
     }
 }
 
+/// Inputs for one snapshot-bound exact-Revision read.
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExactRevisionReadPlanV1 {
+    pub revisions: Vec<RevisionRefV1>,
+    pub include_body: bool,
+    pub read_for_display: bool,
+    pub fact_port_context: Option<RevisionRefV1>,
+}
+
+/// Prepared Change-scoped session. Construction stays library-side; callers
+/// may inspect the narrowed facade before consuming the session with `read`.
+#[doc(hidden)]
+pub struct DerivedExactRevisionSessionV1<'a> {
+    access: &'a DerivedChangeAccess,
+    current: Arc<CurrentGeneration>,
+    generation_id: String,
+    checkpoint: super::semantic::change::ReaderProjectionCheckpointV1,
+    prepared: PreparedNarrowedFacadeV1,
+}
+
+impl<'a> DerivedExactRevisionSessionV1<'a> {
+    pub(crate) fn new(
+        access: &'a DerivedChangeAccess,
+        current: Arc<CurrentGeneration>,
+        generation_id: String,
+        checkpoint: super::semantic::change::ReaderProjectionCheckpointV1,
+        prepared: PreparedNarrowedFacadeV1,
+    ) -> Self {
+        Self {
+            access,
+            current,
+            generation_id,
+            checkpoint,
+            prepared,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        &'a DerivedChangeAccess,
+        Arc<CurrentGeneration>,
+        String,
+        super::semantic::change::ReaderProjectionCheckpointV1,
+        PreparedNarrowedFacadeV1,
+    ) {
+        (
+            self.access,
+            self.current,
+            self.generation_id,
+            self.checkpoint,
+            self.prepared,
+        )
+    }
+
+    pub fn change_view(&self) -> &ChangeView {
+        &self.prepared.view
+    }
+
+    pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
+        &self.prepared.document_projection
+    }
+
+    pub fn facade(&self) -> &ChangeDocumentFacadeV1 {
+        &self.prepared.facade
+    }
+
+    pub fn stamp(&self) -> &str {
+        &self.prepared.stamp
+    }
+
+    pub fn read(
+        self,
+        plan: &ExactRevisionReadPlanV1,
+    ) -> Result<DerivedChangeOutcomeV1<DerivedExactRevisionReadV1>> {
+        super::change_revision_reads::exact_revision_read_v1_inner(self, plan, |_| {})
+    }
+}
+
+/// One completed exact-Revision session read, paired with the narrowed
+/// Change projection and the exact facade used for fact-port discovery.
+#[doc(hidden)]
+pub struct DerivedExactRevisionReadV1 {
+    view: ChangeView,
+    document_projection: ChangeDocumentProjectionV1,
+    facade: ChangeDocumentFacadeV1,
+    stamp: String,
+    results: BTreeMap<RevisionRefV1, RevisionShowResult>,
+}
+
+impl DerivedExactRevisionReadV1 {
+    pub(crate) fn new(
+        view: ChangeView,
+        document_projection: ChangeDocumentProjectionV1,
+        facade: ChangeDocumentFacadeV1,
+        stamp: String,
+        results: BTreeMap<RevisionRefV1, RevisionShowResult>,
+    ) -> Self {
+        Self {
+            view,
+            document_projection,
+            facade,
+            stamp,
+            results,
+        }
+    }
+
+    pub fn change_view(&self) -> &ChangeView {
+        &self.view
+    }
+
+    pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
+        &self.document_projection
+    }
+
+    pub fn facade(&self) -> &ChangeDocumentFacadeV1 {
+        &self.facade
+    }
+
+    pub fn stamp(&self) -> &str {
+        &self.stamp
+    }
+
+    pub fn result(&self, revision: &RevisionRefV1) -> Option<&RevisionShowResult> {
+        self.results.get(revision)
+    }
+}
+
 /// Independent authority, compatibility, and projection outcomes.
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1445,7 +1598,7 @@ pub enum DerivedChangeOutcomeV1<T> {
 }
 
 impl<T> DerivedChangeOutcomeV1<T> {
-    fn map_ready<U>(self, map: impl FnOnce(T) -> U) -> DerivedChangeOutcomeV1<U> {
+    pub fn map_ready<U>(self, map: impl FnOnce(T) -> U) -> DerivedChangeOutcomeV1<U> {
         match self {
             Self::Ready(value) => DerivedChangeOutcomeV1::Ready(map(value)),
             Self::AuthorityUnavailable(document) => {
@@ -2117,8 +2270,9 @@ mod tests {
         ChangeDeclarationStateV1, ReaderProfileAvailabilityV1, change_presentation_projection,
     };
     use crate::model::{
-        ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, ObservationId, RevisionId,
-        TrackId,
+        ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, ObservationId,
+        ReviewEndpoint, ReviewId, ReviewTargetRef, RevisionId, RevisionSource, TrackId,
+        WorktreeCaptureMode,
     };
     use crate::session::derived_access::layout::{
         DerivedStorageLayout, DerivedStorageNamespace, DerivedStorageTransition,
@@ -2130,12 +2284,12 @@ mod tests {
     use crate::session::derived_access::sqlite::StoreWriterLock;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
-        ArtifactRemovedPayload, EventSignature, EventSignatureRecordedPayload, EventTarget,
-        EventToBeSigned, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1,
-        ReviewInitializedPayload, Revision, Writer, build_change_declared,
-        build_membership_asserted, build_membership_withdrawn, build_review_fact_ported,
-        build_revision_relation_asserted, build_revision_relation_withdrawn,
-        event_signature_pre_authentication_encoding,
+        ArtifactRemovedPayload, BodyContentType, EventSignature, EventSignatureRecordedPayload,
+        EventTarget, EventToBeSigned, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1,
+        ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision, Writer,
+        build_change_declared, build_membership_asserted, build_membership_withdrawn,
+        build_review_fact_ported, build_revision_relation_asserted,
+        build_revision_relation_withdrawn, event_signature_pre_authentication_encoding,
     };
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::store::backend::StoreBackend;
@@ -2310,6 +2464,23 @@ mod tests {
                 access,
                 store,
                 changes,
+            }
+        }
+
+        fn repo_bound_access(&self) -> DerivedChangeAccess {
+            if !self._temp.path().join(".git").is_dir() {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(["init", "--quiet"])
+                        .current_dir(self._temp.path())
+                        .status()
+                        .expect("initialize fixture repository")
+                        .success()
+                );
+            }
+            DerivedChangeAccess {
+                runtime: Arc::clone(&self.runtime),
+                repo: Some(self._temp.path().to_path_buf()),
             }
         }
 
@@ -2592,6 +2763,178 @@ mod tests {
                 .expect("record fixture event"),
             EventWriteOutcome::Created
         );
+    }
+
+    fn append_artifact_backed_change(
+        fixture: &ActiveChangeFixture,
+        with_external_body: bool,
+    ) -> FixtureChange {
+        let backend = StoreBackend::Local(fixture._temp.path().to_path_buf());
+        let revision_id = RevisionId::new(format!("rev:sha256:{}", "8".repeat(64)));
+        let object_id = ObjectId::new(format!("obj:sha256:{}", "8".repeat(64)));
+        let engagement_id = EngagementId::new(format!("engagement:sha256:{}", "8".repeat(64)));
+        let snapshot = crate::model::DiffSnapshot::new(
+            ReviewId::new("review:exact-session-artifact"),
+            object_id.clone(),
+            Vec::new(),
+        );
+        let artifact = crate::session::build_object_artifact_v2(snapshot)
+            .expect("build exact-session object artifact");
+        let fingerprint = crate::session::RevisionFingerprint {
+            revision_id: revision_id.clone(),
+            object_id: object_id.clone(),
+            engagement_id: engagement_id.clone(),
+            source: RevisionSource::GitWorktree {
+                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                include_untracked: false,
+                pathspecs: Vec::new(),
+            },
+            base: ReviewEndpoint::GitWorkingTree {
+                worktree_root: fixture._temp.path().display().to_string(),
+            },
+            target: ReviewEndpoint::GitWorkingTree {
+                worktree_root: fixture._temp.path().display().to_string(),
+            },
+        };
+        let artifact = crate::session::object_artifact::write_prepared_object_artifact_to(
+            &backend,
+            &fingerprint,
+            artifact,
+        )
+        .expect("store exact-session object artifact");
+        let revision = RevisionRefV1::new(revision_id.clone(), artifact.content_hash)
+            .expect("build artifact-backed exact Revision");
+
+        let declaration = build_change_declared(
+            ChangeIdentityDescriptorV1::opaque_nonce([188; 32]),
+            [189; 32],
+        )
+        .expect("build artifact-backed Change declaration");
+        let change_id = declaration.change_id.clone();
+        record_fixture_event(
+            &fixture.store,
+            ShoreEvent::new(
+                EventType::ChangeDeclared,
+                "fixture:artifact-backed-change",
+                EventTarget::for_journal(JournalId::new("journal:exact-session-artifact")),
+                Writer::shore_local("exact-session-test"),
+                declaration,
+                "2026-08-10T06:00:00Z",
+            )
+            .expect("build artifact-backed declaration event"),
+        );
+        let proposal = ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            "fixture:artifact-backed-proposal",
+            EventTarget::for_revision(
+                JournalId::new("journal:exact-session-artifact"),
+                revision_id.clone(),
+                None,
+            )
+            .expect("build artifact-backed proposal target"),
+            Writer::shore_local("exact-session-test"),
+            WorkObjectProposedPayload {
+                engagement_id,
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id.clone(),
+                        object_id,
+                        git_provenance: None,
+                    },
+                    summary: Some("artifact-backed exact Revision".to_owned()),
+                    object_artifact_content_hash: revision.object_artifact_content_hash.clone(),
+                    supersedes: Vec::new(),
+                },
+            },
+            "2026-08-10T06:00:01Z",
+        )
+        .expect("build artifact-backed proposal event");
+        record_fixture_event(&fixture.store, proposal.clone());
+
+        if with_external_body {
+            let body = "external exact-Revision body\n".repeat(200);
+            let crate::session::body_artifact::BodyArtifactOutcome::Artifact {
+                relative_path,
+                byte_size,
+                body_envelope,
+            } = crate::session::body_artifact::stage_body_artifact(body.as_bytes())
+                .expect("stage external exact-session body")
+            else {
+                panic!("the exact-session body must cross the artifact threshold");
+            };
+            backend
+                .content_store()
+                .put_once(
+                    &relative_path,
+                    &body_envelope
+                        .to_json_bytes()
+                        .expect("encode exact-session body envelope"),
+                )
+                .expect("store exact-session body artifact");
+            let body_content_hash =
+                crate::session::body_artifact::note_body_content_hash_from_path(&relative_path)
+                    .expect("derive exact-session body hash");
+            let track_id = TrackId::new("track:exact-session-artifact");
+            record_fixture_event(
+                &fixture.store,
+                ShoreEvent::new(
+                    EventType::ReviewObservationRecorded,
+                    ReviewObservationRecordedPayload::idempotency_key(
+                        &revision_id,
+                        &track_id,
+                        "external-body",
+                    ),
+                    EventTarget::for_revision(
+                        JournalId::new("journal:exact-session-artifact"),
+                        revision_id.clone(),
+                        Some(track_id),
+                    )
+                    .expect("build body observation target"),
+                    Writer::shore_local("exact-session-test"),
+                    ReviewObservationRecordedPayload {
+                        observation_id: ObservationId::new(format!(
+                            "observation:sha256:{}",
+                            "8".repeat(64)
+                        )),
+                        target: ReviewTargetRef::Revision {
+                            revision_id: revision_id.clone(),
+                        },
+                        title: "external body".to_owned(),
+                        body: None,
+                        body_content_type: BodyContentType::TextPlain,
+                        body_artifact_path: Some(relative_path),
+                        body_byte_size: Some(byte_size),
+                        body_content_hash: Some(body_content_hash),
+                        tags: Vec::new(),
+                        confidence: None,
+                        supersedes_observation_ids: Vec::new(),
+                        responds_to_observation_ids: Vec::new(),
+                    },
+                    "2026-08-10T06:00:02Z",
+                )
+                .expect("build external-body observation event"),
+            );
+        }
+
+        let membership = build_membership_asserted(&change_id, &revision_id, [190; 32])
+            .expect("build artifact-backed membership");
+        record_fixture_event(
+            &fixture.store,
+            ShoreEvent::new(
+                EventType::ChangeMembershipAsserted,
+                "fixture:artifact-backed-membership",
+                EventTarget::for_journal(JournalId::new("journal:exact-session-artifact")),
+                Writer::shore_local("exact-session-test"),
+                membership,
+                "2026-08-10T06:00:03Z",
+            )
+            .expect("build artifact-backed membership event"),
+        );
+        FixtureChange {
+            change_id,
+            revision,
+            proposal_events: vec![proposal],
+        }
     }
 
     fn normalize_list_projection_stamp(
@@ -6498,6 +6841,133 @@ mod tests {
         assert!(!seek.stamp().is_empty());
     }
 
+    #[test]
+    fn exact_revision_session_carriers_are_available_to_product_callers() {
+        let plan = ExactRevisionReadPlanV1 {
+            revisions: Vec::new(),
+            include_body: true,
+            read_for_display: true,
+            fact_port_context: None,
+        };
+        let method = DerivedChangeAccess::exact_revision_session;
+        let mapped = DerivedChangeOutcomeV1::Ready(1usize).map_ready(|value| value + 1);
+        assert_eq!(mapped, DerivedChangeOutcomeV1::Ready(2));
+        let _ = (plan, method);
+    }
+
+    #[test]
+    fn exact_revision_session_reads_the_context_revision_and_binds_the_repository() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("exact session")]]);
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(fixture._temp.path())
+                .status()
+                .expect("initialize exact-session repository")
+                .success()
+        );
+        let access = DerivedChangeAccess {
+            runtime: Arc::clone(&fixture.runtime),
+            repo: Some(fixture._temp.path().to_path_buf()),
+        };
+        let change = &fixture.changes[0];
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare exact-Revision session")
+        else {
+            panic!("active exact-Revision session must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(read) = session
+            .read(&ExactRevisionReadPlanV1 {
+                revisions: Vec::new(),
+                include_body: true,
+                read_for_display: true,
+                fact_port_context: Some(change.revision.clone()),
+            })
+            .expect("read exact-Revision session")
+        else {
+            panic!("active exact-Revision read must be ready");
+        };
+        let result = read
+            .result(&change.revision)
+            .expect("the unplanned context revision is auto-read");
+        assert_eq!(result.revision.id, change.revision.revision_id);
+
+        let DerivedChangeOutcomeV1::Ready(unbound) = fixture
+            .access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare runtime-only session")
+        else {
+            panic!("runtime-only session preparation remains available");
+        };
+        assert!(matches!(
+            unbound.read(&ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: None,
+            }),
+            Ok(DerivedChangeOutcomeV1::ProjectionUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn session_read_matches_the_authoritative_component_show() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("authoritative parity")]]);
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(fixture._temp.path())
+                .status()
+                .expect("initialize parity repository")
+                .success()
+        );
+        let access = DerivedChangeAccess {
+            runtime: Arc::clone(&fixture.runtime),
+            repo: Some(fixture._temp.path().to_path_buf()),
+        };
+        let change = &fixture.changes[0];
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare parity session")
+        else {
+            panic!("parity session must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(read) = session
+            .read(&ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: true,
+                read_for_display: true,
+                fact_port_context: None,
+            })
+            .expect("read parity session")
+        else {
+            panic!("parity read must be ready");
+        };
+        let mut actual = read
+            .result(&change.revision)
+            .expect("planned Revision result")
+            .clone();
+
+        let backend = StoreBackend::Local(fixture._temp.path().to_path_buf());
+        let state = crate::session::workflow::change_reader_state_from_backend_for_test(&backend)
+            .expect("build authoritative parity generation");
+        let mut expected = crate::session::show_revision_for_change_reader_ready(
+            crate::session::RevisionShowOptions::new(fixture._temp.path())
+                .with_revision_id(change.revision.revision_id.clone())
+                .with_exact(true)
+                .with_include_body(true)
+                .with_read_for_display(true),
+            state.ready().expect("L2 fixture is authoritative-ready"),
+        )
+        .expect("read authoritative component");
+        actual.event_set_hash.clear();
+        actual.event_count = 0;
+        expected.event_set_hash.clear();
+        expected.event_count = 0;
+        assert_eq!(actual, expected);
+    }
+
     fn active_fact_port_fixture() -> (
         ActiveChangeFixture,
         ChangeId,
@@ -6596,6 +7066,339 @@ mod tests {
             record_fixture_event(&fixture.store, event.clone());
         }
         (fixture, change_id, target, events)
+    }
+
+    #[test]
+    fn session_read_discovers_applicable_origins_in_one_snapshot() {
+        use crate::session::derived_access::change_revision_reads::{
+            ExactRevisionReadBoundary, exact_revision_read_v1_inner,
+            exact_revision_session_v1_inner,
+        };
+
+        let (fixture, change_id, target, _) = active_fact_port_fixture();
+        let origin = fixture.changes[1].revision.clone();
+        let access = fixture.repo_bound_access();
+        let mut session_boundaries = Vec::new();
+        let DerivedChangeOutcomeV1::Ready(session) =
+            exact_revision_session_v1_inner(&access, &change_id, |boundary| {
+                session_boundaries.push(boundary)
+            })
+            .expect("prepare contextual session")
+        else {
+            panic!("contextual session must be ready");
+        };
+        assert_eq!(
+            session_boundaries,
+            vec![ExactRevisionReadBoundary::SessionPrepared]
+        );
+
+        let mut read_boundaries = Vec::new();
+        let DerivedChangeOutcomeV1::Ready(read) = exact_revision_read_v1_inner(
+            session,
+            &ExactRevisionReadPlanV1 {
+                revisions: Vec::new(),
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: Some(target.clone()),
+            },
+            |boundary| read_boundaries.push(boundary),
+        )
+        .expect("read contextual session") else {
+            panic!("contextual session read must be ready");
+        };
+        assert!(read.result(&target).is_some());
+        assert!(read.result(&origin).is_some());
+        assert_eq!(
+            read_boundaries
+                .iter()
+                .filter(|boundary| **boundary == ExactRevisionReadBoundary::SnapshotOpened)
+                .count(),
+            1
+        );
+        assert_eq!(
+            read_boundaries
+                .iter()
+                .filter(|boundary| **boundary == ExactRevisionReadBoundary::SnapshotFinished)
+                .count(),
+            1
+        );
+
+        let wrong_hash = format!("sha256:{}", "f".repeat(64));
+        let mismatched_origin =
+            RevisionRefV1::new(origin.revision_id.clone(), wrong_hash.clone()).unwrap();
+        let writer = Writer::shore_local("change-endpoint-test");
+        let track_id = TrackId::new("track:fact-port-seek");
+        let mismatched_port = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: mismatched_origin.clone(),
+                origin_fact: FactRefV1::Observation {
+                    observation_id: ObservationId::new("observation:sha256:mismatched"),
+                },
+                target_revision: target.clone(),
+                relation: FactPortRelationV1::ContextOnly,
+                target_fact: None,
+                rationale_content_hash: None,
+                context_change_id: Some(change_id.clone()),
+            },
+            &writer.actor_id,
+            &track_id,
+        )
+        .unwrap();
+        let mismatched_port_fact = serde_json::json!({
+            "kind": "fact_port",
+            "port": mismatched_port,
+        });
+        fixture.mutate_database(|connection| {
+            connection
+                .execute(
+                    "UPDATE semantic_change_fact
+                     SET fact_json = replace(fact_json, ?1, ?2)
+                     WHERE json_extract(fact_json, '$.kind') = 'revision'
+                       AND instr(fact_json, ?1) > 0",
+                    params![origin.object_artifact_content_hash, wrong_hash],
+                )
+                .expect("inject mismatched materialized origin hash");
+            connection
+                .execute(
+                    "UPDATE semantic_change_fact
+                     SET fact_json = ?1
+                     WHERE json_extract(fact_json, '$.kind') = 'fact_port'",
+                    [mismatched_port_fact.to_string()],
+                )
+                .expect("bind fact ports to the mismatched materialized origin");
+        });
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change_id)
+            .expect("prepare mismatched-origin session")
+        else {
+            panic!("mismatched-origin session preparation stays ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(read) = session
+            .read(&ExactRevisionReadPlanV1 {
+                revisions: Vec::new(),
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: Some(target.clone()),
+            })
+            .expect("read mismatched-origin session")
+        else {
+            panic!("an origin hash mismatch is an omission, not a failed read");
+        };
+        assert!(read.result(&target).is_some());
+        assert!(read.result(&mismatched_origin).is_none());
+    }
+
+    #[test]
+    fn session_read_never_selects_the_removal_audit_closure() {
+        use crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1 as Phase;
+
+        let fixture = ActiveChangeFixture::new(&[&[Some("phase attribution")]]);
+        let access = fixture.repo_bound_access();
+        let change = &fixture.changes[0];
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare phase-attribution session")
+        else {
+            panic!("phase-attribution session must be ready");
+        };
+        let scope = LongitudinalCountingScopeV1::new("e".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = session
+            .read(&ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: None,
+            })
+            .expect("read phase-attribution session");
+        drop(guard);
+        assert!(matches!(outcome, DerivedChangeOutcomeV1::Ready(_)));
+        let snapshot = scope.snapshot();
+        let phases = snapshot
+            .derived_access_phases
+            .iter()
+            .map(|sample| sample.phase)
+            .collect::<BTreeSet<_>>();
+        for phase in [
+            Phase::RevisionDetailSqlSelection,
+            Phase::RevisionDetailSelectedCarrierHydrationValidation,
+            Phase::RevisionDetailSupportCarrierHydrationValidation,
+        ] {
+            assert!(phases.contains(&phase), "missing phase {phase:?}");
+        }
+        assert!(!phases.contains(&Phase::RevisionDetailAuditCarrierHydrationValidation));
+        assert_eq!(snapshot.counters.strict_journal_inspections, 0);
+    }
+
+    #[test]
+    fn session_read_reads_content_from_the_authoritative_backend() {
+        let fixture = ActiveChangeFixture::new(&[]);
+        let change = append_artifact_backed_change(&fixture, true);
+        let access = fixture.repo_bound_access();
+
+        let read_with_body = |include_body: bool, identity: char| {
+            let DerivedChangeOutcomeV1::Ready(session) = access
+                .exact_revision_session(&change.change_id)
+                .expect("prepare artifact-backed session")
+            else {
+                panic!("artifact-backed session must be ready");
+            };
+            let scope = LongitudinalCountingScopeV1::new(identity.to_string().repeat(64)).unwrap();
+            let guard = scope.enter();
+            let outcome = session
+                .read(&ExactRevisionReadPlanV1 {
+                    revisions: vec![change.revision.clone()],
+                    include_body,
+                    read_for_display: include_body,
+                    fact_port_context: None,
+                })
+                .expect("read artifact-backed session");
+            drop(guard);
+            let DerivedChangeOutcomeV1::Ready(read) = outcome else {
+                panic!("artifact-backed read must be ready");
+            };
+            let result = read
+                .result(&change.revision)
+                .expect("artifact-backed result");
+            assert_eq!(
+                result.snapshot_content_state,
+                crate::session::SnapshotContentState::Present
+            );
+            (
+                scope.snapshot().counters,
+                result.observations[0].body.clone(),
+            )
+        };
+
+        let (bodyless, absent_body) = read_with_body(false, 'a');
+        assert_eq!(bodyless.object_artifact_reads, 1);
+        assert_eq!(bodyless.body_artifact_reads, 0);
+        assert!(absent_body.is_none());
+
+        let (with_body, present_body) = read_with_body(true, 'b');
+        assert_eq!(with_body.object_artifact_reads, 1);
+        assert!(with_body.body_artifact_reads > 0);
+        assert!(present_body.is_some());
+    }
+
+    #[test]
+    fn session_read_fails_closed_on_moved_generation() {
+        use crate::session::derived_access::change_revision_reads::{
+            ExactRevisionReadBoundary, exact_revision_read_v1_inner,
+        };
+
+        let fixture = ActiveChangeFixture::new(&[&[Some("moving session")]]);
+        let access = fixture.repo_bound_access();
+        let change = &fixture.changes[0];
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare moving session")
+        else {
+            panic!("moving session must initially be ready");
+        };
+        let mut moved = false;
+        let outcome = exact_revision_read_v1_inner(
+            session,
+            &ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: None,
+            },
+            |boundary| {
+                if boundary == ExactRevisionReadBoundary::SnapshotFinished && !moved {
+                    fixture.append_unrelated("exact-session-moved");
+                    moved = true;
+                }
+            },
+        )
+        .expect("classify moving exact-Revision session");
+        assert!(moved);
+        assert!(matches!(
+            outcome,
+            DerivedChangeOutcomeV1::Retryable(ref document)
+                if document.code() == DerivedProjectionFailureCodeV1::ProjectionUnstable
+        ));
+    }
+
+    #[test]
+    fn session_read_labels_post_selection_failures() {
+        use crate::session::derived_access::change_revision_reads::{
+            ExactRevisionReadBoundary, exact_revision_read_v1_inner,
+        };
+
+        let fixture = ActiveChangeFixture::new(&[&[Some("selected carrier")]]);
+        let access = fixture.repo_bound_access();
+        let change = &fixture.changes[0];
+        let selected_path = fixture
+            .store
+            .event_path_for_idempotency_key(&change.proposal_events[0].idempotency_key);
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare selected-corruption session")
+        else {
+            panic!("selected-corruption session must be ready");
+        };
+        let scope = LongitudinalCountingScopeV1::new("d".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let mut removed = false;
+        let result = exact_revision_read_v1_inner(
+            session,
+            &ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: None,
+            },
+            |boundary| {
+                if boundary == ExactRevisionReadBoundary::SnapshotOpened && !removed {
+                    fs::remove_file(&selected_path)
+                        .expect("remove disposable selected carrier after snapshot open");
+                    removed = true;
+                }
+            },
+        );
+        drop(guard);
+        assert!(removed);
+        let Err(error) = result else {
+            panic!("post-selection carrier loss must be a terminal error");
+        };
+        assert!(!error.to_string().is_empty());
+        assert!(scope.snapshot().observed_route_states.is_empty());
+
+        let stale = ActiveChangeFixture::new(&[&[Some("stale before selection")]]);
+        let access = stale.repo_bound_access();
+        let change = &stale.changes[0];
+        let DerivedChangeOutcomeV1::Ready(session) = access
+            .exact_revision_session(&change.change_id)
+            .expect("prepare pre-selection stale session")
+        else {
+            panic!("pre-selection stale session must initially be ready");
+        };
+        stale.append_unrelated("exact-session-pre-selection");
+        let outcome = session
+            .read(&ExactRevisionReadPlanV1 {
+                revisions: vec![change.revision.clone()],
+                include_body: false,
+                read_for_display: true,
+                fact_port_context: None,
+            })
+            .expect("pre-selection failure is a typed non-Ready outcome");
+        assert!(!matches!(outcome, DerivedChangeOutcomeV1::Ready(_)));
+    }
+
+    #[test]
+    fn session_refuses_unknown_change_like_the_authoritative_arm() {
+        let fixture = ActiveChangeFixture::new(&[&[None]]);
+        let access = fixture.repo_bound_access();
+        let unknown = ChangeId::new(format!("change:sha256:{}", "0".repeat(64)));
+        let Err(error) = access.exact_revision_session(&unknown) else {
+            panic!("unknown Change must be refused before session construction");
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("Change {} is unavailable", unknown.as_str())
+        );
     }
 
     #[test]

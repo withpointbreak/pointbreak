@@ -243,7 +243,7 @@ fn change_reader_ready_from_build(
 }
 
 #[cfg(test)]
-fn change_reader_state_from_backend_for_test(
+pub(in crate::session) fn change_reader_state_from_backend_for_test(
     backend: &StoreBackend,
 ) -> Result<ChangeReaderStateV1> {
     let inspection = inspect_change_reader_journal_records(backend.journal().as_ref())?;
