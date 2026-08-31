@@ -2510,6 +2510,62 @@ fn materialized_journal_identity_follows_canonical_replay_order() {
 }
 
 #[test]
+fn duplicate_responses_with_differing_request_ids_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_event("duplicate-response", Vec::new(), "2026-08-31T00:00:00Z");
+    let revision_id = revision_id("duplicate-response");
+    let first_id = InputRequestId::new("input-request:sha256:first-request");
+    let second_id = InputRequestId::new("input-request:sha256:second-request");
+    let response_id = InputRequestResponseId::new("input-request-response:sha256:same");
+    let close_first = request_responded_with_subject(
+        Some(&revision_id),
+        Some(&revision_id),
+        &first_id,
+        &response_id,
+    );
+    let close_second = request_responded_with_subject(
+        Some(&revision_id),
+        Some(&revision_id),
+        &second_id,
+        &response_id,
+    );
+    assert_ne!(
+        close_first.event_id, close_second.event_id,
+        "the two carriers must be distinct events"
+    );
+
+    let mut stored = vec![
+        revision,
+        request_opened(&revision_id, &first_id),
+        request_opened(&revision_id, &second_id),
+        close_first,
+        close_second,
+    ];
+    stored[3..].sort_by(|left, right| right.event_id.cmp(&left.event_id));
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+    assert_eq!(
+        candidate.state.open_input_request_count, 1,
+        "exactly one request stays open under the canonical response representative"
+    );
+    assert_eq!(
+        candidate.state.open_input_request_count, strict.state.open_input_request_count,
+        "incremental and strict folds must agree on open_input_request_count"
+    );
+    assert_eq!(candidate, strict);
+}
+
+#[test]
 fn selected_engagement_omits_unrelated_materialized_history() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());

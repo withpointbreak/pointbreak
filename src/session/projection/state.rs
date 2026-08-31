@@ -101,6 +101,12 @@ pub struct ProjectionDiagnostic {
 }
 
 #[derive(Debug)]
+struct ResponseRepresentative {
+    event_id: EventId,
+    request_id: InputRequestId,
+}
+
+#[derive(Debug)]
 struct StateReducer {
     journal_id: JournalId,
     captured_revisions: BTreeMap<RevisionId, ObjectId>,
@@ -110,7 +116,7 @@ struct StateReducer {
     input_request_modes: BTreeMap<InputRequestId, AssertionMode>,
     input_request_open_events: BTreeMap<InputRequestId, BTreeSet<EventId>>,
     input_request_response_events: BTreeMap<InputRequestResponseId, BTreeSet<EventId>>,
-    responded_input_request_ids: BTreeSet<InputRequestId>,
+    input_request_response_targets: BTreeMap<InputRequestResponseId, ResponseRepresentative>,
 }
 
 impl Default for StateReducer {
@@ -124,7 +130,7 @@ impl Default for StateReducer {
             input_request_modes: BTreeMap::new(),
             input_request_open_events: BTreeMap::new(),
             input_request_response_events: BTreeMap::new(),
-            responded_input_request_ids: BTreeSet::new(),
+            input_request_response_targets: BTreeMap::new(),
         }
     }
 }
@@ -247,11 +253,33 @@ impl StateReducer {
     fn apply_input_request_responded(&mut self, event: &ShoreEvent) -> Result<()> {
         let payload: InputRequestRespondedPayload = serde_json::from_value(event.payload.clone())?;
         self.input_request_response_events
-            .entry(payload.input_request_response_id)
+            .entry(payload.input_request_response_id.clone())
             .or_default()
             .insert(event.event_id.clone());
-        self.responded_input_request_ids
-            .insert(payload.input_request_id);
+        // Duplicate responses for one response id keep the canonical
+        // (lexicographically earlier event_id) request_id. The incremental
+        // materializer uses the same representative rule; unioning every
+        // duplicate's request_id would disagree on open_input_request_count
+        // and refuse derived publication.
+        match self
+            .input_request_response_targets
+            .entry(payload.input_request_response_id)
+        {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(ResponseRepresentative {
+                    event_id: event.event_id.clone(),
+                    request_id: payload.input_request_id,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if event.event_id < entry.get().event_id {
+                    entry.insert(ResponseRepresentative {
+                        event_id: event.event_id.clone(),
+                        request_id: payload.input_request_id,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -264,19 +292,22 @@ impl StateReducer {
         };
         let current_revision_id = current_revision.map(|(revision_id, _)| revision_id.clone());
         let current_object_id = current_revision.map(|(_, object_id)| object_id.clone());
+        let responded_input_request_ids = self
+            .input_request_response_targets
+            .values()
+            .map(|response| response.request_id.clone())
+            .collect::<BTreeSet<_>>();
         let open_input_request_count = self
             .input_request_modes
             .keys()
-            .filter(|input_request_id| {
-                !self.responded_input_request_ids.contains(*input_request_id)
-            })
+            .filter(|input_request_id| !responded_input_request_ids.contains(*input_request_id))
             .count();
         let open_operative_input_request_count = self
             .input_request_modes
             .iter()
             .filter(|(input_request_id, mode)| {
                 **mode == AssertionMode::Operative
-                    && !self.responded_input_request_ids.contains(*input_request_id)
+                    && !responded_input_request_ids.contains(*input_request_id)
             })
             .count();
 
@@ -771,6 +802,51 @@ mod tests {
 
         assert_eq!(state.open_input_request_count, 0);
         assert_eq!(state.open_operative_input_request_count, 0);
+    }
+
+    #[test]
+    fn projection_keeps_canonical_event_id_request_for_duplicate_responses() {
+        let first = input_request_opened_event_with_assertion_mode(
+            "retry-a",
+            "input-request:sha256:first",
+            AssertionMode::Operative,
+        );
+        let second = input_request_opened_event_with_assertion_mode(
+            "retry-b",
+            "input-request:sha256:second",
+            AssertionMode::Operative,
+        );
+        let close_first = input_request_responded_event(
+            "retry-a",
+            "input-request-response:sha256:same",
+            "input-request:sha256:first",
+        );
+        let close_second = input_request_responded_event(
+            "retry-b",
+            "input-request-response:sha256:same",
+            "input-request:sha256:second",
+        );
+        assert_ne!(
+            close_first.event_id, close_second.event_id,
+            "the two carriers must be distinct events"
+        );
+
+        let forward = SessionState::from_events(&[
+            first.clone(),
+            second.clone(),
+            close_first.clone(),
+            close_second.clone(),
+        ])
+        .unwrap();
+        let reversed =
+            SessionState::from_events(&[first, second, close_second, close_first]).unwrap();
+
+        assert_eq!(forward.input_request_count, 2);
+        assert_eq!(reversed.input_request_count, 2);
+        assert_eq!(forward.open_input_request_count, 1);
+        assert_eq!(reversed.open_input_request_count, 1);
+        assert_eq!(forward.open_operative_input_request_count, 1);
+        assert_eq!(reversed.open_operative_input_request_count, 1);
     }
 
     #[test]

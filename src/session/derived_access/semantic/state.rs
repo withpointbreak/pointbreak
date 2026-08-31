@@ -88,7 +88,7 @@ impl SemanticStateSnapshot {
         let mut captures = BTreeMap::<String, String>::new();
         let mut semantic_events = BTreeMap::<(&str, String), BTreeSet<String>>::new();
         let mut request_modes = BTreeMap::<String, AssertionMode>::new();
-        let mut responded_requests = BTreeSet::<String>::new();
+        let mut response_targets = BTreeMap::<String, (String, String)>::new();
 
         for fact in facts {
             if fact.event_type == EventType::ReviewInitialized.as_str()
@@ -117,7 +117,19 @@ impl SemanticStateSnapshot {
                 }
                 SemanticFactKind::InputRequestResponded(response) => {
                     insert_semantic(&mut semantic_events, "response", fact)?;
-                    responded_requests.insert(response.request_id.clone());
+                    // Keep the canonical earlier event_id's request_id so this
+                    // fold matches the incremental representative rule.
+                    let response_id = required(&fact.semantic_id, "semantic_id")?.to_owned();
+                    match response_targets.entry(response_id) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert((fact.event_id.clone(), response.request_id.clone()));
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            if fact.event_id < entry.get().0 {
+                                entry.insert((fact.event_id.clone(), response.request_id.clone()));
+                            }
+                        }
+                    }
                 }
                 SemanticFactKind::Validation(_) => {
                     insert_semantic(&mut semantic_events, "validation", fact)?;
@@ -129,6 +141,10 @@ impl SemanticStateSnapshot {
         let current = (captures.len() == 1)
             .then(|| captures.iter().next())
             .flatten();
+        let responded_requests = response_targets
+            .into_values()
+            .map(|(_, request_id)| request_id)
+            .collect::<BTreeSet<_>>();
         let open_input_request_count = request_modes
             .keys()
             .filter(|id| !responded_requests.contains(*id))
@@ -408,6 +424,11 @@ pub(crate) enum FreshnessModelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{InputRequestId, InputRequestResponseId, JournalId, RevisionId, TrackId};
+    use crate::session::event::{
+        EventTarget, InputRequestOpenedPayload, InputRequestReasonCode,
+        InputRequestRespondedPayload, InputRequestResponseOutcome, Writer,
+    };
 
     #[test]
     fn materialized_duplicate_diagnostics_follow_authoritative_family_order() {
@@ -438,5 +459,125 @@ mod tests {
                 "duplicate_semantic_validation_event",
             ]
         );
+    }
+
+    #[test]
+    fn from_facts_keeps_canonical_event_id_request_for_duplicate_responses() {
+        fn opened(source: &str, request_id: &str) -> ShoreEvent {
+            ShoreEvent::new(
+                EventType::InputRequestOpened,
+                format!("input_request_opened:{source}"),
+                EventTarget::for_revision(
+                    JournalId::new("journal:default"),
+                    RevisionId::new("rev:one"),
+                    Some(TrackId::new("agent:test")),
+                )
+                .unwrap(),
+                Writer::shore_local("test"),
+                InputRequestOpenedPayload {
+                    input_request_id: InputRequestId::new(request_id),
+                    target: crate::model::ReviewTargetRef::Revision {
+                        revision_id: RevisionId::new("rev:one"),
+                    },
+                    reason_code: InputRequestReasonCode::ManualDecisionRequired,
+                    title: "Need input".to_owned(),
+                    body: None,
+                    body_content_type: Default::default(),
+                    body_artifact_path: None,
+                    body_byte_size: None,
+                    body_content_hash: None,
+                    target_fingerprint: None,
+                    task_target: None,
+                },
+                "2026-08-31T00:00:00Z",
+            )
+            .unwrap()
+            .with_assertion_mode(AssertionMode::Operative)
+        }
+
+        fn responded(source: &str, request_id: &str) -> ShoreEvent {
+            ShoreEvent::new(
+                EventType::InputRequestResponded,
+                format!("input_request_responded:{source}"),
+                EventTarget::for_subject(
+                    JournalId::new("journal:default"),
+                    crate::model::TargetRef::Review(crate::model::ReviewTargetRef::InputRequest {
+                        revision_id: RevisionId::new("rev:one"),
+                        input_request_id: InputRequestId::new(request_id),
+                    }),
+                    None,
+                )
+                .unwrap(),
+                Writer::shore_local("test"),
+                InputRequestRespondedPayload {
+                    input_request_response_id: InputRequestResponseId::new(
+                        "input-request-response:sha256:same",
+                    ),
+                    input_request_id: InputRequestId::new(request_id),
+                    outcome: InputRequestResponseOutcome::Approved,
+                    reason: None,
+                    reason_content_type: Default::default(),
+                    reason_artifact_path: None,
+                    reason_byte_size: None,
+                    reason_content_hash: None,
+                    target_fingerprint: None,
+                    revision_id: Some(RevisionId::new("rev:one")),
+                    task_target: None,
+                },
+                "2026-08-31T00:00:01Z",
+            )
+            .unwrap()
+        }
+
+        let first_open = opened("retry-a", "input-request:sha256:first");
+        let second_open = opened("retry-b", "input-request:sha256:second");
+        let close_first = responded("retry-a", "input-request:sha256:first");
+        let close_second = responded("retry-b", "input-request:sha256:second");
+        assert_ne!(
+            close_first.event_id, close_second.event_id,
+            "the two carriers must be distinct events"
+        );
+        let witness = "a".repeat(64);
+        let facts = [
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 1),
+                &first_open,
+                witness.clone(),
+            )
+            .unwrap(),
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 2),
+                &second_open,
+                witness.clone(),
+            )
+            .unwrap(),
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 3),
+                &close_first,
+                witness.clone(),
+            )
+            .unwrap(),
+            crate::session::derived_access::semantic::SemanticFact::from_event(
+                TruthCursor::new(1, 4),
+                &close_second,
+                witness,
+            )
+            .unwrap(),
+        ];
+        let forward = SemanticStateSnapshot::from_facts(&facts).unwrap();
+        let reversed = SemanticStateSnapshot::from_facts(&[
+            facts[0].clone(),
+            facts[1].clone(),
+            facts[3].clone(),
+            facts[2].clone(),
+        ])
+        .unwrap();
+
+        assert_eq!(forward.input_request_count, 2);
+        assert_eq!(reversed.input_request_count, 2);
+        assert_eq!(forward.open_input_request_count, 1);
+        assert_eq!(reversed.open_input_request_count, 1);
+        assert_eq!(forward.open_operative_input_request_count, 1);
+        assert_eq!(reversed.open_operative_input_request_count, 1);
     }
 }
