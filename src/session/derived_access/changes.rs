@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::change_seek_reads::PreparedNarrowedFacadeV1;
-use super::lifecycle::{CurrentGeneration, LifecycleError};
+use super::change_revision_reads::ExactRevisionSessionStateV1;
+use super::lifecycle::LifecycleError;
 use super::locator::LocatorRead;
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use super::runtime::{
@@ -1470,61 +1470,32 @@ pub struct ExactRevisionReadPlanV1 {
 #[doc(hidden)]
 pub struct DerivedExactRevisionSessionV1<'a> {
     access: &'a DerivedChangeAccess,
-    current: Arc<CurrentGeneration>,
-    generation_id: String,
-    checkpoint: super::semantic::change::ReaderProjectionCheckpointV1,
-    prepared: PreparedNarrowedFacadeV1,
+    state: ExactRevisionSessionStateV1,
 }
 
 impl<'a> DerivedExactRevisionSessionV1<'a> {
-    pub(crate) fn new(
-        access: &'a DerivedChangeAccess,
-        current: Arc<CurrentGeneration>,
-        generation_id: String,
-        checkpoint: super::semantic::change::ReaderProjectionCheckpointV1,
-        prepared: PreparedNarrowedFacadeV1,
-    ) -> Self {
-        Self {
-            access,
-            current,
-            generation_id,
-            checkpoint,
-            prepared,
-        }
+    pub(crate) fn new(access: &'a DerivedChangeAccess, state: ExactRevisionSessionStateV1) -> Self {
+        Self { access, state }
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        &'a DerivedChangeAccess,
-        Arc<CurrentGeneration>,
-        String,
-        super::semantic::change::ReaderProjectionCheckpointV1,
-        PreparedNarrowedFacadeV1,
-    ) {
-        (
-            self.access,
-            self.current,
-            self.generation_id,
-            self.checkpoint,
-            self.prepared,
-        )
+    pub(crate) fn into_parts(self) -> (&'a DerivedChangeAccess, ExactRevisionSessionStateV1) {
+        (self.access, self.state)
     }
 
     pub fn change_view(&self) -> &ChangeView {
-        &self.prepared.view
+        self.state.change_view()
     }
 
     pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
-        &self.prepared.document_projection
+        self.state.document_projection()
     }
 
     pub fn facade(&self) -> &ChangeDocumentFacadeV1 {
-        &self.prepared.facade
+        self.state.facade()
     }
 
     pub fn stamp(&self) -> &str {
-        &self.prepared.stamp
+        self.state.stamp()
     }
 
     pub fn read(

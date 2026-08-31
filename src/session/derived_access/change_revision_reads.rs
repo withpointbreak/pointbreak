@@ -8,8 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
-use super::change_seek_reads::prepare_narrowed_facade;
+use super::change_seek_reads::{PreparedNarrowedFacadeV1, prepare_narrowed_facade};
 use super::changes::{
     DerivedChangeAccess, DerivedChangeOutcomeV1, DerivedExactRevisionReadV1,
     DerivedExactRevisionSessionV1, DerivedProjectionFailureCodeV1, ExactRevisionReadPlanV1,
@@ -18,9 +19,10 @@ use super::changes::{
 use super::detail_reads::validate_selected_component_events;
 use super::fact_reads::{normalize_events, validate_support_events};
 use super::history::hydrate_events;
-use super::lifecycle::LifecycleError;
+use super::lifecycle::{CurrentGeneration, LifecycleError};
 use super::locator::LocatorRead;
 use super::runtime::RuntimeCurrentRead;
+use super::semantic::change::ReaderProjectionCheckpointV1;
 use super::service::DerivedAccessService;
 use super::sqlite::ExactRevisionFactReadSnapshot;
 use super::support::support_event_plan;
@@ -28,14 +30,75 @@ use super::support::support_event_plan;
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
 };
-use crate::documents::{FactPortApplicabilityV1, normalize_fact_presentations};
+use crate::documents::{
+    ChangeDocumentFacadeV1, FactPortApplicabilityV1, normalize_fact_presentations,
+};
 use crate::error::{Result, ShoreError};
 use crate::model::{ChangeId, RevisionRefV1};
 use crate::session::derived_access::cursor::TruthCursor;
 use crate::session::event::FactRefV1;
 use crate::session::store::backend::StoreBackend;
 use crate::session::workflow::show_revision_from_selected_events;
-use crate::session::{RevisionShowOptions, RevisionShowResult};
+use crate::session::{
+    ChangeDocumentProjectionV1, ChangeView, RevisionShowOptions, RevisionShowResult,
+};
+
+/// Opaque producer-owned state that keeps lifecycle implementation types out
+/// of the product Change facade while the public session remains there.
+pub(crate) struct ExactRevisionSessionStateV1 {
+    current: Arc<CurrentGeneration>,
+    generation_id: String,
+    checkpoint: ReaderProjectionCheckpointV1,
+    prepared: PreparedNarrowedFacadeV1,
+}
+
+impl ExactRevisionSessionStateV1 {
+    fn new(
+        current: Arc<CurrentGeneration>,
+        generation_id: String,
+        checkpoint: ReaderProjectionCheckpointV1,
+        prepared: PreparedNarrowedFacadeV1,
+    ) -> Self {
+        Self {
+            current,
+            generation_id,
+            checkpoint,
+            prepared,
+        }
+    }
+
+    pub(crate) fn change_view(&self) -> &ChangeView {
+        &self.prepared.view
+    }
+
+    pub(crate) fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
+        &self.prepared.document_projection
+    }
+
+    pub(crate) fn facade(&self) -> &ChangeDocumentFacadeV1 {
+        &self.prepared.facade
+    }
+
+    pub(crate) fn stamp(&self) -> &str {
+        &self.prepared.stamp
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        Arc<CurrentGeneration>,
+        String,
+        ReaderProjectionCheckpointV1,
+        PreparedNarrowedFacadeV1,
+    ) {
+        (
+            self.current,
+            self.generation_id,
+            self.checkpoint,
+            self.prepared,
+        )
+    }
+}
 
 /// Observable producer boundaries used by deterministic snapshot tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,8 +160,9 @@ pub(crate) fn exact_revision_session_v1_inner<'a>(
         other => return Ok(other.map_ready(|_| unreachable!("matched non-Ready outcome"))),
     };
     hook(ExactRevisionReadBoundary::SessionPrepared);
+    let state = ExactRevisionSessionStateV1::new(current, generation_id, checkpoint, prepared);
     Ok(DerivedChangeOutcomeV1::Ready(
-        DerivedExactRevisionSessionV1::new(access, current, generation_id, checkpoint, prepared),
+        DerivedExactRevisionSessionV1::new(access, state),
     ))
 }
 
@@ -109,7 +173,8 @@ pub(crate) fn exact_revision_read_v1_inner(
     plan: &ExactRevisionReadPlanV1,
     mut hook: impl FnMut(ExactRevisionReadBoundary),
 ) -> Result<DerivedChangeOutcomeV1<DerivedExactRevisionReadV1>> {
-    let (access, current, generation_id, checkpoint, prepared) = session.into_parts();
+    let (access, state) = session.into_parts();
+    let (current, generation_id, checkpoint, prepared) = state.into_parts();
     let Some(repo) = access.repo() else {
         return Ok(DerivedChangeOutcomeV1::projection_unavailable(
             DerivedProjectionFailureCodeV1::ProjectionInvalid,

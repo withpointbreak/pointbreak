@@ -19,6 +19,9 @@ mod attention;
 mod capture;
 mod change;
 pub(crate) mod common;
+#[cfg(test)]
+#[path = "../../tests/support/derived_exact_read_corruption.rs"]
+mod derived_exact_read_corruption;
 mod derived_read;
 mod diff;
 mod endorse;

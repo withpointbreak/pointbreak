@@ -2009,6 +2009,7 @@ fn write<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::derived_exact_read_corruption;
 
     fn select_args(source: Option<&str>, cursor: Option<&str>) -> SelectArgs {
         SelectArgs {
@@ -2502,83 +2503,6 @@ mod tests {
         read
     }
 
-    fn mutate_derived_database(
-        repo: &std::path::Path,
-        generation_id: &str,
-        mutate: impl FnOnce(&rusqlite::Connection),
-    ) {
-        let database = find_generation_database(repo, generation_id)
-            .expect("locate rebuilt exact-read fixture database");
-        let connection =
-            rusqlite::Connection::open(database).expect("open exact-read fixture database");
-        mutate(&connection);
-        connection
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-            .expect("checkpoint exact-read fixture mutation");
-    }
-
-    fn find_generation_database(
-        root: &std::path::Path,
-        generation_id: &str,
-    ) -> Option<std::path::PathBuf> {
-        let mut pending = vec![root.to_path_buf()];
-        while let Some(directory) = pending.pop() {
-            let entries = std::fs::read_dir(directory).ok()?;
-            for entry in entries {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.is_dir() {
-                    pending.push(path);
-                    continue;
-                }
-                if path.file_name().and_then(|name| name.to_str()) == Some("cursor.sqlite3")
-                    && path
-                        .parent()
-                        .and_then(std::path::Path::file_name)
-                        .and_then(|name| name.to_str())
-                        == Some(generation_id)
-                {
-                    return Some(path);
-                }
-            }
-        }
-        None
-    }
-
-    fn canonical_json_sha256(value: &serde_json::Value) -> String {
-        use sha2::{Digest as _, Sha256};
-
-        fn canonical(value: &serde_json::Value) -> serde_json::Value {
-            match value {
-                serde_json::Value::Array(values) => {
-                    serde_json::Value::Array(values.iter().map(canonical).collect())
-                }
-                serde_json::Value::Object(fields) => {
-                    let mut keys = fields.keys().collect::<Vec<_>>();
-                    keys.sort_unstable();
-                    let mut canonical_fields = serde_json::Map::new();
-                    for key in keys {
-                        canonical_fields.insert(
-                            key.clone(),
-                            canonical(fields.get(key).expect("canonical key remains present")),
-                        );
-                    }
-                    serde_json::Value::Object(canonical_fields)
-                }
-                _ => value.clone(),
-            }
-        }
-
-        let bytes =
-            serde_json::to_vec(&canonical(value)).expect("serialize canonical fixture JSON");
-        let digest = Sha256::digest(bytes);
-        let hex = digest
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        format!("sha256:{hex}")
-    }
-
     fn record_helper_observation(
         repo: &std::path::Path,
         revision_id: &RevisionId,
@@ -2888,23 +2812,11 @@ mod tests {
             .target_fact_event_id
             .as_deref()
             .expect("unmaterialized fixture has a target fact event");
-        mutate_derived_database(unmaterialized.repo.path(), &generation, |connection| {
-            assert_eq!(
-                connection
-                    .execute(
-                        "UPDATE semantic_event_fact
-                         SET revision_prefix_id = NULL,
-                             revision_digest = NULL,
-                             revision_raw = NULL
-                         WHERE sequence = (
-                             SELECT sequence FROM locator_event_text WHERE event_id = ?1
-                         )",
-                        [target_fact_event_id],
-                    )
-                    .expect("hide target fact from the exact component"),
-                1,
-            );
-        });
+        derived_exact_read_corruption::hide_target_fact(
+            unmaterialized.repo.path(),
+            &generation,
+            target_fact_event_id,
+        );
         let read = derived_exact_read_from_current(
             unmaterialized.repo.path(),
             &unmaterialized.change_id,
@@ -2936,73 +2848,13 @@ mod tests {
         let mismatched = contextual_port_fixture(false, 7);
         let generation = rebuild_derived_exact_fixture(mismatched.repo.path());
         let wrong_hash = format!("sha256:{}", "f".repeat(64));
-        mutate_derived_database(mismatched.repo.path(), &generation, |connection| {
-            let (fact_json, actor_id, track_id): (String, String, String) = connection
-                .query_row(
-                    "SELECT change_fact.fact_json, event.actor_id, locator.track_id
-                     FROM semantic_change_fact AS change_fact
-                     JOIN semantic_event_fact_text AS event
-                       ON event.sequence = change_fact.sequence
-                     JOIN locator_event_text AS locator
-                       ON locator.sequence = change_fact.sequence
-                     WHERE locator.event_id = ?1",
-                    [mismatched.port_event_id.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .expect("read materialized fact-port carrier");
-            assert_eq!(
-                connection
-                    .execute(
-                        "UPDATE semantic_change_fact
-                         SET fact_json = replace(fact_json, ?1, ?2)
-                         WHERE json_extract(fact_json, '$.kind') = 'revision'
-                           AND instr(fact_json, ?1) > 0",
-                        rusqlite::params![
-                            mismatched.origin.object_artifact_content_hash,
-                            wrong_hash,
-                        ],
-                    )
-                    .expect("inject mismatched materialized origin hash"),
-                1,
-            );
-
-            let mut fact: serde_json::Value =
-                serde_json::from_str(&fact_json).expect("decode materialized fact port");
-            let port = fact
-                .get_mut("port")
-                .and_then(serde_json::Value::as_object_mut)
-                .expect("fact-port payload is an object");
-            port.get_mut("originRevision")
-                .and_then(serde_json::Value::as_object_mut)
-                .expect("origin Revision is an object")
-                .insert(
-                    "objectArtifactContentHash".to_owned(),
-                    serde_json::Value::String(wrong_hash.clone()),
-                );
-            port.remove("portId");
-            let port_id = format!(
-                "fact-port:{}",
-                canonical_json_sha256(&serde_json::json!({
-                    "payload": serde_json::Value::Object(port.clone()),
-                    "actorId": actor_id,
-                    "trackId": track_id,
-                }))
-            );
-            port.insert("portId".to_owned(), serde_json::Value::String(port_id));
-            assert_eq!(
-                connection
-                    .execute(
-                        "UPDATE semantic_change_fact
-                         SET fact_json = ?1
-                         WHERE sequence = (
-                             SELECT sequence FROM locator_event_text WHERE event_id = ?2
-                         )",
-                        rusqlite::params![fact.to_string(), mismatched.port_event_id],
-                    )
-                    .expect("bind fact port to mismatched materialized origin"),
-                1,
-            );
-        });
+        derived_exact_read_corruption::mismatch_origin_artifact(
+            mismatched.repo.path(),
+            &generation,
+            mismatched.port_event_id.as_str(),
+            &mismatched.origin.object_artifact_content_hash,
+            &wrong_hash,
+        );
         let read = derived_exact_read_from_current(
             mismatched.repo.path(),
             &mismatched.change_id,
