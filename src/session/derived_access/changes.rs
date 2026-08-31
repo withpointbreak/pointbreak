@@ -2116,7 +2116,10 @@ mod tests {
     use crate::documents::{
         ChangeDeclarationStateV1, ReaderProfileAvailabilityV1, change_presentation_projection,
     };
-    use crate::model::{ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, RevisionId};
+    use crate::model::{
+        ChangeIdentityDescriptorV1, EngagementId, JournalId, ObjectId, ObservationId, RevisionId,
+        TrackId,
+    };
     use crate::session::derived_access::layout::{
         DerivedStorageLayout, DerivedStorageNamespace, DerivedStorageTransition,
     };
@@ -2128,9 +2131,11 @@ mod tests {
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventSignatureRecordedPayload, EventTarget,
-        EventToBeSigned, ReviewInitializedPayload, Revision, Writer, build_change_declared,
-        build_membership_asserted, build_membership_withdrawn, build_revision_relation_asserted,
-        build_revision_relation_withdrawn, event_signature_pre_authentication_encoding,
+        EventToBeSigned, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1,
+        ReviewInitializedPayload, Revision, Writer, build_change_declared,
+        build_membership_asserted, build_membership_withdrawn, build_review_fact_ported,
+        build_revision_relation_asserted, build_revision_relation_withdrawn,
+        event_signature_pre_authentication_encoding,
     };
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::store::backend::StoreBackend;
@@ -6491,6 +6496,378 @@ mod tests {
             );
         }
         assert!(!seek.stamp().is_empty());
+    }
+
+    fn active_fact_port_fixture() -> (
+        ActiveChangeFixture,
+        ChangeId,
+        RevisionRefV1,
+        Vec<ShoreEvent>,
+    ) {
+        let fixture = ActiveChangeFixture::new(&[&[None], &[None]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let target = fixture.changes[0].revision.clone();
+        let origin = fixture.changes[1].revision.clone();
+        let membership =
+            build_membership_asserted(&change_id, &origin.revision_id, [117; 32]).unwrap();
+        record_fixture_event(
+            &fixture.store,
+            ShoreEvent::new(
+                EventType::ChangeMembershipAsserted,
+                "fixture:fact-port-origin-membership",
+                EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+                Writer::shore_local("change-endpoint-test"),
+                membership,
+                "2026-08-10T03:00:00Z",
+            )
+            .unwrap(),
+        );
+
+        let writer = Writer::shore_local("change-endpoint-test");
+        let track_id = TrackId::new("track:fact-port-seek");
+        let explicit = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: origin.clone(),
+                origin_fact: FactRefV1::Observation {
+                    observation_id: ObservationId::new("observation:sha256:explicit"),
+                },
+                target_revision: target.clone(),
+                relation: FactPortRelationV1::ContextOnly,
+                target_fact: None,
+                rationale_content_hash: None,
+                context_change_id: Some(change_id.clone()),
+            },
+            &writer.actor_id,
+            &track_id,
+        )
+        .unwrap();
+        let unscoped = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: origin.clone(),
+                origin_fact: FactRefV1::Observation {
+                    observation_id: ObservationId::new("observation:sha256:unscoped"),
+                },
+                target_revision: target.clone(),
+                relation: FactPortRelationV1::ContextOnly,
+                target_fact: None,
+                rationale_content_hash: None,
+                context_change_id: None,
+            },
+            &writer.actor_id,
+            &track_id,
+        )
+        .unwrap();
+        let events = [
+            (
+                "fixture:fact-port-explicit-one",
+                explicit.clone(),
+                "2026-08-10T03:00:01Z",
+            ),
+            (
+                "fixture:fact-port-explicit-two",
+                explicit,
+                "2026-08-10T03:00:02Z",
+            ),
+            (
+                "fixture:fact-port-unscoped",
+                unscoped,
+                "2026-08-10T03:00:03Z",
+            ),
+        ]
+        .into_iter()
+        .map(|(key, payload, occurred_at)| {
+            ShoreEvent::new(
+                EventType::ReviewFactPorted,
+                key,
+                EventTarget::for_revision(
+                    JournalId::new("journal:change-endpoint"),
+                    origin.revision_id.clone(),
+                    Some(track_id.clone()),
+                )
+                .unwrap(),
+                writer.clone(),
+                payload,
+                occurred_at,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        for event in &events {
+            record_fixture_event(&fixture.store, event.clone());
+        }
+        (fixture, change_id, target, events)
+    }
+
+    #[test]
+    fn seek_facade_presents_fact_ports_like_the_authoritative_facade() {
+        let (fixture, change_id, target, _) = active_fact_port_fixture();
+
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("fixture generation must be current");
+        };
+        let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+        let DerivedChangeOutcomeV1::Ready(prepared) =
+            super::super::change_seek_reads::prepare_narrowed_facade(
+                &current,
+                &checkpoint,
+                &change_id,
+            )
+            .unwrap()
+        else {
+            panic!("narrowed facade preparation must be ready");
+        };
+
+        let events = fixture.store.list_change_events().unwrap();
+        let semantic = crate::session::project_changes(&events).unwrap();
+        let provenance = crate::session::project_change_documents(&events).unwrap();
+        let event_set_hash = event_set_hash_for_events(&events).unwrap();
+        let authoritative = ChangeDocumentFacadeV1::new(semantic.clone(), provenance.clone())
+            .unwrap()
+            .with_presentations(
+                change_presentation_projection(&semantic, &provenance, &events, &event_set_hash)
+                    .unwrap(),
+            )
+            .unwrap();
+        let expected = authoritative
+            .fact_port_presentations(&change_id, &target)
+            .unwrap();
+        let actual = prepared
+            .facade
+            .fact_port_presentations(&change_id, &target)
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 2);
+        assert!(actual.iter().any(|port| port.context_change_id.is_none()));
+        assert!(actual.iter().any(|port| port.source_event_ids.len() == 2));
+    }
+
+    #[test]
+    fn seek_consumers_fall_back_when_fact_port_sources_are_malformed() {
+        for malformed in ["missing-track", "conflicting-carrier"] {
+            let (fixture, change_id, _, port_events) = active_fact_port_fixture();
+            match malformed {
+                "missing-track" => fixture.mutate_database(|connection| {
+                    connection
+                        .execute(
+                            "UPDATE locator_event SET track_id = NULL WHERE sequence = (\
+                             SELECT sequence FROM locator_event_text WHERE event_id = ?1)",
+                            [port_events[0].event_id.as_str()],
+                        )
+                        .unwrap();
+                }),
+                "conflicting-carrier" => fixture.mutate_database(|connection| {
+                    let mut port = port_events[1].payload.clone();
+                    port["relation"] = serde_json::json!("resolved_by");
+                    let fact = serde_json::json!({
+                        "kind": "fact_port",
+                        "port": port,
+                    });
+                    connection
+                        .execute(
+                            "UPDATE semantic_change_fact SET fact_json = ?1 WHERE sequence = (\
+                             SELECT sequence FROM locator_event_text WHERE event_id = ?2)",
+                            params![fact.to_string(), port_events[1].event_id.as_str()],
+                        )
+                        .unwrap();
+                }),
+                _ => unreachable!(),
+            }
+
+            let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+                panic!("fixture generation must be current");
+            };
+            let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+            let expected = match malformed {
+                "missing-track" => "materialized fact port carries no review track",
+                "conflicting-carrier" => "fact-port identity or attribution mismatch",
+                _ => unreachable!(),
+            };
+            assert_projection_invalid(
+                super::super::change_seek_reads::prepare_narrowed_facade(
+                    &current,
+                    &checkpoint,
+                    &change_id,
+                )
+                .unwrap(),
+                expected,
+            );
+            assert_projection_invalid(
+                fixture.access.review_detail_document(&change_id).unwrap(),
+                expected,
+            );
+            assert_projection_invalid(fixture.access.change_seek(&change_id).unwrap(), expected);
+        }
+    }
+
+    fn normalize_projection_stamps(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(stamp) = fields.get_mut("projectionStamp") {
+                    *stamp = serde_json::Value::String("<seek-stamp>".to_owned());
+                }
+                for value in fields.values_mut() {
+                    normalize_projection_stamps(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    normalize_projection_stamps(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn seek_producer_output_is_unchanged_by_shared_preparation() {
+        let fixture = ActiveChangeFixture::new(&[&[None]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(detail) =
+            fixture.access.review_detail_document(&change_id).unwrap()
+        else {
+            panic!("fixture detail must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(seek) = fixture.access.change_seek(&change_id).unwrap()
+        else {
+            panic!("fixture seek must be ready");
+        };
+        let mut snapshot = serde_json::json!({
+            "detail": detail,
+            "seek": {
+                "changeView": seek.change_view(),
+                "documentProjection": seek.document_projection(),
+                "projectionStamp": seek.stamp(),
+            },
+        });
+        normalize_projection_stamps(&mut snapshot);
+        let actual = serde_json::to_string_pretty(&snapshot).unwrap();
+        const EXPECTED: &str = r#"{
+  "detail": {
+    "currentRevisionRefs": [
+      {
+        "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "diagnostics": [],
+    "effectiveSupersedes": [],
+    "links": [],
+    "memberRevisions": [
+      {
+        "revision": {
+          "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "supportingClaimIds": [
+          "change-membership:sha256:5e8ace7ca9625e75ae16988a4bac9e1b8e97355572578e721df8375ffb67a43b"
+        ]
+      }
+    ],
+    "membershipClaims": [
+      {
+        "active": true,
+        "changeId": "change:sha256:94e12f1e0a87f6a5c34d8a201588b1dabc40690cc1ce34859131335550198e32",
+        "claimId": "change-membership:sha256:5e8ace7ca9625e75ae16988a4bac9e1b8e97355572578e721df8375ffb67a43b",
+        "diagnostics": [],
+        "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "supports": [
+          {
+            "actorId": "actor:local",
+            "eventId": "evt:sha256:39ecbb2b0e87e97e07ec44a83d6caa476857a413d54adfa246c1a095f58eef59"
+          }
+        ],
+        "withdrawals": []
+      }
+    ],
+    "membershipWithdrawals": [],
+    "operativeObligations": [],
+    "pendingOrConflictingEdges": [],
+    "perCurrentRevisionQualification": [
+      {
+        "qualified": false,
+        "revision": {
+          "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      }
+    ],
+    "projectionStamp": "<seek-stamp>",
+    "relationClaims": [],
+    "relationWithdrawals": [],
+    "schema": "pointbreak.review-change",
+    "summary": {
+      "attentionSummary": "in_progress",
+      "availabilitySummary": "available",
+      "changeId": "change:sha256:94e12f1e0a87f6a5c34d8a201588b1dabc40690cc1ce34859131335550198e32",
+      "currentRevisionRefs": [
+        {
+          "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "declarationState": "authoritative",
+      "diagnostics": [],
+      "lifecycle": "in_progress",
+      "memberCount": 1,
+      "projectionStamp": "<seek-stamp>",
+      "titleAssertions": [],
+      "topology": "initial"
+    },
+    "unavailableMemberRevisions": [],
+    "version": 1
+  },
+  "seek": {
+    "changeView": {
+      "changeId": "change:sha256:94e12f1e0a87f6a5c34d8a201588b1dabc40690cc1ce34859131335550198e32",
+      "currentRevisions": [
+        "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "diagnostics": [],
+      "lifecycle": "in_progress",
+      "members": [
+        "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "operativeObligations": [],
+      "qualifiedCurrentRevisions": [],
+      "supersedes": [],
+      "topology": "initial"
+    },
+    "documentProjection": {
+      "diagnostics": [],
+      "membershipClaims": [
+        {
+          "active": true,
+          "changeId": "change:sha256:94e12f1e0a87f6a5c34d8a201588b1dabc40690cc1ce34859131335550198e32",
+          "claimId": "change-membership:sha256:5e8ace7ca9625e75ae16988a4bac9e1b8e97355572578e721df8375ffb67a43b",
+          "diagnostics": [],
+          "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "supports": [
+            {
+              "actorId": "actor:local",
+              "eventId": "evt:sha256:39ecbb2b0e87e97e07ec44a83d6caa476857a413d54adfa246c1a095f58eef59"
+            }
+          ],
+          "withdrawals": []
+        }
+      ],
+      "projectionStamp": "<seek-stamp>",
+      "relationClaims": [],
+      "revisionRefs": {
+        "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+          {
+            "objectArtifactContentHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "revisionId": "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ]
+      },
+      "unavailableRevisionRefs": {}
+    },
+    "projectionStamp": "<seek-stamp>"
+  }
+}"#;
+
+        assert_eq!(actual, EXPECTED);
     }
 
     #[test]

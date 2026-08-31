@@ -214,6 +214,14 @@ struct FactPortCarrierV1 {
     source_event_ids: Vec<EventId>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FactPortCarrierSourceV1 {
+    pub(crate) payload: ReviewFactPortedPayload,
+    pub(crate) event_id: EventId,
+    pub(crate) actor_id: ActorId,
+    pub(crate) track_id: TrackId,
+}
+
 /// Body-free document input built from validated events in the same reader
 /// generation. Proposal summaries remain here rather than entering
 /// `ChangeDocumentProjectionV1`, whose persisted semantic contract is prose-free.
@@ -619,6 +627,17 @@ impl ChangeDocumentFacadeV1 {
             ));
         }
         self.projection_stamp = generation_stamp;
+        Ok(self)
+    }
+
+    /// Bind fact-port carriers from materialized sources without changing the
+    /// projection stamp. Derived callers bind their generation stamp
+    /// separately.
+    pub(crate) fn with_fact_port_sources(
+        mut self,
+        sources: impl IntoIterator<Item = FactPortCarrierSourceV1>,
+    ) -> Result<Self> {
+        self.fact_port_carriers = normalize_fact_port_sources(sources)?;
         Ok(self)
     }
 
@@ -1943,20 +1962,40 @@ pub fn normalize_fact_presentations(
 /// as the Change presentation facade. Contextual applicability is deliberately
 /// deferred until a caller names one Change and one exact target Revision.
 fn normalize_fact_port_carriers(events: &[ShoreEvent]) -> Result<Vec<FactPortCarrierV1>> {
-    let mut by_port_id = BTreeMap::<String, FactPortCarrierV1>::new();
-    for event in events
+    let sources = events
         .iter()
         .filter(|event| event.event_type == EventType::ReviewFactPorted)
-    {
-        let payload: ReviewFactPortedPayload = serde_json::from_value(event.payload.clone())?;
-        let track_id = event
-            .target
-            .track_id
-            .as_ref()
-            .ok_or_else(|| ShoreError::InvalidEvent {
-                message: "review_fact_ported requires an attributed review track".to_owned(),
-            })?;
-        payload.validate_attribution(&event.writer.actor_id, track_id)?;
+        .map(|event| {
+            let payload: ReviewFactPortedPayload = serde_json::from_value(event.payload.clone())?;
+            let track_id =
+                event
+                    .target
+                    .track_id
+                    .clone()
+                    .ok_or_else(|| ShoreError::InvalidEvent {
+                        message: "review_fact_ported requires an attributed review track"
+                            .to_owned(),
+                    })?;
+            Ok(FactPortCarrierSourceV1 {
+                payload,
+                event_id: event.event_id.clone(),
+                actor_id: event.writer.actor_id.clone(),
+                track_id,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    normalize_fact_port_sources(sources)
+}
+
+fn normalize_fact_port_sources(
+    sources: impl IntoIterator<Item = FactPortCarrierSourceV1>,
+) -> Result<Vec<FactPortCarrierV1>> {
+    let mut by_port_id = BTreeMap::<String, FactPortCarrierV1>::new();
+    for source in sources {
+        source
+            .payload
+            .validate_attribution(&source.actor_id, &source.track_id)?;
+        let payload = source.payload;
         let carrier = FactPortCarrierV1 {
             port_id: payload.port_id,
             origin_revision: payload.origin_revision,
@@ -1966,9 +2005,9 @@ fn normalize_fact_port_carriers(events: &[ShoreEvent]) -> Result<Vec<FactPortCar
             target_fact: payload.target_fact,
             rationale_content_hash: payload.rationale_content_hash,
             context_change_id: payload.context_change_id,
-            actor_id: event.writer.actor_id.clone(),
-            track_id: track_id.clone(),
-            source_event_ids: vec![event.event_id.clone()],
+            actor_id: source.actor_id,
+            track_id: source.track_id,
+            source_event_ids: vec![source.event_id],
         };
         let key = carrier.port_id.as_str().to_owned();
         match by_port_id.entry(key) {
@@ -2883,6 +2922,79 @@ mod tests {
         assert_eq!(
             ports[0].source_event_ids,
             vec![first.event_id.clone(), second.event_id.clone()]
+        );
+    }
+
+    #[test]
+    fn fact_port_sources_normalize_identically_to_events() {
+        let (change_id, target, _) = facade();
+        let origin = reference("origin", 'b');
+        let first = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:origin"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id.clone()),
+            "fact-port:source-one",
+        );
+        let duplicate = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:origin"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id.clone()),
+            "fact-port:source-two",
+        );
+        let distinct = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:distinct"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id),
+            "fact-port:source-distinct",
+        );
+        let events = vec![first, duplicate, distinct];
+        let sources = events
+            .iter()
+            .map(|event| FactPortCarrierSourceV1 {
+                payload: serde_json::from_value(event.payload.clone()).unwrap(),
+                event_id: event.event_id.clone(),
+                actor_id: event.writer.actor_id.clone(),
+                track_id: event.target.track_id.clone().unwrap(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            normalize_fact_port_carriers(&events).unwrap(),
+            normalize_fact_port_sources(sources).unwrap()
+        );
+
+        let mut conflicting = events[0].clone();
+        conflicting.event_id = EventId::new("event:sha256:conflicting-source");
+        conflicting.payload["relation"] = serde_json::json!("resolved_by");
+        conflicting.payload_hash =
+            crate::canonical_hash::sha256_json_prefixed(&conflicting.payload).unwrap();
+        let conflicting_events = vec![events[0].clone(), conflicting];
+        let conflicting_sources = conflicting_events
+            .iter()
+            .map(|event| FactPortCarrierSourceV1 {
+                payload: serde_json::from_value(event.payload.clone()).unwrap(),
+                event_id: event.event_id.clone(),
+                actor_id: event.writer.actor_id.clone(),
+                track_id: event.target.track_id.clone().unwrap(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            normalize_fact_port_carriers(&conflicting_events)
+                .unwrap_err()
+                .to_string(),
+            normalize_fact_port_sources(conflicting_sources)
+                .unwrap_err()
+                .to_string()
         );
     }
 

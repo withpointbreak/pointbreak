@@ -55,7 +55,6 @@ pub use attention::{
     derived_attention_list_document,
 };
 pub use capture::{CaptureBody, capture_document};
-pub(crate) use change::change_presentation_projection;
 #[doc(hidden)]
 pub use change::normalize_fact_presentations;
 pub use change::{
@@ -75,6 +74,7 @@ pub use change::{
     ChangeAttentionPresentationV1, ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1,
     attention_presentation_for_change,
 };
+pub(crate) use change::{FactPortCarrierSourceV1, change_presentation_projection};
 pub use event_history::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
     EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,

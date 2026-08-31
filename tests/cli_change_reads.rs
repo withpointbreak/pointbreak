@@ -17,6 +17,7 @@ mod support;
 use std::path::Path;
 use std::process::Output;
 
+use rusqlite::Connection;
 use serde_json::Value;
 use support::git_repo::GitRepo;
 use support::{common_dir_store, pointbreak_env, pointbreak_unprepared_env};
@@ -188,6 +189,7 @@ fn change_reads_fixture() -> ChangeReadsFixture {
 struct ExactReadFixture {
     fixture: ChangeReadsFixture,
     ported_origin_revision_id: String,
+    ported_origin_artifact_hash: String,
     ported_origin_observation_id: String,
     target_observation_id: String,
     association_commit_oids: [String; 2],
@@ -321,6 +323,7 @@ fn exact_read_fixture() -> ExactReadFixture {
     ExactReadFixture {
         fixture,
         ported_origin_revision_id,
+        ported_origin_artifact_hash,
         ported_origin_observation_id,
         target_observation_id,
         association_commit_oids,
@@ -2248,6 +2251,82 @@ fn derived_change_show_is_byte_identical_modulo_the_seek_stamp() {
                 "change show ({lane}): stderr parity"
             );
         }
+    }
+}
+
+#[test]
+fn malformed_fact_port_seek_sources_fall_back_to_authoritative_bytes() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    let generations =
+        std::fs::read_dir(common_dir_store(fixture.repo.path()).join("derived/generations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 1, "expected one published generation");
+    let connection = Connection::open(generations[0].join("cursor.sqlite3")).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE locator_event SET track_id = NULL WHERE sequence IN (\
+             SELECT sequence FROM locator_event_text WHERE event_type = 'review_fact_ported')",
+            [],
+        )
+        .unwrap();
+    assert!(
+        changed > 0,
+        "fixture must corrupt at least one materialized port"
+    );
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+
+    let shapes = [
+        (
+            "show",
+            vec![
+                "change".to_owned(),
+                "show".to_owned(),
+                fixture.accepted_change_id.clone(),
+                "--repo".to_owned(),
+                fixture.repo_arg().to_owned(),
+            ],
+        ),
+        (
+            "select",
+            vec![
+                "change".to_owned(),
+                "select".to_owned(),
+                fixture.accepted_change_id.clone(),
+                "--repo".to_owned(),
+                fixture.repo_arg().to_owned(),
+            ],
+        ),
+        (
+            "interdiff",
+            vec![
+                "change".to_owned(),
+                "interdiff".to_owned(),
+                fixture.accepted_change_id.clone(),
+                fixture.ported_origin_revision_id.clone(),
+                fixture.accepted_revision_id.clone(),
+                "--from-artifact-hash".to_owned(),
+                fixture.ported_origin_artifact_hash.clone(),
+                "--to-artifact-hash".to_owned(),
+                fixture.accepted_artifact_hash.clone(),
+                "--repo".to_owned(),
+                fixture.repo_arg().to_owned(),
+            ],
+        ),
+    ];
+    for (label, args) in shapes {
+        let active = pointbreak_env(args.iter().map(String::as_str), ACTIVE);
+        let off = pointbreak_env(args.iter().map(String::as_str), OFF);
+        assert_success(&active);
+        assert_success(&off);
+        assert_eq!(active.stdout, off.stdout, "{label}: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
     }
 }
 
