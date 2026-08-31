@@ -584,6 +584,27 @@ fn append_revision_less_response(repo_root: &Path, request_id: &str) {
     append_raw_input_request_response(repo_root, request_id, None);
 }
 
+fn current_derived_database(repo_root: &Path) -> std::path::PathBuf {
+    let mut pending = vec![repo_root.to_path_buf()];
+    let mut databases = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).expect("read derived fixture directory") {
+            let path = entry.expect("read derived fixture entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some("cursor.sqlite3") {
+                databases.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        databases.len(),
+        1,
+        "the fresh fixture has one published derived database: {databases:?}",
+    );
+    databases.pop().expect("one derived fixture database")
+}
+
 /// Open an operative review-domain input request on `revision_id` through the
 /// real writer path, returning the opened request's id.
 fn open_operative_request(fixture: &ChangeReadsFixture, revision_id: &str) -> String {
@@ -830,6 +851,32 @@ fn assert_typed_capability_documents(repo_arg: &str, state: &str) {
                 repo_arg,
             ],
         ),
+        (
+            "revision",
+            vec![
+                "change",
+                "revision",
+                &placeholder_change,
+                &placeholder_revision,
+                "--artifact-hash",
+                &placeholder_hash,
+                "--repo",
+                repo_arg,
+            ],
+        ),
+        (
+            "resource",
+            vec![
+                "change",
+                "resource",
+                &placeholder_change,
+                &placeholder_revision,
+                "--artifact-hash",
+                &placeholder_hash,
+                "--repo",
+                repo_arg,
+            ],
+        ),
     ];
     for (command, args) in commands {
         let off = pointbreak_unprepared_env(&args, OFF);
@@ -904,16 +951,35 @@ fn assert_exact_floor_parity(
         off.status.code(),
         "change {command} ({lane}): exit parity"
     );
-    assert_eq!(
-        active.stdout, off.stdout,
-        "change {command} ({lane}): stdout parity"
-    );
+    if command == "revision" {
+        let active_json = parse_json(&active.stdout);
+        let off_json = parse_json(&off.stdout);
+        let active_stamp = active_json["projectionStamp"]
+            .as_str()
+            .expect("derived revision seek stamp");
+        let off_stamp = off_json["projectionStamp"]
+            .as_str()
+            .expect("authoritative revision facade stamp");
+        assert_eq!(
+            String::from_utf8(active.stdout.clone())
+                .expect("revision output is UTF-8")
+                .replace(active_stamp, off_stamp)
+                .into_bytes(),
+            off.stdout,
+            "change revision ({lane}): stdout parity modulo the seek stamp"
+        );
+    } else {
+        assert_eq!(
+            active.stdout, off.stdout,
+            "change {command} ({lane}): stdout parity"
+        );
+    }
     assert_eq!(
         active.stderr, off.stderr,
         "change {command} ({lane}): stderr parity"
     );
     assert_success(&active);
-    parse_json(&active.stdout)
+    parse_json(&off.stdout)
 }
 
 #[test]
@@ -991,6 +1057,97 @@ fn change_revision_emits_the_contextual_document_in_each_format_lane() {
             "{lane}: the authoritative exact read binds the facade stamp"
         );
     }
+}
+
+#[test]
+fn derived_change_revision_matches_the_floor_modulo_the_seek_stamp() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    for lane in FORMAT_LANES {
+        for include_body in [false, true] {
+            let arguments = exact_change_args(&fixture, "revision", lane, include_body);
+            let active = pointbreak_env(&arguments, ACTIVE);
+            let off = pointbreak_env(&arguments, OFF);
+            assert_success(&active);
+            assert_success(&off);
+            let active_document = parse_json(&active.stdout);
+            let off_document = parse_json(&off.stdout);
+            let active_show = parse_json(
+                &pointbreak_env(
+                    [
+                        "change",
+                        "show",
+                        &fixture.accepted_change_id,
+                        "--repo",
+                        fixture.repo_arg(),
+                        "--format",
+                        lane,
+                    ],
+                    ACTIVE,
+                )
+                .stdout,
+            );
+
+            assert_eq!(
+                active_document["projectionStamp"], active_show["projectionStamp"],
+                "{lane}, include_body={include_body}: derived exact read seek stamp",
+            );
+            assert_ne!(
+                active_document["projectionStamp"], off_document["projectionStamp"],
+                "{lane}, include_body={include_body}: seek and facade stamps differ",
+            );
+            let mut normalized = active_document;
+            normalized["projectionStamp"] = off_document["projectionStamp"].clone();
+            assert_eq!(
+                normalized, off_document,
+                "{lane}, include_body={include_body}: document parity modulo stamp",
+            );
+        }
+    }
+
+    let page = parse_json(
+        &pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], ACTIVE).stdout,
+    );
+    let active_show = parse_json(
+        &pointbreak_env(
+            [
+                "change",
+                "show",
+                &fixture.accepted_change_id,
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            ACTIVE,
+        )
+        .stdout,
+    );
+    let active_revision = parse_json(
+        &pointbreak_env(
+            exact_change_args(&fixture, "revision", "json", false),
+            ACTIVE,
+        )
+        .stdout,
+    );
+    let off_show = parse_json(
+        &pointbreak_env(
+            [
+                "change",
+                "show",
+                &fixture.accepted_change_id,
+                "--repo",
+                fixture.repo_arg(),
+            ],
+            OFF,
+        )
+        .stdout,
+    );
+    assert_eq!(
+        active_revision["projectionStamp"],
+        active_show["projectionStamp"]
+    );
+    assert_ne!(active_show["projectionStamp"], page["projectionStamp"]);
+    assert_ne!(active_show["projectionStamp"], off_show["projectionStamp"]);
+    assert_ne!(page["projectionStamp"], off_show["projectionStamp"]);
 }
 
 fn normalize_body_read_for_comparison(document: &mut Value) {
@@ -1148,6 +1305,147 @@ fn change_revision_selector_errors_follow_the_exact_ref_order() {
 }
 
 #[test]
+fn derived_exact_reads_refuse_selectors_with_the_authoritative_strings() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    let mismatched_hash = format!("sha256:{}", "f2".repeat(32));
+    let cases = [
+        (
+            "non-member Revision",
+            fixture.parallel_revision_ids.0.as_str(),
+            fixture.accepted_artifact_hash.as_str(),
+            "exact Revision is not an active member of the Change",
+        ),
+        (
+            "malformed hash",
+            fixture.accepted_revision_id.as_str(),
+            "not-a-hash",
+            "RevisionRefV1 requires a lowercase sha256 object artifact hash",
+        ),
+        (
+            "mismatched hash",
+            fixture.accepted_revision_id.as_str(),
+            mismatched_hash.as_str(),
+            "exact Revision/hash selector does not match authoritative state",
+        ),
+    ];
+
+    for command in ["revision", "resource"] {
+        for lane in FORMAT_LANES {
+            for (label, revision_id, artifact_hash, expected) in cases {
+                let arguments = [
+                    "change",
+                    command,
+                    fixture.accepted_change_id.as_str(),
+                    revision_id,
+                    "--artifact-hash",
+                    artifact_hash,
+                    "--repo",
+                    fixture.repo_arg(),
+                    "--format",
+                    lane,
+                ];
+                let active = pointbreak_env(arguments, ACTIVE);
+                let off = pointbreak_env(arguments, OFF);
+                assert!(!active.status.success(), "{command} {label} ({lane})");
+                assert_eq!(active.status.code(), off.status.code());
+                assert_eq!(active.stdout, off.stdout, "{command} {label} ({lane})");
+                assert_eq!(active.stderr, off.stderr, "{command} {label} ({lane})");
+                assert_eq!(
+                    String::from_utf8_lossy(&active.stderr).trim(),
+                    expected,
+                    "{command} {label} ({lane}): refusal string",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn derived_exact_reads_fall_back_for_an_unknown_change() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    let missing_change = format!("change:sha256:{}", "f1".repeat(32));
+
+    for command in ["revision", "resource"] {
+        for lane in FORMAT_LANES {
+            let arguments = [
+                "change",
+                command,
+                missing_change.as_str(),
+                fixture.accepted_revision_id.as_str(),
+                "--artifact-hash",
+                fixture.accepted_artifact_hash.as_str(),
+                "--repo",
+                fixture.repo_arg(),
+                "--format",
+                lane,
+            ];
+            let active = pointbreak_env(arguments, ACTIVE);
+            let off = pointbreak_env(arguments, OFF);
+            assert!(
+                !active.status.success(),
+                "{command} unknown Change ({lane})"
+            );
+            assert_eq!(active.status.code(), off.status.code());
+            assert_eq!(
+                active.stdout, off.stdout,
+                "{command} unknown Change ({lane})"
+            );
+            assert_eq!(
+                active.stderr, off.stderr,
+                "{command} unknown Change ({lane})"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&active.stderr).trim(),
+                format!("Change {missing_change} is unavailable"),
+            );
+        }
+    }
+}
+
+#[test]
+fn derived_change_revision_falls_back_for_an_unreadable_origin() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    let database = current_derived_database(fixture.repo.path());
+    let connection = Connection::open(database).expect("open derived exact-read fixture");
+    let origin_sequence: i64 = connection
+        .query_row(
+            "SELECT sequence
+             FROM semantic_event_fact_text
+             WHERE semantic_id = ?1",
+            [fixture.ported_origin_observation_id.as_str()],
+            |row| row.get(0),
+        )
+        .expect("locate ported origin observation");
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE locator_event SET event_hash = ?1 WHERE sequence = ?2",
+                rusqlite::params![vec![0_u8; 32], origin_sequence],
+            )
+            .expect("make the materialized origin carrier unreadable"),
+        1,
+    );
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("checkpoint unreadable-origin fixture");
+    drop(connection);
+
+    let arguments = exact_change_args(&fixture, "revision", "json", false);
+    let active = pointbreak_env(&arguments, ACTIVE);
+    let off = pointbreak_env(&arguments, OFF);
+    assert_eq!(active.status.code(), off.status.code());
+    assert_eq!(
+        active.stdout, off.stdout,
+        "an unreadable origin falls back to the authoritative bytes",
+    );
+    assert_eq!(active.stderr, off.stderr);
+    assert_success(&active);
+}
+
+#[test]
 fn change_resource_emits_the_resource_document_in_each_format_lane() {
     let fixture = exact_read_fixture();
     fixture.build_derived();
@@ -1168,6 +1466,76 @@ fn change_resource_emits_the_resource_document_in_each_format_lane() {
             document.get("projectionStamp").is_none(),
             "{lane}: the CLI resource is unstamped"
         );
+    }
+}
+
+#[test]
+fn derived_change_resource_matches_the_floor_bytes() {
+    let available = exact_read_fixture();
+    available.build_derived();
+    for lane in FORMAT_LANES {
+        for include_body in [false, true] {
+            assert_exact_floor_parity(&available, "resource", lane, include_body);
+        }
+    }
+
+    let removed = exact_read_fixture();
+    let removal = pointbreak_env(
+        [
+            "store",
+            "remove",
+            "--repo",
+            removed.repo_arg(),
+            "--revision",
+            &removed.accepted_revision_id,
+        ],
+        OFF,
+    );
+    assert_success(&removal);
+    removed.build_derived();
+    for lane in FORMAT_LANES {
+        for include_body in [false, true] {
+            let document = assert_exact_floor_parity(&removed, "resource", lane, include_body);
+            assert_eq!(document["availability"], "removed", "{lane}");
+        }
+    }
+}
+
+#[test]
+fn derived_exact_reads_fall_back_on_catching_up_and_explicit_off() {
+    let fixture = exact_read_fixture();
+
+    for (state, prepare) in [("unready", false), ("catching_up", true)] {
+        if prepare {
+            fixture.build_derived();
+            append_membership_of_unproposed_revision(
+                fixture.repo.path(),
+                &fixture.accepted_change_id,
+                &format!("rev:sha256:{}", "7f".repeat(32)),
+            );
+        }
+        for command in ["revision", "resource"] {
+            for lane in FORMAT_LANES {
+                let arguments = exact_change_args(&fixture, command, lane, false);
+                let active = pointbreak_env(&arguments, ACTIVE);
+                let off = pointbreak_env(&arguments, OFF);
+                assert_success(&active);
+                assert_success(&off);
+                assert_eq!(
+                    active.status.code(),
+                    off.status.code(),
+                    "{command} {state} ({lane}): exit parity",
+                );
+                assert_eq!(
+                    active.stdout, off.stdout,
+                    "{command} {state} ({lane}): authoritative bytes",
+                );
+                assert_eq!(
+                    active.stderr, off.stderr,
+                    "{command} {state} ({lane}): stderr parity",
+                );
+            }
+        }
     }
 }
 

@@ -292,7 +292,7 @@ fn prepare_results(
     hook(ExactRevisionReadBoundary::OriginsPlanned);
 
     for origin in origins {
-        let Ok(result) = component_read(
+        let result = component_read(
             snapshot,
             service,
             backend,
@@ -301,9 +301,7 @@ fn prepare_results(
             &origin,
             plan,
             selection_started,
-        ) else {
-            continue;
-        };
+        )?;
         if result.revision.object_artifact_content_hash != origin.object_artifact_content_hash {
             continue;
         }

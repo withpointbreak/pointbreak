@@ -22,13 +22,14 @@ use pointbreak::session::{
     ChangeCreateOptions, ChangeDocumentProjectionV1, ChangeLinkOptions, ChangeMembershipOptions,
     ChangeMembershipWithdrawalOptions, ChangeProjection, ChangeReaderReadyV1, ChangeReaderStateV1,
     ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
-    DerivedChangeOutcomeV1, DerivedExactRevisionReadV1, DerivedReadSourceV1, ReviewCursorV1,
-    ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState,
-    WorktreeSpec, assert_change_revision_relation, capture_change_revision,
-    change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
-    link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
-    select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
-    withdraw_change_revision_relation, withdraw_revision_from_change,
+    DerivedChangeOutcomeV1, DerivedExactRevisionReadV1, DerivedReadSourceV1,
+    ExactRevisionReadPlanV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1,
+    RevisionShowOptions, SnapshotContentState, WorktreeSpec, assert_change_revision_relation,
+    capture_change_revision, change_reader_state_for_repo, create_change, dry_run_bulk_adoption,
+    join_revision_to_change, link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup,
+    review_source_binding, select_review_cursor, show_revision_for_change_reader_ready,
+    validate_review_cursor_for_write, withdraw_change_revision_relation,
+    withdraw_revision_from_change,
 };
 
 use crate::cli::{common, output};
@@ -1087,43 +1088,142 @@ fn source_request_from_binding(binding: &ReviewSourceBindingV1) -> ReviewSourceR
     }
 }
 
+enum ExactLaneOutcome {
+    Read(DerivedExactRevisionReadV1, RevisionRefV1),
+    Refused(String),
+}
+
 fn run_exact(
     args: ExactReadArgs,
     stdout: &mut dyn Write,
     contextual: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    with_facade(&args.repo, &args.format_args, stdout, |facade, ready| {
-        let change_id = ChangeId::new(args.change);
-        let exact = exact_ref(
-            ready,
-            &change_id,
-            &RevisionId::new(args.revision),
-            &args.artifact_hash,
-        )?;
-        if contextual {
-            let exact_read = build_contextual_exact_read(
-                &args.repo,
-                ready,
-                facade,
+    let change_id = ChangeId::new(args.change.clone());
+    let revision_id = RevisionId::new(args.revision.clone());
+    match attempt_derived_change_read(
+        &args.repo,
+        |access| -> pointbreak::error::Result<DerivedChangeOutcomeV1<ExactLaneOutcome>> {
+            let session = match access.exact_revision_session(&change_id)? {
+                DerivedChangeOutcomeV1::Ready(session) => session,
+                other => {
+                    return Ok(other.map_ready(|_| {
+                        unreachable!("non-Ready exact-session outcomes carry no session")
+                    }));
+                }
+            };
+            let projection = ChangeProjection {
+                changes: std::iter::once((change_id.clone(), session.change_view().clone()))
+                    .collect(),
+                links: Vec::new(),
+            };
+            let exact = match exact_ref_from_projections(
+                &projection,
+                session.document_projection(),
                 &change_id,
-                &exact,
-                args.include_body,
-            )?;
-            Ok(serde_json::to_value(
-                facade.contextual_revision_document_with_fact_content(
+                &revision_id,
+                &args.artifact_hash,
+            ) {
+                Ok(exact) => exact,
+                Err(error) => {
+                    return Ok(DerivedChangeOutcomeV1::Ready(ExactLaneOutcome::Refused(
+                        error.to_string(),
+                    )));
+                }
+            };
+            let plan = ExactRevisionReadPlanV1 {
+                revisions: vec![exact.clone()],
+                include_body: args.include_body,
+                read_for_display: true,
+                fact_port_context: contextual.then(|| exact.clone()),
+            };
+            Ok(session
+                .read(&plan)?
+                .map_ready(|read| ExactLaneOutcome::Read(read, exact)))
+        },
+    ) {
+        DerivedChangeAttempt::Answered {
+            document: ExactLaneOutcome::Refused(message),
+            state,
+        } => {
+            record_change_route_state(state);
+            Err(message.into())
+        }
+        DerivedChangeAttempt::Answered {
+            document: ExactLaneOutcome::Read(read, exact),
+            state,
+        } => {
+            record_change_route_state(state);
+            let document =
+                compose_exact_document(&read, &change_id, &exact, contextual, args.include_body)?;
+            write(&args.format_args, stdout, &document)
+        }
+        DerivedChangeAttempt::Fallback { state } => {
+            record_change_route_state(state);
+            with_facade(&args.repo, &args.format_args, stdout, |facade, ready| {
+                let change_id = ChangeId::new(args.change);
+                let exact = exact_ref(
+                    ready,
                     &change_id,
-                    &exact,
+                    &RevisionId::new(args.revision),
+                    &args.artifact_hash,
+                )?;
+                if contextual {
+                    let exact_read = build_contextual_exact_read(
+                        &args.repo,
+                        ready,
+                        facade,
+                        &change_id,
+                        &exact,
+                        args.include_body,
+                    )?;
+                    Ok(serde_json::to_value(
+                        facade.contextual_revision_document_with_fact_content(
+                            &change_id,
+                            &exact,
+                            exact_read.resource,
+                            exact_read.facts,
+                            exact_read.associations,
+                            exact_read.fact_content,
+                        )?,
+                    )?)
+                } else {
+                    let exact_read =
+                        build_exact_read(&args.repo, ready, &exact, args.include_body)?;
+                    Ok(serde_json::to_value(exact_read.resource)?)
+                }
+            })
+        }
+    }
+}
+
+fn compose_exact_document(
+    read: &DerivedExactRevisionReadV1,
+    change_id: &ChangeId,
+    exact: &RevisionRefV1,
+    contextual: bool,
+    include_body: bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    if contextual {
+        let exact_read = contextual_exact_read_from_derived(read, change_id, exact, include_body)?;
+        Ok(serde_json::to_value(
+            read.facade()
+                .contextual_revision_document_with_fact_content(
+                    change_id,
+                    exact,
                     exact_read.resource,
                     exact_read.facts,
                     exact_read.associations,
                     exact_read.fact_content,
                 )?,
-            )?)
-        } else {
-            let exact_read = build_exact_read(&args.repo, ready, &exact, args.include_body)?;
-            Ok(serde_json::to_value(exact_read.resource)?)
-        }
-    })
+        )?)
+    } else {
+        let result = read
+            .result(exact)
+            .ok_or("derived exact read did not include the selected Revision")?;
+        Ok(serde_json::to_value(
+            exact_read_from_shown(result, exact, include_body)?.resource,
+        )?)
+    }
 }
 
 fn run_interdiff(
