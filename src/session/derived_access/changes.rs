@@ -447,6 +447,7 @@ impl DerivedChangeAccess {
             projection: materialized.projection,
             document_projection: materialized.document_projection,
             stamp,
+            checkpoint_sha256: checkpoint.checkpoint_sha256.clone(),
         };
 
         hook();
@@ -1397,6 +1398,7 @@ pub struct DerivedChangeGenerationV1 {
     projection: ChangeProjection,
     document_projection: ChangeDocumentProjectionV1,
     stamp: String,
+    checkpoint_sha256: String,
 }
 
 impl DerivedChangeGenerationV1 {
@@ -1410,6 +1412,12 @@ impl DerivedChangeGenerationV1 {
 
     pub fn stamp(&self) -> &str {
         &self.stamp
+    }
+
+    /// Identity of the pinned reader checkpoint; equal values mean one pinned
+    /// generation state.
+    pub fn checkpoint_sha256(&self) -> &str {
+        &self.checkpoint_sha256
     }
 }
 
@@ -1496,6 +1504,12 @@ impl<'a> DerivedExactRevisionSessionV1<'a> {
 
     pub fn stamp(&self) -> &str {
         self.state.stamp()
+    }
+
+    /// Identity of the pinned reader checkpoint; equal values mean one pinned
+    /// generation state.
+    pub fn checkpoint_sha256(&self) -> &str {
+        self.state.checkpoint_sha256()
     }
 
     pub fn read(
@@ -6824,6 +6838,58 @@ mod tests {
         let mapped = DerivedChangeOutcomeV1::Ready(1usize).map_ready(|value| value + 1);
         assert_eq!(mapped, DerivedChangeOutcomeV1::Ready(2));
         let _ = (plan, method);
+    }
+
+    #[test]
+    fn generation_and_session_checkpoint_identities_agree_when_the_generation_is_stable() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("stable checkpoint identity")]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(generation) = fixture
+            .access
+            .review_generation()
+            .expect("read the stable whole generation")
+        else {
+            panic!("stable whole generation must be ready");
+        };
+        let DerivedChangeOutcomeV1::Ready(session) = fixture
+            .access
+            .exact_revision_session(&change_id)
+            .expect("prepare the stable exact-Revision session")
+        else {
+            panic!("stable exact-Revision session must be ready");
+        };
+
+        assert!(!generation.checkpoint_sha256().is_empty());
+        assert_eq!(generation.checkpoint_sha256(), session.checkpoint_sha256());
+    }
+
+    #[test]
+    fn checkpoint_identity_diverges_across_a_generation_move() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("moving checkpoint identity")]]);
+        let change_id = fixture.changes[0].change_id.clone();
+        let DerivedChangeOutcomeV1::Ready(generation) = fixture
+            .access
+            .review_generation()
+            .expect("read the original whole generation")
+        else {
+            panic!("original whole generation must be ready");
+        };
+        let original_checkpoint = generation.checkpoint_sha256().to_owned();
+
+        fixture.append_unrelated("checkpoint-identity-generation-move");
+        fixture
+            .lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish the replacement generation");
+        let replacement_access = fixture.fresh_access();
+        let DerivedChangeOutcomeV1::Ready(session) = replacement_access
+            .exact_revision_session(&change_id)
+            .expect("prepare a replacement-generation session")
+        else {
+            panic!("replacement-generation session must be ready");
+        };
+
+        assert_ne!(original_checkpoint, session.checkpoint_sha256());
     }
 
     #[test]

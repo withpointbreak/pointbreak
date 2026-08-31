@@ -83,6 +83,12 @@ impl ExactRevisionSessionStateV1 {
         &self.prepared.stamp
     }
 
+    /// Identity of the pinned reader checkpoint; equal values mean one pinned
+    /// generation state.
+    pub(crate) fn checkpoint_sha256(&self) -> &str {
+        &self.checkpoint.checkpoint_sha256
+    }
+
     fn into_parts(
         self,
     ) -> (
