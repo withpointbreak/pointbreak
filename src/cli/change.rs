@@ -1184,7 +1184,7 @@ fn source_request_from_binding(binding: &ReviewSourceBindingV1) -> ReviewSourceR
 }
 
 enum ExactLaneOutcome {
-    Read(DerivedExactRevisionReadV1, RevisionRefV1),
+    Read(Box<DerivedExactRevisionReadV1>, RevisionRefV1),
     Refused(String),
 }
 
@@ -1233,7 +1233,7 @@ fn run_exact(
             };
             Ok(session
                 .read(&plan)?
-                .map_ready(|read| ExactLaneOutcome::Read(read, exact)))
+                .map_ready(|read| ExactLaneOutcome::Read(Box::new(read), exact)))
         },
     ) {
         DerivedChangeAttempt::Answered {
