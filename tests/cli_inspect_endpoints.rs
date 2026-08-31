@@ -116,6 +116,181 @@ fn canonical_json(value: &Value) -> String {
     serde_json::to_string(value).expect("serialize canonical JSON")
 }
 
+struct ExactRevisionFloorFixture {
+    repo: GitRepo,
+    change_id: String,
+    revision_id: String,
+    artifact_hash: String,
+    origin_fact_id: String,
+    target_fact_id: String,
+    port_event_id: String,
+    associations: Vec<(String, String)>,
+}
+
+fn exact_revision_floor_fixture() -> ExactRevisionFloorFixture {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+
+    let first_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(
+        first_output.status.success(),
+        "first capture failed:\n{}",
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+    let first: Value = serde_json::from_slice(&first_output.stdout).unwrap();
+    let first_exact = &first["reviewCursor"]["cursor"]["revision"];
+    let first_revision = first_exact["revisionId"].as_str().unwrap();
+    let origin_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--exact-revision",
+        first_revision,
+        "--track",
+        "agent:floor-port",
+        "--title",
+        "ported origin fact",
+        "--body",
+        "origin context carried into the replacement",
+    ]);
+    assert!(
+        origin_output.status.success(),
+        "origin observation failed:\n{}",
+        String::from_utf8_lossy(&origin_output.stderr)
+    );
+    let origin: Value = serde_json::from_slice(&origin_output.stdout).unwrap();
+    let origin_fact_id = origin["observationId"].as_str().unwrap().to_owned();
+
+    repo.commit_all("materialize the fact-port origin");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_output = support::pointbreak([
+        "capture",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        first["reviewCursor"]["token"].as_str().unwrap(),
+        "--advance",
+        "replace",
+    ]);
+    assert!(
+        second_output.status.success(),
+        "replacement capture failed:\n{}",
+        String::from_utf8_lossy(&second_output.stderr)
+    );
+    let second: Value = serde_json::from_slice(&second_output.stdout).unwrap();
+    let second_exact = &second["reviewCursor"]["cursor"]["revision"];
+    let revision_id = second_exact["revisionId"].as_str().unwrap().to_owned();
+    let artifact_hash = second_exact["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let target_output = support::pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--exact-revision",
+        &revision_id,
+        "--track",
+        "agent:floor-port",
+        "--title",
+        "ported target fact",
+        "--body",
+        "materialized target for the contextual fact port",
+    ]);
+    assert!(
+        target_output.status.success(),
+        "target observation failed:\n{}",
+        String::from_utf8_lossy(&target_output.stderr)
+    );
+    let target: Value = serde_json::from_slice(&target_output.stdout).unwrap();
+    let target_fact_id = target["observationId"].as_str().unwrap().to_owned();
+    let origin_exact = format!(
+        "{}@{}",
+        first_revision,
+        first_exact["objectArtifactContentHash"].as_str().unwrap()
+    );
+    let port_output = support::pointbreak_env(
+        [
+            "fact",
+            "port",
+            "--repo",
+            repo_arg,
+            "--origin-revision",
+            &origin_exact,
+            "--origin-fact",
+            &origin_fact_id,
+            "--review-cursor",
+            second["reviewCursor"]["token"].as_str().unwrap(),
+            "--relation",
+            "reanchored-as",
+            "--target-fact",
+            &target_fact_id,
+            "--track",
+            "agent:floor-port",
+        ],
+        &[("POINTBREAK_ACTOR_ID", "actor:agent:floor-port")],
+    );
+    assert!(
+        port_output.status.success(),
+        "fact port failed:\n{}",
+        String::from_utf8_lossy(&port_output.stderr)
+    );
+    let port: Value = serde_json::from_slice(&port_output.stdout).unwrap();
+    let port_event_id = port["eventId"].as_str().unwrap().to_owned();
+
+    let mut commit_oids = [
+        repo.git(["rev-parse", "HEAD~1"]).stdout.trim().to_owned(),
+        repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned(),
+    ];
+    commit_oids.sort();
+    let mut associations = Vec::new();
+    for commit_oid in commit_oids.iter().rev() {
+        let association_output = support::pointbreak([
+            "association",
+            "record",
+            "--repo",
+            repo_arg,
+            "--exact-revision",
+            &revision_id,
+            "--track",
+            "agent:floor-port",
+            "--commit",
+            commit_oid,
+        ]);
+        assert!(
+            association_output.status.success(),
+            "association record failed:\n{}",
+            String::from_utf8_lossy(&association_output.stderr)
+        );
+        let association: Value = serde_json::from_slice(&association_output.stdout).unwrap();
+        associations.push((
+            association["commitAssociationId"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            commit_oid.clone(),
+        ));
+    }
+    associations.sort_by(|left, right| left.1.cmp(&right.1));
+
+    ExactRevisionFloorFixture {
+        repo,
+        change_id: second["changeId"].as_str().unwrap().to_owned(),
+        revision_id,
+        artifact_hash,
+        origin_fact_id,
+        target_fact_id,
+        port_event_id,
+        associations,
+    }
+}
+
 /// Smoke: the shared harness spawns the real `pointbreak inspect --port 0` server and
 /// serves a well-formed history payload for a minimal store.
 #[test]
@@ -350,6 +525,139 @@ fn exact_route_floor_pins_success_bytes_and_stamp_equality() {
     assert_eq!(
         interdiff["diagnostics"],
         serde_json::json!(["revision_interdiff_not_available"])
+    );
+}
+
+/// The existing fact-port HTTP case pins applicability and graph geometry; this
+/// characterization freezes the attribution, contextual fact keys, and complete
+/// association bytes that the exact contextual route must also preserve.
+#[test]
+fn exact_revision_floor_pins_fact_port_and_association_bytes() {
+    let fixture = exact_revision_floor_fixture();
+    let inspector = Inspector::spawn_current(fixture.repo.path());
+    let body = inspector.get_text(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(&fixture.change_id),
+        urlencode(&fixture.revision_id),
+        urlencode(&fixture.artifact_hash)
+    ));
+    let revision: Value = serde_json::from_str(&body).unwrap();
+
+    let ports = revision["factPorts"].as_array().expect("fact ports");
+    assert_eq!(ports.len(), 1, "one applicable fact port: {revision}");
+    assert_eq!(
+        ports[0]["sourceEventIds"],
+        serde_json::json!([fixture.port_event_id])
+    );
+    assert_eq!(ports[0]["actorId"], "actor:agent:floor-port");
+    assert_eq!(ports[0]["trackId"], "agent:floor-port");
+
+    let mut presentation_keys = revision["factPresentations"]
+        .as_array()
+        .expect("fact presentations")
+        .iter()
+        .map(|fact| fact["factId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    presentation_keys.sort_unstable();
+    let mut expected_fact_keys = vec![
+        fixture.origin_fact_id.as_str(),
+        fixture.target_fact_id.as_str(),
+    ];
+    expected_fact_keys.sort_unstable();
+    assert_eq!(presentation_keys, expected_fact_keys);
+    assert_eq!(
+        revision["factContentPresentations"]
+            .as_object()
+            .expect("fact content presentations")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected_fact_keys
+    );
+
+    let exact = pointbreak::model::RevisionRefV1::new(
+        pointbreak::model::RevisionId::new(fixture.revision_id.clone()),
+        fixture.artifact_hash.clone(),
+    )
+    .unwrap();
+    let expected_associations = fixture
+        .associations
+        .iter()
+        .map(|(association_id, commit_oid)| {
+            pointbreak::documents::AssociationComparisonDocumentV1::new(
+                pointbreak::documents::AssociationComparisonRefV1 {
+                    revision: exact.clone(),
+                    association_id: pointbreak::model::CommitAssociationId::new(
+                        association_id.clone(),
+                    ),
+                    commit_oid: commit_oid.clone(),
+                    comparison_base: "captured_revision".to_owned(),
+                    view_kind: "landing".to_owned(),
+                    proof_ref: None,
+                },
+                pointbreak::documents::AssociationComparisonStateV1::Unknown,
+                pointbreak::documents::AssociationProofAvailabilityV1::NotRequested,
+                vec!["comparison_proof_not_requested".to_owned()],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected_association_bytes = canonical_json(
+        &serde_json::to_value(&expected_associations).expect("serialize expected associations"),
+    );
+    assert!(
+        body.contains(&format!("\"associations\":{expected_association_bytes}")),
+        "association array bytes or commit-oid order changed: {body}"
+    );
+}
+
+/// The successful exact-route floor already covers an available captured
+/// resource. This characterization adds the cheap suppressed-content variant,
+/// whose current wire field is `availability`, and freezes its bodyless bytes.
+#[test]
+fn exact_resource_floor_pins_availability_variants() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let capture_output = support::pointbreak(["capture", "--repo", repo_arg]);
+    assert!(
+        capture_output.status.success(),
+        "capture failed:\n{}",
+        String::from_utf8_lossy(&capture_output.stderr)
+    );
+    let capture: Value = serde_json::from_slice(&capture_output.stdout).unwrap();
+    let exact = &capture["reviewCursor"]["cursor"]["revision"];
+    let revision_id = exact["revisionId"].as_str().unwrap();
+    let remove = support::pointbreak([
+        "store",
+        "remove",
+        "--repo",
+        repo_arg,
+        "--revision",
+        revision_id,
+    ]);
+    assert!(
+        remove.status.success(),
+        "store remove failed:\n{}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let resource = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+        urlencode(capture["changeId"].as_str().unwrap()),
+        urlencode(revision_id),
+        urlencode(exact["objectArtifactContentHash"].as_str().unwrap())
+    ));
+
+    assert_eq!(resource["availability"], "removed");
+    assert!(resource.get("capturedDocument").is_none(), "{resource}");
+    assert!(resource.get("capturedDocumentHash").is_none(), "{resource}");
+    assert_eq!(
+        resource["diagnostics"],
+        serde_json::json!(["captured_resource_removed"])
     );
 }
 
