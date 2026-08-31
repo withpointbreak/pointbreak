@@ -32,8 +32,8 @@ use pointbreak::session::{
     DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
     DerivedProjectionFailureCodeV1, DerivedRevisionDetail, DerivedRevisionDetailRoute,
     DerivedRevisionPage, DerivedRevisionPageRoute, DerivedThreads, DerivedThreadsRoute,
-    DistinctValues, EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery,
-    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
+    DistinctValues, EventVerificationPolicy, ExactRevisionReadPlanV1, HistoryCursor, HistoryPage,
+    HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
     ProjectionDiagnostic, QueryDiagnostic, REVISION_PAGE_SCHEMA, ReviewHistoryEntry,
     RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
     RevisionOverviewsOptions, RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError,
@@ -666,6 +666,99 @@ pub(super) fn change_revision_v2_json(
                 .map_err(|error| error.to_string())
         }
     })
+}
+
+pub(super) fn derived_change_revision_v2_json(
+    access: &DerivedChangeAccess,
+    change_id: &str,
+    revision_id: &str,
+    artifact_hash: &str,
+    resource_only: bool,
+) -> Result<ChangeV2Json, String> {
+    derived_change_outcome_json(
+        access
+            .review_generation()
+            .map_err(|error| error.to_string())?,
+        |generation| {
+            let change_id = ChangeId::new(change_id);
+            let exact = match crate::cli::change::exact_ref_from_projections(
+                generation.projection(),
+                generation.document_projection(),
+                &change_id,
+                &RevisionId::new(revision_id),
+                artifact_hash,
+            ) {
+                Ok(exact) => exact,
+                Err(error) => {
+                    return Ok(ChangeV2Json::Invalid(exact_selection_error_json(
+                        &error.to_string(),
+                    )));
+                }
+            };
+            derived_change_outcome_json(
+                access
+                    .exact_revision_session(&change_id)
+                    .map_err(|error| error.to_string())?,
+                |session| {
+                    if let Some(outcome) = derived_checkpoint_mismatch(
+                        generation.checkpoint_sha256(),
+                        session.checkpoint_sha256(),
+                    ) {
+                        return Ok(outcome);
+                    }
+                    derived_change_outcome_json(
+                        session
+                            .read(&ExactRevisionReadPlanV1 {
+                                revisions: vec![exact.clone()],
+                                include_body: true,
+                                read_for_display: true,
+                                fact_port_context: (!resource_only).then(|| exact.clone()),
+                            })
+                            .map_err(|error| error.to_string())?,
+                        |read| {
+                            if !resource_only {
+                                return Err(
+                                    "derived contextual exact Revision composition is unavailable"
+                                        .to_owned(),
+                                );
+                            }
+                            let result = read.result(&exact).ok_or_else(|| {
+                                "derived exact read did not include the selected Revision"
+                                    .to_owned()
+                            })?;
+                            let resource =
+                                crate::cli::change::exact_read_from_shown(result, &exact, true)
+                                    .map_err(|error| error.to_string())?
+                                    .resource
+                                    .with_projection_stamp(generation.stamp().to_owned());
+                            serde_json::to_string(&resource)
+                                .map(ChangeV2Json::Ok)
+                                .map_err(|error| error.to_string())
+                        },
+                    )
+                },
+            )
+        },
+    )
+}
+
+fn derived_checkpoint_mismatch(
+    generation_checkpoint: &str,
+    session_checkpoint: &str,
+) -> Option<ChangeV2Json> {
+    (generation_checkpoint != session_checkpoint)
+        .then(|| ChangeV2Json::Retryable(derived_change_generation_moved_error_json()))
+}
+
+fn derived_change_generation_moved_error_json() -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-change-projection-error",
+        "version": 1,
+        "code": "projection_unstable",
+        "message": "derived Change generation moved between stamp and content acquisition; retry",
+        "retryable": true,
+    })
+    .to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3912,6 +4005,24 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn derived_checkpoint_mismatch_returns_pinned_retryable_bytes() {
+        let Some(ChangeV2Json::Retryable(body)) =
+            derived_checkpoint_mismatch("generation-checkpoint", "session-checkpoint")
+        else {
+            panic!("unequal checkpoint identities must return a retryable response");
+        };
+        assert_eq!(
+            body,
+            r#"{"code":"projection_unstable","message":"derived Change generation moved between stamp and content acquisition; retry","retryable":true,"schema":"pointbreak.inspect-change-projection-error","version":1}"#
+        );
+    }
+
+    #[test]
+    fn derived_checkpoint_comparison_accepts_equal_identities() {
+        assert!(derived_checkpoint_mismatch("same", "same").is_none());
+    }
 
     #[test]
     fn bare_change_page_serialization_is_byte_identical_and_omits_next() {

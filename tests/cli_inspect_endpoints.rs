@@ -878,6 +878,59 @@ fn derived_exact_interdiff_preserves_the_characterization_floor() {
 }
 
 #[test]
+fn derived_exact_resource_preserves_the_characterization_floor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = change["currentRevisionRefs"]
+        .as_array()
+        .expect("current Revision refs")
+        .iter()
+        .find(|reference| reference["revisionId"].as_str() == Some(store.revision_id.as_str()))
+        .expect("representative exact Revision");
+    let revision_id = exact["revisionId"].as_str().expect("Revision identity");
+    let artifact_hash = exact["objectArtifactContentHash"]
+        .as_str()
+        .expect("artifact identity");
+    let revision = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash)
+    ));
+    let resource = inspector.get_json(&format!(
+        "/api/v2/changes/{}/revisions/{}/resource?artifactHash={}",
+        urlencode(change_id),
+        urlencode(revision_id),
+        urlencode(artifact_hash)
+    ));
+
+    assert_eq!(resource["projectionStamp"], changes["projectionStamp"]);
+    assert_eq!(resource["availability"], "available");
+    assert!(resource["capturedDocument"].is_object());
+    assert!(resource["capturedDocumentHash"].is_string());
+    assert_eq!(
+        canonical_json(&resource),
+        canonical_json(&revision["exactRevisionDocument"])
+    );
+}
+
+#[test]
 fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

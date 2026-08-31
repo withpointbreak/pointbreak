@@ -1341,15 +1341,25 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
                 Ok(mut values) => values.remove(0),
                 Err(message) => return exact_selection_error_response(&message),
             };
-            change_v2_response(api::change_revision_v2_json(
-                repo,
-                cache,
-                stamp_binder,
-                change_id,
-                revision_id,
-                &artifact_hash,
-                true,
-            ))
+            if state.derived_changes.is_active() {
+                change_v2_response(api::derived_change_revision_v2_json(
+                    &state.derived_changes,
+                    change_id,
+                    revision_id,
+                    &artifact_hash,
+                    true,
+                ))
+            } else {
+                change_v2_response(api::change_revision_v2_json(
+                    repo,
+                    cache,
+                    stamp_binder,
+                    change_id,
+                    revision_id,
+                    &artifact_hash,
+                    true,
+                ))
+            }
         }
         [change_id, interdiff, from_revision_id, to_revision_id] if interdiff == "interdiff" => {
             let values = match exact_selector_values(query, &["fromArtifactHash", "toArtifactHash"])
@@ -2135,6 +2145,7 @@ mod tests {
         );
         for (name, derived_route, producer) in [
             ("detail", detail, "api::derived_change_detail_v2_json"),
+            ("resource", resource, "api::derived_change_revision_v2_json"),
             (
                 "interdiff",
                 interdiff,
@@ -2153,8 +2164,12 @@ mod tests {
                 !derived_route.contains("change_reader_cache"),
                 "{name} derived dispatch must not name the replay cache"
             );
+            assert!(
+                derived_route.contains("cache,\n                    stamp_binder,"),
+                "{name} inactive dispatch must retain the cache and strict stamp binder pair"
+            );
         }
-        for (name, cache_route) in [("revision", revision), ("resource", resource)] {
+        for (name, cache_route) in [("revision", revision)] {
             assert!(
                 cache_route.contains("cache,\n                stamp_binder,"),
                 "{name} must retain the cache and strict stamp binder pair"
@@ -2162,6 +2177,7 @@ mod tests {
             for forbidden in [
                 "derived_change_detail",
                 "derived_change_interdiff",
+                "derived_change_revision",
                 "review_generation",
             ] {
                 assert!(
@@ -2769,6 +2785,64 @@ mod tests {
                 &fixture.artifact_hash,
             ));
             assert_eq!(derived, authoritative, "{case} byte parity");
+        }
+    }
+
+    #[test]
+    fn derived_change_revision_bytes_equal_the_authoritative_arm() {
+        let fixture = exact_change_fixture(true);
+        let missing_change = format!("change:sha256:{}", "f".repeat(64));
+        let missing_revision = format!("rev:sha256:{}", "e".repeat(64));
+        let mismatched_hash = format!("sha256:{}", "d".repeat(64));
+        for (case, change_id, revision_id, artifact_hash) in [
+            (
+                "success",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "unknown Change",
+                missing_change.as_str(),
+                fixture.revision_id.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "nonmember Revision",
+                fixture.change_id.as_str(),
+                missing_revision.as_str(),
+                fixture.artifact_hash.as_str(),
+            ),
+            (
+                "malformed artifact hash",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                "not-an-artifact-hash",
+            ),
+            (
+                "mismatched artifact hash",
+                fixture.change_id.as_str(),
+                fixture.revision_id.as_str(),
+                mismatched_hash.as_str(),
+            ),
+        ] {
+            let authoritative = change_v2_json_parts(api::change_revision_v2_json(
+                &fixture.state.repo,
+                &fixture.state.change_reader_cache,
+                &fixture.state.strict_change_stamp,
+                change_id,
+                revision_id,
+                artifact_hash,
+                true,
+            ));
+            let derived = change_v2_json_parts(api::derived_change_revision_v2_json(
+                &fixture.state.derived_changes,
+                change_id,
+                revision_id,
+                artifact_hash,
+                true,
+            ));
+            assert_eq!(derived, authoritative, "{case} resource byte parity");
         }
     }
 
