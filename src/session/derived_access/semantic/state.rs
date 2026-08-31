@@ -55,6 +55,36 @@ pub(crate) struct MaterializedSemanticDuplicate {
     pub(crate) event_count: usize,
 }
 
+struct CanonicalFactValue<T> {
+    event_id: String,
+    value: T,
+}
+
+fn retain_canonical_fact_value<K: Ord, T>(
+    representatives: &mut BTreeMap<K, CanonicalFactValue<T>>,
+    semantic_id: K,
+    event_id: &str,
+    value: T,
+) {
+    use std::collections::btree_map::Entry;
+
+    match representatives.entry(semantic_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(CanonicalFactValue {
+                event_id: event_id.to_owned(),
+                value,
+            });
+        }
+        Entry::Occupied(mut entry) if event_id < entry.get().event_id.as_str() => {
+            entry.insert(CanonicalFactValue {
+                event_id: event_id.to_owned(),
+                value,
+            });
+        }
+        Entry::Occupied(_) => {}
+    }
+}
+
 impl SemanticStateSnapshot {
     pub(crate) fn from_events(events: &[ShoreEvent]) -> crate::error::Result<Self> {
         let state = SessionState::from_events(events)?;
@@ -85,10 +115,10 @@ impl SemanticStateSnapshot {
 
     pub(crate) fn from_facts(facts: &[SemanticFact]) -> Result<Self, SemanticModelError> {
         let mut journal_id = DEFAULT_JOURNAL_ID.to_owned();
-        let mut captures = BTreeMap::<String, String>::new();
+        let mut captures = BTreeMap::<String, CanonicalFactValue<String>>::new();
         let mut semantic_events = BTreeMap::<(&str, String), BTreeSet<String>>::new();
-        let mut request_modes = BTreeMap::<String, AssertionMode>::new();
-        let mut responded_requests = BTreeSet::<String>::new();
+        let mut request_modes = BTreeMap::<String, CanonicalFactValue<AssertionMode>>::new();
+        let mut response_targets = BTreeMap::<String, CanonicalFactValue<String>>::new();
 
         for fact in facts {
             if fact.event_type == EventType::ReviewInitialized.as_str()
@@ -98,8 +128,10 @@ impl SemanticStateSnapshot {
             }
             match &fact.kind {
                 SemanticFactKind::Revision(revision) => {
-                    captures.insert(
+                    retain_canonical_fact_value(
+                        &mut captures,
                         required(&fact.revision_id, "revision_id")?.to_owned(),
+                        &fact.event_id,
                         revision.object_id.clone(),
                     );
                 }
@@ -111,13 +143,21 @@ impl SemanticStateSnapshot {
                 }
                 SemanticFactKind::InputRequestOpened(_) => {
                     insert_semantic(&mut semantic_events, "request", fact)?;
-                    request_modes
-                        .entry(required(&fact.semantic_id, "semantic_id")?.to_owned())
-                        .or_insert(fact.assertion_mode);
+                    retain_canonical_fact_value(
+                        &mut request_modes,
+                        required(&fact.semantic_id, "semantic_id")?.to_owned(),
+                        &fact.event_id,
+                        fact.assertion_mode,
+                    );
                 }
                 SemanticFactKind::InputRequestResponded(response) => {
                     insert_semantic(&mut semantic_events, "response", fact)?;
-                    responded_requests.insert(response.request_id.clone());
+                    retain_canonical_fact_value(
+                        &mut response_targets,
+                        required(&fact.semantic_id, "semantic_id")?.to_owned(),
+                        &fact.event_id,
+                        response.request_id.clone(),
+                    );
                 }
                 SemanticFactKind::Validation(_) => {
                     insert_semantic(&mut semantic_events, "validation", fact)?;
@@ -129,6 +169,10 @@ impl SemanticStateSnapshot {
         let current = (captures.len() == 1)
             .then(|| captures.iter().next())
             .flatten();
+        let responded_requests = response_targets
+            .values()
+            .map(|response| &response.value)
+            .collect::<BTreeSet<_>>();
         let open_input_request_count = request_modes
             .keys()
             .filter(|id| !responded_requests.contains(*id))
@@ -136,7 +180,7 @@ impl SemanticStateSnapshot {
         let open_operative_input_request_count = request_modes
             .iter()
             .filter(|(id, mode)| {
-                **mode == AssertionMode::Operative && !responded_requests.contains(*id)
+                mode.value == AssertionMode::Operative && !responded_requests.contains(*id)
             })
             .count();
         let diagnostics = duplicate_diagnostics(&semantic_events);
@@ -144,7 +188,7 @@ impl SemanticStateSnapshot {
         Ok(Self {
             journal_id,
             current_revision_id: current.map(|(id, _)| id.clone()),
-            current_object_id: current.map(|(_, id)| id.clone()),
+            current_object_id: current.map(|(_, revision)| revision.value.clone()),
             revision_count: captures.len(),
             event_count: facts.len(),
             event_set_hash: Some(event_set_hash(facts)?),

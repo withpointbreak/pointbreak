@@ -101,16 +101,48 @@ pub struct ProjectionDiagnostic {
 }
 
 #[derive(Debug)]
+struct CanonicalEventValue<T> {
+    event_id: EventId,
+    value: T,
+}
+
+fn retain_canonical_event_value<K: Ord, T>(
+    representatives: &mut BTreeMap<K, CanonicalEventValue<T>>,
+    semantic_id: K,
+    event_id: &EventId,
+    value: T,
+) {
+    use std::collections::btree_map::Entry;
+
+    match representatives.entry(semantic_id) {
+        Entry::Vacant(entry) => {
+            entry.insert(CanonicalEventValue {
+                event_id: event_id.clone(),
+                value,
+            });
+        }
+        Entry::Occupied(mut entry) if event_id < &entry.get().event_id => {
+            entry.insert(CanonicalEventValue {
+                event_id: event_id.clone(),
+                value,
+            });
+        }
+        Entry::Occupied(_) => {}
+    }
+}
+
+#[derive(Debug)]
 struct StateReducer {
     journal_id: JournalId,
-    captured_revisions: BTreeMap<RevisionId, ObjectId>,
+    captured_revisions: BTreeMap<RevisionId, CanonicalEventValue<ObjectId>>,
     observation_events: BTreeMap<ObservationId, BTreeSet<EventId>>,
     assessment_events: BTreeMap<AssessmentId, BTreeSet<EventId>>,
     validation_check_events: BTreeMap<ValidationCheckId, BTreeSet<EventId>>,
-    input_request_modes: BTreeMap<InputRequestId, AssertionMode>,
+    input_request_modes: BTreeMap<InputRequestId, CanonicalEventValue<AssertionMode>>,
     input_request_open_events: BTreeMap<InputRequestId, BTreeSet<EventId>>,
     input_request_response_events: BTreeMap<InputRequestResponseId, BTreeSet<EventId>>,
-    responded_input_request_ids: BTreeSet<InputRequestId>,
+    input_request_response_targets:
+        BTreeMap<InputRequestResponseId, CanonicalEventValue<InputRequestId>>,
 }
 
 impl Default for StateReducer {
@@ -124,7 +156,7 @@ impl Default for StateReducer {
             input_request_modes: BTreeMap::new(),
             input_request_open_events: BTreeMap::new(),
             input_request_response_events: BTreeMap::new(),
-            responded_input_request_ids: BTreeSet::new(),
+            input_request_response_targets: BTreeMap::new(),
         }
     }
 }
@@ -195,8 +227,12 @@ impl StateReducer {
     fn apply_work_object_proposed(&mut self, event: &ShoreEvent) -> Result<()> {
         let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
         if let WorkObjectProposal::Revision { revision, .. } = payload.work_object {
-            self.captured_revisions
-                .insert(revision.id, revision.object_id);
+            retain_canonical_event_value(
+                &mut self.captured_revisions,
+                revision.id,
+                &event.event_id,
+                revision.object_id,
+            );
         }
         Ok(())
     }
@@ -238,20 +274,27 @@ impl StateReducer {
             .entry(input_request_id.clone())
             .or_default()
             .insert(event.event_id.clone());
-        self.input_request_modes
-            .entry(input_request_id)
-            .or_insert(event.assertion_mode);
+        retain_canonical_event_value(
+            &mut self.input_request_modes,
+            input_request_id,
+            &event.event_id,
+            event.assertion_mode,
+        );
         Ok(())
     }
 
     fn apply_input_request_responded(&mut self, event: &ShoreEvent) -> Result<()> {
         let payload: InputRequestRespondedPayload = serde_json::from_value(event.payload.clone())?;
         self.input_request_response_events
-            .entry(payload.input_request_response_id)
+            .entry(payload.input_request_response_id.clone())
             .or_default()
             .insert(event.event_id.clone());
-        self.responded_input_request_ids
-            .insert(payload.input_request_id);
+        retain_canonical_event_value(
+            &mut self.input_request_response_targets,
+            payload.input_request_response_id,
+            &event.event_id,
+            payload.input_request_id,
+        );
         Ok(())
     }
 
@@ -263,20 +306,23 @@ impl StateReducer {
             _ => None,
         };
         let current_revision_id = current_revision.map(|(revision_id, _)| revision_id.clone());
-        let current_object_id = current_revision.map(|(_, object_id)| object_id.clone());
+        let current_object_id = current_revision.map(|(_, revision)| revision.value.clone());
+        let responded_input_request_ids = self
+            .input_request_response_targets
+            .values()
+            .map(|response| &response.value)
+            .collect::<BTreeSet<_>>();
         let open_input_request_count = self
             .input_request_modes
             .keys()
-            .filter(|input_request_id| {
-                !self.responded_input_request_ids.contains(*input_request_id)
-            })
+            .filter(|input_request_id| !responded_input_request_ids.contains(*input_request_id))
             .count();
         let open_operative_input_request_count = self
             .input_request_modes
             .iter()
             .filter(|(input_request_id, mode)| {
-                **mode == AssertionMode::Operative
-                    && !self.responded_input_request_ids.contains(*input_request_id)
+                mode.value == AssertionMode::Operative
+                    && !responded_input_request_ids.contains(*input_request_id)
             })
             .count();
 
@@ -484,6 +530,26 @@ mod tests {
             "snap:one"
         );
         assert_eq!(state.revision_count, 1);
+    }
+
+    #[test]
+    fn duplicate_revision_proposals_keep_the_canonical_object_id() {
+        let first = revision_captured_event_with_source("rev:one", "snap:first", "first");
+        let second = revision_captured_event_with_source("rev:one", "snap:second", "second");
+        let expected = if first.event_id < second.event_id {
+            "snap:first"
+        } else {
+            "snap:second"
+        };
+
+        let forward = SessionState::from_events(&[first.clone(), second.clone()]).unwrap();
+        let reversed = SessionState::from_events(&[second, first]).unwrap();
+
+        assert_eq!(
+            forward.current_object_id.as_ref().unwrap().as_str(),
+            expected
+        );
+        assert_eq!(forward.current_object_id, reversed.current_object_id);
     }
 
     #[test]
@@ -774,6 +840,72 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_request_opens_keep_the_canonical_assertion_mode() {
+        let operative = input_request_opened_event_with_assertion_mode(
+            "operative",
+            "input-request:sha256:same",
+            AssertionMode::Operative,
+        );
+        let advisory = input_request_opened_event_with_assertion_mode(
+            "advisory",
+            "input-request:sha256:same",
+            AssertionMode::Advisory,
+        );
+        let expected_operative = usize::from(operative.event_id < advisory.event_id);
+
+        let forward = SessionState::from_events(&[operative.clone(), advisory.clone()]).unwrap();
+        let reversed = SessionState::from_events(&[advisory, operative]).unwrap();
+
+        assert_eq!(
+            forward.open_operative_input_request_count,
+            expected_operative
+        );
+        assert_eq!(
+            forward.open_operative_input_request_count,
+            reversed.open_operative_input_request_count
+        );
+    }
+
+    #[test]
+    fn duplicate_responses_keep_the_canonical_request_target() {
+        let first_open = input_request_opened_event_with_assertion_mode(
+            "first-open",
+            "input-request:sha256:first",
+            AssertionMode::Advisory,
+        );
+        let second_open = input_request_opened_event_with_assertion_mode(
+            "second-open",
+            "input-request:sha256:second",
+            AssertionMode::Advisory,
+        );
+        let first_response = input_request_responded_event(
+            "first-response",
+            "input-request-response:sha256:same",
+            "input-request:sha256:first",
+        );
+        let second_response = input_request_responded_event(
+            "second-response",
+            "input-request-response:sha256:same",
+            "input-request:sha256:second",
+        );
+
+        let forward = SessionState::from_events(&[
+            first_open.clone(),
+            second_open.clone(),
+            first_response.clone(),
+            second_response.clone(),
+        ])
+        .unwrap();
+        let reversed =
+            SessionState::from_events(&[first_open, second_open, second_response, first_response])
+                .unwrap();
+
+        assert_eq!(forward.open_input_request_count, 1);
+        assert_eq!(reversed.open_input_request_count, 1);
+        assert_eq!(forward, reversed);
+    }
+
+    #[test]
     fn duplicate_semantic_input_request_events_use_input_request_diagnostic_codes() {
         let events = vec![
             input_request_opened_event_with_assertion_mode(
@@ -867,11 +999,19 @@ mod tests {
     }
 
     fn revision_captured_event(revision_id: &str, object_id: &str) -> ShoreEvent {
+        revision_captured_event_with_source(revision_id, object_id, revision_id)
+    }
+
+    fn revision_captured_event_with_source(
+        revision_id: &str,
+        object_id: &str,
+        source_key: &str,
+    ) -> ShoreEvent {
         // The envelope subject addresses the same revision the payload proposes,
         // mirroring how a real capture stamps both from one minted revision id.
         ShoreEvent::new(
             EventType::WorkObjectProposed,
-            format!("work_object_proposed:{revision_id}"),
+            format!("work_object_proposed:{source_key}"),
             EventTarget::for_revision(
                 JournalId::new("journal:default"),
                 RevisionId::new(revision_id),

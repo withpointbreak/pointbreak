@@ -20,7 +20,7 @@ use crate::session::derived_access::oracle::{
     strict_bodyless_semantic_snapshot,
 };
 use crate::session::event::{
-    ArtifactRemovedPayload, BodyContentType, EventPayload, EventSignature,
+    ArtifactRemovedPayload, AssertionMode, BodyContentType, EventPayload, EventSignature,
     EventSignatureRecordedPayload, EventTarget, EventType, FactPortRelationV1, FactRefV1,
     GitProvenance, InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
     InputRequestResponseOutcome, RelationProofStatusV1, ReviewAssessment,
@@ -96,6 +96,36 @@ fn initialized_event(journal_id: &str) -> ShoreEvent {
 
 fn revision_event(suffix: &str, supersedes: Vec<RevisionId>, occurred_at: &str) -> ShoreEvent {
     revision_event_for_engagement(suffix, supersedes, occurred_at, ENGAGEMENT)
+}
+
+fn revision_event_with_object(suffix: &str, object_id: &str, source_key: &str) -> ShoreEvent {
+    let revision_id = revision_id(suffix);
+    ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        format!("work_object_proposed:{source_key}"),
+        EventTarget::for_revision(
+            JournalId::new(JOURNAL),
+            revision_id.clone(),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("revision target"),
+        Writer::shore_local("0.9.0"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(ENGAGEMENT),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id,
+                    object_id: ObjectId::new(object_id),
+                    git_provenance: None,
+                },
+                summary: None,
+                object_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                supersedes: Vec::new(),
+            },
+        },
+        "2026-08-31T00:00:00Z",
+    )
+    .expect("revision event")
 }
 
 fn revision_event_for_engagement(
@@ -240,13 +270,29 @@ fn assessment_event(
 }
 
 fn request_opened(revision_id: &RevisionId, request_id: &InputRequestId) -> ShoreEvent {
-    ShoreEvent::new(
-        EventType::InputRequestOpened,
+    request_opened_with(
+        revision_id,
+        request_id,
         InputRequestOpenedPayload::idempotency_key(
             revision_id,
             &TrackId::new(TRACK),
             request_id.as_str(),
         ),
+        AssertionMode::Advisory,
+        "2026-07-27T16:00:04Z",
+    )
+}
+
+fn request_opened_with(
+    revision_id: &RevisionId,
+    request_id: &InputRequestId,
+    source_key: impl Into<String>,
+    assertion_mode: AssertionMode,
+    occurred_at: &str,
+) -> ShoreEvent {
+    ShoreEvent::new(
+        EventType::InputRequestOpened,
+        source_key,
         revision_target(revision_id),
         Writer::shore_local("0.8.0"),
         InputRequestOpenedPayload {
@@ -264,9 +310,10 @@ fn request_opened(revision_id: &RevisionId, request_id: &InputRequestId) -> Shor
             body_content_hash: None,
             target_fingerprint: None,
         },
-        "2026-07-27T16:00:04Z",
+        occurred_at,
     )
     .expect("request event")
+    .with_assertion_mode(assertion_mode)
 }
 
 fn request_responded(revision_id: &RevisionId, request_id: &InputRequestId) -> ShoreEvent {
@@ -2507,6 +2554,137 @@ fn materialized_journal_identity_follows_canonical_replay_order() {
             strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
         assert_eq!(candidate, strict, "materialized prefix {}", attempt + 1);
     }
+}
+
+#[test]
+fn conflicting_duplicate_revision_proposals_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let mut stored = vec![
+        revision_event_with_object(
+            "duplicate-object",
+            "obj:sha256:first",
+            "duplicate-object-first",
+        ),
+        revision_event_with_object(
+            "duplicate-object",
+            "obj:sha256:second",
+            "duplicate-object-second",
+        ),
+    ];
+    stored.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+
+    assert_eq!(
+        candidate.state.current_object_id, strict.state.current_object_id,
+        "duplicate revisions must select the same canonical object id"
+    );
+    assert_eq!(candidate, strict);
+}
+
+#[test]
+fn conflicting_duplicate_request_modes_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_event("duplicate-request", Vec::new(), "2026-08-31T00:00:00Z");
+    let revision_id = revision_id("duplicate-request");
+    let request_id = InputRequestId::new("input-request:sha256:duplicate-mode");
+    let mut requests = vec![
+        request_opened_with(
+            &revision_id,
+            &request_id,
+            "input_request_opened:duplicate-mode-operative",
+            AssertionMode::Operative,
+            "2026-08-30T00:00:01Z",
+        ),
+        request_opened_with(
+            &revision_id,
+            &request_id,
+            "input_request_opened:duplicate-mode-advisory",
+            AssertionMode::Advisory,
+            "2026-08-30T00:00:02Z",
+        ),
+    ];
+    requests.sort_by(|left, right| right.event_id.cmp(&left.event_id));
+    let stored = [revision, requests.remove(0), requests.remove(0)];
+
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+
+    assert_eq!(
+        candidate.state.open_operative_input_request_count,
+        strict.state.open_operative_input_request_count,
+        "duplicate requests must select the same canonical assertion mode"
+    );
+    assert_eq!(candidate, strict);
+}
+
+#[test]
+fn conflicting_duplicate_response_targets_match_strict_replay() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let revision = revision_event("duplicate-response", Vec::new(), "2026-08-31T00:00:00Z");
+    let revision_id = revision_id("duplicate-response");
+    let first_request = InputRequestId::new("input-request:sha256:first-request");
+    let second_request = InputRequestId::new("input-request:sha256:second-request");
+    let response_id = InputRequestResponseId::new("input-request-response:sha256:duplicate");
+    let first_response = request_responded_with_subject(
+        Some(&revision_id),
+        Some(&revision_id),
+        &first_request,
+        &response_id,
+    );
+    let second_response = request_responded_with_subject(
+        Some(&revision_id),
+        Some(&revision_id),
+        &second_request,
+        &response_id,
+    );
+    let stored = [
+        revision,
+        request_opened(&revision_id, &first_request),
+        request_opened(&revision_id, &second_request),
+        first_response,
+        second_response,
+    ];
+
+    for (attempt, event) in stored.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let candidate = ready(
+        adapter
+            .semantic_materialized_audit_snapshot()
+            .expect("materialized candidate"),
+    );
+    let strict =
+        strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+
+    assert_eq!(
+        candidate.state.open_input_request_count, strict.state.open_input_request_count,
+        "duplicate responses must select the same canonical request target"
+    );
+    assert_eq!(candidate, strict);
 }
 
 #[test]

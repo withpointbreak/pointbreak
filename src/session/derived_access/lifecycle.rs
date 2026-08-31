@@ -1938,6 +1938,65 @@ fn validate_live_reader_checkpoint(
     }
 }
 
+fn semantic_state_mismatch_fields(
+    actual: &super::semantic::state::SemanticStateSnapshot,
+    expected: &super::semantic::state::SemanticStateSnapshot,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    macro_rules! record {
+        ($field:ident, $label:literal) => {
+            if actual.$field != expected.$field {
+                fields.push(concat!("state.", $label));
+            }
+        };
+    }
+
+    record!(journal_id, "journalId");
+    record!(current_revision_id, "currentRevisionId");
+    record!(current_object_id, "currentObjectId");
+    record!(revision_count, "revisionCount");
+    record!(event_count, "eventCount");
+    record!(event_set_hash, "eventSetHash");
+    record!(observation_count, "observationCount");
+    record!(assessment_count, "assessmentCount");
+    record!(validation_check_count, "validationCheckCount");
+    record!(input_request_count, "inputRequestCount");
+    record!(open_input_request_count, "openInputRequestCount");
+    record!(
+        open_operative_input_request_count,
+        "openOperativeInputRequestCount"
+    );
+    record!(diagnostics, "diagnostics");
+    fields
+}
+
+fn semantic_snapshot_mismatch_fields(
+    actual: &super::semantic::SemanticSnapshot,
+    expected: &super::semantic::SemanticSnapshot,
+) -> Vec<&'static str> {
+    let mut fields = semantic_state_mismatch_fields(&actual.state, &expected.state);
+    for (mismatch, label) in [
+        (actual.as_of != expected.as_of, "asOf"),
+        (actual.revisions != expected.revisions, "revisions"),
+        (actual.threads != expected.threads, "threads"),
+        (actual.attention != expected.attention, "attention"),
+        (
+            actual.removed_content != expected.removed_content,
+            "removedContent",
+        ),
+        (actual.changes != expected.changes, "changes"),
+        (
+            actual.semantic_receipt != expected.semantic_receipt,
+            "semanticReceipt",
+        ),
+    ] {
+        if mismatch {
+            fields.push(label);
+        }
+    }
+    fields
+}
+
 fn validate_candidate(
     service: &DerivedAccessService,
     descriptor: &GenerationDescriptor,
@@ -1980,9 +2039,11 @@ fn validate_candidate(
     let expected = strict_bodyless_materialized_snapshot_at(head, truth_events)
         .map_err(|error| LifecycleError::Validation(error.to_string()))?;
     if actual != expected {
-        return Err(LifecycleError::Validation(
-            "materialized semantic receipt differs from strict replay".to_owned(),
-        ));
+        let mismatches = semantic_snapshot_mismatch_fields(&actual, &expected);
+        return Err(LifecycleError::Validation(format!(
+            "materialized semantic receipt differs from strict replay: {}",
+            mismatches.join(", ")
+        )));
     }
     if !descriptor.semantic_receipt.is_empty()
         && actual.semantic_receipt != descriptor.semantic_receipt
@@ -2244,6 +2305,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn semantic_state_mismatch_reports_exact_field_names() {
+        let expected =
+            super::super::semantic::state::SemanticStateSnapshot::from_events(&[]).unwrap();
+        let mut actual = expected.clone();
+        actual.current_object_id = Some("obj:sha256:different".to_owned());
+        actual.open_input_request_count = 1;
+
+        assert_eq!(
+            semantic_state_mismatch_fields(&actual, &expected),
+            vec!["state.currentObjectId", "state.openInputRequestCount"]
+        );
     }
 
     #[test]
