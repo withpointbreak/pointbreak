@@ -3,6 +3,86 @@ use serde_json::Value;
 mod support;
 
 use support::git_repo::GitRepo;
+use support::pointbreak_env;
+
+const ACTIVE: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")];
+const OFF: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "off")];
+
+fn capture_document(repo: &GitRepo) -> Value {
+    let output = pointbreak_env(["capture", "--repo", repo.path().to_str().unwrap()], OFF);
+    assert!(
+        output.status.success(),
+        "capture stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+fn build_derived(repo: &GitRepo) {
+    let output = pointbreak_env(
+        [
+            "store",
+            "derived",
+            "build",
+            "--repo",
+            repo.path().to_str().unwrap(),
+        ],
+        ACTIVE,
+    );
+    assert!(
+        output.status.success(),
+        "derived build stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn select_with_env(
+    repo: &GitRepo,
+    change_id: &str,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let mut args = vec!["change", "select", change_id];
+    args.extend_from_slice(extra);
+    args.extend_from_slice(&["--repo", repo.path().to_str().unwrap()]);
+    pointbreak_env(args, env)
+}
+
+fn assert_bound_select_floor_parity(
+    repo: &GitRepo,
+    change_id: &str,
+    extra: &[&str],
+    label: &str,
+) -> (std::process::Output, std::process::Output) {
+    let active = select_with_env(repo, change_id, extra, ACTIVE);
+    let off = select_with_env(repo, change_id, extra, OFF);
+    assert_eq!(
+        active.status.code(),
+        off.status.code(),
+        "{label}: exit parity"
+    );
+    assert_eq!(active.stdout, off.stdout, "{label}: stdout parity");
+    assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
+    (active, off)
+}
+
+fn mint_worktree_cursor(repo: &GitRepo, change_id: &str, revision_id: &str) -> String {
+    let output = select_with_env(
+        repo,
+        change_id,
+        &["--revision", revision_id, "--source", "worktree"],
+        OFF,
+    );
+    assert!(
+        output.status.success(),
+        "worktree cursor stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)["token"]
+        .as_str()
+        .expect("worktree cursor token")
+        .to_owned()
+}
 
 #[test]
 fn review_capture_creates_revision_from_subdir() {
@@ -98,6 +178,274 @@ fn change_select_rechecks_worktree_and_commit_source_bindings() {
     );
     let commit = parse_json(&commit.stdout);
     assert_eq!(commit["cursor"]["sourceBinding"]["kind"], "commit_match_v1");
+}
+
+#[test]
+fn change_select_bound_arms_pin_error_order() {
+    // (a) The worktree comparison reports live source drift before selection.
+    {
+        let repo = modified_repo();
+        let capture = capture_document(&repo);
+        let change_id = capture["changeId"].as_str().unwrap();
+        build_derived(&repo);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            change_id,
+            &["--source", "worktree"],
+            "moved worktree",
+        );
+        assert!(!active.status.success());
+        assert!(
+            String::from_utf8_lossy(&active.stderr).contains("review_cursor_source_changed"),
+            "worktree error:\n{}",
+            String::from_utf8_lossy(&active.stderr)
+        );
+    }
+
+    // (b) Commit resolution retains Git's unknown-revision error position.
+    {
+        let repo = modified_repo();
+        let capture = capture_document(&repo);
+        let change_id = capture["changeId"].as_str().unwrap();
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            change_id,
+            &["--source", "commit:refs/heads/does-not-exist"],
+            "unknown commit",
+        );
+        assert!(!active.status.success());
+        assert!(
+            String::from_utf8_lossy(&active.stderr).contains("does-not-exist"),
+            "unknown commit error:\n{}",
+            String::from_utf8_lossy(&active.stderr)
+        );
+    }
+
+    // (c) A real commit that does not materialize the capture reaches the
+    // canonical comparison and reports that mismatch.
+    {
+        let repo = modified_repo();
+        let capture = capture_document(&repo);
+        let change_id = capture["changeId"].as_str().unwrap();
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            change_id,
+            &["--source", "commit:HEAD"],
+            "commit mismatch",
+        );
+        assert!(!active.status.success());
+        assert!(
+            String::from_utf8_lossy(&active.stderr)
+                .contains("selected commit does not materialize the exact Revision"),
+            "commit mismatch error:\n{}",
+            String::from_utf8_lossy(&active.stderr)
+        );
+    }
+
+    // (d) A stale mutable binding is checked before a later historical
+    // selection refusal, even when --revision names that other member.
+    {
+        let repo = modified_repo();
+        let first = capture_document(&repo);
+        let change_id = first["changeId"].as_str().unwrap().to_owned();
+        let historical = first["revision"]["revisionId"].as_str().unwrap().to_owned();
+        let transition = first["reviewCursor"]["token"].as_str().unwrap();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let second = pointbreak_env(
+            [
+                "capture",
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--review-cursor",
+                transition,
+                "--advance",
+                "replace",
+            ],
+            OFF,
+        );
+        assert!(second.status.success());
+        let second = parse_json(&second.stdout);
+        let current = second["revision"]["revisionId"].as_str().unwrap();
+        let cursor = mint_worktree_cursor(&repo, &change_id, current);
+        build_derived(&repo);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            &change_id,
+            &["--cursor", &cursor, "--revision", &historical],
+            "prior binding before historical refusal",
+        );
+        let stderr = String::from_utf8_lossy(&active.stderr);
+        assert!(stderr.contains("review_cursor_source_changed"), "{stderr}");
+        assert!(
+            !stderr.contains("historical_revision_not_authorable"),
+            "the later refusal must not displace the prior binding error: {stderr}"
+        );
+    }
+
+    // (e) Explicit captured resolution still revalidates a mutable prior
+    // binding first, then emits a captured final binding.
+    {
+        let repo = modified_repo();
+        let capture = capture_document(&repo);
+        let change_id = capture["changeId"].as_str().unwrap();
+        let revision_id = capture["revision"]["revisionId"].as_str().unwrap();
+        let cursor = mint_worktree_cursor(&repo, change_id, revision_id);
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            change_id,
+            &["--cursor", &cursor, "--source", "captured"],
+            "captured override",
+        );
+        assert!(active.status.success());
+        assert_eq!(
+            parse_json(&active.stdout)["cursor"]["sourceBinding"]["kind"],
+            "captured"
+        );
+    }
+
+    // (f) The prior binding's exact artifact is checked before provenance.
+    {
+        let repo = modified_repo();
+        let capture = capture_document(&repo);
+        let change_id = capture["changeId"].as_str().unwrap();
+        let revision_id = capture["revision"]["revisionId"].as_str().unwrap();
+        let cursor = mint_worktree_cursor(&repo, change_id, revision_id);
+        let mut decoded = pointbreak::session::ReviewCursorV1::decode_token(&cursor).unwrap();
+        decoded.revision.object_artifact_content_hash = format!("sha256:{}", "f3".repeat(32));
+        let mismatched_cursor = decoded.encode_token().unwrap();
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            change_id,
+            &["--cursor", &mismatched_cursor],
+            "artifact mismatch",
+        );
+        assert!(!active.status.success());
+        assert!(
+            String::from_utf8_lossy(&active.stderr).contains("review_cursor_artifact_mismatch"),
+            "artifact mismatch error:\n{}",
+            String::from_utf8_lossy(&active.stderr)
+        );
+    }
+
+    // (g) A cursor issued for another Change resolves its mutable binding,
+    // then fails the Change validation rather than short-circuiting earlier.
+    {
+        let repo = modified_repo();
+        let first = capture_document(&repo);
+        let first_change = first["changeId"].as_str().unwrap();
+        let first_revision = first["revision"]["revisionId"].as_str().unwrap();
+        let cursor = mint_worktree_cursor(&repo, first_change, first_revision);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let second = capture_document(&repo);
+        let second_change = second["changeId"].as_str().unwrap().to_owned();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            &second_change,
+            &["--cursor", &cursor],
+            "foreign Change cursor",
+        );
+        assert!(!active.status.success());
+        assert_eq!(parse_json(&active.stderr)["code"], "change_graph_stale");
+    }
+
+    // (h) The same binding-first sequence holds when the cursor's own Change
+    // graph advances after issuance.
+    {
+        let repo = modified_repo();
+        let first = capture_document(&repo);
+        let change_id = first["changeId"].as_str().unwrap().to_owned();
+        let revision_id = first["revision"]["revisionId"].as_str().unwrap().to_owned();
+        let cursor = mint_worktree_cursor(&repo, &change_id, &revision_id);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let advanced = pointbreak_env(
+            [
+                "capture",
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--review-cursor",
+                first["reviewCursor"]["token"].as_str().unwrap(),
+                "--advance",
+                "replace",
+            ],
+            OFF,
+        );
+        assert!(advanced.status.success());
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        build_derived(&repo);
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            &change_id,
+            &["--cursor", &cursor],
+            "stale Change graph",
+        );
+        assert!(!active.status.success());
+        assert_eq!(parse_json(&active.stderr)["code"], "change_graph_stale");
+    }
+}
+
+#[test]
+fn change_select_bound_arms_emit_identical_bytes_in_each_format_lane() {
+    let repo = modified_repo();
+    let capture = capture_document(&repo);
+    let change_id = capture["changeId"].as_str().unwrap().to_owned();
+    let revision_id = capture["revision"]["revisionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    build_derived(&repo);
+
+    for lane in ["json", "json-pretty", "text"] {
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            &change_id,
+            &[
+                "--revision",
+                &revision_id,
+                "--source",
+                "worktree",
+                "--format",
+                lane,
+            ],
+            &format!("worktree {lane}"),
+        );
+        assert!(active.status.success());
+        assert_eq!(
+            parse_json(&active.stdout)["cursor"]["sourceBinding"]["kind"],
+            "worktree_match_v1",
+            "{lane}"
+        );
+    }
+
+    repo.commit_all("materialize captured revision");
+    for lane in ["json", "json-pretty", "text"] {
+        let (active, _) = assert_bound_select_floor_parity(
+            &repo,
+            &change_id,
+            &[
+                "--revision",
+                &revision_id,
+                "--source",
+                "commit:HEAD",
+                "--format",
+                lane,
+            ],
+            &format!("commit {lane}"),
+        );
+        assert!(active.status.success());
+        assert_eq!(
+            parse_json(&active.stdout)["cursor"]["sourceBinding"]["kind"],
+            "commit_match_v1",
+            "{lane}"
+        );
+    }
 }
 
 #[test]

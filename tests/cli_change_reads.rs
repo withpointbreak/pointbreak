@@ -1,7 +1,10 @@
 //! Characterization floor and route contracts for the Change CLI reads: the
 //! producer-reuse pages (`change profile`, `change list`, `change attention`)
 //! and the per-Change selector reads (`change show`, `change interdiff`,
-//! captured `change select`).
+//! captured `change select`), plus the exact-Revision `change revision` and
+//! `change resource` reads. An additive exact-read extension carries one
+//! explicit fact port and two structural commit associations so contextual
+//! hydration and association ordering are exercised by the floor.
 //!
 //! The characterization tests freeze the authoritative bytes per format lane;
 //! they are the parity oracle for the derived routing and may only change
@@ -39,6 +42,7 @@ struct ChangeReadsFixture {
     accepted_change_id: String,
     #[cfg_attr(not(feature = "longitudinal-counting"), allow(dead_code))]
     accepted_revision_id: String,
+    accepted_artifact_hash: String,
     withdrawn_claim_id: String,
 }
 
@@ -139,10 +143,15 @@ fn change_reads_fixture() -> ChangeReadsFixture {
         .as_str()
         .expect("third revision id")
         .to_owned();
+    let accepted_artifact_hash = third["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .expect("third revision artifact hash")
+        .to_owned();
     let third_cursor = third["reviewCursor"]["token"]
         .as_str()
         .expect("third review cursor")
         .to_owned();
+
     let accepted = pointbreak_env(
         [
             "assessment",
@@ -171,7 +180,150 @@ fn change_reads_fixture() -> ChangeReadsFixture {
         parallel_revision_ids: (first_revision, second_revision),
         accepted_change_id,
         accepted_revision_id,
+        accepted_artifact_hash,
         withdrawn_claim_id,
+    }
+}
+
+struct ExactReadFixture {
+    fixture: ChangeReadsFixture,
+    ported_origin_revision_id: String,
+    ported_origin_observation_id: String,
+    target_observation_id: String,
+    association_commit_oids: [String; 2],
+}
+
+impl std::ops::Deref for ExactReadFixture {
+    type Target = ChangeReadsFixture;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fixture
+    }
+}
+
+fn exact_read_fixture() -> ExactReadFixture {
+    let mut fixture = change_reads_fixture();
+    let repo_arg = fixture.repo_arg().to_owned();
+    let ported_origin_revision_id = fixture.accepted_revision_id.clone();
+    let ported_origin_artifact_hash = fixture.accepted_artifact_hash.clone();
+    let ported_origin_observation_id = record_fixture_observation(
+        &repo_arg,
+        &ported_origin_revision_id,
+        "ported origin fact",
+        "origin context carried into the accepted revision",
+    );
+
+    // Create the exact-read-only replacement after adding a second real commit.
+    // The shared fixture remains unchanged for every older characterization.
+    let selection = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--repo",
+            &repo_arg,
+        ],
+        OFF,
+    );
+    assert_success(&selection);
+    let transition_cursor = parse_json(&selection.stdout)["token"]
+        .as_str()
+        .expect("accepted selection cursor")
+        .to_owned();
+    fixture.repo.commit_all("materialize the fact-port origin");
+    fixture
+        .repo
+        .write("src/lib.rs", "pub fn value() -> u32 { 6 }\n");
+    let replacement = capture(&[
+        "capture",
+        "--repo",
+        &repo_arg,
+        "--review-cursor",
+        &transition_cursor,
+        "--advance",
+        "replace",
+    ]);
+    fixture.accepted_revision_id = replacement["revision"]["revisionId"]
+        .as_str()
+        .expect("accepted replacement revision id")
+        .to_owned();
+    fixture.accepted_artifact_hash = replacement["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .expect("accepted replacement artifact hash")
+        .to_owned();
+    let replacement_cursor = replacement["reviewCursor"]["token"]
+        .as_str()
+        .expect("accepted replacement cursor")
+        .to_owned();
+    let target_observation_id = record_fixture_observation(
+        &repo_arg,
+        &fixture.accepted_revision_id,
+        "ported target fact",
+        "materialized target for the contextual fact port",
+    );
+    let port = pointbreak_env(
+        [
+            "fact",
+            "port",
+            "--repo",
+            &repo_arg,
+            "--origin-revision",
+            &format!("{ported_origin_revision_id}@{ported_origin_artifact_hash}"),
+            "--origin-fact",
+            &ported_origin_observation_id,
+            "--review-cursor",
+            &replacement_cursor,
+            "--relation",
+            "reanchored-as",
+            "--target-fact",
+            &target_observation_id,
+            "--track",
+            REVIEW_TRACK,
+        ],
+        OFF,
+    );
+    assert_success(&port);
+
+    let mut association_commit_oids = [
+        fixture
+            .repo
+            .git(["rev-parse", "HEAD~1"])
+            .stdout
+            .trim()
+            .to_owned(),
+        fixture
+            .repo
+            .git(["rev-parse", "HEAD"])
+            .stdout
+            .trim()
+            .to_owned(),
+    ];
+    association_commit_oids.sort();
+    for commit_oid in association_commit_oids.iter().rev() {
+        let association = pointbreak_env(
+            [
+                "association",
+                "record",
+                "--repo",
+                &repo_arg,
+                "--exact-revision",
+                &fixture.accepted_revision_id,
+                "--track",
+                REVIEW_TRACK,
+                "--commit",
+                commit_oid,
+            ],
+            OFF,
+        );
+        assert_success(&association);
+    }
+
+    ExactReadFixture {
+        fixture,
+        ported_origin_revision_id,
+        ported_origin_observation_id,
+        target_observation_id,
+        association_commit_oids,
     }
 }
 
@@ -179,6 +331,36 @@ fn capture(args: &[&str]) -> Value {
     let output = pointbreak_env(args, OFF);
     assert_success(&output);
     parse_json(&output.stdout)
+}
+
+fn record_fixture_observation(
+    repo_arg: &str,
+    revision_id: &str,
+    title: &str,
+    body: &str,
+) -> String {
+    let output = pointbreak_env(
+        [
+            "observation",
+            "add",
+            "--repo",
+            repo_arg,
+            "--exact-revision",
+            revision_id,
+            "--track",
+            REVIEW_TRACK,
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        OFF,
+    );
+    assert_success(&output);
+    parse_json(&output.stdout)["observationId"]
+        .as_str()
+        .expect("observation id")
+        .to_owned()
 }
 
 /// A membership withdrawal naming a claim no event asserted. The ordinary
@@ -679,6 +861,350 @@ fn assert_typed_capability_documents(repo_arg: &str, state: &str) {
             assert_eq!(json["state"], state, "change {command}");
         }
     }
+}
+
+fn exact_change_args(
+    fixture: &ExactReadFixture,
+    command: &str,
+    lane: &str,
+    include_body: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "change".to_owned(),
+        command.to_owned(),
+        fixture.accepted_change_id.clone(),
+        fixture.accepted_revision_id.clone(),
+        "--artifact-hash".to_owned(),
+        fixture.accepted_artifact_hash.clone(),
+        "--repo".to_owned(),
+        fixture.repo_arg().to_owned(),
+        "--format".to_owned(),
+        lane.to_owned(),
+    ];
+    if include_body {
+        args.push("--include-body".to_owned());
+    }
+    args
+}
+
+fn assert_exact_floor_parity(
+    fixture: &ExactReadFixture,
+    command: &str,
+    lane: &str,
+    include_body: bool,
+) -> Value {
+    let args = exact_change_args(fixture, command, lane, include_body);
+    let active = pointbreak_env(&args, ACTIVE);
+    let off = pointbreak_env(&args, OFF);
+    assert_eq!(
+        active.status.code(),
+        off.status.code(),
+        "change {command} ({lane}): exit parity"
+    );
+    assert_eq!(
+        active.stdout, off.stdout,
+        "change {command} ({lane}): stdout parity"
+    );
+    assert_eq!(
+        active.stderr, off.stderr,
+        "change {command} ({lane}): stderr parity"
+    );
+    assert_success(&active);
+    parse_json(&active.stdout)
+}
+
+#[test]
+fn change_revision_emits_the_contextual_document_in_each_format_lane() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+
+    for lane in FORMAT_LANES {
+        let document = assert_exact_floor_parity(&fixture, "revision", lane, false);
+        assert_eq!(
+            document["schema"], "pointbreak.review-change-revision",
+            "{lane}"
+        );
+        assert_eq!(document["changeId"], fixture.accepted_change_id, "{lane}");
+        assert_eq!(
+            document["revision"]["revisionId"], fixture.accepted_revision_id,
+            "{lane}"
+        );
+        assert_eq!(document["availability"], "available", "{lane}");
+
+        let facts = document["factPresentations"]
+            .as_array()
+            .expect("fact presentations");
+        for fact_id in [
+            &fixture.ported_origin_observation_id,
+            &fixture.target_observation_id,
+        ] {
+            assert!(
+                facts.iter().any(|fact| fact["factId"] == fact_id.as_str()),
+                "{lane}: contextual fact {fact_id} is present"
+            );
+            assert!(
+                document["factContentPresentations"].get(fact_id).is_some(),
+                "{lane}: contextual content {fact_id} is present"
+            );
+        }
+
+        let ports = document["factPorts"].as_array().expect("fact ports");
+        assert_eq!(ports.len(), 1, "{lane}: one applicable port");
+        let port = &ports[0];
+        assert_eq!(port["applicability"], "applicable", "{lane}");
+        assert_eq!(
+            port["originRevision"]["revisionId"], fixture.ported_origin_revision_id,
+            "{lane}"
+        );
+        assert!(port["actorId"].is_string(), "{lane}: actor attribution");
+        assert!(port["trackId"].is_string(), "{lane}: track attribution");
+        assert!(
+            port["sourceEventIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "{lane}: source event ids"
+        );
+
+        let associations = document["associations"].as_array().expect("associations");
+        assert_eq!(associations.len(), 2, "{lane}: two associations");
+
+        let show = parse_json(
+            &pointbreak_env(
+                [
+                    "change",
+                    "show",
+                    &fixture.accepted_change_id,
+                    "--repo",
+                    fixture.repo_arg(),
+                    "--format",
+                    lane,
+                ],
+                OFF,
+            )
+            .stdout,
+        );
+        assert_eq!(
+            document["projectionStamp"], show["projectionStamp"],
+            "{lane}: the authoritative exact read binds the facade stamp"
+        );
+    }
+}
+
+fn normalize_body_read_for_comparison(document: &mut Value) {
+    document
+        .as_object_mut()
+        .expect("revision document object")
+        .remove("factContentPresentations");
+    let resource = document["exactRevisionDocument"]
+        .as_object_mut()
+        .expect("exact Revision resource");
+    resource.remove("cacheKey");
+    resource["projection"]["includeBody"] = Value::Bool(false);
+}
+
+#[test]
+fn change_revision_include_body_hydrates_fact_content() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+
+    for (label, env) in [("off", OFF), ("active", ACTIVE)] {
+        let bodyless_output =
+            pointbreak_env(exact_change_args(&fixture, "revision", "json", false), env);
+        let with_body_output =
+            pointbreak_env(exact_change_args(&fixture, "revision", "json", true), env);
+        assert_success(&bodyless_output);
+        assert_success(&with_body_output);
+        let mut bodyless = parse_json(&bodyless_output.stdout);
+        let mut with_body = parse_json(&with_body_output.stdout);
+
+        for (fact_id, expected_body) in [
+            (
+                fixture.ported_origin_observation_id.as_str(),
+                "origin context carried into the accepted revision",
+            ),
+            (
+                fixture.target_observation_id.as_str(),
+                "materialized target for the contextual fact port",
+            ),
+        ] {
+            assert!(
+                bodyless["factContentPresentations"][fact_id]["content"]
+                    .get("body")
+                    .is_none(),
+                "{label}: bodyless fact {fact_id}"
+            );
+            assert_eq!(
+                with_body["factContentPresentations"][fact_id]["content"]["body"], expected_body,
+                "{label}: hydrated fact {fact_id}"
+            );
+        }
+
+        normalize_body_read_for_comparison(&mut bodyless);
+        normalize_body_read_for_comparison(&mut with_body);
+        assert_eq!(
+            with_body, bodyless,
+            "{label}: include-body changes only body-bearing material"
+        );
+    }
+}
+
+#[test]
+fn change_revision_associations_are_commit_oid_ascending() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+
+    for (label, env) in [("off", OFF), ("active", ACTIVE)] {
+        let output = pointbreak_env(exact_change_args(&fixture, "revision", "json", false), env);
+        assert_success(&output);
+        let document = parse_json(&output.stdout);
+        let commit_oids = document["associations"]
+            .as_array()
+            .expect("associations")
+            .iter()
+            .map(|association| {
+                association["comparison"]["commitOid"]
+                    .as_str()
+                    .expect("association commit oid")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            commit_oids,
+            fixture
+                .association_commit_oids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "{label}: associations ignore reverse recording order"
+        );
+    }
+}
+
+#[test]
+fn change_revision_selector_errors_follow_the_exact_ref_order() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+    let missing_change = format!("change:sha256:{}", "f1".repeat(32));
+    let mismatched_hash = format!("sha256:{}", "f2".repeat(32));
+    let cases = [
+        (
+            "unknown Change",
+            missing_change.as_str(),
+            fixture.accepted_revision_id.as_str(),
+            fixture.accepted_artifact_hash.as_str(),
+            format!("Change {missing_change} is unavailable"),
+        ),
+        (
+            "non-member Revision",
+            fixture.accepted_change_id.as_str(),
+            fixture.parallel_revision_ids.0.as_str(),
+            fixture.accepted_artifact_hash.as_str(),
+            "exact Revision is not an active member of the Change".to_owned(),
+        ),
+        (
+            "malformed hash",
+            fixture.accepted_change_id.as_str(),
+            fixture.accepted_revision_id.as_str(),
+            "not-a-hash",
+            "RevisionRefV1 requires a lowercase sha256 object artifact hash".to_owned(),
+        ),
+        (
+            "mismatched hash",
+            fixture.accepted_change_id.as_str(),
+            fixture.accepted_revision_id.as_str(),
+            mismatched_hash.as_str(),
+            "exact Revision/hash selector does not match authoritative state".to_owned(),
+        ),
+    ];
+    for (label, change_id, revision_id, artifact_hash, expected) in cases {
+        let args = [
+            "change",
+            "revision",
+            change_id,
+            revision_id,
+            "--artifact-hash",
+            artifact_hash,
+            "--repo",
+            fixture.repo_arg(),
+        ];
+        let active = pointbreak_env(args, ACTIVE);
+        let off = pointbreak_env(args, OFF);
+        assert!(!off.status.success(), "{label}: selector must fail");
+        assert_eq!(
+            active.status.code(),
+            off.status.code(),
+            "{label}: exit parity"
+        );
+        assert_eq!(active.stdout, off.stdout, "{label}: stdout parity");
+        assert_eq!(active.stderr, off.stderr, "{label}: stderr parity");
+        assert_eq!(
+            String::from_utf8_lossy(&off.stderr).trim(),
+            expected,
+            "{label}: exact refusal string"
+        );
+    }
+}
+
+#[test]
+fn change_resource_emits_the_resource_document_in_each_format_lane() {
+    let fixture = exact_read_fixture();
+    fixture.build_derived();
+
+    for lane in FORMAT_LANES {
+        let document = assert_exact_floor_parity(&fixture, "resource", lane, false);
+        assert_eq!(
+            document["schema"], "pointbreak.review-revision-resource",
+            "{lane}"
+        );
+        assert_eq!(
+            document["resource"]["revision"]["revisionId"], fixture.accepted_revision_id,
+            "{lane}"
+        );
+        assert_eq!(document["availability"], "available", "{lane}");
+        assert!(document["cacheKey"].is_string(), "{lane}: cache key");
+        assert!(
+            document.get("projectionStamp").is_none(),
+            "{lane}: the CLI resource is unstamped"
+        );
+    }
+}
+
+#[test]
+fn change_resource_reports_typed_unavailability_without_bytes() {
+    let fixture = exact_read_fixture();
+    let removed = pointbreak_env(
+        [
+            "store",
+            "remove",
+            "--repo",
+            fixture.repo_arg(),
+            "--revision",
+            &fixture.accepted_revision_id,
+        ],
+        OFF,
+    );
+    assert_success(&removed);
+    fixture.build_derived();
+
+    let document = assert_exact_floor_parity(&fixture, "resource", "json", false);
+    assert_eq!(document["availability"], "removed");
+    assert!(document.get("capturedDocument").is_none());
+    assert!(document.get("capturedDocumentHash").is_none());
+    assert_eq!(
+        document["diagnostics"],
+        serde_json::json!(["captured_resource_removed"])
+    );
+}
+
+#[test]
+fn change_resource_is_absent_from_the_parse_shape_family() {
+    let fixture = exact_read_fixture();
+    let output = pointbreak_env(exact_change_args(&fixture, "resource", "json", false), OFF);
+    assert_success(&output);
+    assert_eq!(
+        parse_json(&output.stdout)["schema"],
+        "pointbreak.review-revision-resource",
+        "the executable shape parses even though the cold-family unit inventory omits it"
+    );
 }
 
 #[test]
