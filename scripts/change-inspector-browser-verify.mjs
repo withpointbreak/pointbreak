@@ -958,14 +958,17 @@
 					revisionText,
 				);
 
-				const resourceAction = page.getByRole("button", {
-					name: "Open authoritative captured diff",
-				});
+				const resourceAction = page
+					.locator("#detail-body > .detail-actions")
+					.getByRole("button", {
+						name: "Open authoritative captured diff",
+						exact: true,
+					});
 				const resourceActionCount = await resourceAction.count();
 				requireCondition(
 					resourceActionCount === 1,
 					"exact history resource route",
-					"the accepted Revision exposed no unique captured-resource action",
+					"the accepted Revision exposed no unique primary captured-resource action",
 					1,
 					resourceActionCount,
 				);

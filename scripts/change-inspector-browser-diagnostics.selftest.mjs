@@ -202,6 +202,35 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 	);
 });
 
+test("exact-history shakedown selects the primary Revision resource action", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const branchStart = source.indexOf(
+		'if (config.mode === "shakedown-exact-history-focus")',
+	);
+	const fullMatrix = source.indexOf(
+		'await diagnostics.section("Reader readiness"',
+		branchStart,
+	);
+	assert.ok(
+		branchStart >= 0 && fullMatrix > branchStart,
+		"missing exact-history shakedown branch",
+	);
+	const branch = source.slice(branchStart, fullMatrix);
+	assert.match(
+		branch,
+		/page\s*\.locator\("#detail-body > \.detail-actions"\)\s*\.getByRole\("button", \{[\s\S]*name: "Open authoritative captured diff",[\s\S]*exact: true,[\s\S]*\}\)/,
+		"the journey must distinguish the primary Revision action from association-card actions",
+	);
+	assert.doesNotMatch(
+		branch,
+		/const resourceAction = page\.getByRole\(/,
+		"the exact-history journey must not count same-named actions across the full page",
+	);
+});
+
 test("Changes G waits for the terminal destination route, page key, and selected card", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
