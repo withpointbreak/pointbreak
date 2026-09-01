@@ -13,6 +13,7 @@ import {
 } from "./auth";
 import {
   ChangeInspectorPageFailure,
+  ChangeInspectorRequestFailure,
   fetchChangeInspectorJSON,
 } from "./change-inspector-http";
 import {
@@ -99,12 +100,133 @@ interface CredentialedInspectorIdentity {
   credentialVersion: number;
 }
 
-const EXACT_READING_TIMEOUT_MS = 10_000;
+type ExactReadingPresentation =
+  | { kind: "still_loading"; cancel(): void }
+  | { kind: "retryable_failure"; message: string; retry(): void };
+
+const EXACT_READING_SOFT_BUDGET_MS = 10_000;
+const EXACT_READING_HARD_BUDGET_MS = 30_000;
+const EXACT_POSTFLIGHT_TIMEOUT_MS = 3_000;
 const IDENTITY_TIMEOUT_MS = 3_000;
 const POLL_CYCLE_TIMEOUT_MS = 15_000;
 
 class ChangeInspectorTimeout extends Error {}
 class ChangeInspectorSessionChanged extends Error {}
+
+type ReadingAbortReason =
+  | "superseded"
+  | "hard_budget"
+  | "postflight_budget"
+  | "refresh_expiry"
+  | "cancelled"
+  | "stopped";
+
+const READING_ABORT_REASONS: readonly ReadingAbortReason[] = [
+  "superseded",
+  "hard_budget",
+  "postflight_budget",
+  "refresh_expiry",
+  "cancelled",
+  "stopped",
+];
+
+function readingAbortReason(value: unknown): ReadingAbortReason | null {
+  return typeof value === "string" &&
+    READING_ABORT_REASONS.includes(value as ReadingAbortReason)
+    ? (value as ReadingAbortReason)
+    : null;
+}
+
+class ReadingAttempt {
+  private readonly controller = new AbortController();
+  private readonly timers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly parentSignal: AbortSignal | null;
+  private readonly onParentAbort: (() => void) | null;
+  reason: ReadingAbortReason | null = null;
+
+  constructor(parentSignal?: AbortSignal) {
+    this.parentSignal = parentSignal ?? null;
+    this.onParentAbort =
+      parentSignal === undefined
+        ? null
+        : () => {
+            this.abort(readingAbortReason(parentSignal.reason) ?? "superseded");
+          };
+    if (parentSignal?.aborted) this.onParentAbort?.();
+    else
+      parentSignal?.addEventListener(
+        "abort",
+        this.onParentAbort as () => void,
+        {
+          once: true,
+        },
+      );
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  schedule(
+    callback: () => void,
+    delayMs: number,
+  ): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      callback();
+    }, delayMs);
+    this.timers.add(timer);
+    return timer;
+  }
+
+  clearTimer(timer: ReturnType<typeof setTimeout>): void {
+    clearTimeout(timer);
+    this.timers.delete(timer);
+  }
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.signal.aborted) {
+      return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+    }
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        this.signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () =>
+        finish(() => reject(new ChangeInspectorRequestFailure("aborted")));
+      this.signal.addEventListener("abort", onAbort, { once: true });
+      if (this.signal.aborted) {
+        onAbort();
+        return;
+      }
+      operation().then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  abort(reason: ReadingAbortReason): void {
+    if (this.reason !== null) return;
+    this.reason = reason;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+    this.controller.abort(reason);
+  }
+
+  dispose(): void {
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+    if (this.parentSignal !== null && this.onParentAbort !== null) {
+      this.parentSignal.removeEventListener("abort", this.onParentAbort);
+    }
+    if (activeReadingAttempt === this) activeReadingAttempt = null;
+  }
+}
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let routeListener: (() => void) | null = null;
@@ -119,6 +241,22 @@ let pollCoordinatorStop: (() => void) | null = null;
 let refreshSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let requestEpoch = 0;
 let compositionEpoch = 0;
+let activeReadingAttempt: ReadingAttempt | null = null;
+
+function advanceRequestEpoch(
+  reason: "superseded" | "stopped" = "superseded",
+): number {
+  requestEpoch += 1;
+  activeReadingAttempt?.abort(reason);
+  return requestEpoch;
+}
+
+function activateReadingAttempt(parentSignal?: AbortSignal): ReadingAttempt {
+  activeReadingAttempt?.abort("superseded");
+  const attempt = new ReadingAttempt(parentSignal);
+  activeReadingAttempt = attempt;
+  return attempt;
+}
 
 function clearRefreshSettleTimer(): void {
   if (refreshSettleTimer !== null) clearTimeout(refreshSettleTimer);
@@ -187,7 +325,7 @@ async function withinTimeout<T>(
 /** Stop the active composition without touching the quarantined legacy reader. */
 export function stopChangeInspector(): void {
   compositionEpoch += 1;
-  requestEpoch += 1;
+  advanceRequestEpoch("stopped");
   if (pollTimer !== null) clearInterval(pollTimer);
   pollTimer = null;
   pollCoordinatorStop?.();
@@ -267,6 +405,7 @@ export async function bootstrapChangeInspector(
   };
   let reading: ChangeInspectorReading | null = null;
   let readingRefusal: string | null = null;
+  let exactReadingPresentation: ExactReadingPresentation | null = null;
   let visibleReading = "";
   const timelineMonitor = createTimelineMonitor();
   let pendingTimelineSearchFocus = false;
@@ -319,6 +458,7 @@ export async function bootstrapChangeInspector(
       {
         reading,
         refusal: readingRefusal,
+        exactReading: exactReadingPresentation,
         timeline: monitor,
       },
     );
@@ -421,6 +561,7 @@ export async function bootstrapChangeInspector(
   const clearReading = (): void => {
     reading = null;
     readingRefusal = null;
+    exactReadingPresentation = null;
     visibleReading = "";
   };
 
@@ -449,25 +590,46 @@ export async function bootstrapChangeInspector(
     if (visibleReading === requestedReading && reading !== null) return;
     reading = null;
     readingRefusal = null;
+    exactReadingPresentation = null;
     visibleReading = requestedReading;
     paint(pollDraft);
     const pendingToken = Symbol("exact-reading");
     pendingReading = { key: requestedReading, token: pendingToken };
+    const attempt = activateReadingAttempt();
     try {
-      const { loaded, postflight } = await withinTimeout(
-        (async () => {
-          const loaded = await loadChangeInspectorReading(
-            route,
-            expectedProjectionStamp,
-          );
-          const postflight = decodeReaderProfile(
-            await fetchChangeInspectorJSON("/api/v2/profile"),
-          );
-          return { loaded, postflight };
-        })(),
-        EXACT_READING_TIMEOUT_MS,
-        "exact Change reading timed out",
+      const softBudget = attempt.schedule(() => {
+        if (epoch !== requestEpoch || attempt.signal.aborted) return;
+        exactReadingPresentation = {
+          kind: "still_loading",
+          cancel: () => attempt.abort("cancelled"),
+        };
+        paint(pollDraft);
+      }, EXACT_READING_SOFT_BUDGET_MS);
+      const hardBudget = attempt.schedule(
+        () => attempt.abort("hard_budget"),
+        EXACT_READING_HARD_BUDGET_MS,
       );
+      const loaded = await attempt.run(() =>
+        loadChangeInspectorReading(
+          route,
+          expectedProjectionStamp,
+          attempt.signal,
+        ),
+      );
+      attempt.clearTimer(softBudget);
+      attempt.clearTimer(hardBudget);
+      const postflightBudget = attempt.schedule(
+        () => attempt.abort("postflight_budget"),
+        EXACT_POSTFLIGHT_TIMEOUT_MS,
+      );
+      const postflight = decodeReaderProfile(
+        await attempt.run(() =>
+          fetchChangeInspectorJSON("/api/v2/profile", {
+            signal: attempt.signal,
+          }),
+        ),
+      );
+      attempt.clearTimer(postflightBudget);
       if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
       if (credentialSessionChanged(credentialVersion)) {
         throw new ChangeInspectorSessionChanged();
@@ -484,9 +646,40 @@ export async function bootstrapChangeInspector(
       }
       reading = loaded;
       readingRefusal = null;
+      exactReadingPresentation = null;
       paint(pollDraft);
     } catch (error) {
       if (epoch !== requestEpoch) return;
+      if (attempt.reason === "superseded" || attempt.reason === "stopped") {
+        return;
+      }
+      const retryableMessage =
+        attempt.reason === "hard_budget"
+          ? "exact reading timed out"
+          : attempt.reason === "postflight_budget"
+            ? "exact reading postflight timed out"
+            : attempt.reason === "cancelled"
+              ? "exact reading cancelled"
+              : null;
+      if (retryableMessage !== null) {
+        reading = null;
+        readingRefusal = null;
+        exactReadingPresentation = {
+          kind: "retryable_failure",
+          message: retryableMessage,
+          retry: () => {
+            void onRoute();
+          },
+        };
+        paint(pollDraft);
+        return;
+      }
+      if (
+        error instanceof ChangeInspectorRequestFailure &&
+        error.kind === "aborted"
+      ) {
+        return;
+      }
       const sessionChanged =
         error instanceof ChangeInspectorSessionChanged && origin === "route";
       if (
@@ -502,9 +695,11 @@ export async function bootstrapChangeInspector(
         return;
       }
       reading = null;
+      exactReadingPresentation = null;
       readingRefusal = error instanceof Error ? error.message : String(error);
       paint(pollDraft);
     } finally {
+      attempt.dispose();
       if (pendingReading?.token === pendingToken) pendingReading = null;
       releaseQueuedPoll();
     }
@@ -517,7 +712,9 @@ export async function bootstrapChangeInspector(
     origin: GenerationLoadOrigin = "route",
   ): Promise<void> => {
     const credentialVersion = sessionCredentialVersion();
-    const epoch = ++requestEpoch;
+    const epoch = advanceRequestEpoch();
+    let refreshAttempt: ReadingAttempt | null = null;
+    let refreshPendingToken: symbol | null = null;
     try {
       // The page this load will publish is decided once, before any staged
       // state can shift beneath it: the same URL is fetched and then recorded
@@ -590,20 +787,40 @@ export async function bootstrapChangeInspector(
         if (visibleReading === acceptedReadingKey && reading !== null) {
           acceptedReading = reading;
         } else {
-          const result = await withinTimeout(
-            (async () => {
-              const loaded = await loadChangeInspectorReading(
-                route,
-                changes.projectionStamp,
-              );
-              const readingPostflight = decodeReaderProfile(
-                await fetchChangeInspectorJSON("/api/v2/profile"),
-              );
-              return { loaded, readingPostflight };
-            })(),
-            EXACT_READING_TIMEOUT_MS,
-            "exact Change reading timed out",
+          const displayedGeneration = state.snapshot().generation;
+          refreshPendingToken = Symbol("exact-reading-refresh");
+          pendingReading = {
+            key:
+              displayedGeneration === null
+                ? visibleReading
+                : readingKey(
+                    route,
+                    displayedGeneration.changes.projectionStamp,
+                  ),
+            token: refreshPendingToken,
+          };
+          const attempt = activateReadingAttempt();
+          refreshAttempt = attempt;
+          const refreshBudget = attempt.schedule(
+            () => attempt.abort("refresh_expiry"),
+            EXACT_READING_SOFT_BUDGET_MS,
           );
+          const loaded = await attempt.run(() =>
+            loadChangeInspectorReading(
+              route,
+              changes.projectionStamp,
+              attempt.signal,
+            ),
+          );
+          const readingPostflight = decodeReaderProfile(
+            await attempt.run(() =>
+              fetchChangeInspectorJSON("/api/v2/profile", {
+                signal: attempt.signal,
+              }),
+            ),
+          );
+          attempt.clearTimer(refreshBudget);
+          const result = { loaded, readingPostflight };
           if (epoch !== requestEpoch) return;
           const browserRoute = currentRoute();
           if (
@@ -687,6 +904,14 @@ export async function bootstrapChangeInspector(
       clearReading();
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
+    } finally {
+      refreshAttempt?.dispose();
+      if (refreshPendingToken !== null) {
+        if (pendingReading?.token === refreshPendingToken) {
+          pendingReading = null;
+        }
+        releaseQueuedPoll();
+      }
     }
   };
 
@@ -708,7 +933,7 @@ export async function bootstrapChangeInspector(
     // Every URL intent, including same-query detail/focus navigation, owns a
     // new read epoch. An older detail request may still finish, but it may not
     // restart a generation for the route the user has already left.
-    requestEpoch += 1;
+    advanceRequestEpoch();
     state.setRoute(route);
     if (route.kind === "invalid") {
       clearVisibleRequest();
@@ -873,7 +1098,7 @@ export async function bootstrapChangeInspector(
       if (generation === null || anchor === null || anchor === undefined) {
         return null;
       }
-      const epoch = ++requestEpoch;
+      const epoch = advanceRequestEpoch();
       try {
         const preflight = decodeReaderProfile(
           await fetchChangeInspectorJSON("/api/v2/profile"),

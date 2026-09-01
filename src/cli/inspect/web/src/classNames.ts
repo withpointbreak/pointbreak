@@ -43,6 +43,8 @@ export const CLASS = {
   lensHeading: "lens-heading",
   lensMeta: "lens-meta",
   lensCount: "lens-count",
+  exactReadingStillLoading: "exact-reading-still-loading",
+  exactReadingRetryableFailure: "exact-reading-retryable-failure",
 
   // (The app-shell store-identity chip + detail popover is static markup in
   // index.html — `store-identity*` classes live there and in app.css, not here —

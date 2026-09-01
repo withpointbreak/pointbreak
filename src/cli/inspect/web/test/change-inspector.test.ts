@@ -3099,6 +3099,81 @@ describe("Change-first composition", () => {
     }
   });
 
+  it("keeps a superseded global Timeline boundary completion inert", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=1&order=desc");
+    const currentProfile = {
+      ...profile,
+      authorityCursor: authorityCursor(2),
+    };
+    const currentHead = boundaryHistoryPage({
+      eventIds: ["evt:current-head"],
+      next: "tail-token",
+      offset: 0,
+    });
+    const currentTail = boundaryHistoryPage({
+      eventIds: ["evt:current-tail"],
+      offset: 1,
+    });
+    let profileRequests = 0;
+    let resolveFirstBoundaryPreflight!: (response: Response) => void;
+    const historyRequests: string[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 3) {
+          return new Promise<Response>((resolve) => {
+            resolveFirstBoundaryPreflight = resolve;
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify(currentProfile)));
+      }
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (path.startsWith("/api/v2/history?")) {
+        historyRequests.push(path);
+        const query = new URL(path, "https://pointbreak.invalid").searchParams;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              query.get("after") === "tail-token" ? currentTail : currentHead,
+            ),
+          ),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    list?.focus();
+    list?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    await vi.waitFor(() => expect(profileRequests).toBe(3));
+
+    list?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    await vi.waitFor(() => expect(location.hash).toContain("tail-token"));
+    await vi.waitFor(() => expect(profileRequests).toBeGreaterThanOrEqual(7));
+    const settledHash = location.hash;
+    const settledHistoryRequests = [...historyRequests];
+
+    resolveFirstBoundaryPreflight(new Response(JSON.stringify(currentProfile)));
+    await vi.waitFor(() => expect(location.hash).toBe(settledHash));
+
+    expect(historyRequests).toEqual(settledHistoryRequests);
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Reader refused",
+    );
+  });
+
   it("reuses a coherent generation for exact navigation with the same query", async () => {
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -4157,6 +4232,507 @@ describe("Change-first composition", () => {
     expect(exactRequests).toBe(1);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "server response error",
+    );
+  });
+
+  it("keeps a route-origin reading active at the soft budget and aborts it at the hard budget", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let exactSignal: AbortSignal | null | undefined;
+    let markExactStarted!: () => void;
+    const exactStarted = new Promise<void>((resolve) => {
+      markExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:budget",
+              contextIdentity: "context:sha256:budget",
+              repository: "budget-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactSignal = init?.signal;
+        markExactStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+    await exactStarted;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(exactSignal?.aborted).toBe(false);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Still loading a large exact reading",
+    );
+    expect(
+      document.querySelector("[data-exact-reading-cancel]"),
+    ).not.toBeNull();
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Reader refused",
+    );
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    await bootstrap;
+    expect(exactSignal?.aborted).toBe(true);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "exact reading timed out",
+    );
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+    expect(
+      document.querySelector("#refresh")?.getAttribute("data-state"),
+    ).not.toBe("degraded");
+  });
+
+  it("retries a hard-budget failure as a fresh route reading", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    const signals: AbortSignal[] = [];
+    let exactRequests = 0;
+    let markFirstExactStarted!: () => void;
+    const firstExactStarted = new Promise<void>((resolve) => {
+      markFirstExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        if (init?.signal) signals.push(init.signal);
+        if (exactRequests === 1) markFirstExactStarted();
+        if (exactRequests > 1)
+          return Promise.resolve(
+            new Response(JSON.stringify(revisionDetail())),
+          );
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+    await firstExactStarted;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await bootstrap;
+
+    document
+      .querySelector<HTMLButtonElement>("[data-exact-reading-retry]")
+      ?.click();
+    await vi.waitFor(() => expect(exactRequests).toBe(2));
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).not.toBe(signals[1]);
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Exact Revision",
+      ),
+    );
+  });
+
+  it("accepts a 9.9 second document followed by a 2.5 second postflight", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let profileRequests = 0;
+    let markExactStarted!: () => void;
+    const exactStarted = new Promise<void>((resolve) => {
+      markExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        const delay = profileRequests === 3 ? 2_500 : 0;
+        if (delay === 0)
+          return Promise.resolve(new Response(JSON.stringify(profile)));
+        return new Promise<Response>((resolve) => {
+          setTimeout(
+            () => resolve(new Response(JSON.stringify(profile))),
+            delay,
+          );
+        });
+      }
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        markExactStarted();
+        return new Promise<Response>((resolve) => {
+          setTimeout(
+            () => resolve(new Response(JSON.stringify(revisionDetail()))),
+            9_900,
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+
+    await exactStarted;
+    await vi.advanceTimersByTimeAsync(9_900);
+    expect(profileRequests).toBe(3);
+    await vi.advanceTimersByTimeAsync(2_500);
+    await bootstrap;
+
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Exact Revision",
+    );
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Still loading",
+    );
+  });
+
+  it("aborts a route postflight at its own budget and offers Retry", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let profileRequests = 0;
+    let postflightSignal: AbortSignal | null | undefined;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 3) {
+          postflightSignal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      }
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path))
+        return Promise.resolve(new Response(JSON.stringify(revisionDetail())));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await bootstrap;
+
+    expect(postflightSignal?.aborted).toBe(true);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "exact reading postflight timed out",
+    );
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+  });
+
+  it("aborts a superseded route reading silently", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let exactSignal: AbortSignal | null | undefined;
+    let markExactStarted!: () => void;
+    const exactStarted = new Promise<void>((resolve) => {
+      markExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactSignal = init?.signal;
+        markExactStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+    await exactStarted;
+
+    location.hash = "#/attention";
+    window.dispatchEvent(new Event("hashchange"));
+    await bootstrap;
+    await vi.waitFor(() =>
+      expect(document.querySelector("#master h1")?.textContent).toContain(
+        "Attention",
+      ),
+    );
+
+    expect(exactSignal?.aborted).toBe(true);
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Reader refused",
+    );
+    expect(
+      document.querySelector("#refresh")?.getAttribute("data-state"),
+    ).not.toBe("degraded");
+  });
+
+  it("Cancel aborts the reading and leaves a cancelled presentation with Retry", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let exactSignal: AbortSignal | null | undefined;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactSignal = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector({ poll: false });
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    document
+      .querySelector<HTMLButtonElement>("[data-exact-reading-cancel]")
+      ?.click();
+    await bootstrap;
+
+    expect(exactSignal?.aborted).toBe(true);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "exact reading cancelled",
+    );
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+  });
+
+  it("a poll refresh keeps its reading painted and aborts at the 10 second refresh expiry", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let generation = 1;
+    let exactRequests = 0;
+    const refreshSignals: AbortSignal[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const stamp = `sha256:generation-${generation}`;
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        if (exactRequests === 1)
+          return Promise.resolve(
+            new Response(JSON.stringify(revisionDetail(stamp))),
+          );
+        if (init?.signal) refreshSignals.push(init.signal);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    const readingKey =
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey;
+    generation = 2;
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(exactRequests).toBe(2));
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(refreshSignals[0]?.aborted).toBe(true);
+    expect(
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey,
+    ).toBe(readingKey);
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Still loading",
+    );
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "degraded",
+    );
+  });
+
+  it("a recovery refresh has the same 10 second reading expiry without a cycle bound", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let generation = 1;
+    let exactRequests = 0;
+    const recoverySignals: AbortSignal[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      const stamp = `sha256:generation-${generation}`;
+      if (path === "/api/identity")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:recovery",
+              contextIdentity: "context:sha256:recovery",
+              repository: "recovery-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      if (path === "/api/v2/profile")
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(generation),
+            }),
+          ),
+        );
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        if (exactRequests === 1)
+          return Promise.resolve(
+            new Response(JSON.stringify(revisionDetail(stamp))),
+          );
+        if (init?.signal) recoverySignals.push(init.signal);
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    const readingKey =
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey;
+    generation = 2;
+
+    document.querySelector<HTMLButtonElement>("#connection-action")?.click();
+    await vi.waitFor(() => expect(exactRequests).toBe(2));
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(recoverySignals[0]?.aborted).toBe(false);
+    expect(exactRequests).toBe(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(recoverySignals[0]?.aborted).toBe(true);
+    expect(
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey,
+    ).toBe(readingKey);
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "degraded",
     );
   });
 });

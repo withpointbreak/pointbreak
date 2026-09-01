@@ -75,6 +75,10 @@ export interface ChangeInspectorRenderActions
 export interface ChangeInspectorDetailPresentation {
   reading: ChangeInspectorReading | null;
   refusal: string | null;
+  exactReading?:
+    | { kind: "still_loading"; cancel(): void }
+    | { kind: "retryable_failure"; message: string; retry(): void }
+    | null;
   timeline?: TimelineMonitorSnapshot | null;
 }
 
@@ -1936,6 +1940,33 @@ function renderDetail(
     );
     return;
   }
+  if (presentation.exactReading != null) {
+    const surface = document.createElement("section");
+    surface.className =
+      presentation.exactReading.kind === "still_loading"
+        ? CLASS.exactReadingStillLoading
+        : CLASS.exactReadingRetryableFailure;
+    const status = message(
+      presentation.exactReading.kind === "still_loading"
+        ? "Still loading a large exact reading"
+        : presentation.exactReading.message,
+    );
+    const action = document.createElement("button");
+    action.type = "button";
+    action.className = CLASS.ghost;
+    if (presentation.exactReading.kind === "still_loading") {
+      action.textContent = "Cancel";
+      action.dataset.exactReadingCancel = "";
+      action.addEventListener("click", presentation.exactReading.cancel);
+    } else {
+      action.textContent = "Retry";
+      action.dataset.exactReadingRetry = "";
+      action.addEventListener("click", presentation.exactReading.retry);
+    }
+    surface.append(status, detailActions(action));
+    replaceDetailWith(surface);
+    return;
+  }
   if (presentation.refusal !== null) {
     replaceDetailWith(
       message(`Reader refused this exact surface: ${presentation.refusal}`),
@@ -2005,6 +2036,7 @@ export function renderChangeInspector(
   presentation: ChangeInspectorDetailPresentation = {
     reading: null,
     refusal: null,
+    exactReading: null,
   },
 ): void {
   renderChangeInspectorIdentity(snapshot.identity ?? null);

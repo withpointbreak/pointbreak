@@ -135,11 +135,13 @@ export async function loadChangeInspectorReading(
     { kind: "lens" | "timeline" | "event" | "invalid" }
   >,
   expectedProjectionStamp: string,
+  signal?: AbortSignal,
 ): Promise<ChangeInspectorReading> {
   if (route.kind === "change") {
     const document = decodeChangeDetail(
       await fetchChangeInspectorJSON(
         `/api/v2/changes/${encoded(route.changeId)}`,
+        { signal },
       ),
     );
     if (document.summary.changeId !== route.changeId) {
@@ -160,6 +162,7 @@ export async function loadChangeInspectorReading(
     const document = decodeChangeRevisionDetail(
       await fetchChangeInspectorJSON(
         revisionPath(route.changeId, route.revision),
+        { signal },
       ),
     );
     assertRevisionDetail(document, route, expectedProjectionStamp);
@@ -169,6 +172,7 @@ export async function loadChangeInspectorReading(
     const document = decodeRevisionResource(
       await fetchChangeInspectorJSON(
         resourcePath(route.changeId, route.revision),
+        { signal },
       ),
     );
     if (!sameExactRevision(document.resource.revision, route.revision)) {
@@ -190,6 +194,7 @@ export async function loadChangeInspectorReading(
   const document = decodeRevisionInterdiff(
     await fetchChangeInspectorJSON(
       `/api/v2/changes/${encoded(route.changeId)}/interdiff/${encoded(route.from.revisionId)}/${encoded(route.to.revisionId)}?${params}`,
+      { signal },
     ),
   );
   if (

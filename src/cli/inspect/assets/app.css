@@ -1080,6 +1080,10 @@ main {
   gap: 8px;
   margin: 12px 0 16px;
 }
+.exact-reading-still-loading,
+.exact-reading-retryable-failure {
+  margin: 12px 0;
+}
 .detail-action-primary {
   color: var(--on-accent);
   background: var(--accent);
