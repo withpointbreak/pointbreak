@@ -13,15 +13,17 @@ usage() {
   cat <<'EOF'
 usage: change-inspector-browser-verify.sh --root <empty-directory>
        change-inspector-browser-verify.sh --shakedown
+       change-inspector-browser-verify.sh --shakedown-timeline-boundary
+       change-inspector-browser-verify.sh --shakedown-exact-history-focus
 
 Runs the public L2 Change matrix against an exact injected Pointbreak binary.
 The root must be empty and outside this worktree. Logs, screenshots, fixture
 repositories, the disposable POINTBREAK_HOME, and completion-last manifest all
 remain under that root.
 
---shakedown creates and cleans its own temporary root, exercises the shared
-fixture/server/browser path through one representative exact-reading case, and
-retains nothing on success. It cannot be combined with --root.
+Every --shakedown* mode creates and cleans its own temporary root, exercises
+the shared fixture/server/browser path through one literal representative
+journey, and retains nothing on success. None can be combined with --root.
 EOF
 }
 
@@ -60,21 +62,29 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="${2:-}"; shift 2 ;;
     --shakedown) mode="shakedown"; shift ;;
+    --shakedown-timeline-boundary) mode="shakedown-timeline-boundary"; shift ;;
+    --shakedown-exact-history-focus) mode="shakedown-exact-history-focus"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
-if [ "$mode" = "shakedown" ]; then
-  [ -z "$root" ] || die "--shakedown creates its own root and cannot use --root"
-  shakedown_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
-  shakedown_root="$(mktemp -d "$shakedown_parent/pointbreak-change-inspector-shakedown.XXXXXX")"
-  root="$shakedown_root"
-  shakedown_started_at="$(date +%s)"
-  trap cleanup_shakedown_root EXIT
-else
-  [ -n "$root" ] || die "--root <empty-directory> is required"
-fi
+case "$mode" in
+  shakedown|shakedown-timeline-boundary|shakedown-exact-history-focus)
+    [ -z "$root" ] || die "$mode creates its own root and cannot use --root"
+    shakedown_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+    shakedown_root="$(mktemp -d "$shakedown_parent/pointbreak-change-inspector-shakedown.XXXXXX")"
+    root="$shakedown_root"
+    shakedown_started_at="$(date +%s)"
+    trap cleanup_shakedown_root EXIT
+    ;;
+  full)
+    [ -n "$root" ] || die "--root <empty-directory> is required"
+    ;;
+  *)
+    die "unsupported browser verification mode: $mode"
+    ;;
+esac
 [ -n "$pointbreak_binary" ] || die "POINTBREAK_BINARY must name the exact worktree binary"
 [ -x "$pointbreak_binary" ] || die "POINTBREAK_BINARY is not executable: $pointbreak_binary"
 case "$pointbreak_binary" in
@@ -975,14 +985,28 @@ jq -e '
     ' "$browser_result" >&2
     die "browser diagnostic report did not pass"
   }
-if [ "$mode" = "shakedown" ]; then
-  jq -e '
+case "$mode" in
+  shakedown)
+    expected_shakedown_section="Shakedown exact reading and quiet polling"
+    ;;
+  shakedown-timeline-boundary)
+    expected_shakedown_section="Shakedown Timeline boundary and quiet polling"
+    ;;
+  shakedown-exact-history-focus)
+    expected_shakedown_section="Shakedown exact history and focus"
+    ;;
+  full)
+    expected_shakedown_section=""
+    ;;
+esac
+if [ "$mode" != "full" ]; then
+  jq -e --arg expectedSection "$expected_shakedown_section" '
     .status == "passed" and .globalInvalid == false and
     .sectionCount == 1 and .screenshotCount == 1 and
     (.failures | length == 0) and
-    (.sections == [{name: "Shakedown exact reading and quiet polling", status: "passed", failureCount: 0}])
+    (.sections == [{name: $expectedSection, status: "passed", failureCount: 0}])
   ' "$browser_result" >/dev/null \
-    || die "shakedown did not complete its one representative browser section"
+    || die "$mode did not complete its one representative browser section"
   screenshot_count="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
   [ "$screenshot_count" -eq 1 ] \
     || die "shakedown expected one temporary screenshot, found $screenshot_count"

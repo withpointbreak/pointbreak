@@ -60,7 +60,10 @@ test("shakedown mode owns its root and exits after one shared representative cas
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
 	);
-	const readme = await readFile(new URL("./README.md", import.meta.url), "utf8");
+	const readme = await readFile(
+		new URL("./README.md", import.meta.url),
+		"utf8",
+	);
 
 	assert.match(shell, /--shakedown\) mode="shakedown"; shift ;;/);
 	assert.match(
@@ -82,7 +85,10 @@ test("shakedown mode owns its root and exits after one shared representative cas
 		'"$pointbreak_binary" inspect --repo "$fixture_repo"',
 		modeSplit,
 	);
-	const browserRun = shell.indexOf("run_pw run-code --filename=", primaryServer);
+	const browserRun = shell.indexOf(
+		"run_pw run-code --filename=",
+		primaryServer,
+	);
 	assert.ok(
 		materialize >= 0 &&
 			modeSplit > materialize &&
@@ -101,8 +107,11 @@ test("shakedown mode owns its root and exits after one shared representative cas
 	);
 	const branch = browser.slice(shakedown, fullMatrix);
 	assert.equal(
-		(branch.match(/diagnostics\.section\("Shakedown exact reading and quiet polling"/g) ?? [])
-			.length,
+		(
+			branch.match(
+				/diagnostics\.section\("Shakedown exact reading and quiet polling"/g,
+			) ?? []
+		).length,
 		1,
 		"shakedown must run exactly one named representative section",
 	);
@@ -111,6 +120,268 @@ test("shakedown mode owns its root and exits after one shared representative cas
 	assert.match(branch, /profileCompletions/);
 	assert.match(branch, /return shakedownResult/);
 	assert.match(readme, /--shakedown/);
+});
+
+test("focused shakedown modes are literal, root-owned, and exit before the full matrix", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const readme = await readFile(
+		new URL("./README.md", import.meta.url),
+		"utf8",
+	);
+	const modes = [
+		{
+			flag: "--shakedown-timeline-boundary",
+			mode: "shakedown-timeline-boundary",
+			section: "Shakedown Timeline boundary and quiet polling",
+		},
+		{
+			flag: "--shakedown-exact-history-focus",
+			mode: "shakedown-exact-history-focus",
+			section: "Shakedown exact history and focus",
+		},
+	];
+
+	for (const { flag, mode, section } of modes) {
+		assert.match(
+			shell,
+			new RegExp(`${flag.replaceAll("-", "\\-")}\\) mode="${mode}"; shift ;;`),
+			`${flag} must have one explicit parser arm`,
+		);
+		assert.match(readme, new RegExp(flag.replaceAll("-", "\\-")));
+		const branchStart = browser.indexOf(`if (config.mode === "${mode}")`);
+		const fullMatrix = browser.indexOf(
+			'await diagnostics.section("Reader readiness"',
+		);
+		assert.ok(
+			branchStart >= 0 && branchStart < fullMatrix,
+			`${mode} must branch before the full matrix`,
+		);
+		const branch = browser.slice(branchStart, fullMatrix);
+		assert.equal(
+			(
+				branch.match(new RegExp(`diagnostics\\.section\\("${section}"`, "g")) ??
+				[]
+			).length,
+			1,
+			`${mode} must run exactly one named journey`,
+		);
+		assert.match(branch, /return focusedShakedownResult/);
+	}
+
+	assert.match(
+		shell,
+		/case "\$mode" in[\s\S]*shakedown\|shakedown-timeline-boundary\|shakedown-exact-history-focus\)/,
+		"all three shakedowns must share the self-owned root path",
+	);
+	assert.match(
+		shell,
+		/creates its own root and cannot use --root/,
+		"a caller root must be rejected for every shakedown",
+	);
+	assert.doesNotMatch(
+		shell,
+		/--(?:section|shakedown-section|mode)[= )]/,
+		"the harness must not expose a generic section or mode selector",
+	);
+	assert.match(
+		browser,
+		/config\.mode !== "full"[\s\S]*config\.mode !== "shakedown"[\s\S]*config\.mode !== "shakedown-timeline-boundary"[\s\S]*config\.mode !== "shakedown-exact-history-focus"/,
+		"the browser program must reject every mode outside the closed set",
+	);
+});
+
+test("Changes G waits for the terminal destination route, page key, and selected card", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const helperStart = source.indexOf(
+		"const waitForChangesTerminalDestination =",
+	);
+	const sectionStart = source.indexOf(
+		'await diagnostics.section("Changes keyboard and filters"',
+	);
+	const sectionEnd = source.indexOf(
+		'await diagnostics.section("Change topology cards"',
+		sectionStart,
+	);
+	assert.notEqual(helperStart, -1, "missing Changes terminal destination wait");
+	assert.ok(sectionStart >= 0 && sectionEnd > sectionStart);
+	const helper = source.slice(
+		helperStart,
+		source.indexOf("\n\tconst ", helperStart + 1),
+	);
+	assert.match(helper, /data-change-page=["']last["']/);
+	assert.match(helper, /data-change-target-route/);
+	assert.match(helper, /page\.keyboard\.press\("G"\)/);
+	assert.match(
+		helper,
+		/location\.hash !== expectedHash/,
+		"the wait must reject every route except the terminal destination",
+	);
+	assert.match(
+		helper,
+		/dataset\.changeListKey[\s\S]*JSON\.parse\(rawKey\)/,
+		"the wait must bind the painted page key",
+	);
+	assert.match(
+		helper,
+		/change-card-selected[\s\S]*unit-card\[data-change-id\][\s\S]*key\.changes\.at\(-1\)/,
+		"the destination wait must require its terminal card to be selected",
+	);
+	const section = source.slice(sectionStart, sectionEnd);
+	assert.match(
+		section,
+		/const lastId = await waitForChangesTerminalDestination\(\);[\s\S]*"G boundary"/,
+		"the full Changes journey must wait before asserting G",
+	);
+});
+
+test("narrow Back waits for the complete retained-master destination state", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const helperStart = source.indexOf("const waitForNarrowBackDestination =");
+	assert.notEqual(helperStart, -1, "missing narrow Back destination wait");
+	const helper = source.slice(
+		helperStart,
+		source.indexOf("\n\tconst ", helperStart + 1),
+	);
+	assert.match(
+		helper,
+		/URLSearchParams[\s\S]*normalize\(location\.hash\)[\s\S]*split-closed[\s\S]*detail\?\.inert[\s\S]*aria-hidden[\s\S]*master\?\.contains\(document\.activeElement\)/,
+		"Back readiness must normalize the route and combine it with closed, hidden, retained-master state",
+	);
+	const sectionStart = source.indexOf(
+		'await diagnostics.section("Exact detail and reading"',
+	);
+	const sectionEnd = source.indexOf(
+		'await diagnostics.section("Exact resource availability"',
+		sectionStart,
+	);
+	const section = source.slice(sectionStart, sectionEnd);
+	const click = section.indexOf('await page.locator("#detail-back").click();');
+	const wait = section.indexOf("await waitForNarrowBackDestination(", click);
+	const assertion = section.indexOf("const narrowDetailClosed", click);
+	assert.ok(
+		click >= 0 && wait > click && assertion > wait,
+		"the complete Back wait must precede every sampled destination assertion",
+	);
+});
+
+test("exact readiness requires the requested route and accepted reading body", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf("function isAcceptedExactReadingInPage(");
+	const end = source.indexOf("\n\tconst ", start);
+	assert.notEqual(start, -1, "missing semantic exact-reading predicate");
+	assert.ok(end > start, "missing semantic exact-reading predicate boundary");
+	const classify = new Function(
+		`${source.slice(start, end)}\nreturn isAcceptedExactReadingInPage;`,
+	)();
+	const route =
+		"changes/change%3Asha256%3Aaa/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc";
+	const expectedHash = `#/${route}`;
+	const acceptedDetail = {
+		dataset: { changeReadingKey: `${route}:sha256:projection` },
+		textContent: "Exact Revision Matrix fact",
+		querySelector: (selector) =>
+			selector === ":scope > h2" ? { textContent: "Exact Revision" } : null,
+	};
+	const originalDocument = globalThis.document;
+	const originalLocation = globalThis.location;
+	const documentFor = (detail) => ({
+		querySelector: (selector) => {
+			if (selector === "#detail-body") return detail;
+			if (selector === "#stat-hash") return { textContent: "sha256:stamp" };
+			if (selector === "#master h1") return {};
+			if (selector === "#master") return { textContent: "Changes" };
+			return null;
+		},
+	});
+	try {
+		globalThis.location = { hash: expectedHash };
+		globalThis.document = documentFor(acceptedDetail);
+		assert.deepEqual(classify({ expectedHash, expectedRoute: route }), {
+			state: "ready",
+		});
+		const resourceRoute = `${route.replace("?", "/resource?")}`;
+		globalThis.location = { hash: `#/${resourceRoute}` };
+		globalThis.document = documentFor({
+			dataset: { changeReadingKey: `${resourceRoute}:sha256:projection` },
+			textContent: "Authoritative captured diff available",
+			querySelector: (selector) =>
+				selector === ":scope > h2"
+					? { textContent: "Authoritative captured diff" }
+					: null,
+		});
+		assert.deepEqual(
+			classify({
+				expectedHash: `#/${resourceRoute}`,
+				expectedRoute: resourceRoute,
+			}),
+			{ state: "ready" },
+			"accepted exact resource bodies use the same semantic readiness contract",
+		);
+
+		globalThis.location = { hash: expectedHash };
+		globalThis.document = documentFor(null);
+		assert.equal(
+			classify({ expectedHash, expectedRoute: route }),
+			false,
+			"a matching hash without a reading is not ready",
+		);
+		globalThis.document = documentFor({
+			...acceptedDetail,
+			textContent: "Loading exact Revision…",
+			querySelector: () => null,
+		});
+		assert.equal(
+			classify({ expectedHash, expectedRoute: route }),
+			false,
+			"a loading presentation is not ready",
+		);
+		globalThis.document = documentFor({
+			...acceptedDetail,
+			querySelector: () => null,
+		});
+		assert.equal(
+			classify({ expectedHash, expectedRoute: route }),
+			false,
+			"a merely changed reading key without accepted body is not ready",
+		);
+		globalThis.document = documentFor({
+			...acceptedDetail,
+			dataset: {
+				changeReadingKey: "changes/other:sha256:projection",
+			},
+		});
+		assert.equal(
+			classify({ expectedHash, expectedRoute: route }),
+			false,
+			"an accepted body for another exact route is not ready",
+		);
+	} finally {
+		if (originalDocument === undefined) delete globalThis.document;
+		else globalThis.document = originalDocument;
+		if (originalLocation === undefined) delete globalThis.location;
+		else globalThis.location = originalLocation;
+	}
+	assert.match(
+		source,
+		/page\.waitForFunction\(isAcceptedExactReadingInPage,[\s\S]*expectedRoute:/,
+		"the generic exact open path must use semantic readiness",
+	);
 });
 
 test("empty ready L2 recovery is explicit, authenticated, and retained before browser readiness", async () => {
@@ -156,7 +427,7 @@ test("browser servers force active derived access and retain the primary current
 		"utf8",
 	);
 	const ambientGuard = source.indexOf(
-		'POINTBREAK_DERIVED_ACCESS must be unset or sqlite-wal-bodyless-v1',
+		"POINTBREAK_DERIVED_ACCESS must be unset or sqlite-wal-bodyless-v1",
 	);
 	const readerLaunch = source.indexOf(
 		'POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \\\n    POINTBREAK_HOME="$reader_state_home"',
@@ -171,8 +442,14 @@ test("browser servers force active derived access and retain the primary current
 	);
 	const browserConfig = source.indexOf('browser_config="$(jq -cn');
 	assert.ok(ambientGuard >= 0, "missing ambient derived-access guard");
-	assert.ok(readerLaunch > ambientGuard, "reader servers must force active access");
-	assert.ok(primaryLaunch > ambientGuard, "primary server must force active access");
+	assert.ok(
+		readerLaunch > ambientGuard,
+		"reader servers must force active access",
+	);
+	assert.ok(
+		primaryLaunch > ambientGuard,
+		"primary server must force active access",
+	);
 	assert.ok(
 		primaryStatus > primaryStartup && browserConfig > primaryStatus,
 		"the primary status witness must be retained before browser configuration",
@@ -838,6 +1115,67 @@ test("console 503 exemption accepts only typed primary Change transitions inside
 	);
 });
 
+test("append-window profile exemption accepts only the exact primary stale tuple", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const start = source.indexOf(
+		"function isDeliberateProfileProjectionTransition(",
+	);
+	const end = source.indexOf("\n\tconst responseInspections", start);
+	assert.notEqual(
+		start,
+		-1,
+		"missing profile projection transition classifier",
+	);
+	assert.ok(end > start, "missing profile classifier boundary");
+	const classify = new Function(
+		`${source.slice(start, end)}\nreturn isDeliberateProfileProjectionTransition;`,
+	)();
+	const baseUrl = "http://127.0.0.1:4173";
+	const typed = {
+		url: `${baseUrl}/api/v2/profile`,
+		status: 503,
+		body: {
+			schema: "pointbreak.inspect-change-projection-error",
+			version: 1,
+			code: "projection_stale",
+			retryable: true,
+		},
+		schema: "pointbreak.inspect-change-projection-error",
+		insideAppendWindow: true,
+	};
+	assert.equal(classify(typed, baseUrl), true);
+	for (const rejected of [
+		{ ...typed, insideAppendWindow: false },
+		{ ...typed, status: 409 },
+		{ ...typed, url: `${baseUrl}/api/v2/changes` },
+		{ ...typed, url: `${baseUrl}/api/v2/profile/extra` },
+		{ ...typed, url: `${baseUrl}.example/api/v2/profile` },
+		{ ...typed, url: "http://127.0.0.1:4999/api/v2/profile" },
+		{ ...typed, schema: "pointbreak.inspect-reader-profile" },
+		{
+			...typed,
+			body: { ...typed.body, schema: "pointbreak.inspect-reader-profile" },
+		},
+		{ ...typed, body: { ...typed.body, version: 2 } },
+		{ ...typed, body: { ...typed.body, code: "projection_unstable" } },
+		{ ...typed, body: { ...typed.body, retryable: false } },
+	]) {
+		assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+	}
+	const runtimeAccounting = source.slice(
+		source.indexOf("await settleResponseInspections();"),
+		source.indexOf('await diagnostics.section("Browser runtime"'),
+	);
+	assert.match(
+		runtimeAccounting,
+		/isDeliberateChangeProjectionTransition[\s\S]*isDeliberateProfileProjectionTransition/,
+		"runtime accounting must admit both closed typed transition classes",
+	);
+});
+
 test("an aggregate failure cannot publish a passing completion manifest", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-diagnostics-"));
 	const candidatePath = join(root, ".manifest.json.tmp");
@@ -1279,7 +1617,10 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		/primary derived-access status|active\/current/i,
 	);
 
-	const mismatchedStatusPath = join(root, ".mismatched-status-manifest.json.tmp");
+	const mismatchedStatusPath = join(
+		root,
+		".mismatched-status-manifest.json.tmp",
+	);
 	await writeFile(
 		mismatchedStatusPath,
 		`${JSON.stringify({

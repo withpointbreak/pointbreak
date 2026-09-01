@@ -2,7 +2,12 @@
 // It only reads the disposable Inspector page and writes screenshots under its configured root.
 // biome-ignore format: playwright-cli run-code wraps this file as one function expression.
 ((config) => async (page) => {
-	if (config.mode !== "full" && config.mode !== "shakedown") {
+	if (
+		config.mode !== "full" &&
+		config.mode !== "shakedown" &&
+		config.mode !== "shakedown-timeline-boundary" &&
+		config.mode !== "shakedown-exact-history-focus"
+	) {
 		throw new Error(`unsupported browser verification mode: ${config.mode}`);
 	}
 	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
@@ -40,6 +45,25 @@
 			body.schema === record.schema &&
 			body.version === 1 &&
 			body.code === "projection_unstable" &&
+			body.retryable === true
+		);
+	}
+	function isDeliberateProfileProjectionTransition(record, primaryBaseUrl) {
+		if (!record.insideAppendWindow || record.status !== 503) return false;
+		if (typeof record.url !== "string" || typeof primaryBaseUrl !== "string")
+			return false;
+		const primaryOrigin = primaryBaseUrl.endsWith("/")
+			? primaryBaseUrl.slice(0, -1)
+			: primaryBaseUrl;
+		if (record.url !== `${primaryOrigin}/api/v2/profile`) return false;
+		const body = record.body;
+		return (
+			typeof body === "object" &&
+			body !== null &&
+			record.schema === "pointbreak.inspect-change-projection-error" &&
+			body.schema === record.schema &&
+			body.version === 1 &&
+			body.code === "projection_stale" &&
 			body.retryable === true
 		);
 	}
@@ -180,6 +204,47 @@
 			normalize(actualHash) === normalize(expectedHash)
 		);
 	};
+	function isAcceptedExactReadingInPage({ expectedHash, expectedRoute }) {
+		const normalize = (value) => {
+			const raw = value.startsWith("#/")
+				? value.slice(2)
+				: value.startsWith("#")
+					? value.slice(1)
+					: value;
+			const separator = raw.indexOf("?");
+			const path = separator === -1 ? raw : raw.slice(0, separator);
+			const search = separator === -1 ? "" : raw.slice(separator + 1);
+			const entries = Array.from(new URLSearchParams(search).entries()).sort(
+				([leftKey, leftValue], [rightKey, rightValue]) =>
+					leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue),
+			);
+			return JSON.stringify([path, entries]);
+		};
+		const refusal = document.querySelector("#master")?.textContent?.trim();
+		if (refusal?.startsWith("Reader refused:")) {
+			return { state: "refused", detail: refusal };
+		}
+		if (normalize(location.hash) !== normalize(expectedHash)) return false;
+		const stamp = document.querySelector("#stat-hash")?.textContent?.trim();
+		if (!stamp || stamp === "—" || !document.querySelector("#master h1"))
+			return false;
+		const detail = document.querySelector("#detail-body");
+		const readingKey = detail?.dataset.changeReadingKey;
+		if (typeof readingKey !== "string") return false;
+		const projectionSeparator = readingKey.lastIndexOf(":sha256:");
+		if (projectionSeparator <= 0) return false;
+		const readingRoute = readingKey.slice(0, projectionSeparator);
+		if (normalize(readingRoute) !== normalize(expectedRoute)) return false;
+		const text = detail.textContent?.trim() ?? "";
+		const heading = detail.querySelector(":scope > h2")?.textContent?.trim();
+		if (
+			text.length === 0 ||
+			text.startsWith("Loading ") ||
+			!heading
+		)
+			return false;
+		return { state: "ready" };
+	}
 	const currentRouteMatches = (expectedHash) =>
 		page.evaluate(semanticRouteMatchesInPage, {
 			expectedHash,
@@ -251,6 +316,9 @@
 			page.url().startsWith(`${config.server.baseUrl}/`) &&
 			(await currentRouteMatches(targetHash));
 		const [expectedPath] = route.split("?", 2);
+		const expectedLens = expectedPath.split("/", 1)[0] || "timeline";
+		const expectsExactReading =
+			expectedLens !== "timeline" && expectedPath.includes("/");
 		const eventPrefix = "timeline/events/";
 		const expectedEventId = expectedPath.startsWith(eventPrefix)
 			? decodeURIComponent(expectedPath.slice(eventPrefix.length))
@@ -277,7 +345,12 @@
 		if (companionTimelineHash !== null) {
 			await waitForCurrentRoute(companionTimelineHash, "timeline");
 		}
-		const readiness = await page.waitForFunction(
+		const readiness = expectsExactReading
+			? await page.waitForFunction(isAcceptedExactReadingInPage, {
+					expectedHash: targetHash,
+					expectedRoute: route,
+				})
+			: await page.waitForFunction(
 			({ expectedRoute, expectedEventId, priorKeys, reload }) => {
 				const refusal = document.querySelector("#master")?.textContent?.trim();
 				if (refusal?.startsWith("Reader refused:")) {
@@ -316,15 +389,6 @@
 				if (!rawKey) return false;
 				try {
 					const key = JSON.parse(rawKey);
-					if (path.includes("/")) {
-						const readingKey =
-							document.querySelector("#detail-body")?.dataset.changeReadingKey;
-						return key.lens === expectedLens &&
-							readingKey &&
-							(reload || readingKey !== priorKeys.reading)
-							? { state: "ready" }
-							: false;
-					}
 					const retainedExactCompanion = priorKeys.route.startsWith(
 						`#/${expectedLens}/`,
 					);
@@ -339,7 +403,7 @@
 				}
 			},
 			{ expectedRoute: route, expectedEventId, priorKeys, reload },
-		);
+			);
 		const readinessState = await readiness.jsonValue();
 		await readiness.dispose();
 		if (readinessState.state === "refused") {
@@ -512,6 +576,139 @@
 		}, lens);
 	const selected = () =>
 		page.locator(".unit-card.change-card-selected[data-change-id]");
+	const waitForChangesTerminalDestination = async () => {
+		const lastPage = page.locator('[data-change-page="last"]');
+		const lastPageCount = await lastPage.count();
+		requireCondition(
+			lastPageCount === 1,
+			"Changes G destination",
+			"the Changes page did not expose one terminal-page route",
+			1,
+			lastPageCount,
+		);
+		const expectedHash = await lastPage.getAttribute("data-change-target-route");
+		requireCondition(
+			typeof expectedHash === "string" && expectedHash.startsWith("#/changes?"),
+			"Changes G destination",
+			"the terminal-page control did not expose a Changes route",
+			"#/changes?...",
+			expectedHash,
+		);
+		await page.keyboard.press("G");
+		const destination = await page.waitForFunction((expectedHash) => {
+			if (location.hash !== expectedHash) return false;
+			const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+			if (!rawKey) return false;
+			try {
+				const key = JSON.parse(rawKey);
+				const expectedQuery = Array.from(
+					new URLSearchParams(expectedHash.split("?", 2)[1] ?? "").entries(),
+			).sort();
+				const keyQuery = Object.entries(key.query ?? {})
+					.filter(([, value]) => value !== null && value !== undefined)
+					.map(([name, value]) => [name, String(value)])
+					.sort();
+				const selectedCard = document.querySelector(
+					".unit-card.change-card-selected[data-change-id]",
+				);
+				const cards = Array.from(
+					document.querySelectorAll(".unit-card[data-change-id]"),
+				);
+				return (
+					key.lens === "changes" &&
+					JSON.stringify(keyQuery) === JSON.stringify(expectedQuery) &&
+					Array.isArray(key.changes) &&
+					key.changes.length > 0 &&
+					selectedCard === cards.at(-1) &&
+					selectedCard?.dataset.changeId === key.changes.at(-1)
+				);
+			} catch {
+				return false;
+			}
+		}, expectedHash);
+		await destination.dispose();
+		return selected().getAttribute("data-change-id");
+	};
+	const waitForNarrowBackDestination = (expectedHash) =>
+		page.waitForFunction(
+			({ expectedHash }) => {
+				const normalize = (value) => {
+					const raw = value.startsWith("#/")
+						? value.slice(2)
+						: value.startsWith("#")
+							? value.slice(1)
+							: value;
+					const separator = raw.indexOf("?");
+					const path = separator === -1 ? raw : raw.slice(0, separator);
+					const search = separator === -1 ? "" : raw.slice(separator + 1);
+					const entries = Array.from(new URLSearchParams(search).entries()).sort();
+					return JSON.stringify([path, entries]);
+				};
+				const split = document.querySelector(".split");
+				const detail = document.querySelector("#detail");
+				const master = document.querySelector("#master");
+				return (
+					normalize(location.hash) === normalize(expectedHash) &&
+					split?.classList.contains("split-closed") === true &&
+					detail?.inert === true &&
+					detail.getAttribute("aria-hidden") === "true" &&
+					(master === document.activeElement ||
+						master?.contains(document.activeElement) === true)
+				);
+			},
+			{ expectedHash },
+		);
+	const waitForGlobalTimelineBoundary = async (
+		boundary,
+		priorHash,
+		priorKey,
+	) => {
+		await page.waitForFunction(
+			({ expectedBoundary, previousHash, previousKey }) => {
+				const master = document.querySelector("#master");
+				const list = document.querySelector("#timeline");
+				const rows = Array.from(
+					list?.querySelectorAll("[data-event-id]") ?? [],
+				);
+				const active = list?.getAttribute("aria-activedescendant");
+				const timelineKey = master?.dataset.timelineKey;
+				const expected =
+					expectedBoundary === "first" ? rows[0]?.id : rows.at(-1)?.id;
+				const query = new URLSearchParams(
+					location.hash.split("?", 2)[1] ?? "",
+				);
+				const routeChanged = location.hash !== previousHash;
+				const freshPage = !routeChanged || timelineKey !== previousKey;
+				const summary =
+					document.querySelector(".timeline-summary")?.textContent ?? "";
+				const loaded = /loaded\s+\d+-(\d+)\s+of\s+(\d+)\s+matches/.exec(
+					summary,
+				);
+				const terminalPage =
+					document.querySelector('[data-timeline-page="next"]') === null &&
+					loaded !== null &&
+					loaded[1] === loaded[2];
+				const reachedPage =
+					expectedBoundary === "first"
+						? !query.has("after") && !query.has("at")
+						: terminalPage;
+				return (
+					reachedPage &&
+					freshPage &&
+					rows.length > 0 &&
+					active === expected &&
+					document.activeElement === list &&
+					timelineKey !== undefined &&
+					!master.textContent?.includes("Loading Change generation")
+				);
+			},
+			{
+				expectedBoundary: boundary,
+				previousHash: priorHash,
+				previousKey: priorKey,
+			},
+		);
+	};
 	const cardNamesAreUseful = () =>
 		page.evaluate(() =>
 			Array.from(document.querySelectorAll(".unit-card[data-change-id]")).every(
@@ -593,6 +790,267 @@
 			hierarchy,
 		);
 	};
+
+	if (config.mode === "shakedown-timeline-boundary") {
+		await diagnostics.section("Shakedown Timeline boundary and quiet polling", {
+			setup: () =>
+				open(
+					"timeline?limit=1&order=asc",
+					layouts[0],
+					"Timeline boundary shakedown setup",
+				),
+			run: async () => {
+				const listbox = page.locator("#timeline");
+				await listbox.focus();
+				const priorHash = await hash();
+				const priorKey = await page
+					.locator("#master")
+					.getAttribute("data-timeline-key");
+				const primaryApiPrefix = `${config.server.baseUrl}/api/`;
+				const historyPrefix = `${config.server.baseUrl}/api/v2/history`;
+				const requests = [];
+				let tailStartedAt = null;
+				let markTailStarted;
+				let releaseTail;
+				let tailReleased = false;
+				const tailStarted = new Promise((resolve) => {
+					markTailStarted = resolve;
+				});
+				const tailRelease = new Promise((resolve) => {
+					releaseTail = () => {
+						tailReleased = true;
+						resolve();
+					};
+				});
+				let delayedTail = false;
+				const recordRequest = (request) => {
+					if (request.url().startsWith(primaryApiPrefix)) {
+						requests.push({ url: request.url(), startedAt: Date.now() });
+					}
+				};
+				const delayTail = async (route) => {
+					const requestUrl = route.request().url();
+					const query = new URL(requestUrl).searchParams;
+					if (
+						!delayedTail &&
+						requestUrl.startsWith(historyPrefix) &&
+						query.has("after")
+					) {
+						delayedTail = true;
+						tailStartedAt = Date.now();
+						markTailStarted();
+						const response = await route.fetch();
+						await tailRelease;
+						await route.fulfill({ response });
+						return;
+					}
+					await route.continue();
+				};
+				page.on("request", recordRequest);
+				await page.route("**/api/v2/history**", delayTail);
+				try {
+					await page.keyboard.press("G");
+					await Promise.race([
+						tailStarted,
+						page
+							.waitForTimeout(5_000)
+							.then(() => fail("Timeline boundary shakedown", "no tail continuation was delayed")),
+					]);
+					await page.waitForTimeout(3_500);
+					const requestsDuringHeldTail = requests
+						.filter(
+							(request) =>
+								tailStartedAt !== null && request.startedAt >= tailStartedAt,
+						)
+						.map((request) => request.url);
+					const pollFanOut = requestsDuringHeldTail.filter(
+						(requestUrl) => !requestUrl.startsWith(historyPrefix),
+					);
+					compare(
+						pollFanOut.length === 0,
+						"Timeline traversal poll boundary",
+						"a healthy due tick issued background API work while the foreground tail traversal was pending",
+						[],
+						pollFanOut,
+					);
+					releaseTail();
+					await waitForGlobalTimelineBoundary("last", priorHash, priorKey);
+					const terminal = await page.evaluate(() => {
+						const list = document.querySelector("#timeline");
+						const rows = Array.from(
+							list?.querySelectorAll("[data-event-id]") ?? [],
+						);
+						const selected = rows.find(
+							(row) => row.getAttribute("aria-selected") === "true",
+						);
+						return {
+							active: list?.getAttribute("aria-activedescendant") ?? null,
+							selected: selected?.id ?? null,
+							terminal: rows.at(-1)?.id ?? null,
+						};
+					});
+					compare(
+						terminal.active !== null &&
+							terminal.active === terminal.selected &&
+							terminal.selected === terminal.terminal,
+						"Timeline traversal terminal selection",
+						"the released global traversal did not land on the terminal selected event",
+						{ active: "terminal row", selected: "terminal row" },
+						terminal,
+					);
+					await screenshot("shakedown-timeline-boundary");
+				} finally {
+					if (!tailReleased) releaseTail();
+					page.off("request", recordRequest);
+					await page.unroute("**/api/v2/history**", delayTail);
+				}
+			},
+			teardown: teardownSection,
+		});
+		const focusedShakedownResult = diagnostics.result({
+			screenshotCount: screenshots,
+		});
+		console.log(
+			`POINTBREAK_BROWSER_RESULT=${JSON.stringify(focusedShakedownResult)}`,
+		);
+		return focusedShakedownResult;
+	}
+
+	if (config.mode === "shakedown-exact-history-focus") {
+		await diagnostics.section("Shakedown exact history and focus", {
+			setup: () =>
+				open(
+					"changes?limit=1&order=change_id_asc",
+					layouts[0],
+					"exact history shakedown setup",
+				),
+			run: async () => {
+				const terminalChange = await waitForChangesTerminalDestination();
+				requireCondition(
+					typeof terminalChange === "string" && terminalChange.length > 0,
+					"exact history Changes G",
+					"the terminal Changes journey produced no selected Change",
+					"nonempty Change ID",
+					terminalChange,
+				);
+
+				const revisionRoute = exactReadingRoute();
+				await open(
+					revisionRoute,
+					layouts[0],
+					"exact history accepted Revision",
+				);
+				const revisionText = await page.locator("#detail-body").innerText();
+				compare(
+					revisionText.includes("Matrix fact"),
+					"exact history accepted Revision",
+					"semantic readiness completed without the requested accepted Revision body",
+					"Matrix fact",
+					revisionText,
+				);
+
+				const resourceAction = page.getByRole("button", {
+					name: "Open authoritative captured diff",
+				});
+				const resourceActionCount = await resourceAction.count();
+				requireCondition(
+					resourceActionCount === 1,
+					"exact history resource route",
+					"the accepted Revision exposed no unique captured-resource action",
+					1,
+					resourceActionCount,
+				);
+				await resourceAction.click();
+				const resourceHashHandle = await page.waitForFunction(() =>
+					location.hash.includes("/resource?"),
+				);
+				await resourceHashHandle.dispose();
+				const resourceHash = await hash();
+				const resourceRoute = resourceHash.slice(2);
+				requireCondition(
+					resourceRoute.includes(encodeURIComponent(config.fixture.rich.changeId)) &&
+						resourceRoute.includes(
+							encodeURIComponent(config.fixture.rich.revisionId),
+						) &&
+						resourceRoute.includes(
+							encodeURIComponent(config.fixture.rich.artifactHash),
+						),
+					"exact history resource route",
+					"the resource route lost the requested exact Change, Revision, or artifact",
+					{
+						changeId: config.fixture.rich.changeId,
+						revisionId: config.fixture.rich.revisionId,
+						artifactHash: config.fixture.rich.artifactHash,
+					},
+					resourceHash,
+				);
+				const resourceReady = await page.waitForFunction(
+					isAcceptedExactReadingInPage,
+					{ expectedHash: resourceHash, expectedRoute: resourceRoute },
+				);
+				const resourceReadiness = await resourceReady.jsonValue();
+				await resourceReady.dispose();
+				if (resourceReadiness.state === "refused") {
+					fail("exact history resource route", resourceReadiness.detail);
+				}
+				const resourceFocus = await page
+					.locator("#detail-close")
+					.evaluate((node) => document.activeElement === node);
+				compare(
+					resourceFocus,
+					"exact history resource focus",
+					"accepted resource hydration did not retain exact-detail focus",
+					true,
+					resourceFocus,
+				);
+
+				await page.goBack();
+				const revisionReady = await page.waitForFunction(
+					isAcceptedExactReadingInPage,
+					{ expectedHash: `#/${revisionRoute}`, expectedRoute: revisionRoute },
+				);
+				const revisionReadiness = await revisionReady.jsonValue();
+				await revisionReady.dispose();
+				if (revisionReadiness.state === "refused") {
+					fail("exact history Revision return", revisionReadiness.detail);
+				}
+				const revisionFocus = await page
+					.locator("#detail-close")
+					.evaluate((node) => document.activeElement === node);
+				compare(
+					revisionFocus,
+					"exact history Revision focus",
+					"final accepted Revision hydration did not restore exact-detail focus",
+					true,
+					revisionFocus,
+				);
+
+				await page.setViewportSize({
+					width: layouts[1].width,
+					height: layouts[1].height,
+				});
+				await page.waitForFunction(
+					() => getComputedStyle(document.querySelector("#detail-back")).display !== "none",
+				);
+				const narrowBackTarget =
+					"#/changes?limit=100&order=change_id_asc";
+				await page.locator("#detail-back").click();
+				const narrowBackDestination = await waitForNarrowBackDestination(
+					narrowBackTarget,
+				);
+				await narrowBackDestination.dispose();
+				await screenshot("shakedown-exact-history-focus");
+			},
+			teardown: teardownSection,
+		});
+		const focusedShakedownResult = diagnostics.result({
+			screenshotCount: screenshots,
+		});
+		console.log(
+			`POINTBREAK_BROWSER_RESULT=${JSON.stringify(focusedShakedownResult)}`,
+		);
+		return focusedShakedownResult;
+	}
 
 	if (config.mode === "shakedown") {
 		await diagnostics.section("Shakedown exact reading and quiet polling", {
@@ -1781,57 +2239,6 @@
 			const listbox = page.locator("#timeline");
 			await listbox.focus();
 			const activeEvent = () => listbox.getAttribute("aria-activedescendant");
-			const waitForGlobalTimelineBoundary = async (
-				boundary,
-				priorHash,
-				priorKey,
-			) => {
-				await page.waitForFunction(
-					({ expectedBoundary, previousHash, previousKey }) => {
-						const master = document.querySelector("#master");
-						const list = document.querySelector("#timeline");
-						const rows = Array.from(
-							list?.querySelectorAll("[data-event-id]") ?? [],
-						);
-						const active = list?.getAttribute("aria-activedescendant");
-						const timelineKey = master?.dataset.timelineKey;
-						const expected =
-							expectedBoundary === "first" ? rows[0]?.id : rows.at(-1)?.id;
-						const query = new URLSearchParams(
-							location.hash.split("?", 2)[1] ?? "",
-						);
-						const routeChanged = location.hash !== previousHash;
-						const freshPage = !routeChanged || timelineKey !== previousKey;
-						const summary =
-							document.querySelector(".timeline-summary")?.textContent ?? "";
-						const loaded = /loaded\s+\d+-(\d+)\s+of\s+(\d+)\s+matches/.exec(
-							summary,
-						);
-						const terminalPage =
-							document.querySelector('[data-timeline-page="next"]') === null &&
-							loaded !== null &&
-							loaded[1] === loaded[2];
-						const reachedPage =
-							expectedBoundary === "first"
-								? !query.has("after") && !query.has("at")
-								: terminalPage;
-						return (
-							reachedPage &&
-							freshPage &&
-							rows.length > 0 &&
-							active === expected &&
-							document.activeElement === list &&
-							timelineKey !== undefined &&
-							!master.textContent?.includes("Loading Change generation")
-						);
-					},
-					{
-						expectedBoundary: boundary,
-						previousHash: priorHash,
-						previousKey: priorKey,
-					},
-				);
-			};
 			const firstBoundaryHash = await hash();
 			const firstBoundaryKey = await page
 				.locator("#master")
@@ -2962,8 +3369,7 @@
 				"false",
 				expandedAfterSecondEnter,
 			);
-			await page.keyboard.press("G");
-			const lastId = await selected().getAttribute("data-change-id");
+			const lastId = await waitForChangesTerminalDestination();
 			const lastLoadedId = await page
 				.locator(".unit-card[data-change-id]")
 				.last()
@@ -5091,8 +5497,13 @@
 				{ backTop: ">= detailTop", backBottom: "<= detailBottom" },
 				narrowBackBounds,
 			);
+			const narrowBackTarget =
+				"#/changes?limit=100&order=change_id_asc";
 			await page.locator("#detail-back").click();
-			await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
+			const narrowBackDestination = await waitForNarrowBackDestination(
+				narrowBackTarget,
+			);
+			await narrowBackDestination.dispose();
 			const narrowDetailClosed = await page
 				.locator(".split")
 				.evaluate((node) => node.classList.contains("split-closed"));
@@ -5439,7 +5850,8 @@
 	await settleResponseInspections();
 	const deliberateTransitionResponses = serviceUnavailableResponses.filter(
 		(response) =>
-			isDeliberateChangeProjectionTransition(response, config.server.baseUrl),
+			isDeliberateChangeProjectionTransition(response, config.server.baseUrl) ||
+			isDeliberateProfileProjectionTransition(response, config.server.baseUrl),
 	);
 	const transitionResponsesByUrl = new Map();
 	for (const response of deliberateTransitionResponses) {
@@ -5466,6 +5878,10 @@
 		serviceUnavailableResponses.filter(
 			(response) =>
 				!isDeliberateChangeProjectionTransition(
+					response,
+					config.server.baseUrl,
+				) &&
+				!isDeliberateProfileProjectionTransition(
 					response,
 					config.server.baseUrl,
 				),
