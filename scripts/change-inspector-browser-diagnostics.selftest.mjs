@@ -195,6 +195,11 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 		/config\.mode !== "full"[\s\S]*config\.mode !== "shakedown"[\s\S]*config\.mode !== "shakedown-timeline-boundary"[\s\S]*config\.mode !== "shakedown-exact-history-focus"/,
 		"the browser program must reject every mode outside the closed set",
 	);
+	assert.doesNotMatch(
+		browser,
+		/new URL\(/,
+		"focused modes must remain executable in the Playwright run-code sandbox",
+	);
 });
 
 test("Changes G waits for the terminal destination route, page key, and selected card", async () => {
@@ -315,6 +320,26 @@ test("exact readiness requires the requested route and accepted reading body", a
 		assert.deepEqual(classify({ expectedHash, expectedRoute: route }), {
 			state: "ready",
 		});
+		assert.equal(
+			classify({
+				expectedHash,
+				expectedRoute: route,
+				priorKeys: { reading: acceptedDetail.dataset.changeReadingKey },
+				reload: false,
+			}),
+			false,
+			"a retained key is not a replacement reading for ordinary exact navigation",
+		);
+		assert.deepEqual(
+			classify({
+				expectedHash,
+				expectedRoute: route,
+				priorKeys: { reading: acceptedDetail.dataset.changeReadingKey },
+				reload: true,
+			}),
+			{ state: "ready" },
+			"a deliberate reload may accept the same route-bound reading key",
+		);
 		const resourceRoute = `${route.replace("?", "/resource?")}`;
 		globalThis.location = { hash: `#/${resourceRoute}` };
 		globalThis.document = documentFor({

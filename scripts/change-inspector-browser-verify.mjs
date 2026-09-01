@@ -204,7 +204,12 @@
 			normalize(actualHash) === normalize(expectedHash)
 		);
 	};
-	function isAcceptedExactReadingInPage({ expectedHash, expectedRoute }) {
+	function isAcceptedExactReadingInPage({
+		expectedHash,
+		expectedRoute,
+		priorKeys = null,
+		reload = false,
+	}) {
 		const normalize = (value) => {
 			const raw = value.startsWith("#/")
 				? value.slice(2)
@@ -235,6 +240,8 @@
 		if (projectionSeparator <= 0) return false;
 		const readingRoute = readingKey.slice(0, projectionSeparator);
 		if (normalize(readingRoute) !== normalize(expectedRoute)) return false;
+		if (priorKeys !== null && !(reload || readingKey !== priorKeys.reading))
+			return false;
 		const text = detail.textContent?.trim() ?? "";
 		const heading = detail.querySelector(":scope > h2")?.textContent?.trim();
 		if (
@@ -349,6 +356,8 @@
 			? await page.waitForFunction(isAcceptedExactReadingInPage, {
 					expectedHash: targetHash,
 					expectedRoute: route,
+					priorKeys,
+					reload,
 				})
 			: await page.waitForFunction(
 			({ expectedRoute, expectedEventId, priorKeys, reload }) => {
@@ -830,11 +839,11 @@
 				};
 				const delayTail = async (route) => {
 					const requestUrl = route.request().url();
-					const query = new URL(requestUrl).searchParams;
+					const hasAfter = /[?&]after=/.test(requestUrl);
 					if (
 						!delayedTail &&
 						requestUrl.startsWith(historyPrefix) &&
-						query.has("after")
+						hasAfter
 					) {
 						delayedTail = true;
 						tailStartedAt = Date.now();
