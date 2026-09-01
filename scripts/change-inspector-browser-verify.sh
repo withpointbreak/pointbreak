@@ -924,8 +924,8 @@ if [ "$mode" = "full" ]; then
         --summary "Browser Timeline append after park" --format json \
         >"$log_dir/timeline-append.json" 2>"$log_dir/timeline-append.log"
   ) &
-  timeline_append_pid=$!
-  register_background_process "$timeline_append_pid"
+timeline_append_pid=$!
+register_background_process "$timeline_append_pid"
 fi
 browser_gate_status=0
 run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1 \
