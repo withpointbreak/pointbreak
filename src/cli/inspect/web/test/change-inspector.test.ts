@@ -5,6 +5,7 @@ import {
   CHANGE_READER_DOCUMENTS,
   type EventHistoryDocument,
   type EventHistoryEntry,
+  type ReaderProfileAvailability,
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
@@ -305,6 +306,105 @@ function serveComposition(
     throw new Error(`unexpected ${path}`);
   }) as typeof fetch;
   return requests;
+}
+
+interface PollCompositionControl {
+  availability: ReaderProfileAvailability;
+  changesMode: "ok" | "failure" | "hang" | "stale_once";
+  generation: number;
+  onStaleChanges: (() => void) | null;
+  requests: string[];
+  requestTimes: number[];
+  signals: AbortSignal[];
+}
+
+function servePollComposition(): PollCompositionControl {
+  const control: PollCompositionControl = {
+    availability: "ready",
+    changesMode: "ok",
+    generation: 1,
+    onStaleChanges: null,
+    requests: [],
+    requestTimes: [],
+    signals: [],
+  };
+  globalThis.fetch = vi.fn(
+    (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const path = String(input);
+      control.requests.push(path);
+      control.requestTimes.push(Date.now());
+      if (init?.signal != null) control.signals.push(init.signal);
+      const stamp = `sha256:generation-${control.generation}`;
+      if (path === "/api/identity") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:poll",
+              contextIdentity: "context:sha256:poll",
+              repository: "poll-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              availability: control.availability,
+              authorityCursor: authorityCursor(control.generation),
+            }),
+          ),
+        );
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        if (control.changesMode === "failure") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: "generation failure" }), {
+              status: 500,
+            }),
+          );
+        }
+        if (control.changesMode === "stale_once") {
+          control.changesMode = "ok";
+          control.onStaleChanges?.();
+          return Promise.resolve(staleProjectionResponse());
+        }
+        if (control.changesMode === "hang") {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(page("changes", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        return Promise.resolve(
+          new Response(JSON.stringify(page("attention", stamp))),
+        );
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...historyPage(stamp),
+              authorityCursor: authorityCursor(control.generation),
+              eventCount: control.generation,
+            }),
+          ),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    },
+  ) as typeof fetch;
+  return control;
 }
 
 function setNarrowViewport(narrow: boolean): void {
@@ -1703,18 +1803,12 @@ describe("Change-first composition", () => {
   });
 
   it("drops an Attention continuation before exact navigation so later polls cannot cross lenses", async () => {
+    vi.useFakeTimers();
     history.replaceState(
       null,
       "",
       "/#/attention?after=attention-page&limit=20&order=change_id_asc",
     );
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -1756,7 +1850,7 @@ describe("Change-first composition", () => {
     );
     expect(location.hash).not.toContain("after=");
 
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
       expect(
         requests.filter((path) => path.startsWith("/api/v2/profile")).length,
@@ -1959,13 +2053,7 @@ describe("Change-first composition", () => {
   });
 
   it("hydrates the served identity once at bootstrap and never polls it", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     const requests: string[] = [];
     const identity = {
       schema: "pointbreak.inspect-identity",
@@ -2009,28 +2097,29 @@ describe("Change-first composition", () => {
     );
     expect(document.title).toBe("served-pointbreak · Pointbreak Review");
 
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
       expect(
         requests.filter((path) => path === "/api/v2/profile"),
-      ).toHaveLength(4),
+      ).toHaveLength(3),
     );
     expect(requests.filter((path) => path === "/api/identity")).toHaveLength(1);
   });
 
   it("does not let a hung identity request gate semantic paint or poll installation", async () => {
+    vi.useFakeTimers();
     let identityResolve!: (response: Response) => void;
     const identityResponse = new Promise<Response>((resolve) => {
       identityResolve = resolve;
     });
-    const interval = vi
-      .spyOn(globalThis, "setInterval")
-      .mockImplementation(() => 1 as unknown as ReturnType<typeof setInterval>);
+    let profileRequests = 0;
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/identity") return identityResponse;
-      if (path === "/api/v2/profile")
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
         return Promise.resolve(new Response(JSON.stringify(profile)));
+      }
       if (path.startsWith("/api/v2/changes?"))
         return Promise.resolve(new Response(JSON.stringify(page("changes"))));
       if (path.startsWith("/api/v2/attention?"))
@@ -2048,7 +2137,9 @@ describe("Change-first composition", () => {
           document.querySelector(".unit-card[data-change-id]"),
         ).not.toBeNull(),
       );
-      expect(interval).toHaveBeenCalledWith(expect.any(Function), 3000);
+      expect(profileRequests).toBe(2);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(profileRequests).toBe(3);
       expect(document.querySelector("#refresh-status")?.textContent).toBe(
         "watching",
       );
@@ -2132,13 +2223,7 @@ describe("Change-first composition", () => {
   });
 
   it("retains the last verified identity and generation across a failed poll and retry", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     const identity = {
       schema: "pointbreak.inspect-identity",
       storeIdentity: "store:sha256:stable",
@@ -2180,7 +2265,7 @@ describe("Change-first composition", () => {
     await bootstrapChangeInspector();
     const publishedHash = document.querySelector("#stat-hash")?.textContent;
     failPoll = true;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
       expect(document.querySelector("#refresh-status")?.textContent).toBe(
         "response error",
@@ -2219,13 +2304,7 @@ describe("Change-first composition", () => {
   });
 
   it("reports accepted poll liveness only after a coherent stage and never degrades for a retried mismatch", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     let generation = 1;
     let profileRequests = 0;
     let releaseChangedPostflight!: () => void;
@@ -2251,7 +2330,7 @@ describe("Change-first composition", () => {
         if (holdChangedPostflight && profileRequests === 4) {
           await changedPostflight;
         }
-        if (mismatchPostflight && profileRequests === 8) {
+        if (mismatchPostflight && profileRequests === 7) {
           return new Response(
             JSON.stringify({
               ...profile,
@@ -2259,7 +2338,12 @@ describe("Change-first composition", () => {
             }),
           );
         }
-        return new Response(JSON.stringify(profile));
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            authorityCursor: authorityCursor(generation),
+          }),
+        );
       }
       const stamp = `sha256:generation-${generation}`;
       if (path.startsWith("/api/v2/changes?"))
@@ -2279,7 +2363,7 @@ describe("Change-first composition", () => {
 
     generation = 2;
     holdChangedPostflight = true;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => expect(profileRequests).toBe(4));
     expect(document.querySelector("#stat-hash")?.textContent).toBe(
       "sha256:generation-1",
@@ -2297,29 +2381,23 @@ describe("Change-first composition", () => {
       "updated",
     );
 
-    pollTick();
-    await vi.waitFor(() => expect(profileRequests).toBe(6));
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(profileRequests).toBe(5));
     expect(document.querySelector("#refresh-status")?.textContent).toBe(
       "watching",
     );
 
     generation = 3;
     mismatchPostflight = true;
-    pollTick();
-    await vi.waitFor(() => expect(profileRequests).toBe(10));
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(profileRequests).toBe(9));
     expect(document.querySelector("#refresh-status")?.textContent).not.toBe(
       "response error",
     );
   });
 
   it("does not publish a poll generation after its credential session changes", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     let generation = 1;
     let profileRequests = 0;
     let releasePollProfile!: (response: Response) => void;
@@ -2378,7 +2456,7 @@ describe("Change-first composition", () => {
     const acceptedHash = document.querySelector("#stat-hash")?.textContent;
 
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => expect(profileRequests).toBe(3));
     auth.setSessionToken("rotated-session-token");
     releasePollProfile(
@@ -2680,13 +2758,7 @@ describe("Change-first composition", () => {
   });
 
   it("does not let an old poll timeout invalidate a newer route load", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     let profileRequests = 0;
     let newerRouteProfileResolve!: (response: Response) => void;
     let markPollStarted!: () => void;
@@ -2765,7 +2837,7 @@ describe("Change-first composition", () => {
         }
         return 1 as unknown as ReturnType<typeof setTimeout>;
       });
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await pollStarted;
     history.replaceState(null, "", "/#/changes?q=newer");
     window.dispatchEvent(new Event("hashchange"));
@@ -2793,18 +2865,12 @@ describe("Change-first composition", () => {
   });
 
   it("preserves an accepted exact surface when poll hydration fails", async () => {
+    vi.useFakeTimers();
     history.replaceState(
       null,
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
     let generation = 1;
     let exactRequests = 0;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -2851,7 +2917,7 @@ describe("Change-first composition", () => {
     expect(detail?.textContent).toContain("Exact Revision");
 
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => expect(exactRequests).toBe(2));
 
     expect(detail?.dataset.changeReadingKey).toBe(acceptedReadingKey);
@@ -3479,19 +3545,15 @@ describe("Change-first composition", () => {
   });
 
   it("polls the history page as loaded while an exact event is read", async () => {
+    vi.useFakeTimers();
     history.replaceState(
       null,
       "",
       "/#/timeline/events/evt%3Aone?q=review&limit=20",
     );
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
-    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const pollProfile = { ...stagedPageProfile };
+    const pollHistory = stagedPage();
+    const requests = serveComposition(pollHistory, pollProfile);
     const { bootstrapChangeInspector } = await import(
       "../src/change-inspector"
     );
@@ -3501,7 +3563,10 @@ describe("Change-first composition", () => {
     routeTo("#/timeline/events/evt%3Atwo?q=review&limit=20");
     await vi.waitFor(() => expect(detailEventId()).toBe("evt:two"));
     const beforePoll = requests.length;
-    pollTick();
+    pollProfile.authorityCursor = authorityCursor(4);
+    pollHistory.authorityCursor = authorityCursor(4);
+    pollHistory.eventCount = 4;
+    await vi.advanceTimersByTimeAsync(3_000);
 
     await vi.waitFor(() =>
       expect(
@@ -3532,19 +3597,13 @@ describe("Change-first composition", () => {
   });
 
   it("rehydrates the same exact route when polling publishes a newer projection", async () => {
+    vi.useFakeTimers();
     history.replaceState(
       null,
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
     let generation = 1;
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -3574,7 +3633,7 @@ describe("Change-first composition", () => {
     );
 
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
       expect(requests.filter((path) => isExactRevisionPath(path))).toHaveLength(
         2,
@@ -3588,13 +3647,21 @@ describe("Change-first composition", () => {
 
   it("coalesces overlapping ticks behind one slow generation poll", async () => {
     vi.useFakeTimers();
+    let authoritySequence = 1;
     let changesRequests = 0;
     let activeProjectionStamp = "sha256:generation-0";
     let resolveSlowChanges!: (response: Response) => void;
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/v2/profile")
-        return Promise.resolve(new Response(JSON.stringify(profile)));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(authoritySequence),
+            }),
+          ),
+        );
       if (path.startsWith("/api/v2/changes?")) {
         changesRequests += 1;
         activeProjectionStamp = `sha256:generation-${changesRequests}`;
@@ -3620,6 +3687,7 @@ describe("Change-first composition", () => {
     );
     await bootstrapChangeInspector();
 
+    authoritySequence = 2;
     await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     await vi.advanceTimersByTimeAsync(6_000);
@@ -3628,6 +3696,13 @@ describe("Change-first composition", () => {
     resolveSlowChanges(
       new Response(JSON.stringify(page("changes", "sha256:generation-2"))),
     );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#stat-hash")?.textContent).toBe(
+        "sha256:generation-2",
+      ),
+    );
+    authoritySequence = 3;
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => {
       expect(changesRequests).toBe(3);
       expect(document.querySelector("#stat-hash")?.textContent).toBe(
@@ -3638,13 +3713,6 @@ describe("Change-first composition", () => {
 
   it("times out a hung exact postflight and releases its coalesced successor", async () => {
     vi.useFakeTimers();
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
     history.replaceState(
       null,
       "",
@@ -3700,12 +3768,12 @@ describe("Change-first composition", () => {
     await bootstrapChangeInspector();
 
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await hungPostflightStarted;
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(2);
-    pollTick();
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(2);
 
@@ -3721,13 +3789,7 @@ describe("Change-first composition", () => {
   });
 
   it("preserves a focused uncommitted search draft across poll paints", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     let generation = 1;
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -3773,7 +3835,7 @@ describe("Change-first composition", () => {
       });
     });
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await repainted;
 
     expect(location.hash).toBe("#/changes");
@@ -3785,14 +3847,8 @@ describe("Change-first composition", () => {
   });
 
   it("preserves an incomplete Timeline draft and its completions across poll paints", async () => {
+    vi.useFakeTimers();
     history.replaceState(null, "", "/#/timeline?limit=20");
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
     let generation = 1;
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -3884,7 +3940,7 @@ describe("Change-first composition", () => {
     expect(activeSuggestion).not.toBeNull();
 
     generation = 2;
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
       expect(
         requests.filter((request) => request === "/api/v2/profile"),
@@ -3915,13 +3971,7 @@ describe("Change-first composition", () => {
   });
 
   it("preserves a search draft started after a background poll begins", async () => {
-    let pollTick: () => void = () => {
-      throw new Error("poll interval was not installed");
-    };
-    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
-      if (delay === 3000 && typeof handler === "function") pollTick = handler;
-      return 1 as unknown as ReturnType<typeof setInterval>;
-    });
+    vi.useFakeTimers();
     let generation = 1;
     let profileRequests = 0;
     let markPollStarted!: () => void;
@@ -3961,7 +4011,7 @@ describe("Change-first composition", () => {
 
     const search = document.querySelector<HTMLInputElement>("#filter-text");
     if (search === null) throw new Error("missing Change search input");
-    pollTick();
+    await vi.advanceTimersByTimeAsync(3_000);
     await pollStarted;
     search.focus();
     search.value = "draft started during poll";
@@ -4315,6 +4365,7 @@ describe("Change-first composition", () => {
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
+    let authoritySequence = 1;
     let changesRequests = 0;
     let exactRequests = 0;
     let markExactStarted!: () => void;
@@ -4326,7 +4377,14 @@ describe("Change-first composition", () => {
       if (path === "/api/identity")
         return Promise.reject(new Error("identity is presentation-only"));
       if (path === "/api/v2/profile")
-        return Promise.resolve(new Response(JSON.stringify(profile)));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(authoritySequence),
+            }),
+          ),
+        );
       if (path.startsWith("/api/v2/changes?")) {
         changesRequests += 1;
         return Promise.resolve(new Response(JSON.stringify(page("changes"))));
@@ -4364,6 +4422,7 @@ describe("Change-first composition", () => {
       "Exact Revision",
     );
 
+    authoritySequence = 2;
     await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(1);
@@ -4376,6 +4435,7 @@ describe("Change-first composition", () => {
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
+    let authoritySequence = 1;
     let changesRequests = 0;
     let exactRequests = 0;
     let markExactStarted!: () => void;
@@ -4387,7 +4447,14 @@ describe("Change-first composition", () => {
       if (path === "/api/identity")
         return Promise.reject(new Error("identity is presentation-only"));
       if (path === "/api/v2/profile")
-        return Promise.resolve(new Response(JSON.stringify(profile)));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(authoritySequence),
+            }),
+          ),
+        );
       if (path.startsWith("/api/v2/changes?")) {
         changesRequests += 1;
         return Promise.resolve(new Response(JSON.stringify(page("changes"))));
@@ -4416,6 +4483,7 @@ describe("Change-first composition", () => {
     expect(exactRequests).toBe(1);
     expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
 
+    authoritySequence = 2;
     await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(1);
@@ -4429,6 +4497,7 @@ describe("Change-first composition", () => {
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
+    let authoritySequence = 1;
     let changesRequests = 0;
     let exactRequests = 0;
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
@@ -4436,7 +4505,14 @@ describe("Change-first composition", () => {
       if (path === "/api/identity")
         return Promise.reject(new Error("identity is presentation-only"));
       if (path === "/api/v2/profile")
-        return Promise.resolve(new Response(JSON.stringify(profile)));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...profile,
+              authorityCursor: authorityCursor(authoritySequence),
+            }),
+          ),
+        );
       if (path.startsWith("/api/v2/changes?")) {
         changesRequests += 1;
         return Promise.resolve(new Response(JSON.stringify(page("changes"))));
@@ -4459,6 +4535,7 @@ describe("Change-first composition", () => {
     await bootstrapChangeInspector();
     expect(exactRequests).toBe(1);
 
+    authoritySequence = 2;
     await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(1);
@@ -4748,6 +4825,317 @@ describe("Change-first composition", () => {
       "exact reading cancelled",
     );
     expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+  });
+
+  it("an unchanged healthy poll performs one profile probe and does not paint", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const stateModule = await import("../src/change-inspector-state");
+    const createState = stateModule.createChangeInspectorState;
+    let publishCalls = 0;
+    vi.spyOn(stateModule, "createChangeInspectorState").mockImplementation(
+      (route) => {
+        const state = createState(route);
+        const publish = state.publish;
+        state.publish = (...args) => {
+          publishCalls += 1;
+          return publish(...args);
+        };
+        return state;
+      },
+    );
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    expect(publishCalls).toBe(1);
+
+    const master = document.querySelector<HTMLElement>("#master");
+    if (master === null) throw new Error("missing master pane");
+    const sentinel = document.createElement("details");
+    sentinel.dataset.pollSentinel = "retained";
+    sentinel.open = true;
+    master.append(sentinel);
+    master.scrollTop = 41;
+    const requestBoundary = control.requests.length;
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(
+        control.requests.filter((path) => path === "/api/v2/profile"),
+      ).toHaveLength(3),
+    );
+
+    expect(control.requests.slice(requestBoundary)).toEqual([
+      "/api/v2/profile",
+    ]);
+    expect(sentinel.isConnected).toBe(true);
+    expect(sentinel.open).toBe(true);
+    expect(master.scrollTop).toBe(41);
+    expect(document.querySelector("[data-poll-sentinel='retained']")).toBe(
+      sentinel,
+    );
+    expect(publishCalls).toBe(1);
+  });
+
+  it("a changed profile reuses its probe and performs one full coherent load", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    const requestBoundary = control.requests.length;
+    control.generation = 2;
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(document.querySelector("#stat-hash")?.textContent).toBe(
+        "sha256:generation-2",
+      ),
+    );
+
+    const cycleRequests = control.requests.slice(requestBoundary);
+    expect(
+      cycleRequests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(2);
+    expect(
+      cycleRequests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(1);
+    expect(
+      cycleRequests.filter((path) => path.startsWith("/api/v2/attention?")),
+    ).toHaveLength(1);
+  });
+
+  it("a failed full cycle backs off and forces full validation before quiet polling resumes", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    control.generation = 2;
+    control.changesMode = "failure";
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "response error",
+    );
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(2);
+
+    control.generation = 1;
+    control.changesMode = "ok";
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(3);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(6);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(3);
+  });
+
+  it("failed cycles double their completion delay to the 30 second cap", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    control.generation = 2;
+    control.changesMode = "failure";
+
+    for (const delay of [3_000, 6_000, 12_000, 24_000, 30_000, 30_000]) {
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+
+    const profileStarts = control.requests.flatMap((path, index) =>
+      path === "/api/v2/profile" ? [control.requestTimes[index]] : [],
+    );
+    const startedAt = profileStarts[0] ?? 0;
+    expect(profileStarts.slice(2).map((time) => time - startedAt)).toEqual([
+      3_000, 9_000, 21_000, 45_000, 75_000, 105_000,
+    ]);
+  });
+
+  it("a projection retry forwards the cycle signal and cannot become quiet", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    control.generation = 2;
+    control.changesMode = "stale_once";
+    control.onStaleChanges = () => {
+      control.generation = 1;
+    };
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(
+        control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+      ).toHaveLength(3),
+    );
+
+    expect(control.signals.length).toBeGreaterThan(0);
+    expect(new Set(control.signals).size).toBe(1);
+  });
+
+  it.each([
+    "migration_required",
+    "migration_in_progress",
+  ] as const)("treats the %s non-ready profile branch as a failed backoff cycle", async (availability) => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    control.availability = availability;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(3);
+  });
+
+  it("retains an accepted generation while a non-ready poll backs off and latches full validation", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    control.availability = "migration_in_progress";
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(3);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(1);
+    expect(document.querySelector(".unit-card[data-change-id]")).not.toBeNull();
+
+    control.availability = "ready";
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(5);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(2);
+  });
+
+  it("credential movement cannot take the quiet profile path", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const reader = await import("../src/change-inspector");
+    const auth = await import("../src/auth");
+    await reader.bootstrapChangeInspector();
+    auth.setSessionToken("rotated-poll-session");
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(
+        control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+      ).toHaveLength(2),
+    );
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(
+        control.requests.filter((path) => path === "/api/v2/profile"),
+      ).toHaveLength(5),
+    );
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(2);
+  });
+
+  it("a cycle timeout aborts in-flight requests and requires full validation", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    control.generation = 2;
+    control.changesMode = "hang";
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(2);
+    const cycleSignal = control.signals[0];
+    expect(cycleSignal).toBeDefined();
+    expect(cycleSignal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(cycleSignal?.aborted).toBe(true);
+    expect(document.querySelector("#refresh-status")?.textContent).toBe(
+      "response error",
+    );
+
+    control.generation = 1;
+    control.changesMode = "ok";
+    const profileRequests = () =>
+      control.requests.filter((path) => path === "/api/v2/profile").length;
+    const beforeRecovery = profileRequests();
+    await vi.advanceTimersByTimeAsync(5_999);
+    expect(profileRequests()).toBe(beforeRecovery);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(profileRequests()).toBe(beforeRecovery + 2);
+    expect(
+      control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
+    ).toHaveLength(3);
+  });
+
+  it("an invalid route consumes a tick without stalling the loop", async () => {
+    vi.useFakeTimers();
+    const control = servePollComposition();
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    history.replaceState(null, "", "/#/changes?unknown=value");
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(
+      control.requests.filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(2);
+    history.replaceState(null, "", "/#/changes");
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() =>
+      expect(
+        control.requests.filter((path) => path === "/api/v2/profile"),
+      ).toHaveLength(3),
+    );
   });
 
   it("a poll refresh keeps its reading painted and aborts at the 10 second refresh expiry", async () => {

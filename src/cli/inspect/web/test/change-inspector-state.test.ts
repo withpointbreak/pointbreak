@@ -187,6 +187,35 @@ describe("Change inspector state", () => {
     expect(state.snapshot().identity).toEqual(nextIdentity);
   });
 
+  it("matches a published profile only for the same credential generation", () => {
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens: "changes",
+      query: {},
+    });
+    expect(state.matchesPublishedProfile(profile, 7)).toBe(false);
+
+    const generation = stageGeneration(
+      profile,
+      page("changes") as ChangesPage,
+      page("attention") as AttentionPage,
+      profile,
+    );
+    state.publish(generation, 7);
+
+    expect(state.matchesPublishedProfile(profile, 7)).toBe(true);
+    expect(state.matchesPublishedProfile(profile, 8)).toBe(false);
+    expect(
+      state.matchesPublishedProfile(
+        { ...profile, authorityCursor: authorityCursor(2) },
+        7,
+      ),
+    ).toBe(false);
+
+    state.clearGeneration();
+    expect(state.matchesPublishedProfile(profile, 7)).toBe(false);
+  });
+
   it("refuses to stage a mixed stamp or changed profile postflight", () => {
     expect(() =>
       stageGeneration(

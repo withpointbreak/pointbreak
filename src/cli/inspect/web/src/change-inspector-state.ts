@@ -130,6 +130,16 @@ export function createChangeInspectorState(initialRoute: ChangeInspectorRoute) {
 
   return {
     snapshot,
+    matchesPublishedProfile(
+      next: ReaderProfile,
+      credentialVersion: number,
+    ): boolean {
+      return (
+        generation !== null &&
+        generationCredentialVersion === credentialVersion &&
+        sameProfileGeneration(generation.profile, next)
+      );
+    },
     publish(
       next: ChangeInspectorGeneration,
       credentialVersion = 0,

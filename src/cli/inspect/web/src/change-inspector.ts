@@ -80,6 +80,7 @@ interface ProjectionRetryBudget {
 }
 
 type GenerationLoadOrigin = "route" | "poll" | "recovery";
+type GenerationLoadOutcome = "published" | "quiet" | "failed" | "superseded";
 
 type ChangeInspectorExactRoute = Exclude<
   ChangeInspectorRoute,
@@ -108,6 +109,8 @@ const EXACT_READING_SOFT_BUDGET_MS = 10_000;
 const EXACT_READING_HARD_BUDGET_MS = 30_000;
 const EXACT_POSTFLIGHT_TIMEOUT_MS = 3_000;
 const IDENTITY_TIMEOUT_MS = 3_000;
+const POLL_HEALTHY_INTERVAL_MS = 3_000;
+const POLL_BACKOFF_CAP_MS = 30_000;
 const POLL_CYCLE_TIMEOUT_MS = 15_000;
 
 class ChangeInspectorTimeout extends Error {}
@@ -228,7 +231,7 @@ class ReadingAttempt {
   }
 }
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let routeListener: (() => void) | null = null;
 let filterInput: HTMLInputElement | null = null;
 let searchController: ChangeInspectorSearchController | null = null;
@@ -242,11 +245,14 @@ let refreshSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let requestEpoch = 0;
 let compositionEpoch = 0;
 let activeReadingAttempt: ReadingAttempt | null = null;
+let activePollCycleController: AbortController | null = null;
 
 function advanceRequestEpoch(
   reason: "superseded" | "stopped" = "superseded",
+  abortPollCycle = true,
 ): number {
   requestEpoch += 1;
+  if (abortPollCycle) activePollCycleController?.abort(reason);
   activeReadingAttempt?.abort(reason);
   return requestEpoch;
 }
@@ -326,7 +332,7 @@ async function withinTimeout<T>(
 export function stopChangeInspector(): void {
   compositionEpoch += 1;
   advanceRequestEpoch("stopped");
-  if (pollTimer !== null) clearInterval(pollTimer);
+  if (pollTimer !== null) clearTimeout(pollTimer);
   pollTimer = null;
   pollCoordinatorStop?.();
   pollCoordinatorStop = null;
@@ -552,6 +558,7 @@ export async function bootstrapChangeInspector(
   let pendingReading: { key: string; token: symbol } | null = null;
   let releaseQueuedPoll: () => void = () => {};
   let revalidateIdentityForCurrentSession: () => void = () => {};
+  let pollRequiresFullValidation = false;
 
   const readingKey = (
     route: ChangeInspectorExactRoute,
@@ -727,9 +734,11 @@ export async function bootstrapChangeInspector(
     retryBudget: ProjectionRetryBudget,
     pollDraft: FocusedFilterDraft | null = null,
     origin: GenerationLoadOrigin = "route",
-  ): Promise<void> => {
+    signal?: AbortSignal,
+    allowUnchangedPoll = false,
+  ): Promise<GenerationLoadOutcome> => {
     const credentialVersion = sessionCredentialVersion();
-    const epoch = advanceRequestEpoch();
+    const epoch = advanceRequestEpoch("superseded", origin !== "poll");
     let refreshAttempt: ReadingAttempt | null = null;
     let refreshPendingToken: symbol | null = null;
     try {
@@ -738,20 +747,33 @@ export async function bootstrapChangeInspector(
       // as the visible request.
       const request = requestKey(route);
       const profile = decodeReaderProfile(
-        await fetchChangeInspectorJSON("/api/v2/profile"),
+        await fetchChangeInspectorJSON("/api/v2/profile", { signal }),
       );
-      if (epoch !== requestEpoch) return;
+      if (epoch !== requestEpoch) return "superseded";
       if (profile.availability !== "ready") {
         if (origin !== "route" && state.snapshot().generation !== null) {
           showPollFailure();
-          return;
+          return "failed";
         }
         pendingTimelineSearchFocus = false;
         clearVisibleRequest();
         clearReading();
         state.clearGeneration();
         renderChangeInspectorUnavailable(profile.availability);
-        return;
+        return "failed";
+      }
+      const browserRoute = currentRoute();
+      if (
+        origin === "poll" &&
+        allowUnchangedPoll &&
+        !pollRequiresFullValidation &&
+        browserRoute.kind !== "invalid" &&
+        formatChangeInspectorRoute(browserRoute) ===
+          formatChangeInspectorRoute(route) &&
+        !credentialSessionChanged(credentialVersion) &&
+        state.matchesPublishedProfile(profile, credentialVersion)
+      ) {
+        return "quiet";
       }
       const query =
         route.kind === "timeline" || route.kind === "event" ? {} : route.query;
@@ -766,25 +788,28 @@ export async function bootstrapChangeInspector(
         activeLens === "attention" ? query : firstPageQuery(query);
       const historyRequest =
         route.kind === "timeline" || route.kind === "event"
-          ? fetchChangeInspectorJSON(request).then(decodeEventHistory)
+          ? fetchChangeInspectorJSON(request, { signal }).then(
+              decodeEventHistory,
+            )
           : Promise.resolve(null);
       const [changes, attention, history] = await Promise.all([
-        fetchChangeInspectorJSON(
-          buildChangePageUrl("changes", changesQuery),
-        ).then((value) =>
+        fetchChangeInspectorJSON(buildChangePageUrl("changes", changesQuery), {
+          signal,
+        }).then((value) =>
           decodeChangePage(value, { lens: "changes", bounded: true }),
         ),
         fetchChangeInspectorJSON(
           buildChangePageUrl("attention", attentionQuery),
+          { signal },
         ).then((value) =>
           decodeChangePage(value, { lens: "attention", bounded: true }),
         ),
         historyRequest,
       ]);
       const postflight = decodeReaderProfile(
-        await fetchChangeInspectorJSON("/api/v2/profile"),
+        await fetchChangeInspectorJSON("/api/v2/profile", { signal }),
       );
-      if (epoch !== requestEpoch) return;
+      if (epoch !== requestEpoch) return "superseded";
       const staged = stageGeneration(
         profile,
         changes,
@@ -821,7 +846,7 @@ export async function bootstrapChangeInspector(
                   ),
             token: refreshPendingToken,
           };
-          const attempt = activateReadingAttempt();
+          const attempt = activateReadingAttempt(signal);
           refreshAttempt = attempt;
           const refreshBudget = attempt.schedule(
             () => attempt.abort("refresh_expiry"),
@@ -843,7 +868,7 @@ export async function bootstrapChangeInspector(
           );
           attempt.clearTimer(refreshBudget);
           const result = { loaded, readingPostflight };
-          if (epoch !== requestEpoch) return;
+          if (epoch !== requestEpoch) return "superseded";
           const browserRoute = currentRoute();
           if (
             browserRoute.kind === "invalid" ||
@@ -896,8 +921,9 @@ export async function bootstrapChangeInspector(
           credentialVersion,
         );
       }
+      return "published";
     } catch (error) {
-      if (epoch !== requestEpoch) return;
+      if (epoch !== requestEpoch) return "superseded";
       const sessionChanged =
         error instanceof ChangeInspectorSessionChanged && origin === "route";
       if (
@@ -909,18 +935,25 @@ export async function bootstrapChangeInspector(
         consumeProjectionRetry(retryBudget)
       ) {
         if (sessionChanged) revalidateIdentityForCurrentSession();
-        await loadGeneration(route, retryBudget, pollDraft, origin);
-        return;
+        return loadGeneration(
+          route,
+          retryBudget,
+          pollDraft,
+          origin,
+          signal,
+          false,
+        );
       }
       if (origin !== "route" && state.snapshot().generation !== null) {
         showPollFailure();
-        return;
+        return "failed";
       }
       clearVisibleRequest();
       pendingTimelineSearchFocus = false;
       clearReading();
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
+      return "failed";
     } finally {
       refreshAttempt?.dispose();
       if (refreshPendingToken !== null) {
@@ -1298,11 +1331,21 @@ export async function bootstrapChangeInspector(
     let pollRequested = false;
     let pollRunning = false;
     let pollActive = true;
+    let pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+    const schedulePoll = (delayMs: number): void => {
+      if (!pollActive) return;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = setTimeout(() => {
+        pollTimer = null;
+        requestPoll();
+      }, delayMs);
+    };
     const drainPoll = (): void => {
       if (!pollActive || pollRunning || !pollRequested) return;
       const route = currentRoute();
       if (route.kind === "invalid") {
         pollRequested = false;
+        schedulePoll(pollDelayMs);
         return;
       }
       const generation = state.snapshot().generation;
@@ -1314,49 +1357,83 @@ export async function bootstrapChangeInspector(
         pendingReading?.key ===
           readingKey(route, generation.changes.projectionStamp)
       ) {
+        pollRequested = false;
+        schedulePoll(pollDelayMs);
         return;
       }
       pollRequested = false;
       pollRunning = true;
+      const controller = new AbortController();
       const operation = loadGeneration(
         route,
         newProjectionRetryBudget(),
         capturePollFilterDraft(),
         "poll",
+        controller.signal,
+        !pollRequiresFullValidation,
       );
+      activePollCycleController = controller;
       const pollEpoch = requestEpoch;
+      let outcome: GenerationLoadOutcome = "superseded";
       void withinTimeout(
         operation,
         POLL_CYCLE_TIMEOUT_MS,
         "Change generation poll timed out",
       )
+        .then((result) => {
+          outcome = result;
+        })
         .catch((error) => {
-          if (
-            error instanceof ChangeInspectorTimeout &&
-            isCurrentComposition() &&
-            requestEpoch === pollEpoch
-          ) {
-            // The fetch cannot be forcibly cancelled at this layer. Advancing
-            // the epoch makes its eventual completion observationally inert
-            // before the coalesced successor poll is allowed to publish.
-            requestEpoch += 1;
+          if (error instanceof ChangeInspectorTimeout) {
+            if (isCurrentComposition() && requestEpoch === pollEpoch) {
+              controller.abort("superseded");
+              advanceRequestEpoch();
+              showPollFailure();
+              outcome = "failed";
+            }
+            return;
+          }
+          if (isCurrentComposition() && requestEpoch === pollEpoch) {
             showPollFailure();
+            outcome = "failed";
           }
         })
         .finally(() => {
+          if (activePollCycleController === controller) {
+            activePollCycleController = null;
+          }
+          if (outcome === "failed") {
+            pollRequiresFullValidation = true;
+            pollDelayMs = Math.min(pollDelayMs * 2, POLL_BACKOFF_CAP_MS);
+          } else if (outcome === "published") {
+            pollRequiresFullValidation = false;
+            pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+          } else if (outcome === "quiet") {
+            pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+          }
           pollRunning = false;
-          drainPoll();
+          schedulePoll(pollDelayMs);
         });
     };
     const requestPoll = (): void => {
       pollRequested = true;
       drainPoll();
     };
-    releaseQueuedPoll = drainPoll;
+    releaseQueuedPoll = () => {
+      if (!pollActive) return;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = null;
+      pollRequested = false;
+      if (!pollRunning) schedulePoll(pollDelayMs);
+    };
     pollCoordinatorStop = () => {
       pollActive = false;
       pollRequested = false;
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      pollTimer = null;
+      activePollCycleController?.abort("stopped");
+      activePollCycleController = null;
     };
-    pollTimer = setInterval(requestPoll, 3000);
+    schedulePoll(pollDelayMs);
   }
 }
