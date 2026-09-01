@@ -50,7 +50,7 @@ use pointbreak::session::{
 };
 use serde::Serialize;
 
-use super::server::HighlightCache;
+use super::server::{ExactDocumentBodyCache, ExactDocumentKey, HighlightCache};
 
 /// Result of a Change-capable `/api/v2` semantic route. The server owns the
 /// status code; this layer owns the exact typed body and never wraps it in a
@@ -62,6 +62,106 @@ pub(super) enum ChangeV2Json {
     Invalid(String),
     Stale(String),
     Retryable(String),
+}
+
+fn exact_document_cache_hit(
+    cache: &RwLock<ExactDocumentBodyCache>,
+    key: &ExactDocumentKey,
+) -> Option<ChangeV2Json> {
+    cache
+        .read()
+        .ok()
+        .and_then(|cache| cache.get(key))
+        .map(ChangeV2Json::Ok)
+}
+
+fn exact_document_cache_store(
+    cache: &RwLock<ExactDocumentBodyCache>,
+    key: ExactDocumentKey,
+    body: String,
+) -> ChangeV2Json {
+    if exact_document_cache_eligible(&body)
+        && let Ok(mut cache) = cache.write()
+    {
+        cache.put(key, body.clone());
+    }
+    ChangeV2Json::Ok(body)
+}
+
+/// One population predicate for both exact-document lanes and variants. It
+/// admits only available, diagnostic-free response and captured-resource
+/// carriers, with every fact and input-response body present and available.
+pub(super) fn exact_document_cache_eligible(body: &str) -> bool {
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    if !available_document_carrier(&document) {
+        return false;
+    }
+    if document.get("schema").and_then(serde_json::Value::as_str)
+        == Some("pointbreak.review-revision-resource")
+    {
+        return true;
+    }
+
+    let Some(resource) = document.get("exactRevisionDocument") else {
+        return false;
+    };
+    if !available_document_carrier(resource) {
+        return false;
+    }
+    let Some(facts) = document
+        .get("factPresentations")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if facts.iter().any(|fact| {
+        fact.get("availability").and_then(serde_json::Value::as_str) != Some("available")
+    }) {
+        return false;
+    }
+    let Some(content_value) = document.get("factContentPresentations") else {
+        return facts.is_empty();
+    };
+    let Some(content) = content_value.as_object() else {
+        return false;
+    };
+    if content.len() != facts.len() {
+        return false;
+    }
+    content.values().all(|fact| {
+        fact.get("bodyContentState")
+            .and_then(serde_json::Value::as_str)
+            == Some("present")
+            && fact
+                .get("content")
+                .and_then(|content| content.get("responses"))
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|responses| responses.iter().all(available_response_body))
+    })
+}
+
+fn available_document_carrier(carrier: &serde_json::Value) -> bool {
+    carrier
+        .get("availability")
+        .and_then(serde_json::Value::as_str)
+        == Some("available")
+        && carrier
+            .get("diagnostics")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
+}
+
+fn available_response_body(response: &serde_json::Value) -> bool {
+    response
+        .get("bodyContentState")
+        .and_then(serde_json::Value::as_str)
+        == Some("present")
+        && response
+            .get("availability")
+            .and_then(serde_json::Value::as_str)
+            == Some("available")
 }
 
 fn derived_change_outcome_json<T>(
@@ -605,10 +705,12 @@ pub(super) fn derived_change_detail_v2_json(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn change_revision_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
     stamp_binder: &StrictChangeStampBinder,
+    exact_documents: &RwLock<ExactDocumentBodyCache>,
     change_id: &str,
     revision_id: &str,
     artifact_hash: &str,
@@ -629,6 +731,16 @@ pub(super) fn change_revision_v2_json(
                 )));
             }
         };
+        let key = ExactDocumentKey::new(
+            change_id.as_str(),
+            revision_id,
+            artifact_hash,
+            resource_only,
+            facade.projection_stamp(),
+        );
+        if let Some(hit) = exact_document_cache_hit(exact_documents, &key) {
+            return Ok(hit);
+        }
         let mut exact_read = if resource_only {
             crate::cli::change::build_exact_read(repo, ready, &exact, true)
         } else {
@@ -640,10 +752,8 @@ pub(super) fn change_revision_v2_json(
         exact_read.resource = exact_read
             .resource
             .with_projection_stamp(facade.projection_stamp().to_owned());
-        if resource_only {
-            serde_json::to_string(&exact_read.resource)
-                .map(ChangeV2Json::Ok)
-                .map_err(|error| error.to_string())
+        let body = if resource_only {
+            serde_json::to_string(&exact_read.resource).map_err(|error| error.to_string())?
         } else {
             let fact_relationships = exact_read.fact_relationships.clone();
             let document = facade
@@ -661,15 +771,15 @@ pub(super) fn change_revision_v2_json(
             if let Some(graph) = graph {
                 splice_inspector_presentation(&mut value, "factGraph", graph)?;
             }
-            serde_json::to_string(&value)
-                .map(ChangeV2Json::Ok)
-                .map_err(|error| error.to_string())
-        }
+            serde_json::to_string(&value).map_err(|error| error.to_string())?
+        };
+        Ok(exact_document_cache_store(exact_documents, key, body))
     })
 }
 
 pub(super) fn derived_change_revision_v2_json(
     access: &DerivedChangeAccess,
+    exact_documents: &RwLock<ExactDocumentBodyCache>,
     change_id: &str,
     revision_id: &str,
     artifact_hash: &str,
@@ -695,6 +805,16 @@ pub(super) fn derived_change_revision_v2_json(
                     )));
                 }
             };
+            let key = ExactDocumentKey::new(
+                change_id.as_str(),
+                revision_id,
+                artifact_hash,
+                resource_only,
+                generation.stamp(),
+            );
+            if let Some(hit) = exact_document_cache_hit(exact_documents, &key) {
+                return Ok(hit);
+            }
             derived_change_outcome_json(
                 access
                     .exact_revision_session(&change_id)
@@ -731,10 +851,9 @@ pub(super) fn derived_change_revision_v2_json(
                             exact_read.resource = exact_read
                                 .resource
                                 .with_projection_stamp(generation.stamp().to_owned());
-                            if resource_only {
+                            let body = if resource_only {
                                 serde_json::to_string(&exact_read.resource)
-                                    .map(ChangeV2Json::Ok)
-                                    .map_err(|error| error.to_string())
+                                    .map_err(|error| error.to_string())?
                             } else {
                                 let fact_relationships = exact_read.fact_relationships.clone();
                                 let facade = read
@@ -761,10 +880,9 @@ pub(super) fn derived_change_revision_v2_json(
                                 if let Some(graph) = graph {
                                     splice_inspector_presentation(&mut value, "factGraph", graph)?;
                                 }
-                                serde_json::to_string(&value)
-                                    .map(ChangeV2Json::Ok)
-                                    .map_err(|error| error.to_string())
-                            }
+                                serde_json::to_string(&value).map_err(|error| error.to_string())?
+                            };
+                            Ok(exact_document_cache_store(exact_documents, key, body))
                         },
                     )
                 },

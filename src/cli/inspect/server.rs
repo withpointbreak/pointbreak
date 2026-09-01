@@ -121,6 +121,10 @@ pub(super) struct InspectState {
     /// Journal marker. Only Timeline and exact/detail/resource/interdiff routes
     /// may enter it; Profile, Changes, and Attention use `derived_changes`.
     pub change_reader_cache: ChangeReaderCache,
+    /// Bounded serialized exact-document bodies shared by the authoritative
+    /// and derived exact Revision lanes. The projection stamp in each key
+    /// prevents reuse across accepted generations.
+    pub exact_document_bodies: RwLock<ExactDocumentBodyCache>,
     /// Ephemeral continuation-token authority, deliberately independent of the
     /// browser bearer secret and never persisted beyond this Inspector process.
     pub page_token_signer: super::page_token::PageTokenSigner,
@@ -157,6 +161,7 @@ impl InspectState {
             history_cache: super::cache::HistoryProjectionCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             change_reader_cache: ChangeReaderCache::new(),
+            exact_document_bodies: RwLock::new(ExactDocumentBodyCache::new()),
             page_token_signer: super::page_token::PageTokenSigner::generate()
                 .map_err(|error| error.to_string())?,
             authoritative_fallback: AuthoritativeFallbackGate::new(),
@@ -518,6 +523,108 @@ struct AuthoritativeFallbackGuard<'a>(&'a AtomicBool);
 impl Drop for AuthoritativeFallbackGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+pub(super) const EXACT_DOCUMENT_CACHE_MAX_ENTRIES: usize = 16;
+pub(super) const EXACT_DOCUMENT_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct ExactDocumentKey {
+    change_id: String,
+    revision_id: String,
+    artifact_hash: String,
+    resource_only: bool,
+    projection_stamp: String,
+}
+
+impl ExactDocumentKey {
+    pub(super) fn new(
+        change_id: &str,
+        revision_id: &str,
+        artifact_hash: &str,
+        resource_only: bool,
+        projection_stamp: &str,
+    ) -> Self {
+        Self {
+            change_id: change_id.to_owned(),
+            revision_id: revision_id.to_owned(),
+            artifact_hash: artifact_hash.to_owned(),
+            resource_only,
+            projection_stamp: projection_stamp.to_owned(),
+        }
+    }
+}
+
+/// A process-local FIFO of serialized exact Revision response bodies. Entries
+/// are current by key construction; eviction bounds retained ownership without
+/// changing any wire or availability contract.
+pub(super) struct ExactDocumentBodyCache {
+    max_entries: usize,
+    max_bytes: usize,
+    bytes: usize,
+    map: HashMap<ExactDocumentKey, String>,
+    order: Vec<ExactDocumentKey>,
+}
+
+impl ExactDocumentBodyCache {
+    fn new() -> Self {
+        Self::with_limits(
+            EXACT_DOCUMENT_CACHE_MAX_ENTRIES,
+            EXACT_DOCUMENT_CACHE_MAX_BYTES,
+        )
+    }
+
+    fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            max_entries,
+            max_bytes,
+            bytes: 0,
+            map: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    pub(super) fn get(&self, key: &ExactDocumentKey) -> Option<String> {
+        self.map.get(key).cloned()
+    }
+
+    pub(super) fn put(&mut self, key: ExactDocumentKey, body: String) {
+        if self.max_entries == 0 || body.len() > self.max_bytes {
+            self.remove(&key);
+            return;
+        }
+
+        let body_bytes = body.len();
+        if let Some(previous) = self.map.insert(key.clone(), body) {
+            self.bytes -= previous.len();
+        } else {
+            self.order.push(key);
+        }
+        self.bytes += body_bytes;
+        while self.order.len() > self.max_entries || self.bytes > self.max_bytes {
+            let oldest = self.order.remove(0);
+            if let Some(body) = self.map.remove(&oldest) {
+                self.bytes -= body.len();
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &ExactDocumentKey) {
+        if let Some(body) = self.map.remove(key) {
+            self.bytes -= body.len();
+            self.order.retain(|candidate| candidate != key);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -1292,6 +1399,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
     let repo = state.repo.as_path();
     let cache = &state.change_reader_cache;
     let stamp_binder = &state.strict_change_stamp;
+    let exact_documents = &state.exact_document_bodies;
     let segments = member_path
         .split('/')
         .map(|raw| {
@@ -1327,6 +1435,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             if state.derived_changes.is_active() {
                 change_v2_response(api::derived_change_revision_v2_json(
                     &state.derived_changes,
+                    exact_documents,
                     change_id,
                     revision_id,
                     &artifact_hash,
@@ -1337,6 +1446,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
                     repo,
                     cache,
                     stamp_binder,
+                    exact_documents,
                     change_id,
                     revision_id,
                     &artifact_hash,
@@ -1354,6 +1464,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             if state.derived_changes.is_active() {
                 change_v2_response(api::derived_change_revision_v2_json(
                     &state.derived_changes,
+                    exact_documents,
                     change_id,
                     revision_id,
                     &artifact_hash,
@@ -1364,6 +1475,7 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
                     repo,
                     cache,
                     stamp_binder,
+                    exact_documents,
                     change_id,
                     revision_id,
                     &artifact_hash,
@@ -2524,6 +2636,39 @@ mod tests {
         }
     }
 
+    fn exact_refusal_state(migration_in_progress: bool) -> (tempfile::TempDir, InspectState) {
+        let repo = tempfile::tempdir().expect("exact refusal repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .expect("initialize exact refusal repository")
+                .success()
+        );
+        if migration_in_progress {
+            let events = repo.path().join(".pointbreak/data/events");
+            std::fs::create_dir_all(&events).expect("create migration-in-progress authority");
+            std::fs::write(
+                repo.path().join(".pointbreak/store.local.json"),
+                b"{\"schema\":\"shore.store-config\",\"version\":1,\"mode\":\"ephemeral\"}\n",
+            )
+            .expect("write migration-in-progress store configuration");
+            std::fs::write(
+                events.join(
+                    "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+                ),
+                include_bytes!(
+                    "../../../tests/support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+                ),
+            )
+            .expect("install migration-in-progress activation only");
+        }
+        let state =
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap();
+        (repo, state)
+    }
+
     fn exact_change_fixture_with_fact_port() -> ExactChangeFixture {
         let mut fixture = exact_change_fixture(false);
         let repo = fixture._repo.path();
@@ -2930,6 +3075,7 @@ mod tests {
                 &fixture.state.repo,
                 &fixture.state.change_reader_cache,
                 &fixture.state.strict_change_stamp,
+                &fixture.state.exact_document_bodies,
                 change_id,
                 revision_id,
                 artifact_hash,
@@ -2937,6 +3083,7 @@ mod tests {
             ));
             let derived = change_v2_json_parts(api::derived_change_revision_v2_json(
                 &fixture.state.derived_changes,
+                &fixture.state.exact_document_bodies,
                 change_id,
                 revision_id,
                 artifact_hash,
@@ -2985,6 +3132,7 @@ mod tests {
                 &fixture.state.repo,
                 &fixture.state.change_reader_cache,
                 &fixture.state.strict_change_stamp,
+                &fixture.state.exact_document_bodies,
                 change_id,
                 revision_id,
                 artifact_hash,
@@ -3001,6 +3149,7 @@ mod tests {
             }
             let derived = change_v2_json_parts(api::derived_change_revision_v2_json(
                 &fixture.state.derived_changes,
+                &fixture.state.exact_document_bodies,
                 change_id,
                 revision_id,
                 artifact_hash,
@@ -3061,6 +3210,7 @@ mod tests {
         let _guard = scope.enter();
         let (outcome, _) = change_v2_json_parts(api::derived_change_revision_v2_json(
             &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
             &fixture.change_id,
             &fixture.revision_id,
             &fixture.artifact_hash,
@@ -3292,6 +3442,588 @@ mod tests {
         assert!(cache.get("a").is_none());
         assert_eq!(cache.get("b").as_deref(), Some("2"));
         assert_eq!(cache.get("c").as_deref(), Some("3"));
+    }
+
+    fn exact_document_key(
+        change_id: &str,
+        revision_id: &str,
+        artifact_hash: &str,
+        resource_only: bool,
+        projection_stamp: &str,
+    ) -> ExactDocumentKey {
+        ExactDocumentKey::new(
+            change_id,
+            revision_id,
+            artifact_hash,
+            resource_only,
+            projection_stamp,
+        )
+    }
+
+    #[test]
+    fn exact_document_key_includes_every_selector_and_projection_stamp() {
+        let base = exact_document_key("change-a", "revision-a", "artifact-a", false, "stamp-a");
+        let mut cache = ExactDocumentBodyCache::with_limits(16, 1024);
+        cache.put(base.clone(), "body-a".to_owned());
+
+        assert_eq!(cache.get(&base).as_deref(), Some("body-a"));
+        for distinct in [
+            exact_document_key("change-b", "revision-a", "artifact-a", false, "stamp-a"),
+            exact_document_key("change-a", "revision-b", "artifact-a", false, "stamp-a"),
+            exact_document_key("change-a", "revision-a", "artifact-b", false, "stamp-a"),
+            exact_document_key("change-a", "revision-a", "artifact-a", true, "stamp-a"),
+            exact_document_key("change-a", "revision-a", "artifact-a", false, "stamp-b"),
+        ] {
+            assert!(cache.get(&distinct).is_none(), "key component was omitted");
+        }
+    }
+
+    #[test]
+    fn exact_document_cache_evicts_fifo_within_entry_and_byte_bounds() {
+        let key_a = exact_document_key("change-a", "revision", "artifact", false, "stamp");
+        let key_b = exact_document_key("change-b", "revision", "artifact", false, "stamp");
+        let key_c = exact_document_key("change-c", "revision", "artifact", false, "stamp");
+        let oversized = exact_document_key("change-d", "revision", "artifact", false, "stamp");
+
+        let mut entry_bounded = ExactDocumentBodyCache::with_limits(2, usize::MAX);
+        entry_bounded.put(key_a.clone(), "111".to_owned());
+        entry_bounded.put(key_b.clone(), "22".to_owned());
+        assert_eq!(entry_bounded.get(&key_a).as_deref(), Some("111"));
+        entry_bounded.put(key_c.clone(), "333".to_owned());
+        assert_eq!(entry_bounded.len(), 2);
+        assert!(
+            entry_bounded.get(&key_a).is_none(),
+            "a read must not turn insertion-order eviction into LRU"
+        );
+        assert_eq!(entry_bounded.get(&key_b).as_deref(), Some("22"));
+        assert_eq!(entry_bounded.get(&key_c).as_deref(), Some("333"));
+
+        let mut byte_bounded = ExactDocumentBodyCache::with_limits(16, 6);
+        byte_bounded.put(key_a.clone(), "111".to_owned());
+        byte_bounded.put(key_b.clone(), "22".to_owned());
+        assert_eq!(byte_bounded.get(&key_a).as_deref(), Some("111"));
+        byte_bounded.put(key_c.clone(), "333".to_owned());
+        assert_eq!(byte_bounded.len(), 2);
+        assert_eq!(byte_bounded.bytes(), 5);
+        assert!(
+            byte_bounded.get(&key_a).is_none(),
+            "the byte cap must evict in insertion order independently of the entry cap"
+        );
+        assert_eq!(byte_bounded.get(&key_b).as_deref(), Some("22"));
+        assert_eq!(byte_bounded.get(&key_c).as_deref(), Some("333"));
+
+        byte_bounded.put(oversized.clone(), "1234567".to_owned());
+        assert!(byte_bounded.get(&oversized).is_none());
+        assert_eq!(byte_bounded.len(), 2);
+        assert_eq!(byte_bounded.bytes(), 5);
+        assert_eq!(EXACT_DOCUMENT_CACHE_MAX_ENTRIES, 16);
+        assert_eq!(EXACT_DOCUMENT_CACHE_MAX_BYTES, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn exact_document_cache_eligibility_covers_every_availability_carrier() {
+        let available = serde_json::json!({
+            "schema": "pointbreak.review-change-revision",
+            "availability": "available",
+            "diagnostics": [],
+            "exactRevisionDocument": {
+                "schema": "pointbreak.review-revision-resource",
+                "availability": "available",
+                "diagnostics": []
+            },
+            "factPresentations": [{
+                "factId": "fact-a",
+                "availability": "available"
+            }],
+            "factContentPresentations": {
+                "fact-a": {
+                    "bodyContentState": "present",
+                    "content": {
+                        "responses": [{
+                            "bodyContentState": "present",
+                            "availability": "available"
+                        }]
+                    }
+                }
+            }
+        });
+        assert!(api::exact_document_cache_eligible(&available.to_string()));
+
+        let mut degraded_document = available.clone();
+        degraded_document["availability"] = serde_json::json!("removed");
+        assert!(!api::exact_document_cache_eligible(
+            &degraded_document.to_string()
+        ));
+
+        let mut diagnosed_document = available.clone();
+        diagnosed_document["diagnostics"] = serde_json::json!(["body_content_unavailable"]);
+        assert!(!api::exact_document_cache_eligible(
+            &diagnosed_document.to_string()
+        ));
+
+        let mut degraded_resource = available.clone();
+        degraded_resource["exactRevisionDocument"]["availability"] = serde_json::json!("removed");
+        assert!(!api::exact_document_cache_eligible(
+            &degraded_resource.to_string()
+        ));
+
+        let mut diagnosed_resource = available.clone();
+        diagnosed_resource["exactRevisionDocument"]["diagnostics"] =
+            serde_json::json!(["captured_resource_removed"]);
+        assert!(!api::exact_document_cache_eligible(
+            &diagnosed_resource.to_string()
+        ));
+
+        let mut degraded_fact = available.clone();
+        degraded_fact["factPresentations"][0]["availability"] = serde_json::json!("removed");
+        assert!(!api::exact_document_cache_eligible(
+            &degraded_fact.to_string()
+        ));
+
+        let mut removed_fact_body = available.clone();
+        removed_fact_body["factContentPresentations"]["fact-a"]["bodyContentState"] =
+            serde_json::json!("physically_removed");
+        assert!(!api::exact_document_cache_eligible(
+            &removed_fact_body.to_string()
+        ));
+
+        let mut removed_response = available.clone();
+        removed_response["factContentPresentations"]["fact-a"]["content"]["responses"][0]["bodyContentState"] =
+            serde_json::json!("physically_removed");
+        assert!(!api::exact_document_cache_eligible(
+            &removed_response.to_string()
+        ));
+
+        let mut degraded_response = available;
+        degraded_response["factContentPresentations"]["fact-a"]["content"]["responses"][0]["availability"] =
+            serde_json::json!("removed");
+        assert!(!api::exact_document_cache_eligible(
+            &degraded_response.to_string()
+        ));
+    }
+
+    fn append_exact_observation(fixture: &ExactChangeFixture, title: &str) {
+        pointbreak::session::record_observation(
+            pointbreak::session::ObservationAddOptions::new(fixture._repo.path())
+                .with_exact_revision_id(pointbreak::model::RevisionId::new(
+                    fixture.revision_id.clone(),
+                ))
+                .with_track("agent:exact-document-cache-test")
+                .with_title(title)
+                .with_body("available exact-document cache test body")
+                .with_actor_id(pointbreak::model::ActorId::new(
+                    "actor:agent:exact-document-cache-test",
+                )),
+        )
+        .expect("append exact Revision observation");
+    }
+
+    #[test]
+    fn exact_document_cache_hit_matches_miss_and_separates_resource_variant() {
+        let fixture = exact_change_fixture(true);
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 0);
+
+        let first = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            false,
+        ))
+        .expect("first exact document");
+        assert_eq!(first.0, "ok");
+        assert_eq!(
+            fixture.state.exact_document_bodies.read().unwrap().len(),
+            1,
+            "eligible contextual body was not cached: {}",
+            first.1
+        );
+
+        let hit = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            false,
+        ))
+        .expect("cached exact document");
+        assert_eq!(hit, first);
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 1);
+
+        let resource = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("exact resource");
+        assert_eq!(resource.0, "ok");
+        assert_ne!(resource.1, first.1);
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn exact_document_cache_uses_a_new_entry_after_projection_stamp_movement() {
+        let fixture = exact_change_fixture(true);
+        let first = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            false,
+        ))
+        .expect("first exact document");
+        let first_json: serde_json::Value = serde_json::from_str(&first.1).unwrap();
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 1);
+
+        append_exact_observation(&fixture, "move exact document projection stamp");
+        fixture
+            .state
+            .derived_changes
+            .recovery_access()
+            .rebuild(|_| pointbreak::session::DerivedHistoryControl::Continue)
+            .expect("publish the advanced generation");
+
+        let second = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            false,
+        ))
+        .expect("advanced exact document");
+        let second_json: serde_json::Value = serde_json::from_str(&second.1).unwrap();
+        assert_ne!(second.1, first.1);
+        assert_ne!(
+            second_json["projectionStamp"],
+            first_json["projectionStamp"]
+        );
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn exact_document_cache_hit_bypasses_only_post_consult_outcomes() {
+        let fixture = exact_change_fixture(true);
+        let warm = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("warm exact resource");
+        assert_eq!(warm.0, "ok");
+
+        let missing_revision = format!("rev:sha256:{}", "e".repeat(64));
+        let pointbreak::session::DerivedChangeOutcomeV1::Ready(generation) = fixture
+            .state
+            .derived_changes
+            .review_generation()
+            .expect("read the warm generation")
+        else {
+            panic!("the warm fixture must have a current generation")
+        };
+        fixture.state.exact_document_bodies.write().unwrap().put(
+            exact_document_key(
+                &fixture.change_id,
+                &missing_revision,
+                &fixture.artifact_hash,
+                true,
+                generation.stamp(),
+            ),
+            "selector-cache-sentinel".to_owned(),
+        );
+        let empty_cache = RwLock::new(ExactDocumentBodyCache::new());
+        let cold_selector_refusal = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &empty_cache,
+            &fixture.change_id,
+            &missing_revision,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("cold selector refusal");
+        let occupied_selector_refusal = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &missing_revision,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("occupied-cache selector refusal");
+        assert_eq!(occupied_selector_refusal, cold_selector_refusal);
+        assert_eq!(occupied_selector_refusal.0, "invalid");
+
+        append_exact_observation(&fixture, "make the derived generation stale");
+        let cold_after_authority_movement =
+            change_v2_json_parts(api::derived_change_revision_v2_json(
+                &fixture.state.derived_changes,
+                &empty_cache,
+                &fixture.change_id,
+                &fixture.revision_id,
+                &fixture.artifact_hash,
+                true,
+            ))
+            .expect("cold derived authority-movement outcome");
+        let occupied_after_authority_movement =
+            change_v2_json_parts(api::derived_change_revision_v2_json(
+                &fixture.state.derived_changes,
+                &fixture.state.exact_document_bodies,
+                &fixture.change_id,
+                &fixture.revision_id,
+                &fixture.artifact_hash,
+                true,
+            ))
+            .expect("occupied-cache derived authority-movement outcome");
+        assert_eq!(
+            occupied_after_authority_movement, cold_after_authority_movement,
+            "generation-acquisition outcomes must precede a cache consult"
+        );
+        assert_ne!(
+            occupied_after_authority_movement, warm,
+            "authority movement must not reuse the previously accepted stamp"
+        );
+
+        let cold_strict = change_v2_json_parts(api::change_revision_v2_json(
+            &fixture.state.repo,
+            &fixture.state.change_reader_cache,
+            &fixture.state.strict_change_stamp,
+            &empty_cache,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("cold authoritative strict-binding outcome");
+        let occupied_strict = change_v2_json_parts(api::change_revision_v2_json(
+            &fixture.state.repo,
+            &fixture.state.change_reader_cache,
+            &fixture.state.strict_change_stamp,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("occupied-cache authoritative strict-binding outcome");
+        assert_eq!(
+            occupied_strict, cold_strict,
+            "strict stamp movement must precede a cache consult"
+        );
+        assert_ne!(
+            occupied_strict, warm,
+            "strict stamp rebinding must not reuse the previously accepted stamp"
+        );
+
+        let unavailable_change = format!("change:sha256:{}", "1".repeat(64));
+        let unavailable_revision = format!("rev:sha256:{}", "2".repeat(64));
+        let unavailable_artifact = format!("sha256:{}", "3".repeat(64));
+        let unavailable_path =
+            format!("/api/v2/changes/{unavailable_change}/revisions/{unavailable_revision}");
+        let unavailable_query = format!("artifactHash={unavailable_artifact}");
+        for (name, migration_in_progress, expected_schema) in [
+            ("L0", false, "pointbreak.store-migration-required"),
+            ("M1", true, "pointbreak.store-migration-in-progress"),
+        ] {
+            let (_repo, state) = exact_refusal_state(migration_in_progress);
+            let cold = route_change_v2(&state, &unavailable_path, Some(&unavailable_query));
+            state.exact_document_bodies.write().unwrap().put(
+                exact_document_key(
+                    &unavailable_change,
+                    &unavailable_revision,
+                    &unavailable_artifact,
+                    false,
+                    "unavailable-stamp",
+                ),
+                "unavailable-cache-sentinel".to_owned(),
+            );
+            let occupied = route_change_v2(&state, &unavailable_path, Some(&unavailable_query));
+            assert_eq!(occupied.status, cold.status, "{name} status");
+            assert_eq!(occupied.body, cold.body, "{name} refusal bytes");
+            assert_eq!(occupied.status, "409 Conflict", "{name} status class");
+            let document: serde_json::Value = serde_json::from_slice(&occupied.body).unwrap();
+            assert_eq!(document["schema"], expected_schema, "{name} schema");
+        }
+
+        let authoritative = source_between(
+            API_SOURCE,
+            "pub(super) fn change_revision_v2_json(",
+            "pub(super) fn derived_change_revision_v2_json(",
+        );
+        for pre_consult in [
+            "with_change_v2_outcome(repo, cache, Some(stamp_binder)",
+            "crate::cli::change::exact_ref(",
+        ] {
+            assert_source_order(authoritative, pre_consult, "exact_document_cache_hit(");
+        }
+        for post_consult in ["build_exact_read(", "build_contextual_exact_read("] {
+            assert_source_order(authoritative, "exact_document_cache_hit(", post_consult);
+        }
+
+        let derived = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_change_revision_v2_json(",
+            "fn derived_checkpoint_mismatch(",
+        );
+        for pre_consult in [".review_generation()", "exact_ref_from_projections("] {
+            assert_source_order(derived, pre_consult, "exact_document_cache_hit(");
+        }
+        for post_consult in [
+            ".exact_revision_session(",
+            "derived_checkpoint_mismatch(",
+            ".read(&ExactRevisionReadPlanV1",
+            "exact_read_from_shown(",
+            "contextual_exact_read_from_derived(",
+        ] {
+            assert_source_order(derived, "exact_document_cache_hit(", post_consult);
+        }
+    }
+
+    #[test]
+    fn exact_document_cache_never_caches_refusals_and_poison_is_a_miss() {
+        let fixture = exact_change_fixture(true);
+        let missing_revision = format!("rev:sha256:{}", "f".repeat(64));
+        let refusal = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &missing_revision,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("selector refusal");
+        assert_eq!(refusal.0, "invalid");
+        assert_eq!(fixture.state.exact_document_bodies.read().unwrap().len(), 0);
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = fixture.state.exact_document_bodies.write().unwrap();
+            panic!("poison exact document cache");
+        }));
+        let miss = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("poisoned cache must fall through to composition");
+        assert_eq!(miss.0, "ok");
+    }
+
+    #[test]
+    fn exact_document_cache_hit_preserves_pre_removal_availability_at_one_stamp() {
+        let fixture = exact_change_fixture(true);
+        let first = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("available exact resource");
+        assert_eq!(first.0, "ok");
+
+        let common_dir = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(fixture._repo.path())
+            .output()
+            .expect("resolve git common dir");
+        assert!(common_dir.status.success());
+        let object = PathBuf::from(String::from_utf8(common_dir.stdout).unwrap().trim())
+            .join("pointbreak/artifacts/objects")
+            .join(format!(
+                "{}.json",
+                fixture.artifact_hash.strip_prefix("sha256:").unwrap()
+            ));
+        std::fs::remove_file(object).expect("remove captured artifact out of band");
+
+        let hit = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fixture.state.derived_changes,
+            &fixture.state.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("warm exact resource");
+        assert_eq!(
+            hit, first,
+            "the accepted residual window preserves warm bytes"
+        );
+
+        let fresh =
+            InspectState::new_with_background_rebuild(fixture._repo.path().to_path_buf(), false)
+                .unwrap();
+        let forced_miss = change_v2_json_parts(api::derived_change_revision_v2_json(
+            &fresh.derived_changes,
+            &fresh.exact_document_bodies,
+            &fixture.change_id,
+            &fixture.revision_id,
+            &fixture.artifact_hash,
+            true,
+        ))
+        .expect("fresh-state exact resource");
+        assert_eq!(forced_miss.0, "ok");
+        assert_ne!(forced_miss.1, first.1);
+        let degraded: serde_json::Value = serde_json::from_str(&forced_miss.1).unwrap();
+        assert_eq!(degraded["availability"], "missing");
+        assert_eq!(fresh.exact_document_bodies.read().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn exact_document_cache_source_shape_preserves_lane_ownership() {
+        let state = source_between(
+            SERVER_SOURCE,
+            "pub(super) struct InspectState {",
+            "impl InspectState {",
+        );
+        assert!(state.contains("exact_document_bodies: RwLock<ExactDocumentBodyCache>"));
+        let cache = source_between(
+            SERVER_SOURCE,
+            "pub(super) const EXACT_DOCUMENT_CACHE_MAX_ENTRIES",
+            "const HIGHLIGHT_CACHE_CAPACITY",
+        );
+        assert!(!cache.contains("ChangeReaderCache"));
+        assert!(!cache.contains("change_reader_cache"));
+        assert!(!cache.contains("longitudinal"));
+
+        let route = source_between(
+            SERVER_SOURCE,
+            "fn route_change_v2(",
+            "fn exact_selector_values(",
+        );
+        assert!(route.contains("let exact_documents = &state.exact_document_bodies"));
+        assert!(route.contains(
+            "cache,\n                    stamp_binder,\n                    exact_documents,"
+        ));
+
+        let derived = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_change_revision_v2_json(",
+            "pub(super) fn change_interdiff_v2_json(",
+        );
+        for forbidden in [
+            "ChangeReaderCache",
+            "change_reader_cache",
+            "StrictChangeStampBinder",
+            "build_exact_read",
+            "build_contextual_exact_read",
+        ] {
+            assert!(
+                !derived.contains(forbidden),
+                "derived producer names {forbidden}"
+            );
+        }
     }
 
     #[cfg(feature = "longitudinal-counting")]

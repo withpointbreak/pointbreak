@@ -538,6 +538,44 @@ fn exact_route_floor_pins_success_bytes_and_stamp_equality() {
     );
 }
 
+#[test]
+fn repeated_exact_revision_requests_return_identical_raw_bytes() {
+    let store = representative_store();
+    let inspector = Inspector::spawn_current(store.repo.path());
+    let changes = inspector.get_json("/api/v2/changes");
+    let change = changes["changes"]
+        .as_array()
+        .expect("Change list")
+        .iter()
+        .find(|change| {
+            change["currentRevisionRefs"]
+                .as_array()
+                .is_some_and(|references| {
+                    references.iter().any(|reference| {
+                        reference["revisionId"].as_str() == Some(store.revision_id.as_str())
+                    })
+                })
+        })
+        .expect("representative Change");
+    let change_id = change["changeId"].as_str().expect("Change identity");
+    let exact = change["currentRevisionRefs"]
+        .as_array()
+        .expect("current Revision refs")
+        .iter()
+        .find(|reference| reference["revisionId"].as_str() == Some(store.revision_id.as_str()))
+        .expect("representative exact Revision");
+    let path = format!(
+        "/api/v2/changes/{}/revisions/{}?artifactHash={}",
+        urlencode(change_id),
+        urlencode(exact["revisionId"].as_str().unwrap()),
+        urlencode(exact["objectArtifactContentHash"].as_str().unwrap())
+    );
+
+    let miss = inspector.get_text(&path);
+    let hit = inspector.get_text(&path);
+    assert_eq!(hit.as_bytes(), miss.as_bytes());
+}
+
 /// The existing fact-port HTTP case pins applicability and graph geometry; this
 /// characterization freezes the attribution, contextual fact keys, and complete
 /// association bytes that the exact contextual route must also preserve.
