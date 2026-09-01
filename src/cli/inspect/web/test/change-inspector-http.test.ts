@@ -99,6 +99,51 @@ describe("Change Inspector HTTP cancellation", () => {
     expect(markRequestSuccess).not.toHaveBeenCalled();
   });
 
+  it("an abort observed with a 401 skips unauthorized recovery", async () => {
+    const controller = new AbortController();
+    globalThis.fetch = vi.fn(async () => {
+      controller.abort();
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+      });
+    }) as typeof fetch;
+    const { recoverUnauthorized } = await import("../src/auth");
+    vi.mocked(recoverUnauthorized).mockClear();
+
+    await expect(
+      fetchChangeInspectorJSON(requestPath, { signal: controller.signal }),
+    ).rejects.toMatchObject({ kind: "aborted" });
+    expect(recoverUnauthorized).not.toHaveBeenCalled();
+    expect(markRequestFailure).not.toHaveBeenCalled();
+    expect(markRequestSuccess).not.toHaveBeenCalled();
+  });
+
+  it("an abort during declined recovery never marks the connection failed", async () => {
+    const controller = new AbortController();
+    let finishRecovery: (recovered: boolean) => void = () => undefined;
+    const recovery = new Promise<boolean>((resolve) => {
+      finishRecovery = resolve;
+    });
+    globalThis.fetch = vi.fn(async () => {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+      });
+    }) as typeof fetch;
+    const { recoverUnauthorized } = await import("../src/auth");
+    vi.mocked(recoverUnauthorized).mockImplementationOnce(async () => recovery);
+
+    const pending = fetchChangeInspectorJSON(requestPath, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(recoverUnauthorized).toHaveBeenCalledOnce());
+    controller.abort();
+    finishRecovery(false);
+
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    expect(markRequestFailure).not.toHaveBeenCalled();
+    expect(markRequestSuccess).not.toHaveBeenCalled();
+  });
+
   it("reuses the same signal after one unauthorized recovery", async () => {
     const controller = new AbortController();
     const observedSignals: Array<AbortSignal | null | undefined> = [];

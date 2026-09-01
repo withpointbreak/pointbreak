@@ -106,6 +106,7 @@ async function fetchOnce(
     }
     throw failure("unreachable", undefined, reportConnection);
   }
+  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
   if (response.status === 401)
     throw new ChangeInspectorRequestFailure("unauthorized", 401);
   let data: unknown;
@@ -150,10 +151,13 @@ export async function fetchChangeInspectorJSON(
     )
       throw error;
   }
-  if (
-    sessionCredentialVersion() !== credentialVersion ||
-    (await recoverUnauthorized())
-  )
+  if (options.signal?.aborted)
+    throw new ChangeInspectorRequestFailure("aborted");
+  if (sessionCredentialVersion() !== credentialVersion)
     return fetchOnce(path, reportConnection, options.signal);
+  const recovered = await recoverUnauthorized();
+  if (options.signal?.aborted)
+    throw new ChangeInspectorRequestFailure("aborted");
+  if (recovered) return fetchOnce(path, reportConnection, options.signal);
   throw failure("unauthorized", 401, reportConnection);
 }
