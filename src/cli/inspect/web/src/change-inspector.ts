@@ -556,6 +556,7 @@ export async function bootstrapChangeInspector(
     visibleHistoryFilters = "";
   };
   let pendingReading: { key: string; token: symbol } | null = null;
+  let pendingAuthorityTraversal: { token: symbol; epoch: number } | null = null;
   let releaseQueuedPoll: () => void = () => {};
   let revalidateIdentityForCurrentSession: () => void = () => {};
   let pollRequiresFullValidation = false;
@@ -1138,71 +1139,26 @@ export async function bootstrapChangeInspector(
 
     const retryBudget = newProjectionRetryBudget();
     const requestedRoute = formatChangeInspectorRoute(route);
-    for (;;) {
-      const generation = state.snapshot().generation;
-      // A parked monitor intentionally retains an older presentation window.
-      // Global traversal, however, is an authority read and must be anchored
-      // to the current staged generation or its first fetched page will appear
-      // to cross generations and refuse forever while the monitor is parked.
-      const anchor = generation?.history;
-      if (generation === null || anchor === null || anchor === undefined) {
-        return null;
-      }
-      const epoch = advanceRequestEpoch();
-      try {
-        const preflight = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile"),
-        );
-        if (
-          epoch !== requestEpoch ||
-          currentRoute().kind === "invalid" ||
-          formatChangeInspectorRoute(
-            currentRoute() as Exclude<
-              ChangeInspectorRoute,
-              { kind: "invalid" }
-            >,
-          ) !== requestedRoute
-        ) {
+    const traversalToken = Symbol("timeline-authority-traversal");
+    try {
+      for (;;) {
+        const generation = state.snapshot().generation;
+        // A parked monitor intentionally retains an older presentation window.
+        // Global traversal, however, is an authority read and must be anchored
+        // to the current staged generation or its first fetched page will appear
+        // to cross generations and refuse forever while the monitor is parked.
+        const anchor = generation?.history;
+        if (generation === null || anchor === null || anchor === undefined) {
           return null;
         }
-        if (!sameProfileGeneration(generation.profile, preflight)) {
-          throw new ChangeInspectorGenerationChanged();
-        }
-        const tail = await traverseTimelineTail(
-          route,
-          anchor,
-          async (query) => {
-            const page = decodeEventHistory(
-              await fetchChangeInspectorJSON(buildEventHistoryUrl(query)),
-            );
-            if (epoch !== requestEpoch) {
-              throw new ChangeInspectorGenerationChanged();
-            }
-            return page;
-          },
-        );
-        const postflight = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile"),
-        );
-        if (
-          epoch !== requestEpoch ||
-          !sameProfileGeneration(generation.profile, postflight)
-        ) {
-          throw new ChangeInspectorGenerationChanged();
-        }
-        navigate(tail.route);
-        return tail.route;
-      } catch (error) {
-        if (epoch !== requestEpoch) return null;
-        if (
-          (error instanceof ChangeInspectorGenerationChanged ||
-            (error instanceof ChangeInspectorPageFailure &&
-              (error.code === "stale_projection" ||
-                error.code === "moving_journal"))) &&
-          consumeProjectionRetry(retryBudget)
-        ) {
-          await loadGeneration(route, retryBudget);
+        const epoch = advanceRequestEpoch();
+        pendingAuthorityTraversal = { token: traversalToken, epoch };
+        try {
+          const preflight = decodeReaderProfile(
+            await fetchChangeInspectorJSON("/api/v2/profile"),
+          );
           if (
+            epoch !== requestEpoch ||
             currentRoute().kind === "invalid" ||
             formatChangeInspectorRoute(
               currentRoute() as Exclude<
@@ -1213,13 +1169,67 @@ export async function bootstrapChangeInspector(
           ) {
             return null;
           }
-          continue;
+          if (!sameProfileGeneration(generation.profile, preflight)) {
+            throw new ChangeInspectorGenerationChanged();
+          }
+          const tail = await traverseTimelineTail(
+            route,
+            anchor,
+            async (query) => {
+              const page = decodeEventHistory(
+                await fetchChangeInspectorJSON(buildEventHistoryUrl(query)),
+              );
+              if (epoch !== requestEpoch) {
+                throw new ChangeInspectorGenerationChanged();
+              }
+              return page;
+            },
+          );
+          const postflight = decodeReaderProfile(
+            await fetchChangeInspectorJSON("/api/v2/profile"),
+          );
+          if (
+            epoch !== requestEpoch ||
+            !sameProfileGeneration(generation.profile, postflight)
+          ) {
+            throw new ChangeInspectorGenerationChanged();
+          }
+          navigate(tail.route);
+          return tail.route;
+        } catch (error) {
+          if (epoch !== requestEpoch) return null;
+          if (
+            (error instanceof ChangeInspectorGenerationChanged ||
+              (error instanceof ChangeInspectorPageFailure &&
+                (error.code === "stale_projection" ||
+                  error.code === "moving_journal"))) &&
+            consumeProjectionRetry(retryBudget)
+          ) {
+            await loadGeneration(route, retryBudget);
+            if (
+              currentRoute().kind === "invalid" ||
+              formatChangeInspectorRoute(
+                currentRoute() as Exclude<
+                  ChangeInspectorRoute,
+                  { kind: "invalid" }
+                >,
+              ) !== requestedRoute
+            ) {
+              return null;
+            }
+            continue;
+          }
+          clearVisibleRequest();
+          clearReading();
+          state.clearGeneration();
+          renderChangeInspectorRefusal(error);
+          return null;
         }
-        clearVisibleRequest();
-        clearReading();
-        state.clearGeneration();
-        renderChangeInspectorRefusal(error);
-        return null;
+      }
+    } finally {
+      if (pendingAuthorityTraversal?.token === traversalToken) {
+        pendingAuthorityTraversal = null;
+        releaseQueuedPoll();
       }
     }
   };
@@ -1344,6 +1354,11 @@ export async function bootstrapChangeInspector(
       if (!pollActive || pollRunning || !pollRequested) return;
       const route = currentRoute();
       if (route.kind === "invalid") {
+        pollRequested = false;
+        schedulePoll(pollDelayMs);
+        return;
+      }
+      if (pendingAuthorityTraversal?.epoch === requestEpoch) {
         pollRequested = false;
         schedulePoll(pollDelayMs);
         return;

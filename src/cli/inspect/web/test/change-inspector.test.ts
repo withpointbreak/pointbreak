@@ -3165,6 +3165,229 @@ describe("Change-first composition", () => {
     }
   });
 
+  it("keeps a healthy poll tick behind a current global Timeline traversal", async () => {
+    vi.useFakeTimers();
+    history.replaceState(null, "", "/#/timeline?limit=1&order=desc");
+    const currentProfile = {
+      ...profile,
+      authorityCursor: authorityCursor(2),
+    };
+    const currentHead = boundaryHistoryPage({
+      eventIds: ["evt:current-head"],
+      next: "tail-token",
+      offset: 0,
+    });
+    const currentTail = boundaryHistoryPage({
+      eventIds: ["evt:current-tail"],
+      offset: 1,
+    });
+    let profileRequests = 0;
+    let changesRequests = 0;
+    let attentionRequests = 0;
+    let historyRequests = 0;
+    const profileRequestTimes: number[] = [];
+    let traversalTailDeferred = false;
+    let resolveTraversalTail!: (response: Response) => void;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:timeline-poll",
+              contextIdentity: "context:sha256:timeline-poll",
+              repository: "timeline-poll-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        profileRequestTimes.push(Date.now());
+        return Promise.resolve(new Response(JSON.stringify(currentProfile)));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        attentionRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        historyRequests += 1;
+        const query = new URL(path, "https://pointbreak.invalid").searchParams;
+        if (query.get("after") === "tail-token" && !traversalTailDeferred) {
+          traversalTailDeferred = true;
+          return new Promise<Response>((resolve) => {
+            resolveTraversalTail = resolve;
+          });
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              query.get("after") === "tail-token" ? currentTail : currentHead,
+            ),
+          ),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    list?.focus();
+    list?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    await vi.waitFor(() => {
+      expect(profileRequests).toBe(3);
+      expect(historyRequests).toBe(3);
+    });
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(profileRequests).toBe(3);
+    expect(changesRequests).toBe(1);
+    expect(attentionRequests).toBe(1);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(profileRequests).toBe(3);
+
+    const traversalReleasedAt = Date.now();
+    resolveTraversalTail(new Response(JSON.stringify(currentTail)));
+    await vi.waitFor(() => expect(location.hash).toContain("tail-token"));
+    await vi.waitFor(() => expect(profileRequests).toBe(6));
+    await vi.waitFor(() =>
+      expect(
+        document
+          .querySelector("#timeline [aria-selected='true']")
+          ?.getAttribute("data-event-id"),
+      ).toBe("evt:current-tail"),
+    );
+    expect(historyRequests).toBe(4);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(profileRequests).toBe(7);
+    expect(
+      (profileRequestTimes.at(-1) ?? 0) - traversalReleasedAt,
+    ).toBeGreaterThanOrEqual(3_000);
+    expect(changesRequests).toBe(2);
+    expect(attentionRequests).toBe(2);
+  });
+
+  it("lifts Timeline traversal poll suppression after a later route epoch", async () => {
+    vi.useFakeTimers();
+    history.replaceState(null, "", "/#/timeline?limit=1&order=desc");
+    const currentProfile = {
+      ...profile,
+      authorityCursor: authorityCursor(2),
+    };
+    const currentHead = boundaryHistoryPage({
+      eventIds: ["evt:current-head"],
+      next: "tail-token",
+      offset: 0,
+    });
+    const currentTail = boundaryHistoryPage({
+      eventIds: ["evt:current-tail"],
+      offset: 1,
+    });
+    let profileRequests = 0;
+    let changesRequests = 0;
+    let attentionRequests = 0;
+    let historyRequests = 0;
+    let traversalPageSettled = false;
+    let traversalTailDeferred = false;
+    let resolveTraversalTail!: (response: Response) => void;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:timeline-route",
+              contextIdentity: "context:sha256:timeline-route",
+              repository: "timeline-route-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(currentProfile)));
+      }
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      }
+      if (path.startsWith("/api/v2/attention?")) {
+        attentionRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      }
+      if (path.startsWith("/api/v2/history?")) {
+        historyRequests += 1;
+        const query = new URL(path, "https://pointbreak.invalid").searchParams;
+        if (query.get("after") === "tail-token" && !traversalTailDeferred) {
+          traversalTailDeferred = true;
+          return new Promise<Response>((resolve) => {
+            resolveTraversalTail = (response) => {
+              traversalPageSettled = true;
+              resolve(response);
+            };
+          });
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify(
+              query.get("after") === "tail-token" ? currentTail : currentHead,
+            ),
+          ),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    list?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    await vi.waitFor(() => {
+      expect(profileRequests).toBe(3);
+      expect(historyRequests).toBe(3);
+    });
+
+    history.replaceState(null, "", "/#/changes?q=next-route");
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() => {
+      expect(profileRequests).toBe(5);
+      expect(document.querySelector("#master")?.textContent).toContain(
+        "change:sha256:one",
+      );
+    });
+    const routeChangesRequests = changesRequests;
+    const routeAttentionRequests = attentionRequests;
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(traversalPageSettled).toBe(false);
+    expect(profileRequests).toBe(6);
+    expect(changesRequests).toBe(routeChangesRequests);
+    expect(attentionRequests).toBe(routeAttentionRequests);
+
+    resolveTraversalTail(new Response(JSON.stringify(currentTail)));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(location.hash).toBe("#/changes?q=next-route");
+  });
+
   it("keeps a superseded global Timeline boundary completion inert", async () => {
     history.replaceState(null, "", "/#/timeline?limit=1&order=desc");
     const currentProfile = {
@@ -4085,6 +4308,93 @@ describe("Change-first composition", () => {
     );
   });
 
+  it("retains exact detail chrome through resource loading and accepted paints", async () => {
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let resolveResource!: (response: Response) => void;
+    let markResourceStarted!: () => void;
+    const resourceStarted = new Promise<void>((resolve) => {
+      markResourceStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-identity",
+              storeIdentity: "store:sha256:focus",
+              contextIdentity: "context:sha256:focus",
+              repository: "focus-pointbreak",
+              placement: { tier: "clone", label: "clone store" },
+            }),
+          ),
+        );
+      }
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactResourcePath(path)) {
+        markResourceStarted();
+        return new Promise<Response>((resolve) => {
+          resolveResource = resolve;
+        });
+      }
+      if (isExactRevisionPath(path))
+        return Promise.resolve(new Response(JSON.stringify(revisionDetail())));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    const activation = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    ).find(
+      (button) => button.textContent === "Open authoritative captured diff",
+    );
+    if (activation === undefined) {
+      throw new Error("missing captured-resource activation");
+    }
+    activation.focus();
+    expect(document.activeElement).toBe(activation);
+    activation.click();
+    await resourceStarted;
+
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Loading captured resource",
+      ),
+    );
+    expect(activation.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      document.querySelector("#detail-close"),
+    );
+
+    resolveResource(
+      new Response(JSON.stringify(revisionDetail().exactRevisionDocument)),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Authoritative captured diff",
+      ),
+    );
+    expect(
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey,
+    ).toContain("/resource?");
+    expect(document.activeElement).toBe(
+      document.querySelector("#detail-close"),
+    );
+  });
+
   it("restores exact selection through Back, Forward, and a fresh bootstrap", async () => {
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -4426,6 +4736,143 @@ describe("Change-first composition", () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(changesRequests).toBe(2);
     expect(exactRequests).toBe(1);
+  });
+
+  it("keeps a Back-target Revision reading ahead of a due poll", async () => {
+    vi.useFakeTimers();
+    const revisionHash =
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
+    history.replaceState(null, "", `/${revisionHash}`);
+    let profileRequests = 0;
+    let changesRequests = 0;
+    let attentionRequests = 0;
+    let revisionRequests = 0;
+    let resourceRequests = 0;
+    let resourceSignal: AbortSignal | null | undefined;
+    let backRevisionSignal: AbortSignal | null | undefined;
+    let resolveBackRevision!: (response: Response) => void;
+    let markResourceStarted!: () => void;
+    let markBackRevisionStarted!: () => void;
+    const resourceStarted = new Promise<void>((resolve) => {
+      markResourceStarted = resolve;
+    });
+    const backRevisionStarted = new Promise<void>((resolve) => {
+      markBackRevisionStarted = resolve;
+    });
+    globalThis.fetch = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const path = String(input);
+        if (path === "/api/identity") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                schema: "pointbreak.inspect-identity",
+                storeIdentity: "store:sha256:exact-back",
+                contextIdentity: "context:sha256:exact-back",
+                repository: "exact-back-pointbreak",
+                placement: { tier: "clone", label: "clone store" },
+              }),
+            ),
+          );
+        }
+        if (path === "/api/v2/profile") {
+          profileRequests += 1;
+          return Promise.resolve(new Response(JSON.stringify(profile)));
+        }
+        if (path.startsWith("/api/v2/changes?")) {
+          changesRequests += 1;
+          return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+        }
+        if (path.startsWith("/api/v2/attention?")) {
+          attentionRequests += 1;
+          return Promise.resolve(
+            new Response(JSON.stringify(page("attention"))),
+          );
+        }
+        if (isExactResourcePath(path)) {
+          resourceRequests += 1;
+          resourceSignal = init?.signal;
+          markResourceStarted();
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        }
+        if (isExactRevisionPath(path)) {
+          revisionRequests += 1;
+          if (revisionRequests === 1) {
+            return Promise.resolve(
+              new Response(JSON.stringify(revisionDetail())),
+            );
+          }
+          backRevisionSignal = init?.signal;
+          markBackRevisionStarted();
+          return new Promise<Response>((resolve) => {
+            resolveBackRevision = resolve;
+          });
+        }
+        throw new Error(`unexpected ${path}`);
+      },
+    ) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    const activation = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
+    ).find(
+      (button) => button.textContent === "Open authoritative captured diff",
+    );
+    if (activation === undefined) {
+      throw new Error("missing captured-resource activation");
+    }
+    activation.click();
+    await resourceStarted;
+    expect(resourceRequests).toBe(1);
+
+    history.back();
+    await vi.advanceTimersByTimeAsync(0);
+    await backRevisionStarted;
+    expect(location.hash).toBe(revisionHash);
+    expect(resourceSignal?.aborted).toBe(true);
+    expect(backRevisionSignal?.aborted).toBe(false);
+    expect(revisionRequests).toBe(2);
+    const profileRequestsBeforeTick = profileRequests;
+    const changesRequestsBeforeTick = changesRequests;
+    const attentionRequestsBeforeTick = attentionRequests;
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(profileRequests).toBe(profileRequestsBeforeTick);
+    expect(changesRequests).toBe(changesRequestsBeforeTick);
+    expect(attentionRequests).toBe(attentionRequestsBeforeTick);
+    expect(backRevisionSignal?.aborted).toBe(false);
+    expect(revisionRequests).toBe(2);
+
+    resolveBackRevision(new Response(JSON.stringify(revisionDetail())));
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Exact Revision",
+      ),
+    );
+    const acceptedReadingKey =
+      document.querySelector<HTMLElement>("#detail-body")?.dataset
+        .changeReadingKey;
+    expect(acceptedReadingKey).toContain("/revisions/");
+    expect(acceptedReadingKey).not.toContain("/resource?");
+    expect(acceptedReadingKey).toContain("sha256:generation");
+    expect(backRevisionSignal?.aborted).toBe(false);
+    expect(resourceRequests).toBe(1);
+    expect(revisionRequests).toBe(2);
+
+    const profileRequestsAfterReading = profileRequests;
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(profileRequests).toBe(profileRequestsAfterReading + 1);
+    expect(changesRequests).toBe(changesRequestsBeforeTick);
+    expect(attentionRequests).toBe(attentionRequestsBeforeTick);
   });
 
   it("keeps a hard-budget failure on manual Retry instead of polling it automatically", async () => {
@@ -5118,24 +5565,34 @@ describe("Change-first composition", () => {
 
   it("an invalid route consumes a tick without stalling the loop", async () => {
     vi.useFakeTimers();
-    const control = servePollComposition();
-    const { bootstrapChangeInspector } = await import(
-      "../src/change-inspector"
-    );
-    await bootstrapChangeInspector();
-    history.replaceState(null, "", "/#/changes?unknown=value");
+    const suppressSyntheticHashchange = (event: Event): void => {
+      event.stopImmediatePropagation();
+    };
+    window.addEventListener("hashchange", suppressSyntheticHashchange, true);
+    try {
+      const control = servePollComposition();
+      const { bootstrapChangeInspector } = await import(
+        "../src/change-inspector"
+      );
+      await bootstrapChangeInspector();
+      history.replaceState(null, "", "/#/changes?unknown=value");
 
-    await vi.advanceTimersByTimeAsync(3_000);
-    expect(
-      control.requests.filter((path) => path === "/api/v2/profile"),
-    ).toHaveLength(2);
-    history.replaceState(null, "", "/#/changes");
-    await vi.advanceTimersByTimeAsync(3_000);
-    await vi.waitFor(() =>
+      await vi.advanceTimersByTimeAsync(3_000);
       expect(
         control.requests.filter((path) => path === "/api/v2/profile"),
-      ).toHaveLength(3),
-    );
+      ).toHaveLength(2);
+      history.replaceState(null, "", "/#/changes");
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(
+        control.requests.filter((path) => path === "/api/v2/profile"),
+      ).toHaveLength(3);
+    } finally {
+      window.removeEventListener(
+        "hashchange",
+        suppressSyntheticHashchange,
+        true,
+      );
+    }
   });
 
   it("a poll refresh keeps its reading painted and aborts at the 10 second refresh expiry", async () => {

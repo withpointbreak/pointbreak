@@ -10614,6 +10614,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       visibleHistoryFilters = "";
     }, "clearVisibleRequest");
     let pendingReading = null;
+    let pendingAuthorityTraversal = null;
     let releaseQueuedPoll = /* @__PURE__ */ __name(() => {
     }, "releaseQueuedPoll");
     let revalidateIdentityForCurrentSession = /* @__PURE__ */ __name(() => {
@@ -11060,62 +11061,71 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
       const retryBudget = newProjectionRetryBudget();
       const requestedRoute = formatChangeInspectorRoute(route);
-      for (; ; ) {
-        const generation = state.snapshot().generation;
-        const anchor = generation?.history;
-        if (generation === null || anchor === null || anchor === void 0) {
-          return null;
-        }
-        const epoch = advanceRequestEpoch();
-        try {
-          const preflight = decodeReaderProfile(
-            await fetchChangeInspectorJSON("/api/v2/profile")
-          );
-          if (epoch !== requestEpoch || currentRoute().kind === "invalid" || formatChangeInspectorRoute(
-            currentRoute()
-          ) !== requestedRoute) {
+      const traversalToken = /* @__PURE__ */ Symbol("timeline-authority-traversal");
+      try {
+        for (; ; ) {
+          const generation = state.snapshot().generation;
+          const anchor = generation?.history;
+          if (generation === null || anchor === null || anchor === void 0) {
             return null;
           }
-          if (!sameProfileGeneration(generation.profile, preflight)) {
-            throw new ChangeInspectorGenerationChanged();
-          }
-          const tail = await traverseTimelineTail(
-            route,
-            anchor,
-            async (query) => {
-              const page = decodeEventHistory(
-                await fetchChangeInspectorJSON(buildEventHistoryUrl(query))
-              );
-              if (epoch !== requestEpoch) {
-                throw new ChangeInspectorGenerationChanged();
-              }
-              return page;
-            }
-          );
-          const postflight = decodeReaderProfile(
-            await fetchChangeInspectorJSON("/api/v2/profile")
-          );
-          if (epoch !== requestEpoch || !sameProfileGeneration(generation.profile, postflight)) {
-            throw new ChangeInspectorGenerationChanged();
-          }
-          navigate(tail.route);
-          return tail.route;
-        } catch (error) {
-          if (epoch !== requestEpoch) return null;
-          if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
-            await loadGeneration(route, retryBudget);
-            if (currentRoute().kind === "invalid" || formatChangeInspectorRoute(
+          const epoch = advanceRequestEpoch();
+          pendingAuthorityTraversal = { token: traversalToken, epoch };
+          try {
+            const preflight = decodeReaderProfile(
+              await fetchChangeInspectorJSON("/api/v2/profile")
+            );
+            if (epoch !== requestEpoch || currentRoute().kind === "invalid" || formatChangeInspectorRoute(
               currentRoute()
             ) !== requestedRoute) {
               return null;
             }
-            continue;
+            if (!sameProfileGeneration(generation.profile, preflight)) {
+              throw new ChangeInspectorGenerationChanged();
+            }
+            const tail = await traverseTimelineTail(
+              route,
+              anchor,
+              async (query) => {
+                const page = decodeEventHistory(
+                  await fetchChangeInspectorJSON(buildEventHistoryUrl(query))
+                );
+                if (epoch !== requestEpoch) {
+                  throw new ChangeInspectorGenerationChanged();
+                }
+                return page;
+              }
+            );
+            const postflight = decodeReaderProfile(
+              await fetchChangeInspectorJSON("/api/v2/profile")
+            );
+            if (epoch !== requestEpoch || !sameProfileGeneration(generation.profile, postflight)) {
+              throw new ChangeInspectorGenerationChanged();
+            }
+            navigate(tail.route);
+            return tail.route;
+          } catch (error) {
+            if (epoch !== requestEpoch) return null;
+            if ((error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
+              await loadGeneration(route, retryBudget);
+              if (currentRoute().kind === "invalid" || formatChangeInspectorRoute(
+                currentRoute()
+              ) !== requestedRoute) {
+                return null;
+              }
+              continue;
+            }
+            clearVisibleRequest();
+            clearReading();
+            state.clearGeneration();
+            renderChangeInspectorRefusal(error);
+            return null;
           }
-          clearVisibleRequest();
-          clearReading();
-          state.clearGeneration();
-          renderChangeInspectorRefusal(error);
-          return null;
+        }
+      } finally {
+        if (pendingAuthorityTraversal?.token === traversalToken) {
+          pendingAuthorityTraversal = null;
+          releaseQueuedPoll();
         }
       }
     }, "navigateTimelineBoundary");
@@ -11230,6 +11240,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (!pollActive || pollRunning || !pollRequested) return;
         const route = currentRoute();
         if (route.kind === "invalid") {
+          pollRequested = false;
+          schedulePoll(pollDelayMs);
+          return;
+        }
+        if (pendingAuthorityTraversal?.epoch === requestEpoch) {
           pollRequested = false;
           schedulePoll(pollDelayMs);
           return;
