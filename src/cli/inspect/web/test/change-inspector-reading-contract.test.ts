@@ -335,16 +335,27 @@ describe("exact-reading preservation floor", () => {
     vi.useFakeTimers();
     history.replaceState(null, "", "/#/changes");
     let profileRequests = 0;
+    let reportPollStarted!: () => void;
+    let releasePollFailure!: () => void;
+    const pollStarted = new Promise<void>((resolve) => {
+      reportPollStarted = resolve;
+    });
+    const pollFailureReleased = new Promise<void>((resolve) => {
+      releasePollFailure = resolve;
+    });
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/identity") return identityResponse();
       if (path === "/api/v2/profile") {
         profileRequests += 1;
-        return profileRequests === 3
-          ? new Response(JSON.stringify({ error: "poll failed" }), {
-              status: 500,
-            })
-          : new Response(JSON.stringify(profile()));
+        if (profileRequests === 3) {
+          reportPollStarted();
+          await pollFailureReleased;
+          return new Response(JSON.stringify({ error: "poll failed" }), {
+            status: 500,
+          });
+        }
+        return new Response(JSON.stringify(profile()));
       }
       if (path.startsWith("/api/v2/changes?"))
         return new Response(JSON.stringify(page("changes")));
@@ -357,11 +368,17 @@ describe("exact-reading preservation floor", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector();
+    // Settle any queued same-route hashchange before the draft is created so
+    // this assertion isolates the poll that follows.
+    await vi.advanceTimersByTimeAsync(0);
+    const failedPoll = vi.advanceTimersByTimeAsync(3_000);
+    await pollStarted;
     const input = document.querySelector<HTMLInputElement>("#filter-text");
     input?.focus();
     if (input) input.value = "unfinished draft";
 
-    await vi.advanceTimersByTimeAsync(3_000);
+    releasePollFailure();
+    await failedPoll;
 
     expect(profileRequests).toBe(3);
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
