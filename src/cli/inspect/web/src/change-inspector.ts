@@ -565,6 +565,22 @@ export async function bootstrapChangeInspector(
     visibleReading = "";
   };
 
+  const showRetryableReadingFailure = (
+    message: string,
+    pollDraft: FocusedFilterDraft | null,
+  ): void => {
+    reading = null;
+    readingRefusal = null;
+    exactReadingPresentation = {
+      kind: "retryable_failure",
+      message,
+      retry: () => {
+        void onRoute();
+      },
+    };
+    paint(pollDraft);
+  };
+
   const loadReading = async (
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
     expectedProjectionStamp: string,
@@ -662,16 +678,7 @@ export async function bootstrapChangeInspector(
               ? "exact reading cancelled"
               : null;
       if (retryableMessage !== null) {
-        reading = null;
-        readingRefusal = null;
-        exactReadingPresentation = {
-          kind: "retryable_failure",
-          message: retryableMessage,
-          retry: () => {
-            void onRoute();
-          },
-        };
-        paint(pollDraft);
+        showRetryableReadingFailure(retryableMessage, pollDraft);
         return;
       }
       if (
@@ -692,6 +699,16 @@ export async function bootstrapChangeInspector(
       ) {
         if (sessionChanged) revalidateIdentityForCurrentSession();
         await loadGeneration(route, retryBudget, pollDraft, origin);
+        return;
+      }
+      if (
+        error instanceof ChangeInspectorRequestFailure &&
+        !(error instanceof ChangeInspectorPageFailure)
+      ) {
+        showRetryableReadingFailure(
+          `Reader refused this exact surface: ${error.message}`,
+          pollDraft,
+        );
         return;
       }
       reading = null;
@@ -775,11 +792,16 @@ export async function bootstrapChangeInspector(
         postflight,
         history,
       );
-      const refreshesExactReading =
-        origin !== "route" &&
+      const hasExactReading =
         route.kind !== "lens" &&
         route.kind !== "timeline" &&
         route.kind !== "event";
+      const holdsManualReadingRetry =
+        origin !== "route" &&
+        hasExactReading &&
+        exactReadingPresentation?.kind === "retryable_failure";
+      const refreshesExactReading =
+        origin !== "route" && hasExactReading && !holdsManualReadingRetry;
       let acceptedReading: ChangeInspectorReading | null = null;
       let acceptedReadingKey = "";
       if (refreshesExactReading) {
@@ -837,12 +859,7 @@ export async function bootstrapChangeInspector(
       if (credentialSessionChanged(credentialVersion)) {
         throw new ChangeInspectorSessionChanged();
       }
-      if (
-        origin === "route" &&
-        route.kind !== "lens" &&
-        route.kind !== "timeline" &&
-        route.kind !== "event"
-      ) {
+      if (origin === "route" && hasExactReading) {
         const requestedReading = readingKey(route, changes.projectionStamp);
         if (visibleReading !== requestedReading) {
           // Never paint a detail from the prior generation beside a newly
@@ -868,7 +885,7 @@ export async function bootstrapChangeInspector(
           ? eventHistoryFilters(route.historyQuery)
           : "";
       paint(pollDraft);
-      if (!refreshesExactReading) {
+      if (!refreshesExactReading && !holdsManualReadingRetry) {
         await loadReading(
           route,
           changes.projectionStamp,

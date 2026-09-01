@@ -4308,6 +4308,176 @@ describe("Change-first composition", () => {
     ).not.toBe("degraded");
   });
 
+  it("does not overlap a slow route reading with background polling", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let changesRequests = 0;
+    let exactRequests = 0;
+    let markExactStarted!: () => void;
+    const exactStarted = new Promise<void>((resolve) => {
+      markExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      }
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        markExactStarted();
+        return new Promise<Response>((resolve) => {
+          setTimeout(
+            () => resolve(new Response(JSON.stringify(revisionDetail()))),
+            12_000,
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector();
+    await exactStarted;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(exactRequests).toBe(1);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Still loading a large exact reading",
+    );
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await bootstrap;
+    expect(exactRequests).toBe(1);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Exact Revision",
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(changesRequests).toBe(2);
+    expect(exactRequests).toBe(1);
+  });
+
+  it("keeps a hard-budget failure on manual Retry instead of polling it automatically", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let changesRequests = 0;
+    let exactRequests = 0;
+    let markExactStarted!: () => void;
+    const exactStarted = new Promise<void>((resolve) => {
+      markExactStarted = resolve;
+    });
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      }
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        markExactStarted();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const bootstrap = bootstrapChangeInspector();
+    await exactStarted;
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await bootstrap;
+    expect(exactRequests).toBe(1);
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(changesRequests).toBe(2);
+    expect(exactRequests).toBe(1);
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+  });
+
+  it("keeps an empty-body route failure on manual Retry instead of polling it automatically", async () => {
+    vi.useFakeTimers();
+    history.replaceState(
+      null,
+      "",
+      "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
+    );
+    let changesRequests = 0;
+    let exactRequests = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return Promise.reject(new Error("identity is presentation-only"));
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?")) {
+        changesRequests += 1;
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      }
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        exactRequests += 1;
+        return Promise.resolve(
+          exactRequests === 1
+            ? new Response("", { status: 503 })
+            : new Response(JSON.stringify(revisionDetail())),
+        );
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+    expect(exactRequests).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(changesRequests).toBe(2);
+    expect(exactRequests).toBe(1);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "server response error",
+    );
+    expect(document.querySelector("[data-exact-reading-retry]")).not.toBeNull();
+
+    document
+      .querySelector<HTMLButtonElement>("[data-exact-reading-retry]")
+      ?.click();
+    await vi.waitFor(() => expect(exactRequests).toBe(2));
+    await vi.waitFor(() =>
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Exact Revision",
+      ),
+    );
+  });
+
   it("retries a hard-budget failure as a fresh route reading", async () => {
     vi.useFakeTimers();
     history.replaceState(
