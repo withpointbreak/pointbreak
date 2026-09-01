@@ -51,6 +51,68 @@ test("browser program remains one expression for the Playwright runner", async (
 	);
 });
 
+test("shakedown mode owns its root and exits after one shared representative case", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const readme = await readFile(new URL("./README.md", import.meta.url), "utf8");
+
+	assert.match(shell, /--shakedown\) mode="shakedown"; shift ;;/);
+	assert.match(
+		shell,
+		/shakedown_root="\$\(mktemp -d "\$shakedown_parent\/pointbreak-change-inspector-shakedown\.XXXXXX"\)"/,
+	);
+	assert.match(shell, /cleanup_shakedown_root/);
+	assert.match(shell, /--arg mode "\$mode"/);
+	assert.match(shell, /mode: \$mode/);
+	assert.equal(
+		(shell.match(/run_pw run-code --filename=/g) ?? []).length,
+		1,
+		"both modes must use the same browser runner",
+	);
+
+	const materialize = shell.indexOf('"$matrix_materializer" "$fixture_repo"');
+	const modeSplit = shell.indexOf('if [ "$mode" = "full" ]; then', materialize);
+	const primaryServer = shell.indexOf(
+		'"$pointbreak_binary" inspect --repo "$fixture_repo"',
+		modeSplit,
+	);
+	const browserRun = shell.indexOf("run_pw run-code --filename=", primaryServer);
+	assert.ok(
+		materialize >= 0 &&
+			modeSplit > materialize &&
+			primaryServer > modeSplit &&
+			browserRun > primaryServer,
+		"shakedown must share materialization, primary server, and browser launch paths",
+	);
+
+	const shakedown = browser.indexOf('if (config.mode === "shakedown")');
+	const fullMatrix = browser.indexOf(
+		'await diagnostics.section("Reader readiness"',
+	);
+	assert.ok(
+		shakedown >= 0 && fullMatrix > shakedown,
+		"the shakedown branch must precede the full matrix",
+	);
+	const branch = browser.slice(shakedown, fullMatrix);
+	assert.equal(
+		(branch.match(/diagnostics\.section\("Shakedown exact reading and quiet polling"/g) ?? [])
+			.length,
+		1,
+		"shakedown must run exactly one named representative section",
+	);
+	assert.match(branch, /data-browser-poll-sentinel/);
+	assert.match(branch, /\/api\/v2\/profile/);
+	assert.match(branch, /profileCompletions/);
+	assert.match(branch, /return shakedownResult/);
+	assert.match(readme, /--shakedown/);
+});
+
 test("empty ready L2 recovery is explicit, authenticated, and retained before browser readiness", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.sh", import.meta.url),

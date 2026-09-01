@@ -12,15 +12,20 @@ die() {
 usage() {
   cat <<'EOF'
 usage: change-inspector-browser-verify.sh --root <empty-directory>
+       change-inspector-browser-verify.sh --shakedown
 
 Runs the public L2 Change matrix against an exact injected Pointbreak binary.
 The root must be empty and outside this worktree. Logs, screenshots, fixture
 repositories, the disposable POINTBREAK_HOME, and completion-last manifest all
 remain under that root.
+
+--shakedown creates and cleans its own temporary root, exercises the shared
+fixture/server/browser path through one representative exact-reading case, and
+retains nothing on success. It cannot be combined with --root.
 EOF
 }
 
-for command in git jq node rg shasum find sort wc tr mv curl cp chmod; do
+for command in git jq node rg shasum find sort wc tr mv curl cp chmod mktemp rm date du uname; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
@@ -32,16 +37,44 @@ browser_manifest_publisher="$script_dir/change-inspector-browser-manifest.mjs"
 matrix_materializer="$script_dir/materialize-inspector-decision-matrix.sh"
 pointbreak_binary="${POINTBREAK_BINARY:-}"
 root=""
+mode="full"
+shakedown_parent=""
+shakedown_root=""
+shakedown_started_at=""
+
+cleanup_shakedown_root() {
+  local cleanup_root="${shakedown_root:-}"
+  [ -n "$cleanup_root" ] || return 0
+  [ -n "$shakedown_parent" ] || return 1
+  [ "$cleanup_root" != "/" ] || return 1
+  case "$cleanup_root" in
+    "$shakedown_parent"/pointbreak-change-inspector-shakedown.*) ;;
+    *) return 1 ;;
+  esac
+  rm -rf -- "$cleanup_root"
+  [ ! -e "$cleanup_root" ] || return 1
+  shakedown_root=""
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="${2:-}"; shift 2 ;;
+    --shakedown) mode="shakedown"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
-[ -n "$root" ] || die "--root <empty-directory> is required"
+if [ "$mode" = "shakedown" ]; then
+  [ -z "$root" ] || die "--shakedown creates its own root and cannot use --root"
+  shakedown_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
+  shakedown_root="$(mktemp -d "$shakedown_parent/pointbreak-change-inspector-shakedown.XXXXXX")"
+  root="$shakedown_root"
+  shakedown_started_at="$(date +%s)"
+  trap cleanup_shakedown_root EXIT
+else
+  [ -n "$root" ] || die "--root <empty-directory> is required"
+fi
 [ -n "$pointbreak_binary" ] || die "POINTBREAK_BINARY must name the exact worktree binary"
 [ -x "$pointbreak_binary" ] || die "POINTBREAK_BINARY is not executable: $pointbreak_binary"
 case "$pointbreak_binary" in
@@ -117,6 +150,7 @@ stop_background_process() {
 cleanup() {
   local mode="${1:-best-effort}"
   local browser_close_status=0
+  local root_cleanup_status=0
   local pid
   if [ "$browser_cleanup_enabled" = true ]; then
     if run_pw close >"$log_dir/browser-close.log" 2>&1; then
@@ -130,8 +164,12 @@ cleanup() {
     stop_background_process "$pid"
   done
   background_pids=()
+  cleanup_shakedown_root || root_cleanup_status=$?
   if [ "$mode" = strict ] && [ "$browser_close_status" -ne 0 ]; then
     return "$browser_close_status"
+  fi
+  if [ "$mode" = strict ] && [ "$root_cleanup_status" -ne 0 ]; then
+    return "$root_cleanup_status"
   fi
   return 0
 }
@@ -271,6 +309,8 @@ POINTBREAK_HOME="$pointbreak_home" POINTBREAK_BINARY="$pointbreak_binary" \
   POINTBREAK_LEGACY_NOTE_FIXTURE_DIR="$snapshot_legacy_note_store" \
   "$matrix_materializer" "$fixture_repo" \
   >"$log_dir/base-matrix.json" 2>"$log_dir/base-matrix.log"
+
+if [ "$mode" = "full" ]; then
 printf 'pub const BROWSER_SCALE: u32 = 0;\n' >"$fixture_repo/src/browser-scale.rs"
 git -C "$fixture_repo" add src/browser-scale.rs
 git -C "$fixture_repo" commit --quiet -m "browser scale source"
@@ -630,7 +670,37 @@ jq -n \
       joinEventId: $historicalJoinEvent, withdrawEventId: $historicalWithdrawEvent},
     equalTimestamp: $equalTimestamp}' \
   >"$log_dir/fixture.json"
+else
+  POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" store derived build \
+    --repo "$fixture_repo" --format json \
+    >"$log_dir/derived-build.json" 2>"$log_dir/derived-build.log"
+  rich_change="$(jq -er '.topology.initial.change' "$log_dir/base-matrix.json")"
+  rich_revision="$(jq -er '.primary_revision' "$log_dir/base-matrix.json")"
+  rich_artifact="$(jq -er '.topology.initial.current.artifact' "$log_dir/base-matrix.json")"
+  fixture_identity="public-l2-change-matrix-shakedown-v1"
+  jq -n \
+    --arg fixture "$fixture_identity" \
+    --arg sourceCommit "$source_commit" \
+    --arg richChange "$rich_change" \
+    --arg richRevision "$rich_revision" \
+    --arg richArtifact "$rich_artifact" \
+    '{fixture: $fixture, sourceCommit: $sourceCommit,
+      rich: {changeId: $richChange, revisionId: $richRevision, artifactHash: $richArtifact}}' \
+    >"$log_dir/fixture.json"
+fi
 
+session="pointbreak-change-browser-$$"
+if [ -n "${PLAYWRIGHT_CLI:-}" ]; then
+  pwcli=("$PLAYWRIGHT_CLI")
+elif command -v playwright-cli >/dev/null 2>&1; then
+  pwcli=(playwright-cli)
+else
+  command -v npx >/dev/null 2>&1 || die "playwright-cli and npx are unavailable"
+  pwcli=(npx --yes --package @playwright/cli@0.1.17 playwright-cli)
+fi
+browser_cleanup_enabled=true
+
+if [ "$mode" = "full" ]; then
 # Retain three tiny reader-state roots beside the primary fixture so the real
 # browser can prove readiness sequencing without borrowing owner authority.
 # Each repository pins its store to worktree-local ephemeral placement.
@@ -660,17 +730,6 @@ completion_record="$ready_store/$completion_fixture"
   || die "public reader-state activation fixtures are unavailable"
 cp "$activation_record" "$completion_record" "$reader_empty_l2_repo/.pointbreak/data/events/"
 cp "$activation_record" "$reader_m1_repo/.pointbreak/data/events/"
-
-session="pointbreak-change-browser-$$"
-if [ -n "${PLAYWRIGHT_CLI:-}" ]; then
-  pwcli=("$PLAYWRIGHT_CLI")
-elif command -v playwright-cli >/dev/null 2>&1; then
-  pwcli=(playwright-cli)
-else
-  command -v npx >/dev/null 2>&1 || die "playwright-cli and npx are unavailable"
-  pwcli=(npx --yes --package @playwright/cli@0.1.17 playwright-cli)
-fi
-browser_cleanup_enabled=true
 
 start_reader_state_server() {
   local state="$1"
@@ -735,6 +794,24 @@ retry_empty_ready_l2() {
   die "empty-ready-l2 did not publish a current derived generation after explicit retry"
 }
 
+start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
+retry_empty_ready_l2
+start_reader_state_server "l0" "$reader_l0_repo"
+start_reader_state_server "m1" "$reader_m1_repo"
+reader_servers="$(jq -cn \
+  --slurpfile empty "$log_dir/reader-empty-ready-l2-startup.json" \
+  --slurpfile l0 "$log_dir/reader-l0-startup.json" \
+  --slurpfile m1 "$log_dir/reader-m1-startup.json" '
+    def server($startup): {
+      baseUrl: ("http://" + $startup.host + ":" + ($startup.port | tostring)),
+      token: $startup.token
+    };
+    {emptyReadyL2: server($empty[0]), l0: server($l0[0]), m1: server($m1[0])}
+  ')"
+else
+  reader_servers='{}'
+fi
+
 retain_primary_derived_access_status() {
   local startup="$log_dir/inspect-startup.json"
   local status_log="$log_dir/browser-primary-derived-access-status.json"
@@ -762,21 +839,6 @@ retain_primary_derived_access_status() {
   [ -f "$status_tmp" ] && mv "$status_tmp" "$status_log"
   die "primary Inspector did not publish an active current derived-access status"
 }
-
-start_reader_state_server "empty-ready-l2" "$reader_empty_l2_repo"
-retry_empty_ready_l2
-start_reader_state_server "l0" "$reader_l0_repo"
-start_reader_state_server "m1" "$reader_m1_repo"
-reader_servers="$(jq -cn \
-  --slurpfile empty "$log_dir/reader-empty-ready-l2-startup.json" \
-  --slurpfile l0 "$log_dir/reader-l0-startup.json" \
-  --slurpfile m1 "$log_dir/reader-m1-startup.json" '
-    def server($startup): {
-      baseUrl: ("http://" + $startup.host + ":" + ($startup.port | tostring)),
-      token: $startup.token
-    };
-    {emptyReadyL2: server($empty[0]), l0: server($l0[0]), m1: server($m1[0])}
-  ')"
 
 POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
   POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" inspect --repo "$fixture_repo" --port 0 --format json \
@@ -807,11 +869,12 @@ jq -e '.schema == "pointbreak.reader-upgrade-required" and .version == 1' \
 browser_config="$(jq -cn \
   --arg artifactDir "$artifact_dir" \
   --arg appendReceipt "$log_dir/timeline-append.json" \
+  --arg mode "$mode" \
   --argjson server "$server" \
   --argjson readerServers "$reader_servers" \
   --slurpfile fixture "$log_dir/fixture.json" \
   --slurpfile matrix "$log_dir/base-matrix.json" \
-  '{artifactDir: $artifactDir, appendReceipt: $appendReceipt, server: $server,
+  '{artifactDir: $artifactDir, appendReceipt: $appendReceipt, mode: $mode, server: $server,
     readerServers: $readerServers,
     fixture: ($fixture[0] + {matrix: $matrix[0]})}')"
 browser_program="$log_dir/browser-program.mjs"
@@ -844,23 +907,26 @@ run_pw open about:blank >"$log_dir/browser-open.log" 2>&1
 # racy sleep while proving that a parked reader remains stable until its
 # explicit catch-up action.  The worker changes only the disposable repository
 # and writes its receipt below the caller-provided evidence root.
-timeline_append_marker="$artifact_dir/timeline-parked-before-append.png"
-(
-  for _ in $(seq 1 240); do
-    [ -f "$timeline_append_marker" ] && break
-    sleep 0.25
-  done
-  [ -f "$timeline_append_marker" ] || exit 1
-  printf 'pub const BROWSER_TIMELINE_APPEND: &str = "after-park";\n' \
-    >"$fixture_repo/src/browser-scale.rs"
-  POINTBREAK_HOME="$pointbreak_home" \
-    POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-    "$pointbreak_binary" capture --repo "$fixture_repo" \
-      --summary "Browser Timeline append after park" --format json \
-      >"$log_dir/timeline-append.json" 2>"$log_dir/timeline-append.log"
-) &
-timeline_append_pid=$!
-register_background_process "$timeline_append_pid"
+timeline_append_pid=""
+if [ "$mode" = "full" ]; then
+  timeline_append_marker="$artifact_dir/timeline-parked-before-append.png"
+  (
+    for _ in $(seq 1 240); do
+      [ -f "$timeline_append_marker" ] && break
+      sleep 0.25
+    done
+    [ -f "$timeline_append_marker" ] || exit 1
+    printf 'pub const BROWSER_TIMELINE_APPEND: &str = "after-park";\n' \
+      >"$fixture_repo/src/browser-scale.rs"
+    POINTBREAK_HOME="$pointbreak_home" \
+      POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
+      "$pointbreak_binary" capture --repo "$fixture_repo" \
+        --summary "Browser Timeline append after park" --format json \
+        >"$log_dir/timeline-append.json" 2>"$log_dir/timeline-append.log"
+  ) &
+  timeline_append_pid=$!
+  register_background_process "$timeline_append_pid"
+fi
 browser_gate_status=0
 run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1 \
   || browser_gate_status=$?
@@ -909,6 +975,46 @@ jq -e '
     ' "$browser_result" >&2
     die "browser diagnostic report did not pass"
   }
+if [ "$mode" = "shakedown" ]; then
+  jq -e '
+    .status == "passed" and .globalInvalid == false and
+    .sectionCount == 1 and .screenshotCount == 1 and
+    (.failures | length == 0) and
+    (.sections == [{name: "Shakedown exact reading and quiet polling", status: "passed", failureCount: 0}])
+  ' "$browser_result" >/dev/null \
+    || die "shakedown did not complete its one representative browser section"
+  screenshot_count="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
+  [ "$screenshot_count" -eq 1 ] \
+    || die "shakedown expected one temporary screenshot, found $screenshot_count"
+  assertion_count="$(jq -er '.assertionCount' "$browser_result")"
+  shakedown_finished_at="$(date +%s)"
+  shakedown_elapsed_seconds="$((shakedown_finished_at - shakedown_started_at))"
+  shakedown_storage_kib="$(du -sk "$root" | awk '{print $1}')"
+  shakedown_receipt="$(jq -cn \
+    --arg mode "$mode" \
+    --arg root "$root" \
+    --arg sourceCommit "$source_commit" \
+    --arg binarySha256 "$binary_sha256" \
+    --arg host "$(uname -srm)" \
+    --argjson assertionCount "$assertion_count" \
+    --argjson screenshotCount "$screenshot_count" \
+    --argjson elapsedSeconds "$shakedown_elapsed_seconds" \
+    --argjson temporaryStorageKiB "$shakedown_storage_kib" \
+    '{gate: "change-inspector-browser-shakedown", mode: $mode, status: "passed",
+      root: $root, sourceCommit: $sourceCommit, binarySha256: $binarySha256,
+      assertionCount: $assertionCount, screenshotCount: $screenshotCount,
+      cost: {host: $host, elapsedSeconds: $elapsedSeconds, sourceBuilds: 0,
+        derivedStoreBuilds: 1, inspectorLaunches: 1, browserLaunches: 1,
+        temporaryStorageKiB: $temporaryStorageKiB},
+      retained: false, cleanup: "removed own temporary root"}')"
+  completed_shakedown_root="$root"
+  cleanup strict || die "shakedown browser session or temporary root did not clean up"
+  trap - EXIT
+  [ ! -e "$completed_shakedown_root" ] \
+    || die "shakedown temporary root remained after cleanup"
+  printf '%s\n' "$shakedown_receipt"
+  exit 0
+fi
 if wait "$timeline_append_pid"; then
   forget_background_process "$timeline_append_pid"
 else

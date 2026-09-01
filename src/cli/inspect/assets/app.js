@@ -375,7 +375,7 @@
   var ChangeInspectorRequestFailure = class extends Error {
     constructor(kind, status) {
       super(
-        kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
+        kind === "aborted" ? "request cancelled" : kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
       );
       this.kind = kind;
       this.status = status;
@@ -386,6 +386,10 @@
       __name(this, "ChangeInspectorRequestFailure");
     }
   };
+  function isRequestAbort(error, signal) {
+    return signal?.aborted === true || error instanceof DOMException && error.name === "AbortError";
+  }
+  __name(isRequestAbort, "isRequestAbort");
   var ChangeInspectorPageFailure = class extends ChangeInspectorRequestFailure {
     constructor(code, status) {
       super("protocol", status);
@@ -419,7 +423,7 @@
     return null;
   }
   __name(typedPageFailure, "typedPageFailure");
-  async function fetchOnce(path, reportConnection) {
+  async function fetchOnce(path, reportConnection, signal) {
     const headers = {};
     const token = getSessionToken();
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -430,17 +434,25 @@
         cache: "no-store",
         credentials: "omit",
         referrerPolicy: "no-referrer",
-        headers
+        headers,
+        signal
       });
-    } catch {
+    } catch (error) {
+      if (isRequestAbort(error, signal)) {
+        throw new ChangeInspectorRequestFailure("aborted");
+      }
       throw failure("unreachable", void 0, reportConnection);
     }
+    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
     if (response.status === 401)
       throw new ChangeInspectorRequestFailure("unauthorized", 401);
     let data;
     try {
       data = JSON.parse(await response.text());
-    } catch {
+    } catch (error) {
+      if (isRequestAbort(error, signal)) {
+        throw new ChangeInspectorRequestFailure("aborted");
+      }
       throw failure("protocol", response.status, reportConnection);
     }
     if (!response.ok)
@@ -448,6 +460,7 @@
     if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error)) {
       throw failure("protocol", response.status, reportConnection);
     }
+    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
     if (reportConnection) markRequestSuccess();
     return data;
   }
@@ -456,13 +469,19 @@
     const reportConnection = options.reportConnection !== false;
     const credentialVersion2 = sessionCredentialVersion();
     try {
-      return await fetchOnce(path, reportConnection);
+      return await fetchOnce(path, reportConnection, options.signal);
     } catch (error) {
       if (!(error instanceof ChangeInspectorRequestFailure) || error.kind !== "unauthorized")
         throw error;
     }
-    if (sessionCredentialVersion() !== credentialVersion2 || await recoverUnauthorized())
-      return fetchOnce(path, reportConnection);
+    if (options.signal?.aborted)
+      throw new ChangeInspectorRequestFailure("aborted");
+    if (sessionCredentialVersion() !== credentialVersion2)
+      return fetchOnce(path, reportConnection, options.signal);
+    const recovered = await recoverUnauthorized();
+    if (options.signal?.aborted)
+      throw new ChangeInspectorRequestFailure("aborted");
+    if (recovered) return fetchOnce(path, reportConnection, options.signal);
     throw failure("unauthorized", 401, reportConnection);
   }
   __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
@@ -1332,6 +1351,8 @@
     lensHeading: "lens-heading",
     lensMeta: "lens-meta",
     lensCount: "lens-count",
+    exactReadingStillLoading: "exact-reading-still-loading",
+    exactReadingRetryableFailure: "exact-reading-retryable-failure",
     // (The app-shell store-identity chip + detail popover is static markup in
     // index.html — `store-identity*` classes live there and in app.css, not here —
     // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
@@ -5270,11 +5291,12 @@
     assertStamp(document2.projectionStamp, stamp, "contextual Revision detail");
   }
   __name(assertRevisionDetail, "assertRevisionDetail");
-  async function loadChangeInspectorReading(route, expectedProjectionStamp) {
+  async function loadChangeInspectorReading(route, expectedProjectionStamp, signal) {
     if (route.kind === "change") {
       const document3 = decodeChangeDetail(
         await fetchChangeInspectorJSON(
-          `/api/v2/changes/${encoded(route.changeId)}`
+          `/api/v2/changes/${encoded(route.changeId)}`,
+          { signal }
         )
       );
       if (document3.summary.changeId !== route.changeId) {
@@ -5290,7 +5312,8 @@
     if (route.kind === "revision" || route.kind === "diff" || route.kind === "association") {
       const document3 = decodeChangeRevisionDetail(
         await fetchChangeInspectorJSON(
-          revisionPath(route.changeId, route.revision)
+          revisionPath(route.changeId, route.revision),
+          { signal }
         )
       );
       assertRevisionDetail(document3, route, expectedProjectionStamp);
@@ -5299,7 +5322,8 @@
     if (route.kind === "resource") {
       const document3 = decodeRevisionResource(
         await fetchChangeInspectorJSON(
-          resourcePath(route.changeId, route.revision)
+          resourcePath(route.changeId, route.revision),
+          { signal }
         )
       );
       if (!sameExactRevision(document3.resource.revision, route.revision)) {
@@ -5320,7 +5344,8 @@
     });
     const document2 = decodeRevisionInterdiff(
       await fetchChangeInspectorJSON(
-        `/api/v2/changes/${encoded(route.changeId)}/interdiff/${encoded(route.from.revisionId)}/${encoded(route.to.revisionId)}?${params}`
+        `/api/v2/changes/${encoded(route.changeId)}/interdiff/${encoded(route.from.revisionId)}/${encoded(route.to.revisionId)}?${params}`,
+        { signal }
       )
     );
     if (!sameExactRevision(document2.interdiff.from, route.from) || !sameExactRevision(document2.interdiff.to, route.to)) {
@@ -9052,6 +9077,28 @@
       );
       return;
     }
+    if (presentation.exactReading != null) {
+      const surface = document.createElement("section");
+      surface.className = presentation.exactReading.kind === "still_loading" ? CLASS.exactReadingStillLoading : CLASS.exactReadingRetryableFailure;
+      const status = message(
+        presentation.exactReading.kind === "still_loading" ? "Still loading a large exact reading" : presentation.exactReading.message
+      );
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = CLASS.ghost;
+      if (presentation.exactReading.kind === "still_loading") {
+        action.textContent = "Cancel";
+        action.dataset.exactReadingCancel = "";
+        action.addEventListener("click", presentation.exactReading.cancel);
+      } else {
+        action.textContent = "Retry";
+        action.dataset.exactReadingRetry = "";
+        action.addEventListener("click", presentation.exactReading.retry);
+      }
+      surface.append(status, detailActions(action));
+      replaceDetailWith(surface);
+      return;
+    }
     if (presentation.refusal !== null) {
       replaceDetailWith(
         message(`Reader refused this exact surface: ${presentation.refusal}`)
@@ -9101,7 +9148,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(renderDetail, "renderDetail");
   function renderChangeInspector(snapshot2, actions2, presentation = {
     reading: null,
-    refusal: null
+    refusal: null,
+    exactReading: null
   }) {
     renderChangeInspectorIdentity(snapshot2.identity ?? null);
     const master = document.querySelector("#master");
@@ -9935,6 +9983,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "snapshot");
     return {
       snapshot: snapshot2,
+      matchesPublishedProfile(next, credentialVersion2) {
+        return generation !== null && generationCredentialVersion === credentialVersion2 && sameProfileGeneration(generation.profile, next);
+      },
       publish(next, credentialVersion2 = 0) {
         const transition = generation === null ? "initial" : sameProfileGeneration(generation.profile, next.profile) && generation.changes.projectionStamp === next.changes.projectionStamp && generation.history?.timelineProjectionStamp === next.history?.timelineProjectionStamp ? "unchanged" : "changed";
         generation = next;
@@ -10210,8 +10261,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(createDisclosure, "createDisclosure");
 
   // src/change-inspector.ts
-  var EXACT_READING_TIMEOUT_MS = 1e4;
+  var EXACT_READING_SOFT_BUDGET_MS = 1e4;
+  var EXACT_READING_HARD_BUDGET_MS = 3e4;
+  var EXACT_POSTFLIGHT_TIMEOUT_MS = 3e3;
   var IDENTITY_TIMEOUT_MS = 3e3;
+  var POLL_HEALTHY_INTERVAL_MS = 3e3;
+  var POLL_BACKOFF_CAP_MS = 3e4;
   var POLL_CYCLE_TIMEOUT_MS = 15e3;
   var ChangeInspectorTimeout = class extends Error {
     static {
@@ -10221,6 +10276,97 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var ChangeInspectorSessionChanged = class extends Error {
     static {
       __name(this, "ChangeInspectorSessionChanged");
+    }
+  };
+  var READING_ABORT_REASONS = [
+    "superseded",
+    "hard_budget",
+    "postflight_budget",
+    "refresh_expiry",
+    "cancelled",
+    "stopped"
+  ];
+  function readingAbortReason(value) {
+    return typeof value === "string" && READING_ABORT_REASONS.includes(value) ? value : null;
+  }
+  __name(readingAbortReason, "readingAbortReason");
+  var ReadingAttempt = class {
+    static {
+      __name(this, "ReadingAttempt");
+    }
+    controller = new AbortController();
+    timers = /* @__PURE__ */ new Set();
+    parentSignal;
+    onParentAbort;
+    reason = null;
+    constructor(parentSignal) {
+      this.parentSignal = parentSignal ?? null;
+      this.onParentAbort = parentSignal === void 0 ? null : () => {
+        this.abort(readingAbortReason(parentSignal.reason) ?? "superseded");
+      };
+      if (parentSignal?.aborted) this.onParentAbort?.();
+      else
+        parentSignal?.addEventListener(
+          "abort",
+          this.onParentAbort,
+          {
+            once: true
+          }
+        );
+    }
+    get signal() {
+      return this.controller.signal;
+    }
+    schedule(callback, delayMs) {
+      const timer = setTimeout(() => {
+        this.timers.delete(timer);
+        callback();
+      }, delayMs);
+      this.timers.add(timer);
+      return timer;
+    }
+    clearTimer(timer) {
+      clearTimeout(timer);
+      this.timers.delete(timer);
+    }
+    run(operation) {
+      if (this.signal.aborted) {
+        return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = /* @__PURE__ */ __name((callback) => {
+          if (settled) return;
+          settled = true;
+          this.signal.removeEventListener("abort", onAbort);
+          callback();
+        }, "finish");
+        const onAbort = /* @__PURE__ */ __name(() => finish(() => reject(new ChangeInspectorRequestFailure("aborted"))), "onAbort");
+        this.signal.addEventListener("abort", onAbort, { once: true });
+        if (this.signal.aborted) {
+          onAbort();
+          return;
+        }
+        operation().then(
+          (value) => finish(() => resolve(value)),
+          (error) => finish(() => reject(error))
+        );
+      });
+    }
+    abort(reason) {
+      if (this.reason !== null) return;
+      this.reason = reason;
+      for (const timer of this.timers) clearTimeout(timer);
+      this.timers.clear();
+      this.controller.abort(reason);
+    }
+    dispose() {
+      for (const timer of this.timers) clearTimeout(timer);
+      this.timers.clear();
+      if (this.parentSignal !== null && this.onParentAbort !== null) {
+        this.parentSignal.removeEventListener("abort", this.onParentAbort);
+      }
+      if (activeReadingAttempt === this) activeReadingAttempt = null;
     }
   };
   var pollTimer = null;
@@ -10236,6 +10382,22 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var refreshSettleTimer = null;
   var requestEpoch = 0;
   var compositionEpoch = 0;
+  var activeReadingAttempt = null;
+  var activePollCycleController = null;
+  function advanceRequestEpoch(reason = "superseded", abortPollCycle = true) {
+    requestEpoch += 1;
+    if (abortPollCycle) activePollCycleController?.abort(reason);
+    activeReadingAttempt?.abort(reason);
+    return requestEpoch;
+  }
+  __name(advanceRequestEpoch, "advanceRequestEpoch");
+  function activateReadingAttempt(parentSignal) {
+    activeReadingAttempt?.abort("superseded");
+    const attempt = new ReadingAttempt(parentSignal);
+    activeReadingAttempt = attempt;
+    return attempt;
+  }
+  __name(activateReadingAttempt, "activateReadingAttempt");
   function clearRefreshSettleTimer() {
     if (refreshSettleTimer !== null) clearTimeout(refreshSettleTimer);
     refreshSettleTimer = null;
@@ -10291,8 +10453,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(withinTimeout, "withinTimeout");
   function stopChangeInspector() {
     compositionEpoch += 1;
-    requestEpoch += 1;
-    if (pollTimer !== null) clearInterval(pollTimer);
+    advanceRequestEpoch("stopped");
+    if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
     pollCoordinatorStop?.();
     pollCoordinatorStop = null;
@@ -10357,6 +10519,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "replace");
     let reading = null;
     let readingRefusal = null;
+    let exactReadingPresentation = null;
     let visibleReading = "";
     const timelineMonitor = createTimelineMonitor();
     let pendingTimelineSearchFocus = false;
@@ -10397,6 +10560,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         {
           reading,
           refusal: readingRefusal,
+          exactReading: exactReadingPresentation,
           timeline: monitor
         }
       );
@@ -10454,12 +10618,26 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "releaseQueuedPoll");
     let revalidateIdentityForCurrentSession = /* @__PURE__ */ __name(() => {
     }, "revalidateIdentityForCurrentSession");
+    let pollRequiresFullValidation = false;
     const readingKey = /* @__PURE__ */ __name((route, projectionStamp) => `${formatChangeInspectorRoute(route)}\0${projectionStamp}`, "readingKey");
     const clearReading = /* @__PURE__ */ __name(() => {
       reading = null;
       readingRefusal = null;
+      exactReadingPresentation = null;
       visibleReading = "";
     }, "clearReading");
+    const showRetryableReadingFailure = /* @__PURE__ */ __name((message2, pollDraft) => {
+      reading = null;
+      readingRefusal = null;
+      exactReadingPresentation = {
+        kind: "retryable_failure",
+        message: message2,
+        retry: /* @__PURE__ */ __name(() => {
+          void onRoute();
+        }, "retry")
+      };
+      paint(pollDraft);
+    }, "showRetryableReadingFailure");
     const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, retryBudget, pollDraft = null, origin = "route", credentialVersion2 = sessionCredentialVersion()) => {
       if (route.kind === "lens" || route.kind === "timeline" || route.kind === "event") {
         clearReading();
@@ -10470,25 +10648,46 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (visibleReading === requestedReading && reading !== null) return;
       reading = null;
       readingRefusal = null;
+      exactReadingPresentation = null;
       visibleReading = requestedReading;
       paint(pollDraft);
       const pendingToken = /* @__PURE__ */ Symbol("exact-reading");
       pendingReading = { key: requestedReading, token: pendingToken };
+      const attempt = activateReadingAttempt();
       try {
-        const { loaded, postflight } = await withinTimeout(
-          (async () => {
-            const loaded2 = await loadChangeInspectorReading(
-              route,
-              expectedProjectionStamp
-            );
-            const postflight2 = decodeReaderProfile(
-              await fetchChangeInspectorJSON("/api/v2/profile")
-            );
-            return { loaded: loaded2, postflight: postflight2 };
-          })(),
-          EXACT_READING_TIMEOUT_MS,
-          "exact Change reading timed out"
+        const softBudget = attempt.schedule(() => {
+          if (epoch !== requestEpoch || attempt.signal.aborted) return;
+          exactReadingPresentation = {
+            kind: "still_loading",
+            cancel: /* @__PURE__ */ __name(() => attempt.abort("cancelled"), "cancel")
+          };
+          paint(pollDraft);
+        }, EXACT_READING_SOFT_BUDGET_MS);
+        const hardBudget = attempt.schedule(
+          () => attempt.abort("hard_budget"),
+          EXACT_READING_HARD_BUDGET_MS
         );
+        const loaded = await attempt.run(
+          () => loadChangeInspectorReading(
+            route,
+            expectedProjectionStamp,
+            attempt.signal
+          )
+        );
+        attempt.clearTimer(softBudget);
+        attempt.clearTimer(hardBudget);
+        const postflightBudget = attempt.schedule(
+          () => attempt.abort("postflight_budget"),
+          EXACT_POSTFLIGHT_TIMEOUT_MS
+        );
+        const postflight = decodeReaderProfile(
+          await attempt.run(
+            () => fetchChangeInspectorJSON("/api/v2/profile", {
+              signal: attempt.signal
+            })
+          )
+        );
+        attempt.clearTimer(postflightBudget);
         if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
         if (credentialSessionChanged(credentialVersion2)) {
           throw new ChangeInspectorSessionChanged();
@@ -10501,66 +10700,96 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         }
         reading = loaded;
         readingRefusal = null;
+        exactReadingPresentation = null;
         paint(pollDraft);
       } catch (error) {
         if (epoch !== requestEpoch) return;
+        if (attempt.reason === "superseded" || attempt.reason === "stopped") {
+          return;
+        }
+        const retryableMessage = attempt.reason === "hard_budget" ? "exact reading timed out" : attempt.reason === "postflight_budget" ? "exact reading postflight timed out" : attempt.reason === "cancelled" ? "exact reading cancelled" : null;
+        if (retryableMessage !== null) {
+          showRetryableReadingFailure(retryableMessage, pollDraft);
+          return;
+        }
+        if (error instanceof ChangeInspectorRequestFailure && error.kind === "aborted") {
+          return;
+        }
         const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
         if ((error instanceof ChangeInspectorGenerationChanged || sessionChanged || error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal")) && consumeProjectionRetry(retryBudget)) {
           if (sessionChanged) revalidateIdentityForCurrentSession();
           await loadGeneration(route, retryBudget, pollDraft, origin);
           return;
         }
+        if (error instanceof ChangeInspectorRequestFailure && !(error instanceof ChangeInspectorPageFailure)) {
+          showRetryableReadingFailure(
+            `Reader refused this exact surface: ${error.message}`,
+            pollDraft
+          );
+          return;
+        }
         reading = null;
+        exactReadingPresentation = null;
         readingRefusal = error instanceof Error ? error.message : String(error);
         paint(pollDraft);
       } finally {
+        attempt.dispose();
         if (pendingReading?.token === pendingToken) pendingReading = null;
         releaseQueuedPoll();
       }
     }, "loadReading");
-    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route") => {
+    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route", signal, allowUnchangedPoll = false) => {
       const credentialVersion2 = sessionCredentialVersion();
-      const epoch = ++requestEpoch;
+      const epoch = advanceRequestEpoch("superseded", origin !== "poll");
+      let refreshAttempt = null;
+      let refreshPendingToken = null;
       try {
         const request = requestKey(route);
         const profile = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile")
+          await fetchChangeInspectorJSON("/api/v2/profile", { signal })
         );
-        if (epoch !== requestEpoch) return;
+        if (epoch !== requestEpoch) return "superseded";
         if (profile.availability !== "ready") {
           if (origin !== "route" && state.snapshot().generation !== null) {
             showPollFailure();
-            return;
+            return "failed";
           }
           pendingTimelineSearchFocus = false;
           clearVisibleRequest();
           clearReading();
           state.clearGeneration();
           renderChangeInspectorUnavailable(profile.availability);
-          return;
+          return "failed";
+        }
+        const browserRoute = currentRoute();
+        if (origin === "poll" && allowUnchangedPoll && !pollRequiresFullValidation && browserRoute.kind !== "invalid" && formatChangeInspectorRoute(browserRoute) === formatChangeInspectorRoute(route) && !credentialSessionChanged(credentialVersion2) && state.matchesPublishedProfile(profile, credentialVersion2)) {
+          return "quiet";
         }
         const query = route.kind === "timeline" || route.kind === "event" ? {} : route.query;
         const activeLens = lensForRoute(route);
         const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
         const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
-        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(request).then(decodeEventHistory) : Promise.resolve(null);
+        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(request, { signal }).then(
+          decodeEventHistory
+        ) : Promise.resolve(null);
         const [changes, attention, history2] = await Promise.all([
-          fetchChangeInspectorJSON(
-            buildChangePageUrl("changes", changesQuery)
-          ).then(
+          fetchChangeInspectorJSON(buildChangePageUrl("changes", changesQuery), {
+            signal
+          }).then(
             (value) => decodeChangePage(value, { lens: "changes", bounded: true })
           ),
           fetchChangeInspectorJSON(
-            buildChangePageUrl("attention", attentionQuery)
+            buildChangePageUrl("attention", attentionQuery),
+            { signal }
           ).then(
             (value) => decodeChangePage(value, { lens: "attention", bounded: true })
           ),
           historyRequest
         ]);
         const postflight = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile")
+          await fetchChangeInspectorJSON("/api/v2/profile", { signal })
         );
-        if (epoch !== requestEpoch) return;
+        if (epoch !== requestEpoch) return "superseded";
         const staged = stageGeneration(
           profile,
           changes,
@@ -10568,7 +10797,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           postflight,
           history2
         );
-        const refreshesExactReading = origin !== "route" && route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event";
+        const hasExactReading = route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event";
+        const holdsManualReadingRetry = origin !== "route" && hasExactReading && exactReadingPresentation?.kind === "retryable_failure";
+        const refreshesExactReading = origin !== "route" && hasExactReading && !holdsManualReadingRetry;
         let acceptedReading = null;
         let acceptedReadingKey = "";
         if (refreshesExactReading) {
@@ -10576,23 +10807,40 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           if (visibleReading === acceptedReadingKey && reading !== null) {
             acceptedReading = reading;
           } else {
-            const result = await withinTimeout(
-              (async () => {
-                const loaded = await loadChangeInspectorReading(
-                  route,
-                  changes.projectionStamp
-                );
-                const readingPostflight = decodeReaderProfile(
-                  await fetchChangeInspectorJSON("/api/v2/profile")
-                );
-                return { loaded, readingPostflight };
-              })(),
-              EXACT_READING_TIMEOUT_MS,
-              "exact Change reading timed out"
+            const displayedGeneration = state.snapshot().generation;
+            refreshPendingToken = /* @__PURE__ */ Symbol("exact-reading-refresh");
+            pendingReading = {
+              key: displayedGeneration === null ? visibleReading : readingKey(
+                route,
+                displayedGeneration.changes.projectionStamp
+              ),
+              token: refreshPendingToken
+            };
+            const attempt = activateReadingAttempt(signal);
+            refreshAttempt = attempt;
+            const refreshBudget = attempt.schedule(
+              () => attempt.abort("refresh_expiry"),
+              EXACT_READING_SOFT_BUDGET_MS
             );
-            if (epoch !== requestEpoch) return;
-            const browserRoute = currentRoute();
-            if (browserRoute.kind === "invalid" || formatChangeInspectorRoute(browserRoute) !== formatChangeInspectorRoute(route) || !sameProfileGeneration(staged.profile, result.readingPostflight)) {
+            const loaded = await attempt.run(
+              () => loadChangeInspectorReading(
+                route,
+                changes.projectionStamp,
+                attempt.signal
+              )
+            );
+            const readingPostflight = decodeReaderProfile(
+              await attempt.run(
+                () => fetchChangeInspectorJSON("/api/v2/profile", {
+                  signal: attempt.signal
+                })
+              )
+            );
+            attempt.clearTimer(refreshBudget);
+            const result = { loaded, readingPostflight };
+            if (epoch !== requestEpoch) return "superseded";
+            const browserRoute2 = currentRoute();
+            if (browserRoute2.kind === "invalid" || formatChangeInspectorRoute(browserRoute2) !== formatChangeInspectorRoute(route) || !sameProfileGeneration(staged.profile, result.readingPostflight)) {
               throw new ChangeInspectorGenerationChanged();
             }
             acceptedReading = result.loaded;
@@ -10601,7 +10849,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (credentialSessionChanged(credentialVersion2)) {
           throw new ChangeInspectorSessionChanged();
         }
-        if (origin === "route" && route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event") {
+        if (origin === "route" && hasExactReading) {
           const requestedReading = readingKey(route, changes.projectionStamp);
           if (visibleReading !== requestedReading) {
             reading = null;
@@ -10620,7 +10868,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         visibleRequest = request;
         visibleHistoryFilters = (route.kind === "timeline" || route.kind === "event") && history2 !== null ? eventHistoryFilters(route.historyQuery) : "";
         paint(pollDraft);
-        if (!refreshesExactReading) {
+        if (!refreshesExactReading && !holdsManualReadingRetry) {
           await loadReading(
             route,
             changes.projectionStamp,
@@ -10631,23 +10879,39 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             credentialVersion2
           );
         }
+        return "published";
       } catch (error) {
-        if (epoch !== requestEpoch) return;
+        if (epoch !== requestEpoch) return "superseded";
         const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
         if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged || sessionChanged) && consumeProjectionRetry(retryBudget)) {
           if (sessionChanged) revalidateIdentityForCurrentSession();
-          await loadGeneration(route, retryBudget, pollDraft, origin);
-          return;
+          return loadGeneration(
+            route,
+            retryBudget,
+            pollDraft,
+            origin,
+            signal,
+            false
+          );
         }
         if (origin !== "route" && state.snapshot().generation !== null) {
           showPollFailure();
-          return;
+          return "failed";
         }
         clearVisibleRequest();
         pendingTimelineSearchFocus = false;
         clearReading();
         state.clearGeneration();
         renderChangeInspectorRefusal(error);
+        return "failed";
+      } finally {
+        refreshAttempt?.dispose();
+        if (refreshPendingToken !== null) {
+          if (pendingReading?.token === refreshPendingToken) {
+            pendingReading = null;
+          }
+          releaseQueuedPoll();
+        }
       }
     }, "loadGeneration");
     const onRoute = /* @__PURE__ */ __name(async () => {
@@ -10657,7 +10921,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const route = parseChangeInspectorRoute(
         capability2.cleanedHash || "#/timeline"
       );
-      requestEpoch += 1;
+      advanceRequestEpoch();
       state.setRoute(route);
       if (route.kind === "invalid") {
         clearVisibleRequest();
@@ -10802,7 +11066,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (generation === null || anchor === null || anchor === void 0) {
           return null;
         }
-        const epoch = ++requestEpoch;
+        const epoch = advanceRequestEpoch();
         try {
           const preflight = decodeReaderProfile(
             await fetchChangeInspectorJSON("/api/v2/profile")
@@ -10953,50 +11217,100 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       let pollRequested = false;
       let pollRunning = false;
       let pollActive = true;
+      let pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+      const schedulePoll = /* @__PURE__ */ __name((delayMs) => {
+        if (!pollActive) return;
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          requestPoll();
+        }, delayMs);
+      }, "schedulePoll");
       const drainPoll = /* @__PURE__ */ __name(() => {
         if (!pollActive || pollRunning || !pollRequested) return;
         const route = currentRoute();
         if (route.kind === "invalid") {
           pollRequested = false;
+          schedulePoll(pollDelayMs);
           return;
         }
         const generation = state.snapshot().generation;
         if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event" && generation !== null && pendingReading?.key === readingKey(route, generation.changes.projectionStamp)) {
+          pollRequested = false;
+          schedulePoll(pollDelayMs);
           return;
         }
         pollRequested = false;
         pollRunning = true;
+        const controller = new AbortController();
         const operation = loadGeneration(
           route,
           newProjectionRetryBudget(),
           capturePollFilterDraft(),
-          "poll"
+          "poll",
+          controller.signal,
+          !pollRequiresFullValidation
         );
+        activePollCycleController = controller;
         const pollEpoch = requestEpoch;
+        let outcome = "superseded";
         void withinTimeout(
           operation,
           POLL_CYCLE_TIMEOUT_MS,
           "Change generation poll timed out"
-        ).catch((error) => {
-          if (error instanceof ChangeInspectorTimeout && isCurrentComposition() && requestEpoch === pollEpoch) {
-            requestEpoch += 1;
+        ).then((result) => {
+          outcome = result;
+        }).catch((error) => {
+          if (error instanceof ChangeInspectorTimeout) {
+            if (isCurrentComposition() && requestEpoch === pollEpoch) {
+              controller.abort("superseded");
+              advanceRequestEpoch();
+              showPollFailure();
+              outcome = "failed";
+            }
+            return;
+          }
+          if (isCurrentComposition() && requestEpoch === pollEpoch) {
             showPollFailure();
+            outcome = "failed";
           }
         }).finally(() => {
+          if (activePollCycleController === controller) {
+            activePollCycleController = null;
+          }
+          if (outcome === "failed") {
+            pollRequiresFullValidation = true;
+            pollDelayMs = Math.min(pollDelayMs * 2, POLL_BACKOFF_CAP_MS);
+          } else if (outcome === "published") {
+            pollRequiresFullValidation = false;
+            pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+          } else if (outcome === "quiet") {
+            pollDelayMs = POLL_HEALTHY_INTERVAL_MS;
+          }
           pollRunning = false;
-          drainPoll();
+          schedulePoll(pollDelayMs);
         });
       }, "drainPoll");
       const requestPoll = /* @__PURE__ */ __name(() => {
         pollRequested = true;
         drainPoll();
       }, "requestPoll");
-      releaseQueuedPoll = drainPoll;
+      releaseQueuedPoll = /* @__PURE__ */ __name(() => {
+        if (!pollActive) return;
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        pollTimer = null;
+        pollRequested = false;
+        if (!pollRunning) schedulePoll(pollDelayMs);
+      }, "releaseQueuedPoll");
       pollCoordinatorStop = /* @__PURE__ */ __name(() => {
         pollActive = false;
         pollRequested = false;
+        if (pollTimer !== null) clearTimeout(pollTimer);
+        pollTimer = null;
+        activePollCycleController?.abort("stopped");
+        activePollCycleController = null;
       }, "pollCoordinatorStop");
-      pollTimer = setInterval(requestPoll, 3e3);
+      schedulePoll(pollDelayMs);
     }
   }
   __name(bootstrapChangeInspector, "bootstrapChangeInspector");

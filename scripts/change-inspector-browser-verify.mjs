@@ -2,6 +2,9 @@
 // It only reads the disposable Inspector page and writes screenshots under its configured root.
 // biome-ignore format: playwright-cli run-code wraps this file as one function expression.
 ((config) => async (page) => {
+	if (config.mode !== "full" && config.mode !== "shakedown") {
+		throw new Error(`unsupported browser verification mode: ${config.mode}`);
+	}
 	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
 	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
 	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
@@ -144,6 +147,12 @@
 	// origin-scoped sessionStorage. Route changes are same-document navigation
 	// and therefore use only the strict, shareable Change route grammar.
 	const url = (route) => `${config.server.baseUrl}/#/${route}`;
+	const exactReadingRoute = () => {
+		const encodedChange = encodeURIComponent(config.fixture.rich.changeId);
+		const encodedRevision = encodeURIComponent(config.fixture.rich.revisionId);
+		const encodedArtifact = encodeURIComponent(config.fixture.rich.artifactHash);
+		return `changes/${encodedChange}/revisions/${encodedRevision}?artifactHash=${encodedArtifact}&limit=100&order=change_id_asc`;
+	};
 	// Playwright serializes this callback into the page. Query normalization must
 	// stay there because the run-code sandbox does not expose URLSearchParams.
 	const semanticRouteMatchesInPage = ({ expectedHash, source }) => {
@@ -584,6 +593,212 @@
 			hierarchy,
 		);
 	};
+
+	if (config.mode === "shakedown") {
+		await diagnostics.section("Shakedown exact reading and quiet polling", {
+			setup: () =>
+				open(
+					exactReadingRoute(),
+					layouts[1],
+					"shakedown exact reading setup",
+				),
+			run: async () => {
+				const detailText = await page.locator("#detail-body").innerText();
+				const exactIdentity = `exact Revision ${config.fixture.rich.revisionId}; artifact ${config.fixture.rich.artifactHash}`;
+				const identityPresentation = await page
+					.locator("#detail-body .detail-identity code")
+					.first()
+					.evaluate((node) => ({
+						title: node.getAttribute("title"),
+						name: node.getAttribute("aria-label"),
+					}));
+				compare(
+					identityPresentation.title === exactIdentity &&
+						identityPresentation.name === exactIdentity &&
+						detailText.includes("Matrix fact"),
+					"shakedown exact reading",
+					"representative exact Revision identity or rich detail was absent",
+					{ identity: exactIdentity, detail: "Matrix fact" },
+					{ identity: identityPresentation, hasRichDetail: detailText.includes("Matrix fact") },
+				);
+
+				const sentinelBefore = await page.evaluate(() => {
+					const detail = document.querySelector("#detail-body");
+					const disclosure = detail?.querySelector("details");
+					if (!(detail instanceof HTMLElement) || !(disclosure instanceof HTMLDetailsElement)) {
+						return null;
+					}
+					disclosure.open = true;
+					disclosure.setAttribute("data-browser-poll-sentinel", "quiet");
+					disclosure.__pointbreakBrowserPollSentinel = { retained: true };
+					window.__pointbreakBrowserPollSentinel = disclosure;
+					detail.scrollTop = Math.min(
+						96,
+						Math.max(0, detail.scrollHeight - detail.clientHeight),
+					);
+					return {
+						readingKey: detail.dataset.changeReadingKey ?? null,
+						scrollTop: detail.scrollTop,
+						open: disclosure.open,
+					};
+				});
+				requireCondition(
+					sentinelBefore !== null &&
+						sentinelBefore.readingKey !== null &&
+						sentinelBefore.scrollTop > 0 &&
+						sentinelBefore.open,
+					"shakedown interaction sentinel",
+					"representative exact reading did not establish an open disclosure and non-zero scroll sentinel",
+					{ readingKey: "nonempty", scrollTop: "> 0", open: true },
+					sentinelBefore,
+				);
+
+				const primaryApiPrefix = `${config.server.baseUrl}/api/`;
+				const profileUrl = `${config.server.baseUrl}/api/v2/profile`;
+				const apiRequests = [];
+				const profileCycles = [];
+				const profileByRequest = new Map();
+				let profileInFlight = 0;
+				let maxProfileInFlight = 0;
+				let profileCompletions = 0;
+				const recordApiRequest = (request) => {
+					if (!request.url().startsWith(primaryApiPrefix)) return;
+					apiRequests.push(request.url());
+					if (request.url() !== profileUrl) return;
+					const cycle = {
+						startedAt: Date.now(),
+						completedAt: null,
+						status: null,
+					};
+					profileCycles.push(cycle);
+					profileByRequest.set(request, cycle);
+					profileInFlight += 1;
+					maxProfileInFlight = Math.max(maxProfileInFlight, profileInFlight);
+				};
+				const recordApiResponse = (response) => {
+					const cycle = profileByRequest.get(response.request());
+					if (cycle !== undefined) cycle.status = response.status();
+				};
+				const recordApiCompletion = (request) => {
+					const cycle = profileByRequest.get(request);
+					if (cycle === undefined || cycle.completedAt !== null) return;
+					cycle.completedAt = Date.now();
+					profileInFlight -= 1;
+					profileCompletions += 1;
+				};
+				page.on("request", recordApiRequest);
+				page.on("response", recordApiResponse);
+				page.on("requestfinished", recordApiCompletion);
+				try {
+					const deadline = Date.now() + 15_000;
+					while (profileCompletions < 2 && Date.now() < deadline) {
+						await page.waitForTimeout(100);
+					}
+				} finally {
+					page.off("request", recordApiRequest);
+					page.off("response", recordApiResponse);
+					page.off("requestfinished", recordApiCompletion);
+				}
+
+				const completedCycles = profileCycles.filter(
+					(cycle) => cycle.completedAt !== null,
+				);
+				const completionAnchoredDelay =
+					completedCycles.length >= 2
+						? completedCycles[1].startedAt - completedCycles[0].completedAt
+						: null;
+				compare(
+					profileCompletions === 2 &&
+						profileCycles.length === 2 &&
+						profileCycles.every((cycle) => cycle.status === 200) &&
+						maxProfileInFlight === 1 &&
+						completionAnchoredDelay !== null &&
+						completionAnchoredDelay >= 2500,
+					"shakedown completion-anchored polling",
+					"two serialized healthy profile ticks were not anchored after the prior completion",
+					{
+						profileCompletions: 2,
+						profileStarts: 2,
+						statuses: [200, 200],
+						maxInFlight: 1,
+						completionAnchoredDelay: ">= 2500ms",
+					},
+					{
+						profileCompletions,
+						profileStarts: profileCycles.length,
+						statuses: profileCycles.map((cycle) => cycle.status),
+						maxInFlight: maxProfileInFlight,
+						completionAnchoredDelay,
+					},
+				);
+				compare(
+					apiRequests.length === 2 &&
+						apiRequests.every((requestUrl) => requestUrl === profileUrl),
+					"shakedown quiet-poll request surface",
+					"a quiet exact-reading tick fanned out beyond the profile probe",
+					[profileUrl, profileUrl],
+					apiRequests,
+				);
+
+				const sentinelAfter = await page.evaluate(() => {
+					const detail = document.querySelector("#detail-body");
+					const disclosure = document.querySelector(
+						'[data-browser-poll-sentinel="quiet"]',
+					);
+					return {
+						sameNode:
+							disclosure !== null &&
+							disclosure === window.__pointbreakBrowserPollSentinel &&
+							disclosure.__pointbreakBrowserPollSentinel?.retained === true,
+						connected: disclosure?.isConnected ?? false,
+						open: disclosure instanceof HTMLDetailsElement && disclosure.open,
+						readingKey:
+							detail instanceof HTMLElement
+								? (detail.dataset.changeReadingKey ?? null)
+								: null,
+						scrollTop: detail instanceof HTMLElement ? detail.scrollTop : null,
+					};
+				});
+				compare(
+					sentinelAfter.sameNode &&
+						sentinelAfter.connected &&
+						sentinelAfter.open &&
+						sentinelAfter.readingKey === sentinelBefore.readingKey &&
+						sentinelAfter.scrollTop === sentinelBefore.scrollTop,
+					"shakedown quiet-poll interaction retention",
+					"quiet polling replaced or reset the exact-reading DOM sentinel",
+					sentinelBefore,
+					sentinelAfter,
+				);
+
+				await settleResponseInspections();
+				expect(
+					consoleErrors.length === 0 && serviceUnavailableResponses.length === 0,
+					"shakedown browser console",
+					JSON.stringify({ consoleErrors, serviceUnavailableResponses }),
+					{
+						expected: { consoleErrors: [], serviceUnavailableResponses: [] },
+						actual: { consoleErrors, serviceUnavailableResponses },
+					},
+				);
+				expect(pageErrors.length === 0, "shakedown browser page", pageErrors.join("\n"), {
+					expected: [],
+					actual: pageErrors,
+				});
+				expect(
+					requestFailures.length === 0,
+					"shakedown browser requests",
+					JSON.stringify(requestFailures),
+					{ expected: [], actual: requestFailures },
+				);
+				await screenshot("shakedown-exact-reading");
+			},
+			teardown: teardownSection,
+		});
+		const shakedownResult = diagnostics.result({ screenshotCount: screenshots });
+		console.log(`POINTBREAK_BROWSER_RESULT=${JSON.stringify(shakedownResult)}`);
+		return shakedownResult;
+	}
 
 	const isHistoryRequest = (requestUrl, server) => {
 		const endpoint = `${server.baseUrl}/api/v2/history`;
@@ -4049,10 +4264,7 @@
 		teardown: teardownSection,
 	});
 
-	const encodedChange = encodeURIComponent(config.fixture.rich.changeId);
-	const encodedRevision = encodeURIComponent(config.fixture.rich.revisionId);
-	const encodedArtifact = encodeURIComponent(config.fixture.rich.artifactHash);
-	const exact = `changes/${encodedChange}/revisions/${encodedRevision}?artifactHash=${encodedArtifact}&limit=100&order=change_id_asc`;
+	const exact = exactReadingRoute();
 
 	await diagnostics.section("Fact relationship graph", {
 		setup: () => open(exact, layouts[0], "exact fact relationship graph"),
