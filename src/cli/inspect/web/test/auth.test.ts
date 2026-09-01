@@ -8,6 +8,7 @@ import {
   resolveReconnectInput,
   sessionTokenKey,
 } from "../src/auth";
+import { parseChangeInspectorRoute } from "../src/change-inspector-router";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
 const TOKEN = "opaque_test_capability_0123456789abcdef";
@@ -63,6 +64,16 @@ describe("capability fragment bootstrap", () => {
     expect(result.token === TOKEN).toBe(true);
     expect(result.cleanedHash).toBe(cleaned);
     expect(result.cleanedHash.includes(TOKEN)).toBe(false);
+  });
+
+  it("extracts a tokened Timeline entry and lands on Timeline", () => {
+    const result = extractCapability(`#/timeline?token=${TOKEN}`);
+
+    expect(result).toEqual({ token: TOKEN, cleanedHash: "#/timeline" });
+    expect(parseChangeInspectorRoute(result.cleanedHash)).toEqual({
+      kind: "timeline",
+      historyQuery: {},
+    });
   });
 
   it("stores the token under a versioned origin key and scrubs history", () => {

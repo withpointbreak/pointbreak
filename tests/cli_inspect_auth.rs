@@ -40,7 +40,7 @@ fn text_web_startup_carries_a_fragment_capability() {
     let url = lines[2].strip_prefix("  url:   ").expect("web URL label");
     let capability = url
         .strip_prefix(&format!(
-            "http://{}/#/changes?token=",
+            "http://{}/#/timeline?token=",
             inspector.canonical_host()
         ))
         .expect("web capability URL");
