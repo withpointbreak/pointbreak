@@ -13,17 +13,26 @@ import {
 
 export class ChangeInspectorRequestFailure extends Error {
   constructor(
-    readonly kind: RequestFailureKind,
+    readonly kind: RequestFailureKind | "aborted",
     readonly status?: number,
   ) {
     super(
-      kind === "unauthorized"
-        ? "authentication required"
-        : kind === "unreachable"
-          ? "server unavailable"
-          : "server response error",
+      kind === "aborted"
+        ? "request cancelled"
+        : kind === "unauthorized"
+          ? "authentication required"
+          : kind === "unreachable"
+            ? "server unavailable"
+            : "server response error",
     );
   }
+}
+
+function isRequestAbort(error: unknown, signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true ||
+    (error instanceof DOMException && error.name === "AbortError")
+  );
 }
 
 export class ChangeInspectorPageFailure extends ChangeInspectorRequestFailure {
@@ -76,6 +85,7 @@ function typedPageFailure(
 async function fetchOnce(
   path: string,
   reportConnection: boolean,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const headers: Record<string, string> = {};
   const token = getSessionToken();
@@ -88,8 +98,12 @@ async function fetchOnce(
       credentials: "omit",
       referrerPolicy: "no-referrer",
       headers,
+      signal,
     });
-  } catch {
+  } catch (error) {
+    if (isRequestAbort(error, signal)) {
+      throw new ChangeInspectorRequestFailure("aborted");
+    }
     throw failure("unreachable", undefined, reportConnection);
   }
   if (response.status === 401)
@@ -97,7 +111,10 @@ async function fetchOnce(
   let data: unknown;
   try {
     data = JSON.parse(await response.text());
-  } catch {
+  } catch (error) {
+    if (isRequestAbort(error, signal)) {
+      throw new ChangeInspectorRequestFailure("aborted");
+    }
     throw failure("protocol", response.status, reportConnection);
   }
   if (!response.ok)
@@ -112,6 +129,7 @@ async function fetchOnce(
   ) {
     throw failure("protocol", response.status, reportConnection);
   }
+  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
   if (reportConnection) markRequestSuccess();
   return data;
 }
@@ -119,12 +137,12 @@ async function fetchOnce(
 /** Fetch one Change reader document, retrying exactly once after capability recovery. */
 export async function fetchChangeInspectorJSON(
   path: string,
-  options: { reportConnection?: boolean } = {},
+  options: { reportConnection?: boolean; signal?: AbortSignal } = {},
 ): Promise<unknown> {
   const reportConnection = options.reportConnection !== false;
   const credentialVersion = sessionCredentialVersion();
   try {
-    return await fetchOnce(path, reportConnection);
+    return await fetchOnce(path, reportConnection, options.signal);
   } catch (error) {
     if (
       !(error instanceof ChangeInspectorRequestFailure) ||
@@ -136,6 +154,6 @@ export async function fetchChangeInspectorJSON(
     sessionCredentialVersion() !== credentialVersion ||
     (await recoverUnauthorized())
   )
-    return fetchOnce(path, reportConnection);
+    return fetchOnce(path, reportConnection, options.signal);
   throw failure("unauthorized", 401, reportConnection);
 }
