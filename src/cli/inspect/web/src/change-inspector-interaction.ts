@@ -199,6 +199,18 @@ function exactActivationIdentity(route: ValidRoute | null): string | null {
   return `revision\0${route.changeId}\0${route.revision.revisionId}\0${route.revision.objectArtifactContentHash}`;
 }
 
+function sameResourceRevisionIdentity(
+  resource: Extract<ValidRoute, { kind: "resource" }>,
+  revision: Extract<ValidRoute, { kind: "revision" }>,
+): boolean {
+  return (
+    resource.changeId === revision.changeId &&
+    resource.revision.revisionId === revision.revision.revisionId &&
+    resource.revision.objectArtifactContentHash ===
+      revision.revision.objectArtifactContentHash
+  );
+}
+
 function diffIdentity(
   route: Extract<ValidRoute, { kind: "diff" }>,
 ): DiffIdentity {
@@ -396,6 +408,7 @@ export function installChangeInspectorInteraction(
   let detailDomIdentity: ChildNode | null = null;
   let pendingDiffEntryFocus: DiffIdentity | null = null;
   let pendingDiffExitFocus: string | null = null;
+  let pendingResourceReturnFocus: string | null = null;
   let pendingExactActivationFocus: string | null = null;
   let focusedExactActivationIdentity: string | null = null;
   let diffReturnRoute: DiffReturnRoute | null = null;
@@ -2019,6 +2032,7 @@ export function installChangeInspectorInteraction(
     detailDomIdentity = null;
     pendingDiffEntryFocus = null;
     pendingDiffExitFocus = null;
+    pendingResourceReturnFocus = null;
     pendingExactActivationFocus = null;
     focusedExactActivationIdentity = null;
     diffReturnRoute = null;
@@ -2185,10 +2199,28 @@ export function installChangeInspectorInteraction(
         nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
       const currentDiffIdentity =
         currentRoute?.kind === "diff" ? diffIdentity(currentRoute) : null;
+      const nextRevisionRoute =
+        nextRoute?.kind === "revision"
+          ? formatChangeInspectorRoute(nextRoute)
+          : null;
+      const returnsFromResourceToRevision =
+        currentRoute?.kind === "resource" &&
+        nextRoute?.kind === "revision" &&
+        sameResourceRevisionIdentity(currentRoute, nextRoute);
+      if (returnsFromResourceToRevision) {
+        pendingResourceReturnFocus = nextRevisionRoute;
+      } else if (pendingResourceReturnFocus !== nextRevisionRoute) {
+        pendingResourceReturnFocus = null;
+      }
       const nextExactActivationIdentity = exactActivationIdentity(nextRoute);
       const currentExactActivationIdentity =
         exactActivationIdentity(currentRoute);
-      if (nextExactActivationIdentity === null) {
+      if (pendingResourceReturnFocus !== null) {
+        // Returning from a captured resource owns focus until the exact
+        // Revision reading is accepted. Do not leave a generic activation
+        // token armed for this hydration or a later same-route repaint.
+        pendingExactActivationFocus = null;
+      } else if (nextExactActivationIdentity === null) {
         pendingExactActivationFocus = null;
         focusedExactActivationIdentity = null;
       } else if (
@@ -2236,10 +2268,6 @@ export function installChangeInspectorInteraction(
         nextRoute.kind !== "timeline";
       const leavesDiffForRevision =
         leavesDiffForExactSurface && nextRoute?.kind === "revision";
-      const nextRevisionRoute =
-        nextRoute?.kind === "revision"
-          ? formatChangeInspectorRoute(nextRoute)
-          : null;
       if (leavesDiffForRevision) {
         pendingDiffExitFocus = nextRevisionRoute;
       } else if (pendingDiffExitFocus !== nextRevisionRoute) {
@@ -2252,6 +2280,14 @@ export function installChangeInspectorInteraction(
           .querySelector<HTMLElement>("#detail-body")
           ?.dataset.changeReadingKey?.startsWith(`${pendingDiffExitFocus}:`) ===
           true;
+      const completesResourceReturnFocus =
+        pendingResourceReturnFocus !== null &&
+        pendingResourceReturnFocus === nextRevisionRoute &&
+        document
+          .querySelector<HTMLElement>("#detail-body")
+          ?.dataset.changeReadingKey?.startsWith(
+            `${pendingResourceReturnFocus}:`,
+          ) === true;
       document
         .querySelector(".split")
         ?.classList.toggle("split-closed", !detailOpen);
@@ -2260,7 +2296,11 @@ export function installChangeInspectorInteraction(
         if (detailOpen) detail.removeAttribute("aria-hidden");
         else detail.setAttribute("aria-hidden", "true");
       }
-      if (exactActivationTarget !== null) {
+      if (completesResourceReturnFocus) {
+        pendingResourceReturnFocus = null;
+        pendingExactActivationFocus = null;
+        focusFallback(nextRoute);
+      } else if (exactActivationTarget !== null) {
         pendingExactActivationFocus = null;
         exactActivationTarget.focus({ preventScroll: true });
         focusedExactActivationIdentity = nextExactActivationIdentity;

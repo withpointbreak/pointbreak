@@ -2448,6 +2448,10 @@
     return `revision\0${route.changeId}\0${route.revision.revisionId}\0${route.revision.objectArtifactContentHash}`;
   }
   __name(exactActivationIdentity, "exactActivationIdentity");
+  function sameResourceRevisionIdentity(resource, revision2) {
+    return resource.changeId === revision2.changeId && resource.revision.revisionId === revision2.revision.revisionId && resource.revision.objectArtifactContentHash === revision2.revision.objectArtifactContentHash;
+  }
+  __name(sameResourceRevisionIdentity, "sameResourceRevisionIdentity");
   function diffIdentity(route) {
     return {
       changeId: route.changeId,
@@ -2595,6 +2599,7 @@
     let detailDomIdentity = null;
     let pendingDiffEntryFocus = null;
     let pendingDiffExitFocus = null;
+    let pendingResourceReturnFocus = null;
     let pendingExactActivationFocus = null;
     let focusedExactActivationIdentity = null;
     let diffReturnRoute = null;
@@ -3845,6 +3850,7 @@
       detailDomIdentity = null;
       pendingDiffEntryFocus = null;
       pendingDiffExitFocus = null;
+      pendingResourceReturnFocus = null;
       pendingExactActivationFocus = null;
       focusedExactActivationIdentity = null;
       diffReturnRoute = null;
@@ -3940,9 +3946,18 @@
         const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
         const nextDiffIdentity = nextRoute?.kind === "diff" ? diffIdentity(nextRoute) : null;
         const currentDiffIdentity = currentRoute2?.kind === "diff" ? diffIdentity(currentRoute2) : null;
+        const nextRevisionRoute = nextRoute?.kind === "revision" ? formatChangeInspectorRoute(nextRoute) : null;
+        const returnsFromResourceToRevision = currentRoute2?.kind === "resource" && nextRoute?.kind === "revision" && sameResourceRevisionIdentity(currentRoute2, nextRoute);
+        if (returnsFromResourceToRevision) {
+          pendingResourceReturnFocus = nextRevisionRoute;
+        } else if (pendingResourceReturnFocus !== nextRevisionRoute) {
+          pendingResourceReturnFocus = null;
+        }
         const nextExactActivationIdentity = exactActivationIdentity(nextRoute);
         const currentExactActivationIdentity = exactActivationIdentity(currentRoute2);
-        if (nextExactActivationIdentity === null) {
+        if (pendingResourceReturnFocus !== null) {
+          pendingExactActivationFocus = null;
+        } else if (nextExactActivationIdentity === null) {
           pendingExactActivationFocus = null;
           focusedExactActivationIdentity = null;
         } else if (currentRoute2?.kind !== "diff" && (followsCursor ? detailDomChanged && focusWasDisplaced : nextExactActivationIdentity !== currentExactActivationIdentity || nextExactActivationIdentity === focusedExactActivationIdentity && detailDomChanged && focusWasDisplaced)) {
@@ -3963,20 +3978,26 @@
         const entersVisibleDiff = nextRoute?.kind === "diff" && sameDiffIdentity(pendingDiffEntryFocus, nextDiffIdentity) && document.querySelector("#diff-page:not(.hidden)") !== null;
         const leavesDiffForExactSurface = currentRoute2?.kind === "diff" && nextRoute !== null && nextRoute.kind !== "diff" && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline";
         const leavesDiffForRevision = leavesDiffForExactSurface && nextRoute?.kind === "revision";
-        const nextRevisionRoute = nextRoute?.kind === "revision" ? formatChangeInspectorRoute(nextRoute) : null;
         if (leavesDiffForRevision) {
           pendingDiffExitFocus = nextRevisionRoute;
         } else if (pendingDiffExitFocus !== nextRevisionRoute) {
           pendingDiffExitFocus = null;
         }
         const completesDiffExitFocus = pendingDiffExitFocus !== null && pendingDiffExitFocus === nextRevisionRoute && document.querySelector("#detail-body")?.dataset.changeReadingKey?.startsWith(`${pendingDiffExitFocus}:`) === true;
+        const completesResourceReturnFocus = pendingResourceReturnFocus !== null && pendingResourceReturnFocus === nextRevisionRoute && document.querySelector("#detail-body")?.dataset.changeReadingKey?.startsWith(
+          `${pendingResourceReturnFocus}:`
+        ) === true;
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
           detail.inert = !detailOpen;
           if (detailOpen) detail.removeAttribute("aria-hidden");
           else detail.setAttribute("aria-hidden", "true");
         }
-        if (exactActivationTarget !== null) {
+        if (completesResourceReturnFocus) {
+          pendingResourceReturnFocus = null;
+          pendingExactActivationFocus = null;
+          focusFallback(nextRoute);
+        } else if (exactActivationTarget !== null) {
           pendingExactActivationFocus = null;
           exactActivationTarget.focus({ preventScroll: true });
           focusedExactActivationIdentity = nextExactActivationIdentity;

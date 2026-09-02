@@ -4830,6 +4830,8 @@ describe("Change-first composition", () => {
     if (activation === undefined) {
       throw new Error("missing captured-resource activation");
     }
+    activation.focus();
+    expect(document.activeElement).toBe(activation);
     activation.click();
     await resourceStarted;
     expect(resourceRequests).toBe(1);
@@ -4867,6 +4869,9 @@ describe("Change-first composition", () => {
     expect(backRevisionSignal?.aborted).toBe(false);
     expect(resourceRequests).toBe(1);
     expect(revisionRequests).toBe(2);
+    expect(document.activeElement).toBe(
+      document.querySelector("#detail-close"),
+    );
 
     const profileRequestsAfterReading = profileRequests;
     await vi.advanceTimersByTimeAsync(3_000);
