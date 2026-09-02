@@ -146,6 +146,11 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 			mode: "shakedown-exact-history-focus",
 			section: "Shakedown exact history and focus",
 		},
+		{
+			flag: "--shakedown-return-destinations",
+			mode: "shakedown-return-destinations",
+			section: "Shakedown return destinations and exact history",
+		},
 	];
 
 	for (const { flag, mode, section } of modes) {
@@ -166,8 +171,9 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 		const branch = browser.slice(branchStart, fullMatrix);
 		assert.equal(
 			(
-				branch.match(new RegExp(`diagnostics\\.section\\("${section}"`, "g")) ??
-				[]
+				branch.match(
+					new RegExp(`diagnostics\\.section\\(\\s*"${section}"`, "g"),
+				) ?? []
 			).length,
 			1,
 			`${mode} must run exactly one named journey`,
@@ -177,8 +183,8 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 
 	assert.match(
 		shell,
-		/case "\$mode" in[\s\S]*shakedown\|shakedown-timeline-boundary\|shakedown-exact-history-focus\)/,
-		"all three shakedowns must share the self-owned root path",
+		/case "\$mode" in[\s\S]*shakedown\|shakedown-timeline-boundary\|shakedown-exact-history-focus\|shakedown-return-destinations\)/,
+		"all four shakedowns must share the self-owned root path",
 	);
 	assert.match(
 		shell,
@@ -192,7 +198,7 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 	);
 	assert.match(
 		browser,
-		/config\.mode !== "full"[\s\S]*config\.mode !== "shakedown"[\s\S]*config\.mode !== "shakedown-timeline-boundary"[\s\S]*config\.mode !== "shakedown-exact-history-focus"/,
+		/config\.mode !== "full"[\s\S]*config\.mode !== "shakedown"[\s\S]*config\.mode !== "shakedown-timeline-boundary"[\s\S]*config\.mode !== "shakedown-exact-history-focus"[\s\S]*config\.mode !== "shakedown-return-destinations"/,
 		"the browser program must reject every mode outside the closed set",
 	);
 	assert.doesNotMatch(
@@ -278,13 +284,15 @@ test("Changes G waits for the terminal destination route, page key, and selected
 	);
 });
 
-test("narrow Back waits for the complete retained-master destination state", async () => {
+test("retained-master Back waits for the complete destination state", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
 	);
-	const helperStart = source.indexOf("const waitForNarrowBackDestination =");
-	assert.notEqual(helperStart, -1, "missing narrow Back destination wait");
+	const helperStart = source.indexOf(
+		"const waitForRetainedMasterDestination =",
+	);
+	assert.notEqual(helperStart, -1, "missing retained-master destination wait");
 	const helper = source.slice(
 		helperStart,
 		source.indexOf("\n\tconst ", helperStart + 1),
@@ -303,12 +311,186 @@ test("narrow Back waits for the complete retained-master destination state", asy
 	);
 	const section = source.slice(sectionStart, sectionEnd);
 	const click = section.indexOf('await page.locator("#detail-back").click();');
-	const wait = section.indexOf("await waitForNarrowBackDestination(", click);
+	const wait = section.indexOf(
+		"await waitForRetainedMasterDestination(",
+		click,
+	);
 	const assertion = section.indexOf("const narrowDetailClosed", click);
 	assert.ok(
 		click >= 0 && wait > click && assertion > wait,
 		"the complete Back wait must precede every sampled destination assertion",
 	);
+});
+
+test("full return journeys await complete semantic destinations", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const helperStart = source.indexOf(
+		"const waitForRetainedMasterDestination =",
+	);
+	assert.notEqual(
+		helperStart,
+		-1,
+		"the retained-master predicate must have a viewport-neutral name",
+	);
+	const helper = source.slice(
+		helperStart,
+		source.indexOf("\n\tconst ", helperStart + 1),
+	);
+	assert.match(
+		helper,
+		/URLSearchParams[\s\S]*normalize\(location\.hash\)[\s\S]*split-closed[\s\S]*detail\?\.inert[\s\S]*aria-hidden[\s\S]*master\?\.contains\(document\.activeElement\)/,
+		"retained-master readiness must preserve route, closed, hidden, inert, and focus predicates",
+	);
+
+	const timelineStart = source.indexOf(
+		'await diagnostics.section("Timeline keyboard and exact detail"',
+	);
+	const timelineEnd = source.indexOf(
+		'await diagnostics.section("Timeline follow and stale continuation"',
+		timelineStart,
+	);
+	assert.ok(timelineStart >= 0 && timelineEnd > timelineStart);
+	const timeline = source.slice(timelineStart, timelineEnd);
+	const timelineClick = timeline.lastIndexOf(
+		'await page.locator("#detail-back").click();',
+	);
+	const timelineRoute = timeline.indexOf(
+		"await waitForTimelineRoute(narrowTimelineHash);",
+		timelineClick,
+	);
+	const timelineDestination = timeline.indexOf(
+		"await waitForRetainedMasterDestination(",
+		timelineRoute,
+	);
+	const timelineAssertion = timeline.indexOf(
+		'"narrow Timeline event return"',
+		timelineDestination,
+	);
+	assert.ok(
+		timelineClick >= 0 &&
+			timelineRoute > timelineClick &&
+			timelineDestination > timelineRoute &&
+			timelineAssertion > timelineDestination,
+		"full Timeline return must keep its route/dataset wait, then await retained-master completion before sampling inertness",
+	);
+
+	const changesStart = source.indexOf(
+		'await diagnostics.section("Changes keyboard and filters"',
+	);
+	const changesEnd = source.indexOf(
+		'await diagnostics.section("Change topology cards"',
+		changesStart,
+	);
+	assert.ok(changesStart >= 0 && changesEnd > changesStart);
+	const changes = source.slice(changesStart, changesEnd);
+	const changesEscape = changes.indexOf(
+		'await page.keyboard.press("Escape");',
+	);
+	const changesDestination = changes.indexOf(
+		"await waitForRetainedMasterDestination(",
+		changesEscape,
+	);
+	const viewFocus = changes.indexOf("await viewToggle.focus();", changesEscape);
+	const changesTerminal = changes.indexOf(
+		"await waitForChangesTerminalDestination();",
+		changesEscape,
+	);
+	assert.ok(
+		changesEscape >= 0 &&
+			changesDestination > changesEscape &&
+			viewFocus > changesDestination &&
+			changesTerminal > viewFocus,
+		"full Changes return must complete its retained master before View and terminal G",
+	);
+
+	const exactStart = source.indexOf(
+		'await diagnostics.section("Exact Revision selection and history"',
+	);
+	const exactEnd = source.indexOf(
+		'await diagnostics.section("Shared Revision membership"',
+		exactStart,
+	);
+	assert.ok(exactStart >= 0 && exactEnd > exactStart);
+	const exact = source.slice(exactStart, exactEnd);
+	const lateJourney = exact.slice(exact.indexOf("const revisionHash ="));
+	assert.match(
+		lateJourney,
+		/const revisionHash = await hash\(\);[\s\S]*const revisionRoute = revisionHash\.slice\(2\);/,
+		"the full exact journey must retain its accepted Revision identity",
+	);
+	assert.match(
+		lateJourney,
+		/const resourceReady = await page\.waitForFunction\([\s\S]*isAcceptedExactReadingInPage,[\s\S]*expectedHash: resourceHash,[\s\S]*expectedRoute: resourceRoute,[\s\S]*priorKeys: \{ reading: revisionReadingKey \}[\s\S]*resourceReadiness\.state === "refused"[\s\S]*exact route focus[\s\S]*await page\.goBack\(\)/,
+		"resource focus and Back must follow exact accepted resource readiness",
+	);
+	assert.match(
+		lateJourney,
+		/await page\.goBack\(\);[\s\S]*const revisionReady = await page\.waitForFunction\([\s\S]*isAcceptedExactReadingInPage,[\s\S]*expectedHash: revisionHash,[\s\S]*expectedRoute: revisionRoute,[\s\S]*priorKeys: \{ reading: resourceReadingKey \}[\s\S]*revisionReadiness\.state === "refused"[\s\S]*await page\.keyboard\.press\("3"\)/,
+		"later history must follow exact accepted Back-target Revision readiness",
+	);
+});
+
+test("return-destinations shakedown is literal, root-owned, and complete", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const readme = await readFile(new URL("./README.md", import.meta.url), "utf8");
+	const flag = "--shakedown-return-destinations";
+	const mode = "shakedown-return-destinations";
+	const section = "Shakedown return destinations and exact history";
+
+	assert.match(
+		shell,
+		/--shakedown-return-destinations\) mode="shakedown-return-destinations"; shift ;;/,
+		"the semantic mode must have one explicit parser arm",
+	);
+	assert.match(
+		shell,
+		/shakedown\|shakedown-timeline-boundary\|shakedown-exact-history-focus\|shakedown-return-destinations\)/,
+		"the semantic mode must share the self-owned shakedown root path",
+	);
+	assert.match(readme, /--shakedown-return-destinations/);
+	const branchStart = browser.indexOf(`if (config.mode === "${mode}")`);
+	const fullMatrix = browser.indexOf(
+		'await diagnostics.section("Reader readiness"',
+	);
+	assert.ok(
+		branchStart >= 0 && branchStart < fullMatrix,
+		"the semantic mode must branch before the full matrix",
+	);
+	const branch = browser.slice(branchStart, fullMatrix);
+	assert.equal(
+		(
+			branch.match(
+				new RegExp(`diagnostics\\.section\\(\\s*"${section}"`, "g"),
+			) ?? []
+		).length,
+		1,
+		"the semantic mode must run exactly one named journey",
+	);
+	assert.match(branch, /narrow Timeline return/);
+	assert.match(branch, /return destinations Changes G/);
+	assert.match(branch, /parallel-current resource readiness/);
+	assert.match(branch, /return focusedShakedownResult/);
+	assert.match(
+		browser,
+		/config\.mode !== "shakedown-exact-history-focus"[\s\S]*config\.mode !== "shakedown-return-destinations"/,
+		"the semantic mode must be a member of the closed browser set",
+	);
+	assert.doesNotMatch(
+		shell,
+		/--(?:section|shakedown-section|mode)[= )]/,
+		"the semantic mode must not expose a generic selector",
+	);
+	assert.equal(flag, `--${mode}`);
 });
 
 test("exact readiness requires the requested route and accepted reading body", async () => {

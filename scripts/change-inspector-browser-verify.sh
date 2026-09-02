@@ -15,6 +15,7 @@ usage: change-inspector-browser-verify.sh --root <empty-directory>
        change-inspector-browser-verify.sh --shakedown
        change-inspector-browser-verify.sh --shakedown-timeline-boundary
        change-inspector-browser-verify.sh --shakedown-exact-history-focus
+       change-inspector-browser-verify.sh --shakedown-return-destinations
 
 Runs the public L2 Change matrix against an exact injected Pointbreak binary.
 The root must be empty and outside this worktree. Logs, screenshots, fixture
@@ -64,13 +65,14 @@ while [ "$#" -gt 0 ]; do
     --shakedown) mode="shakedown"; shift ;;
     --shakedown-timeline-boundary) mode="shakedown-timeline-boundary"; shift ;;
     --shakedown-exact-history-focus) mode="shakedown-exact-history-focus"; shift ;;
+    --shakedown-return-destinations) mode="shakedown-return-destinations"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
 case "$mode" in
-  shakedown|shakedown-timeline-boundary|shakedown-exact-history-focus)
+  shakedown|shakedown-timeline-boundary|shakedown-exact-history-focus|shakedown-return-destinations)
     [ -z "$root" ] || die "$mode creates its own root and cannot use --root"
     shakedown_parent="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
     shakedown_root="$(mktemp -d "$shakedown_parent/pointbreak-change-inspector-shakedown.XXXXXX")"
@@ -994,6 +996,9 @@ case "$mode" in
     ;;
   shakedown-exact-history-focus)
     expected_shakedown_section="Shakedown exact history and focus"
+    ;;
+  shakedown-return-destinations)
+    expected_shakedown_section="Shakedown return destinations and exact history"
     ;;
   full)
     expected_shakedown_section=""

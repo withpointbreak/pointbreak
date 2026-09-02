@@ -6,7 +6,8 @@
 		config.mode !== "full" &&
 		config.mode !== "shakedown" &&
 		config.mode !== "shakedown-timeline-boundary" &&
-		config.mode !== "shakedown-exact-history-focus"
+		config.mode !== "shakedown-exact-history-focus" &&
+		config.mode !== "shakedown-return-destinations"
 	) {
 		throw new Error(`unsupported browser verification mode: ${config.mode}`);
 	}
@@ -638,7 +639,7 @@
 		await destination.dispose();
 		return selected().getAttribute("data-change-id");
 	};
-	const waitForNarrowBackDestination = (expectedHash) =>
+	const waitForRetainedMasterDestination = (expectedHash) =>
 		page.waitForFunction(
 			({ expectedHash }) => {
 				const normalize = (value) => {
@@ -1047,7 +1048,7 @@
 				const narrowBackTarget =
 					"#/changes?limit=100&order=change_id_asc";
 				await page.locator("#detail-back").click();
-				const narrowBackDestination = await waitForNarrowBackDestination(
+				const narrowBackDestination = await waitForRetainedMasterDestination(
 					narrowBackTarget,
 				);
 				await narrowBackDestination.dispose();
@@ -1055,6 +1056,262 @@
 			},
 			teardown: teardownSection,
 		});
+		const focusedShakedownResult = diagnostics.result({
+			screenshotCount: screenshots,
+		});
+		console.log(
+			`POINTBREAK_BROWSER_RESULT=${JSON.stringify(focusedShakedownResult)}`,
+		);
+		return focusedShakedownResult;
+	}
+
+	if (config.mode === "shakedown-return-destinations") {
+		await diagnostics.section(
+			"Shakedown return destinations and exact history",
+			{
+				setup: () =>
+					open(
+						"timeline?limit=100&order=desc",
+						layouts[1],
+						"return destinations setup",
+					),
+				run: async () => {
+					const narrowTimelineHash = await hash();
+					const eventRows = page.locator("#timeline [data-event-id]");
+					const eventCount = await eventRows.count();
+					requireCondition(
+						eventCount > 0,
+						"narrow Timeline return",
+						"the narrow Timeline exposed no exact event",
+						"> 0",
+						eventCount,
+					);
+					const eventId = await eventRows.first().getAttribute("data-event-id");
+					requireCondition(
+						typeof eventId === "string" && eventId.length > 0,
+						"narrow Timeline return",
+						"the narrow Timeline event had no identity",
+						"nonempty event ID",
+						eventId,
+					);
+					await eventRows.first().click();
+					await waitForExactTimelineEvent(eventId);
+					await page.setViewportSize({
+						width: layouts[0].width,
+						height: layouts[0].height,
+					});
+					await page.waitForFunction(
+						() =>
+							getComputedStyle(document.querySelector("#detail-back"))
+								.display === "none" &&
+							document.querySelector("#master")?.inert === false,
+					);
+					await page.setViewportSize({
+						width: layouts[1].width,
+						height: layouts[1].height,
+					});
+					await page.waitForFunction(
+						() =>
+							getComputedStyle(document.querySelector("#detail-back"))
+								.display !== "none" &&
+							document.querySelector("#master")?.inert === true,
+					);
+					await page.locator("#detail-back").click();
+					await waitForTimelineRoute(narrowTimelineHash);
+					const timelineDestination =
+						await waitForRetainedMasterDestination(narrowTimelineHash);
+					await timelineDestination.dispose();
+					const pageControlsRestored = await page.evaluate(() =>
+						["#topbar", "#toolbar", "#master-rail", "#master", ".divider"].every(
+							(selector) => document.querySelector(selector)?.inert === false,
+						),
+					);
+					compare(
+						pageControlsRestored,
+						"narrow Timeline return",
+						"the retained Timeline master did not complete after detail Back",
+						true,
+						pageControlsRestored,
+					);
+
+					const changesHash = "#/changes?limit=100&order=change_id_asc";
+					await open(
+						changesHash.slice(2),
+						layouts[0],
+						"return destinations Changes setup",
+					);
+					const selectedChange = await selected().getAttribute("data-change-id");
+					requireCondition(
+						typeof selectedChange === "string" && selectedChange.length > 0,
+						"return destinations Changes",
+						"the returned-lens journey had no selected Change",
+						"nonempty Change ID",
+						selectedChange,
+					);
+					await page.locator("#master").focus();
+					await page.keyboard.press("Enter");
+					await page.waitForFunction(
+						(changeId) =>
+							location.hash.includes(`/changes/${encodeURIComponent(changeId)}`) &&
+							Boolean(
+								document.querySelector("#detail-body")?.dataset.changeReadingKey,
+							),
+						selectedChange,
+					);
+					await page.keyboard.press("Escape");
+					const changesDestination =
+						await waitForRetainedMasterDestination(changesHash);
+					await changesDestination.dispose();
+					const beforeViewEnter = await hash();
+					const viewToggle = page.locator("#view-toggle");
+					await viewToggle.focus();
+					await page.keyboard.press("Enter");
+					const expandedAfterEnter = await viewToggle.getAttribute("aria-expanded");
+					const hashAfterEnter = await hash();
+					compare(
+						expandedAfterEnter === "true" && hashAfterEnter === beforeViewEnter,
+						"return destinations View Enter",
+						"the returned Changes lens intercepted native View activation",
+						{ expanded: "true", hash: beforeViewEnter },
+						{ expanded: expandedAfterEnter, hash: hashAfterEnter },
+					);
+					await page.keyboard.press("Enter");
+					const expandedAfterSecondEnter =
+						await viewToggle.getAttribute("aria-expanded");
+					compare(
+						expandedAfterSecondEnter === "false",
+						"return destinations View Enter",
+						"the second native View activation did not close the menu",
+						"false",
+						expandedAfterSecondEnter,
+					);
+					const terminalChange = await waitForChangesTerminalDestination();
+					requireCondition(
+						typeof terminalChange === "string" && terminalChange.length > 0,
+						"return destinations Changes G",
+						"the terminal Changes journey produced no selected Change",
+						"nonempty Change ID",
+						terminalChange,
+					);
+
+					const parallel = config.fixture.matrix.topology.parallel_current;
+					const parallelRoute = `changes?limit=100&order=change_id_asc&topology=parallel_current&q=${encodeURIComponent(parallel.change)}`;
+					await open(
+						parallelRoute,
+						layouts[0],
+						"parallel-current exact history setup",
+					);
+					const parallelCard = page.locator(
+						`.unit-card[data-change-id="${parallel.change}"]`,
+					);
+					const peerButtons = parallelCard.locator(".change-card-peer-open");
+					const peerCount = await peerButtons.count();
+					requireCondition(
+						peerCount > 1,
+						"parallel-current exact choice",
+						"the fixture exposed fewer than two current Revision peers",
+						"> 1",
+						peerCount,
+					);
+					await peerButtons.first().click();
+					const revisionHashHandle = await page.waitForFunction(() =>
+						location.hash.includes("/revisions/"),
+					);
+					await revisionHashHandle.dispose();
+					const revisionHash = await hash();
+					const revisionRoute = revisionHash.slice(2);
+					const revisionReady = await page.waitForFunction(
+						isAcceptedExactReadingInPage,
+						{ expectedHash: revisionHash, expectedRoute: revisionRoute },
+					);
+					const revisionReadiness = await revisionReady.jsonValue();
+					await revisionReady.dispose();
+					if (revisionReadiness.state === "refused") {
+						fail("parallel-current Revision readiness", revisionReadiness.detail);
+					}
+					const revisionReadingKey = await page
+						.locator("#detail-body")
+						.getAttribute("data-change-reading-key");
+					const resourceAction = page
+						.locator("#detail-body > .detail-actions")
+						.getByRole("button", {
+							name: "Open authoritative captured diff",
+							exact: true,
+						});
+					const resourceActionCount = await resourceAction.count();
+					requireCondition(
+						resourceActionCount === 1,
+						"parallel-current resource readiness",
+						"the accepted Revision exposed no unique captured-resource action",
+						1,
+						resourceActionCount,
+					);
+					await resourceAction.click();
+					const resourceHashHandle = await page.waitForFunction(() =>
+						location.hash.includes("/resource?"),
+					);
+					await resourceHashHandle.dispose();
+					const resourceHash = await hash();
+					const resourceRoute = resourceHash.slice(2);
+					const resourceReady = await page.waitForFunction(
+						isAcceptedExactReadingInPage,
+						{
+							expectedHash: resourceHash,
+							expectedRoute: resourceRoute,
+							priorKeys: { reading: revisionReadingKey },
+						},
+					);
+					const resourceReadiness = await resourceReady.jsonValue();
+					await resourceReady.dispose();
+					if (resourceReadiness.state === "refused") {
+						fail("parallel-current resource readiness", resourceReadiness.detail);
+					}
+					const resourceFocus = await page
+						.locator("#detail-close")
+						.evaluate((node) => document.activeElement === node);
+					compare(
+						resourceFocus,
+						"parallel-current resource readiness",
+						"accepted resource hydration did not retain exact-detail focus",
+						true,
+						resourceFocus,
+					);
+					const resourceReadingKey = await page
+						.locator("#detail-body")
+						.getAttribute("data-change-reading-key");
+					await page.goBack();
+					const returnedRevisionReady = await page.waitForFunction(
+						isAcceptedExactReadingInPage,
+						{
+							expectedHash: revisionHash,
+							expectedRoute: revisionRoute,
+							priorKeys: { reading: resourceReadingKey },
+						},
+					);
+					const returnedRevisionReadiness =
+						await returnedRevisionReady.jsonValue();
+					await returnedRevisionReady.dispose();
+					if (returnedRevisionReadiness.state === "refused") {
+						fail(
+							"parallel-current Revision return",
+							returnedRevisionReadiness.detail,
+						);
+					}
+					const revisionFocus = await page
+						.locator("#detail-close")
+						.evaluate((node) => document.activeElement === node);
+					compare(
+						revisionFocus,
+						"parallel-current Revision return",
+						"accepted Revision Back hydration did not restore exact-detail focus",
+						true,
+						revisionFocus,
+					);
+					await screenshot("shakedown-return-destinations");
+				},
+				teardown: teardownSection,
+			},
+		);
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
 		});
@@ -2828,6 +3085,9 @@
 			);
 			await page.locator("#detail-back").click();
 			await waitForTimelineRoute(narrowTimelineHash);
+			const narrowTimelineDestination =
+				await waitForRetainedMasterDestination(narrowTimelineHash);
+			await narrowTimelineDestination.dispose();
 			expect(
 				await page.evaluate(() =>
 					["#topbar", "#toolbar", "#master-rail", "#master", ".divider"].every(
@@ -3342,7 +3602,9 @@
 			);
 			await screenshot("wide-keyboard-change");
 			await page.keyboard.press("Escape");
-			await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
+			const returnedChangesDestination =
+				await waitForRetainedMasterDestination(localSelectionHash);
+			await returnedChangesDestination.dispose();
 			const returnedSelectionCount = await selected().count();
 			compare(
 				returnedSelectionCount === 1,
@@ -4374,18 +4636,33 @@
 				copiedExactRevisionUrl,
 			);
 			await screenshot("wide-parallel-explicit-revision");
+			const revisionHash = await hash();
+			const revisionRoute = revisionHash.slice(2);
 			const revisionReadingKey = await page
 				.locator("#detail-body")
 				.getAttribute("data-change-reading-key");
 			await page
 				.getByRole("button", { name: "Open authoritative captured diff" })
 				.click();
-			await page.waitForFunction(() => location.hash.includes("/resource?"));
-			await page.waitForFunction((key) => {
-				const next =
-					document.querySelector("#detail-body")?.dataset.changeReadingKey;
-				return Boolean(next && next !== key);
-			}, revisionReadingKey);
+			const resourceHashHandle = await page.waitForFunction(() =>
+				location.hash.includes("/resource?"),
+			);
+			await resourceHashHandle.dispose();
+			const resourceHash = await hash();
+			const resourceRoute = resourceHash.slice(2);
+			const resourceReady = await page.waitForFunction(
+				isAcceptedExactReadingInPage,
+				{
+					expectedHash: resourceHash,
+					expectedRoute: resourceRoute,
+					priorKeys: { reading: revisionReadingKey },
+				},
+			);
+			const resourceReadiness = await resourceReady.jsonValue();
+			await resourceReady.dispose();
+			if (resourceReadiness.state === "refused") {
+				fail("parallel-current resource readiness", resourceReadiness.detail);
+			}
 			const detailCloseFocusedOnExactRoute = await page
 				.locator("#detail-close")
 				.evaluate((node) => document.activeElement === node);
@@ -4400,16 +4677,19 @@
 				.locator("#detail-body")
 				.getAttribute("data-change-reading-key");
 			await page.goBack();
-			await page.waitForFunction(
-				() =>
-					location.hash.includes("/revisions/") &&
-					!location.hash.includes("/resource?"),
+			const revisionReady = await page.waitForFunction(
+				isAcceptedExactReadingInPage,
+				{
+					expectedHash: revisionHash,
+					expectedRoute: revisionRoute,
+					priorKeys: { reading: resourceReadingKey },
+				},
 			);
-			await page.waitForFunction((key) => {
-				const next =
-					document.querySelector("#detail-body")?.dataset.changeReadingKey;
-				return Boolean(next && next !== key);
-			}, resourceReadingKey);
+			const revisionReadiness = await revisionReady.jsonValue();
+			await revisionReady.dispose();
+			if (revisionReadiness.state === "refused") {
+				fail("parallel-current Revision return", revisionReadiness.detail);
+			}
 			await page.keyboard.press("3");
 			await page.waitForFunction(() =>
 				location.hash.startsWith("#/attention?"),
@@ -5512,7 +5792,7 @@
 			const narrowBackTarget =
 				"#/changes?limit=100&order=change_id_asc";
 			await page.locator("#detail-back").click();
-			const narrowBackDestination = await waitForNarrowBackDestination(
+			const narrowBackDestination = await waitForRetainedMasterDestination(
 				narrowBackTarget,
 			);
 			await narrowBackDestination.dispose();
