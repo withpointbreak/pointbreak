@@ -479,6 +479,33 @@ test("return-destinations shakedown is literal, root-owned, and complete", async
 	assert.match(branch, /narrow Timeline return/);
 	assert.match(branch, /return destinations Changes G/);
 	assert.match(branch, /parallel-current resource readiness/);
+	const changesOpen = branch.indexOf(
+		'"return destinations Changes setup",',
+	);
+	const changesCursorFocus = branch.indexOf(
+		'await page.locator("#master").focus();',
+		changesOpen,
+	);
+	const changesCursorDown = branch.indexOf(
+		'await page.keyboard.press("j");',
+		changesOpen,
+	);
+	const selectedChangeRead = branch.indexOf(
+		"const selectedChange = await selected().getAttribute",
+		changesOpen,
+	);
+	const selectedChangeEnter = branch.indexOf(
+		'await page.keyboard.press("Enter");',
+		changesOpen,
+	);
+	assert.ok(
+		changesOpen >= 0 &&
+			changesCursorFocus > changesOpen &&
+			changesCursorDown > changesCursorFocus &&
+			selectedChangeRead > changesCursorDown &&
+			selectedChangeEnter > selectedChangeRead,
+		"the focused Changes journey must establish its local cursor before reading and opening the selected Change",
+	);
 	assert.match(branch, /return focusedShakedownResult/);
 	assert.match(
 		browser,

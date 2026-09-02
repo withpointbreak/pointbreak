@@ -1140,6 +1140,8 @@
 						layouts[0],
 						"return destinations Changes setup",
 					);
+					await page.locator("#master").focus();
+					await page.keyboard.press("j");
 					const selectedChange = await selected().getAttribute("data-change-id");
 					requireCondition(
 						typeof selectedChange === "string" && selectedChange.length > 0,
