@@ -19,6 +19,8 @@
 	const consoleErrors = [];
 	const pageErrors = [];
 	const requestFailures = [];
+	const outstandingRequests = new Set();
+	const profileSupersessionTransitionByRequest = new Map();
 	const serviceUnavailableResponses = [];
 	let insideAppendWindow = false;
 	const bootstrapUrl = (server) =>
@@ -68,6 +70,29 @@
 			body.retryable === true
 		);
 	}
+	function isAdmissibleProfileSupersessionFailure(record, primaryBaseUrl) {
+		if (typeof record !== "object" || record === null) return false;
+		if (typeof primaryBaseUrl !== "string") return false;
+		const primaryOrigin = primaryBaseUrl.endsWith("/")
+			? primaryBaseUrl.slice(0, -1)
+			: primaryBaseUrl;
+		const transition = record.transition;
+		if (typeof transition !== "object" || transition === null) return false;
+		return (
+			(transition.arm === "optional" || transition.arm === "required") &&
+			(transition.sourceHash === "#/changes" ||
+				transition.sourceHash.startsWith("#/changes?")) &&
+			transition.targetHash === "#/timeline?limit=100&order=desc" &&
+			Array.isArray(transition.profileRequestsBeforeNavigation) &&
+			transition.profileRequestsBeforeNavigation.length === 1 &&
+			transition.profileRequestsBeforeNavigation[0] === record.request &&
+			transition.destinationSucceeded === true &&
+			record.method === "GET" &&
+			record.resourceType === "fetch" &&
+			record.url === `${primaryOrigin}/api/v2/profile` &&
+			record.error === "net::ERR_ABORTED"
+		);
+	}
 	const responseInspections = new Set();
 	const settleResponseInspections = async () => {
 		while (responseInspections.size > 0) {
@@ -83,15 +108,36 @@
 		});
 	});
 	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("request", (request) => {
+		outstandingRequests.add(request);
+	});
 	page.on("requestfailed", (request) => {
+		const transition =
+			profileSupersessionTransitionByRequest.get(request) ?? null;
 		requestFailures.push({
+			request,
+			transition,
 			method: request.method(),
 			resourceType: request.resourceType(),
 			url: request.url(),
 			error: request.failure()?.errorText ?? "unknown request failure",
 		});
+		transition?.settleRequest("requestfailed");
+		profileSupersessionTransitionByRequest.delete(request);
+		outstandingRequests.delete(request);
+	});
+	page.on("requestfinished", (request) => {
+		const transition = profileSupersessionTransitionByRequest.get(request);
+		transition?.settleRequest("requestfinished");
+		profileSupersessionTransitionByRequest.delete(request);
+		outstandingRequests.delete(request);
 	});
 	page.on("response", (response) => {
+		const request = response.request();
+		const transition = profileSupersessionTransitionByRequest.get(request);
+		transition?.settleRequest("response");
+		profileSupersessionTransitionByRequest.delete(request);
+		outstandingRequests.delete(request);
 		if (response.status() !== 503) return;
 		const responseWindow = insideAppendWindow;
 		const inspection = (async () => {
@@ -308,7 +354,19 @@
 		}
 		lastScreenshot = `screenshots/${name}.png`;
 	};
-	const open = async (route, layout, label) => {
+	const open = async (
+		route,
+		layout,
+		label,
+		{ profileSupersessionArm = null } = {},
+	) => {
+		if (
+			profileSupersessionArm !== null &&
+			profileSupersessionArm !== "optional" &&
+			profileSupersessionArm !== "required"
+		) {
+			fail(label, `unsupported profile supersession arm: ${profileSupersessionArm}`);
+		}
 		await page.setViewportSize({ width: layout.width, height: layout.height });
 		const targetUrl = url(route);
 		const targetHash = `#/${route}`;
@@ -336,6 +394,71 @@
 			: expectedPath === "timeline"
 				? targetHash
 				: null;
+		let profileSupersessionTransition = null;
+		if (profileSupersessionArm !== null) {
+			const isPrimaryProfileRequest = (request) =>
+				request.method() === "GET" &&
+				request.resourceType() === "fetch" &&
+				request.url() === `${config.server.baseUrl}/api/v2/profile`;
+			let awaitedProfileRequest = null;
+			if (profileSupersessionArm === "required") {
+				awaitedProfileRequest = await page.waitForEvent(
+					"request",
+					isPrimaryProfileRequest,
+				);
+			}
+			const profileRequestsBeforeNavigation = Array.from(
+				outstandingRequests,
+			).filter(isPrimaryProfileRequest);
+			if (
+				profileSupersessionArm === "required" &&
+				!profileRequestsBeforeNavigation.includes(awaitedProfileRequest)
+			) {
+				requireCondition(
+					profileRequestsBeforeNavigation.length === 0,
+					label,
+					"the awaited profile request completed beside another in-flight profile request",
+					[],
+					profileRequestsBeforeNavigation.map((request) => request.url()),
+				);
+				return {
+					navigationPerformed: false,
+					profileSupersessionObserved: false,
+					profileSupersessionOutcome: "completed-before-navigation",
+				};
+			}
+			requireCondition(
+				profileRequestsBeforeNavigation.length <= 1,
+				label,
+				"the explicit arm observed more than one serialized profile request",
+				"at most one in-flight primary profile request",
+				profileRequestsBeforeNavigation.length,
+			);
+			if (profileRequestsBeforeNavigation.length === 1) {
+				let requestWasSettled = false;
+				let settleRequest;
+				const requestSettled = new Promise((resolve) => {
+					settleRequest = (outcome) => {
+						if (requestWasSettled) return;
+						requestWasSettled = true;
+						resolve(outcome);
+					};
+				});
+				profileSupersessionTransition = {
+					arm: profileSupersessionArm,
+					sourceHash: priorKeys.route,
+					targetHash,
+					profileRequestsBeforeNavigation,
+					destinationSucceeded: false,
+					requestSettled,
+					settleRequest,
+				};
+				profileSupersessionTransitionByRequest.set(
+					profileRequestsBeforeNavigation[0],
+					profileSupersessionTransition,
+				);
+			}
+		}
 		// A goto to the exact current fragment is a no-op. Force a document reload
 		// so a deliberately refused reader-profile fixture cannot leak its DOM
 		// into the real reader that follows it.
@@ -447,7 +570,29 @@
 			`<= ${metrics.width}`,
 			metrics.scrollWidth,
 		);
-		return metrics;
+		if (profileSupersessionTransition !== null) {
+			profileSupersessionTransition.destinationSucceeded = true;
+			await profileSupersessionTransition.requestSettled;
+		}
+		const profileSupersessionObserved = requestFailures.some(
+			(record) =>
+				record.transition === profileSupersessionTransition &&
+				isAdmissibleProfileSupersessionFailure(
+					record,
+					config.server.baseUrl,
+				),
+		);
+		return {
+			...metrics,
+			navigationPerformed: true,
+			profileSupersessionObserved,
+			profileSupersessionOutcome:
+				profileSupersessionTransition === null
+					? "not-observed"
+					: profileSupersessionObserved
+						? "admitted"
+						: "completed-without-abort",
+		};
 	};
 	const hash = () => page.evaluate(() => location.hash);
 	const routeParameter = (name) =>
@@ -638,6 +783,56 @@
 		}, expectedHash);
 		await destination.dispose();
 		return selected().getAttribute("data-change-id");
+	};
+	const waitForChangesFirstDestination = async (expectedHash) => {
+		const destination = await page.waitForFunction((expectedHash) => {
+			if (location.hash !== expectedHash) return false;
+			const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+			if (!rawKey) return false;
+			try {
+				const key = JSON.parse(rawKey);
+				const expectedQuery = Array.from(
+					new URLSearchParams(expectedHash.split("?", 2)[1] ?? "").entries(),
+				).sort();
+				const keyQuery = Object.entries(key.query ?? {})
+					.filter(([, value]) => value !== null && value !== undefined)
+					.map(([name, value]) => [name, String(value)])
+					.sort();
+				const selectedCard = document.querySelector(
+					".unit-card.change-card-selected[data-change-id]",
+				);
+				const cards = Array.from(
+					document.querySelectorAll(".unit-card[data-change-id]"),
+				);
+				return (
+					key.lens === "changes" &&
+					JSON.stringify(keyQuery) === JSON.stringify(expectedQuery) &&
+					Array.isArray(key.changes) &&
+					key.changes.length > 0 &&
+					selectedCard === cards[0] &&
+					selectedCard?.dataset.changeId === key.changes[0]
+				);
+			} catch {
+				return false;
+			}
+		}, expectedHash);
+		await destination.dispose();
+		return selected().getAttribute("data-change-id");
+	};
+	const traverseChangesTerminalAndFirst = async () => {
+		const expectedFirstHash = await hash();
+		const lastId = await waitForChangesTerminalDestination();
+		const lastLoadedId = await page
+			.locator(".unit-card[data-change-id]")
+			.last()
+			.getAttribute("data-change-id");
+		await page.keyboard.press("g");
+		const firstId = await waitForChangesFirstDestination(expectedFirstHash);
+		const firstLoadedId = await page
+			.locator(".unit-card[data-change-id]")
+			.first()
+			.getAttribute("data-change-id");
+		return { lastId, lastLoadedId, firstId, firstLoadedId };
 	};
 	const waitForRetainedMasterDestination = (expectedHash) =>
 		page.waitForFunction(
@@ -1310,13 +1505,21 @@
 						"false",
 						expandedAfterSecondEnter,
 					);
-					const terminalChange = await waitForChangesTerminalDestination();
-					requireCondition(
-						typeof terminalChange === "string" && terminalChange.length > 0,
+					const changesTraversal =
+						await traverseChangesTerminalAndFirst();
+					compare(
+						changesTraversal.lastId === changesTraversal.lastLoadedId,
 						"return destinations Changes G",
-						"the terminal Changes journey produced no selected Change",
-						"nonempty Change ID",
-						terminalChange,
+						"the terminal Changes journey did not select the last keyed Change",
+						changesTraversal.lastLoadedId,
+						changesTraversal.lastId,
+					);
+					compare(
+						changesTraversal.firstId === changesTraversal.firstLoadedId,
+						"return destinations Changes g",
+						"the first-page Changes journey did not select the first keyed Change",
+						changesTraversal.firstLoadedId,
+						changesTraversal.firstId,
 					);
 					await screenshot("shakedown-changes-terminal-return");
 				},
@@ -1447,6 +1650,66 @@
 				teardown: teardownSection,
 			},
 		);
+
+		await diagnostics.section("Shakedown poll supersession request accounting", {
+				setup: () =>
+					open(
+						"changes?limit=100&order=change_id_asc",
+						layouts[0],
+						"poll supersession Changes setup",
+					),
+				run: async () => {
+					const PROFILE_SUPERSESSION_OBSERVATION_MAX_OPPORTUNITIES = 3;
+					let profileSupersessionObserved = false;
+					let finalOpportunity = null;
+					for (
+						let opportunity = 1;
+						opportunity <=
+						PROFILE_SUPERSESSION_OBSERVATION_MAX_OPPORTUNITIES;
+						opportunity += 1
+					) {
+						const outcome = await open(
+							"timeline?limit=100&order=desc",
+							layouts[1],
+							`poll supersession opportunity ${opportunity}`,
+							{ profileSupersessionArm: "required" },
+						);
+						finalOpportunity = {
+							opportunity,
+							navigationPerformed: outcome.navigationPerformed,
+							profileSupersessionOutcome:
+								outcome.profileSupersessionOutcome,
+						};
+						if (outcome.profileSupersessionObserved) {
+							profileSupersessionObserved = true;
+							break;
+						}
+						if (
+							outcome.navigationPerformed &&
+							opportunity <
+								PROFILE_SUPERSESSION_OBSERVATION_MAX_OPPORTUNITIES
+						) {
+							await open(
+								"changes?limit=100&order=change_id_asc",
+								layouts[0],
+								`poll supersession Changes opportunity ${opportunity}`,
+							);
+						}
+					}
+					requireCondition(
+						profileSupersessionObserved,
+						"Shakedown poll supersession request accounting",
+						"three natural poll opportunities did not produce one exact successful-destination profile supersession",
+						{ profileSupersessionObserved: true },
+						{
+							profileSupersessionObserved,
+							finalOpportunity,
+						},
+					);
+					await screenshot("shakedown-poll-supersession-request-accounting");
+				},
+				teardown: teardownSection,
+			});
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
 		});
@@ -3778,30 +4041,20 @@
 				"false",
 				expandedAfterSecondEnter,
 			);
-			const lastId = await waitForChangesTerminalDestination();
-			const lastLoadedId = await page
-				.locator(".unit-card[data-change-id]")
-				.last()
-				.getAttribute("data-change-id");
+			const changesTraversal = await traverseChangesTerminalAndFirst();
 			compare(
-				lastId === lastLoadedId,
+				changesTraversal.lastId === changesTraversal.lastLoadedId,
 				"G boundary",
 				"G did not select last loaded Change",
-				lastLoadedId,
-				lastId,
+				changesTraversal.lastLoadedId,
+				changesTraversal.lastId,
 			);
-			await page.keyboard.press("g");
-			const firstSelectedId = await selected().getAttribute("data-change-id");
-			const firstLoadedId = await page
-				.locator(".unit-card[data-change-id]")
-				.first()
-				.getAttribute("data-change-id");
 			compare(
-				firstSelectedId === firstLoadedId,
+				changesTraversal.firstId === changesTraversal.firstLoadedId,
 				"g boundary",
 				"g did not select first loaded Change",
-				firstLoadedId,
-				firstSelectedId,
+				changesTraversal.firstLoadedId,
+				changesTraversal.firstId,
 			);
 			await page.keyboard.press("3");
 			await page.waitForFunction(() =>
@@ -6255,6 +6508,7 @@
 				"timeline?limit=100&order=desc",
 				layouts[1],
 				"narrow reduced motion",
+				{ profileSupersessionArm: "optional" },
 			);
 			const narrowReducedMotionDuration = await page
 				.locator("#detail")
@@ -6313,6 +6567,41 @@
 					config.server.baseUrl,
 				),
 		);
+	const admissibleProfileSupersessionFailures = requestFailures.filter(
+		(failure) =>
+			isAdmissibleProfileSupersessionFailure(
+				failure,
+				config.server.baseUrl,
+			),
+	);
+	const profileSupersessionAdmissionWithinBound =
+		admissibleProfileSupersessionFailures.length <= 1;
+	const admittedRequestFailures = profileSupersessionAdmissionWithinBound
+		? new Set(admissibleProfileSupersessionFailures)
+		: new Set();
+	const unexpectedRequestFailures = requestFailures.filter(
+		(failure) => !admittedRequestFailures.has(failure),
+	);
+	const requestFailureEvidence = (failure) => ({
+		method: failure.method,
+		resourceType: failure.resourceType,
+		url: failure.url,
+		error: failure.error,
+		profileSupersession: failure.transition
+			? {
+					arm: failure.transition.arm,
+					sourceHash: failure.transition.sourceHash,
+					targetHash: failure.transition.targetHash,
+					destinationSucceeded:
+						failure.transition.destinationSucceeded,
+					profileRequestCount:
+						failure.transition.profileRequestsBeforeNavigation.length,
+				}
+			: null,
+	});
+	const unexpectedRequestFailureEvidence = unexpectedRequestFailures.map(
+		requestFailureEvidence,
+	);
 
 	await diagnostics.section("Browser runtime", async () => {
 		expect(
@@ -6341,17 +6630,25 @@
 			actual: pageErrors,
 		});
 		expect(
-			requestFailures.length === 0,
+			profileSupersessionAdmissionWithinBound &&
+				unexpectedRequestFailures.length === 0,
 			"browser requests",
-			requestFailures
+			unexpectedRequestFailureEvidence
 				.map(
 					(failure) =>
 						`${failure.method} ${failure.url}: ${failure.error}`,
 				)
 				.join("\n"),
 			{
-				expected: [],
-				actual: requestFailures,
+				expected: {
+					unexpected: [],
+					admissibleProfileSupersessionMaximum: 1,
+				},
+				actual: {
+					unexpected: unexpectedRequestFailureEvidence,
+					admissibleProfileSupersessionCount:
+						admissibleProfileSupersessionFailures.length,
+				},
 			},
 		);
 	});

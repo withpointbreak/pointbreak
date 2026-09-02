@@ -274,8 +274,304 @@ test("Changes G waits for the terminal destination route, page key, and selected
 	const section = source.slice(sectionStart, sectionEnd);
 	assert.match(
 		section,
-		/const lastId = await waitForChangesTerminalDestination\(\);[\s\S]*"G boundary"/,
-		"the full Changes journey must wait before asserting G",
+		/const changesTraversal = await traverseChangesTerminalAndFirst\(\);[\s\S]*"G boundary"[\s\S]*"g boundary"/,
+		"the full Changes journey must await the shared terminal and first-page destinations",
+	);
+});
+
+test("D69 preserves the 17 untouched full sections, scale producer, and reduced-motion D68 body", async () => {
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const fullSectionNames = [
+		"Reader readiness",
+		"Timeline overview and chronology",
+		"Timeline search and correlation",
+		"Timeline preferences",
+		"Timeline keyboard and exact detail",
+		"Timeline follow and stale continuation",
+		"Changes and Attention paging",
+		"Attention guidance",
+		"Changes keyboard and filters",
+		"Change topology cards",
+		"Change relationship graph",
+		"Exact Revision selection and history",
+		"Shared Revision membership",
+		"Split, preferences, and dialogs",
+		"Fact relationship graph",
+		"Annotated diff",
+		"Exact detail and reading",
+		"Exact resource availability",
+		"Polling retention and reduced motion",
+		"Browser runtime",
+	];
+	const frozenSectionNames = fullSectionNames.filter(
+		(name) =>
+			name !== "Changes keyboard and filters" &&
+			name !== "Polling retention and reduced motion" &&
+			name !== "Browser runtime",
+	);
+	const observedFullSectionNames = [
+		...browser.matchAll(/^\tawait diagnostics\.section\("([^"]+)"/gm),
+	]
+		.map((match) => match[1])
+		.slice(-fullSectionNames.length);
+	assert.deepEqual(
+		observedFullSectionNames,
+		fullSectionNames,
+		"the complete D68 full-section ledger must remain explicit",
+	);
+	assert.equal(frozenSectionNames.length, 17);
+
+	const sectionSource = (name) => {
+		const start = browser.indexOf(`\tawait diagnostics.section("${name}"`);
+		assert.notEqual(start, -1, `missing full section ${name}`);
+		const next = browser.indexOf(
+			'\n\tawait diagnostics.section("',
+			start + 1,
+		);
+		assert.notEqual(next, -1, `missing boundary after full section ${name}`);
+		return browser.slice(start, next + 1);
+	};
+	const preservation = createHash("sha256");
+	for (const name of frozenSectionNames) {
+		const source = sectionSource(name);
+		preservation.update(
+			`section\0${name}\0${Buffer.byteLength(source)}\0`,
+		);
+		preservation.update(source);
+	}
+	const scaleStartMarker =
+		'if [ "$mode" = "full" ]; then\nprintf \'pub const BROWSER_SCALE: u32 = 0;\\n\' >"$fixture_repo/src/browser-scale.rs"';
+	const scaleStart = shell.indexOf(scaleStartMarker);
+	const scaleEnd = shell.indexOf(
+		"\n# An initial Change capture mints",
+		scaleStart,
+	);
+	assert.ok(
+		scaleStart >= 0 && scaleEnd > scaleStart,
+		"missing exact full scale-producer slice",
+	);
+	const scaleSource = shell.slice(scaleStart, scaleEnd);
+	preservation.update(
+		`shell\0full-scale-producer\0${Buffer.byteLength(scaleSource)}\0`,
+	);
+	preservation.update(scaleSource);
+	assert.equal(
+		preservation.digest("hex"),
+		"084bdb3253de950ce3072b4d459c9f8ac0af16c71ad264facc25270a701de056",
+		"17 passing full sections and the complete scale producer changed from D68",
+	);
+
+	const reducedStart = browser.indexOf(
+		'\tawait diagnostics.section("Polling retention and reduced motion"',
+	);
+	const reducedEnd = browser.indexOf(
+		"\n\tawait settleResponseInspections();",
+		reducedStart,
+	);
+	assert.ok(
+		reducedStart >= 0 && reducedEnd > reducedStart,
+		"missing complete reduced-motion section boundary",
+	);
+	const reducedSource = browser.slice(reducedStart, reducedEnd);
+	const optionalArmLiteral =
+		'\t\t\t\t{ profileSupersessionArm: "optional" },\n';
+	const armOccurrences = reducedSource.split(optionalArmLiteral).length - 1;
+	assert.ok(
+		armOccurrences === 0 || armOccurrences === 1,
+		"reduced-motion may contain at most the one exact optional arm literal",
+	);
+	const canonicalReducedSource = reducedSource.replace(optionalArmLiteral, "");
+	assert.equal(
+		createHash("sha256").update(canonicalReducedSource).digest("hex"),
+		"57532687ce2b0b6009a0ded69a3b739f4e42b41fadf861d052409d6393f93b67",
+		"reduced-motion differs from D68 beyond its one exact optional arm literal",
+	);
+});
+
+test("D69 shares one semantic Changes terminal-to-first journey across focused and full paths", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const firstStart = source.indexOf("const waitForChangesFirstDestination =");
+	assert.notEqual(firstStart, -1, "missing Changes first-page destination wait");
+	const firstEnd = source.indexOf("\n\tconst ", firstStart + 1);
+	const firstHelper = source.slice(firstStart, firstEnd);
+	assert.match(firstHelper, /location\.hash !== expectedHash/);
+	assert.match(
+		firstHelper,
+		/dataset\.changeListKey[\s\S]*JSON\.parse\(rawKey\)/,
+		"the first-page wait must bind the painted list key",
+	);
+	assert.match(
+		firstHelper,
+		/JSON\.stringify\(keyQuery\) === JSON\.stringify\(expectedQuery\)/,
+		"the first-page wait must bind the exact rendered query",
+	);
+	assert.match(
+		firstHelper,
+		/change-card-selected[\s\S]*cards\[0\][\s\S]*key\.changes\[0\]/,
+		"the first-page wait must require the first keyed card to be selected",
+	);
+
+	const journeyStart = source.indexOf(
+		"const traverseChangesTerminalAndFirst =",
+	);
+	assert.notEqual(journeyStart, -1, "missing shared Changes G-to-g journey");
+	const journeyEnd = source.indexOf("\n\tconst ", journeyStart + 1);
+	const journey = source.slice(journeyStart, journeyEnd);
+	assert.match(
+		journey,
+		/await waitForChangesTerminalDestination\(\)[\s\S]*page\.keyboard\.press\("g"\)[\s\S]*waitForChangesFirstDestination\(/,
+	);
+
+	const focusedStart = source.indexOf(
+		'await diagnostics.section("Shakedown Changes terminal return"',
+	);
+	const focusedEnd = source.indexOf(
+		'await diagnostics.section("Shakedown parallel-current exact history"',
+		focusedStart,
+	);
+	const fullStart = source.indexOf(
+		'await diagnostics.section("Changes keyboard and filters"',
+	);
+	const fullEnd = source.indexOf(
+		'await diagnostics.section("Change topology cards"',
+		fullStart,
+	);
+	for (const [label, section] of [
+		["focused", source.slice(focusedStart, focusedEnd)],
+		["full", source.slice(fullStart, fullEnd)],
+	]) {
+		assert.equal(
+			(section.match(/traverseChangesTerminalAndFirst\(/g) ?? []).length,
+			1,
+			`${label} Changes must call the shared G-to-g journey exactly once`,
+		);
+	}
+});
+
+test("D69 profile supersession accounting is exact-object, explicit-arm, and fail-closed", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const classifierStart = source.indexOf(
+		"function isAdmissibleProfileSupersessionFailure(",
+	);
+	assert.notEqual(
+		classifierStart,
+		-1,
+		"missing pure profile-supersession classifier",
+	);
+	const classifierEnd = source.indexOf("\n\tconst ", classifierStart);
+	const classify = new Function(
+		`${source.slice(classifierStart, classifierEnd)}\nreturn isAdmissibleProfileSupersessionFailure;`,
+	)();
+	const request = {};
+	const transition = {
+		arm: "optional",
+		sourceHash: "#/changes?limit=100&order=change_id_asc",
+		targetHash: "#/timeline?limit=100&order=desc",
+		profileRequestsBeforeNavigation: [request],
+		destinationSucceeded: true,
+	};
+	const record = {
+		request,
+		transition,
+		method: "GET",
+		resourceType: "fetch",
+		url: "http://127.0.0.1:4173/api/v2/profile",
+		error: "net::ERR_ABORTED",
+	};
+	assert.equal(
+		classify(record, "http://127.0.0.1:4173"),
+		true,
+		"the exact successful pre-navigation profile supersession must be admissible",
+	);
+	for (const [label, candidate] of [
+		["unarmed", { ...record, transition: { ...transition, arm: null } }],
+		["new request", { ...record, request: {} }],
+		["wrong method", { ...record, method: "POST" }],
+		["wrong resource", { ...record, resourceType: "document" }],
+		["wrong origin", { ...record, url: "http://127.0.0.1:4174/api/v2/profile" }],
+		["wrong endpoint", { ...record, url: "http://127.0.0.1:4173/api/v2/changes" }],
+		["wrong error", { ...record, error: "net::ERR_FAILED" }],
+		[
+			"multiple profile requests",
+			{
+				...record,
+				transition: {
+					...transition,
+					profileRequestsBeforeNavigation: [request, {}],
+				},
+			},
+		],
+		[
+			"unsuccessful destination",
+			{
+				...record,
+				transition: { ...transition, destinationSucceeded: false },
+			},
+		],
+		[
+			"wrong source lens",
+			{
+				...record,
+				transition: { ...transition, sourceHash: "#/attention" },
+			},
+		],
+		[
+			"wrong destination lens",
+			{
+				...record,
+				transition: { ...transition, targetHash: "#/attention" },
+			},
+		],
+	]) {
+		assert.equal(
+			classify(candidate, "http://127.0.0.1:4173"),
+			false,
+			`${label} must remain fatal`,
+		);
+	}
+
+	assert.match(source, /page\.on\("request",[\s\S]*outstandingRequests\.add/);
+	assert.match(source, /page\.on\("response",[\s\S]*outstandingRequests\.delete/);
+	assert.match(
+		source,
+		/page\.on\("requestfinished",[\s\S]*outstandingRequests\.delete/,
+	);
+	assert.match(
+		source,
+		/page\.on\("requestfailed",[\s\S]*requestFailures\.push[\s\S]*outstandingRequests\.delete/,
+	);
+	assert.match(
+		source,
+		/profileRequestsBeforeNavigation[\s\S]*page\.goto\(targetUrl/,
+		"the exact Request-object snapshot must precede navigation",
+	);
+	assert.equal(
+		(source.match(/\{ profileSupersessionArm: "optional" \}/g) ?? []).length,
+		1,
+		"full reduced-motion must own exactly one optional arm argument",
+	);
+	assert.equal(
+		(source.match(/\{ profileSupersessionArm: "required" \}/g) ?? []).length,
+		1,
+		"the fourth focused section must own exactly one required arm argument",
+	);
+	assert.match(
+		source,
+		/admissibleProfileSupersessionFailures\.length <= 1/,
+		"the whole invocation may admit at most one exact supersession failure",
 	);
 });
 
@@ -387,16 +683,16 @@ test("full return journeys await complete semantic destinations", async () => {
 		changesEscape,
 	);
 	const viewFocus = changes.indexOf("await viewToggle.focus();", changesEscape);
-	const changesTerminal = changes.indexOf(
-		"await waitForChangesTerminalDestination();",
+	const changesTraversal = changes.indexOf(
+		"await traverseChangesTerminalAndFirst();",
 		changesEscape,
 	);
 	assert.ok(
 		changesEscape >= 0 &&
 			changesDestination > changesEscape &&
 			viewFocus > changesDestination &&
-			changesTerminal > viewFocus,
-		"full Changes return must complete its retained master before View and terminal G",
+		changesTraversal > viewFocus,
+		"full Changes return must complete its retained master before View and shared G-to-g traversal",
 	);
 
 	const exactStart = source.indexOf(
@@ -445,11 +741,13 @@ test("return-destinations shakedown closes every executable dependency", async (
 		"Shakedown retained Timeline return",
 		"Shakedown Changes terminal return",
 		"Shakedown parallel-current exact history",
+		"Shakedown poll supersession request accounting",
 	];
 	const screenshots = [
 		"shakedown-retained-timeline-return",
 		"shakedown-changes-terminal-return",
 		"shakedown-parallel-current-exact-history",
+		"shakedown-poll-supersession-request-accounting",
 	];
 
 	assert.match(
@@ -482,8 +780,8 @@ test("return-destinations shakedown closes every executable dependency", async (
 	const branch = browser.slice(branchStart, branchEnd);
 	assert.equal(
 		(branch.match(/await diagnostics\.section\(/g) ?? []).length,
-		3,
-		"the semantic mode must run exactly three independent journeys",
+		4,
+		"the semantic mode must run exactly four independent journeys",
 	);
 	const sectionStarts = sections.map((name) =>
 		branch.indexOf(`await diagnostics.section("${name}"`),
@@ -493,7 +791,7 @@ test("return-destinations shakedown closes every executable dependency", async (
 			sectionStarts.every(
 				(start, index) => index === 0 || start > sectionStarts[index - 1],
 			),
-		"the three exact sections must run in ledger order",
+		"the four exact sections must run in ledger order",
 	);
 	for (const [index, name] of sections.entries()) {
 		const end =
@@ -521,7 +819,7 @@ test("return-destinations shakedown closes every executable dependency", async (
 	);
 	assert.ok(
 		resultIndex > sectionStarts.at(-1),
-		"the aggregate report must be emitted only after all three sections",
+		"the aggregate report must be emitted only after all four sections",
 	);
 	assert.match(branch, /narrow Timeline return/);
 	assert.match(branch, /return destinations Changes G/);
@@ -583,34 +881,55 @@ test("return-destinations shakedown closes every executable dependency", async (
 			selectedChangeEnter > selectedChangeRead,
 		"the focused Changes journey must establish its local cursor before reading and opening the selected Change",
 	);
-	const parallelSection = branch.slice(sectionStarts[2], resultIndex);
+	const parallelSection = branch.slice(sectionStarts[2], sectionStarts[3]);
 	assert.match(
 		parallelSection,
 		/`changes\?limit=100&order=change_id_asc&topology=parallel_current&q=\$\{encodeURIComponent\(parallel\.change\)\}`/,
 		"parallel-current exact history must keep its filtered limit=100 route",
 	);
+	const pollSection = branch.slice(sectionStarts[3], resultIndex);
+	assert.match(
+		pollSection,
+		/PROFILE_SUPERSESSION_OBSERVATION_MAX_OPPORTUNITIES\s*=\s*3/,
+		"poll supersession must cap natural opportunities inside one invocation",
+	);
+	assert.match(
+		pollSection,
+		/profileSupersessionArm:\s*"required"/,
+		"poll supersession must explicitly arm only its Changes-to-Timeline open",
+	);
+	assert.doesNotMatch(
+		pollSection,
+		/waitForTimeout|route\.abort|intercept|retry/i,
+		"poll supersession must use natural opportunities without delay, interception, or invocation retry",
+	);
+	assert.match(
+		pollSection,
+		/profileSupersessionObserved[\s\S]*Shakedown poll supersession request accounting/,
+		"the fourth section must prove one exact admitted supersession",
+	);
 	assert.match(branch, /return focusedShakedownResult/);
 	assert.match(
 		shell,
-		/\.sections == \[\s*\{name: "Shakedown retained Timeline return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown Changes terminal return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0\}\s*\]/,
+		/\.sections == \[\s*\{name: "Shakedown retained Timeline return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown Changes terminal return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0\},\s*\{name: "Shakedown poll supersession request accounting", status: "passed", failureCount: 0\}\s*\]/,
 		"the shell must pin the exact ordered passing-section array",
 	);
 	assert.match(
 		shell,
-		/shakedown-return-destinations[\s\S]*\.sectionCount == 3[\s\S]*\.screenshotCount == 3/,
+		/shakedown-return-destinations[\s\S]*\.sectionCount == 4[\s\S]*\.screenshotCount == 4/,
 		"the shell must special-case the aggregate report contract",
 	);
 	assert.match(
 		shell,
-		/shakedown-return-destinations[\s\S]*screenshot_count[^\n]*-eq 3/,
-		"the shell must independently require three PNG files",
+		/shakedown-return-destinations[\s\S]*screenshot_count[^\n]*-eq 4/,
+		"the shell must independently require four PNG files",
 	);
 	assert.match(
 		shell,
-		/expected_screenshot_names="\$\(printf '%s\\n' \\\n\s*'shakedown-changes-terminal-return\.png' \\\n\s*'shakedown-parallel-current-exact-history\.png' \\\n\s*'shakedown-retained-timeline-return\.png'\)"[\s\S]*\[ "\$screenshot_names" = "\$expected_screenshot_names" \]/,
+		/expected_screenshot_names="\$\(printf '%s\\n' \\\n\s*'shakedown-changes-terminal-return\.png' \\\n\s*'shakedown-parallel-current-exact-history\.png' \\\n\s*'shakedown-poll-supersession-request-accounting\.png' \\\n\s*'shakedown-retained-timeline-return\.png'\)"[\s\S]*\[ "\$screenshot_names" = "\$expected_screenshot_names" \]/,
 		"the shell must pin and compare the exact sorted PNG-name set",
 	);
-	assert.match(readme, /three independent diagnostics sections/);
+	assert.match(readme, /four independent diagnostics sections/);
 	for (const screenshot of screenshots) {
 		assert.match(readme, new RegExp(`${screenshot}\\.png`));
 	}
