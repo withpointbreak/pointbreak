@@ -1066,9 +1066,7 @@
 	}
 
 	if (config.mode === "shakedown-return-destinations") {
-		await diagnostics.section(
-			"Shakedown return destinations and exact history",
-			{
+		await diagnostics.section("Shakedown retained Timeline return", {
 				setup: () =>
 					open(
 						"timeline?limit=100&order=desc",
@@ -1133,13 +1131,138 @@
 						true,
 						pageControlsRestored,
 					);
+					await screenshot("shakedown-retained-timeline-return");
+				},
+				teardown: teardownSection,
+			},
+		);
 
-					const changesHash = "#/changes?limit=100&order=change_id_asc";
-					await open(
-						changesHash.slice(2),
-						layouts[0],
-						"return destinations Changes setup",
-					);
+		await diagnostics.section("Shakedown Changes terminal return", {
+			setup: async () => {
+				const changesQuery = "limit=1&order=change_id_asc";
+				const changesPageResponse = await page.request.get(
+					`${config.server.baseUrl}/api/v2/changes?${changesQuery}`,
+					{
+						headers: {
+							Authorization: `Bearer ${config.server.token}`,
+						},
+					},
+				);
+				const changesPageStatus = changesPageResponse.status();
+				requireCondition(
+					changesPageStatus === 200,
+					"return destinations Changes preflight",
+					"the focused Changes preflight did not return HTTP 200",
+					200,
+					changesPageStatus,
+				);
+				const changesPage = await changesPageResponse.json();
+				requireCondition(
+					changesPage.schema === "pointbreak.inspect-changes-page" &&
+						changesPage.version === 1,
+					"return destinations Changes preflight",
+					"the focused Changes preflight did not return a typed v1 page",
+					{
+						schema: "pointbreak.inspect-changes-page",
+						version: 1,
+					},
+					{
+						schema: changesPage.schema,
+						version: changesPage.version,
+					},
+				);
+				requireCondition(
+					Array.isArray(changesPage.changes) &&
+						changesPage.changes.length === 1,
+					"return destinations Changes preflight",
+					"the focused Changes preflight did not return exactly one Change",
+					1,
+					Array.isArray(changesPage.changes)
+						? changesPage.changes.length
+						: null,
+				);
+				requireCondition(
+					typeof changesPage.next === "string" &&
+						changesPage.next.length > 0,
+					"return destinations Changes preflight",
+					"the focused Changes preflight exposed no next capability",
+					"nonempty next capability",
+					changesPage.next,
+				);
+				requireCondition(
+					typeof changesPage.last === "string" &&
+						changesPage.last.length > 0,
+					"return destinations Changes preflight",
+					"the focused Changes preflight exposed no last capability",
+					"nonempty last capability",
+					changesPage.last,
+				);
+				requireCondition(
+					typeof changesPage.projectionStamp === "string" &&
+						changesPage.projectionStamp.length > 0,
+					"return destinations Changes preflight",
+					"the focused Changes preflight exposed no projection stamp",
+					"nonempty projection stamp",
+					changesPage.projectionStamp,
+				);
+
+				const changesHash = `#/changes?${changesQuery}`;
+				await open(
+					changesHash.slice(2),
+					layouts[0],
+					"return destinations Changes setup",
+				);
+				const terminalBindingHandle = await page.waitForFunction((expected) => {
+					const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+					const target = document.querySelector('[data-change-page="last"]');
+					if (!rawKey || !(target instanceof HTMLElement)) return null;
+					try {
+						const listKey = JSON.parse(rawKey);
+						const targetRoute = target.dataset.changeTargetRoute ?? null;
+						const targetAfter =
+							typeof targetRoute === "string"
+								? new URLSearchParams(
+										targetRoute.split("?", 2)[1] ?? "",
+									).get("after")
+								: null;
+						const matches =
+							listKey.projectionStamp === expected.projectionStamp &&
+							listKey.last === expected.last &&
+							targetAfter === expected.last &&
+							targetRoute !== location.hash;
+						return matches
+							? {
+									matches,
+							listProjectionStamp: listKey.projectionStamp ?? null,
+							listLast: listKey.last ?? null,
+							targetAfter,
+							targetRoute,
+							currentRoute: location.hash,
+								}
+							: null;
+					} catch {
+						return null;
+					}
+				}, {
+					projectionStamp: changesPage.projectionStamp,
+					last: changesPage.last,
+				});
+				const terminalBinding = await terminalBindingHandle.jsonValue();
+				await terminalBindingHandle.dispose();
+				requireCondition(
+					terminalBinding?.matches === true,
+					"return destinations Changes preflight",
+					"the rendered Changes pager did not match the typed preflight",
+					{
+						projectionStamp: changesPage.projectionStamp,
+						last: changesPage.last,
+						distinctTarget: true,
+					},
+					terminalBinding,
+				);
+				return { changesHash };
+			},
+			run: async ({ changesHash }) => {
 					await page.locator("#master").focus();
 					await page.keyboard.press("j");
 					const selectedChange = await selected().getAttribute("data-change-id");
@@ -1195,14 +1318,24 @@
 						"nonempty Change ID",
 						terminalChange,
 					);
+					await screenshot("shakedown-changes-terminal-return");
+				},
+				teardown: teardownSection,
+			},
+		);
 
-					const parallel = config.fixture.matrix.topology.parallel_current;
-					const parallelRoute = `changes?limit=100&order=change_id_asc&topology=parallel_current&q=${encodeURIComponent(parallel.change)}`;
-					await open(
-						parallelRoute,
-						layouts[0],
-						"parallel-current exact history setup",
-					);
+		await diagnostics.section("Shakedown parallel-current exact history", {
+			setup: async () => {
+				const parallel = config.fixture.matrix.topology.parallel_current;
+				const parallelRoute = `changes?limit=100&order=change_id_asc&topology=parallel_current&q=${encodeURIComponent(parallel.change)}`;
+				await open(
+					parallelRoute,
+					layouts[0],
+					"parallel-current exact history setup",
+				);
+				return parallel;
+			},
+			run: async (parallel) => {
 					const parallelCard = page.locator(
 						`.unit-card[data-change-id="${parallel.change}"]`,
 					);
@@ -1309,7 +1442,7 @@
 						true,
 						revisionFocus,
 					);
-					await screenshot("shakedown-return-destinations");
+					await screenshot("shakedown-parallel-current-exact-history");
 				},
 				teardown: teardownSection,
 			},

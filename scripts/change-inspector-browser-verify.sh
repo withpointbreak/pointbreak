@@ -28,7 +28,7 @@ journey, and retains nothing on success. None can be combined with --root.
 EOF
 }
 
-for command in git jq node rg shasum find sort wc tr mv curl cp chmod mktemp rm date du uname; do
+for command in git jq node rg shasum find basename sort wc tr mv curl cp chmod mktemp rm date du uname; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
@@ -998,23 +998,49 @@ case "$mode" in
     expected_shakedown_section="Shakedown exact history and focus"
     ;;
   shakedown-return-destinations)
-    expected_shakedown_section="Shakedown return destinations and exact history"
+    expected_shakedown_section=""
     ;;
   full)
     expected_shakedown_section=""
     ;;
 esac
 if [ "$mode" != "full" ]; then
-  jq -e --arg expectedSection "$expected_shakedown_section" '
-    .status == "passed" and .globalInvalid == false and
-    .sectionCount == 1 and .screenshotCount == 1 and
-    (.failures | length == 0) and
-    (.sections == [{name: $expectedSection, status: "passed", failureCount: 0}])
-  ' "$browser_result" >/dev/null \
-    || die "$mode did not complete its one representative browser section"
+  if [ "$mode" = "shakedown-return-destinations" ]; then
+    jq -e '
+      .status == "passed" and .globalInvalid == false and
+      .sectionCount == 3 and .screenshotCount == 3 and
+      (.failures | length == 0) and
+      (.sections == [
+        {name: "Shakedown retained Timeline return", status: "passed", failureCount: 0},
+        {name: "Shakedown Changes terminal return", status: "passed", failureCount: 0},
+        {name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0}
+      ])
+    ' "$browser_result" >/dev/null \
+      || die "$mode did not complete its three ordered browser sections"
+  else
+    jq -e --arg expectedSection "$expected_shakedown_section" '
+      .status == "passed" and .globalInvalid == false and
+      .sectionCount == 1 and .screenshotCount == 1 and
+      (.failures | length == 0) and
+      (.sections == [{name: $expectedSection, status: "passed", failureCount: 0}])
+    ' "$browser_result" >/dev/null \
+      || die "$mode did not complete its one representative browser section"
+  fi
   screenshot_count="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
-  [ "$screenshot_count" -eq 1 ] \
-    || die "shakedown expected one temporary screenshot, found $screenshot_count"
+  if [ "$mode" = "shakedown-return-destinations" ]; then
+    [ "$screenshot_count" -eq 3 ] \
+      || die "shakedown expected three temporary screenshots, found $screenshot_count"
+    screenshot_names="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' -exec basename {} \; | LC_ALL=C sort)"
+    expected_screenshot_names="$(printf '%s\n' \
+      'shakedown-changes-terminal-return.png' \
+      'shakedown-parallel-current-exact-history.png' \
+      'shakedown-retained-timeline-return.png')"
+    [ "$screenshot_names" = "$expected_screenshot_names" ] \
+      || die "shakedown screenshots did not match the three exact journey names"
+  else
+    [ "$screenshot_count" -eq 1 ] \
+      || die "shakedown expected one temporary screenshot, found $screenshot_count"
+  fi
   assertion_count="$(jq -er '.assertionCount' "$browser_result")"
   shakedown_finished_at="$(date +%s)"
   shakedown_elapsed_seconds="$((shakedown_finished_at - shakedown_started_at))"

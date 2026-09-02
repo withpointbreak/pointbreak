@@ -122,7 +122,7 @@ test("shakedown mode owns its root and exits after one shared representative cas
 	assert.match(readme, /--shakedown/);
 });
 
-test("focused shakedown modes are literal, root-owned, and exit before the full matrix", async () => {
+test("single-journey focused shakedowns are literal, root-owned, and exit before the full matrix", async () => {
 	const shell = await readFile(
 		new URL("./change-inspector-browser-verify.sh", import.meta.url),
 		"utf8",
@@ -145,11 +145,6 @@ test("focused shakedown modes are literal, root-owned, and exit before the full 
 			flag: "--shakedown-exact-history-focus",
 			mode: "shakedown-exact-history-focus",
 			section: "Shakedown exact history and focus",
-		},
-		{
-			flag: "--shakedown-return-destinations",
-			mode: "shakedown-return-destinations",
-			section: "Shakedown return destinations and exact history",
 		},
 	];
 
@@ -386,9 +381,7 @@ test("full return journeys await complete semantic destinations", async () => {
 	);
 	assert.ok(changesStart >= 0 && changesEnd > changesStart);
 	const changes = source.slice(changesStart, changesEnd);
-	const changesEscape = changes.indexOf(
-		'await page.keyboard.press("Escape");',
-	);
+	const changesEscape = changes.indexOf('await page.keyboard.press("Escape");');
 	const changesDestination = changes.indexOf(
 		"await waitForRetainedMasterDestination(",
 		changesEscape,
@@ -433,7 +426,7 @@ test("full return journeys await complete semantic destinations", async () => {
 	);
 });
 
-test("return-destinations shakedown is literal, root-owned, and complete", async () => {
+test("return-destinations shakedown closes every executable dependency", async () => {
 	const shell = await readFile(
 		new URL("./change-inspector-browser-verify.sh", import.meta.url),
 		"utf8",
@@ -442,10 +435,22 @@ test("return-destinations shakedown is literal, root-owned, and complete", async
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
 	);
-	const readme = await readFile(new URL("./README.md", import.meta.url), "utf8");
+	const readme = await readFile(
+		new URL("./README.md", import.meta.url),
+		"utf8",
+	);
 	const flag = "--shakedown-return-destinations";
 	const mode = "shakedown-return-destinations";
-	const section = "Shakedown return destinations and exact history";
+	const sections = [
+		"Shakedown retained Timeline return",
+		"Shakedown Changes terminal return",
+		"Shakedown parallel-current exact history",
+	];
+	const screenshots = [
+		"shakedown-retained-timeline-return",
+		"shakedown-changes-terminal-return",
+		"shakedown-parallel-current-exact-history",
+	];
 
 	assert.match(
 		shell,
@@ -466,22 +471,94 @@ test("return-destinations shakedown is literal, root-owned, and complete", async
 		branchStart >= 0 && branchStart < fullMatrix,
 		"the semantic mode must branch before the full matrix",
 	);
-	const branch = browser.slice(branchStart, fullMatrix);
+	const branchEnd = browser.indexOf(
+		'if (config.mode === "shakedown")',
+		branchStart,
+	);
+	assert.ok(
+		branchEnd > branchStart && branchEnd < fullMatrix,
+		"the semantic mode must remain a closed literal branch",
+	);
+	const branch = browser.slice(branchStart, branchEnd);
 	assert.equal(
-		(
-			branch.match(
-				new RegExp(`diagnostics\\.section\\(\\s*"${section}"`, "g"),
-			) ?? []
-		).length,
-		1,
-		"the semantic mode must run exactly one named journey",
+		(branch.match(/await diagnostics\.section\(/g) ?? []).length,
+		3,
+		"the semantic mode must run exactly three independent journeys",
+	);
+	const sectionStarts = sections.map((name) =>
+		branch.indexOf(`await diagnostics.section("${name}"`),
+	);
+	assert.ok(
+		sectionStarts.every((start) => start >= 0) &&
+			sectionStarts.every(
+				(start, index) => index === 0 || start > sectionStarts[index - 1],
+			),
+		"the three exact sections must run in ledger order",
+	);
+	for (const [index, name] of sections.entries()) {
+		const end =
+			sectionStarts[index + 1] ??
+			branch.indexOf(
+				"const focusedShakedownResult = diagnostics.result",
+				sectionStarts[index],
+			);
+		const source = branch.slice(sectionStarts[index], end);
+		assert.match(source, /setup:/, `${name} must own setup`);
+		assert.match(source, /run:/, `${name} must own its transition`);
+		assert.match(
+			source,
+			/teardown: teardownSection/,
+			`${name} must own teardown`,
+		);
+		assert.match(
+			source,
+			new RegExp(`await screenshot\\("${screenshots[index]}"\\)`),
+			`${name} must write its distinct screenshot`,
+		);
+	}
+	const resultIndex = branch.indexOf(
+		"const focusedShakedownResult = diagnostics.result",
+	);
+	assert.ok(
+		resultIndex > sectionStarts.at(-1),
+		"the aggregate report must be emitted only after all three sections",
 	);
 	assert.match(branch, /narrow Timeline return/);
 	assert.match(branch, /return destinations Changes G/);
 	assert.match(branch, /parallel-current resource readiness/);
-	const changesOpen = branch.indexOf(
-		'"return destinations Changes setup",',
+
+	const changesSection = branch.slice(sectionStarts[1], sectionStarts[2]);
+	assert.match(
+		changesSection,
+		/const changesQuery = "limit=1&order=change_id_asc";/,
+		"the focused Changes section must use the guaranteed pagination query",
 	);
+	assert.match(
+		changesSection,
+		/page\.request\.get\([\s\S]*\/api\/v2\/changes\?\$\{changesQuery\}[\s\S]*Authorization:\s*`Bearer \$\{config\.server\.token\}`/,
+		"the typed Changes preflight must use the exact Inspector bearer credential",
+	);
+	assert.match(changesSection, /changesPageResponse\.status\(\)[\s\S]*200/);
+	assert.match(
+		changesSection,
+		/changesPage\.schema === "pointbreak\.inspect-changes-page"/,
+	);
+	assert.match(changesSection, /changesPage\.version === 1/);
+	assert.match(changesSection, /changesPage\.changes\.length === 1/);
+	assert.match(
+		changesSection,
+		/typeof changesPage\.next === "string"[\s\S]*changesPage\.next\.length > 0/,
+	);
+	assert.match(
+		changesSection,
+		/typeof changesPage\.last === "string"[\s\S]*changesPage\.last\.length > 0/,
+	);
+	assert.match(
+		changesSection,
+		/listKey\.projectionStamp === expected\.projectionStamp[\s\S]*listKey\.last === expected\.last[\s\S]*targetAfter === expected\.last[\s\S]*targetRoute !== location\.hash/,
+		"the preflight response must be bound to the exact rendered list and terminal capability",
+	);
+	const changesOpen = branch.indexOf('"return destinations Changes setup",');
 	const changesCursorFocus = branch.indexOf(
 		'await page.locator("#master").focus();',
 		changesOpen,
@@ -506,7 +583,37 @@ test("return-destinations shakedown is literal, root-owned, and complete", async
 			selectedChangeEnter > selectedChangeRead,
 		"the focused Changes journey must establish its local cursor before reading and opening the selected Change",
 	);
+	const parallelSection = branch.slice(sectionStarts[2], resultIndex);
+	assert.match(
+		parallelSection,
+		/`changes\?limit=100&order=change_id_asc&topology=parallel_current&q=\$\{encodeURIComponent\(parallel\.change\)\}`/,
+		"parallel-current exact history must keep its filtered limit=100 route",
+	);
 	assert.match(branch, /return focusedShakedownResult/);
+	assert.match(
+		shell,
+		/\.sections == \[\s*\{name: "Shakedown retained Timeline return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown Changes terminal return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0\}\s*\]/,
+		"the shell must pin the exact ordered passing-section array",
+	);
+	assert.match(
+		shell,
+		/shakedown-return-destinations[\s\S]*\.sectionCount == 3[\s\S]*\.screenshotCount == 3/,
+		"the shell must special-case the aggregate report contract",
+	);
+	assert.match(
+		shell,
+		/shakedown-return-destinations[\s\S]*screenshot_count[^\n]*-eq 3/,
+		"the shell must independently require three PNG files",
+	);
+	assert.match(
+		shell,
+		/expected_screenshot_names="\$\(printf '%s\\n' \\\n\s*'shakedown-changes-terminal-return\.png' \\\n\s*'shakedown-parallel-current-exact-history\.png' \\\n\s*'shakedown-retained-timeline-return\.png'\)"[\s\S]*\[ "\$screenshot_names" = "\$expected_screenshot_names" \]/,
+		"the shell must pin and compare the exact sorted PNG-name set",
+	);
+	assert.match(readme, /three independent diagnostics sections/);
+	for (const screenshot of screenshots) {
+		assert.match(readme, new RegExp(`${screenshot}\\.png`));
+	}
 	assert.match(
 		browser,
 		/config\.mode !== "shakedown-exact-history-focus"[\s\S]*config\.mode !== "shakedown-return-destinations"/,
