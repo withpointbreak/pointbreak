@@ -115,7 +115,13 @@ fn package_identity_declares_only_pointbreak_binary_unconditionally() {
 fn cargo_install_exposes_only_pointbreak_executable() {
     let install_root = tempfile::tempdir().expect("create cargo install root");
     let output = Command::new(env!("CARGO"))
-        .args(["install", "--path", env!("CARGO_MANIFEST_DIR"), "--root"])
+        .args([
+            "install",
+            "--locked",
+            "--path",
+            env!("CARGO_MANIFEST_DIR"),
+            "--root",
+        ])
         .arg(install_root.path())
         .arg("--debug")
         .output()
