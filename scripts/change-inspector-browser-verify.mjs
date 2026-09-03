@@ -62,6 +62,16 @@
 			(path.startsWith("#/changes/") && path.length > "#/changes/".length)
 		);
 	};
+	const classifyRouteVisitAction = ({
+		expectedLens,
+		expectsExactReading,
+		reload,
+	}) =>
+		expectedLens === "changes" && expectsExactReading === true && reload === false
+			? "exact-detail-changes-goto"
+			: "ineligible";
+	const classifyRouteVisitActionResult = (result) =>
+		result === null ? "same-document-null" : "document-response";
 	let nextPageTimerId = 1;
 	const reportPageTimerError = (page, error) => {
 		try {
@@ -140,12 +150,14 @@
 			: primaryBaseUrl;
 		const recordsByRequest = new Map();
 		const transitionByRequest = new Map();
+		const routeVisitDiagnostics = new WeakMap();
 		let committedDocumentGeneration = 0;
 		let nextRequestOrdinal = 0;
 		let nextRouteVisitId = 1;
 		let pendingNavigation = null;
 		let currentRouteVisit = null;
 		let ownedRouteVisitId = null;
+		let currentRouteVisitActionToken = null;
 		let activeRouteVisitDiagnostic = null;
 		let nextDiagnosticRootOrdinal = 1;
 		const routeVisitDiagnosticFrameLimit = 4;
@@ -238,10 +250,65 @@
 					}
 				: {}),
 		});
+		const recordedDiagnosticForVisit = (visit) =>
+			visit === null || visit === undefined
+				? null
+				: (routeVisitDiagnostics.get(visit) ?? null);
 		const diagnosticForVisit = (visit) =>
 			activeRouteVisitDiagnostic?.visit === visit
 				? activeRouteVisitDiagnostic
 				: null;
+		const actionIsCurrent = (visit, diagnostic) =>
+			diagnostic !== null &&
+			visit === currentRouteVisit &&
+			diagnostic.actionToken === currentRouteVisitActionToken &&
+			visit.state !== "retired";
+		const routeVisitActionSnapshot = (
+			visit,
+			diagnostic,
+			{ includeFrames = true } = {},
+		) => ({
+			schema: "pointbreak.browser-route-action-diagnostic",
+			version: 1,
+			actionClass: diagnostic.actionClass,
+			eligibility:
+				diagnostic.actionClass !== "exact-detail-changes-goto" ||
+				diagnostic.resultKind === "document-response" ||
+				diagnostic.resultKind === "threw"
+					? "ineligible"
+					: diagnostic.resultKind === "same-document-null"
+						? "eligible"
+						: "pending",
+			phase: diagnostic.actionPhase,
+			resultKind: diagnostic.resultKind,
+			current: actionIsCurrent(visit, diagnostic),
+			capturedMainFrame: diagnostic.capturedMainFrame !== null,
+			sourceHash: diagnostic.sourceHash,
+			intendedHash: visit.intendedHash,
+			activationGeneration: diagnostic.activationGeneration,
+			settlementGeneration: diagnostic.settlementGeneration,
+			currentGeneration: committedDocumentGeneration,
+			mainFrameNavigationRequestCount:
+				diagnostic.mainFrameNavigationRequestCount,
+			navigationRootCount: diagnostic.navigationRootCount,
+			domContentLoadedCount: diagnostic.domContentLoadedCount,
+			frameEntryCount: diagnostic.frameEntryCount,
+			...(includeFrames
+				? {
+						frameEntries: diagnostic.frameEntries.map((entry) => ({
+							...entry,
+							root: { ...entry.root },
+						})),
+					}
+				: {}),
+			overflowed: diagnostic.overflowed,
+		});
+		const routeVisitActionDiagnostic = (visit) => {
+			const diagnostic = recordedDiagnosticForVisit(visit);
+			return diagnostic === null
+				? null
+				: routeVisitActionSnapshot(visit, diagnostic);
+		};
 		const diagnosticRootSnapshot = (diagnostic) => ({
 			ambiguous: diagnostic.root.ambiguous,
 			bound: diagnostic.root.bound,
@@ -271,8 +338,13 @@
 			}
 		};
 		const routeVisitDiagnostic = (visit) => {
-			const diagnostic = diagnosticForVisit(visit);
-			if (diagnostic === null || diagnostic.certification === null) return null;
+			const diagnostic = recordedDiagnosticForVisit(visit);
+			if (
+				diagnostic === null ||
+				diagnostic.certification === null ||
+				diagnostic.certificationPassed
+			)
+				return null;
 			return {
 				schema: "pointbreak.browser-route-visit-diagnostic",
 				version: 1,
@@ -290,6 +362,9 @@
 				})),
 				overflowed: diagnostic.overflowed,
 				root: diagnosticRootSnapshot(diagnostic),
+				action: routeVisitActionSnapshot(visit, diagnostic, {
+					includeFrames: false,
+				}),
 				certification: {
 					...diagnostic.certification,
 					predicates: { ...diagnostic.certification.predicates },
@@ -317,6 +392,13 @@
 		};
 		const retireRouteVisit = (visit) => {
 			if (visit === null || visit.state === "retired") return;
+			const diagnostic = recordedDiagnosticForVisit(visit);
+			if (diagnostic !== null && diagnostic.actionPhase !== "certified") {
+				diagnostic.actionPhase = "retired";
+			}
+			if (diagnostic?.actionToken === currentRouteVisitActionToken) {
+				currentRouteVisitActionToken = null;
+			}
 			visit.state = "retired";
 			if (currentRouteVisit === visit) currentRouteVisit = null;
 			if (ownedRouteVisitId === visit.id) ownedRouteVisitId = null;
@@ -376,9 +458,19 @@
 			nextRequestOrdinal += 1;
 			recordsByRequest.set(request, record);
 			if (navigation && initiator === "main-frame") {
+				if (activeRouteVisitDiagnostic !== null) {
+					activeRouteVisitDiagnostic.mainFrameNavigationRequestCount += 1;
+				}
 				const root = redirectRoot(request);
 				record.navigationRoot = root;
 				if (root !== null) {
+					if (
+						activeRouteVisitDiagnostic !== null &&
+						!activeRouteVisitDiagnostic.privateNavigationRoots.has(root)
+					) {
+						activeRouteVisitDiagnostic.privateNavigationRoots.add(root);
+						activeRouteVisitDiagnostic.navigationRootCount += 1;
+					}
 					if (pendingNavigation === null) {
 						pendingNavigation = {
 							root,
@@ -462,9 +554,15 @@
 			}
 			if (!isMainFrame) return;
 			let frameHash = "";
+			let actionFrameHash = null;
+			let actionFrameHashAvailable = false;
 			try {
-				frameHash = capabilityRedactedHash(frame.url());
+				const frameUrl = frame.url();
+				actionFrameHash = capabilityRedactedHash(frameUrl);
+				actionFrameHashAvailable = true;
+				frameHash = actionFrameHash;
 			} catch {
+				actionFrameHash = null;
 				frameHash = capabilityRedactedHash(page.url());
 			}
 			const diagnostic = activeRouteVisitDiagnostic;
@@ -473,6 +571,13 @@
 			const routeObservedBefore = tracedVisit?.routeObserved ?? false;
 			const currentVisitIdBefore = currentRouteVisit?.id ?? null;
 			const ownedVisitIdBefore = ownedRouteVisitId;
+			const actionPhase = diagnostic?.actionPhase ?? null;
+			const actionCurrent =
+				diagnostic !== null && tracedVisit !== null
+					? actionIsCurrent(tracedVisit, diagnostic)
+					: false;
+			const capturedFrameMatch =
+				diagnostic !== null && diagnostic.capturedMainFrame === frame;
 			if (
 				currentRouteVisit !== null &&
 				currentRouteVisit.state === "pending" &&
@@ -513,6 +618,14 @@
 						semanticHash: null,
 						navigationKind: diagnostic.navigationKind,
 						targetMatch: frameHash === tracedVisit.intendedHash,
+						actionPhase,
+						actionCurrent,
+						capturedFrameMatch,
+						actionFrameHash,
+						actionFrameHashAvailable,
+						actionTargetMatch:
+							actionFrameHashAvailable &&
+							actionFrameHash === tracedVisit.intendedHash,
 						committedGeneration: committedDocumentGeneration,
 						activationGeneration: diagnostic.activationGeneration,
 						root: diagnosticRootSnapshot(diagnostic),
@@ -523,6 +636,9 @@
 			}
 		};
 		const domContentLoaded = () => {
+			if (activeRouteVisitDiagnostic !== null) {
+				activeRouteVisitDiagnostic.domContentLoadedCount += 1;
+			}
 			const pending = pendingNavigation;
 			pendingNavigation = null;
 			const diagnostic = activeRouteVisitDiagnostic;
@@ -597,20 +713,42 @@
 		};
 		const activateRouteVisit = (
 			visit,
-			{ navigationKind = "goto" } = {},
+			{
+				actionClass = "ineligible",
+				capturedMainFrame = null,
+				navigationKind = "goto",
+				sourceHash = page.url(),
+			} = {},
 		) => {
 			if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
 			visit.state = "pending";
 			currentRouteVisit = visit;
 			ownedRouteVisitId = visit.id;
-			activeRouteVisitDiagnostic = {
+			const actionToken = {};
+			currentRouteVisitActionToken = actionToken;
+			const diagnostic = {
 				visit,
+				actionToken,
+				actionClass:
+					actionClass === "exact-detail-changes-goto"
+						? "exact-detail-changes-goto"
+						: "ineligible",
+				actionPhase: "created",
+				actionInvoked: false,
+				resultKind: "unsettled",
+				capturedMainFrame,
+				sourceHash: capabilityRedactedHash(sourceHash),
 				navigationKind: navigationKind === "reload" ? "reload" : "goto",
 				activationGeneration: committedDocumentGeneration,
+				settlementGeneration: null,
+				mainFrameNavigationRequestCount: 0,
+				navigationRootCount: 0,
+				domContentLoadedCount: 0,
 				frameEntryCount: 0,
 				frameEntries: [],
 				overflowed: false,
 				privateRoot: null,
+				privateNavigationRoots: new Set(),
 				root: {
 					ambiguous: false,
 					bound: false,
@@ -621,8 +759,47 @@
 					same: false,
 				},
 				certification: null,
+				certificationPassed: false,
 			};
-			return visit;
+			routeVisitDiagnostics.set(visit, diagnostic);
+			activeRouteVisitDiagnostic = diagnostic;
+			return actionToken;
+		};
+		const invokeRouteVisitAction = (visit, actionToken) => {
+			const diagnostic = recordedDiagnosticForVisit(visit);
+			if (
+				diagnostic === null ||
+				diagnostic.actionToken !== actionToken ||
+				!actionIsCurrent(visit, diagnostic) ||
+				diagnostic.actionPhase !== "created"
+			)
+				return false;
+			diagnostic.actionInvoked = true;
+			diagnostic.actionPhase = "invoked";
+			return true;
+		};
+		const settleRouteVisitAction = (visit, actionToken, resultKind) => {
+			const diagnostic = recordedDiagnosticForVisit(visit);
+			if (
+				diagnostic === null ||
+				diagnostic.actionToken !== actionToken ||
+				!diagnostic.actionInvoked ||
+				diagnostic.resultKind !== "unsettled" ||
+				(resultKind !== "same-document-null" &&
+					resultKind !== "document-response" &&
+					resultKind !== "threw")
+			)
+				return false;
+			diagnostic.resultKind = resultKind;
+			diagnostic.settlementGeneration = committedDocumentGeneration;
+			if (
+				diagnostic.actionPhase === "invoked" &&
+				actionIsCurrent(visit, diagnostic)
+			) {
+				diagnostic.actionPhase = "settled";
+				return true;
+			}
+			return false;
 		};
 		const certifyChangesVisit = (visit, acceptedHash) => {
 			const semanticHash = capabilityRedactedHash(acceptedHash);
@@ -678,6 +855,13 @@
 			visit.state = "accepted";
 			visit.acceptedHash = semanticHash;
 			visit.documentGeneration = committedDocumentGeneration;
+			if (diagnostic !== null) {
+				diagnostic.actionPhase = "certified";
+				diagnostic.certificationPassed = true;
+				if (diagnostic.actionToken === currentRouteVisitActionToken) {
+					currentRouteVisitActionToken = null;
+				}
+			}
 			ownedRouteVisitId = null;
 			activeRouteVisitDiagnostic = null;
 			return true;
@@ -750,8 +934,11 @@
 				currentRouteVisit?.state === "accepted" ? currentRouteVisit : null,
 			eligibleProfileRequests,
 			enterSettlementJoin,
+			invokeRouteVisitAction,
 			requestRecord: (request) => recordsByRequest.get(request) ?? null,
+			routeVisitActionDiagnostic,
 			routeVisitDiagnostic,
+			settleRouteVisitAction,
 			snapshotProfileArm,
 			state: () => ({
 				committedDocumentGeneration,
@@ -925,6 +1112,8 @@
 
 	if (typeof config.__pointbreakD70Selftest === "function") {
 		return config.__pointbreakD70Selftest({
+			classifyRouteVisitAction,
+			classifyRouteVisitActionResult,
 			createDiagnostics: createBrowserDiagnostics,
 			createProfileRequestLifecycle,
 			createProfileRequestLifecycleActivationOwner,
@@ -1313,6 +1502,11 @@
 		const expectedLens = expectedPath.split("/", 1)[0] || "timeline";
 		const expectsExactReading =
 			expectedLens !== "timeline" && expectedPath.includes("/");
+		const routeVisitActionClass = classifyRouteVisitAction({
+			expectedLens,
+			expectsExactReading,
+			reload,
+		});
 		const eventPrefix = "timeline/events/";
 		const expectedEventId = expectedPath.startsWith(eventPrefix)
 			? decodeURIComponent(expectedPath.slice(eventPrefix.length))
@@ -1372,16 +1566,35 @@
 			);
 			profileSupersessionTransition = armSnapshot.transition;
 		}
-		requestLifecycle.activateRouteVisit(targetVisit, {
+		const routeVisitActionToken = requestLifecycle.activateRouteVisit(targetVisit, {
+			actionClass: routeVisitActionClass,
+			capturedMainFrame: page.mainFrame(),
 			navigationKind: reload ? "reload" : "goto",
+			sourceHash: page.url(),
 		});
+		requestLifecycle.invokeRouteVisitAction(
+			targetVisit,
+			routeVisitActionToken,
+		);
 		// A goto to the exact current fragment is a no-op. Force a document reload
 		// so a deliberately refused reader-profile fixture cannot leak its DOM
 		// into the real reader that follows it.
-		if (reload) {
-			await page.reload({ waitUntil: "domcontentloaded" });
-		} else {
-			await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+		try {
+			const navigationResult = reload
+				? await page.reload({ waitUntil: "domcontentloaded" })
+				: await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+			requestLifecycle.settleRouteVisitAction(
+				targetVisit,
+				routeVisitActionToken,
+				classifyRouteVisitActionResult(navigationResult),
+			);
+		} catch (error) {
+			requestLifecycle.settleRouteVisitAction(
+				targetVisit,
+				routeVisitActionToken,
+				"threw",
+			);
+			throw error;
 		}
 		await waitForCurrentRoute(targetHash);
 		await page.waitForFunction(

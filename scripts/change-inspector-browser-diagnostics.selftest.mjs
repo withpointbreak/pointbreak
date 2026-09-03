@@ -120,6 +120,10 @@ class FakePage {
 		this.#url = url;
 	}
 
+	setMainFrame(frame) {
+		this.main = frame;
+	}
+
 	url() {
 		return this.#url;
 	}
@@ -1136,6 +1140,666 @@ test("D74 Changes-lens classification is segment-bounded for exact routes", asyn
 		},
 	);
 	assert.equal(result, true);
+});
+
+test("D75 diagnostics bind one exact goto action window without changing acceptance", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({
+			classifyRouteVisitAction,
+			classifyRouteVisitActionResult,
+			createProfileRequestLifecycle,
+		}) => {
+			assert.equal(
+				typeof classifyRouteVisitAction,
+				"function",
+				"the production helper must own the closed D75 action class",
+			);
+			assert.equal(
+				typeof classifyRouteVisitActionResult,
+				"function",
+				"the production helper must classify resolved results without retaining them",
+			);
+			const eligibleActionClass = "exact-detail-changes-goto";
+			const ineligibleActionClass = "ineligible";
+			assert.deepEqual(
+				[
+					{
+						expectedLens: "changes",
+						expectsExactReading: true,
+						reload: false,
+					},
+					{
+						expectedLens: "changes",
+						expectsExactReading: false,
+						reload: false,
+					},
+					{
+						expectedLens: "changes",
+						expectsExactReading: true,
+						reload: true,
+					},
+					{
+						expectedLens: "timeline",
+						expectsExactReading: true,
+						reload: false,
+					},
+					{
+						expectedLens: "attention",
+						expectsExactReading: true,
+						reload: false,
+					},
+					{
+						expectedLens: "history",
+						expectsExactReading: true,
+						reload: false,
+					},
+				].map(classifyRouteVisitAction),
+				[
+					eligibleActionClass,
+					ineligibleActionClass,
+					ineligibleActionClass,
+					ineligibleActionClass,
+					ineligibleActionClass,
+					ineligibleActionClass,
+				],
+			);
+
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const sourceHash =
+				"#/changes?limit=100&order=change_id_asc&token=bootstrap-secret";
+			const intendedHash =
+				"#/changes/change%3Asha256%3Aaa/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc&limit=100&order=change_id_asc";
+			assert.equal(
+				classifyRouteVisitActionResult(null),
+				"same-document-null",
+			);
+			assert.equal(
+				classifyRouteVisitActionResult(
+					new FakeResponse(new FakeRequest()),
+				),
+				"document-response",
+			);
+			const makeAction = ({
+				actionClass = eligibleActionClass,
+				frame = null,
+				navigationKind = "goto",
+				pageUrl = `${primaryBaseUrl}/${sourceHash}`,
+			} = {}) => {
+				const page = new FakePage(pageUrl);
+				if (frame !== null) page.setMainFrame(frame);
+				const lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+				});
+				const visit = lifecycle.createRouteVisitIntent(intendedHash);
+				const actionToken = lifecycle.activateRouteVisit(visit, {
+					actionClass,
+					capturedMainFrame: page.mainFrame(),
+					navigationKind,
+					sourceHash: page.url(),
+				});
+				return { actionToken, lifecycle, page, visit };
+			};
+			const actionSummary = (action) => ({
+				actionClass: action.actionClass,
+				activationGeneration: action.activationGeneration,
+				capturedMainFrame: action.capturedMainFrame,
+				current: action.current,
+				currentGeneration: action.currentGeneration,
+				domContentLoadedCount: action.domContentLoadedCount,
+				eligibility: action.eligibility,
+				intendedHash: action.intendedHash,
+				mainFrameNavigationRequestCount:
+					action.mainFrameNavigationRequestCount,
+				navigationRootCount: action.navigationRootCount,
+				phase: action.phase,
+				resultKind: action.resultKind,
+				settlementGeneration: action.settlementGeneration,
+				sourceHash: action.sourceHash,
+			});
+
+			const one = makeAction();
+			assert.equal(typeof one.lifecycle.invokeRouteVisitAction, "function");
+			assert.equal(typeof one.lifecycle.settleRouteVisitAction, "function");
+			assert.equal(typeof one.lifecycle.routeVisitActionDiagnostic, "function");
+			assert.deepEqual(
+				actionSummary(one.lifecycle.routeVisitActionDiagnostic(one.visit)),
+				{
+					actionClass: eligibleActionClass,
+					activationGeneration: 0,
+					capturedMainFrame: true,
+					current: true,
+					currentGeneration: 0,
+					domContentLoadedCount: 0,
+					eligibility: "pending",
+					intendedHash,
+					mainFrameNavigationRequestCount: 0,
+					navigationRootCount: 0,
+					phase: "created",
+					resultKind: "unsettled",
+					settlementGeneration: null,
+					sourceHash:
+						"#/changes?limit=100&order=change_id_asc",
+				},
+			);
+			assert.equal(
+				one.lifecycle.invokeRouteVisitAction(one.visit, one.actionToken),
+				true,
+			);
+			assert.equal(
+				one.lifecycle.routeVisitActionDiagnostic(one.visit).phase,
+				"invoked",
+			);
+			one.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			one.page.emit("framenavigated", one.page.mainFrame());
+			assert.deepEqual(
+				one.lifecycle
+					.routeVisitActionDiagnostic(one.visit)
+					.frameEntries.map((entry) => ({
+						actionCurrent: entry.actionCurrent,
+						actionFrameHashAvailable: entry.actionFrameHashAvailable,
+						actionPhase: entry.actionPhase,
+						actionTargetMatch: entry.actionTargetMatch,
+						capturedFrameMatch: entry.capturedFrameMatch,
+					})),
+				[
+					{
+						actionCurrent: true,
+						actionFrameHashAvailable: true,
+						actionPhase: "invoked",
+						actionTargetMatch: true,
+						capturedFrameMatch: true,
+					},
+				],
+			);
+			assert.equal(
+				one.lifecycle.settleRouteVisitAction(
+					one.visit,
+					one.actionToken,
+					classifyRouteVisitActionResult(null),
+				),
+				true,
+			);
+			assert.equal(
+				one.lifecycle.routeVisitActionDiagnostic(one.visit).resultKind,
+				"same-document-null",
+			);
+			assert.equal(
+				one.lifecycle.routeVisitActionDiagnostic(one.visit).eligibility,
+				"eligible",
+			);
+			assert.equal(
+				one.lifecycle.certifyChangesVisit(one.visit, intendedHash),
+				true,
+				"Candidate 1 must preserve the accepted one-event result",
+			);
+			assert.equal(
+				one.lifecycle.routeVisitActionDiagnostic(one.visit).phase,
+				"certified",
+			);
+			assert.equal(one.lifecycle.routeVisitDiagnostic(one.visit), null);
+
+			const preWindow = makeAction();
+			preWindow.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			preWindow.page.emit("framenavigated", preWindow.page.mainFrame());
+			assert.equal(
+				preWindow.lifecycle.routeVisitActionDiagnostic(preWindow.visit)
+					.frameEntries[0].actionPhase,
+				"created",
+			);
+			assert.equal(
+				preWindow.lifecycle.invokeRouteVisitAction(
+					preWindow.visit,
+					preWindow.actionToken,
+				),
+				true,
+			);
+			assert.equal(
+				preWindow.lifecycle.settleRouteVisitAction(
+					preWindow.visit,
+					preWindow.actionToken,
+					"same-document-null",
+				),
+				true,
+			);
+			assert.equal(
+				preWindow.lifecycle.certifyChangesVisit(preWindow.visit, intendedHash),
+				true,
+				"pre-window observation remains accepted under unchanged Candidate-1 semantics",
+			);
+
+			const postWindow = makeAction();
+			assert.equal(
+				postWindow.lifecycle.invokeRouteVisitAction(
+					postWindow.visit,
+					postWindow.actionToken,
+				),
+				true,
+			);
+			assert.equal(
+				postWindow.lifecycle.settleRouteVisitAction(
+					postWindow.visit,
+					postWindow.actionToken,
+					"same-document-null",
+				),
+				true,
+			);
+			postWindow.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			postWindow.page.emit("framenavigated", postWindow.page.mainFrame());
+			assert.equal(
+				postWindow.lifecycle.routeVisitActionDiagnostic(postWindow.visit)
+					.frameEntries[0].actionPhase,
+				"settled",
+			);
+			assert.equal(
+				postWindow.lifecycle.certifyChangesVisit(postWindow.visit, intendedHash),
+				true,
+				"post-window observation remains accepted under unchanged Candidate-1 semantics",
+			);
+
+			const stale = makeAction();
+			assert.equal(
+				stale.lifecycle.invokeRouteVisitAction(
+					stale.visit,
+					stale.actionToken,
+				),
+				true,
+			);
+			const replacement = stale.lifecycle.createRouteVisitIntent(intendedHash);
+			const replacementToken = stale.lifecycle.activateRouteVisit(replacement, {
+				actionClass: eligibleActionClass,
+				capturedMainFrame: stale.page.mainFrame(),
+				navigationKind: "goto",
+				sourceHash: stale.page.url(),
+			});
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(stale.visit).phase,
+				"retired",
+			);
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(stale.visit).current,
+				false,
+			);
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(replacement).current,
+				true,
+				"the replacement must own a distinct opaque current action",
+			);
+			assert.equal(
+				stale.lifecycle.settleRouteVisitAction(
+					stale.visit,
+					stale.actionToken,
+					"same-document-null",
+				),
+				false,
+				"a stale completion must be ignored without touching the replacement action",
+			);
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(stale.visit).resultKind,
+				"same-document-null",
+				"the retired action may retain its own safe result without mutating current ownership",
+			);
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(stale.visit).phase,
+				"retired",
+				"a stale settlement must not revive or replace the current action",
+			);
+			assert.equal(
+				stale.lifecycle.routeVisitActionDiagnostic(replacement).phase,
+				"created",
+			);
+			assert.equal(
+				stale.lifecycle.invokeRouteVisitAction(replacement, stale.actionToken),
+				false,
+				"a wrong opaque token must not invoke the current action",
+			);
+			assert.equal(
+				stale.lifecycle.invokeRouteVisitAction(replacement, replacementToken),
+				true,
+			);
+
+			const responseCase = makeAction();
+			const responseRequest = new FakeRequest({
+				frame: responseCase.page.mainFrame(),
+			});
+			const response = new FakeResponse(responseRequest);
+			assert.equal(
+				responseCase.lifecycle.invokeRouteVisitAction(
+					responseCase.visit,
+					responseCase.actionToken,
+				),
+				true,
+			);
+			assert.equal(
+				responseCase.lifecycle.settleRouteVisitAction(
+					responseCase.visit,
+					responseCase.actionToken,
+					classifyRouteVisitActionResult(response),
+				),
+				true,
+			);
+			assert.equal(
+				responseCase.lifecycle.routeVisitActionDiagnostic(responseCase.visit)
+					.resultKind,
+				"document-response",
+			);
+			assert.equal(
+				responseCase.lifecycle.routeVisitActionDiagnostic(responseCase.visit)
+					.eligibility,
+				"ineligible",
+				"a document-response goto must not remain D75-eligible",
+			);
+			assert.equal(
+				responseCase.lifecycle.settleRouteVisitAction(
+					responseCase.visit,
+					responseCase.actionToken,
+					"same-document-null",
+				),
+				false,
+				"an action result must settle exactly once",
+			);
+			assert.equal(
+				responseCase.lifecycle.routeVisitActionDiagnostic(responseCase.visit)
+					.resultKind,
+				"document-response",
+			);
+
+			const thrown = makeAction();
+			assert.equal(
+				thrown.lifecycle.invokeRouteVisitAction(
+					thrown.visit,
+					thrown.actionToken,
+				),
+				true,
+			);
+			assert.equal(
+				thrown.lifecycle.settleRouteVisitAction(
+					thrown.visit,
+					thrown.actionToken,
+					"threw",
+				),
+				true,
+			);
+			assert.equal(
+				thrown.lifecycle.routeVisitActionDiagnostic(thrown.visit).resultKind,
+				"threw",
+			);
+			assert.equal(
+				thrown.lifecycle.routeVisitActionDiagnostic(thrown.visit).eligibility,
+				"ineligible",
+			);
+
+			const replacementFrame = new FakeFrame(
+				() => `${primaryBaseUrl}/${intendedHash}`,
+			);
+			const wrongFrame = makeAction();
+			wrongFrame.page.setMainFrame(replacementFrame);
+			wrongFrame.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			wrongFrame.page.emit("framenavigated", replacementFrame);
+			assert.equal(
+				wrongFrame.lifecycle.routeVisitActionDiagnostic(wrongFrame.visit)
+					.frameEntries[0].capturedFrameMatch,
+				false,
+				"captured-frame identity must use object identity rather than URL equality",
+			);
+
+			let volatileFrameUrlReads = 0;
+			const volatileFrame = {
+				url() {
+					volatileFrameUrlReads += 1;
+					if (volatileFrameUrlReads > 1) {
+						throw new Error("frame URL was read more than once");
+					}
+					return `${primaryBaseUrl}/${intendedHash}`;
+				},
+			};
+			const volatile = makeAction({ frame: volatileFrame });
+			assert.equal(
+				volatile.lifecycle.invokeRouteVisitAction(
+					volatile.visit,
+					volatile.actionToken,
+				),
+				true,
+			);
+			volatile.page.emit("framenavigated", volatileFrame);
+			assert.equal(
+				volatileFrameUrlReads,
+				1,
+				"D75 and legacy ownership must share one frame.url() observation",
+			);
+			assert.equal(
+				volatile.lifecycle.settleRouteVisitAction(
+					volatile.visit,
+					volatile.actionToken,
+					"same-document-null",
+				),
+				true,
+			);
+			volatile.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			assert.equal(
+				volatile.lifecycle.certifyChangesVisit(volatile.visit, intendedHash),
+				true,
+				"the single frame URL observation must preserve legacy acceptance",
+			);
+
+			const unavailableFrame = {
+				url() {
+					throw new Error("raw-frame-url-secret");
+				},
+			};
+			const unavailable = makeAction({ frame: unavailableFrame });
+			assert.equal(
+				unavailable.lifecycle.invokeRouteVisitAction(
+					unavailable.visit,
+					unavailable.actionToken,
+				),
+				true,
+			);
+			unavailable.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			unavailable.page.emit("framenavigated", unavailableFrame);
+			const unavailableEntry = unavailable.lifecycle.routeVisitActionDiagnostic(
+				unavailable.visit,
+			).frameEntries[0];
+			assert.equal(unavailableEntry.targetMatch, true);
+			assert.equal(unavailableEntry.actionFrameHashAvailable, false);
+			assert.equal(unavailableEntry.actionTargetMatch, false);
+			assert.equal(
+				unavailable.lifecycle.settleRouteVisitAction(
+					unavailable.visit,
+					unavailable.actionToken,
+					"same-document-null",
+				),
+				true,
+			);
+			assert.equal(
+				unavailable.lifecycle.certifyChangesVisit(
+					unavailable.visit,
+					intendedHash,
+				),
+				true,
+				"Candidate 1 records unavailable frame URLs without changing old fallback acceptance",
+			);
+
+			const documentTransition = makeAction();
+			assert.equal(
+				documentTransition.lifecycle.invokeRouteVisitAction(
+					documentTransition.visit,
+					documentTransition.actionToken,
+				),
+				true,
+			);
+			const subframe = new FakeFrame(
+				() => `${primaryBaseUrl}/#/timeline`,
+			);
+			documentTransition.page.emit(
+				"request",
+				new FakeRequest({ frame: subframe, navigation: false }),
+			);
+			const navigationRoot = new FakeRequest({
+				frame: documentTransition.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				url: `${primaryBaseUrl}/?token=raw-navigation-secret`,
+			});
+			documentTransition.page.emit("request", navigationRoot);
+			documentTransition.page.emit("domcontentloaded");
+			assert.equal(
+				documentTransition.lifecycle.settleRouteVisitAction(
+					documentTransition.visit,
+					documentTransition.actionToken,
+					classifyRouteVisitActionResult(new FakeResponse(navigationRoot)),
+				),
+				true,
+			);
+			const transitionAction =
+				documentTransition.lifecycle.routeVisitActionDiagnostic(
+					documentTransition.visit,
+				);
+			assert.deepEqual(
+				{
+					currentGeneration: transitionAction.currentGeneration,
+					domContentLoadedCount: transitionAction.domContentLoadedCount,
+					eligibility: transitionAction.eligibility,
+					mainFrameNavigationRequestCount:
+						transitionAction.mainFrameNavigationRequestCount,
+					navigationRootCount: transitionAction.navigationRootCount,
+					resultKind: transitionAction.resultKind,
+					settlementGeneration: transitionAction.settlementGeneration,
+				},
+				{
+					currentGeneration: 1,
+					domContentLoadedCount: 1,
+					eligibility: "ineligible",
+					mainFrameNavigationRequestCount: 1,
+					navigationRootCount: 1,
+					resultKind: "document-response",
+					settlementGeneration: 1,
+				},
+				"only main-frame document transition signals must increment D75 counters",
+			);
+
+			const overflow = makeAction();
+			assert.equal(
+				overflow.lifecycle.invokeRouteVisitAction(
+					overflow.visit,
+					overflow.actionToken,
+				),
+				true,
+			);
+			for (let index = 0; index < 5; index += 1) {
+				overflow.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+				overflow.page.emit("framenavigated", overflow.page.mainFrame());
+			}
+			assert.equal(
+				overflow.lifecycle.settleRouteVisitAction(
+					overflow.visit,
+					overflow.actionToken,
+					"same-document-null",
+				),
+				false,
+				"retired duplicate ownership stays retired while retaining its own safe result",
+			);
+			assert.equal(
+				overflow.lifecycle.certifyChangesVisit(overflow.visit, intendedHash),
+				false,
+				"Candidate 1 must preserve duplicate-event retirement",
+			);
+			const overflowTrace = overflow.lifecycle.routeVisitDiagnostic(
+				overflow.visit,
+			);
+			assert.equal(overflowTrace.frameEntryCount, 5);
+			assert.equal(overflowTrace.frameEntries.length, 4);
+			assert.equal(overflowTrace.overflowed, true);
+			assert.equal(overflowTrace.action.phase, "retired");
+			assert.equal(overflowTrace.action.resultKind, "same-document-null");
+			assert.deepEqual(
+				overflowTrace.frameEntries.map((entry) => entry.actionPhase),
+				["invoked", "invoked", "retired", "retired"],
+			);
+			const serialized = JSON.stringify({
+				overflowTrace,
+				responseAction:
+					responseCase.lifecycle.routeVisitActionDiagnostic(responseCase.visit),
+				thrownAction: thrown.lifecycle.routeVisitActionDiagnostic(thrown.visit),
+				transitionAction,
+			});
+			assert.doesNotMatch(
+				serialized,
+				/bootstrap-secret|raw-thrown-secret|raw-frame-url-secret|raw-navigation-secret|authorization|bearer|actor:|store path|store content|response body|requestUrl|http:\/\//i,
+			);
+			assert.doesNotMatch(serialized, /actionToken|\[object Object\]/);
+
+			const reload = makeAction({
+				actionClass: ineligibleActionClass,
+				navigationKind: "reload",
+				pageUrl: `${primaryBaseUrl}/${intendedHash}`,
+			});
+			assert.equal(
+				reload.lifecycle.invokeRouteVisitAction(
+					reload.visit,
+					reload.actionToken,
+				),
+				true,
+			);
+			assert.equal(
+				reload.lifecycle.settleRouteVisitAction(
+					reload.visit,
+					reload.actionToken,
+					"same-document-null",
+				),
+				true,
+			);
+			reload.page.emit("framenavigated", reload.page.mainFrame());
+			assert.equal(
+				reload.lifecycle.certifyChangesVisit(reload.visit, intendedHash),
+				true,
+				"reload acceptance must remain unchanged and D75-ineligible",
+			);
+			assert.equal(
+				reload.lifecycle.routeVisitActionDiagnostic(reload.visit).actionClass,
+				ineligibleActionClass,
+			);
+			assert.equal(
+				reload.lifecycle.routeVisitActionDiagnostic(reload.visit).eligibility,
+				"ineligible",
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
+
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const openStart = source.indexOf("const open = async (");
+	const actionClassification = source.indexOf(
+		"const routeVisitActionClass = classifyRouteVisitAction({",
+		openStart,
+	);
+	const routeVisitActivation = source.indexOf(
+		"requestLifecycle.activateRouteVisit(targetVisit",
+		openStart,
+	);
+	assert.ok(
+		actionClassification > openStart &&
+			actionClassification < routeVisitActivation,
+		"open() must classify the exact action synchronously before activation",
+	);
+	const navigationSlice = source.slice(
+		routeVisitActivation,
+		source.indexOf("await waitForCurrentRoute", routeVisitActivation),
+	);
+	assert.match(
+		navigationSlice,
+		/requestLifecycle\.invokeRouteVisitAction\([\s\S]*await page\.goto\(targetUrl[\s\S]*requestLifecycle\.settleRouteVisitAction/,
+		"the production helper must mark and settle the exact inline page.goto invocation",
+	);
+	assert.match(
+		navigationSlice,
+		/catch \(error\)[\s\S]*"threw"[\s\S]*throw error/,
+		"the exact thrown result must be recorded before rethrowing the identical error",
+	);
 });
 
 function createBoundProfileTransition({
