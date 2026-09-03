@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { runInNewContext } from "node:vm";
 
 import {
 	BrowserDiagnosticFailure,
@@ -32,6 +33,7 @@ const currentDerivedAccessStatus = {
 
 class FakePage {
 	#listeners = new Map();
+	#timerWaiters = [];
 	#url;
 
 	constructor(url = "http://127.0.0.1:4173/#/") {
@@ -49,10 +51,42 @@ class FakePage {
 		for (const listener of this.#listeners.get(name) ?? []) listener(...args);
 	}
 
-	waitForEvent(name, predicate) {
+	waitForEvent(name, predicateOrOptions) {
+		if (typeof predicateOrOptions !== "function") {
+			this.lastWaitForTimeout = predicateOrOptions?.timeout;
+			switch (this.waitForTimeoutMode) {
+				case "reject":
+					return Promise.reject(
+						Object.assign(new Error("fake Page timer rejected"), {
+							name: "TargetClosedError",
+						}),
+					);
+				case "throw":
+					throw new Error("fake Page timer threw");
+			}
+			return new Promise((resolve, reject) => {
+				const waiter = { event: name, listener: null, reject };
+				const listener = (value) => {
+					const listeners = this.#listeners.get(name) ?? [];
+					this.#listeners.set(
+						name,
+						listeners.filter((candidate) => candidate !== listener),
+					);
+					this.#timerWaiters = this.#timerWaiters.filter(
+						(candidate) => candidate !== waiter,
+					);
+					resolve(value);
+				};
+				waiter.listener = listener;
+				this.#timerWaiters.push(waiter);
+				const listeners = this.#listeners.get(name) ?? [];
+				listeners.push(listener);
+				this.#listeners.set(name, listeners);
+			});
+		}
 		return new Promise((resolve) => {
 			const listener = (...args) => {
-				if (!predicate(...args)) return;
+				if (!predicateOrOptions(...args)) return;
 				const listeners = this.#listeners.get(name) ?? [];
 				this.#listeners.set(
 					name,
@@ -76,6 +110,25 @@ class FakePage {
 
 	url() {
 		return this.#url;
+	}
+
+	pendingTimerWaits() {
+		return this.#timerWaiters.length;
+	}
+
+	rejectTimerWait() {
+		const waiter = this.#timerWaiters.shift();
+		assert.ok(waiter, "expected a pending fake Page timer");
+		const listeners = this.#listeners.get(waiter.event) ?? [];
+		this.#listeners.set(
+			waiter.event,
+			listeners.filter((candidate) => candidate !== waiter.listener),
+		);
+		waiter.reject(
+			Object.assign(new Error("deferred fake Page timer rejected"), {
+				name: "TimeoutError",
+			}),
+		);
 	}
 }
 
@@ -198,7 +251,7 @@ class ManualTimers {
 	}
 }
 
-async function runD70BrowserSelftest(hook) {
+async function renderBrowserProgram(config) {
 	let source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
@@ -209,14 +262,18 @@ async function runD70BrowserSelftest(hook) {
 			BrowserDiagnosticFailure.toString(),
 		],
 		["__POINTBREAK_BROWSER_DIAGNOSTICS__", createBrowserDiagnostics.toString()],
-		[
-			"__POINTBREAK_CHANGE_BROWSER_CONFIG__",
-			'({mode: "full", server: {baseUrl: "http://127.0.0.1:4173"}, __pointbreakD70Selftest: selftestHook})',
-		],
+		["__POINTBREAK_CHANGE_BROWSER_CONFIG__", config],
 	]) {
 		assert.ok(source.includes(marker), `missing browser marker ${marker}`);
 		source = source.replace(marker, replacement);
 	}
+	return source;
+}
+
+async function runD70BrowserSelftest(hook) {
+	const source = await renderBrowserProgram(
+		'({mode: "full", server: {baseUrl: "http://127.0.0.1:4173"}, __pointbreakD70Selftest: selftestHook})',
+	);
 	const programOrResult = new Function("selftestHook", `return (${source}\n);`)(
 		hook,
 	);
@@ -224,6 +281,127 @@ async function runD70BrowserSelftest(hook) {
 		? await programOrResult(new FakePage())
 		: await programOrResult;
 }
+
+test("D71 production lifecycle defaults execute in the Playwright sparse VM", async () => {
+	const page = new FakePage(
+		"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
+	);
+	const source = await renderBrowserProgram(`({
+		mode: "full",
+		server: {baseUrl: "http://127.0.0.1:4173"},
+		__pointbreakD70Selftest: async ({createProfileRequestLifecycle}) => {
+			const pageErrors = [];
+			page.on("pageerror", (error) => pageErrors.push(error.message));
+			const lifecycle = createProfileRequestLifecycle({
+				page,
+				primaryBaseUrl: "http://127.0.0.1:4173",
+			});
+			const bindTransition = () => {
+				const visit = lifecycle.createRouteVisitIntent(
+					"#/changes?limit=100&order=change_id_asc",
+				);
+				lifecycle.activateRouteVisit(visit);
+				const request = {
+					failure: () => null,
+					frame: () => page.mainFrame(),
+					isNavigationRequest: () => false,
+					method: () => "GET",
+					redirectedFrom: () => null,
+					resourceType: () => "fetch",
+					url: () => "http://127.0.0.1:4173/api/v2/profile",
+				};
+				page.emit("request", request);
+				const certified = lifecycle.certifyChangesVisit(
+					visit,
+					visit.intendedHash,
+				);
+				const arm = lifecycle.snapshotProfileArm({
+					arm: "optional",
+					targetHash: "#/timeline?limit=100&order=desc",
+				});
+				arm.transition.destinationSucceeded = true;
+				return {arm, certified, request};
+			};
+
+			const response = bindTransition();
+			const responseSettlement = lifecycle.enterSettlementJoin(
+				response.arm.transition,
+			);
+			page.emit("response", {request: () => response.request});
+			const responseOutcome = (await responseSettlement).outcome;
+			await Promise.resolve();
+			const responseHistory = response.arm.transition.terminalHistory.length;
+
+			const timeout = bindTransition();
+			const timeoutSettlement = lifecycle.enterSettlementJoin(
+				timeout.arm.transition,
+			);
+			page.rejectTimerWait();
+			const timeoutOutcome = (await timeoutSettlement).outcome;
+
+			page.waitForTimeoutMode = "reject";
+			const rejected = bindTransition();
+			const rejectedOutcome = (
+				await lifecycle.enterSettlementJoin(rejected.arm.transition)
+			).outcome;
+
+			page.waitForTimeoutMode = "throw";
+			const threw = bindTransition();
+			const threwOutcome = (
+				await lifecycle.enterSettlementJoin(threw.arm.transition)
+			).outcome;
+			return {
+				certified: response.certified,
+				pageErrors,
+				pendingTimerWaits: page.pendingTimerWaits(),
+				rejectedHistory: rejected.arm.transition.terminalHistory.length,
+				rejectedTimer: rejected.arm.transition.timer,
+				rejectedOutcome,
+				responseHistory,
+				responseOutcome,
+				responseTimer: response.arm.transition.timer,
+				timerDelayMs: page.lastWaitForTimeout,
+				timeoutHistory: timeout.arm.transition.terminalHistory.length,
+				timeoutOutcome,
+				timeoutTimer: timeout.arm.transition.timer,
+				threwHistory: threw.arm.transition.terminalHistory.length,
+				threwOutcome,
+				threwTimer: threw.arm.transition.timer,
+			};
+		},
+	})`);
+	const globals = runInNewContext(
+		"({date: typeof Date, performance: typeof performance, setTimeout: typeof setTimeout, clearTimeout: typeof clearTimeout})",
+		{},
+	);
+	assert.equal(globals.date, "function");
+	assert.equal(globals.performance, "undefined");
+	assert.equal(globals.setTimeout, "undefined");
+	assert.equal(globals.clearTimeout, "undefined");
+	const result = await runInNewContext(`(${source}\n)`, {
+		page,
+		__end__: () => {},
+	});
+	assert.equal(result.certified, true);
+	assert.equal(result.pendingTimerWaits, 0);
+	assert.deepEqual(Array.from(result.pageErrors), [
+		"fake Page timer rejected",
+		"fake Page timer threw",
+	]);
+	assert.equal(result.responseOutcome, "response");
+	assert.equal(result.responseHistory, 1);
+	assert.equal(result.responseTimer, null);
+	assert.equal(result.timerDelayMs, 30_000);
+	assert.equal(result.timeoutOutcome, "timeout");
+	assert.equal(result.timeoutHistory, 1);
+	assert.equal(result.timeoutTimer, null);
+	assert.equal(result.rejectedOutcome, "timeout");
+	assert.equal(result.rejectedHistory, 1);
+	assert.equal(result.rejectedTimer, null);
+	assert.equal(result.threwOutcome, "timeout");
+	assert.equal(result.threwHistory, 1);
+	assert.equal(result.threwTimer, null);
+});
 
 function createBoundProfileTransition({
 	createProfileRequestLifecycle,

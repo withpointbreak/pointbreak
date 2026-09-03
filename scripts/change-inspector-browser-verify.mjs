@@ -55,13 +55,76 @@
 	};
 	const isChangesHash = (hash) =>
 		hash === "#/changes" || hash.startsWith("#/changes?");
+	let nextPageTimerId = 1;
+	const reportPageTimerError = (page, error) => {
+		try {
+			page.emit(
+				"pageerror",
+				typeof error === "object" &&
+					error !== null &&
+					typeof error.message === "string"
+					? error
+					: new Error(String(error)),
+			);
+		} catch {
+			// The timer path must never create an unhandled rejection.
+		}
+	};
+	const isPageTimerTimeout = (error) =>
+		typeof error === "object" &&
+		error !== null &&
+		error.name === "TimeoutError";
+	const createPageTimer = (page, callback, delayMs) => {
+		const timer = {
+			cancelled: false,
+			eventName: `pointbreak:profile-settlement-timer:${nextPageTimerId}`,
+			page,
+		};
+		nextPageTimerId += 1;
+		const fire = () => {
+			if (timer.cancelled) return;
+			timer.cancelled = true;
+			try {
+				callback();
+			} catch (error) {
+				reportPageTimerError(page, error);
+			}
+		};
+		let wait;
+		try {
+			wait = page.waitForEvent(timer.eventName, { timeout: delayMs });
+		} catch (error) {
+			reportPageTimerError(page, error);
+			void Promise.resolve().then(fire);
+			return timer;
+		}
+		void Promise.resolve(wait).then(
+			() => {
+				timer.cancelled = true;
+			},
+			(error) => {
+				if (!isPageTimerTimeout(error)) reportPageTimerError(page, error);
+				fire();
+			},
+		);
+		return timer;
+	};
+	const clearPageTimer = (timer) => {
+		if (!timer || timer.cancelled) return;
+		timer.cancelled = true;
+		try {
+			timer.page.emit(timer.eventName);
+		} catch (error) {
+			reportPageTimerError(timer.page, error);
+		}
+	};
 
 	function createProfileRequestLifecycle({
 		page,
 		primaryBaseUrl,
-		now = () => performance.now(),
-		setTimer = (callback, delay) => setTimeout(callback, delay),
-		clearTimer = (timer) => clearTimeout(timer),
+		now = () => Date.now(),
+		setTimer = (callback, delayMs) => createPageTimer(page, callback, delayMs),
+		clearTimer = clearPageTimer,
 		onLifecycleFailure = () => {},
 		onRequestFailure = () => {},
 	}) {
