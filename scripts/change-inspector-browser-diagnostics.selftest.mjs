@@ -865,6 +865,279 @@ test("D72 lifecycle activation excludes capability setup and gates every focused
 	assert.ok(healthSnapshots[1] < browserRuntime);
 });
 
+test("D73 diagnostics distinguish bounded exact-detail reload event sequences", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({ createDiagnostics, createProfileRequestLifecycle }) => {
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const intendedHash =
+				"#/changes/change%3Asha256%3Aaa/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc&limit=100&order=change_id_asc";
+			const runSequence = (hashes) => {
+				const page = new FakePage(
+					`${primaryBaseUrl}/#/?token=bootstrap-secret`,
+				);
+				const lifecycleFailures = [];
+				const lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+					onLifecycleFailure: (failure) =>
+						lifecycleFailures.push(failure),
+				});
+				assert.equal(
+					typeof lifecycle.routeVisitDiagnostic,
+					"function",
+					"the production lifecycle must expose one bounded safe diagnostic snapshot",
+				);
+				const visit = lifecycle.createRouteVisitIntent(intendedHash);
+				lifecycle.activateRouteVisit(visit, { navigationKind: "reload" });
+				const root = new FakeRequest({
+					frame: page.mainFrame(),
+					navigation: true,
+					resourceType: "document",
+					url: `${primaryBaseUrl}/?token=raw-capability`,
+				});
+				page.emit("request", root);
+				for (const hash of hashes) {
+					page.setUrl(`${primaryBaseUrl}/${hash}`);
+					page.emit("framenavigated", page.mainFrame());
+				}
+				page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+				page.emit("domcontentloaded");
+				const certified = lifecycle.certifyChangesVisit(visit, intendedHash);
+				return {
+					certified,
+					lifecycleFailures,
+					trace: lifecycle.routeVisitDiagnostic(visit),
+				};
+			};
+
+			const duplicate = runSequence([intendedHash, intendedHash]);
+			assert.equal(duplicate.certified, false);
+			assert.deepEqual(duplicate.lifecycleFailures, []);
+			assert.equal(
+				duplicate.trace.schema,
+				"pointbreak.browser-route-visit-diagnostic",
+			);
+			assert.equal(duplicate.trace.version, 1);
+			assert.equal(duplicate.trace.navigationKind, "reload");
+			assert.equal(duplicate.trace.activationGeneration, 0);
+			assert.equal(duplicate.trace.committedGeneration, 1);
+			assert.equal(duplicate.trace.frameEntryCount, 2);
+			assert.equal(duplicate.trace.frameEntries.length, 2);
+			assert.equal(duplicate.trace.overflowed, false);
+			assert.deepEqual(
+				duplicate.trace.frameEntries.map((entry) => entry.targetMatch),
+				[true, true],
+			);
+			assert.equal(duplicate.trace.frameEntries[0].ownedVisitIdBefore, 1);
+			assert.equal(duplicate.trace.frameEntries[0].ownedVisitIdAfter, null);
+			assert.equal(duplicate.trace.frameEntries[0].routeObservedAfter, true);
+			assert.equal(duplicate.trace.frameEntries[1].visitStateAfter, "retired");
+			assert.deepEqual(duplicate.trace.root, {
+				ambiguous: false,
+				bound: true,
+				commitCount: 1,
+				committed: true,
+				ordinal: 1,
+				present: true,
+				same: true,
+			});
+			assert.deepEqual(duplicate.trace.certification.predicates, {
+				actionOwned: true,
+				changesHash: true,
+				pageMatchesSemantic: true,
+				pendingState: false,
+				routeObserved: true,
+				sameVisit: false,
+				semanticMatchesIntended: true,
+			});
+			assert.equal(duplicate.trace.certification.reloadChain.rootBound, true);
+			assert.equal(duplicate.trace.certification.reloadChain.rootSame, true);
+			assert.equal(
+				duplicate.trace.certification.reloadChain.rootUnambiguous,
+				true,
+			);
+			assert.equal(duplicate.trace.certification.reloadChain.commitCount, 1);
+
+			const transient = runSequence([
+				intendedHash,
+				"#/timeline?limit=100&order=desc",
+			]);
+			assert.equal(transient.certified, false);
+			assert.deepEqual(
+				transient.trace.frameEntries.map((entry) => entry.targetMatch),
+				[true, false],
+				"the diagnostic must distinguish target duplicates from a transient mismatch",
+			);
+			assert.equal(transient.trace.certification.predicates.sameVisit, false);
+
+			const overflow = runSequence([
+				intendedHash,
+				intendedHash,
+				intendedHash,
+				intendedHash,
+				intendedHash,
+			]);
+			assert.equal(overflow.trace.frameEntryCount, 5);
+			assert.equal(overflow.trace.frameEntries.length, 4);
+			assert.equal(overflow.trace.overflowed, true);
+
+			for (const trace of [duplicate.trace, transient.trace, overflow.trace]) {
+				const serialized = JSON.stringify(trace);
+				assert.doesNotMatch(
+					serialized,
+					/bootstrap-secret|raw-capability|authorization|bearer|actor:|store path|store content|response body|requestUrl/i,
+				);
+				assert.doesNotMatch(serialized, /http:\/\//);
+			}
+
+			const diagnostics = createDiagnostics();
+			await diagnostics.section("D73 rejected reload visit", async () => {
+				diagnostics.requireCondition(
+					false,
+					"D73 route visit",
+					"the semantic Changes destination could not certify its route visit",
+					{
+						expected: { hash: intendedHash },
+						actual: { hash: intendedHash, routeVisitTrace: duplicate.trace },
+					},
+				);
+			});
+			const report = diagnostics.result({ screenshotCount: 0 });
+			assert.equal(report.status, "failed");
+			assert.equal(report.failures.length, 1);
+			assert.equal(
+				report.failures[0].actual.routeVisitTrace.schema,
+				"pointbreak.browser-route-visit-diagnostic",
+			);
+			assert.doesNotMatch(
+				JSON.stringify(report),
+				/bootstrap-secret|raw-capability|authorization|bearer|actor:|store path|store content|response body|requestUrl|http:\/\//i,
+			);
+
+			const passingPage = new FakePage(`${primaryBaseUrl}/${intendedHash}`);
+			const passingLifecycle = createProfileRequestLifecycle({
+				page: passingPage,
+				primaryBaseUrl,
+			});
+			const passingVisit =
+				passingLifecycle.createRouteVisitIntent(intendedHash);
+			passingLifecycle.activateRouteVisit(passingVisit, {
+				navigationKind: "goto",
+			});
+			assert.equal(
+				passingLifecycle.certifyChangesVisit(passingVisit, intendedHash),
+				true,
+			);
+			assert.equal(
+				passingLifecycle.routeVisitDiagnostic(passingVisit),
+				null,
+				"an ordinary passing certification must not publish a failure trace",
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
+
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const certificationCall = source.indexOf(
+		"requestLifecycle.certifyChangesVisit(targetVisit, semanticHash)",
+	);
+	assert.notEqual(certificationCall, -1);
+	const certificationFailure = source.slice(
+		certificationCall,
+		source.indexOf("\n\t\t}", certificationCall),
+	);
+	assert.match(
+		certificationFailure,
+		/routeVisitTrace:\s*requestLifecycle\.routeVisitDiagnostic\(targetVisit\)/,
+		"the exact certification failure must carry only the bounded safe lifecycle snapshot",
+	);
+});
+
+test("D74 Changes-lens classification is segment-bounded for exact routes", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({ createProfileRequestLifecycle }) => {
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const change = "change%3Asha256%3Aaa";
+			const revision = "rev%3Asha256%3Abb";
+			const artifactQuery = "artifactHash=sha256%3Acc";
+			const runCase = ({ intendedHash, pageHash = intendedHash }) => {
+				const renderedHash = typeof pageHash === "string" ? pageHash : "#/";
+				const page = new FakePage(`${primaryBaseUrl}/${renderedHash}`);
+				const lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+				});
+				const visit = lifecycle.createRouteVisitIntent(intendedHash);
+				lifecycle.activateRouteVisit(visit);
+				const request = new FakeRequest({ frame: page.mainFrame() });
+				page.emit("request", request);
+				return {
+					attributed:
+						lifecycle.requestRecord(request)?.routeVisitId === visit.id,
+					certified: lifecycle.certifyChangesVisit(
+						visit,
+						visit.intendedHash,
+					),
+				};
+			};
+
+			const positives = [
+				"#/changes",
+				"#/changes?limit=100&order=change_id_asc",
+				`#/changes/${change}?limit=100&order=change_id_asc`,
+				`#/changes/${change}/revisions/${revision}?${artifactQuery}`,
+				`#/changes/${change}/revisions/${revision}/resource?${artifactQuery}`,
+			];
+			assert.deepEqual(
+				positives.map((intendedHash) => ({
+					intendedHash,
+					...runCase({ intendedHash }),
+				})),
+				positives.map((intendedHash) => ({
+					intendedHash,
+					attributed: true,
+					certified: true,
+				})),
+				"list, Change, Revision, and resource routes must share one Changes-lens boundary",
+			);
+
+			const negatives = [
+				null,
+				"",
+				"#/change",
+				"#/changes/",
+				"#/changes/?limit=100",
+				"#/changeset",
+				"#/changes-extra",
+				`#/changes%2F${change}`,
+				"#/timeline",
+				"#/attention",
+				"#changes",
+				"/changes",
+			];
+			assert.deepEqual(
+				negatives.map((intendedHash) => runCase({ intendedHash })),
+				negatives.map(() => ({ attributed: false, certified: false })),
+				"empty, neighboring-prefix, encoded-separator, and other-lens hashes must remain ineligible",
+			);
+
+			const exactRevision =
+				`#/changes/${change}/revisions/${revision}?${artifactQuery}`;
+			assert.deepEqual(
+				runCase({ intendedHash: exactRevision, pageHash: "#/timeline" }),
+				{ attributed: false, certified: false },
+				"lens membership must not replace exact source/page hash equality",
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
+});
+
 function createBoundProfileTransition({
 	createProfileRequestLifecycle,
 	timers = new ManualTimers(),
@@ -1142,6 +1415,91 @@ test("shakedown mode owns its root and exits after one shared representative cas
 	assert.match(branch, /profileCompletions/);
 	assert.match(branch, /return shakedownResult/);
 	assert.match(readme, /--shakedown/);
+});
+
+test("D73 base shakedown repeats its exact-detail open without widening the harness", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const readme = await readFile(
+		new URL("./README.md", import.meta.url),
+		"utf8",
+	);
+	assert.equal(
+		createHash("sha256").update(shell).digest("hex"),
+		"c9b1824fffd8547afd844285fcd9ad3e23716a606f0f8b9f81a7f380653fb861",
+		"D73 must not edit the shell",
+	);
+	assert.equal(
+		createHash("sha256").update(readme).digest("hex"),
+		"697bc42fd0126b7e992da6cf24567dfdfd80c63f5f70cd09edcfa844bd2937e5",
+		"D73 must not edit the README",
+	);
+
+	const branchStart = browser.indexOf('if (config.mode === "shakedown")');
+	const fullMatrix = browser.indexOf(
+		'await diagnostics.section("Reader readiness"',
+	);
+	assert.ok(branchStart >= 0 && fullMatrix > branchStart);
+	const branch = browser.slice(branchStart, fullMatrix);
+	const approvedReloadOpen =
+		'\t\t\t\tawait open(\n' +
+		'\t\t\t\t\texactReadingRoute(),\n' +
+		'\t\t\t\t\tlayouts[1],\n' +
+		'\t\t\t\t\t"shakedown exact reading reload",\n' +
+		'\t\t\t\t);\n';
+	assert.equal(
+		branch.split(approvedReloadOpen).length - 1,
+		1,
+		"the existing base section must contain exactly one approved reload statement",
+	);
+	assert.equal(
+		createHash("sha256")
+			.update(branch.replace(approvedReloadOpen, ""))
+			.digest("hex"),
+		"09acdda0a52b5c33a95d5b559d6fb327e7b475185d6d78cb8fb6e3e3cb0b42e0",
+		"D73 must not change any other base-shakedown byte",
+	);
+	const sectionStart = branch.indexOf(
+		'diagnostics.section("Shakedown exact reading and quiet polling"',
+	);
+	const resultStart = branch.indexOf(
+		"recordCurrentFocusedRequestHealth();",
+		sectionStart,
+	);
+	assert.ok(sectionStart >= 0 && resultStart > sectionStart);
+	const section = branch.slice(sectionStart, resultStart);
+	assert.equal(
+		(section.match(/open\(\s*exactReadingRoute\(\)/g) ?? []).length,
+		2,
+		"the existing section must own one setup open and one exact-detail reload open",
+	);
+	const runStart = section.indexOf("run: async () => {");
+	const reloadOpen = section.indexOf(
+		'"shakedown exact reading reload"',
+		runStart,
+	);
+	const firstExistingAssertion = section.indexOf(
+		'const detailText = await page.locator("#detail-body").innerText();',
+		runStart,
+	);
+	assert.ok(
+		runStart >= 0 &&
+			reloadOpen > runStart &&
+			firstExistingAssertion > reloadOpen,
+		"the repeated production open must be the first operation in the retained run body",
+	);
+	assert.equal(
+		(section.match(/await screenshot\("shakedown-exact-reading"\)/g) ?? [])
+			.length,
+		1,
+		"the repaired section must retain exactly one existing screenshot",
+	);
 });
 
 test("single-journey focused shakedowns are literal, root-owned, and exit before the full matrix", async () => {

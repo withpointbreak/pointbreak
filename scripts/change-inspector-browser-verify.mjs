@@ -53,8 +53,15 @@
 			});
 		return retained.length === 0 ? path : `${path}?${retained.join("&")}`;
 	};
-	const isChangesHash = (hash) =>
-		hash === "#/changes" || hash.startsWith("#/changes?");
+	const isChangesHash = (hash) => {
+		if (typeof hash !== "string") return false;
+		const query = hash.indexOf("?");
+		const path = query === -1 ? hash : hash.slice(0, query);
+		return (
+			path === "#/changes" ||
+			(path.startsWith("#/changes/") && path.length > "#/changes/".length)
+		);
+	};
 	let nextPageTimerId = 1;
 	const reportPageTimerError = (page, error) => {
 		try {
@@ -139,6 +146,9 @@
 		let pendingNavigation = null;
 		let currentRouteVisit = null;
 		let ownedRouteVisitId = null;
+		let activeRouteVisitDiagnostic = null;
+		let nextDiagnosticRootOrdinal = 1;
+		const routeVisitDiagnosticFrameLimit = 4;
 
 		const elapsedAge = (startedAt) => Math.max(0, now() - startedAt);
 		const lifecycleFailure = (detail, actual = {}) => {
@@ -228,6 +238,65 @@
 					}
 				: {}),
 		});
+		const diagnosticForVisit = (visit) =>
+			activeRouteVisitDiagnostic?.visit === visit
+				? activeRouteVisitDiagnostic
+				: null;
+		const diagnosticRootSnapshot = (diagnostic) => ({
+			ambiguous: diagnostic.root.ambiguous,
+			bound: diagnostic.root.bound,
+			commitCount: diagnostic.root.commitCount,
+			committed: diagnostic.root.committed,
+			ordinal: diagnostic.root.ordinal,
+			present: diagnostic.root.present,
+			same: diagnostic.root.same,
+		});
+		const observeDiagnosticRoot = (visit, root) => {
+			const diagnostic = diagnosticForVisit(visit);
+			if (diagnostic === null || root === null) return;
+			if (!diagnostic.root.present) {
+				diagnostic.privateRoot = root;
+				diagnostic.root.present = true;
+				diagnostic.root.bound =
+					visit === currentRouteVisit && visit.state === "pending";
+				diagnostic.root.same = true;
+				diagnostic.root.ordinal = nextDiagnosticRootOrdinal;
+				nextDiagnosticRootOrdinal += 1;
+			} else if (diagnostic.privateRoot !== root) {
+				diagnostic.root.same = false;
+				diagnostic.root.ambiguous = true;
+			}
+			if (pendingNavigation?.ambiguous === true) {
+				diagnostic.root.ambiguous = true;
+			}
+		};
+		const routeVisitDiagnostic = (visit) => {
+			const diagnostic = diagnosticForVisit(visit);
+			if (diagnostic === null || diagnostic.certification === null) return null;
+			return {
+				schema: "pointbreak.browser-route-visit-diagnostic",
+				version: 1,
+				visitId: visit.id,
+				currentVisitId: currentRouteVisit?.id ?? null,
+				ownedVisitId: ownedRouteVisitId,
+				intendedHash: visit.intendedHash,
+				navigationKind: diagnostic.navigationKind,
+				activationGeneration: diagnostic.activationGeneration,
+				committedGeneration: committedDocumentGeneration,
+				frameEntryCount: diagnostic.frameEntryCount,
+				frameEntries: diagnostic.frameEntries.map((entry) => ({
+					...entry,
+					root: { ...entry.root },
+				})),
+				overflowed: diagnostic.overflowed,
+				root: diagnosticRootSnapshot(diagnostic),
+				certification: {
+					...diagnostic.certification,
+					predicates: { ...diagnostic.certification.predicates },
+					reloadChain: { ...diagnostic.certification.reloadChain },
+				},
+			};
+		};
 		const settleTransition = (transition, outcome) => {
 			if (transition.outcome !== null) return false;
 			transition.outcome = outcome;
@@ -326,6 +395,7 @@
 							{ pendingRootCount: 2 },
 						);
 					}
+					observeDiagnosticRoot(currentRouteVisit, root);
 				}
 			}
 			return record;
@@ -397,6 +467,12 @@
 			} catch {
 				frameHash = capabilityRedactedHash(page.url());
 			}
+			const diagnostic = activeRouteVisitDiagnostic;
+			const tracedVisit = diagnostic?.visit ?? null;
+			const visitStateBefore = tracedVisit?.state ?? null;
+			const routeObservedBefore = tracedVisit?.routeObserved ?? false;
+			const currentVisitIdBefore = currentRouteVisit?.id ?? null;
+			const ownedVisitIdBefore = ownedRouteVisitId;
 			if (
 				currentRouteVisit !== null &&
 				currentRouteVisit.state === "pending" &&
@@ -405,16 +481,68 @@
 			) {
 				ownedRouteVisitId = null;
 				currentRouteVisit.routeObserved = true;
-				return;
+			} else {
+				if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
+				ownedRouteVisitId = null;
 			}
-			if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
-			ownedRouteVisitId = null;
+			if (diagnostic !== null && tracedVisit !== null) {
+				diagnostic.frameEntryCount += 1;
+				if (diagnostic.frameEntries.length < routeVisitDiagnosticFrameLimit) {
+					let pageHash = "";
+					try {
+						pageHash = capabilityRedactedHash(page.url());
+					} catch {
+						pageHash = frameHash;
+					}
+					diagnostic.frameEntries.push({
+						eventOrdinal: diagnostic.frameEntryCount,
+						visitStateBefore,
+						visitStateAfter: tracedVisit.state,
+						routeObservedBefore,
+						routeObservedAfter: tracedVisit.routeObserved,
+						visitId: tracedVisit.id,
+						currentVisitIdBefore,
+						currentVisitIdAfter: currentRouteVisit?.id ?? null,
+						ownedVisitIdBefore,
+						ownedVisitIdAfter: ownedRouteVisitId,
+						ownershipBefore: ownedVisitIdBefore === tracedVisit.id,
+						ownershipAfter: ownedRouteVisitId === tracedVisit.id,
+						intendedHash: tracedVisit.intendedHash,
+						frameHash,
+						pageHash,
+						semanticHash: null,
+						navigationKind: diagnostic.navigationKind,
+						targetMatch: frameHash === tracedVisit.intendedHash,
+						committedGeneration: committedDocumentGeneration,
+						activationGeneration: diagnostic.activationGeneration,
+						root: diagnosticRootSnapshot(diagnostic),
+					});
+				} else {
+					diagnostic.overflowed = true;
+				}
+			}
 		};
 		const domContentLoaded = () => {
 			const pending = pendingNavigation;
 			pendingNavigation = null;
+			const diagnostic = activeRouteVisitDiagnostic;
+			if (diagnostic !== null && pending !== null) {
+				diagnostic.root.ambiguous =
+					diagnostic.root.ambiguous || pending.ambiguous;
+				if (diagnostic.privateRoot !== pending.root) {
+					diagnostic.root.same = false;
+				}
+			}
 			if (pending === null || pending.ambiguous) return false;
 			committedDocumentGeneration += 1;
+			if (
+				diagnostic !== null &&
+				diagnostic.root.bound &&
+				diagnostic.privateRoot === pending.root
+			) {
+				diagnostic.root.committed = true;
+				diagnostic.root.commitCount += 1;
+			}
 			retirePriorGeneration();
 			return true;
 		};
@@ -467,21 +595,82 @@
 			nextRouteVisitId += 1;
 			return visit;
 		};
-		const activateRouteVisit = (visit) => {
+		const activateRouteVisit = (
+			visit,
+			{ navigationKind = "goto" } = {},
+		) => {
 			if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
 			visit.state = "pending";
 			currentRouteVisit = visit;
 			ownedRouteVisitId = visit.id;
+			activeRouteVisitDiagnostic = {
+				visit,
+				navigationKind: navigationKind === "reload" ? "reload" : "goto",
+				activationGeneration: committedDocumentGeneration,
+				frameEntryCount: 0,
+				frameEntries: [],
+				overflowed: false,
+				privateRoot: null,
+				root: {
+					ambiguous: false,
+					bound: false,
+					commitCount: 0,
+					committed: false,
+					ordinal: null,
+					present: false,
+					same: false,
+				},
+				certification: null,
+			};
 			return visit;
 		};
 		const certifyChangesVisit = (visit, acceptedHash) => {
 			const semanticHash = capabilityRedactedHash(acceptedHash);
+			const pageHash = capabilityRedactedHash(page.url());
+			const predicates = {
+				sameVisit: visit === currentRouteVisit,
+				pendingState: visit.state === "pending",
+				changesHash: isChangesHash(visit.intendedHash),
+				semanticMatchesIntended: semanticHash === visit.intendedHash,
+				pageMatchesSemantic: pageHash === semanticHash,
+			};
+			const diagnostic = diagnosticForVisit(visit);
+			if (diagnostic !== null) {
+				for (const entry of diagnostic.frameEntries) {
+					entry.semanticHash = semanticHash;
+				}
+				diagnostic.certification = {
+					semanticHash,
+					pageHash,
+					predicates: {
+						...predicates,
+						actionOwned:
+							diagnostic.navigationKind === "goto" ||
+							diagnostic.navigationKind === "reload",
+						routeObserved: visit.routeObserved,
+					},
+					reloadChain: {
+						reloadAction: diagnostic.navigationKind === "reload",
+						rootPresent: diagnostic.root.present,
+						rootBound: diagnostic.root.bound,
+						rootSame: diagnostic.root.same,
+						rootUnambiguous: !diagnostic.root.ambiguous,
+						rootCommitted: diagnostic.root.committed,
+						commitCount: diagnostic.root.commitCount,
+						generationAdvancedExactlyOnce:
+							diagnostic.root.commitCount === 1 &&
+							committedDocumentGeneration ===
+								diagnostic.activationGeneration + 1,
+						currentGeneration: committedDocumentGeneration,
+					},
+				};
+			}
 			if (
-				visit !== currentRouteVisit ||
-				visit.state !== "pending" ||
-				!isChangesHash(visit.intendedHash) ||
-				semanticHash !== visit.intendedHash ||
-				capabilityRedactedHash(page.url()) !== semanticHash
+				!predicates.sameVisit ||
+				!predicates.pendingState ||
+				!predicates.changesHash ||
+				!predicates.semanticMatchesIntended ||
+				!predicates.pageMatchesSemantic
 			) {
 				retireRouteVisit(visit);
 				return false;
@@ -490,6 +679,7 @@
 			visit.acceptedHash = semanticHash;
 			visit.documentGeneration = committedDocumentGeneration;
 			ownedRouteVisitId = null;
+			activeRouteVisitDiagnostic = null;
 			return true;
 		};
 		const awaitRequiredProfileRequest = (visit) => {
@@ -561,6 +751,7 @@
 			eligibleProfileRequests,
 			enterSettlementJoin,
 			requestRecord: (request) => recordsByRequest.get(request) ?? null,
+			routeVisitDiagnostic,
 			snapshotProfileArm,
 			state: () => ({
 				committedDocumentGeneration,
@@ -1181,7 +1372,9 @@
 			);
 			profileSupersessionTransition = armSnapshot.transition;
 		}
-		requestLifecycle.activateRouteVisit(targetVisit);
+		requestLifecycle.activateRouteVisit(targetVisit, {
+			navigationKind: reload ? "reload" : "goto",
+		});
 		// A goto to the exact current fragment is a no-op. Force a document reload
 		// so a deliberately refused reader-profile fixture cannot leak its DOM
 		// into the real reader that follows it.
@@ -1274,8 +1467,20 @@
 			semanticHash.includes("token="),
 		);
 		if (expectedLens === "changes") {
+			const routeVisitCertified =
+				requestLifecycle.certifyChangesVisit(targetVisit, semanticHash);
+			const routeVisitActual = {
+				hash: capabilityRedactedHash(semanticHash),
+				visitId: targetVisit.id,
+				...(!routeVisitCertified
+					? {
+							routeVisitTrace:
+								requestLifecycle.routeVisitDiagnostic(targetVisit),
+						}
+					: {}),
+			};
 			requireCondition(
-				requestLifecycle.certifyChangesVisit(targetVisit, semanticHash),
+				routeVisitCertified,
 				label,
 				"the semantic Changes destination could not certify its route visit",
 				{
@@ -1283,10 +1488,7 @@
 					documentGeneration:
 						requestLifecycle.state().committedDocumentGeneration,
 				},
-				{
-					hash: capabilityRedactedHash(semanticHash),
-					visitId: targetVisit.id,
-				},
+				routeVisitActual,
 			);
 		}
 		const metrics = await page.evaluate(() => ({
@@ -2475,6 +2677,11 @@
 					"shakedown exact reading setup",
 				),
 			run: async () => {
+				await open(
+					exactReadingRoute(),
+					layouts[1],
+					"shakedown exact reading reload",
+				);
 				const detailText = await page.locator("#detail-body").innerText();
 				const exactIdentity = `exact Revision ${config.fixture.rich.revisionId}; artifact ${config.fixture.rich.artifactHash}`;
 				const identityPresentation = await page
