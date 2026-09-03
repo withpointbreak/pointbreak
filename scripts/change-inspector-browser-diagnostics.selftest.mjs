@@ -47,6 +47,18 @@ class FakePage {
 		this.#listeners.set(name, listeners);
 	}
 
+	off(name, listener) {
+		const listeners = this.#listeners.get(name) ?? [];
+		this.#listeners.set(
+			name,
+			listeners.filter((candidate) => candidate !== listener),
+		);
+	}
+
+	listenerCount(name) {
+		return (this.#listeners.get(name) ?? []).length;
+	}
+
 	emit(name, ...args) {
 		for (const listener of this.#listeners.get(name) ?? []) listener(...args);
 	}
@@ -401,6 +413,456 @@ test("D71 production lifecycle defaults execute in the Playwright sparse VM", as
 	assert.equal(result.threwOutcome, "timeout");
 	assert.equal(result.threwHistory, 1);
 	assert.equal(result.threwTimer, null);
+});
+
+test("D72 lifecycle activation excludes capability setup and gates every focused result", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const classifierStart = source.indexOf(
+		"function isAdmissibleProfileSupersessionFailure(",
+	);
+	assert.notEqual(
+		classifierStart,
+		-1,
+		"missing exact D69 profile-supersession classifier",
+	);
+	const classifierEnd = source.indexOf("\n\tconst ", classifierStart);
+	assert.ok(classifierEnd > classifierStart);
+	const classify = new Function(
+		`${source.slice(classifierStart, classifierEnd)}\nreturn isAdmissibleProfileSupersessionFailure;`,
+	)();
+	const result = await runD70BrowserSelftest(
+		async ({
+			createDiagnostics,
+			createProfileRequestLifecycleActivationOwner,
+			createRequestHealthSnapshot,
+			recordFocusedRequestHealth,
+		}) => {
+			assert.equal(
+				typeof createProfileRequestLifecycleActivationOwner,
+				"function",
+				"the production hook must expose the single-start activation owner",
+			);
+			assert.equal(
+				typeof createRequestHealthSnapshot,
+				"function",
+				"the production hook must expose the shared D69 request-health snapshot",
+			);
+			assert.equal(
+				typeof recordFocusedRequestHealth,
+				"function",
+				"the production hook must expose the focused lifecycle/request-health assertion",
+			);
+
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const snapshotRequestHealth = (requestFailures) =>
+				createRequestHealthSnapshot({
+					requestFailures,
+					isAdmissibleRequestFailure: (failure) =>
+						classify(failure, primaryBaseUrl),
+				});
+			const buildOwner = (
+				url = `${primaryBaseUrl}/#/?token=bootstrap-secret`,
+			) => {
+				const page = new FakePage(url);
+				const lifecycleFailures = [];
+				const requestFailures = [];
+				const timers = new ManualTimers();
+				const owner = createProfileRequestLifecycleActivationOwner({
+					page,
+					primaryBaseUrl,
+					now: () => timers.now,
+					setTimer: timers.setTimeout,
+					clearTimer: timers.clearTimeout,
+					onLifecycleFailure: (failure) =>
+						lifecycleFailures.push(failure),
+					onRequestFailure: (failure) => requestFailures.push(failure),
+				});
+				return { lifecycleFailures, owner, page, requestFailures };
+			};
+			const lifecycleEvents = [
+				"request",
+				"response",
+				"requestfinished",
+				"requestfailed",
+				"framenavigated",
+				"domcontentloaded",
+			];
+			const assertDormantListeners = (page) => {
+				for (const event of lifecycleEvents) {
+					assert.equal(
+						page.listenerCount(event),
+						event === "requestfailed" ? 1 : 0,
+						`${event} listener count before activation`,
+					);
+				}
+			};
+			const assertActiveListeners = (page) => {
+				for (const event of lifecycleEvents) {
+					assert.equal(
+						page.listenerCount(event),
+						1,
+						`${event} listener count after activation`,
+					);
+				}
+			};
+
+			const preamble = buildOwner();
+			assertDormantListeners(preamble.page);
+			assert.throws(
+				() => preamble.owner.active(),
+				/not active|before start/i,
+			);
+			const preambleRequests = [];
+			for (const [index, origin] of [
+				primaryBaseUrl,
+				"http://127.0.0.1:4174",
+				"http://127.0.0.1:4175",
+				"http://127.0.0.1:4176",
+			].entries()) {
+				preamble.page.setUrl(`${origin}/#/?token=capability-${index}`);
+				const first = new FakeRequest({
+					frame: preamble.page.mainFrame(),
+					navigation: true,
+					resourceType: "document",
+					url: `${origin}/`,
+				});
+				const second = new FakeRequest({
+					frame: preamble.page.mainFrame(),
+					navigation: true,
+					redirectedFrom: null,
+					resourceType: "document",
+					url: `${origin}/`,
+				});
+				preambleRequests.push(first, second);
+				preamble.page.emit("request", first);
+				preamble.page.emit("request", second);
+				preamble.page.emit("domcontentloaded");
+			}
+			const mismatch = new FakeRequest({
+				frame: preamble.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				url: `${primaryBaseUrl}/`,
+			});
+			preambleRequests.push(mismatch);
+			preamble.page.emit("request", mismatch);
+			preamble.page.emit("domcontentloaded");
+			assertDormantListeners(preamble.page);
+			assert.deepEqual(preamble.lifecycleFailures, []);
+			assert.deepEqual(preamble.requestFailures, []);
+
+			const activeLifecycle = preamble.owner.start();
+			assert.notEqual(typeof activeLifecycle?.then, "function");
+			assert.equal(preamble.owner.active(), activeLifecycle);
+			assertActiveListeners(preamble.page);
+			assert.equal(
+				activeLifecycle.state().committedDocumentGeneration,
+				0,
+			);
+			for (const request of preambleRequests) {
+				assert.equal(activeLifecycle.requestRecord(request), null);
+			}
+			assert.throws(() => preamble.owner.start(), /already active|start.*once/i);
+
+			const committedRoot = new FakeRequest({
+				frame: preamble.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			preamble.page.emit("request", committedRoot);
+			preamble.page.emit("domcontentloaded");
+			assert.equal(
+				activeLifecycle.state().committedDocumentGeneration,
+				1,
+			);
+			const overlapFirst = new FakeRequest({
+				frame: preamble.page.mainFrame(),
+				navigation: true,
+				redirectedFrom: null,
+				resourceType: "document",
+			});
+			const overlapSecond = new FakeRequest({
+				frame: preamble.page.mainFrame(),
+				navigation: true,
+				redirectedFrom: null,
+				resourceType: "document",
+			});
+			preamble.page.emit("request", overlapFirst);
+			preamble.page.emit("request", overlapSecond);
+			preamble.page.emit("domcontentloaded");
+			assert.equal(
+				activeLifecycle.state().committedDocumentGeneration,
+				1,
+				"an active independent-root A/B/DCL sequence must not commit",
+			);
+			assert.equal(activeLifecycle.state().pendingNavigationRoot, null);
+			assert.equal(preamble.lifecycleFailures.length, 1);
+			assert.match(
+				preamble.lifecycleFailures[0].detail,
+				/overlap|unrelated/i,
+			);
+
+			const preambleFailure = buildOwner();
+			const failedBeforeStart = new FakeRequest({
+				failure: "net::ERR_FAILED",
+				frame: preambleFailure.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				url: `${primaryBaseUrl}/bootstrap?token=raw-capability&keep=1#/?token=fragment-capability`,
+			});
+			preambleFailure.page.emit("requestfailed", failedBeforeStart);
+			assert.equal(preambleFailure.requestFailures.length, 1);
+			assert.equal(preambleFailure.requestFailures[0].transition, null);
+			assert.equal(preambleFailure.requestFailures[0].url, "/bootstrap?keep=1");
+			assert.equal(
+				JSON.stringify(preambleFailure.requestFailures[0]).includes("capability"),
+				false,
+			);
+			const failedBeforeStartHealth = snapshotRequestHealth(
+				preambleFailure.requestFailures,
+			);
+			assert.equal(failedBeforeStartHealth.unexpectedRequestFailures.length, 1);
+			const preambleDiagnostics = createDiagnostics();
+			recordFocusedRequestHealth({
+				diagnostics: preambleDiagnostics,
+				requestLifecycleFailures: [],
+				requestHealth: failedBeforeStartHealth,
+			});
+			const preambleReport = preambleDiagnostics.result({ screenshotCount: 0 });
+			assert.equal(preambleReport.assertionCount, 1);
+			assert.equal(preambleReport.sectionCount, 0);
+			assert.equal(preambleReport.status, "failed");
+			assert.equal(preambleReport.failures[0].section, "Unsectioned");
+
+			const handoff = buildOwner();
+			const failedAfterStart = new FakeRequest({
+				failure: "net::ERR_FAILED",
+				frame: handoff.page.mainFrame(),
+				url: `${primaryBaseUrl}/bootstrap?token=raw-capability&keep=1#/?token=fragment-capability`,
+			});
+			handoff.page.emit("request", failedAfterStart);
+			const handoffLifecycle = handoff.owner.start();
+			assertActiveListeners(handoff.page);
+			handoff.page.emit("requestfailed", failedAfterStart);
+			assert.equal(handoff.requestFailures.length, 1);
+			assert.equal(handoff.requestFailures[0].transition, null);
+			assert.equal(handoff.requestFailures[0].retired, false);
+			assert.equal(handoff.requestFailures[0].url, "/bootstrap?keep=1");
+			assert.equal(
+				JSON.stringify(handoff.requestFailures[0]).includes("capability"),
+				false,
+			);
+			assert.equal(handoffLifecycle.requestRecord(failedAfterStart), null);
+			const handoffHealth = snapshotRequestHealth(handoff.requestFailures);
+			assert.equal(handoffHealth.unexpectedRequestFailures.length, 1);
+
+			const unarmedRequest = new FakeRequest({
+				failure: "net::ERR_FAILED",
+				frame: handoff.page.mainFrame(),
+			});
+			handoff.page.emit("request", unarmedRequest);
+			handoff.page.emit("requestfailed", unarmedRequest);
+			assert.equal(handoff.requestFailures.at(-1).transition, null);
+			const unarmedHealth = snapshotRequestHealth([
+				handoff.requestFailures.at(-1),
+			]);
+			assert.equal(unarmedHealth.unexpectedRequestFailures.length, 1);
+
+			const retired = buildOwner(
+				`${primaryBaseUrl}/#/changes?limit=100&order=change_id_asc`,
+			);
+			const retiredLifecycle = retired.owner.start();
+			const retiredRequest = new FakeRequest({
+				frame: retired.page.mainFrame(),
+			});
+			retired.page.emit("request", retiredRequest);
+			const replacement = new FakeRequest({
+				frame: retired.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			retired.page.emit("request", replacement);
+			retired.page.emit("domcontentloaded");
+			assert.equal(retiredLifecycle.requestRecord(retiredRequest).retired, true);
+			retired.page.emit("requestfailed", retiredRequest);
+			assert.equal(retired.requestFailures.length, 1);
+			assert.equal(retired.requestFailures[0].retired, true);
+			const retiredHealth = snapshotRequestHealth(retired.requestFailures);
+			assert.equal(retiredHealth.unexpectedRequestFailures.length, 1);
+
+			const admissibleFailure = () => {
+				const request = {};
+				return {
+					request,
+					transition: {
+						arm: "required",
+						sourceHash: "#/changes?limit=100&order=change_id_asc",
+						targetHash: "#/timeline?limit=100&order=desc",
+						profileRequestsBeforeNavigation: [request],
+						destinationSucceeded: true,
+					},
+					method: "GET",
+					resourceType: "fetch",
+					url: `${primaryBaseUrl}/api/v2/profile`,
+					error: "net::ERR_ABORTED",
+					retired: false,
+				};
+			};
+			const exactHealth = snapshotRequestHealth([admissibleFailure()]);
+			assert.equal(exactHealth.profileSupersessionAdmissionWithinBound, true);
+			assert.equal(exactHealth.unexpectedRequestFailures.length, 0);
+			const exactDiagnostics = createDiagnostics();
+			recordFocusedRequestHealth({
+				diagnostics: exactDiagnostics,
+				requestLifecycleFailures: [],
+				requestHealth: exactHealth,
+			});
+			const exactReport = exactDiagnostics.result({ screenshotCount: 0 });
+			assert.equal(exactReport.assertionCount, 1);
+			assert.equal(exactReport.sectionCount, 0);
+			assert.equal(exactReport.status, "passed");
+
+			const multipleHealth = snapshotRequestHealth([
+				admissibleFailure(),
+				admissibleFailure(),
+			]);
+			assert.equal(multipleHealth.profileSupersessionAdmissionWithinBound, false);
+			assert.equal(multipleHealth.unexpectedRequestFailures.length, 2);
+			const lifecycleDiagnostics = createDiagnostics();
+			recordFocusedRequestHealth({
+				diagnostics: lifecycleDiagnostics,
+				requestLifecycleFailures: preamble.lifecycleFailures,
+				requestHealth: exactHealth,
+			});
+			const lifecycleReport = lifecycleDiagnostics.result({ screenshotCount: 0 });
+			assert.equal(lifecycleReport.assertionCount, 1);
+			assert.equal(lifecycleReport.sectionCount, 0);
+			assert.equal(lifecycleReport.status, "failed");
+			return true;
+		},
+	);
+	assert.equal(result, true);
+
+	const ownerConstruction = source.indexOf(
+		"const requestLifecycleOwner = createProfileRequestLifecycleActivationOwner(",
+	);
+	const primaryBootstrap = source.indexOf(
+		"await page.goto(bootstrapUrl(config.server)",
+	);
+	const startCalls = [...source.matchAll(/requestLifecycleOwner\.start\(\);/g)].map(
+		(match) => match.index,
+	);
+	assert.ok(ownerConstruction >= 0 && ownerConstruction < primaryBootstrap);
+	assert.equal(startCalls.length, 2);
+	assert.ok(startCalls[0] > primaryBootstrap);
+	for (const mode of [
+		"shakedown-timeline-boundary",
+		"shakedown-exact-history-focus",
+		"shakedown-return-destinations",
+		"shakedown",
+	]) {
+		const branch = source.indexOf(`if (config.mode === "${mode}")`);
+		assert.ok(
+			branch > startCalls[0],
+			`${mode} must activate after bootstrap and before its first open`,
+		);
+	}
+	const openStart = source.indexOf("const open = async (");
+	const activeAccess = source.indexOf(
+		"const requestLifecycle = requestLifecycleOwner.active();",
+		openStart,
+	);
+	assert.ok(
+		startCalls[1] > openStart && startCalls[1] < activeAccess,
+		"full activation must occur inside open before lifecycle access",
+	);
+	const firstLifecycleOperation = source.indexOf(
+		"requestLifecycle.createRouteVisitIntent(targetHash)",
+		openStart,
+	);
+	assert.ok(activeAccess > openStart && activeAccess < firstLifecycleOperation);
+	const readerReadiness = source.indexOf(
+		'await diagnostics.section("Reader readiness"',
+	);
+	const finalPreambleNavigation = source.indexOf(
+		'await page.goto(url(""), { waitUntil: "domcontentloaded" })',
+		readerReadiness,
+	);
+	const firstFullSection = source.indexOf(
+		'await diagnostics.section("Timeline overview and chronology"',
+		readerReadiness,
+	);
+	const firstFullOpen = source.indexOf(
+		'setup: () => open("", layouts[0], "default Timeline startup")',
+		firstFullSection,
+	);
+	assert.ok(
+		finalPreambleNavigation > readerReadiness &&
+			firstFullSection > finalPreambleNavigation &&
+			firstFullOpen > firstFullSection,
+		"the first full open must execute only after final Reader readiness",
+	);
+	assert.equal(
+		(source.match(/recordCurrentFocusedRequestHealth\(\);/g) ?? []).length,
+		4,
+		"every focused result must record the shared request-health assertion",
+	);
+	assert.equal(
+		(
+			source.match(
+				/recordCurrentFocusedRequestHealth\(\);\n\t\tconst focusedShakedownResult = diagnostics\.result/g,
+			) ?? []
+		).length,
+		3,
+	);
+	assert.equal(
+		(
+			source.match(
+				/recordCurrentFocusedRequestHealth\(\);\n\t\tconst shakedownResult = diagnostics\.result/g,
+			) ?? []
+		).length,
+		1,
+	);
+	const focusedHealthStart = source.indexOf(
+		"function recordFocusedRequestHealth(",
+	);
+	const focusedHealthEnd = source.indexOf("\n\tfunction ", focusedHealthStart + 1);
+	assert.ok(focusedHealthStart >= 0 && focusedHealthEnd > focusedHealthStart);
+	assert.equal(
+		(
+			source
+				.slice(focusedHealthStart, focusedHealthEnd)
+				.match(/diagnostics\.expect\(/g) ?? []
+		).length,
+		1,
+		"the shared focused gate must add exactly one diagnostic assertion",
+	);
+	const readerSectionEnd = source.indexOf(
+		'\n\tawait diagnostics.section("Timeline overview and chronology"',
+		readerReadiness,
+	);
+	assert.ok(readerSectionEnd > readerReadiness);
+	assert.doesNotMatch(
+		source.slice(readerReadiness, readerSectionEnd),
+		/requestLifecycleOwner\.start\(\);/,
+		"the frozen Reader section slice must not absorb activation",
+	);
+	const healthSnapshots = [
+		...source.matchAll(/createRequestHealthSnapshot\(\{/g),
+	].map((match) => match.index);
+	assert.equal(healthSnapshots.length, 2);
+	assert.equal(
+		(source.match(/requestHealthSnapshot\(\)/g) ?? []).length,
+		2,
+		"focused and full completion must share one runtime health snapshot closure",
+	);
+	const browserRuntime = source.indexOf(
+		'await diagnostics.section("Browser runtime"',
+	);
+	assert.ok(healthSnapshots[1] < browserRuntime);
 });
 
 function createBoundProfileTransition({

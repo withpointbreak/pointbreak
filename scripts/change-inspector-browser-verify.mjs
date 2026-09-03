@@ -335,7 +335,6 @@
 			if (!record) {
 				if (outcome === "requestfailed") {
 					onRequestFailure({
-						request,
 						transition: null,
 						method: safeRequestValue(request, "method", "unknown"),
 						resourceType: safeRequestValue(
@@ -343,7 +342,9 @@
 							"resourceType",
 							"unknown",
 						),
-						url: safeRequestValue(request, "url", ""),
+						url: capabilityRedactedPath(
+							safeRequestValue(request, "url", ""),
+						),
 						error:
 							safeRequestValue(request, "failure", null)?.errorText ??
 							"unknown request failure",
@@ -572,6 +573,147 @@
 		};
 	}
 
+	function createProfileRequestLifecycleActivationOwner({
+		page,
+		primaryBaseUrl,
+		now = () => Date.now(),
+		setTimer = (callback, delayMs) => createPageTimer(page, callback, delayMs),
+		clearTimer = clearPageTimer,
+		onLifecycleFailure = () => {},
+		onRequestFailure = () => {},
+	}) {
+		let lifecycle = null;
+		let started = false;
+		const safeRequestValue = (request, method, fallback) => {
+			try {
+				return request[method]();
+			} catch {
+				return fallback;
+			}
+		};
+		const recordPreambleRequestFailure = (request) => {
+			onRequestFailure({
+				transition: null,
+				method: safeRequestValue(request, "method", "unknown"),
+				resourceType: safeRequestValue(
+					request,
+					"resourceType",
+					"unknown",
+				),
+				url: capabilityRedactedPath(
+					safeRequestValue(request, "url", ""),
+				),
+				error:
+					safeRequestValue(request, "failure", null)?.errorText ??
+					"unknown request failure",
+				retired: false,
+			});
+		};
+
+		page.on("requestfailed", recordPreambleRequestFailure);
+
+		return {
+			active: () => {
+				if (lifecycle === null)
+					throw new Error("request lifecycle is not active before start");
+				return lifecycle;
+			},
+			isActive: () => lifecycle !== null,
+			start: () => {
+				if (started)
+					throw new Error("request lifecycle start may run only once");
+				started = true;
+				page.off("requestfailed", recordPreambleRequestFailure);
+				lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+					now,
+					setTimer,
+					clearTimer,
+					onLifecycleFailure,
+					onRequestFailure,
+				});
+				return lifecycle;
+			},
+		};
+	}
+
+	function recordFocusedRequestHealth({
+		diagnostics,
+		requestLifecycleFailures,
+		requestHealth,
+	}) {
+		diagnostics.expect(
+			requestLifecycleFailures.length === 0 &&
+				requestHealth.profileSupersessionAdmissionWithinBound &&
+				requestHealth.unexpectedRequestFailures.length === 0,
+			"focused browser lifecycle and requests",
+			[
+				...requestLifecycleFailures.map((failure) => failure.detail),
+				...requestHealth.unexpectedRequestFailureEvidence.map(
+					(failure) =>
+						`${failure.method} ${failure.url}: ${failure.error}`,
+				),
+			].join("\n"),
+			{
+				expected: {
+					lifecycle: [],
+					unexpected: [],
+					admissibleProfileSupersessionMaximum: 1,
+				},
+				actual: {
+					lifecycle: requestLifecycleFailures,
+					unexpected: requestHealth.unexpectedRequestFailureEvidence,
+					admissibleProfileSupersessionCount:
+						requestHealth.admissibleProfileSupersessionFailures.length,
+				},
+			},
+		);
+	}
+
+	function createRequestHealthSnapshot({
+		requestFailures,
+		isAdmissibleRequestFailure,
+	}) {
+		const admissibleProfileSupersessionFailures = requestFailures.filter(
+			isAdmissibleRequestFailure,
+		);
+		const profileSupersessionAdmissionWithinBound =
+			admissibleProfileSupersessionFailures.length <= 1;
+		const admittedRequestFailures = profileSupersessionAdmissionWithinBound
+			? new Set(admissibleProfileSupersessionFailures)
+			: new Set();
+		const unexpectedRequestFailures = requestFailures.filter(
+			(failure) => !admittedRequestFailures.has(failure),
+		);
+		const requestFailureEvidence = (failure) => ({
+			method: failure.method,
+			resourceType: failure.resourceType,
+			url: failure.url,
+			error: failure.error,
+			profileSupersession: failure.transition
+				? {
+						arm: failure.transition.arm,
+						sourceHash: failure.transition.sourceHash,
+						targetHash: failure.transition.targetHash,
+						destinationSucceeded:
+							failure.transition.destinationSucceeded,
+						profileRequestCount:
+							failure.transition.profileRequestsBeforeNavigation.length,
+					}
+				: null,
+		});
+		const unexpectedRequestFailureEvidence = unexpectedRequestFailures.map(
+			requestFailureEvidence,
+		);
+		return {
+			admissibleProfileSupersessionFailures,
+			profileSupersessionAdmissionWithinBound,
+			unexpectedRequestFailures,
+			unexpectedRequestFailureEvidence,
+		};
+	}
+
 	const recordProfileSettlementTimeout = (diagnostics, label, settlement) =>
 		diagnostics.requireCondition(
 			false,
@@ -594,6 +736,9 @@
 		return config.__pointbreakD70Selftest({
 			createDiagnostics: createBrowserDiagnostics,
 			createProfileRequestLifecycle,
+			createProfileRequestLifecycleActivationOwner,
+			createRequestHealthSnapshot,
+			recordFocusedRequestHealth,
 			recordProfileSettlementTimeout,
 			settlementTimeoutMs: PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS,
 		});
@@ -615,7 +760,7 @@
 	const pageErrors = [];
 	const requestFailures = [];
 	const requestLifecycleFailures = [];
-	const requestLifecycle = createProfileRequestLifecycle({
+	const requestLifecycleOwner = createProfileRequestLifecycleActivationOwner({
 		page,
 		primaryBaseUrl: config.server.baseUrl,
 		onLifecycleFailure: (failure) => requestLifecycleFailures.push(failure),
@@ -764,9 +909,25 @@
 			);
 		},
 	});
+	const requestHealthSnapshot = () =>
+		createRequestHealthSnapshot({
+			requestFailures,
+			isAdmissibleRequestFailure: (failure) =>
+				isAdmissibleProfileSupersessionFailure(
+					failure,
+					config.server.baseUrl,
+				),
+		});
+	const recordCurrentFocusedRequestHealth = () =>
+		recordFocusedRequestHealth({
+			diagnostics,
+			requestLifecycleFailures,
+			requestHealth: requestHealthSnapshot(),
+		});
 	await page.goto(bootstrapUrl(config.server), {
 		waitUntil: "domcontentloaded",
 	});
+	if (config.mode !== "full") requestLifecycleOwner.start();
 	const fail = (label, detail) => {
 		throw new Error(`${label}: ${detail}`);
 	};
@@ -931,6 +1092,10 @@
 		label,
 		{ profileSupersessionArm = null } = {},
 	) => {
+		if (config.mode === "full" && !requestLifecycleOwner.isActive()) {
+			requestLifecycleOwner.start();
+		}
+		const requestLifecycle = requestLifecycleOwner.active();
 		if (
 			profileSupersessionArm !== null &&
 			profileSupersessionArm !== "optional" &&
@@ -1691,6 +1856,7 @@
 			},
 			teardown: teardownSection,
 		});
+		recordCurrentFocusedRequestHealth();
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
 		});
@@ -1830,6 +1996,7 @@
 			},
 			teardown: teardownSection,
 		});
+		recordCurrentFocusedRequestHealth();
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
 		});
@@ -2289,6 +2456,7 @@
 				},
 				teardown: teardownSection,
 			});
+		recordCurrentFocusedRequestHealth();
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
 		});
@@ -2499,6 +2667,7 @@
 			},
 			teardown: teardownSection,
 		});
+		recordCurrentFocusedRequestHealth();
 		const shakedownResult = diagnostics.result({ screenshotCount: screenshots });
 		console.log(`POINTBREAK_BROWSER_RESULT=${JSON.stringify(shakedownResult)}`);
 		return shakedownResult;
@@ -7146,41 +7315,13 @@
 					config.server.baseUrl,
 				),
 		);
-	const admissibleProfileSupersessionFailures = requestFailures.filter(
-		(failure) =>
-			isAdmissibleProfileSupersessionFailure(
-				failure,
-				config.server.baseUrl,
-			),
-	);
-	const profileSupersessionAdmissionWithinBound =
-		admissibleProfileSupersessionFailures.length <= 1;
-	const admittedRequestFailures = profileSupersessionAdmissionWithinBound
-		? new Set(admissibleProfileSupersessionFailures)
-		: new Set();
-	const unexpectedRequestFailures = requestFailures.filter(
-		(failure) => !admittedRequestFailures.has(failure),
-	);
-	const requestFailureEvidence = (failure) => ({
-		method: failure.method,
-		resourceType: failure.resourceType,
-		url: failure.url,
-		error: failure.error,
-		profileSupersession: failure.transition
-			? {
-					arm: failure.transition.arm,
-					sourceHash: failure.transition.sourceHash,
-					targetHash: failure.transition.targetHash,
-					destinationSucceeded:
-						failure.transition.destinationSucceeded,
-					profileRequestCount:
-						failure.transition.profileRequestsBeforeNavigation.length,
-				}
-			: null,
-	});
-	const unexpectedRequestFailureEvidence = unexpectedRequestFailures.map(
-		requestFailureEvidence,
-	);
+	const requestHealth = requestHealthSnapshot();
+	const {
+		admissibleProfileSupersessionFailures,
+		profileSupersessionAdmissionWithinBound,
+		unexpectedRequestFailures,
+		unexpectedRequestFailureEvidence,
+	} = requestHealth;
 
 	await diagnostics.section("Browser runtime", async () => {
 		if (requestLifecycleFailures.length > 0) {
