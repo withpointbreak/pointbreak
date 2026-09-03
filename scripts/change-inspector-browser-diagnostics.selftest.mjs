@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
 	BrowserDiagnosticFailure,
@@ -27,6 +29,386 @@ const currentDerivedAccessStatus = {
 	rebuildInFlight: false,
 	rebuildPaused: false,
 };
+
+class FakePage {
+	#listeners = new Map();
+	#url;
+
+	constructor(url = "http://127.0.0.1:4173/#/") {
+		this.#url = url;
+		this.main = new FakeFrame(() => this.#url);
+	}
+
+	on(name, listener) {
+		const listeners = this.#listeners.get(name) ?? [];
+		listeners.push(listener);
+		this.#listeners.set(name, listeners);
+	}
+
+	emit(name, ...args) {
+		for (const listener of this.#listeners.get(name) ?? []) listener(...args);
+	}
+
+	waitForEvent(name, predicate) {
+		return new Promise((resolve) => {
+			const listener = (...args) => {
+				if (!predicate(...args)) return;
+				const listeners = this.#listeners.get(name) ?? [];
+				this.#listeners.set(
+					name,
+					listeners.filter((candidate) => candidate !== listener),
+				);
+				resolve(args[0]);
+			};
+			const listeners = this.#listeners.get(name) ?? [];
+			listeners.push(listener);
+			this.#listeners.set(name, listeners);
+		});
+	}
+
+	mainFrame() {
+		return this.main;
+	}
+
+	setUrl(url) {
+		this.#url = url;
+	}
+
+	url() {
+		return this.#url;
+	}
+}
+
+class FakeFrame {
+	constructor(url) {
+		this.currentUrl = url;
+	}
+
+	url() {
+		return this.currentUrl();
+	}
+}
+
+class FakeRequest {
+	constructor({
+		url = "http://127.0.0.1:4173/api/v2/profile",
+		method = "GET",
+		resourceType = "fetch",
+		frame,
+		frameUnavailable = false,
+		navigation = false,
+		redirectedFrom = null,
+		failure = "net::ERR_ABORTED",
+	} = {}) {
+		this.requestUrl = url;
+		this.requestMethod = method;
+		this.requestResourceType = resourceType;
+		this.requestFrame = frame;
+		this.frameUnavailable = frameUnavailable;
+		this.navigation = navigation;
+		this.redirectSource = redirectedFrom;
+		this.failureText = failure;
+	}
+
+	failure() {
+		return this.failureText === null ? null : { errorText: this.failureText };
+	}
+
+	frame() {
+		if (this.frameUnavailable) throw new Error("request has no frame");
+		return this.requestFrame;
+	}
+
+	isNavigationRequest() {
+		return this.navigation;
+	}
+
+	method() {
+		return this.requestMethod;
+	}
+
+	redirectedFrom() {
+		return this.redirectSource;
+	}
+
+	resourceType() {
+		return this.requestResourceType;
+	}
+
+	url() {
+		return this.requestUrl;
+	}
+}
+
+class FakeResponse {
+	constructor(request, status = 200) {
+		this.sourceRequest = request;
+		this.responseStatus = status;
+	}
+
+	request() {
+		return this.sourceRequest;
+	}
+
+	status() {
+		return this.responseStatus;
+	}
+
+	url() {
+		return this.sourceRequest.url();
+	}
+}
+
+class ManualTimers {
+	#nextId = 1;
+	#timers = new Map();
+
+	constructor() {
+		this.now = 0;
+	}
+
+	clearTimeout = (id) => {
+		this.#timers.delete(id);
+	};
+
+	setTimeout = (callback, delayMs) => {
+		const id = this.#nextId;
+		this.#nextId += 1;
+		this.#timers.set(id, { at: this.now + delayMs, callback });
+		return id;
+	};
+
+	advanceTo(value, { run = true } = {}) {
+		this.now = value;
+		if (run) this.flushDue();
+	}
+
+	flushDue() {
+		for (;;) {
+			const due = [...this.#timers.entries()]
+				.filter(([, timer]) => timer.at <= this.now)
+				.sort(([leftId, left], [rightId, right]) =>
+					left.at === right.at ? leftId - rightId : left.at - right.at,
+				)[0];
+			if (!due) return;
+			const [id, timer] = due;
+			this.#timers.delete(id);
+			timer.callback();
+		}
+	}
+}
+
+async function runD70BrowserSelftest(hook) {
+	let source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	for (const [marker, replacement] of [
+		[
+			"__POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__",
+			BrowserDiagnosticFailure.toString(),
+		],
+		["__POINTBREAK_BROWSER_DIAGNOSTICS__", createBrowserDiagnostics.toString()],
+		[
+			"__POINTBREAK_CHANGE_BROWSER_CONFIG__",
+			'({mode: "full", server: {baseUrl: "http://127.0.0.1:4173"}, __pointbreakD70Selftest: selftestHook})',
+		],
+	]) {
+		assert.ok(source.includes(marker), `missing browser marker ${marker}`);
+		source = source.replace(marker, replacement);
+	}
+	const programOrResult = new Function("selftestHook", `return (${source}\n);`)(
+		hook,
+	);
+	return typeof programOrResult === "function"
+		? await programOrResult(new FakePage())
+		: await programOrResult;
+}
+
+function createBoundProfileTransition({
+	createProfileRequestLifecycle,
+	timers = new ManualTimers(),
+	onRequestFailure = () => {},
+	sourceUrl =
+		"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
+	targetHash = "#/timeline?limit=100&order=desc",
+} = {}) {
+	const page = new FakePage(sourceUrl);
+	const lifecycleFailures = [];
+	const requestFailures = [];
+	const lifecycle = createProfileRequestLifecycle({
+		page,
+		primaryBaseUrl: "http://127.0.0.1:4173",
+		now: () => timers.now,
+		setTimer: timers.setTimeout,
+		clearTimer: timers.clearTimeout,
+		onLifecycleFailure: (failure) => lifecycleFailures.push(failure),
+		onRequestFailure: (failure) => {
+			requestFailures.push(failure);
+			onRequestFailure(failure);
+		},
+	});
+	const visit = lifecycle.createRouteVisitIntent(
+		"#/changes?limit=100&order=change_id_asc",
+	);
+	lifecycle.activateRouteVisit(visit);
+	const request = new FakeRequest({ frame: page.mainFrame() });
+	page.emit("request", request);
+	assert.equal(lifecycle.certifyChangesVisit(visit, visit.intendedHash), true);
+	const arm = lifecycle.snapshotProfileArm({
+		arm: "optional",
+		targetHash,
+	});
+	assert.equal(arm.candidates.length, 1);
+	assert.ok(arm.transition);
+	arm.transition.destinationSucceeded = true;
+	return {
+		arm,
+		lifecycle,
+		lifecycleFailures,
+		page,
+		request,
+		requestFailures,
+		timers,
+	};
+}
+
+async function processTable() {
+	const child = spawn("ps", ["-ax", "-o", "pid=", "-o", "ppid=", "-o", "pgid="]);
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk;
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk;
+	});
+	const code = await new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("exit", resolve);
+	});
+	assert.equal(code, 0, `ps process-table query failed: ${stderr}`);
+	return stdout
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => {
+			const [pid, parentPid, processGroupId] = line.trim().split(/\s+/).map(Number);
+			return { parentPid, pid, processGroupId };
+		});
+}
+
+async function runD70ShellSelftest(caseName, { signal = null } = {}) {
+	const root = await mkdtemp(join(tmpdir(), `pointbreak-d70-${caseName}-`));
+	const script = new URL(
+		"./change-inspector-browser-verify.sh",
+		import.meta.url,
+	).pathname;
+	const child = spawn(
+		process.env.POINTBREAK_BROWSER_STAGE_SELFTEST_BASH ?? "bash",
+		[script],
+		{
+			env: {
+				...process.env,
+				POINTBREAK_BROWSER_STAGE_SELFTEST: "1",
+				POINTBREAK_BROWSER_STAGE_SELFTEST_CASE: caseName,
+				POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT: root,
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		},
+	);
+	let stdout = "";
+	let stderr = "";
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk;
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk;
+	});
+	const startPath = join(root, "logs", "browser-stage-start.json");
+	const descendantPath = join(root, "fake-descendant.pid");
+	let start;
+	let launched = false;
+	for (let attempt = 0; attempt < 200; attempt += 1) {
+		try {
+			start = JSON.parse(await readFile(startPath, "utf8"));
+			await readFile(descendantPath);
+			launched = true;
+			break;
+		} catch {
+			await delay(10);
+		}
+	}
+	assert.equal(
+		launched,
+		true,
+		`${caseName} did not launch its recorded process tree`,
+	);
+	let workerPids = [];
+	let workerTimerPids = [];
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		const liveProcesses = await processTable();
+		workerPids = liveProcesses
+			.filter(
+				(process) =>
+					process.parentPid === child.pid && process.pid !== start.childPid,
+			)
+			.map((process) => process.pid);
+		workerTimerPids = liveProcesses
+			.filter((process) => workerPids.includes(process.parentPid))
+			.map((process) => process.pid);
+		if (workerPids.length >= 2 && workerTimerPids.length >= 2) break;
+		await delay(10);
+	}
+	assert.ok(workerPids.length >= 2, `${caseName} did not expose both stage workers`);
+	assert.ok(
+		workerTimerPids.length >= 2,
+		`${caseName} did not expose both worker timers`,
+	);
+	const waitForMarker = async (name) => {
+		for (let attempt = 0; attempt < 400; attempt += 1) {
+			try {
+				return await readFile(join(root, name), "utf8");
+			} catch {
+				await delay(10);
+			}
+		}
+		assert.fail(`${caseName} did not publish ${name}`);
+	};
+	if (caseName === "precedence-exit-timeout") {
+		await writeFile(join(root, "child-release"), "release\n");
+		assert.equal((await waitForMarker("winner-observed")).trim(), "exit");
+		await writeFile(join(root, "watchdog-release"), "release\n");
+		await waitForMarker("watchdog-fired");
+		await writeFile(join(root, "supervisor-release"), "release\n");
+	} else if (caseName === "precedence-timeout-exit") {
+		await writeFile(join(root, "watchdog-release"), "release\n");
+		assert.equal((await waitForMarker("winner-observed")).trim(), "timeout");
+		await writeFile(join(root, "child-release"), "release\n");
+		await waitForMarker("fake-child-exited");
+		await writeFile(join(root, "supervisor-release"), "release\n");
+	} else if (signal !== null) {
+		child.kill(signal);
+	}
+	const exit = await Promise.race([
+		new Promise((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", (code, exitSignal) =>
+				resolve({ code, signal: exitSignal }),
+			);
+		}),
+		delay(6_000, undefined, { ref: false }).then(() => {
+			child.kill("SIGKILL");
+			throw new Error(`${caseName} shell selftest exceeded six seconds`);
+		}),
+	]);
+	return { exit, root, stderr, stdout, workerPids, workerTimerPids };
+}
+
+async function processExists(pid) {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	return (await processTable()).some((process) => process.pid === pid);
+}
 
 test("browser program remains one expression for the Playwright runner", async () => {
 	let source = await readFile(
@@ -543,15 +925,19 @@ test("D69 profile supersession accounting is exact-object, explicit-arm, and fai
 		);
 	}
 
-	assert.match(source, /page\.on\("request",[\s\S]*outstandingRequests\.add/);
-	assert.match(source, /page\.on\("response",[\s\S]*outstandingRequests\.delete/);
+	assert.match(source, /function createProfileRequestLifecycle\(/);
+	assert.match(source, /page\.on\("request", requestStarted\)/);
 	assert.match(
 		source,
-		/page\.on\("requestfinished",[\s\S]*outstandingRequests\.delete/,
+		/page\.on\("response",[\s\S]*requestTerminated\(response\.request\(\), "response"\)/,
 	);
 	assert.match(
 		source,
-		/page\.on\("requestfailed",[\s\S]*requestFailures\.push[\s\S]*outstandingRequests\.delete/,
+		/page\.on\("requestfinished",[\s\S]*requestTerminated\(request, "requestfinished"\)/,
+	);
+	assert.match(
+		source,
+		/page\.on\("requestfailed",[\s\S]*requestTerminated\(request, "requestfailed"\)/,
 	);
 	assert.match(
 		source,
@@ -573,6 +959,856 @@ test("D69 profile supersession accounting is exact-object, explicit-arm, and fai
 		/admissibleProfileSupersessionFailures\.length <= 1/,
 		"the whole invocation may admit at most one exact supersession failure",
 	);
+});
+
+test("D70 production lifecycle binds committed documents and exact accepted route visits", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({ createProfileRequestLifecycle, settlementTimeoutMs }) => {
+			assert.equal(settlementTimeoutMs, 30_000);
+			const page = new FakePage(
+				"http://127.0.0.1:4173/#/?token=bootstrap-secret",
+			);
+			const timers = new ManualTimers();
+			const lifecycleFailures = [];
+			const requestFailures = [];
+			const lifecycle = createProfileRequestLifecycle({
+				page,
+				primaryBaseUrl: "http://127.0.0.1:4173",
+				now: () => timers.now,
+				setTimer: timers.setTimeout,
+				clearTimer: timers.clearTimeout,
+				onLifecycleFailure: (failure) => lifecycleFailures.push(failure),
+				onRequestFailure: (failure) => requestFailures.push(failure),
+			});
+
+			const staleBootstrap = new FakeRequest({ frame: page.mainFrame() });
+			page.emit("request", staleBootstrap);
+			assert.equal(
+				lifecycle.requestRecord(staleBootstrap).sourceHash,
+				"#/",
+				"request-start ownership must not retain the bootstrap capability",
+			);
+			const navigationRoot = new FakeRequest({
+				frame: page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				url: "http://127.0.0.1:4173/redirect-one",
+			});
+			const navigationRedirect = new FakeRequest({
+				frame: page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				redirectedFrom: navigationRoot,
+				url: "http://127.0.0.1:4173/redirect-two",
+			});
+			const navigationFinal = new FakeRequest({
+				frame: page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+				redirectedFrom: navigationRedirect,
+				url: "http://127.0.0.1:4173/",
+			});
+			for (const request of [
+				navigationRoot,
+				navigationRedirect,
+				navigationFinal,
+			]) {
+				page.emit("request", request);
+				page.emit("response", new FakeResponse(request));
+				page.emit("requestfinished", request);
+				assert.equal(lifecycle.state().committedDocumentGeneration, 0);
+				assert.equal(
+					lifecycle.state().pendingNavigationRoot,
+					navigationRoot,
+					"successful Request settlement must not erase the redirect-root token",
+				);
+			}
+			page.setUrl(
+				"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
+			);
+			page.emit("domcontentloaded");
+			assert.equal(lifecycle.state().committedDocumentGeneration, 1);
+			assert.equal(lifecycle.state().pendingNavigationRoot, null);
+			assert.equal(lifecycle.requestRecord(staleBootstrap).status, "retired");
+			page.emit("domcontentloaded");
+			assert.equal(
+				lifecycle.state().committedDocumentGeneration,
+				1,
+				"a DCL without a pending redirect root must not advance generation",
+			);
+			page.emit("requestfailed", staleBootstrap);
+			assert.equal(requestFailures.at(-1).transition, null);
+			assert.equal(requestFailures.at(-1).retired, true);
+
+			const acceptedVisit = lifecycle.createRouteVisitIntent(
+				"#/changes?limit=100&order=change_id_asc",
+			);
+			lifecycle.activateRouteVisit(acceptedVisit);
+			const currentPoll = new FakeRequest({ frame: page.mainFrame() });
+			page.emit("request", currentPoll);
+			assert.equal(
+				lifecycle.requestRecord(currentPoll).routeVisitId,
+				acceptedVisit.id,
+				"a poll begun after route intent but before readiness must retain the visit",
+			);
+			assert.equal(
+				lifecycle.certifyChangesVisit(acceptedVisit, acceptedVisit.intendedHash),
+				true,
+			);
+			assert.deepEqual(lifecycle.eligibleProfileRequests(acceptedVisit), [
+				currentPoll,
+			]);
+			assert.equal(
+				await lifecycle.awaitRequiredProfileRequest(acceptedVisit),
+				currentPoll,
+				"the required arm must reuse an already-outstanding eligible poll",
+			);
+			const arm = lifecycle.snapshotProfileArm({
+				arm: "optional",
+				targetHash: "#/timeline?limit=100&order=desc",
+			});
+			assert.deepEqual(arm.candidates, [currentPoll]);
+			assert.equal(lifecycle.state().currentRouteVisit, null);
+			assert.deepEqual(
+				lifecycle.eligibleProfileRequests(acceptedVisit),
+				[],
+				"a consumed visit must stay closed after the outgoing arm",
+			);
+			assert.ok(
+				lifecycle.requestRecord(currentPoll).ordinal >
+					lifecycle.requestRecord(staleBootstrap).ordinal,
+				"request ordinals must be monotonic and invocation-local",
+			);
+			assert.equal(lifecycle.requestRecord(currentPoll).documentGeneration, 1);
+			assert.equal(lifecycle.requestRecord(currentPoll).initiator, "main-frame");
+
+			const sameHashVisit = lifecycle.createRouteVisitIntent(
+				acceptedVisit.intendedHash,
+			);
+			lifecycle.activateRouteVisit(sameHashVisit);
+			assert.equal(
+				lifecycle.certifyChangesVisit(sameHashVisit, sameHashVisit.intendedHash),
+				true,
+			);
+			assert.deepEqual(
+				lifecycle.eligibleProfileRequests(sameHashVisit),
+				[],
+				"an earlier identical-hash visit must not regain ownership",
+			);
+			const generationBeforeSameDocumentRoute =
+				lifecycle.state().committedDocumentGeneration;
+			page.emit("framenavigated", page.mainFrame());
+			assert.equal(
+				lifecycle.state().currentRouteVisit,
+				null,
+				"an unowned main-frame route event must invalidate even an identical hash",
+			);
+			assert.equal(
+				lifecycle.state().committedDocumentGeneration,
+				generationBeforeSameDocumentRoute,
+				"a same-document route event must not advance document generation",
+			);
+
+			const acceptedLifecycle = ({
+				url = "http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
+			} = {}) => {
+				const candidatePage = new FakePage(url);
+				const candidateFailures = [];
+				const candidateLifecycle = createProfileRequestLifecycle({
+					page: candidatePage,
+					primaryBaseUrl: "http://127.0.0.1:4173",
+					now: () => timers.now,
+					setTimer: timers.setTimeout,
+					clearTimer: timers.clearTimeout,
+					onLifecycleFailure: (failure) =>
+						candidateFailures.push(failure),
+					onRequestFailure: () => {},
+				});
+				const candidateVisit = candidateLifecycle.createRouteVisitIntent(
+					"#/changes?limit=100&order=change_id_asc",
+				);
+				candidateLifecycle.activateRouteVisit(candidateVisit);
+				return {
+					failures: candidateFailures,
+					lifecycle: candidateLifecycle,
+					page: candidatePage,
+					visit: candidateVisit,
+				};
+			};
+
+			const zero = acceptedLifecycle();
+			assert.equal(
+				zero.lifecycle.certifyChangesVisit(
+					zero.visit,
+					zero.visit.intendedHash,
+				),
+				true,
+			);
+			const zeroArm = zero.lifecycle.snapshotProfileArm({
+				arm: "optional",
+				targetHash: "#/timeline?limit=100&order=desc",
+			});
+			assert.deepEqual(zeroArm.candidates, []);
+			assert.equal(zeroArm.transition, null);
+			assert.equal(zero.lifecycle.currentAcceptedRouteVisit(), null);
+
+			const future = acceptedLifecycle();
+			assert.equal(
+				future.lifecycle.certifyChangesVisit(
+					future.visit,
+					future.visit.intendedHash,
+				),
+				true,
+			);
+			const futureRequired = future.lifecycle.awaitRequiredProfileRequest(
+				future.visit,
+			);
+			const futurePoll = new FakeRequest({ frame: future.page.mainFrame() });
+			future.page.emit("request", futurePoll);
+			assert.equal(await futureRequired, futurePoll);
+
+			const completedFuture = acceptedLifecycle();
+			assert.equal(
+				completedFuture.lifecycle.certifyChangesVisit(
+					completedFuture.visit,
+					completedFuture.visit.intendedHash,
+				),
+				true,
+			);
+			const completedRequired =
+				completedFuture.lifecycle.awaitRequiredProfileRequest(
+					completedFuture.visit,
+				);
+			const completedFuturePoll = new FakeRequest({
+				frame: completedFuture.page.mainFrame(),
+			});
+			completedFuture.page.emit("request", completedFuturePoll);
+			completedFuture.page.emit(
+				"response",
+				new FakeResponse(completedFuturePoll),
+			);
+			assert.equal(await completedRequired, completedFuturePoll);
+			const completedRequiredArm =
+				completedFuture.lifecycle.snapshotProfileArm({
+					arm: "required",
+					targetHash: "#/timeline?limit=100&order=desc",
+				});
+			assert.deepEqual(completedRequiredArm.candidates, []);
+			assert.equal(completedRequiredArm.transition, null);
+			assert.equal(
+				completedFuture.lifecycle.currentAcceptedRouteVisit(),
+				completedFuture.visit,
+				"a completed required poll must retain the accepted source visit for retry",
+			);
+
+			const multiple = acceptedLifecycle();
+			const firstConcurrent = new FakeRequest({
+				frame: multiple.page.mainFrame(),
+			});
+			const secondConcurrent = new FakeRequest({
+				frame: multiple.page.mainFrame(),
+			});
+			multiple.page.emit("request", firstConcurrent);
+			multiple.page.emit("request", secondConcurrent);
+			assert.equal(
+				multiple.lifecycle.certifyChangesVisit(
+					multiple.visit,
+					multiple.visit.intendedHash,
+				),
+				true,
+			);
+			assert.equal(
+				await multiple.lifecycle.awaitRequiredProfileRequest(multiple.visit),
+				firstConcurrent,
+				"the subsequent snapshot, not the wait helper, owns multiple-candidate refusal",
+			);
+			const multipleArm = multiple.lifecycle.snapshotProfileArm({
+				arm: "optional",
+				targetHash: "#/timeline?limit=100&order=desc",
+			});
+			assert.deepEqual(multipleArm.candidates, [
+				firstConcurrent,
+				secondConcurrent,
+			]);
+			assert.equal(multipleArm.transition, null);
+			assert.equal(multiple.lifecycle.currentAcceptedRouteVisit(), null);
+
+			const ineligible = acceptedLifecycle();
+			const completed = new FakeRequest({ frame: ineligible.page.mainFrame() });
+			for (const request of [
+				new FakeRequest({ frame: new FakeFrame(() => "about:blank") }),
+				new FakeRequest({ frameUnavailable: true }),
+				new FakeRequest({ frame: ineligible.page.mainFrame(), method: "POST" }),
+				new FakeRequest({
+					frame: ineligible.page.mainFrame(),
+					resourceType: "document",
+				}),
+				new FakeRequest({
+					frame: ineligible.page.mainFrame(),
+					url: "http://127.0.0.1:4173/api/v2/history",
+				}),
+				completed,
+			]) {
+				ineligible.page.emit("request", request);
+			}
+			ineligible.page.emit("response", new FakeResponse(completed));
+			assert.equal(
+				ineligible.lifecycle.certifyChangesVisit(
+					ineligible.visit,
+					ineligible.visit.intendedHash,
+				),
+				true,
+			);
+			assert.deepEqual(
+				ineligible.lifecycle.eligibleProfileRequests(ineligible.visit),
+				[],
+				"subframe, unavailable-frame, non-GET/fetch/path, and completed requests must be ineligible",
+			);
+			assert.deepEqual(ineligible.failures, []);
+
+			const wrongSource = acceptedLifecycle({
+				url: "http://127.0.0.1:4173/#/attention",
+			});
+			const wrongSourceRequest = new FakeRequest({
+				frame: wrongSource.page.mainFrame(),
+			});
+			wrongSource.page.emit("request", wrongSourceRequest);
+			wrongSource.page.setUrl(
+				"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
+			);
+			assert.equal(
+				wrongSource.lifecycle.certifyChangesVisit(
+					wrongSource.visit,
+					wrongSource.visit.intendedHash,
+				),
+				true,
+			);
+			assert.deepEqual(
+				wrongSource.lifecycle.eligibleProfileRequests(wrongSource.visit),
+				[],
+			);
+
+			const staleGeneration = acceptedLifecycle();
+			const stalePoll = new FakeRequest({
+				frame: staleGeneration.page.mainFrame(),
+			});
+			staleGeneration.page.emit("request", stalePoll);
+			assert.equal(
+				staleGeneration.lifecycle.certifyChangesVisit(
+					staleGeneration.visit,
+					staleGeneration.visit.intendedHash,
+				),
+				true,
+			);
+			const replacementRoot = new FakeRequest({
+				frame: staleGeneration.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			staleGeneration.page.emit("request", replacementRoot);
+			staleGeneration.page.emit("domcontentloaded");
+			assert.equal(
+				staleGeneration.lifecycle.requestRecord(stalePoll).status,
+				"retired",
+			);
+			assert.deepEqual(
+				staleGeneration.lifecycle.eligibleProfileRequests(
+					staleGeneration.visit,
+				),
+				[],
+			);
+
+			const negativePage = new FakePage();
+			const negativeFailures = [];
+			const negative = createProfileRequestLifecycle({
+				page: negativePage,
+				primaryBaseUrl: "http://127.0.0.1:4173",
+				now: () => timers.now,
+				setTimer: timers.setTimeout,
+				clearTimer: timers.clearTimeout,
+				onLifecycleFailure: (failure) => negativeFailures.push(failure),
+				onRequestFailure: () => {},
+			});
+			const failedNavigation = new FakeRequest({
+				frame: negativePage.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			negativePage.emit("request", failedNavigation);
+			negativePage.emit("requestfailed", failedNavigation);
+			negativePage.emit("domcontentloaded");
+			assert.equal(negative.state().committedDocumentGeneration, 0);
+			const overlapOne = new FakeRequest({
+				frame: negativePage.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			const overlapTwo = new FakeRequest({
+				frame: negativePage.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			negativePage.emit("request", overlapOne);
+			negativePage.emit("request", overlapTwo);
+			negativePage.emit("domcontentloaded");
+			assert.equal(negative.state().committedDocumentGeneration, 0);
+			const subframe = new FakeFrame(() => "http://127.0.0.1:4173/frame");
+			negativePage.emit(
+				"request",
+				new FakeRequest({ frame: subframe, navigation: true }),
+			);
+			negativePage.emit("domcontentloaded");
+			assert.equal(negative.state().committedDocumentGeneration, 0);
+			negativePage.emit(
+				"request",
+				new FakeRequest({ frameUnavailable: true, navigation: false }),
+			);
+			negativePage.emit(
+				"request",
+				new FakeRequest({ frame: null, navigation: false }),
+			);
+			negativePage.emit(
+				"request",
+				new FakeRequest({ frame: null, navigation: true }),
+			);
+			negativePage.emit(
+				"request",
+				new FakeRequest({ frameUnavailable: true, navigation: true }),
+			);
+			assert.equal(
+				negativeFailures.filter((failure) =>
+					/frame.*unavailable.*navigation/i.test(failure.detail),
+				).length,
+				2,
+				"null and throwing navigation-frame lookups must both fail fatally",
+			);
+			assert.ok(
+				negativeFailures.some((failure) => /overlap|unrelated/i.test(failure.detail)),
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
+});
+
+test("D70 production settlement is bounded, settle-once, and capability-redacted", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({
+			createProfileRequestLifecycle,
+			createDiagnostics,
+			recordProfileSettlementTimeout,
+			settlementTimeoutMs,
+		}) => {
+			const beforeJoin = createBoundProfileTransition({
+				createProfileRequestLifecycle,
+			});
+			beforeJoin.timers.advanceTo(100_000);
+			const beforeJoinPromise = beforeJoin.lifecycle.enterSettlementJoin(
+				beforeJoin.arm.transition,
+			);
+			beforeJoin.timers.advanceTo(129_999);
+			beforeJoin.page.emit("requestfinished", beforeJoin.request);
+			assert.equal((await beforeJoinPromise).outcome, "requestfinished");
+			beforeJoin.timers.advanceTo(130_000);
+			assert.equal(beforeJoin.arm.transition.terminalHistory.length, 1);
+
+			const timedOut = createBoundProfileTransition({
+				createProfileRequestLifecycle,
+				sourceUrl:
+					"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc&token=bootstrap-secret",
+				targetHash:
+					"#/timeline?limit=100&order=desc&token=destination-secret",
+			});
+			const timeoutPromise = timedOut.lifecycle.enterSettlementJoin(
+				timedOut.arm.transition,
+			);
+			timedOut.timers.advanceTo(settlementTimeoutMs, { run: false });
+			timedOut.timers.flushDue();
+			const timeout = await timeoutPromise;
+			assert.equal(timeout.outcome, "timeout");
+			assert.equal(
+				timedOut.lifecycle.transitionForRequest(timedOut.request),
+				null,
+				"timeout must detach exact Request ownership before resolution",
+			);
+			timedOut.page.emit("requestfailed", timedOut.request);
+			assert.equal(timedOut.requestFailures.length, 1);
+			assert.equal(timedOut.requestFailures[0].transition, null);
+			assert.equal(timedOut.arm.transition.terminalHistory.length, 1);
+
+			const diagnostics = createDiagnostics();
+			await diagnostics.section("D70 settlement", async () => {
+				recordProfileSettlementTimeout(diagnostics, "profile settlement", timeout);
+			});
+			const report = diagnostics.result({ screenshotCount: 0 });
+			assert.equal(report.status, "failed");
+			assert.equal(report.globalInvalid, false);
+			assert.equal(report.failures.length, 1);
+			assert.deepEqual(Object.keys(timeout.diagnostic).sort(), [
+				"candidateCount",
+				"destinationOutcome",
+				"documentGeneration",
+				"method",
+				"outcome",
+				"path",
+				"requestAgeMs",
+				"requestOrdinal",
+				"resourceType",
+				"routeVisitId",
+				"sourceHash",
+				"targetHash",
+				"terminalHistory",
+				"timeoutMs",
+			]);
+			const serialized = JSON.stringify(report.failures[0]);
+			assert.doesNotMatch(
+				serialized,
+				/bootstrap-secret|destination-secret|authorization|bearer|actor:|store content|response body/i,
+			);
+			assert.match(serialized, /requestOrdinal/);
+			assert.match(serialized, /documentGeneration/);
+			assert.match(serialized, /routeVisitId/);
+			assert.match(serialized, /terminalHistory/);
+
+			const terminalFirst = createBoundProfileTransition({
+				createProfileRequestLifecycle,
+			});
+			const terminalFirstPromise = terminalFirst.lifecycle.enterSettlementJoin(
+				terminalFirst.arm.transition,
+			);
+			terminalFirst.timers.advanceTo(settlementTimeoutMs, { run: false });
+			terminalFirst.page.emit("requestfailed", terminalFirst.request);
+			terminalFirst.timers.flushDue();
+			assert.equal((await terminalFirstPromise).outcome, "requestfailed");
+			assert.equal(terminalFirst.arm.transition.terminalHistory.length, 1);
+
+			const timeoutFirst = createBoundProfileTransition({
+				createProfileRequestLifecycle,
+			});
+			const timeoutFirstPromise = timeoutFirst.lifecycle.enterSettlementJoin(
+				timeoutFirst.arm.transition,
+			);
+			timeoutFirst.timers.advanceTo(settlementTimeoutMs, { run: false });
+			timeoutFirst.timers.flushDue();
+			timeoutFirst.page.emit("requestfailed", timeoutFirst.request);
+			assert.equal((await timeoutFirstPromise).outcome, "timeout");
+			assert.equal(timeoutFirst.arm.transition.terminalHistory.length, 1);
+
+			for (const [event, expected] of [
+				["response", "response"],
+				["requestfinished", "requestfinished"],
+				["requestfailed", "requestfailed"],
+			]) {
+				const terminal = createBoundProfileTransition({
+					createProfileRequestLifecycle,
+				});
+				const promise = terminal.lifecycle.enterSettlementJoin(
+					terminal.arm.transition,
+				);
+				terminal.page.emit(
+					event,
+					event === "response"
+						? new FakeResponse(terminal.request)
+						: terminal.request,
+				);
+				assert.equal((await promise).outcome, expected);
+			}
+
+			const replaced = createBoundProfileTransition({
+				createProfileRequestLifecycle,
+			});
+			const replacementNavigation = new FakeRequest({
+				frame: replaced.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			replaced.page.emit("request", replacementNavigation);
+			replaced.page.emit("domcontentloaded");
+			assert.equal(
+				(
+					await replaced.lifecycle.enterSettlementJoin(replaced.arm.transition)
+				).outcome,
+				"document-replaced",
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
+});
+
+test("D70 shell stage helper publishes live terminal evidence and reaps its process group", async () => {
+	const expectations = [
+		{
+			caseName: "exit-0",
+			expectedCode: 0,
+			terminalCode: 0,
+			winner: "exit",
+			cleanup: "complete",
+		},
+		{
+			caseName: "exit-23",
+			expectedCode: 23,
+			terminalCode: 23,
+			winner: "exit",
+			cleanup: "complete",
+		},
+		{
+			caseName: "timeout",
+			expectedCode: 124,
+			terminalCode: 124,
+			winner: "timeout",
+			cleanup: "complete",
+		},
+		{
+			caseName: "signal-int",
+			signal: "SIGINT",
+			expectedCode: 130,
+			terminalCode: 130,
+			terminalSignal: "INT",
+			winner: "signal",
+			cleanup: "complete",
+		},
+		{
+			caseName: "signal-term",
+			signal: "SIGTERM",
+			expectedCode: 143,
+			terminalCode: 143,
+			terminalSignal: "TERM",
+			winner: "signal",
+			cleanup: "complete",
+		},
+		{
+			caseName: "precedence-exit-timeout",
+			expectedCode: 0,
+			terminalCode: 0,
+			winner: "exit",
+			cleanup: "complete",
+		},
+		{
+			caseName: "precedence-timeout-exit",
+			expectedCode: 124,
+			terminalCode: 124,
+			winner: "timeout",
+			cleanup: "complete",
+		},
+		{
+			caseName: "heartbeat-failed",
+			expectedCode: 125,
+			terminalCode: 125,
+			winner: "internal",
+			cleanup: "complete",
+		},
+		{
+			caseName: "heartbeat-late",
+			expectedCode: 125,
+			terminalCode: 125,
+			winner: "internal",
+			cleanup: "complete",
+		},
+		{
+			caseName: "heartbeat-render-hung",
+			expectedCode: 0,
+			terminalCode: 0,
+			winner: "exit",
+			cleanup: "complete",
+		},
+		{
+			caseName: "ps-failed",
+			expectedCode: 125,
+			terminalCode: 0,
+			winner: "exit",
+			cleanup: "failed",
+		},
+	];
+	for (const {
+		caseName,
+		cleanup,
+		expectedCode,
+		signal = null,
+		terminalCode,
+		terminalSignal = null,
+		winner,
+	} of expectations) {
+		const execution = await runD70ShellSelftest(caseName, { signal });
+		assert.equal(
+			execution.exit.code,
+			expectedCode,
+			`${caseName} exit mismatch: ${execution.stderr}`,
+		);
+		assert.equal(execution.exit.signal, null);
+		const startBytes = await readFile(
+			join(execution.root, "logs", "browser-stage-start.json"),
+			"utf8",
+		);
+		const heartbeatBytes = await readFile(
+			join(execution.root, "logs", "browser-stage-heartbeat.log"),
+			"utf8",
+		);
+		const terminalPath = join(
+			execution.root,
+			"logs",
+			"browser-stage-terminal.json",
+		);
+		const terminalBytes = await readFile(terminalPath, "utf8");
+		const start = JSON.parse(startBytes);
+		const terminal = JSON.parse(terminalBytes);
+		assert.equal(start.schema, "pointbreak.browser-stage-start");
+		assert.equal(start.version, 1);
+		assert.equal(start.mode, "selftest");
+		assert.equal(terminal.schema, "pointbreak.browser-stage-terminal");
+		assert.equal(terminal.version, 1);
+		assert.equal(terminal.winner, winner);
+		assert.equal(terminal.exitCode, terminalCode);
+		assert.equal(terminal.signal, terminalSignal);
+		assert.equal(terminal.runCodeGroupCleanup, cleanup);
+		assert.equal(terminal.browserSessionCleanup, "pending");
+		assert.match(execution.stdout, /pointbreak\.browser-stage-terminal/);
+		const heartbeats = heartbeatBytes
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
+		assert.ok(heartbeats.length >= 1);
+		for (const heartbeat of heartbeats) {
+			assert.deepEqual(Object.keys(heartbeat).sort(), [
+				"childAlive",
+				"elapsedSeconds",
+				"gateLogBytes",
+				"latestScreenshot",
+				"mode",
+				"screenshotCount",
+			]);
+		}
+		assert.doesNotMatch(
+			`${startBytes}${heartbeatBytes}${terminalBytes}`,
+			/token|authorization|bearer|actor:|store content|response body/i,
+		);
+		assert.equal(await processExists(terminal.childPid), false);
+		const descendantPath = join(execution.root, "fake-descendant.pid");
+		const descendantPid = Number(
+			(await readFile(descendantPath, "utf8")).trim(),
+		);
+		assert.equal(await processExists(descendantPid), false);
+		for (const workerPid of [
+			...execution.workerPids,
+			...execution.workerTimerPids,
+		]) {
+			assert.equal(await processExists(workerPid), false);
+		}
+		let renderPidBytes = null;
+		try {
+			renderPidBytes = await readFile(
+				join(execution.root, "heartbeat-render.pid"),
+				"utf8",
+			);
+		} catch (error) {
+			if (error?.code !== "ENOENT") throw error;
+		}
+		if (renderPidBytes !== null) {
+			assert.equal(await processExists(Number(renderPidBytes.trim())), false);
+		}
+		assert.deepEqual(
+			(await processTable())
+				.filter(
+					(process) => process.processGroupId === terminal.processGroupId,
+				)
+				.map((process) => process.pid),
+			[],
+			`${caseName} left members in the recorded process group`,
+		);
+		await delay(100);
+		assert.equal(await readFile(terminalPath, "utf8"), terminalBytes);
+		assert.equal(
+			await readFile(
+				join(execution.root, "logs", "browser-stage-heartbeat.log"),
+				"utf8",
+			),
+			heartbeatBytes,
+		);
+		await assert.rejects(
+			readFile(join(execution.root, "logs", "browser-result.json")),
+			/ENOENT/,
+		);
+		await assert.rejects(
+			readFile(join(execution.root, "manifest.json")),
+			/ENOENT/,
+		);
+	}
+});
+
+test("D70 stage contracts are production-bounded, inventoried, and documented", async () => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const readme = await readFile(new URL("./README.md", import.meta.url), "utf8");
+	assert.match(browser, /PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS\s*=\s*30_000/);
+	assert.match(browser, /__pointbreakD70Selftest/);
+	assert.match(
+		browser,
+		/profileSupersessionArm === "required"[\s\S]*profileRequestsBeforeNavigation\.length === 0[\s\S]*navigationPerformed: false[\s\S]*profileSupersessionOutcome: "completed-before-navigation"/,
+	);
+	assert.match(shell, /BROWSER_PROGRAM_TIMEOUT_SECONDS=600/);
+	assert.match(shell, /BROWSER_STAGE_HEARTBEAT_SECONDS=15/);
+	assert.match(shell, /BROWSER_STAGE_GROUP_CLEANUP_SECONDS=10/);
+	assert.match(
+		shell,
+		/set -m[\s\S]*\) >"\$stage_gate_log" 2>&1 &[\s\S]*child_pid=\$![\s\S]*set \+m/,
+	);
+	assert.match(shell, /command in[\s\S]*\bps\b/);
+	const helper = shell.slice(
+		shell.indexOf("run_browser_program_stage()"),
+		shell.indexOf("browser_stage_selftest_child()"),
+	);
+	assert.match(
+		helper,
+		/shell_group_id=""[\s\S]*read_process_group_id "\$\$"[\s\S]*is_positive_process_id "\$shell_group_id"/,
+	);
+	assert.ok(
+		helper.indexOf("trap 'observe_browser_stage_terminal signal 130 INT") <
+			helper.indexOf('atomic_publish_stage_json "$stage_start"'),
+		"handled stage signals must be owned before the start receipt is published",
+	);
+	assert.ok(
+		helper.lastIndexOf("trap - INT TERM USR1") >
+			helper.lastIndexOf('atomic_publish_stage_json "$stage_terminal"'),
+		"handled stage signals must remain owned through terminal publication",
+	);
+	const browserStageCall = shell.indexOf("run_browser_program_stage ", 1);
+	const browserStageStatusCheck = shell.indexOf(
+		'if [ "$browser_gate_status" -ne 0 ]',
+		browserStageCall,
+	);
+	const browserResultWrite = shell.indexOf(
+		'printf \'%s\\n\' "$browser_result_line" >"$browser_result"',
+		browserStageCall,
+	);
+	assert.ok(
+		browserStageStatusCheck > browserStageCall &&
+			browserStageStatusCheck < browserResultWrite,
+		"a failed browser-program stage must stop before browser-result publication",
+	);
+	assert.doesNotMatch(
+		shell.slice(shell.indexOf("usage()"), shell.indexOf("EOF", shell.indexOf("usage()"))),
+		/POINTBREAK_BROWSER_STAGE_SELFTEST/,
+	);
+	for (const path of [
+		"logs/browser-stage-start.json",
+		"logs/browser-stage-heartbeat.log",
+		"logs/browser-stage-terminal.json",
+	]) {
+		assert.match(shell, new RegExp(path.replaceAll("/", "\\/")));
+		assert.match(readme, new RegExp(path.replaceAll("/", "\\/")));
+	}
+	assert.match(readme, /run-code[^.]*600 seconds/i);
+	assert.match(readme, /heartbeat[^.]*15 seconds/i);
+	assert.match(readme, /process group[\s\S]*10 seconds/i);
+	assert.match(readme, /browser session cleanup[\s\S]*pending/i);
+	assert.match(readme, /timeout[\s\S]*browser-result\.json[\s\S]*manifest\.json/i);
 });
 
 test("retained-master Back waits for the complete destination state", async () => {

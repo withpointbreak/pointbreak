@@ -66,6 +66,30 @@ exact version and source commit, and explicit owner authorization are defined in
 
 The four literal shakedown modes are bounded readiness tiers for the full Change Inspector browser gate. Each accepts no caller evidence root: the harness creates one temporary root and uses the same public fixture materializer, primary Inspector server, injected browser program, and launch path as the full gate. The first three modes exit after one hard-coded journey. `--shakedown` observes two completion-anchored quiet polls, permits only serialized `/api/v2/profile` probes, and verifies unchanged-generation disclosure and scroll retention. `--shakedown-timeline-boundary` holds one Timeline continuation while a due tick passes, rejects background API fan-out during that foreground traversal, then verifies the released global `G` traversal reaches the terminal selected event. `--shakedown-exact-history-focus` verifies Changes `G`, accepted exact Revision and resource hydration, browser Back restoration, and narrow detail Back route/closure/focus as one history journey. `--shakedown-return-destinations` instead runs four independent diagnostics sections so an earlier non-fatal failure cannot hide a later journey. It verifies narrow Timeline detail Back reaches the fully restored retained master; performs an authenticated typed `limit=1` Changes preflight and binds its exact projection stamp and terminal capability to the rendered list before any detail/keyboard input; verifies a Changes exact-detail return completes before View input and the shared terminal-`G`/first-page-`g` traversal; preserves the parallel-current filtered `limit=100` Revision/resource/Back journey through accepted route-bound bodies with retained detail focus; and uses at most three consecutive natural poll opportunities to prove one exact pre-navigation primary-profile request was superseded by an explicitly armed Changes-to-Timeline transition whose destination completed successfully. Request tracking is by Playwright Request-object identity; only `GET`/`fetch`, the primary `/api/v2/profile`, exact `net::ERR_ABORTED`, one snapshotted request, and at most one admitted failure per invocation qualify. Every unarmed, new, different, multiple, or unsuccessful-destination failure remains fatal. The exact ordered sections write distinct temporary screenshots named `shakedown-retained-timeline-return.png`, `shakedown-changes-terminal-return.png`, `shakedown-parallel-current-exact-history.png`, and `shakedown-poll-supersession-request-accounting.png`; the report and independent filesystem checks must both count all four. A passing shakedown closes the browser, stops its servers, removes its root, prints a compact cleanup receipt, and retains no manifest or browser evidence. Setup, browser, product, or cleanup failures are non-full-attempt failures and may leave diagnostics only when cleanup itself cannot complete; do not supply or touch any reserved full-gate evidence root. Use at most two failed focused shakedown cycles for one failure class. After the plan-required shakedown passes, run the full browser verifier once against its fresh reserved empty caller root.
 
+The browser program now records request ownership by committed main-document generation,
+an exact accepted Changes route visit, capability-redacted source hash, and safely resolved
+main-frame initiator. Only one still-outstanding profile request with all of that provenance
+can bind either explicit supersession arm. Its post-destination settlement join is bounded
+at 30 seconds; timeout is a single non-admissible section failure, not a retry or a new
+request-failure exemption.
+
+The shell bounds only the `run-code` browser-program stage at 600 seconds. While that child
+is active it writes `logs/browser-stage-start.json`, appends a redacted heartbeat no less
+often than every 15 seconds to `logs/browser-stage-heartbeat.log`, and publishes exactly
+one `logs/browser-stage-terminal.json`. The heartbeat contains only mode, elapsed time,
+child liveness, screenshot count/latest basename, and gate-log byte count. The child leads
+a verified process group. Heartbeats run against fixed 15-second deadlines; a missed
+deadline or worker/render failure becomes a gate-failing internal terminal outcome. After
+the first observed exit, timeout, `INT`, or `TERM`, the
+shell stops its workers, spends at most 10 seconds terminating and verifying absence of
+that process group, and records `runCodeGroupCleanup` as `complete` or `failed`; inability
+to enumerate the group is failure, never proof of absence. The
+terminal receipt deliberately records browser session cleanup as `pending` and is printed
+before the separate browser-close attempt, so a slow close cannot hide the stage outcome.
+Focused roots may then be removed; full-mode inventories hash all three receipts before
+the completion-last manifest. A timeout or cleanup failure never fabricates
+`browser-result.json` or `manifest.json`.
+
 Screenshot and canonical-example changes have cross-repository consequences. Follow
 `docs/manual-testing.md` and the marketing repository's documented synchronization workflow before
 advancing protected captures or marketing locks.

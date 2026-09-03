@@ -28,7 +28,7 @@ journey, and retains nothing on success. None can be combined with --root.
 EOF
 }
 
-for command in git jq node rg shasum find basename sort wc tr mv curl cp chmod mktemp rm date du uname; do
+for command in git jq node rg shasum find basename sort wc tr mv curl cp chmod mktemp rm date du uname ps awk sleep seq; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 
@@ -44,6 +44,574 @@ mode="full"
 shakedown_parent=""
 shakedown_root=""
 shakedown_started_at=""
+
+BROWSER_PROGRAM_TIMEOUT_SECONDS=600
+BROWSER_STAGE_HEARTBEAT_SECONDS=15
+BROWSER_STAGE_GROUP_CLEANUP_SECONDS=10
+
+atomic_publish_stage_json() {
+  local target="$1"
+  local document="$2"
+  local candidate="$target.tmp.$$.$RANDOM"
+  [ ! -e "$target" ] || return 1
+  umask 077
+  printf '%s\n' "$document" >"$candidate" || return 1
+  if [ -e "$target" ]; then
+    rm -f -- "$candidate"
+    return 1
+  fi
+  mv "$candidate" "$target"
+}
+
+read_process_group_id() {
+  ps -o pgid= -p "$1" 2>/dev/null \
+    | awk 'NR == 1 {gsub(/[[:space:]]/, ""); print; exit}'
+}
+
+is_positive_process_id() {
+  case "${1:-}" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ]
+}
+
+process_group_member_pids() {
+  local listing
+  if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_PS_FAILURE:-}" = 1 ]; then
+    return 70
+  fi
+  listing="$(ps -ax -o pid= -o pgid= 2>/dev/null)" || return 70
+  printf '%s\n' "$listing" | awk -v group="$1" '$2 == group {print $1}'
+}
+
+latest_stage_screenshot() {
+  local directory="$1"
+  local candidate
+  local latest=""
+  for candidate in "$directory"/*.png; do
+    [ -f "$candidate" ] || continue
+    if [ -z "$latest" ] || [ "$candidate" -nt "$latest" ]; then
+      latest="$candidate"
+    fi
+  done
+  if [ -n "$latest" ]; then
+    basename "$latest"
+  fi
+}
+
+stage_screenshot_count() {
+  find "$1" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' '
+}
+
+stage_gate_log_bytes() {
+  if [ -f "$1" ]; then
+    wc -c <"$1" | tr -d ' '
+  else
+    printf '0\n'
+  fi
+}
+
+render_browser_stage_heartbeat() {
+  local stage_mode="$1"
+  local stage_started_seconds="$2"
+  local stage_child_pid="$3"
+  local stage_artifact_dir="$4"
+  local stage_gate_log="$5"
+  local child_alive=false
+  local latest
+  local screenshot_count
+  local gate_log_bytes
+  if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_RENDER_HANG:-}" = 1 ] \
+    && [ "${POINTBREAK_BROWSER_STAGE_WORKER_RENDER:-}" = 1 ]; then
+    while :; do :; done
+  fi
+  kill -0 "$stage_child_pid" >/dev/null 2>&1 && child_alive=true
+  latest="$(latest_stage_screenshot "$stage_artifact_dir")" || return 1
+  screenshot_count="$(stage_screenshot_count "$stage_artifact_dir")" || return 1
+  gate_log_bytes="$(stage_gate_log_bytes "$stage_gate_log")" || return 1
+  jq -cn \
+    --arg mode "$stage_mode" \
+    --argjson elapsedSeconds "$((SECONDS - stage_started_seconds))" \
+    --argjson childAlive "$child_alive" \
+    --argjson screenshotCount "$screenshot_count" \
+    --arg latestScreenshot "$latest" \
+    --argjson gateLogBytes "$gate_log_bytes" \
+    '{mode: $mode, elapsedSeconds: $elapsedSeconds, childAlive: $childAlive,
+      screenshotCount: $screenshotCount,
+      latestScreenshot: (if $latestScreenshot == "" then null else $latestScreenshot end),
+      gateLogBytes: $gateLogBytes}'
+}
+
+append_browser_stage_heartbeat() {
+  local document
+  document="$(render_browser_stage_heartbeat "$@")" || return 1
+  printf '%s\n' "$document" >>"$6"
+}
+
+browser_stage_heartbeat_worker() {
+  local stage_mode="$1"
+  local stage_started_seconds="$2"
+  local stage_child_pid="$3"
+  local stage_artifact_dir="$4"
+  local stage_gate_log="$5"
+  local stage_heartbeat_log="$6"
+  local heartbeat_seconds="$7"
+  local supervisor_pid="$8"
+  local timer_pid=""
+  local render_pid=""
+  local render_output="$stage_heartbeat_log.render.$RANDOM"
+  local document
+  local next_deadline
+  local now_seconds
+  local wait_seconds
+
+  # Invoked by the worker's signal trap.
+  # shellcheck disable=SC2329
+  stop_heartbeat_timer() {
+    [ -n "$timer_pid" ] || return 0
+    kill "$timer_pid" >/dev/null 2>&1 || true
+    wait "$timer_pid" >/dev/null 2>&1 || true
+    timer_pid=""
+  }
+  # Invoked by the worker's signal trap.
+  # shellcheck disable=SC2329
+  stop_heartbeat_render() {
+    [ -n "$render_pid" ] || return 0
+    kill "$render_pid" >/dev/null 2>&1 || true
+    wait "$render_pid" >/dev/null 2>&1 || true
+    render_pid=""
+    rm -f -- "$render_output"
+  }
+  trap 'stop_heartbeat_timer; stop_heartbeat_render; exit 0' TERM INT
+  next_deadline="$(($(date +%s) + heartbeat_seconds))"
+  while :; do
+    now_seconds="$(date +%s)"
+    wait_seconds="$((next_deadline - now_seconds))"
+    if [ "$wait_seconds" -gt 0 ]; then
+      sleep "$wait_seconds" &
+      timer_pid=$!
+      wait "$timer_pid" || exit 0
+      timer_pid=""
+    fi
+    if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_FAILURE:-}" = 1 ]; then
+      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    if [ -n "${POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS:-}" ]; then
+      sleep "$POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS" &
+      timer_pid=$!
+      wait "$timer_pid" || exit 0
+      timer_pid=""
+    fi
+    (
+      export POINTBREAK_BROWSER_STAGE_WORKER_RENDER=1
+      render_browser_stage_heartbeat \
+        "$stage_mode" "$stage_started_seconds" "$stage_child_pid" \
+        "$stage_artifact_dir" "$stage_gate_log" "$stage_heartbeat_log"
+    ) >"$render_output" &
+    render_pid=$!
+    if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST:-}" = 1 ]; then
+      printf '%s\n' "$render_pid" \
+        >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/heartbeat-render.pid"
+    fi
+    if ! wait "$render_pid"; then
+      render_pid=""
+      rm -f -- "$render_output"
+      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    render_pid=""
+    document="$(<"$render_output")"
+    rm -f -- "$render_output"
+    printf '%s\n' "$document" >>"$stage_heartbeat_log" || {
+      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      exit 1
+    }
+    now_seconds="$(date +%s)"
+    if [ "$now_seconds" -gt "$next_deadline" ]; then
+      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    next_deadline="$((next_deadline + heartbeat_seconds))"
+  done
+}
+
+browser_stage_watchdog_worker() {
+  local timeout_seconds="$1"
+  local supervisor_pid="$2"
+  local timer_pid=""
+  # Invoked by the worker's signal trap.
+  # shellcheck disable=SC2329
+  stop_watchdog_timer() {
+    [ -n "$timer_pid" ] || return 0
+    kill "$timer_pid" >/dev/null 2>&1 || true
+    wait "$timer_pid" >/dev/null 2>&1 || true
+    timer_pid=""
+  }
+  trap 'stop_watchdog_timer; exit 0' TERM INT
+  case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
+    precedence-exit-timeout|precedence-timeout-exit)
+      while [ ! -e "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/watchdog-release" ]; do
+        sleep 0.01 &
+        timer_pid=$!
+        wait "$timer_pid" || exit 0
+        timer_pid=""
+      done
+      : >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/watchdog-fired"
+      kill -USR1 "$supervisor_pid" >/dev/null 2>&1 || true
+      return 0
+      ;;
+  esac
+  sleep "$timeout_seconds" &
+  timer_pid=$!
+  wait "$timer_pid" || exit 0
+  timer_pid=""
+  kill -USR1 "$supervisor_pid" >/dev/null 2>&1 || true
+}
+
+browser_stage_terminal_kind=""
+browser_stage_terminal_code=""
+browser_stage_terminal_signal=""
+
+observe_browser_stage_terminal() {
+  local kind="$1"
+  local code="${2:-}"
+  local signal="${3:-}"
+  [ -z "$browser_stage_terminal_kind" ] || return 1
+  browser_stage_terminal_kind="$kind"
+  browser_stage_terminal_code="$code"
+  browser_stage_terminal_signal="$signal"
+}
+
+stop_browser_stage_worker() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 0
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+browser_stage_child_reaped=false
+browser_stage_child_status=""
+
+reap_browser_stage_child_if_done() {
+  local pid="$1"
+  local process_state
+  local process_status
+  [ "$browser_stage_child_reaped" = false ] || return 0
+  process_status=0
+  process_state="$(ps -o stat= -p "$pid" 2>/dev/null \
+    | awk 'NR == 1 {gsub(/[[:space:]]/, ""); print; exit}')" \
+    || process_status=$?
+  if [ "$process_status" -ne 0 ] && kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  case "$process_state" in
+    ""|Z*)
+      if wait "$pid" >/dev/null 2>&1; then
+        browser_stage_child_status=0
+      else
+        browser_stage_child_status=$?
+      fi
+      browser_stage_child_reaped=true
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+cleanup_browser_stage_group() {
+  local child_pid="$1"
+  local group_id="$2"
+  local cleanup_seconds="$3"
+  local cleanup_started="$SECONDS"
+  local kill_after="$((cleanup_started + (cleanup_seconds / 2)))"
+  local cleanup_deadline="$((cleanup_started + cleanup_seconds))"
+  local sent_kill=false
+  local members=""
+  local members_known=false
+
+  if members="$(process_group_member_pids "$group_id")"; then
+    members_known=true
+  fi
+  if [ "$members_known" = false ] || [ -n "$members" ]; then
+    kill -TERM -- "-$group_id" >/dev/null 2>&1 || true
+  fi
+  while { [ "$members_known" = false ] || [ -n "$members" ]; } \
+    && [ "$SECONDS" -lt "$cleanup_deadline" ]; do
+    reap_browser_stage_child_if_done "$child_pid" || true
+    if [ "$sent_kill" = false ] && [ "$SECONDS" -ge "$kill_after" ]; then
+      kill -KILL -- "-$group_id" >/dev/null 2>&1 || true
+      sent_kill=true
+    fi
+    sleep 0.05
+    members=""
+    members_known=false
+    if members="$(process_group_member_pids "$group_id")"; then
+      members_known=true
+    fi
+  done
+  if { [ "$members_known" = false ] || [ -n "$members" ]; } \
+    && [ "$sent_kill" = false ]; then
+    kill -KILL -- "-$group_id" >/dev/null 2>&1 || true
+  fi
+  reap_browser_stage_child_if_done "$child_pid" || true
+  members=""
+  members_known=false
+  if members="$(process_group_member_pids "$group_id")"; then
+    members_known=true
+  fi
+  [ "$members_known" = true ] \
+    && [ -z "$members" ] \
+    && [ "$browser_stage_child_reaped" = true ]
+}
+
+run_browser_program_stage() {
+  local stage_mode="$1"
+  local stage_log_dir="$2"
+  local stage_artifact_dir="$3"
+  local timeout_seconds="$4"
+  local heartbeat_seconds="$5"
+  local cleanup_seconds="$6"
+  shift 6
+  [ "${1:-}" = "--" ] || return 125
+  shift
+
+  local stage_start="$stage_log_dir/browser-stage-start.json"
+  local stage_heartbeats="$stage_log_dir/browser-stage-heartbeat.log"
+  local stage_terminal="$stage_log_dir/browser-stage-terminal.json"
+  local stage_gate_log="$stage_log_dir/browser-gate.log"
+  local launch_gate="$stage_log_dir/.browser-stage-launch.$$.$RANDOM"
+  local started_at
+  local finished_at
+  local started_seconds="$SECONDS"
+  local shell_group_id
+  local child_group_id
+  local child_pid
+  local heartbeat_pid=""
+  local watchdog_pid=""
+  local cleanup_status="complete"
+  local stage_return=0
+  local latest
+  local screenshot_count
+  local gate_log_bytes
+  local terminal_document
+  local start_document
+  local supervisor_pid="$$"
+
+  browser_stage_terminal_kind=""
+  browser_stage_terminal_code=""
+  browser_stage_terminal_signal=""
+  browser_stage_child_reaped=false
+  browser_stage_child_status=""
+  started_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  shell_group_id=""
+  if ! shell_group_id="$(read_process_group_id "$$")" \
+    || ! is_positive_process_id "$shell_group_id"; then
+    return 125
+  fi
+
+  set -m
+  (
+    while [ ! -e "$launch_gate" ]; do sleep 0.01; done
+    "$@"
+  ) >"$stage_gate_log" 2>&1 &
+  child_pid=$!
+  set +m
+
+  child_group_id=""
+  if ! is_positive_process_id "$child_pid" \
+    || ! child_group_id="$(read_process_group_id "$child_pid")" \
+    || ! is_positive_process_id "$child_group_id" \
+    || [ "$child_pid" != "$child_group_id" ] \
+    || [ "$child_group_id" = "$shell_group_id" ]; then
+    kill "$child_pid" >/dev/null 2>&1 || true
+    wait "$child_pid" >/dev/null 2>&1 || true
+    rm -f -- "$launch_gate"
+    return 125
+  fi
+
+  trap 'observe_browser_stage_terminal signal 130 INT || true' INT
+  trap 'observe_browser_stage_terminal signal 143 TERM || true' TERM
+  trap 'observe_browser_stage_terminal timeout 124 "" || true' USR1
+  trap 'observe_browser_stage_terminal internal 125 "" || true' USR2
+
+  start_document="$(jq -cn \
+    --arg mode "$stage_mode" \
+    --arg startedAt "$started_at" \
+    --argjson timeoutSeconds "$timeout_seconds" \
+    --argjson childPid "$child_pid" \
+    --argjson processGroupId "$child_group_id" \
+    '{schema: "pointbreak.browser-stage-start", version: 1, mode: $mode,
+      startedAt: $startedAt, timeoutSeconds: $timeoutSeconds,
+      childPid: $childPid, processGroupId: $processGroupId}')"
+  atomic_publish_stage_json "$stage_start" "$start_document" || {
+    kill "$child_pid" >/dev/null 2>&1 || true
+    wait "$child_pid" >/dev/null 2>&1 || true
+    rm -f -- "$launch_gate"
+    trap - INT TERM USR1 USR2
+    return 125
+  }
+  : >"$stage_heartbeats"
+
+  append_browser_stage_heartbeat \
+    "$stage_mode" "$started_seconds" "$child_pid" \
+    "$stage_artifact_dir" "$stage_gate_log" "$stage_heartbeats" || {
+      observe_browser_stage_terminal internal 125 "" || true
+    }
+  browser_stage_heartbeat_worker \
+    "$stage_mode" "$started_seconds" "$child_pid" \
+    "$stage_artifact_dir" "$stage_gate_log" "$stage_heartbeats" \
+    "$heartbeat_seconds" "$supervisor_pid" &
+  heartbeat_pid=$!
+  browser_stage_watchdog_worker "$timeout_seconds" "$supervisor_pid" &
+  watchdog_pid=$!
+  : >"$launch_gate"
+
+  while [ -z "$browser_stage_terminal_kind" ]; do
+    if reap_browser_stage_child_if_done "$child_pid"; then
+      observe_browser_stage_terminal exit "$browser_stage_child_status" "" || true
+      break
+    fi
+    sleep 0.05
+  done
+
+  case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
+    precedence-exit-timeout|precedence-timeout-exit)
+      printf '%s\n' "$browser_stage_terminal_kind" \
+        >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/winner-observed"
+      while [ ! -e "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/supervisor-release" ]; do
+        sleep 0.01
+      done
+      ;;
+  esac
+  if reap_browser_stage_child_if_done "$child_pid"; then
+    observe_browser_stage_terminal exit "$browser_stage_child_status" "" || true
+  fi
+
+  stop_browser_stage_worker "$heartbeat_pid"
+  stop_browser_stage_worker "$watchdog_pid"
+  rm -f -- "$launch_gate"
+  if ! cleanup_browser_stage_group \
+    "$child_pid" "$child_group_id" "$cleanup_seconds"; then
+    cleanup_status="failed"
+  fi
+
+  finished_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  latest="$(latest_stage_screenshot "$stage_artifact_dir")"
+  screenshot_count="$(stage_screenshot_count "$stage_artifact_dir")"
+  gate_log_bytes="$(stage_gate_log_bytes "$stage_gate_log")"
+  terminal_document="$(jq -cn \
+    --arg mode "$stage_mode" \
+    --arg startedAt "$started_at" \
+    --arg finishedAt "$finished_at" \
+    --arg winner "$browser_stage_terminal_kind" \
+    --arg terminalSignal "$browser_stage_terminal_signal" \
+    --arg latestScreenshot "$latest" \
+    --arg cleanup "$cleanup_status" \
+    --argjson elapsedSeconds "$((SECONDS - started_seconds))" \
+    --argjson timeoutSeconds "$timeout_seconds" \
+    --argjson childPid "$child_pid" \
+    --argjson processGroupId "$child_group_id" \
+    --argjson exitCode "${browser_stage_terminal_code:-null}" \
+    --argjson screenshotCount "$screenshot_count" \
+    --argjson gateLogBytes "$gate_log_bytes" \
+    '{schema: "pointbreak.browser-stage-terminal", version: 1, mode: $mode,
+      startedAt: $startedAt, finishedAt: $finishedAt,
+      elapsedSeconds: $elapsedSeconds, timeoutSeconds: $timeoutSeconds,
+      winner: $winner, exitCode: $exitCode,
+      signal: (if $terminalSignal == "" then null else $terminalSignal end),
+      childPid: $childPid, processGroupId: $processGroupId,
+      screenshotCount: $screenshotCount,
+      latestScreenshot: (if $latestScreenshot == "" then null else $latestScreenshot end),
+      gateLogBytes: $gateLogBytes, runCodeGroupCleanup: $cleanup,
+      browserSessionCleanup: "pending"}')"
+  if ! atomic_publish_stage_json "$stage_terminal" "$terminal_document"; then
+    trap - INT TERM USR1 USR2
+    return 125
+  fi
+  printf '%s\n' "$terminal_document"
+  trap - INT TERM USR1 USR2
+
+  if [ "$cleanup_status" = failed ]; then
+    stage_return=125
+  else
+    case "$browser_stage_terminal_kind" in
+      exit) stage_return="${browser_stage_terminal_code:-125}" ;;
+      timeout) stage_return=124 ;;
+      signal) stage_return="${browser_stage_terminal_code:-125}" ;;
+      *) stage_return=125 ;;
+    esac
+  fi
+  return "$stage_return"
+}
+
+browser_stage_selftest_child() {
+  (
+    trap 'exit 0' TERM INT
+    while :; do sleep 1; done
+  ) &
+  printf '%s\n' "$!" >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/fake-descendant.pid"
+  case "$POINTBREAK_BROWSER_STAGE_SELFTEST_CASE" in
+    exit-0|ps-failed)
+      sleep 0.4
+      return 0
+      ;;
+    exit-23)
+      sleep 0.4
+      return 23
+      ;;
+    precedence-exit-timeout|precedence-timeout-exit)
+      while [ ! -e "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/child-release" ]; do
+        sleep 0.01
+      done
+      : >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/fake-child-exited"
+      return 0
+      ;;
+    heartbeat-render-hung)
+      sleep 1.4
+      return 0
+      ;;
+    timeout|signal-int|signal-term|heartbeat-failed|heartbeat-late)
+      while :; do sleep 1; done
+      ;;
+  esac
+  return 125
+}
+
+if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST:-}" = 1 ]; then
+  [ -n "${POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT:-}" ] \
+    || die "browser-stage selftest root is required"
+  [ -d "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT" ] \
+    || die "browser-stage selftest root must exist"
+  [ -z "$(find "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || die "browser-stage selftest root must be empty"
+  case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
+    exit-0|exit-23|timeout|signal-int|signal-term|precedence-exit-timeout|precedence-timeout-exit|heartbeat-failed|heartbeat-late|heartbeat-render-hung|ps-failed) ;;
+    *) die "unsupported browser-stage selftest case" ;;
+  esac
+  mkdir -p \
+    "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/logs" \
+    "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/browser-artifacts"
+  browser_stage_selftest_timeout=2
+  case "$POINTBREAK_BROWSER_STAGE_SELFTEST_CASE" in
+    heartbeat-failed) export POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_FAILURE=1 ;;
+    heartbeat-late)
+      export POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS=2
+      browser_stage_selftest_timeout=4
+      ;;
+    heartbeat-render-hung) export POINTBREAK_BROWSER_STAGE_SELFTEST_RENDER_HANG=1 ;;
+    ps-failed) export POINTBREAK_BROWSER_STAGE_SELFTEST_PS_FAILURE=1 ;;
+  esac
+  browser_stage_selftest_status=0
+  run_browser_program_stage \
+    "selftest" \
+    "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/logs" \
+    "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/browser-artifacts" \
+    "$browser_stage_selftest_timeout" 1 2 \
+    -- browser_stage_selftest_child \
+    || browser_stage_selftest_status=$?
+  exit "$browser_stage_selftest_status"
+fi
 
 cleanup_shakedown_root() {
   local cleanup_root="${shakedown_root:-}"
@@ -940,9 +1508,18 @@ timeline_append_pid=$!
 register_background_process "$timeline_append_pid"
 fi
 browser_gate_status=0
-run_pw run-code --filename="$browser_program" >"$log_dir/browser-gate.log" 2>&1 \
+run_browser_program_stage \
+  "$mode" "$log_dir" "$artifact_dir" \
+  "$BROWSER_PROGRAM_TIMEOUT_SECONDS" \
+  "$BROWSER_STAGE_HEARTBEAT_SECONDS" \
+  "$BROWSER_STAGE_GROUP_CLEANUP_SECONDS" \
+  -- run_pw run-code --filename="$browser_program" \
   || browser_gate_status=$?
 browser_result="$log_dir/browser-result.json"
+if [ "$browser_gate_status" -ne 0 ]; then
+  sed -n '1,240p' "$log_dir/browser-gate.log" >&2
+  die "real-browser Change Inspector gate failed"
+fi
 browser_result_line="$(awk '
   {
     line = $0
@@ -969,10 +1546,6 @@ if [ -n "$browser_result_line" ]; then
     (.sections | type == "array") and ((.sections | length) == .sectionCount) and
     (.failures | type == "array")
   ' "$browser_result" >/dev/null || die "browser emitted an invalid diagnostic report"
-fi
-if [ "$browser_gate_status" -ne 0 ]; then
-  sed -n '1,240p' "$log_dir/browser-gate.log" >&2
-  die "real-browser Change Inspector gate failed"
 fi
 [ -s "$browser_result" ] || die "browser did not emit its diagnostic report"
 jq -e '
@@ -1137,6 +1710,9 @@ for required_evidence_path in \
   logs/browser-empty-ready-l2-retry.json \
   logs/browser-empty-ready-l2-ready.json \
   logs/browser-primary-derived-access-status.json \
+  logs/browser-stage-start.json \
+  logs/browser-stage-heartbeat.log \
+  logs/browser-stage-terminal.json \
   logs/browser-result.json \
   logs/browser-gate.log \
   logs/browser-program.mjs; do

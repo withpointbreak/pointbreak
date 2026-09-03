@@ -1,7 +1,542 @@
 // Internal browser program injected by change-inspector-browser-verify.sh.
 // It only reads the disposable Inspector page and writes screenshots under its configured root.
 // biome-ignore format: playwright-cli run-code wraps this file as one function expression.
-((config) => async (page) => {
+((config) => {
+	const PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS = 30_000;
+	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
+	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
+	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
+	const capabilityRedactedHash = (value) => {
+		if (typeof value !== "string") return "";
+		const hashStart = value.indexOf("#");
+		if (hashStart === -1) return "";
+		const hash = value.slice(hashStart);
+		const separator = hash.indexOf("?");
+		if (separator === -1) return hash;
+		const path = hash.slice(0, separator);
+		const retained = hash
+			.slice(separator + 1)
+			.split("&")
+			.filter(Boolean)
+			.filter((entry) => {
+				const rawKey = entry.split("=", 1)[0];
+				try {
+					return decodeURIComponent(rawKey).toLowerCase() !== "token";
+				} catch {
+					return rawKey.toLowerCase() !== "token";
+				}
+			});
+		return retained.length === 0 ? path : `${path}?${retained.join("&")}`;
+	};
+	const capabilityRedactedPath = (value) => {
+		if (typeof value !== "string") return "";
+		const scheme = value.indexOf("://");
+		const pathStart = scheme === -1 ? 0 : value.indexOf("/", scheme + 3);
+		const rawPath = pathStart === -1 ? "/" : value.slice(pathStart);
+		const fragmentStart = rawPath.indexOf("#");
+		const withoutFragment =
+			fragmentStart === -1 ? rawPath : rawPath.slice(0, fragmentStart);
+		const separator = withoutFragment.indexOf("?");
+		if (separator === -1) return withoutFragment;
+		const path = withoutFragment.slice(0, separator);
+		const retained = withoutFragment
+			.slice(separator + 1)
+			.split("&")
+			.filter(Boolean)
+			.filter((entry) => {
+				const rawKey = entry.split("=", 1)[0];
+				try {
+					return decodeURIComponent(rawKey).toLowerCase() !== "token";
+				} catch {
+					return rawKey.toLowerCase() !== "token";
+				}
+			});
+		return retained.length === 0 ? path : `${path}?${retained.join("&")}`;
+	};
+	const isChangesHash = (hash) =>
+		hash === "#/changes" || hash.startsWith("#/changes?");
+
+	function createProfileRequestLifecycle({
+		page,
+		primaryBaseUrl,
+		now = () => performance.now(),
+		setTimer = (callback, delay) => setTimeout(callback, delay),
+		clearTimer = (timer) => clearTimeout(timer),
+		onLifecycleFailure = () => {},
+		onRequestFailure = () => {},
+	}) {
+		const primaryOrigin = primaryBaseUrl.endsWith("/")
+			? primaryBaseUrl.slice(0, -1)
+			: primaryBaseUrl;
+		const recordsByRequest = new Map();
+		const transitionByRequest = new Map();
+		let committedDocumentGeneration = 0;
+		let nextRequestOrdinal = 0;
+		let nextRouteVisitId = 1;
+		let pendingNavigation = null;
+		let currentRouteVisit = null;
+		let ownedRouteVisitId = null;
+
+		const elapsedAge = (startedAt) => Math.max(0, now() - startedAt);
+		const lifecycleFailure = (detail, actual = {}) => {
+			onLifecycleFailure({
+				detail,
+				expected: "one unambiguous committed main-document lifecycle",
+				actual,
+			});
+		};
+		const safeRequestValue = (request, method, fallback) => {
+			try {
+				return request[method]();
+			} catch {
+				return fallback;
+			}
+		};
+		const requestInitiator = (request, navigation) => {
+			try {
+				const frame = request.frame();
+				if (frame === page.mainFrame()) return "main-frame";
+				if (frame !== null && frame !== undefined) return "subframe";
+				if (navigation) {
+					lifecycleFailure("frame is unavailable for a navigation Request", {
+						navigation: true,
+					});
+				}
+				return "unavailable";
+			} catch {
+				if (navigation) {
+					lifecycleFailure(
+						"frame is unavailable for a navigation Request",
+						{ navigation: true },
+					);
+				}
+				return "unavailable";
+			}
+		};
+		const redirectRoot = (request) => {
+			const seen = new Set();
+			let current = request;
+			for (;;) {
+				if (seen.has(current)) {
+					lifecycleFailure("navigation redirect chain contains a cycle");
+					return null;
+				}
+				seen.add(current);
+				let previous;
+				try {
+					previous = current.redirectedFrom();
+				} catch {
+					lifecycleFailure("navigation redirect root is unavailable");
+					return null;
+				}
+				if (previous === null || previous === undefined) return current;
+				current = previous;
+			}
+		};
+		const transitionResult = (transition, outcome) => ({
+			outcome,
+			terminalHistory: transition.terminalHistory.map((entry) => ({ ...entry })),
+			...(outcome === "timeout"
+				? {
+						diagnostic: {
+							outcome,
+							timeoutMs: PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS,
+							requestOrdinal: transition.requestRecord.ordinal,
+							requestAgeMs: elapsedAge(
+								transition.requestRecord.startedAt,
+							),
+							method: transition.requestRecord.method,
+							resourceType: transition.requestRecord.resourceType,
+							path: capabilityRedactedPath(transition.requestRecord.url),
+							documentGeneration:
+								transition.requestRecord.documentGeneration,
+							routeVisitId: transition.requestRecord.routeVisitId,
+							sourceHash: transition.sourceHash,
+							targetHash: transition.targetHash,
+							candidateCount:
+								transition.profileRequestsBeforeNavigation.length,
+							destinationOutcome: transition.destinationSucceeded
+								? "succeeded"
+								: "not-succeeded",
+							terminalHistory: transition.terminalHistory.map((entry) => ({
+								...entry,
+							})),
+						},
+					}
+				: {}),
+		});
+		const settleTransition = (transition, outcome) => {
+			if (transition.outcome !== null) return false;
+			transition.outcome = outcome;
+			transition.terminalHistory.push({
+				outcome,
+				ageMs: elapsedAge(transition.requestRecord.startedAt),
+			});
+			if (transition.timer !== null) {
+				clearTimer(transition.timer);
+				transition.timer = null;
+			}
+			if (transitionByRequest.get(transition.request) === transition) {
+				transitionByRequest.delete(transition.request);
+			}
+			transition.result = transitionResult(transition, outcome);
+			transition.resolve(transition.result);
+			return true;
+		};
+		const retireRouteVisit = (visit) => {
+			if (visit === null || visit.state === "retired") return;
+			visit.state = "retired";
+			if (currentRouteVisit === visit) currentRouteVisit = null;
+			if (ownedRouteVisitId === visit.id) ownedRouteVisitId = null;
+		};
+		const retirePriorGeneration = () => {
+			for (const record of recordsByRequest.values()) {
+				if (
+					record.documentGeneration >= committedDocumentGeneration ||
+					record.status !== "outstanding"
+				)
+					continue;
+				record.retired = true;
+				record.status = "retired";
+				record.terminalHistory.push({
+					outcome: "document-replaced",
+					ageMs: elapsedAge(record.startedAt),
+				});
+				const transition = transitionByRequest.get(record.request);
+				if (transition) settleTransition(transition, "document-replaced");
+			}
+			if (
+				currentRouteVisit?.state === "accepted" &&
+				currentRouteVisit.documentGeneration < committedDocumentGeneration
+			) {
+				retireRouteVisit(currentRouteVisit);
+			}
+		};
+		const requestStarted = (request) => {
+			const navigation =
+				safeRequestValue(request, "isNavigationRequest", false) === true;
+			const initiator = requestInitiator(request, navigation);
+			const sourceHash = capabilityRedactedHash(page.url());
+			const routeVisitId =
+				currentRouteVisit !== null &&
+				currentRouteVisit.state !== "retired" &&
+				isChangesHash(currentRouteVisit.intendedHash) &&
+				sourceHash === currentRouteVisit.intendedHash
+					? currentRouteVisit.id
+					: null;
+			const record = {
+				request,
+				ordinal: nextRequestOrdinal,
+				startedAt: now(),
+				documentGeneration: committedDocumentGeneration,
+				sourceHash,
+				routeVisitId,
+				initiator,
+				method: safeRequestValue(request, "method", "unknown"),
+				resourceType: safeRequestValue(request, "resourceType", "unknown"),
+				url: safeRequestValue(request, "url", ""),
+				navigation,
+				navigationRoot: null,
+				retired: false,
+				status: "outstanding",
+				terminalHistory: [],
+			};
+			nextRequestOrdinal += 1;
+			recordsByRequest.set(request, record);
+			if (navigation && initiator === "main-frame") {
+				const root = redirectRoot(request);
+				record.navigationRoot = root;
+				if (root !== null) {
+					if (pendingNavigation === null) {
+						pendingNavigation = {
+							root,
+							members: new Set([request]),
+							ambiguous: false,
+						};
+					} else if (pendingNavigation.root === root) {
+						pendingNavigation.members.add(request);
+					} else {
+						pendingNavigation.ambiguous = true;
+						pendingNavigation.members.add(request);
+						lifecycleFailure(
+							"an unrelated main-frame navigation root overlapped the pending root",
+							{ pendingRootCount: 2 },
+						);
+					}
+				}
+			}
+			return record;
+		};
+		const requestTerminated = (request, outcome) => {
+			const record = recordsByRequest.get(request);
+			if (!record) {
+				if (outcome === "requestfailed") {
+					onRequestFailure({
+						request,
+						transition: null,
+						method: safeRequestValue(request, "method", "unknown"),
+						resourceType: safeRequestValue(
+							request,
+							"resourceType",
+							"unknown",
+						),
+						url: safeRequestValue(request, "url", ""),
+						error:
+							safeRequestValue(request, "failure", null)?.errorText ??
+							"unknown request failure",
+						retired: false,
+					});
+				}
+				return;
+			}
+			const wasRetired = record.retired;
+			record.terminalHistory.push({
+				outcome,
+				ageMs: elapsedAge(record.startedAt),
+			});
+			const transition = transitionByRequest.get(request) ?? null;
+			if (transition !== null) settleTransition(transition, outcome);
+			if (
+				outcome === "requestfailed" &&
+				pendingNavigation !== null &&
+				record.navigationRoot === pendingNavigation.root
+			) {
+				pendingNavigation = null;
+			}
+			if (record.status === "outstanding") record.status = "terminal";
+			if (wasRetired) record.status = "retired-terminal";
+			if (outcome === "requestfailed") {
+				onRequestFailure({
+					request,
+					transition: wasRetired ? null : transition,
+					method: record.method,
+					resourceType: record.resourceType,
+					url: record.url,
+					error:
+						safeRequestValue(request, "failure", null)?.errorText ??
+						"unknown request failure",
+					retired: wasRetired,
+				});
+			}
+		};
+		const frameNavigated = (frame) => {
+			let isMainFrame = false;
+			try {
+				isMainFrame = frame === page.mainFrame();
+			} catch {
+				return;
+			}
+			if (!isMainFrame) return;
+			let frameHash = "";
+			try {
+				frameHash = capabilityRedactedHash(frame.url());
+			} catch {
+				frameHash = capabilityRedactedHash(page.url());
+			}
+			if (
+				currentRouteVisit !== null &&
+				currentRouteVisit.state === "pending" &&
+				ownedRouteVisitId === currentRouteVisit.id &&
+				frameHash === currentRouteVisit.intendedHash
+			) {
+				ownedRouteVisitId = null;
+				currentRouteVisit.routeObserved = true;
+				return;
+			}
+			if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
+			ownedRouteVisitId = null;
+		};
+		const domContentLoaded = () => {
+			const pending = pendingNavigation;
+			pendingNavigation = null;
+			if (pending === null || pending.ambiguous) return false;
+			committedDocumentGeneration += 1;
+			retirePriorGeneration();
+			return true;
+		};
+
+		page.on("request", requestStarted);
+		page.on("response", (response) =>
+			requestTerminated(response.request(), "response"),
+		);
+		page.on("requestfinished", (request) =>
+			requestTerminated(request, "requestfinished"),
+		);
+		page.on("requestfailed", (request) =>
+			requestTerminated(request, "requestfailed"),
+		);
+		page.on("framenavigated", frameNavigated);
+		page.on("domcontentloaded", domContentLoaded);
+
+		const eligibleProfileRequests = (visit) => {
+			if (
+				visit === null ||
+				visit !== currentRouteVisit ||
+				visit.state !== "accepted"
+			)
+				return [];
+			return [...recordsByRequest.values()]
+				.filter(
+					(record) =>
+						record.status === "outstanding" &&
+						!record.retired &&
+						record.initiator === "main-frame" &&
+						record.documentGeneration === visit.documentGeneration &&
+						record.routeVisitId === visit.id &&
+						record.sourceHash === visit.acceptedHash &&
+						record.method === "GET" &&
+						record.resourceType === "fetch" &&
+						record.url === `${primaryOrigin}/api/v2/profile`,
+				)
+				.sort((left, right) => left.ordinal - right.ordinal)
+				.map((record) => record.request);
+		};
+		const createRouteVisitIntent = (intendedHash) => {
+			const visit = {
+				id: nextRouteVisitId,
+				intendedHash: capabilityRedactedHash(intendedHash),
+				state: "intent",
+				documentGeneration: null,
+				acceptedHash: null,
+				routeObserved: false,
+			};
+			nextRouteVisitId += 1;
+			return visit;
+		};
+		const activateRouteVisit = (visit) => {
+			if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
+			visit.state = "pending";
+			currentRouteVisit = visit;
+			ownedRouteVisitId = visit.id;
+			return visit;
+		};
+		const certifyChangesVisit = (visit, acceptedHash) => {
+			const semanticHash = capabilityRedactedHash(acceptedHash);
+			if (
+				visit !== currentRouteVisit ||
+				visit.state !== "pending" ||
+				!isChangesHash(visit.intendedHash) ||
+				semanticHash !== visit.intendedHash ||
+				capabilityRedactedHash(page.url()) !== semanticHash
+			) {
+				retireRouteVisit(visit);
+				return false;
+			}
+			visit.state = "accepted";
+			visit.acceptedHash = semanticHash;
+			visit.documentGeneration = committedDocumentGeneration;
+			ownedRouteVisitId = null;
+			return true;
+		};
+		const awaitRequiredProfileRequest = (visit) => {
+			const current = eligibleProfileRequests(visit);
+			if (current.length > 0) return Promise.resolve(current[0]);
+			return page.waitForEvent("request", (request) =>
+				eligibleProfileRequests(visit).includes(request),
+			);
+		};
+		const snapshotProfileArm = ({ arm, targetHash }) => {
+			const visit =
+				currentRouteVisit?.state === "accepted" ? currentRouteVisit : null;
+			const candidates = eligibleProfileRequests(visit);
+			if (arm === "optional" || candidates.length !== 0) {
+				retireRouteVisit(visit);
+			}
+			let transition = null;
+			if (visit !== null && candidates.length === 1) {
+				const request = candidates[0];
+				const requestRecord = recordsByRequest.get(request);
+				let resolve;
+				const requestSettled = new Promise((settle) => {
+					resolve = settle;
+				});
+				transition = {
+					arm,
+					request,
+					requestRecord,
+					sourceHash: visit.acceptedHash,
+					targetHash: capabilityRedactedHash(targetHash),
+					profileRequestsBeforeNavigation: candidates,
+					destinationSucceeded: false,
+					outcome: null,
+					terminalHistory: [],
+					timer: null,
+					joinStarted: false,
+					result: null,
+					resolve,
+					requestSettled,
+					settleRequest: (outcome) => settleTransition(transition, outcome),
+				};
+				transitionByRequest.set(request, transition);
+			}
+			return { visit, candidates, transition };
+		};
+		const enterSettlementJoin = (transition) => {
+			if (transition.outcome !== null) return transition.requestSettled;
+			if (!transition.joinStarted) {
+				transition.joinStarted = true;
+				transition.timer = setTimer(() => {
+					if (transition.outcome !== null) return;
+					if (transitionByRequest.get(transition.request) === transition) {
+						transitionByRequest.delete(transition.request);
+					}
+					settleTransition(transition, "timeout");
+				}, PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS);
+			}
+			return transition.requestSettled;
+		};
+
+		return {
+			abandonRouteVisitIntent: retireRouteVisit,
+			activateRouteVisit,
+			awaitRequiredProfileRequest,
+			certifyChangesVisit,
+			createRouteVisitIntent,
+			currentAcceptedRouteVisit: () =>
+				currentRouteVisit?.state === "accepted" ? currentRouteVisit : null,
+			eligibleProfileRequests,
+			enterSettlementJoin,
+			requestRecord: (request) => recordsByRequest.get(request) ?? null,
+			snapshotProfileArm,
+			state: () => ({
+				committedDocumentGeneration,
+				pendingNavigationRoot: pendingNavigation?.root ?? null,
+				pendingNavigationAmbiguous: pendingNavigation?.ambiguous ?? false,
+				currentRouteVisit,
+			}),
+			transitionForRequest: (request) =>
+				transitionByRequest.get(request) ?? null,
+		};
+	}
+
+	const recordProfileSettlementTimeout = (diagnostics, label, settlement) =>
+		diagnostics.requireCondition(
+			false,
+			label,
+			`exact profile Request did not settle within ${PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS} ms`,
+			{
+				expected: {
+					outcome: [
+						"response",
+						"requestfinished",
+						"requestfailed",
+						"document-replaced",
+					],
+				},
+				actual: settlement.diagnostic,
+			},
+		);
+
+	if (typeof config.__pointbreakD70Selftest === "function") {
+		return config.__pointbreakD70Selftest({
+			createDiagnostics: createBrowserDiagnostics,
+			createProfileRequestLifecycle,
+			recordProfileSettlementTimeout,
+			settlementTimeoutMs: PROFILE_SUPERSESSION_SETTLEMENT_TIMEOUT_MS,
+		});
+	}
+
+	return async (page) => {
 	if (
 		config.mode !== "full" &&
 		config.mode !== "shakedown" &&
@@ -11,16 +546,18 @@
 	) {
 		throw new Error(`unsupported browser verification mode: ${config.mode}`);
 	}
-	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
-	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
-	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
 	let screenshots = 0;
 	let lastScreenshot = null;
 	const consoleErrors = [];
 	const pageErrors = [];
 	const requestFailures = [];
-	const outstandingRequests = new Set();
-	const profileSupersessionTransitionByRequest = new Map();
+	const requestLifecycleFailures = [];
+	const requestLifecycle = createProfileRequestLifecycle({
+		page,
+		primaryBaseUrl: config.server.baseUrl,
+		onLifecycleFailure: (failure) => requestLifecycleFailures.push(failure),
+		onRequestFailure: (failure) => requestFailures.push(failure),
+	});
 	const serviceUnavailableResponses = [];
 	let insideAppendWindow = false;
 	const bootstrapUrl = (server) =>
@@ -108,36 +645,7 @@
 		});
 	});
 	page.on("pageerror", (error) => pageErrors.push(error.message));
-	page.on("request", (request) => {
-		outstandingRequests.add(request);
-	});
-	page.on("requestfailed", (request) => {
-		const transition =
-			profileSupersessionTransitionByRequest.get(request) ?? null;
-		requestFailures.push({
-			request,
-			transition,
-			method: request.method(),
-			resourceType: request.resourceType(),
-			url: request.url(),
-			error: request.failure()?.errorText ?? "unknown request failure",
-		});
-		transition?.settleRequest("requestfailed");
-		profileSupersessionTransitionByRequest.delete(request);
-		outstandingRequests.delete(request);
-	});
-	page.on("requestfinished", (request) => {
-		const transition = profileSupersessionTransitionByRequest.get(request);
-		transition?.settleRequest("requestfinished");
-		profileSupersessionTransitionByRequest.delete(request);
-		outstandingRequests.delete(request);
-	});
 	page.on("response", (response) => {
-		const request = response.request();
-		const transition = profileSupersessionTransitionByRequest.get(request);
-		transition?.settleRequest("response");
-		profileSupersessionTransitionByRequest.delete(request);
-		outstandingRequests.delete(request);
 		if (response.status() !== 503) return;
 		const responseWindow = insideAppendWindow;
 		const inspection = (async () => {
@@ -367,9 +875,10 @@
 		) {
 			fail(label, `unsupported profile supersession arm: ${profileSupersessionArm}`);
 		}
-		await page.setViewportSize({ width: layout.width, height: layout.height });
 		const targetUrl = url(route);
 		const targetHash = `#/${route}`;
+		const targetVisit = requestLifecycle.createRouteVisitIntent(targetHash);
+		await page.setViewportSize({ width: layout.width, height: layout.height });
 		const priorKeys = await page.evaluate(() => ({
 			changeList:
 				document.querySelector("#master")?.dataset.changeListKey ?? null,
@@ -396,24 +905,32 @@
 				: null;
 		let profileSupersessionTransition = null;
 		if (profileSupersessionArm !== null) {
-			const isPrimaryProfileRequest = (request) =>
-				request.method() === "GET" &&
-				request.resourceType() === "fetch" &&
-				request.url() === `${config.server.baseUrl}/api/v2/profile`;
+			const sourceVisit = requestLifecycle.currentAcceptedRouteVisit();
 			let awaitedProfileRequest = null;
 			if (profileSupersessionArm === "required") {
-				awaitedProfileRequest = await page.waitForEvent(
-					"request",
-					isPrimaryProfileRequest,
-				);
+				if (sourceVisit === null) {
+					requestLifecycle.abandonRouteVisitIntent(targetVisit);
+					requireCondition(
+						false,
+						label,
+						"the required profile arm has no accepted Changes route visit",
+						"one exact accepted Changes route visit",
+						null,
+					);
+				}
+				awaitedProfileRequest =
+					await requestLifecycle.awaitRequiredProfileRequest(sourceVisit);
 			}
-			const profileRequestsBeforeNavigation = Array.from(
-				outstandingRequests,
-			).filter(isPrimaryProfileRequest);
+			const armSnapshot = requestLifecycle.snapshotProfileArm({
+				arm: profileSupersessionArm,
+				targetHash,
+			});
+			const profileRequestsBeforeNavigation = armSnapshot.candidates;
 			if (
 				profileSupersessionArm === "required" &&
 				!profileRequestsBeforeNavigation.includes(awaitedProfileRequest)
 			) {
+				requestLifecycle.abandonRouteVisitIntent(targetVisit);
 				requireCondition(
 					profileRequestsBeforeNavigation.length === 0,
 					label,
@@ -434,31 +951,9 @@
 				"at most one in-flight primary profile request",
 				profileRequestsBeforeNavigation.length,
 			);
-			if (profileRequestsBeforeNavigation.length === 1) {
-				let requestWasSettled = false;
-				let settleRequest;
-				const requestSettled = new Promise((resolve) => {
-					settleRequest = (outcome) => {
-						if (requestWasSettled) return;
-						requestWasSettled = true;
-						resolve(outcome);
-					};
-				});
-				profileSupersessionTransition = {
-					arm: profileSupersessionArm,
-					sourceHash: priorKeys.route,
-					targetHash,
-					profileRequestsBeforeNavigation,
-					destinationSucceeded: false,
-					requestSettled,
-					settleRequest,
-				};
-				profileSupersessionTransitionByRequest.set(
-					profileRequestsBeforeNavigation[0],
-					profileSupersessionTransition,
-				);
-			}
+			profileSupersessionTransition = armSnapshot.transition;
 		}
+		requestLifecycle.activateRouteVisit(targetVisit);
 		// A goto to the exact current fragment is a no-op. Force a document reload
 		// so a deliberately refused reader-profile fixture cannot leak its DOM
 		// into the real reader that follows it.
@@ -550,6 +1045,22 @@
 			false,
 			semanticHash.includes("token="),
 		);
+		if (expectedLens === "changes") {
+			requireCondition(
+				requestLifecycle.certifyChangesVisit(targetVisit, semanticHash),
+				label,
+				"the semantic Changes destination could not certify its route visit",
+				{
+					hash: targetHash,
+					documentGeneration:
+						requestLifecycle.state().committedDocumentGeneration,
+				},
+				{
+					hash: capabilityRedactedHash(semanticHash),
+					visitId: targetVisit.id,
+				},
+			);
+		}
 		const metrics = await page.evaluate(() => ({
 			width: document.documentElement.clientWidth,
 			scrollWidth: document.documentElement.scrollWidth,
@@ -572,7 +1083,12 @@
 		);
 		if (profileSupersessionTransition !== null) {
 			profileSupersessionTransition.destinationSucceeded = true;
-			await profileSupersessionTransition.requestSettled;
+			const settlement = await requestLifecycle.enterSettlementJoin(
+				profileSupersessionTransition,
+			);
+			if (settlement.outcome === "timeout") {
+				recordProfileSettlementTimeout(diagnostics, label, settlement);
+			}
 		}
 		const profileSupersessionObserved = requestFailures.some(
 			(record) =>
@@ -6604,6 +7120,17 @@
 	);
 
 	await diagnostics.section("Browser runtime", async () => {
+		if (requestLifecycleFailures.length > 0) {
+			diagnostics.abort(
+				requestLifecycleFailures
+					.map((failure) => failure.detail)
+					.join("\n"),
+				{
+					expected: [],
+					actual: requestLifecycleFailures,
+				},
+			);
+		}
 		expect(
 			unexpectedConsoleErrors.length === 0 &&
 				unexpectedServiceUnavailableResponses.length === 0,
@@ -6656,4 +7183,5 @@
 	const completion = diagnostics.result({ screenshotCount: screenshots });
 	console.log(`POINTBREAK_BROWSER_RESULT=${JSON.stringify(completion)}`);
 	return completion;
+	};
 })(__POINTBREAK_CHANGE_BROWSER_CONFIG__)
