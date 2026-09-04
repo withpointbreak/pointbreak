@@ -5978,6 +5978,228 @@ test("append-window Profile exemption accepts only the exact primary stale and u
 	);
 });
 
+test("append-window transition admission is closed over the Timeline poll request set", async () => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const classifierStart = source.indexOf(
+		"function isDeliberateChangeProjectionTransition(",
+	);
+	const classifierEnd = source.indexOf(
+		"\n\tconst responseInspections",
+		classifierStart,
+	);
+	const runtimeStart = source.indexOf(
+		"\tconst deliberateTransitionResponses =",
+		source.indexOf("await settleResponseInspections();"),
+	);
+	const runtimeEnd = source.indexOf(
+		"\n\tconst requestHealth = requestHealthSnapshot();",
+		runtimeStart,
+	);
+	assert.notEqual(classifierStart, -1, "missing classifier region");
+	assert.ok(classifierEnd > classifierStart, "missing classifier boundary");
+	assert.ok(runtimeStart > classifierEnd, "missing runtime accounting region");
+	assert.ok(runtimeEnd > runtimeStart, "missing runtime accounting boundary");
+
+	const harness = new Function(`
+${source.slice(classifierStart, classifierEnd)}
+const hasHistoryClassifier =
+	typeof isDeliberateHistoryProjectionTransition === "function";
+return {
+	classify(record, primaryBaseUrl) {
+		return (
+			isDeliberateChangeProjectionTransition(record, primaryBaseUrl) ||
+			isDeliberateProfileProjectionTransition(record, primaryBaseUrl) ||
+			(hasHistoryClassifier &&
+				isDeliberateHistoryProjectionTransition(record, primaryBaseUrl))
+		);
+	},
+	account(serviceUnavailableResponses, consoleErrors, primaryBaseUrl) {
+		const config = { server: { baseUrl: primaryBaseUrl } };
+${source.slice(runtimeStart, runtimeEnd)}
+		return {
+			unexpectedConsoleErrors,
+			unexpectedServiceUnavailableResponses,
+		};
+	},
+};
+`)();
+	const baseUrl = "http://127.0.0.1:4173";
+	const schema = "pointbreak.inspect-change-projection-error";
+	const genericServiceUnavailable =
+		"Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+	const typed = (url, code = "projection_stale") => ({
+		url,
+		status: 503,
+		body: { schema, version: 1, code, retryable: true },
+		schema,
+		insideAppendWindow: true,
+	});
+	const consoleFor = (record, overrides = {}) => ({
+		text: genericServiceUnavailable,
+		url: record.url,
+		insideAppendWindow: true,
+		...overrides,
+	});
+	const endpoints = [
+		["Profile", `${baseUrl}/api/v2/profile`],
+		["Changes", `${baseUrl}/api/v2/changes?limit=100`],
+		["Attention", `${baseUrl}/api/v2/attention?limit=100`],
+		["History", `${baseUrl}/api/v2/history?limit=100&order=desc`],
+	];
+	const allowed = [];
+	for (const [family, url] of endpoints) {
+		for (const code of ["projection_stale", "projection_unstable"]) {
+			const record = typed(url, code);
+			assert.equal(harness.classify(record, baseUrl), true, `${family}:${code}`);
+			allowed.push(record);
+		}
+	}
+	for (const code of ["projection_stale", "projection_unstable"]) {
+		assert.equal(
+			harness.classify(typed(`${baseUrl}/api/v2/history`, code), baseUrl),
+			true,
+			`History without query:${code}`,
+		);
+	}
+
+	const complete = harness.account(
+		allowed,
+		allowed.map((record) => consoleFor(record)),
+		baseUrl,
+	);
+	assert.deepEqual(complete.unexpectedConsoleErrors, []);
+	assert.deepEqual(complete.unexpectedServiceUnavailableResponses, []);
+
+	const history = typed(
+		`${baseUrl}/api/v2/history?limit=100&order=desc`,
+		"projection_unstable",
+	);
+	const oneFieldNegatives = [
+		["outside window", { ...history, insideAppendWindow: false }],
+		["wrong status", { ...history, status: 409 }],
+		["route suffix", { ...history, url: `${baseUrl}/api/v2/history/` }],
+		["route extension", { ...history, url: `${baseUrl}/api/v2/history-extra` }],
+		["legacy route", { ...history, url: `${baseUrl}/api/history` }],
+		["lookalike origin", { ...history, url: `${baseUrl}.example/api/v2/history` }],
+		[
+			"secondary origin",
+			{ ...history, url: "http://127.0.0.1:4999/api/v2/history" },
+		],
+		["wrong outer schema", { ...history, schema: "pointbreak.inspect-event-history-error" }],
+		[
+			"wrong body schema",
+			{
+				...history,
+				body: { ...history.body, schema: "pointbreak.inspect-event-history-error" },
+			},
+		],
+		[
+			"wrong version",
+			{ ...history, body: { ...history.body, version: 2 } },
+		],
+		[
+			"nonretryable",
+			{ ...history, body: { ...history.body, retryable: false } },
+		],
+		[
+			"outside code pair",
+			{
+				...history,
+				body: { ...history.body, code: "projection_rebuild_required" },
+			},
+		],
+		["invalid body", { ...history, body: null }],
+	];
+	for (const [label, rejected] of oneFieldNegatives) {
+		assert.equal(harness.classify(rejected, baseUrl), false, label);
+		const accounted = harness.account(
+			[rejected],
+			[consoleFor(rejected)],
+			baseUrl,
+		);
+		assert.equal(
+			accounted.unexpectedServiceUnavailableResponses.length,
+			1,
+			`${label}:response`,
+		);
+		assert.equal(
+			accounted.unexpectedConsoleErrors.length,
+			1,
+			`${label}:console`,
+		);
+	}
+
+	for (const [label, rejected] of [
+		[
+			"inactive moving journal",
+			{
+				...history,
+				schema: "pointbreak.inspect-event-history-error",
+				body: {
+					schema: "pointbreak.inspect-event-history-error",
+					version: 1,
+					code: "moving_journal",
+					retryable: true,
+				},
+			},
+		],
+		[
+			"stale continuation",
+			{
+				...history,
+				status: 409,
+				body: { ...history.body, code: "stale_projection", retryable: false },
+			},
+		],
+		[
+			"exact member route",
+			{ ...history, url: `${baseUrl}/api/v2/changes/change%3Asha256%3A01` },
+		],
+		[
+			"Profile query",
+			{ ...history, url: `${baseUrl}/api/v2/profile?limit=100` },
+		],
+	]) {
+		assert.equal(harness.classify(rejected, baseUrl), false, label);
+	}
+
+	const duplicate = harness.account(
+		[history, { ...history }],
+		[consoleFor(history), consoleFor(history)],
+		baseUrl,
+	);
+	assert.deepEqual(duplicate.unexpectedConsoleErrors, []);
+	assert.deepEqual(duplicate.unexpectedServiceUnavailableResponses, []);
+	const extraConsole = harness.account(
+		[history],
+		[consoleFor(history), consoleFor(history)],
+		baseUrl,
+	);
+	assert.equal(extraConsole.unexpectedConsoleErrors.length, 1);
+	assert.deepEqual(extraConsole.unexpectedServiceUnavailableResponses, []);
+	const crossUrl = harness.account(
+		[history],
+		[
+			consoleFor(history, {
+				url: `${baseUrl}/api/v2/changes?limit=100`,
+			}),
+		],
+		baseUrl,
+	);
+	assert.equal(crossUrl.unexpectedConsoleErrors.length, 1);
+	assert.deepEqual(crossUrl.unexpectedServiceUnavailableResponses, []);
+	const nonGeneric = harness.account(
+		[history],
+		[consoleFor(history, { text: "another browser error" })],
+		baseUrl,
+	);
+	assert.equal(nonGeneric.unexpectedConsoleErrors.length, 1);
+	assert.deepEqual(nonGeneric.unexpectedServiceUnavailableResponses, []);
+});
+
 test("an aggregate failure cannot publish a passing completion manifest", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pointbreak-browser-diagnostics-"));
 	const candidatePath = join(root, ".manifest.json.tmp");

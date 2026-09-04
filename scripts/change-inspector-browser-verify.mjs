@@ -1567,6 +1567,27 @@
 			body.retryable === true
 		);
 	}
+	function isDeliberateHistoryProjectionTransition(record, primaryBaseUrl) {
+		if (!record.insideAppendWindow || record.status !== 503) return false;
+		if (typeof record.url !== "string" || typeof primaryBaseUrl !== "string")
+			return false;
+		const primaryOrigin = primaryBaseUrl.endsWith("/")
+			? primaryBaseUrl.slice(0, -1)
+			: primaryBaseUrl;
+		const route = `${primaryOrigin}/api/v2/history`;
+		if (record.url !== route && !record.url.startsWith(`${route}?`)) return false;
+		const body = record.body;
+		return (
+			typeof body === "object" &&
+			body !== null &&
+			record.schema === "pointbreak.inspect-change-projection-error" &&
+			body.schema === record.schema &&
+			body.version === 1 &&
+			(body.code === "projection_stale" ||
+				body.code === "projection_unstable") &&
+			body.retryable === true
+		);
+	}
 	function isAdmissibleProfileSupersessionFailure(record, primaryBaseUrl) {
 		if (typeof record !== "object" || record === null) return false;
 		if (typeof primaryBaseUrl !== "string") return false;
@@ -8129,7 +8150,8 @@
 	const deliberateTransitionResponses = serviceUnavailableResponses.filter(
 		(response) =>
 			isDeliberateChangeProjectionTransition(response, config.server.baseUrl) ||
-			isDeliberateProfileProjectionTransition(response, config.server.baseUrl),
+			isDeliberateProfileProjectionTransition(response, config.server.baseUrl) ||
+			isDeliberateHistoryProjectionTransition(response, config.server.baseUrl),
 	);
 	const transitionResponsesByUrl = new Map();
 	for (const response of deliberateTransitionResponses) {
@@ -8160,6 +8182,10 @@
 					config.server.baseUrl,
 				) &&
 				!isDeliberateProfileProjectionTransition(
+					response,
+					config.server.baseUrl,
+				) &&
+				!isDeliberateHistoryProjectionTransition(
 					response,
 					config.server.baseUrl,
 				),
