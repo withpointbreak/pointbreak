@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -824,9 +824,14 @@ test("D72 lifecycle activation excludes capability setup and gates every focused
 	);
 	assert.equal(
 		(
-			source.match(
-				/recordCurrentFocusedRequestHealth\(\);\n\t\tconst shakedownResult = diagnostics\.result/g,
-			) ?? []
+			source
+				.replace(
+					/\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_BEGIN[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_END/,
+					"",
+				)
+				.match(
+					/recordCurrentFocusedRequestHealth\(\);\n\t\tconst shakedownResult = diagnostics\.result/g,
+				) ?? []
 		).length,
 		1,
 	);
@@ -2154,6 +2159,439 @@ test("D77 retains only one exact settled goto tail before certification", async 
 	assert.equal(result, true);
 });
 
+test("D78 publishes one closed repair-base proof after exact setup and reload", async () => {
+	const expectedProof = {
+		schema: "pointbreak.change-inspector-d77-repair-base-proof",
+		version: 1,
+		action: {
+			actionClass: "exact-detail-changes-goto",
+			navigationKind: "goto",
+			resultKind: "same-document-null",
+			sourceDiffersFromTarget: true,
+			eventCount: 2,
+			eventOrdinals: [1, 2],
+			eventPhases: ["invoked", "settled"],
+			capturedFrameMatches: [true, true],
+			targetMatches: [true, true],
+			actionCurrent: [true, true],
+			visitStatesBefore: ["pending", "pending"],
+			visitStatesAfter: ["pending", "pending"],
+			routeObservedBefore: [false, true],
+			routeObservedAfter: [true, true],
+			ownershipBefore: [true, false],
+			ownershipAfter: [false, false],
+		},
+		transition: {
+			mainFrameNavigationRequestCount: 0,
+			navigationRootCount: 0,
+			domContentLoadedCount: 0,
+			rootCommitCount: 0,
+			generationUnchanged: true,
+			overflowed: false,
+		},
+		certification: {
+			passed: true,
+			sameVisit: true,
+			pendingState: true,
+			changesHash: true,
+			semanticMatchesIntended: true,
+			pageMatchesSemantic: true,
+			exactReadingReady: true,
+			routeObserved: true,
+		},
+		reload: {
+			passed: true,
+			navigationKind: "reload",
+			d77Eligible: false,
+		},
+		health: {
+			lifecycleFailureCount: 0,
+			unexpectedRequestFailureCount: 0,
+			admissibleProfileSupersessionCount: 0,
+			profileSupersessionAdmissionWithinBound: true,
+		},
+	};
+
+	const result = await runD70BrowserSelftest(
+		async ({ createD78RepairBaseProof, createProfileRequestLifecycle }) => {
+			assert.equal(
+				typeof createD78RepairBaseProof,
+				"function",
+				"D78 Red: the production program must expose one private pure proof constructor",
+			);
+
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const sourceHash =
+				"#/changes?limit=100&order=change_id_asc&token=bootstrap-secret";
+			const intendedHash =
+				"#/changes/change%3Asha256%3Aaa/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc&limit=100&order=change_id_asc";
+			const createOpenResult = ({ reload }) => {
+				const page = new FakePage(
+					`${primaryBaseUrl}/${reload ? intendedHash : sourceHash}`,
+				);
+				const lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+				});
+				const visit = lifecycle.createRouteVisitIntent(intendedHash);
+				const actionToken = lifecycle.activateRouteVisit(visit, {
+					actionClass: reload ? "ineligible" : "exact-detail-changes-goto",
+					capturedMainFrame: page.mainFrame(),
+					navigationKind: reload ? "reload" : "goto",
+					sourceHash: page.url(),
+				});
+				assert.equal(
+					lifecycle.invokeRouteVisitAction(visit, actionToken),
+					true,
+				);
+				page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+				page.emit("framenavigated", page.mainFrame());
+				assert.equal(
+					lifecycle.settleRouteVisitAction(
+						visit,
+						actionToken,
+						reload ? "document-response" : "same-document-null",
+					),
+					true,
+				);
+				if (!reload) page.emit("framenavigated", page.mainFrame());
+				const routeVisitAction = lifecycle.routeVisitActionDiagnostic(visit);
+				const routeVisitCertification = {
+					passed: lifecycle.certifyChangesVisit(visit, intendedHash),
+					sameVisit: routeVisitAction.current,
+					pendingState: routeVisitAction.frameEntries.every(
+						(entry) =>
+							entry.visitStateBefore === "pending" &&
+							entry.visitStateAfter === "pending",
+					),
+					changesHash: true,
+					semanticMatchesIntended: true,
+					pageMatchesSemantic: true,
+					exactReadingReady: true,
+					routeObserved:
+						routeVisitAction.frameEntries.at(-1)?.routeObservedAfter === true,
+				};
+				return {
+					navigationKind: reload ? "reload" : "goto",
+					routeVisitAction,
+					routeVisitCertification,
+				};
+			};
+			const input = {
+				setupOpen: createOpenResult({ reload: false }),
+				reloadOpen: createOpenResult({ reload: true }),
+				health: {
+					requestLifecycleFailureCount: 0,
+					unexpectedRequestFailureCount: 0,
+					admissibleProfileSupersessionCount: 0,
+					profileSupersessionAdmissionWithinBound: true,
+				},
+			};
+			const proof = createD78RepairBaseProof(input);
+			assert.deepEqual(proof, expectedProof);
+			const serialized = JSON.stringify(proof);
+			assert.doesNotMatch(
+				serialized,
+				/token|visitId|ownedVisit|currentVisit|sourceHash|intendedHash|frameHash|pageHash|semanticHash|requestUrl|responseBody|capability|actor|storePath|storeContent|rawContent|error|\[object Object\]|http:\/\//i,
+			);
+
+			const rejects = (label, mutate) => {
+				const candidate = structuredClone(input);
+				mutate(candidate);
+				assert.throws(
+					() => createD78RepairBaseProof(candidate),
+					/D78 repair-base proof/i,
+					label,
+				);
+			};
+			rejects("one event", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntryCount = 1;
+				candidate.setupOpen.routeVisitAction.frameEntries.length = 1;
+			});
+			rejects("zero events", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntryCount = 0;
+				candidate.setupOpen.routeVisitAction.frameEntries.length = 0;
+			});
+			rejects("three events", (candidate) => {
+				const tail = structuredClone(
+					candidate.setupOpen.routeVisitAction.frameEntries[1],
+				);
+				tail.eventOrdinal = 3;
+				candidate.setupOpen.routeVisitAction.frameEntryCount = 3;
+				candidate.setupOpen.routeVisitAction.frameEntries.push(tail);
+			});
+			rejects("reordered events", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntries.reverse();
+			});
+			rejects("repeated ordinal", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntries[1].eventOrdinal = 1;
+			});
+			rejects("target mismatch", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntries[1].actionTargetMatch = false;
+			});
+			rejects("unavailable captured frame", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntries[1].actionFrameHashAvailable = false;
+			});
+			rejects("stale action", (candidate) => {
+				candidate.setupOpen.routeVisitAction.current = false;
+			});
+			rejects("request transition", (candidate) => {
+				candidate.setupOpen.routeVisitAction.mainFrameNavigationRequestCount = 1;
+			});
+			rejects("root commit", (candidate) => {
+				candidate.setupOpen.routeVisitAction.frameEntries[0].root.commitCount = 1;
+			});
+			rejects("generation movement", (candidate) => {
+				candidate.setupOpen.routeVisitAction.currentGeneration += 1;
+			});
+			rejects("failed certification", (candidate) => {
+				candidate.setupOpen.routeVisitCertification.exactReadingReady = false;
+			});
+			rejects("changed reload", (candidate) => {
+				candidate.reloadOpen.navigationKind = "goto";
+			});
+			rejects("D77-eligible reload", (candidate) => {
+				candidate.reloadOpen.routeVisitAction.actionClass =
+					"exact-detail-changes-goto";
+			});
+			rejects("failed reload certification", (candidate) => {
+				candidate.reloadOpen.routeVisitCertification.passed = false;
+			});
+			rejects("lifecycle failure", (candidate) => {
+				candidate.health.requestLifecycleFailureCount = 1;
+			});
+			rejects("unexpected request failure", (candidate) => {
+				candidate.health.unexpectedRequestFailureCount = 1;
+			});
+			rejects("admissible failure", (candidate) => {
+				candidate.health.admissibleProfileSupersessionCount = 1;
+			});
+			rejects("admission overflow", (candidate) => {
+				candidate.health.profileSupersessionAdmissionWithinBound = false;
+			});
+			return true;
+		},
+	);
+	assert.equal(result, true);
+
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	assert.equal(
+		(browser.match(/POINTBREAK_D78_OPEN_PROOF_BEGIN/g) ?? []).length,
+		1,
+	);
+	assert.equal(
+		(browser.match(/POINTBREAK_D78_BASE_PROOF_BEGIN/g) ?? []).length,
+		1,
+	);
+	const openProof = browser.indexOf("POINTBREAK_D78_OPEN_PROOF_BEGIN");
+	const certification = browser.indexOf(
+		"requestLifecycle.certifyChangesVisit(targetVisit, semanticHash)",
+		openProof,
+	);
+	assert.ok(
+		openProof >= 0 && certification > openProof,
+		"the successful action snapshot must be retained immediately around certification",
+	);
+	const baseProof = browser.indexOf("POINTBREAK_D78_BASE_PROOF_BEGIN");
+	const focusedHealth = browser.lastIndexOf(
+		"recordCurrentFocusedRequestHealth();",
+		baseProof,
+	);
+	const report = browser.indexOf("diagnostics.result(", baseProof);
+	assert.ok(
+		focusedHealth >= 0 && baseProof > focusedHealth && report > baseProof,
+		"the base proof must use setup/reload and shared health before report construction",
+	);
+
+	const shellBridgeStart = shell.indexOf(
+		"POINTBREAK_D78_PROOF_VALIDATION_BEGIN",
+	);
+	const shellBridgeEnd = shell.indexOf(
+		"POINTBREAK_D78_PROOF_VALIDATION_END",
+		shellBridgeStart,
+	);
+	assert.ok(shellBridgeStart >= 0 && shellBridgeEnd > shellBridgeStart);
+	const shellBridge = shell.slice(shellBridgeStart, shellBridgeEnd);
+	const shellBridgeLineStart = shell.lastIndexOf("\n", shellBridgeStart) + 1;
+	const shellBridgeLineEnd = shell.indexOf("\n", shellBridgeEnd);
+	assert.ok(
+		shellBridgeLineStart >= 0 && shellBridgeLineEnd > shellBridgeLineStart,
+	);
+	const shellValidationBlock = shell.slice(
+		shellBridgeLineStart,
+		shellBridgeLineEnd,
+	);
+	assert.match(shellBridge, /repairBaseProof/);
+	assert.match(shellBridge, /has\("repairBaseProof"\) \| not/);
+	assert.match(shellBridge, /repair_base_proof_occurrences/);
+	assert.ok(
+		shellBridgeStart < shell.indexOf('if [ "$mode" != "full" ]; then'),
+		"full and every focused mode must reject a proof outside the base mode",
+	);
+	const proofValidation = shellBridge.indexOf("jq -cer");
+	const receiptConstruction = shell.indexOf('shakedown_receipt="$(jq -cn');
+	const cleanup = shell.indexOf("cleanup strict", receiptConstruction);
+	const proofCopy = shell.indexOf("POINTBREAK_D78_PROOF_COPY_BEGIN");
+	assert.ok(
+		proofValidation >= 0 &&
+			shellBridgeStart + proofValidation < receiptConstruction &&
+			proofCopy > receiptConstruction &&
+			cleanup > proofCopy,
+		"proof validation/copy must precede strict cleanup and terminal publication",
+	);
+	assert.match(
+		shell.slice(proofCopy, cleanup),
+		/\+ \{repairBaseProof: \$repairBaseProof\}/,
+	);
+	const filterMatch = shellBridge.match(
+		/jq -cer '([\s\S]*?)' "\$browser_result"/,
+	);
+	assert.ok(
+		filterMatch,
+		"the exact production jq proof predicate must be extractable",
+	);
+	const runProofFilter = async (input) => {
+		const child = spawn("jq", ["-ce", filterMatch[1]]);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.stdin.end(`${JSON.stringify(input)}\n`);
+		const code = await new Promise((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", resolve);
+		});
+		return { code, stderr, stdout };
+	};
+	const acceptedByShell = await runProofFilter({
+		repairBaseProof: expectedProof,
+	});
+	assert.equal(acceptedByShell.code, 0, acceptedByShell.stderr);
+	assert.deepEqual(JSON.parse(acceptedByShell.stdout), expectedProof);
+	for (const invalid of [
+		{},
+		{
+			repairBaseProof: {
+				...expectedProof,
+				extra: true,
+			},
+		},
+		{
+			repairBaseProof: {
+				...expectedProof,
+				action: {
+					...expectedProof.action,
+					eventPhases: ["settled", "invoked"],
+				},
+			},
+		},
+	]) {
+		assert.notEqual(
+			(await runProofFilter(invalid)).code,
+			0,
+			"the production shell predicate must reject missing, extra, or reordered proof",
+		);
+	}
+
+	const shellValidationProgram = `set -euo pipefail
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+mode="$1"
+browser_result="$2"
+${shellValidationBlock}
+printf '%s\\n' "$repair_base_proof_json"
+`;
+	const shellValidationRoot = await mkdtemp(
+		join(tmpdir(), "pointbreak-d78-shell-"),
+	);
+	const shellValidationResult = join(shellValidationRoot, "browser-result.json");
+	const runShellValidation = async (mode, bytes) => {
+		await writeFile(shellValidationResult, bytes);
+		const child = spawn("bash", [
+			"-c",
+			shellValidationProgram,
+			"d78-shell-validation",
+			mode,
+			shellValidationResult,
+		]);
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		const code = await new Promise((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", resolve);
+		});
+		return { code, stderr, stdout };
+	};
+	const proofBytes = JSON.stringify(expectedProof);
+	try {
+		const acceptedBase = await runShellValidation(
+			"shakedown",
+			`${JSON.stringify({ repairBaseProof: expectedProof })}\n`,
+		);
+		assert.equal(acceptedBase.code, 0, acceptedBase.stderr);
+		assert.deepEqual(JSON.parse(acceptedBase.stdout), expectedProof);
+		assert.notEqual(
+			(await runShellValidation("shakedown", "{}\n")).code,
+			0,
+			"base mode must reject a missing proof",
+		);
+		assert.notEqual(
+			(
+				await runShellValidation(
+					"shakedown",
+					`{"repairBaseProof":${proofBytes},"repairBaseProof":${proofBytes}}\n`,
+				)
+			).code,
+			0,
+			"base mode must reject duplicate raw proof keys",
+		);
+
+		for (const mode of [
+			"shakedown-timeline-boundary",
+			"shakedown-exact-history-focus",
+			"shakedown-return-destinations",
+			"full",
+		]) {
+			assert.notEqual(
+				(
+					await runShellValidation(
+						mode,
+						`${JSON.stringify({ repairBaseProof: expectedProof })}\n`,
+					)
+				).code,
+				0,
+				`${mode} must reject a repair-base proof`,
+			);
+			const acceptedWithoutProof = await runShellValidation(mode, "{}\n");
+			assert.equal(
+				acceptedWithoutProof.code,
+				0,
+				acceptedWithoutProof.stderr,
+			);
+			assert.equal(acceptedWithoutProof.stdout.trim(), "null");
+		}
+	} finally {
+		await rm(shellValidationRoot, { recursive: true, force: true });
+	}
+});
+
+
 function createBoundProfileTransition({
 	createProfileRequestLifecycle,
 	timers = new ManualTimers(),
@@ -2446,10 +2884,19 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		new URL("./README.md", import.meta.url),
 		"utf8",
 	);
+	const canonicalShell = shell
+		.replace(
+			/\n\s*# POINTBREAK_D78_PROOF_VALIDATION_BEGIN[\s\S]*?\n\s*# POINTBREAK_D78_PROOF_VALIDATION_END\n/,
+			"\n",
+		)
+		.replace(
+			/\n\s*# POINTBREAK_D78_PROOF_COPY_BEGIN[\s\S]*?\n\s*# POINTBREAK_D78_PROOF_COPY_END\n/,
+			"\n",
+		);
 	assert.equal(
-		createHash("sha256").update(shell).digest("hex"),
+		createHash("sha256").update(canonicalShell).digest("hex"),
 		"c9b1824fffd8547afd844285fcd9ad3e23716a606f0f8b9f81a7f380653fb861",
-		"D73 must not edit the shell",
+		"D78-local proof plumbing must canonicalize to the accepted D73 shell",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
@@ -2469,27 +2916,53 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		'\t\t\t\t\tlayouts[1],\n' +
 		'\t\t\t\t\t"shakedown exact reading reload",\n' +
 		'\t\t\t\t);\n';
+	const approvedSetupAndRun =
+		'\t\t\tsetup: () =>\n' +
+		'\t\t\t\topen(\n' +
+		'\t\t\t\t\texactReadingRoute(),\n' +
+		'\t\t\t\t\tlayouts[1],\n' +
+		'\t\t\t\t\t"shakedown exact reading setup",\n' +
+		'\t\t\t\t),\n' +
+		'\t\t\trun: async () => {\n' +
+		approvedReloadOpen;
+	const canonicalBranch = branch
+		.replace(
+			/\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_BEGIN\n\s*let repairBaseSetupOpen[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_END\n/,
+			"\n",
+		)
+		.replace(
+			/\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_BEGIN\n\s*setup: async[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_END\n/,
+			`\n${approvedSetupAndRun}`,
+		)
+		.replace(
+			/\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_BEGIN[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_END\n/,
+			"\n",
+		)
+		.replace(
+			/\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_ATTACHMENT_BEGIN[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_PROOF_ATTACHMENT_END\n/,
+			"\n",
+		);
 	assert.equal(
-		branch.split(approvedReloadOpen).length - 1,
+		canonicalBranch.split(approvedReloadOpen).length - 1,
 		1,
 		"the existing base section must contain exactly one approved reload statement",
 	);
 	assert.equal(
 		createHash("sha256")
-			.update(branch.replace(approvedReloadOpen, ""))
+			.update(canonicalBranch.replace(approvedReloadOpen, ""))
 			.digest("hex"),
 		"09acdda0a52b5c33a95d5b559d6fb327e7b475185d6d78cb8fb6e3e3cb0b42e0",
 		"D73 must not change any other base-shakedown byte",
 	);
-	const sectionStart = branch.indexOf(
+	const sectionStart = canonicalBranch.indexOf(
 		'diagnostics.section("Shakedown exact reading and quiet polling"',
 	);
-	const resultStart = branch.indexOf(
+	const resultStart = canonicalBranch.indexOf(
 		"recordCurrentFocusedRequestHealth();",
 		sectionStart,
 	);
 	assert.ok(sectionStart >= 0 && resultStart > sectionStart);
-	const section = branch.slice(sectionStart, resultStart);
+	const section = canonicalBranch.slice(sectionStart, resultStart);
 	assert.equal(
 		(section.match(/open\(\s*exactReadingRoute\(\)/g) ?? []).length,
 		2,

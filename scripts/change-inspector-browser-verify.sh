@@ -1577,6 +1577,85 @@ case "$mode" in
     expected_shakedown_section=""
     ;;
 esac
+	# POINTBREAK_D78_PROOF_VALIDATION_BEGIN
+	repair_base_proof_occurrences="$(awk '
+	  {
+	    line = $0
+	    while (match(line, /"repairBaseProof"[[:space:]]*:/)) {
+	      count += 1
+	      line = substr(line, RSTART + RLENGTH)
+	    }
+	  }
+	  END { print count + 0 }
+	' "$browser_result")"
+	if [ "$mode" = "shakedown" ]; then
+	  [ "$repair_base_proof_occurrences" -eq 1 ] \
+	    || die "shakedown browser report did not contain exactly one repair-base proof"
+	  repair_base_proof_json="$(jq -cer '
+	    .repairBaseProof as $proof |
+	    if $proof == {
+	      schema: "pointbreak.change-inspector-d77-repair-base-proof",
+	      version: 1,
+	      action: {
+	        actionClass: "exact-detail-changes-goto",
+	        navigationKind: "goto",
+	        resultKind: "same-document-null",
+	        sourceDiffersFromTarget: true,
+	        eventCount: 2,
+	        eventOrdinals: [1, 2],
+	        eventPhases: ["invoked", "settled"],
+	        capturedFrameMatches: [true, true],
+	        targetMatches: [true, true],
+	        actionCurrent: [true, true],
+	        visitStatesBefore: ["pending", "pending"],
+	        visitStatesAfter: ["pending", "pending"],
+	        routeObservedBefore: [false, true],
+	        routeObservedAfter: [true, true],
+	        ownershipBefore: [true, false],
+	        ownershipAfter: [false, false]
+	      },
+	      transition: {
+	        mainFrameNavigationRequestCount: 0,
+	        navigationRootCount: 0,
+	        domContentLoadedCount: 0,
+	        rootCommitCount: 0,
+	        generationUnchanged: true,
+	        overflowed: false
+	      },
+	      certification: {
+	        passed: true,
+	        sameVisit: true,
+	        pendingState: true,
+	        changesHash: true,
+	        semanticMatchesIntended: true,
+	        pageMatchesSemantic: true,
+	        exactReadingReady: true,
+	        routeObserved: true
+	      },
+	      reload: {
+	        passed: true,
+	        navigationKind: "reload",
+	        d77Eligible: false
+	      },
+	      health: {
+	        lifecycleFailureCount: 0,
+	        unexpectedRequestFailureCount: 0,
+	        admissibleProfileSupersessionCount: 0,
+	        profileSupersessionAdmissionWithinBound: true
+	      }
+	    } then $proof
+	    else error("repair-base proof did not match the closed D78 contract")
+	    end
+	  ' "$browser_result")" \
+	    || die "shakedown browser report contained an invalid repair-base proof"
+	else
+	  [ "$repair_base_proof_occurrences" -eq 0 ] \
+	    || die "$mode browser report unexpectedly contained a repair-base proof"
+	  jq -e 'has("repairBaseProof") | not' "$browser_result" >/dev/null \
+	    || die "$mode browser report unexpectedly contained a repair-base proof"
+	  repair_base_proof_json='null'
+	fi
+	# POINTBREAK_D78_PROOF_VALIDATION_END
 if [ "$mode" != "full" ]; then
   if [ "$mode" = "shakedown-return-destinations" ]; then
     jq -e '
@@ -1637,6 +1716,14 @@ if [ "$mode" != "full" ]; then
         derivedStoreBuilds: 1, inspectorLaunches: 1, browserLaunches: 1,
         temporaryStorageKiB: $temporaryStorageKiB},
       retained: false, cleanup: "removed own temporary root"}')"
+	# POINTBREAK_D78_PROOF_COPY_BEGIN
+	if [ "$mode" = "shakedown" ]; then
+	  shakedown_receipt="$(jq -cn \
+	    --argjson receipt "$shakedown_receipt" \
+	    --argjson repairBaseProof "$repair_base_proof_json" \
+	    '$receipt + {repairBaseProof: $repairBaseProof}')"
+	fi
+	# POINTBREAK_D78_PROOF_COPY_END
   completed_shakedown_root="$root"
   cleanup strict || die "shakedown browser session or temporary root did not clean up"
   trap - EXIT

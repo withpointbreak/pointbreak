@@ -1258,6 +1258,209 @@
 		};
 	}
 
+	function createD78RepairBaseProof({ setupOpen, reloadOpen, health } = {}) {
+		const fail = (stage) => {
+			throw new Error(`D78 repair-base proof ${stage} did not match the closed contract`);
+		};
+		const action = setupOpen?.routeVisitAction;
+		const certification = setupOpen?.routeVisitCertification;
+		const entries = action?.frameEntries;
+		const certificationPassed = (value) =>
+			value?.passed === true &&
+			value.sameVisit === true &&
+			value.pendingState === true &&
+			value.changesHash === true &&
+			value.semanticMatchesIntended === true &&
+			value.pageMatchesSemantic === true &&
+			value.exactReadingReady === true &&
+			value.routeObserved === true;
+		const rootStayedAbsent = (entry) =>
+			entry?.root?.present === false &&
+			entry.root.committed === false &&
+			entry.root.commitCount === 0 &&
+			entry.root.ambiguous === false;
+		const entryMatches = (
+			entry,
+			{
+				eventOrdinal,
+				actionPhase,
+				routeObservedBefore,
+				routeObservedAfter,
+				ownershipBefore,
+				ownershipAfter,
+			},
+		) =>
+			entry?.eventOrdinal === eventOrdinal &&
+			entry.visitStateBefore === "pending" &&
+			entry.visitStateAfter === "pending" &&
+			entry.routeObservedBefore === routeObservedBefore &&
+			entry.routeObservedAfter === routeObservedAfter &&
+			entry.ownershipBefore === ownershipBefore &&
+			entry.ownershipAfter === ownershipAfter &&
+			entry.intendedHash === action.intendedHash &&
+			entry.frameHash === action.intendedHash &&
+			entry.pageHash === action.intendedHash &&
+			entry.semanticHash === null &&
+			entry.navigationKind === "goto" &&
+			entry.targetMatch === true &&
+			entry.actionPhase === actionPhase &&
+			entry.actionCurrent === true &&
+			entry.capturedFrameMatch === true &&
+			entry.actionFrameHashAvailable === true &&
+			entry.actionFrameHash === action.intendedHash &&
+			entry.actionTargetMatch === true &&
+			entry.committedGeneration === action.activationGeneration &&
+			entry.activationGeneration === action.activationGeneration &&
+			rootStayedAbsent(entry);
+		if (
+			setupOpen?.navigationKind !== "goto" ||
+			action?.schema !== "pointbreak.browser-route-action-diagnostic" ||
+			action.version !== 1 ||
+			action.actionClass !== "exact-detail-changes-goto" ||
+			action.eligibility !== "eligible" ||
+			action.phase !== "settled" ||
+			action.resultKind !== "same-document-null" ||
+			action.current !== true ||
+			action.capturedMainFrame !== true ||
+			typeof action.sourceHash !== "string" ||
+			action.sourceHash.length === 0 ||
+			action.sourceHash === action.intendedHash ||
+			typeof action.intendedHash !== "string" ||
+			action.intendedHash.length === 0 ||
+			action.activationGeneration !== action.settlementGeneration ||
+			action.activationGeneration !== action.currentGeneration ||
+			action.mainFrameNavigationRequestCount !== 0 ||
+			action.navigationRootCount !== 0 ||
+			action.domContentLoadedCount !== 0 ||
+			action.frameEntryCount !== 2 ||
+			!Array.isArray(entries) ||
+			entries.length !== 2 ||
+			action.overflowed !== false ||
+			!entryMatches(entries[0], {
+				eventOrdinal: 1,
+				actionPhase: "invoked",
+				routeObservedBefore: false,
+				routeObservedAfter: true,
+				ownershipBefore: true,
+				ownershipAfter: false,
+			}) ||
+			!entryMatches(entries[1], {
+				eventOrdinal: 2,
+				actionPhase: "settled",
+				routeObservedBefore: true,
+				routeObservedAfter: true,
+				ownershipBefore: false,
+				ownershipAfter: false,
+			}) ||
+			entries[0].visitId !== entries[1].visitId ||
+			entries[0].currentVisitIdBefore !== entries[0].visitId ||
+			entries[0].currentVisitIdAfter !== entries[0].visitId ||
+			entries[1].currentVisitIdBefore !== entries[1].visitId ||
+			entries[1].currentVisitIdAfter !== entries[1].visitId ||
+			entries[0].ownedVisitIdBefore !== entries[0].visitId ||
+			entries[0].ownedVisitIdAfter !== null ||
+			entries[1].ownedVisitIdBefore !== null ||
+			entries[1].ownedVisitIdAfter !== null
+		) {
+			fail("setup action");
+		}
+		if (!certificationPassed(certification)) {
+			fail("setup certification");
+		}
+
+		const reloadAction = reloadOpen?.routeVisitAction;
+		if (
+			reloadOpen?.navigationKind !== "reload" ||
+			reloadAction?.schema !== "pointbreak.browser-route-action-diagnostic" ||
+			reloadAction.version !== 1 ||
+			reloadAction.actionClass !== "ineligible" ||
+			reloadAction.eligibility !== "ineligible" ||
+			reloadAction.phase !== "settled" ||
+			(reloadAction.resultKind !== "same-document-null" &&
+				reloadAction.resultKind !== "document-response") ||
+			reloadAction.current !== true ||
+			reloadAction.capturedMainFrame !== true ||
+			reloadAction.sourceHash !== reloadAction.intendedHash ||
+			!Array.isArray(reloadAction.frameEntries) ||
+			reloadAction.frameEntries.length === 0 ||
+			!reloadAction.frameEntries.every(
+				(entry) => entry.navigationKind === "reload",
+			) ||
+			!certificationPassed(reloadOpen.routeVisitCertification) ||
+			health?.requestLifecycleFailureCount !== 0 ||
+			health.unexpectedRequestFailureCount !== 0 ||
+			health.admissibleProfileSupersessionCount !== 0 ||
+			health.profileSupersessionAdmissionWithinBound !== true
+		) {
+			fail("reload or health");
+		}
+
+		return {
+			schema: "pointbreak.change-inspector-d77-repair-base-proof",
+			version: 1,
+			action: {
+				actionClass: "exact-detail-changes-goto",
+				navigationKind: "goto",
+				resultKind: "same-document-null",
+				sourceDiffersFromTarget: true,
+				eventCount: 2,
+				eventOrdinals: entries.map((entry) => entry.eventOrdinal),
+				eventPhases: entries.map((entry) => entry.actionPhase),
+				capturedFrameMatches: entries.map(
+					(entry) => entry.capturedFrameMatch,
+				),
+				targetMatches: entries.map((entry) => entry.targetMatch),
+				actionCurrent: entries.map((entry) => entry.actionCurrent),
+				visitStatesBefore: entries.map((entry) => entry.visitStateBefore),
+				visitStatesAfter: entries.map((entry) => entry.visitStateAfter),
+				routeObservedBefore: entries.map(
+					(entry) => entry.routeObservedBefore,
+				),
+				routeObservedAfter: entries.map(
+					(entry) => entry.routeObservedAfter,
+				),
+				ownershipBefore: entries.map((entry) => entry.ownershipBefore),
+				ownershipAfter: entries.map((entry) => entry.ownershipAfter),
+			},
+			transition: {
+				mainFrameNavigationRequestCount:
+					action.mainFrameNavigationRequestCount,
+				navigationRootCount: action.navigationRootCount,
+				domContentLoadedCount: action.domContentLoadedCount,
+				rootCommitCount: entries.reduce(
+					(total, entry) => total + entry.root.commitCount,
+					0,
+				),
+				generationUnchanged: true,
+				overflowed: action.overflowed,
+			},
+			certification: {
+				passed: certification.passed,
+				sameVisit: certification.sameVisit,
+				pendingState: certification.pendingState,
+				changesHash: certification.changesHash,
+				semanticMatchesIntended: certification.semanticMatchesIntended,
+				pageMatchesSemantic: certification.pageMatchesSemantic,
+				exactReadingReady: certification.exactReadingReady,
+				routeObserved: certification.routeObserved,
+			},
+			reload: {
+				passed: true,
+				navigationKind: "reload",
+				d77Eligible: false,
+			},
+			health: {
+				lifecycleFailureCount: health.requestLifecycleFailureCount,
+				unexpectedRequestFailureCount:
+					health.unexpectedRequestFailureCount,
+				admissibleProfileSupersessionCount:
+					health.admissibleProfileSupersessionCount,
+				profileSupersessionAdmissionWithinBound:
+					health.profileSupersessionAdmissionWithinBound,
+			},
+		};
+	}
+
 	const recordProfileSettlementTimeout = (diagnostics, label, settlement) =>
 		diagnostics.requireCondition(
 			false,
@@ -1280,6 +1483,7 @@
 		return config.__pointbreakD70Selftest({
 			classifyRouteVisitAction,
 			classifyRouteVisitActionResult,
+			createD78RepairBaseProof,
 			createDiagnostics: createBrowserDiagnostics,
 			createProfileRequestLifecycle,
 			createProfileRequestLifecycleActivationOwner,
@@ -1464,12 +1668,25 @@
 					config.server.baseUrl,
 				),
 		});
-	const recordCurrentFocusedRequestHealth = () =>
+	let lastFocusedRequestHealth = null;
+	const recordCurrentFocusedRequestHealth = () => {
+		const requestHealth = requestHealthSnapshot();
 		recordFocusedRequestHealth({
 			diagnostics,
 			requestLifecycleFailures,
-			requestHealth: requestHealthSnapshot(),
+			requestHealth,
 		});
+		lastFocusedRequestHealth = {
+			requestLifecycleFailureCount: requestLifecycleFailures.length,
+			unexpectedRequestFailureCount:
+				requestHealth.unexpectedRequestFailures.length,
+			admissibleProfileSupersessionCount:
+				requestHealth.admissibleProfileSupersessionFailures.length,
+			profileSupersessionAdmissionWithinBound:
+				requestHealth.profileSupersessionAdmissionWithinBound,
+		};
+		return lastFocusedRequestHealth;
+	};
 	await page.goto(bootstrapUrl(config.server), {
 		waitUntil: "domcontentloaded",
 	});
@@ -1845,9 +2062,31 @@
 			false,
 			semanticHash.includes("token="),
 		);
+		let routeVisitAction = null;
+		let routeVisitCertification = null;
 		if (expectedLens === "changes") {
+			// POINTBREAK_D78_OPEN_PROOF_BEGIN
+			routeVisitAction =
+				requestLifecycle.routeVisitActionDiagnostic(targetVisit);
+			const routeVisitCertificationFacts = {
+				sameVisit: routeVisitAction?.current === true,
+				pendingState: targetVisit.state === "pending",
+				changesHash: isChangesHash(targetVisit.intendedHash),
+				semanticMatchesIntended:
+					capabilityRedactedHash(semanticHash) === targetVisit.intendedHash,
+				pageMatchesSemantic:
+					capabilityRedactedHash(page.url()) ===
+					capabilityRedactedHash(semanticHash),
+				exactReadingReady: readinessState.state === "ready",
+				routeObserved: targetVisit.routeObserved === true,
+			};
 			const routeVisitCertified =
 				requestLifecycle.certifyChangesVisit(targetVisit, semanticHash);
+			routeVisitCertification = {
+				passed: routeVisitCertified,
+				...routeVisitCertificationFacts,
+			};
+			// POINTBREAK_D78_OPEN_PROOF_END
 			const routeVisitActual = {
 				hash: capabilityRedactedHash(semanticHash),
 				visitId: targetVisit.id,
@@ -1909,6 +2148,7 @@
 		);
 		return {
 			...metrics,
+			navigationKind: reload ? "reload" : "goto",
 			navigationPerformed: true,
 			profileSupersessionObserved,
 			profileSupersessionOutcome:
@@ -1917,6 +2157,8 @@
 					: profileSupersessionObserved
 						? "admitted"
 						: "completed-without-abort",
+			routeVisitAction,
+			routeVisitCertification,
 		};
 	};
 	const hash = () => page.evaluate(() => location.hash);
@@ -3048,19 +3290,28 @@
 	}
 
 	if (config.mode === "shakedown") {
+		// POINTBREAK_D78_BASE_SETUP_PLUMBING_BEGIN
+		let repairBaseSetupOpen = null;
+		let repairBaseReloadOpen = null;
+		// POINTBREAK_D78_BASE_SETUP_PLUMBING_END
 		await diagnostics.section("Shakedown exact reading and quiet polling", {
-			setup: () =>
-				open(
+			// POINTBREAK_D78_BASE_SETUP_PLUMBING_BEGIN
+			setup: async () => {
+				repairBaseSetupOpen = await open(
 					exactReadingRoute(),
 					layouts[1],
 					"shakedown exact reading setup",
-				),
-			run: async () => {
-				await open(
+				);
+				return repairBaseSetupOpen;
+			},
+			run: async (setupOpen) => {
+				repairBaseSetupOpen = setupOpen;
+				repairBaseReloadOpen = await open(
 					exactReadingRoute(),
 					layouts[1],
 					"shakedown exact reading reload",
 				);
+				// POINTBREAK_D78_BASE_SETUP_PLUMBING_END
 				const detailText = await page.locator("#detail-body").innerText();
 				const exactIdentity = `exact Revision ${config.fixture.rich.revisionId}; artifact ${config.fixture.rich.artifactHash}`;
 				const identityPresentation = await page
@@ -3254,7 +3505,17 @@
 			teardown: teardownSection,
 		});
 		recordCurrentFocusedRequestHealth();
+		// POINTBREAK_D78_BASE_PROOF_BEGIN
+		const repairBaseProof = createD78RepairBaseProof({
+			setupOpen: repairBaseSetupOpen,
+			reloadOpen: repairBaseReloadOpen,
+			health: lastFocusedRequestHealth,
+		});
+		// POINTBREAK_D78_BASE_PROOF_END
 		const shakedownResult = diagnostics.result({ screenshotCount: screenshots });
+		// POINTBREAK_D78_BASE_PROOF_ATTACHMENT_BEGIN
+		shakedownResult.repairBaseProof = repairBaseProof;
+		// POINTBREAK_D78_BASE_PROOF_ATTACHMENT_END
 		console.log(`POINTBREAK_BROWSER_RESULT=${JSON.stringify(shakedownResult)}`);
 		return shakedownResult;
 	}
