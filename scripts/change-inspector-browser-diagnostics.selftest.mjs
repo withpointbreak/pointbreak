@@ -1142,7 +1142,7 @@ test("D74 Changes-lens classification is segment-bounded for exact routes", asyn
 	assert.equal(result, true);
 });
 
-test("D75 diagnostics bind one exact goto action window without changing acceptance", async () => {
+test("D75 diagnostics bind one exact goto action window and expose D77 negatives", async () => {
 	const result = await runD70BrowserSelftest(
 		async ({
 			classifyRouteVisitAction,
@@ -1352,7 +1352,7 @@ test("D75 diagnostics bind one exact goto action window without changing accepta
 					preWindow.visit,
 					preWindow.actionToken,
 				),
-				true,
+				false,
 			);
 			assert.equal(
 				preWindow.lifecycle.settleRouteVisitAction(
@@ -1360,12 +1360,12 @@ test("D75 diagnostics bind one exact goto action window without changing accepta
 					preWindow.actionToken,
 					"same-document-null",
 				),
-				true,
+				false,
 			);
 			assert.equal(
 				preWindow.lifecycle.certifyChangesVisit(preWindow.visit, intendedHash),
-				true,
-				"pre-window observation remains accepted under unchanged Candidate-1 semantics",
+				false,
+				"D77 makes an exact event before invocation permanently ineligible",
 			);
 
 			const postWindow = makeAction();
@@ -1393,8 +1393,8 @@ test("D75 diagnostics bind one exact goto action window without changing accepta
 			);
 			assert.equal(
 				postWindow.lifecycle.certifyChangesVisit(postWindow.visit, intendedHash),
-				true,
-				"post-window observation remains accepted under unchanged Candidate-1 semantics",
+				false,
+				"D77 admits settled phase only after an invoked-phase event 1",
 			);
 
 			const stale = makeAction();
@@ -1609,15 +1609,15 @@ test("D75 diagnostics bind one exact goto action window without changing accepta
 					unavailable.actionToken,
 					"same-document-null",
 				),
-				true,
+				false,
 			);
 			assert.equal(
 				unavailable.lifecycle.certifyChangesVisit(
 					unavailable.visit,
 					intendedHash,
 				),
-				true,
-				"Candidate 1 records unavailable frame URLs without changing old fallback acceptance",
+				false,
+				"D77 forbids page.url() fallback from establishing exact frame identity",
 			);
 
 			const documentTransition = makeAction();
@@ -1800,6 +1800,358 @@ test("D75 diagnostics bind one exact goto action window without changing accepta
 		/catch \(error\)[\s\S]*"threw"[\s\S]*throw error/,
 		"the exact thrown result must be recorded before rethrowing the identical error",
 	);
+});
+
+test("D77 retains only one exact settled goto tail before certification", async () => {
+	const result = await runD70BrowserSelftest(
+		async ({ createProfileRequestLifecycle }) => {
+			const primaryBaseUrl = "http://127.0.0.1:4173";
+			const sourceHash =
+				"#/changes?limit=100&order=change_id_asc&token=bootstrap-secret";
+			const intendedHash =
+				"#/changes/change%3Asha256%3Aaa/revisions/rev%3Asha256%3Abb?artifactHash=sha256%3Acc&limit=100&order=change_id_asc";
+			const createAction = ({
+				actionClass = "exact-detail-changes-goto",
+				frame = null,
+				navigationKind = "goto",
+				source = sourceHash,
+			} = {}) => {
+				const page = new FakePage(`${primaryBaseUrl}/${source}`);
+				if (frame !== null) page.setMainFrame(frame);
+				const lifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl,
+				});
+				const visit = lifecycle.createRouteVisitIntent(intendedHash);
+				const actionToken = lifecycle.activateRouteVisit(visit, {
+					actionClass,
+					capturedMainFrame: page.mainFrame(),
+					navigationKind,
+					sourceHash: page.url(),
+				});
+				return { actionToken, lifecycle, page, visit };
+			};
+			const invoke = (action) =>
+				assert.equal(
+					action.lifecycle.invokeRouteVisitAction(
+						action.visit,
+						action.actionToken,
+					),
+					true,
+				);
+			const emit = (
+				action,
+				hash = intendedHash,
+				frame = action.page.mainFrame(),
+			) => {
+				action.page.setUrl(`${primaryBaseUrl}/${hash}`);
+				action.page.emit("framenavigated", frame);
+			};
+			const settle = (action, resultKind = "same-document-null") =>
+				assert.equal(
+					action.lifecycle.settleRouteVisitAction(
+						action.visit,
+						action.actionToken,
+						resultKind,
+					),
+					true,
+				);
+			const certify = (action) =>
+				action.lifecycle.certifyChangesVisit(action.visit, intendedHash);
+
+			const positive = createAction();
+			invoke(positive);
+			emit(positive);
+			settle(positive);
+			emit(positive);
+			const positiveTrace =
+				positive.lifecycle.routeVisitActionDiagnostic(positive.visit);
+			assert.deepEqual(
+				positiveTrace.frameEntries.map((entry) => entry.actionPhase),
+				["invoked", "settled"],
+			);
+			assert.equal(
+				certify(positive),
+				true,
+				"the exact settled event 2 must remain provisional until semantic certification",
+			);
+			assert.deepEqual(
+				positiveTrace.frameEntries.map((entry) => ({
+					actionCurrent: entry.actionCurrent,
+					actionFrameHashAvailable: entry.actionFrameHashAvailable,
+					actionTargetMatch: entry.actionTargetMatch,
+					capturedFrameMatch: entry.capturedFrameMatch,
+					eventOrdinal: entry.eventOrdinal,
+					ownershipAfter: entry.ownershipAfter,
+					ownershipBefore: entry.ownershipBefore,
+					routeObservedAfter: entry.routeObservedAfter,
+					visitStateAfter: entry.visitStateAfter,
+				})),
+				[
+					{
+						actionCurrent: true,
+						actionFrameHashAvailable: true,
+						actionTargetMatch: true,
+						capturedFrameMatch: true,
+						eventOrdinal: 1,
+						ownershipAfter: false,
+						ownershipBefore: true,
+						routeObservedAfter: true,
+						visitStateAfter: "pending",
+					},
+					{
+						actionCurrent: true,
+						actionFrameHashAvailable: true,
+						actionTargetMatch: true,
+						capturedFrameMatch: true,
+						eventOrdinal: 2,
+						ownershipAfter: false,
+						ownershipBefore: false,
+						routeObservedAfter: true,
+						visitStateAfter: "pending",
+					},
+				],
+				"event 2 must change no visit or ownership state",
+			);
+
+			for (const resultKind of [null, "document-response", "threw"]) {
+				const oneEventInvalidResult = createAction();
+				invoke(oneEventInvalidResult);
+				emit(oneEventInvalidResult);
+				if (resultKind !== null) {
+					settle(oneEventInvalidResult, resultKind);
+				}
+				assert.equal(
+					certify(oneEventInvalidResult),
+					false,
+					`one-event ${resultKind ?? "unsettled"} action must fail at certification`,
+				);
+			}
+
+			const transitionAfterTail = createAction();
+			invoke(transitionAfterTail);
+			emit(transitionAfterTail);
+			settle(transitionAfterTail);
+			emit(transitionAfterTail);
+			const postTailNavigationRoot = new FakeRequest({
+				frame: transitionAfterTail.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			transitionAfterTail.page.emit("request", postTailNavigationRoot);
+			transitionAfterTail.page.emit("domcontentloaded");
+			transitionAfterTail.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			assert.equal(
+				certify(transitionAfterTail),
+				false,
+				"document movement after event 2 must fail at certification",
+			);
+
+			const semanticMismatchAfterTail = createAction();
+			invoke(semanticMismatchAfterTail);
+			emit(semanticMismatchAfterTail);
+			settle(semanticMismatchAfterTail);
+			emit(semanticMismatchAfterTail);
+			assert.equal(
+				semanticMismatchAfterTail.lifecycle.certifyChangesVisit(
+					semanticMismatchAfterTail.visit,
+					"#/timeline?limit=100",
+				),
+				false,
+				"the tail must not replace semantic/intended equality",
+			);
+
+			const pageMismatchAfterTail = createAction();
+			invoke(pageMismatchAfterTail);
+			emit(pageMismatchAfterTail);
+			settle(pageMismatchAfterTail);
+			emit(pageMismatchAfterTail);
+			pageMismatchAfterTail.page.setUrl(`${primaryBaseUrl}/#/timeline`);
+			assert.equal(
+				certify(pageMismatchAfterTail),
+				false,
+				"the tail must not replace page/semantic equality",
+			);
+
+			const firstAfterSettlement = createAction();
+			invoke(firstAfterSettlement);
+			settle(firstAfterSettlement);
+			emit(firstAfterSettlement);
+			assert.equal(
+				certify(firstAfterSettlement),
+				false,
+				"a settled-phase event 1 is not the admitted settlement tail",
+			);
+
+			const secondBeforeSettlement = createAction();
+			invoke(secondBeforeSettlement);
+			emit(secondBeforeSettlement);
+			emit(secondBeforeSettlement);
+			assert.equal(
+				secondBeforeSettlement.lifecycle.settleRouteVisitAction(
+					secondBeforeSettlement.visit,
+					secondBeforeSettlement.actionToken,
+					"same-document-null",
+				),
+				false,
+			);
+			assert.equal(certify(secondBeforeSettlement), false);
+
+			const thirdEvent = createAction();
+			invoke(thirdEvent);
+			emit(thirdEvent);
+			settle(thirdEvent);
+			emit(thirdEvent);
+			emit(thirdEvent);
+			assert.equal(certify(thirdEvent), false);
+
+			const interveningMismatch = createAction();
+			invoke(interveningMismatch);
+			emit(interveningMismatch);
+			settle(interveningMismatch);
+			emit(interveningMismatch, "#/timeline?limit=100");
+			interveningMismatch.page.setUrl(`${primaryBaseUrl}/${intendedHash}`);
+			assert.equal(
+				certify(interveningMismatch),
+				false,
+				"final hash equality must not revive an intervening mismatch",
+			);
+
+			let frameUrlReads = 0;
+			const unavailableTailFrame = {
+				url() {
+					frameUrlReads += 1;
+					if (frameUrlReads === 2) throw new Error("tail frame unavailable");
+					return `${primaryBaseUrl}/${intendedHash}`;
+				},
+			};
+			const unavailableTail = createAction({ frame: unavailableTailFrame });
+			invoke(unavailableTail);
+			emit(unavailableTail);
+			settle(unavailableTail);
+			emit(unavailableTail);
+			assert.equal(frameUrlReads, 2);
+			assert.equal(certify(unavailableTail), false);
+
+			const replacementFrame = createAction();
+			invoke(replacementFrame);
+			emit(replacementFrame);
+			settle(replacementFrame);
+			const newMainFrame = new FakeFrame(
+				() => `${primaryBaseUrl}/${intendedHash}`,
+			);
+			replacementFrame.page.setMainFrame(newMainFrame);
+			emit(replacementFrame, intendedHash, newMainFrame);
+			assert.equal(certify(replacementFrame), false);
+
+			for (const resultKind of ["document-response", "threw", null]) {
+				const resultCase = createAction();
+				invoke(resultCase);
+				emit(resultCase);
+				if (resultKind !== null) settle(resultCase, resultKind);
+				emit(resultCase);
+				assert.equal(
+					certify(resultCase),
+					false,
+					`${resultKind ?? "unsettled"} must not admit the settled tail`,
+				);
+			}
+
+			const sameSource = createAction({ source: intendedHash });
+			invoke(sameSource);
+			emit(sameSource);
+			assert.equal(
+				sameSource.lifecycle.settleRouteVisitAction(
+					sameSource.visit,
+					sameSource.actionToken,
+					"same-document-null",
+				),
+				false,
+			);
+			emit(sameSource);
+			assert.equal(certify(sameSource), false);
+
+			const ineligible = createAction({ actionClass: "ineligible" });
+			invoke(ineligible);
+			emit(ineligible);
+			settle(ineligible);
+			emit(ineligible);
+			assert.equal(certify(ineligible), false);
+
+			const reloadTail = createAction({
+				actionClass: "ineligible",
+				navigationKind: "reload",
+			});
+			invoke(reloadTail);
+			emit(reloadTail);
+			settle(reloadTail);
+			emit(reloadTail);
+			assert.equal(certify(reloadTail), false);
+
+			const unchangedReload = createAction({
+				actionClass: "ineligible",
+				navigationKind: "reload",
+				source: intendedHash,
+			});
+			invoke(unchangedReload);
+			settle(unchangedReload);
+			emit(unchangedReload);
+			assert.equal(
+				certify(unchangedReload),
+				true,
+				"the existing one-event reload path must remain unchanged",
+			);
+
+			const replaced = createAction();
+			invoke(replaced);
+			emit(replaced);
+			const replacementVisit =
+				replaced.lifecycle.createRouteVisitIntent(intendedHash);
+			replaced.lifecycle.activateRouteVisit(replacementVisit, {
+				actionClass: "exact-detail-changes-goto",
+				capturedMainFrame: replaced.page.mainFrame(),
+				navigationKind: "goto",
+				sourceHash: sourceHash,
+			});
+			assert.equal(
+				replaced.lifecycle.settleRouteVisitAction(
+					replaced.visit,
+					replaced.actionToken,
+					"same-document-null",
+				),
+				false,
+			);
+			assert.equal(certify(replaced), false);
+
+			const documentTransition = createAction();
+			invoke(documentTransition);
+			emit(documentTransition);
+			const navigationRoot = new FakeRequest({
+				frame: documentTransition.page.mainFrame(),
+				navigation: true,
+				resourceType: "document",
+			});
+			documentTransition.page.emit("request", navigationRoot);
+			documentTransition.page.emit("domcontentloaded");
+			settle(documentTransition);
+			emit(documentTransition);
+			assert.equal(certify(documentTransition), false);
+
+			const accepted = createAction();
+			invoke(accepted);
+			emit(accepted);
+			settle(accepted);
+			assert.equal(certify(accepted), true);
+			emit(accepted);
+			assert.equal(
+				certify(accepted),
+				false,
+				"a post-certification callback must not reopen the closed action",
+			);
+			return true;
+		},
+	);
+	assert.equal(result, true);
 });
 
 function createBoundProfileTransition({

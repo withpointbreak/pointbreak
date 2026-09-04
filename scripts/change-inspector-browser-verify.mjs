@@ -263,6 +263,137 @@
 			visit === currentRouteVisit &&
 			diagnostic.actionToken === currentRouteVisitActionToken &&
 			visit.state !== "retired";
+		const isBoundExactGotoActionState = ({
+			actionFrameHash,
+			actionFrameHashAvailable,
+			diagnostic,
+			frame,
+			stage,
+			visit,
+		}) => {
+			if (
+				diagnostic === null ||
+				visit === null ||
+				!actionIsCurrent(visit, diagnostic) ||
+				visit.state !== "pending" ||
+				diagnostic.actionClass !== "exact-detail-changes-goto" ||
+				diagnostic.navigationKind !== "goto" ||
+				diagnostic.sourceHash === visit.intendedHash ||
+				diagnostic.activationGeneration !== committedDocumentGeneration ||
+				diagnostic.mainFrameNavigationRequestCount !== 0 ||
+				diagnostic.navigationRootCount !== 0 ||
+				diagnostic.domContentLoadedCount !== 0 ||
+				diagnostic.root.present ||
+				diagnostic.root.committed ||
+				diagnostic.root.commitCount !== 0 ||
+				diagnostic.overflowed
+			)
+				return false;
+			const frameIdentifiesAction =
+				diagnostic.capturedMainFrame === frame &&
+				actionFrameHashAvailable &&
+				actionFrameHash === visit.intendedHash;
+			if (stage === "initial") {
+				return (
+					frameIdentifiesAction &&
+					ownedRouteVisitId === visit.id &&
+					!visit.routeObserved &&
+					diagnostic.actionPhase === "invoked" &&
+					diagnostic.resultKind === "unsettled" &&
+					diagnostic.settlementGeneration === null &&
+					diagnostic.frameEntryCount === 0 &&
+					diagnostic.frameEntries.length === 0
+				);
+			}
+			const [initial] = diagnostic.frameEntries;
+			const initialEntryIsBound =
+				initial !== undefined &&
+				initial.eventOrdinal === 1 &&
+				initial.visitStateBefore === "pending" &&
+				initial.visitStateAfter === "pending" &&
+				initial.routeObservedBefore === false &&
+				initial.routeObservedAfter === true &&
+				initial.visitId === visit.id &&
+				initial.currentVisitIdBefore === visit.id &&
+				initial.currentVisitIdAfter === visit.id &&
+				initial.ownedVisitIdBefore === visit.id &&
+				initial.ownedVisitIdAfter === null &&
+				initial.ownershipBefore === true &&
+				initial.ownershipAfter === false &&
+				initial.intendedHash === visit.intendedHash &&
+				initial.frameHash === visit.intendedHash &&
+				initial.navigationKind === "goto" &&
+				initial.targetMatch === true &&
+				initial.actionPhase === "invoked" &&
+				initial.actionCurrent === true &&
+				initial.capturedFrameMatch === true &&
+				initial.actionFrameHash === visit.intendedHash &&
+				initial.actionFrameHashAvailable === true &&
+				initial.actionTargetMatch === true &&
+				initial.committedGeneration ===
+					diagnostic.activationGeneration &&
+				initial.activationGeneration ===
+					diagnostic.activationGeneration &&
+				initial.root.present === false &&
+				initial.root.committed === false &&
+				initial.root.commitCount === 0;
+			const actionSettledWithoutDocumentMovement =
+				ownedRouteVisitId === null &&
+				visit.routeObserved &&
+				diagnostic.actionPhase === "settled" &&
+				diagnostic.resultKind === "same-document-null" &&
+				diagnostic.settlementGeneration ===
+					diagnostic.activationGeneration;
+			if (stage === "settlement-tail") {
+				return (
+					frameIdentifiesAction &&
+					actionSettledWithoutDocumentMovement &&
+					diagnostic.frameEntryCount === 1 &&
+					diagnostic.frameEntries.length === 1 &&
+					initialEntryIsBound
+				);
+			}
+			if (
+				stage !== "certification" ||
+				!actionSettledWithoutDocumentMovement ||
+				(diagnostic.frameEntryCount !== 1 &&
+					diagnostic.frameEntryCount !== 2) ||
+				diagnostic.frameEntries.length !== diagnostic.frameEntryCount ||
+				!initialEntryIsBound
+			)
+				return false;
+			if (diagnostic.frameEntryCount === 1) return true;
+			const tail = diagnostic.frameEntries[1];
+			return (
+				tail.eventOrdinal === 2 &&
+				tail.visitStateBefore === "pending" &&
+				tail.visitStateAfter === "pending" &&
+				tail.routeObservedBefore === true &&
+				tail.routeObservedAfter === true &&
+				tail.visitId === visit.id &&
+				tail.currentVisitIdBefore === visit.id &&
+				tail.currentVisitIdAfter === visit.id &&
+				tail.ownedVisitIdBefore === null &&
+				tail.ownedVisitIdAfter === null &&
+				tail.ownershipBefore === false &&
+				tail.ownershipAfter === false &&
+				tail.intendedHash === visit.intendedHash &&
+				tail.frameHash === visit.intendedHash &&
+				tail.navigationKind === "goto" &&
+				tail.targetMatch === true &&
+				tail.actionPhase === "settled" &&
+				tail.actionCurrent === true &&
+				tail.capturedFrameMatch === true &&
+				tail.actionFrameHash === visit.intendedHash &&
+				tail.actionFrameHashAvailable === true &&
+				tail.actionTargetMatch === true &&
+				tail.committedGeneration === diagnostic.activationGeneration &&
+				tail.activationGeneration === diagnostic.activationGeneration &&
+				tail.root.present === false &&
+				tail.root.committed === false &&
+				tail.root.commitCount === 0
+			);
+		};
 		const routeVisitActionSnapshot = (
 			visit,
 			diagnostic,
@@ -578,14 +709,37 @@
 					: false;
 			const capturedFrameMatch =
 				diagnostic !== null && diagnostic.capturedMainFrame === frame;
+			const exactGotoAction =
+				diagnostic !== null &&
+				diagnostic.actionClass === "exact-detail-changes-goto" &&
+				diagnostic.navigationKind === "goto";
+			const boundExactGotoInitialEvent = isBoundExactGotoActionState({
+				actionFrameHash,
+				actionFrameHashAvailable,
+				diagnostic,
+				frame,
+				stage: "initial",
+				visit: tracedVisit,
+			});
+			const boundExactGotoSettlementTail = isBoundExactGotoActionState({
+				actionFrameHash,
+				actionFrameHashAvailable,
+				diagnostic,
+				frame,
+				stage: "settlement-tail",
+				visit: tracedVisit,
+			});
 			if (
 				currentRouteVisit !== null &&
 				currentRouteVisit.state === "pending" &&
 				ownedRouteVisitId === currentRouteVisit.id &&
-				frameHash === currentRouteVisit.intendedHash
+				frameHash === currentRouteVisit.intendedHash &&
+				(!exactGotoAction || boundExactGotoInitialEvent)
 			) {
 				ownedRouteVisitId = null;
 				currentRouteVisit.routeObserved = true;
+			} else if (boundExactGotoSettlementTail) {
+				// Event 2 remains provisional; certification is the sole acceptor.
 			} else {
 				if (currentRouteVisit !== null) retireRouteVisit(currentRouteVisit);
 				ownedRouteVisitId = null;
@@ -804,6 +958,18 @@
 		const certifyChangesVisit = (visit, acceptedHash) => {
 			const semanticHash = capabilityRedactedHash(acceptedHash);
 			const pageHash = capabilityRedactedHash(page.url());
+			const diagnostic = diagnosticForVisit(visit);
+			const actionPermitsCertification =
+				diagnostic === null ||
+				diagnostic.actionClass !== "exact-detail-changes-goto" ||
+				isBoundExactGotoActionState({
+					actionFrameHash: null,
+					actionFrameHashAvailable: false,
+					diagnostic,
+					frame: null,
+					stage: "certification",
+					visit,
+				});
 			const predicates = {
 				sameVisit: visit === currentRouteVisit,
 				pendingState: visit.state === "pending",
@@ -811,7 +977,6 @@
 				semanticMatchesIntended: semanticHash === visit.intendedHash,
 				pageMatchesSemantic: pageHash === semanticHash,
 			};
-			const diagnostic = diagnosticForVisit(visit);
 			if (diagnostic !== null) {
 				for (const entry of diagnostic.frameEntries) {
 					entry.semanticHash = semanticHash;
@@ -847,7 +1012,8 @@
 				!predicates.pendingState ||
 				!predicates.changesHash ||
 				!predicates.semanticMatchesIntended ||
-				!predicates.pageMatchesSemantic
+				!predicates.pageMatchesSemantic ||
+				!actionPermitsCertification
 			) {
 				retireRouteVisit(visit);
 				return false;
