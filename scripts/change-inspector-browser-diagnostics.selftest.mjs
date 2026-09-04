@@ -2665,8 +2665,12 @@ async function processTable() {
 		});
 }
 
-async function runD70ShellSelftest(caseName, { signal = null } = {}) {
+async function runD70ShellSelftest(
+	caseName,
+	{ signal = null, timeoutMs = 6_000 } = {},
+) {
 	const root = await mkdtemp(join(tmpdir(), `pointbreak-d70-${caseName}-`));
+	const startedAt = Date.now();
 	const script = new URL(
 		"./change-inspector-browser-verify.sh",
 		import.meta.url,
@@ -2764,12 +2768,22 @@ async function runD70ShellSelftest(caseName, { signal = null } = {}) {
 				resolve({ code, signal: exitSignal }),
 			);
 		}),
-		delay(6_000, undefined, { ref: false }).then(() => {
+		delay(timeoutMs, undefined, { ref: false }).then(() => {
 			child.kill("SIGKILL");
-			throw new Error(`${caseName} shell selftest exceeded six seconds`);
+			throw new Error(
+				`${caseName} shell selftest exceeded ${timeoutMs / 1_000} seconds`,
+			);
 		}),
 	]);
-	return { exit, root, stderr, stdout, workerPids, workerTimerPids };
+	return {
+		durationMs: Date.now() - startedAt,
+		exit,
+		root,
+		stderr,
+		stdout,
+		workerPids,
+		workerTimerPids,
+	};
 }
 
 async function processExists(pid) {
@@ -2895,8 +2909,8 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"c9b1824fffd8547afd844285fcd9ad3e23716a606f0f8b9f81a7f380653fb861",
-		"D78-local proof plumbing must canonicalize to the accepted D73 shell",
+		"69191fc499ff600360a8f5e65f3b8427fd8933b2c48c6916de56084f69f66d76",
+		"D79-authorized shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
@@ -4156,6 +4170,7 @@ test("D70 shell stage helper publishes live terminal evidence and reaps its proc
 			.filter(Boolean)
 			.map((line) => JSON.parse(line));
 		assert.ok(heartbeats.length >= 1);
+		if (caseName === "timeout") assert.equal(heartbeats.length, 1);
 		for (const heartbeat of heartbeats) {
 			assert.deepEqual(Object.keys(heartbeat).sort(), [
 				"childAlive",
@@ -4223,6 +4238,146 @@ test("D70 shell stage helper publishes live terminal evidence and reaps its proc
 	}
 });
 
+test("D79 heartbeat reserve publishes bounded work and fails a hung render internally", async () => {
+	const caseNames = ["heartbeat-render-bounded", "heartbeat-render-deadline"];
+	const executions = await Promise.all(
+		caseNames.map((caseName) =>
+			runD70ShellSelftest(caseName, { timeoutMs: 10_000 }),
+		),
+	);
+	const results = await Promise.all(
+		executions.map(async (execution, index) => {
+			const terminalPath = join(
+				execution.root,
+				"logs",
+				"browser-stage-terminal.json",
+			);
+			const heartbeatPath = join(
+				execution.root,
+				"logs",
+				"browser-stage-heartbeat.log",
+			);
+			const terminalBytes = await readFile(terminalPath, "utf8");
+			const heartbeatBytes = await readFile(heartbeatPath, "utf8");
+			const terminal = JSON.parse(terminalBytes);
+			return {
+				caseName: caseNames[index],
+				execution,
+				heartbeatBytes,
+				heartbeatPath,
+				terminal,
+				terminalBytes,
+				terminalPath,
+			};
+		}),
+	);
+
+	assert.deepEqual(
+		results.map(({ caseName, execution, terminal }) => ({
+			caseName,
+			exitCode: execution.exit.code,
+			exitSignal: execution.exit.signal,
+			terminalCode: terminal.exitCode,
+			winner: terminal.winner,
+		})),
+		[
+			{
+				caseName: "heartbeat-render-bounded",
+				exitCode: 0,
+				exitSignal: null,
+				terminalCode: 0,
+				winner: "exit",
+			},
+			{
+				caseName: "heartbeat-render-deadline",
+				exitCode: 125,
+				exitSignal: null,
+				terminalCode: 125,
+				winner: "internal",
+			},
+		],
+	);
+
+	for (const {
+		execution,
+		heartbeatBytes,
+		heartbeatPath,
+		terminal,
+		terminalBytes,
+		terminalPath,
+	} of results) {
+		assert.ok(execution.durationMs < 10_000);
+		const descendantPid = Number(
+			(
+				await readFile(join(execution.root, "fake-descendant.pid"), "utf8")
+			).trim(),
+		);
+		const privatePids = await Promise.all(
+			[
+				"heartbeat-render.pid",
+				"heartbeat-guard.pid",
+				"heartbeat-guard-timer.pid",
+			].map(async (name) =>
+				Number((await readFile(join(execution.root, name), "utf8")).trim()),
+			),
+		);
+		for (const pid of [
+			terminal.childPid,
+			descendantPid,
+			...execution.workerPids,
+			...execution.workerTimerPids,
+			...privatePids,
+		]) {
+			assert.equal(await processExists(pid), false);
+		}
+		assert.deepEqual(
+			(await processTable())
+				.filter((process) => process.processGroupId === terminal.processGroupId)
+				.map((process) => process.pid),
+			[],
+		);
+		for (const heartbeat of heartbeatBytes
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line))) {
+			assert.deepEqual(Object.keys(heartbeat).sort(), [
+				"childAlive",
+				"elapsedSeconds",
+				"gateLogBytes",
+				"latestScreenshot",
+				"mode",
+				"screenshotCount",
+			]);
+		}
+		await delay(100);
+		assert.equal(await readFile(terminalPath, "utf8"), terminalBytes);
+		assert.equal(await readFile(heartbeatPath, "utf8"), heartbeatBytes);
+		await assert.rejects(
+			readFile(join(execution.root, "logs", "browser-result.json")),
+			/ENOENT/,
+		);
+		await assert.rejects(
+			readFile(join(execution.root, "manifest.json")),
+			/ENOENT/,
+		);
+	}
+
+	const bounded = results[0];
+	await readFile(
+		join(bounded.execution.root, "heartbeat-render-bounded-published"),
+	);
+	const boundedHeartbeats = bounded.heartbeatBytes
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line));
+	assert.ok(boundedHeartbeats.length >= 2);
+	assert.ok(
+		boundedHeartbeats.slice(1).some(({ elapsedSeconds }) => elapsedSeconds <= 4),
+	);
+});
+
 test("D70 stage contracts are production-bounded, inventoried, and documented", async () => {
 	const shell = await readFile(
 		new URL("./change-inspector-browser-verify.sh", import.meta.url),
@@ -4241,16 +4396,135 @@ test("D70 stage contracts are production-bounded, inventoried, and documented", 
 	);
 	assert.match(shell, /BROWSER_PROGRAM_TIMEOUT_SECONDS=600/);
 	assert.match(shell, /BROWSER_STAGE_HEARTBEAT_SECONDS=15/);
+	assert.match(shell, /BROWSER_STAGE_HEARTBEAT_RENDER_RESERVE_SECONDS=2/);
 	assert.match(shell, /BROWSER_STAGE_GROUP_CLEANUP_SECONDS=10/);
 	assert.match(
 		shell,
 		/set -m[\s\S]*\) >"\$stage_gate_log" 2>&1 &[\s\S]*child_pid=\$![\s\S]*set \+m/,
 	);
 	assert.match(shell, /command in[\s\S]*\bps\b/);
+	const heartbeatGuard = shell.slice(
+		shell.indexOf("browser_stage_heartbeat_deadline_guard()"),
+		shell.indexOf("browser_stage_heartbeat_worker()"),
+	);
+	assert.match(heartbeatGuard, /trap 'cleanup_heartbeat_guard' EXIT/);
+	assert.match(heartbeatGuard, /trap 'exit 0' TERM INT/);
+	assert.match(
+		heartbeatGuard,
+		/\[ "\$now_seconds" -le "\$next_deadline" \] \|\| break/,
+	);
+	assert.match(
+		heartbeatGuard,
+		/wait_seconds="\$\(\(next_deadline - now_seconds \+ 1\)\)"/,
+	);
+	assert.ok(
+		heartbeatGuard.indexOf('wait "$guard_timer_pid"') <
+			heartbeatGuard.indexOf('kill -USR2 "$supervisor_pid"'),
+		"the guard must prove the first recorded second after the deadline before signaling",
+	);
+	const heartbeatWorker = shell.slice(
+		shell.indexOf("browser_stage_heartbeat_worker()"),
+		shell.indexOf("browser_stage_watchdog_worker()"),
+	);
+	assert.match(heartbeatWorker, /local heartbeat_render_reserve_seconds="\$8"/);
+	assert.match(heartbeatWorker, /local supervisor_pid="\$9"/);
+	assert.match(heartbeatWorker, /trap 'cleanup_heartbeat_worker' EXIT/);
+	assert.match(heartbeatWorker, /trap 'exit 0' TERM INT/);
+	assert.match(
+		heartbeatWorker,
+		/POINTBREAK_BROWSER_STAGE_SELFTEST_TIMEOUT_HEARTBEAT_IDLE[\s\S]*sleep "\$heartbeat_seconds" &[\s\S]*timer_pid=\$![\s\S]*wait "\$timer_pid" \|\| exit 0/,
+	);
+	assert.equal(
+		(
+			shell.match(/POINTBREAK_BROWSER_STAGE_SELFTEST_TIMEOUT_HEARTBEAT_IDLE/g) ??
+			[]
+		).length,
+		2,
+		"the watchdog-only heartbeat isolation must stay private to its worker and case",
+	);
+	const dispatch = heartbeatWorker.indexOf(
+		'dispatch_at="$((next_deadline - heartbeat_render_reserve_seconds))"',
+	);
+	const guardStart = heartbeatWorker.indexOf(
+		'browser_stage_heartbeat_deadline_guard "$next_deadline" "$supervisor_pid" &',
+	);
+	const renderStart = heartbeatWorker.indexOf(
+		"      render_browser_stage_heartbeat \\",
+	);
+	const append = heartbeatWorker.indexOf(
+		'printf \'%s\\n\' "$document" >>"$stage_heartbeat_log"',
+	);
+	const latenessCheck = heartbeatWorker.indexOf(
+		'if [ "$now_seconds" -gt "$next_deadline" ]',
+	);
+	const guardStop = heartbeatWorker.indexOf(
+		"    stop_heartbeat_guard",
+		latenessCheck,
+	);
+	const deadlineAdvance = heartbeatWorker.indexOf(
+		'next_deadline="$((next_deadline + heartbeat_seconds))"',
+	);
+	assert.ok(
+		dispatch >= 0 &&
+			guardStart > dispatch &&
+			renderStart > guardStart &&
+			append > renderStart &&
+			latenessCheck > append &&
+			guardStop > latenessCheck &&
+			deadlineAdvance > guardStop,
+		"recurring work must dispatch early, remain guarded through append/postflight, and advance from its anchor",
+	);
+	assert.doesNotMatch(heartbeatWorker, /next_deadline=.*now_seconds/);
 	const helper = shell.slice(
 		shell.indexOf("run_browser_program_stage()"),
 		shell.indexOf("browser_stage_selftest_child()"),
 	);
+	assert.match(
+		helper,
+		/local heartbeat_render_reserve_seconds="\$6"[\s\S]*local cleanup_seconds="\$7"[\s\S]*shift 7/,
+	);
+	for (const sourcePin of [
+		'case "$heartbeat_seconds" in',
+		'case "$heartbeat_render_reserve_seconds" in',
+		'[ "$heartbeat_seconds" -gt 0 ] || return 125',
+		'[ "$heartbeat_render_reserve_seconds" -lt "$heartbeat_seconds" ] || return 125',
+	]) {
+		assert.ok(helper.includes(sourcePin), `missing reserve validation: ${sourcePin}`);
+	}
+	assert.match(
+		shell,
+		/"\$browser_stage_selftest_heartbeat_seconds"[\s\S]{0,120}"\$browser_stage_selftest_render_reserve_seconds" 2/,
+	);
+	assert.match(
+		shell,
+		/"\$BROWSER_STAGE_HEARTBEAT_SECONDS"[\s\S]{0,120}"\$BROWSER_STAGE_HEARTBEAT_RENDER_RESERVE_SECONDS"[\s\S]{0,120}"\$BROWSER_STAGE_GROUP_CLEANUP_SECONDS"/,
+	);
+	const selftestConfig = shell.slice(
+		shell.indexOf("browser_stage_selftest_timeout=2"),
+		shell.indexOf("browser_stage_selftest_status=0"),
+	);
+	assert.match(
+		selftestConfig,
+		/browser_stage_selftest_timeout=2[\s\S]*browser_stage_selftest_heartbeat_seconds=1[\s\S]*browser_stage_selftest_render_reserve_seconds=0/,
+	);
+	assert.match(
+		selftestConfig,
+		/timeout\) export POINTBREAK_BROWSER_STAGE_SELFTEST_TIMEOUT_HEARTBEAT_IDLE=1 ;;/,
+	);
+	for (const caseName of [
+		"heartbeat-render-bounded",
+		"heartbeat-render-deadline",
+	]) {
+		const caseStart = selftestConfig.indexOf(`${caseName})`);
+		const caseEnd = selftestConfig.indexOf(";;", caseStart);
+		const caseBlock = selftestConfig.slice(caseStart, caseEnd);
+		assert.match(caseBlock, /browser_stage_selftest_timeout=8/);
+		assert.match(caseBlock, /browser_stage_selftest_heartbeat_seconds=4/);
+		assert.match(
+			caseBlock,
+			/browser_stage_selftest_render_reserve_seconds=2/,
+		);
+	}
 	assert.match(
 		helper,
 		/shell_group_id=""[\s\S]*read_process_group_id "\$\$"[\s\S]*is_positive_process_id "\$shell_group_id"/,

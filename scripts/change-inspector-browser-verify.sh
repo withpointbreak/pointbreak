@@ -47,6 +47,7 @@ shakedown_started_at=""
 
 BROWSER_PROGRAM_TIMEOUT_SECONDS=600
 BROWSER_STAGE_HEARTBEAT_SECONDS=15
+BROWSER_STAGE_HEARTBEAT_RENDER_RESERVE_SECONDS=2
 BROWSER_STAGE_GROUP_CLEANUP_SECONDS=10
 
 atomic_publish_stage_json() {
@@ -148,6 +149,44 @@ append_browser_stage_heartbeat() {
   printf '%s\n' "$document" >>"$6"
 }
 
+browser_stage_heartbeat_deadline_guard() {
+  local next_deadline="$1"
+  local supervisor_pid="$2"
+  local guard_timer_pid=""
+  local cleanup_done=false
+  local now_seconds
+  local wait_seconds
+
+  # Invoked by the guard's EXIT trap.
+  # shellcheck disable=SC2329
+  cleanup_heartbeat_guard() {
+    [ "$cleanup_done" = false ] || return 0
+    cleanup_done=true
+    [ -n "$guard_timer_pid" ] || return 0
+    kill "$guard_timer_pid" >/dev/null 2>&1 || true
+    wait "$guard_timer_pid" >/dev/null 2>&1 || true
+    guard_timer_pid=""
+  }
+  trap 'cleanup_heartbeat_guard' EXIT
+  trap 'exit 0' TERM INT
+  while :; do
+    now_seconds="$(date +%s)"
+    [ "$now_seconds" -le "$next_deadline" ] || break
+    wait_seconds="$((next_deadline - now_seconds + 1))"
+    sleep "$wait_seconds" &
+    guard_timer_pid=$!
+    case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
+      heartbeat-render-bounded|heartbeat-render-deadline)
+        printf '%s\n' "$guard_timer_pid" \
+          >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/heartbeat-guard-timer.pid"
+        ;;
+    esac
+    wait "$guard_timer_pid" || exit 0
+    guard_timer_pid=""
+  done
+  kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+}
+
 browser_stage_heartbeat_worker() {
   local stage_mode="$1"
   local stage_started_seconds="$2"
@@ -156,10 +195,14 @@ browser_stage_heartbeat_worker() {
   local stage_gate_log="$5"
   local stage_heartbeat_log="$6"
   local heartbeat_seconds="$7"
-  local supervisor_pid="$8"
+  local heartbeat_render_reserve_seconds="$8"
+  local supervisor_pid="$9"
   local timer_pid=""
+  local guard_pid=""
   local render_pid=""
   local render_output="$stage_heartbeat_log.render.$RANDOM"
+  local cleanup_done=false
+  local dispatch_at
   local document
   local next_deadline
   local now_seconds
@@ -173,6 +216,14 @@ browser_stage_heartbeat_worker() {
     wait "$timer_pid" >/dev/null 2>&1 || true
     timer_pid=""
   }
+  # Invoked by the worker's EXIT trap and the successful append path.
+  # shellcheck disable=SC2329
+  stop_heartbeat_guard() {
+    [ -n "$guard_pid" ] || return 0
+    kill "$guard_pid" >/dev/null 2>&1 || true
+    wait "$guard_pid" >/dev/null 2>&1 || true
+    guard_pid=""
+  }
   # Invoked by the worker's signal trap.
   # shellcheck disable=SC2329
   stop_heartbeat_render() {
@@ -182,17 +233,49 @@ browser_stage_heartbeat_worker() {
     render_pid=""
     rm -f -- "$render_output"
   }
-  trap 'stop_heartbeat_timer; stop_heartbeat_render; exit 0' TERM INT
+  # Invoked by the worker's EXIT trap.
+  # shellcheck disable=SC2329
+  cleanup_heartbeat_worker() {
+    [ "$cleanup_done" = false ] || return 0
+    cleanup_done=true
+    stop_heartbeat_timer
+    stop_heartbeat_guard
+    stop_heartbeat_render
+  }
+  trap 'cleanup_heartbeat_worker' EXIT
+  trap 'exit 0' TERM INT
   next_deadline="$(($(date +%s) + heartbeat_seconds))"
+  if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_TIMEOUT_HEARTBEAT_IDLE:-}" = 1 ]; then
+    while :; do
+      sleep "$heartbeat_seconds" &
+      timer_pid=$!
+      wait "$timer_pid" || exit 0
+      timer_pid=""
+    done
+  fi
   while :; do
+    dispatch_at="$((next_deadline - heartbeat_render_reserve_seconds))"
     now_seconds="$(date +%s)"
-    wait_seconds="$((next_deadline - now_seconds))"
+    wait_seconds="$((dispatch_at - now_seconds))"
     if [ "$wait_seconds" -gt 0 ]; then
       sleep "$wait_seconds" &
       timer_pid=$!
       wait "$timer_pid" || exit 0
       timer_pid=""
     fi
+    now_seconds="$(date +%s)"
+    if [ "$now_seconds" -gt "$dispatch_at" ]; then
+      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    browser_stage_heartbeat_deadline_guard "$next_deadline" "$supervisor_pid" &
+    guard_pid=$!
+    case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
+      heartbeat-render-bounded|heartbeat-render-deadline)
+        printf '%s\n' "$guard_pid" \
+          >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/heartbeat-guard.pid"
+        ;;
+    esac
     if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_FAILURE:-}" = 1 ]; then
       kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
       exit 1
@@ -231,6 +314,10 @@ browser_stage_heartbeat_worker() {
     if [ "$now_seconds" -gt "$next_deadline" ]; then
       kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
       exit 1
+    fi
+    stop_heartbeat_guard
+    if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" = heartbeat-render-bounded ]; then
+      : >"$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/heartbeat-render-bounded-published"
     fi
     next_deadline="$((next_deadline + heartbeat_seconds))"
   done
@@ -371,10 +458,20 @@ run_browser_program_stage() {
   local stage_artifact_dir="$3"
   local timeout_seconds="$4"
   local heartbeat_seconds="$5"
-  local cleanup_seconds="$6"
-  shift 6
+  local heartbeat_render_reserve_seconds="$6"
+  local cleanup_seconds="$7"
+  shift 7
   [ "${1:-}" = "--" ] || return 125
   shift
+
+  case "$heartbeat_seconds" in
+    ""|*[!0-9]*) return 125 ;;
+  esac
+  case "$heartbeat_render_reserve_seconds" in
+    ""|*[!0-9]*) return 125 ;;
+  esac
+  [ "$heartbeat_seconds" -gt 0 ] || return 125
+  [ "$heartbeat_render_reserve_seconds" -lt "$heartbeat_seconds" ] || return 125
 
   local stage_start="$stage_log_dir/browser-stage-start.json"
   local stage_heartbeats="$stage_log_dir/browser-stage-heartbeat.log"
@@ -461,7 +558,7 @@ run_browser_program_stage() {
   browser_stage_heartbeat_worker \
     "$stage_mode" "$started_seconds" "$child_pid" \
     "$stage_artifact_dir" "$stage_gate_log" "$stage_heartbeats" \
-    "$heartbeat_seconds" "$supervisor_pid" &
+    "$heartbeat_seconds" "$heartbeat_render_reserve_seconds" "$supervisor_pid" &
   heartbeat_pid=$!
   browser_stage_watchdog_worker "$timeout_seconds" "$supervisor_pid" &
   watchdog_pid=$!
@@ -571,7 +668,13 @@ browser_stage_selftest_child() {
       sleep 1.4
       return 0
       ;;
-    timeout|signal-int|signal-term|heartbeat-failed|heartbeat-late)
+    heartbeat-render-bounded)
+      while [ ! -e "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/heartbeat-render-bounded-published" ]; do
+        sleep 0.01
+      done
+      return 0
+      ;;
+    timeout|signal-int|signal-term|heartbeat-failed|heartbeat-late|heartbeat-render-deadline)
       while :; do sleep 1; done
       ;;
   esac
@@ -586,20 +689,35 @@ if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST:-}" = 1 ]; then
   [ -z "$(find "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ] \
     || die "browser-stage selftest root must be empty"
   case "${POINTBREAK_BROWSER_STAGE_SELFTEST_CASE:-}" in
-    exit-0|exit-23|timeout|signal-int|signal-term|precedence-exit-timeout|precedence-timeout-exit|heartbeat-failed|heartbeat-late|heartbeat-render-hung|ps-failed) ;;
+    exit-0|exit-23|timeout|signal-int|signal-term|precedence-exit-timeout|precedence-timeout-exit|heartbeat-failed|heartbeat-late|heartbeat-render-hung|heartbeat-render-bounded|heartbeat-render-deadline|ps-failed) ;;
     *) die "unsupported browser-stage selftest case" ;;
   esac
   mkdir -p \
     "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/logs" \
     "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/browser-artifacts"
   browser_stage_selftest_timeout=2
+  browser_stage_selftest_heartbeat_seconds=1
+  browser_stage_selftest_render_reserve_seconds=0
   case "$POINTBREAK_BROWSER_STAGE_SELFTEST_CASE" in
+    timeout) export POINTBREAK_BROWSER_STAGE_SELFTEST_TIMEOUT_HEARTBEAT_IDLE=1 ;;
     heartbeat-failed) export POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_FAILURE=1 ;;
     heartbeat-late)
       export POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS=2
       browser_stage_selftest_timeout=4
       ;;
     heartbeat-render-hung) export POINTBREAK_BROWSER_STAGE_SELFTEST_RENDER_HANG=1 ;;
+    heartbeat-render-bounded)
+      export POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS=1
+      browser_stage_selftest_timeout=8
+      browser_stage_selftest_heartbeat_seconds=4
+      browser_stage_selftest_render_reserve_seconds=2
+      ;;
+    heartbeat-render-deadline)
+      export POINTBREAK_BROWSER_STAGE_SELFTEST_RENDER_HANG=1
+      browser_stage_selftest_timeout=8
+      browser_stage_selftest_heartbeat_seconds=4
+      browser_stage_selftest_render_reserve_seconds=2
+      ;;
     ps-failed) export POINTBREAK_BROWSER_STAGE_SELFTEST_PS_FAILURE=1 ;;
   esac
   browser_stage_selftest_status=0
@@ -607,7 +725,9 @@ if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST:-}" = 1 ]; then
     "selftest" \
     "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/logs" \
     "$POINTBREAK_BROWSER_STAGE_SELFTEST_ROOT/browser-artifacts" \
-    "$browser_stage_selftest_timeout" 1 2 \
+    "$browser_stage_selftest_timeout" \
+    "$browser_stage_selftest_heartbeat_seconds" \
+    "$browser_stage_selftest_render_reserve_seconds" 2 \
     -- browser_stage_selftest_child \
     || browser_stage_selftest_status=$?
   exit "$browser_stage_selftest_status"
@@ -1512,6 +1632,7 @@ run_browser_program_stage \
   "$mode" "$log_dir" "$artifact_dir" \
   "$BROWSER_PROGRAM_TIMEOUT_SECONDS" \
   "$BROWSER_STAGE_HEARTBEAT_SECONDS" \
+  "$BROWSER_STAGE_HEARTBEAT_RENDER_RESERVE_SECONDS" \
   "$BROWSER_STAGE_GROUP_CLEANUP_SECONDS" \
   -- run_pw run-code --filename="$browser_program" \
   || browser_gate_status=$?
