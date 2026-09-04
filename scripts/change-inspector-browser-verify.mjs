@@ -1717,7 +1717,7 @@
 		const encodedChange = encodeURIComponent(config.fixture.rich.changeId);
 		const encodedRevision = encodeURIComponent(config.fixture.rich.revisionId);
 		const encodedArtifact = encodeURIComponent(config.fixture.rich.artifactHash);
-		return `changes/${encodedChange}/revisions/${encodedRevision}?artifactHash=${encodedArtifact}&limit=100&order=change_id_asc`;
+		return `changes/${encodedChange}/revisions/${encodedRevision}?limit=100&order=change_id_asc&artifactHash=${encodedArtifact}`;
 	};
 	// Playwright serializes this callback into the page. Query normalization must
 	// stay there because the run-code sandbox does not expose URLSearchParams.

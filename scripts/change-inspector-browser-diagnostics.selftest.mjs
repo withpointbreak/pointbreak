@@ -2814,6 +2814,103 @@ test("browser program remains one expression for the Playwright runner", async (
 	);
 });
 
+test("D80 exact reading routes use Pointbreak canonical query order", async () => {
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const exactReadingRouteStart = browser.indexOf(
+		"const exactReadingRoute = () => {",
+	);
+	const exactReadingRouteEnd = browser.indexOf(
+		"\n\t\t};",
+		exactReadingRouteStart,
+	);
+	const exactReadingRouteSource = browser.slice(
+		exactReadingRouteStart,
+		exactReadingRouteEnd + 6,
+	);
+	const canonicalTemplate =
+		'return `changes/${encodedChange}/revisions/${encodedRevision}?limit=100&order=change_id_asc&artifactHash=${encodedArtifact}`;';
+	const legacyTemplate =
+		'return `changes/${encodedChange}/revisions/${encodedRevision}?artifactHash=${encodedArtifact}&limit=100&order=change_id_asc`;';
+	const retainedPath =
+		"#/changes/change%3Asha256%3Aba077324a8b2a4610ec64df6ffe2e94c87d537bca3afe89d1e37685089501598/revisions/rev%3Asha256%3A7d35aa91c1fb5b6d534cdc41d9b1a36f69e8a5baae88b20420e8dc00084a66ac";
+	const retainedArtifact =
+		"sha256%3A1295cfa9d8516a15dcaaf8d577589f74976c1344b812ea0a6a16215adce168be";
+	const retainedIntended = `${retainedPath}?artifactHash=${retainedArtifact}&limit=100&order=change_id_asc`;
+	const canonicalRoute = `${retainedPath}?limit=100&order=change_id_asc&artifactHash=${retainedArtifact}`;
+	const routeParts = (value) => {
+		const separator = value.indexOf("?");
+		return {
+			path: separator === -1 ? value : value.slice(0, separator),
+			query: Array.from(
+				new URLSearchParams(separator === -1 ? "" : value.slice(separator + 1)),
+			).sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+				leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue),
+			),
+		};
+	};
+	const lifecycle = await runD70BrowserSelftest(
+		async ({ createProfileRequestLifecycle }) => {
+			const certify = (acceptedHash) => {
+				const page = new FakePage(`http://127.0.0.1:4173/${acceptedHash}`);
+				const routeLifecycle = createProfileRequestLifecycle({
+					page,
+					primaryBaseUrl: "http://127.0.0.1:4173",
+				});
+				const visit = routeLifecycle.createRouteVisitIntent(canonicalRoute);
+				routeLifecycle.activateRouteVisit(visit, { navigationKind: "reload" });
+				return routeLifecycle.certifyChangesVisit(visit, acceptedHash);
+			};
+			return {
+				canonical: certify(canonicalRoute),
+				legacyOrder: certify(retainedIntended),
+				changedValue: certify(
+					`${retainedPath}?limit=99&order=change_id_asc&artifactHash=${retainedArtifact}`,
+				),
+				missingKey: certify(
+					`${retainedPath}?limit=100&artifactHash=${retainedArtifact}`,
+				),
+				addedKey: certify(
+					`${canonicalRoute}&q=non-token-negative`,
+				),
+				duplicateKey: certify(`${canonicalRoute}&limit=100`),
+			};
+		},
+	);
+
+	assert.deepEqual(
+		{
+			rawBytesDiffer: retainedIntended !== canonicalRoute,
+			pathMatches: routeParts(retainedIntended).path === routeParts(canonicalRoute).path,
+			queryMultisetMatches:
+				JSON.stringify(routeParts(retainedIntended).query) ===
+				JSON.stringify(routeParts(canonicalRoute).query),
+			canonicalTemplateCount:
+				exactReadingRouteSource.split(canonicalTemplate).length - 1,
+			legacyTemplateCount:
+				exactReadingRouteSource.split(legacyTemplate).length - 1,
+			lifecycle,
+		},
+		{
+			rawBytesDiffer: true,
+			pathMatches: true,
+			queryMultisetMatches: true,
+			canonicalTemplateCount: 1,
+			legacyTemplateCount: 0,
+			lifecycle: {
+				canonical: true,
+				legacyOrder: false,
+				changedValue: false,
+				missingKey: false,
+				addedKey: false,
+				duplicateKey: false,
+			},
+		},
+	);
+});
+
 test("shakedown mode owns its root and exits after one shared representative case", async () => {
 	const shell = await readFile(
 		new URL("./change-inspector-browser-verify.sh", import.meta.url),
