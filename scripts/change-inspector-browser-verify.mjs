@@ -1542,7 +1542,8 @@
 			record.schema === "pointbreak.inspect-change-projection-error" &&
 			body.schema === record.schema &&
 			body.version === 1 &&
-			body.code === "projection_unstable" &&
+			(body.code === "projection_stale" ||
+				body.code === "projection_unstable") &&
 			body.retryable === true
 		);
 	}
@@ -1561,7 +1562,8 @@
 			record.schema === "pointbreak.inspect-change-projection-error" &&
 			body.schema === record.schema &&
 			body.version === 1 &&
-			body.code === "projection_stale" &&
+			(body.code === "projection_stale" ||
+				body.code === "projection_unstable") &&
 			body.retryable === true
 		);
 	}

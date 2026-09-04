@@ -5811,7 +5811,7 @@ test("Timeline event widen waits for the complete split-pane transition", async 
 	);
 });
 
-test("console 503 exemption accepts only typed primary Change transitions inside append", async () => {
+test("append-window Changes and Attention exemptions accept only the exact primary stale and unstable tuples", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
@@ -5838,32 +5838,42 @@ test("console 503 exemption accepts only typed primary Change transitions inside
 		schema: "pointbreak.inspect-change-projection-error",
 		insideAppendWindow: true,
 	};
-	assert.equal(classify(typed, baseUrl), true);
-	assert.equal(
-		classify(
-			{ ...typed, url: `${baseUrl}/api/v2/attention?limit=100` },
-			baseUrl,
-		),
-		true,
-	);
-	for (const rejected of [
-		{ ...typed, insideAppendWindow: false },
-		{ ...typed, status: 409 },
-		{ ...typed, url: `${baseUrl}/api/v2/profile` },
-		{ ...typed, url: `${baseUrl}/api/v2/changes-extra` },
-		{ ...typed, url: `${baseUrl}/api/v2/changes/` },
-		{ ...typed, url: `${baseUrl}.example/api/v2/changes` },
-		{ ...typed, url: "http://127.0.0.1:4999/api/v2/changes" },
-		{ ...typed, schema: "pointbreak.inspect-reader-profile" },
-		{
-			...typed,
-			body: { ...typed.body, schema: "pointbreak.inspect-reader-profile" },
-		},
-		{ ...typed, body: { ...typed.body, code: "moving_journal" } },
-		{ ...typed, body: { ...typed.body, version: 2 } },
-		{ ...typed, body: { ...typed.body, retryable: false } },
-	]) {
-		assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+	for (const code of ["projection_stale", "projection_unstable"]) {
+		const allowed = { ...typed, body: { ...typed.body, code } };
+		assert.equal(classify(allowed, baseUrl), true, code);
+		assert.equal(
+			classify(
+				{ ...allowed, url: `${baseUrl}/api/v2/attention?limit=100` },
+				baseUrl,
+			),
+			true,
+			code,
+		);
+		for (const rejected of [
+			{ ...allowed, insideAppendWindow: false },
+			{ ...allowed, status: 409 },
+			{ ...allowed, url: `${baseUrl}/api/v2/profile` },
+			{ ...allowed, url: `${baseUrl}/api/v2/changes-extra` },
+			{ ...allowed, url: `${baseUrl}/api/v2/changes/` },
+			{ ...allowed, url: `${baseUrl}.example/api/v2/changes` },
+			{ ...allowed, url: "http://127.0.0.1:4999/api/v2/changes" },
+			{ ...allowed, schema: "pointbreak.inspect-reader-profile" },
+			{
+				...allowed,
+				body: {
+					...allowed.body,
+					schema: "pointbreak.inspect-reader-profile",
+				},
+			},
+			{
+				...allowed,
+				body: { ...allowed.body, code: "projection_rebuild_required" },
+			},
+			{ ...allowed, body: { ...allowed.body, version: 2 } },
+			{ ...allowed, body: { ...allowed.body, retryable: false } },
+		]) {
+			assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+		}
 	}
 	const responseCapture = source.slice(
 		source.indexOf('page.on("response"'),
@@ -5898,7 +5908,7 @@ test("console 503 exemption accepts only typed primary Change transitions inside
 	);
 });
 
-test("append-window profile exemption accepts only the exact primary stale tuple", async () => {
+test("append-window Profile exemption accepts only the exact primary stale and unstable tuples", async () => {
 	const source = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
@@ -5929,24 +5939,33 @@ test("append-window profile exemption accepts only the exact primary stale tuple
 		schema: "pointbreak.inspect-change-projection-error",
 		insideAppendWindow: true,
 	};
-	assert.equal(classify(typed, baseUrl), true);
-	for (const rejected of [
-		{ ...typed, insideAppendWindow: false },
-		{ ...typed, status: 409 },
-		{ ...typed, url: `${baseUrl}/api/v2/changes` },
-		{ ...typed, url: `${baseUrl}/api/v2/profile/extra` },
-		{ ...typed, url: `${baseUrl}.example/api/v2/profile` },
-		{ ...typed, url: "http://127.0.0.1:4999/api/v2/profile" },
-		{ ...typed, schema: "pointbreak.inspect-reader-profile" },
-		{
-			...typed,
-			body: { ...typed.body, schema: "pointbreak.inspect-reader-profile" },
-		},
-		{ ...typed, body: { ...typed.body, version: 2 } },
-		{ ...typed, body: { ...typed.body, code: "projection_unstable" } },
-		{ ...typed, body: { ...typed.body, retryable: false } },
-	]) {
-		assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+	for (const code of ["projection_stale", "projection_unstable"]) {
+		const allowed = { ...typed, body: { ...typed.body, code } };
+		assert.equal(classify(allowed, baseUrl), true, code);
+		for (const rejected of [
+			{ ...allowed, insideAppendWindow: false },
+			{ ...allowed, status: 409 },
+			{ ...allowed, url: `${baseUrl}/api/v2/changes` },
+			{ ...allowed, url: `${baseUrl}/api/v2/profile/extra` },
+			{ ...allowed, url: `${baseUrl}.example/api/v2/profile` },
+			{ ...allowed, url: "http://127.0.0.1:4999/api/v2/profile" },
+			{ ...allowed, schema: "pointbreak.inspect-reader-profile" },
+			{
+				...allowed,
+				body: {
+					...allowed.body,
+					schema: "pointbreak.inspect-reader-profile",
+				},
+			},
+			{ ...allowed, body: { ...allowed.body, version: 2 } },
+			{
+				...allowed,
+				body: { ...allowed.body, code: "projection_rebuild_required" },
+			},
+			{ ...allowed, body: { ...allowed.body, retryable: false } },
+		]) {
+			assert.equal(classify(rejected, baseUrl), false, JSON.stringify(rejected));
+		}
 	}
 	const runtimeAccounting = source.slice(
 		source.indexOf("await settleResponseInspections();"),
