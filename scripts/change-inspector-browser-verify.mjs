@@ -136,6 +136,150 @@
 		}
 	};
 
+	// Verifier-only provenance. The serialized function has no MJS closure dependencies.
+	function installClientAbortProvenanceBridge(scope, config) {
+		const header = "X-Pointbreak-Browser-Provenance";
+		const nonce = scope.crypto.randomUUID();
+		const records = new Map();
+		const originalFetch = scope.fetch;
+		const origin = new scope.URL(config.primaryBaseUrl).origin;
+		const limit = config.recordLimit ?? 512;
+		let invalid = false;
+		let ordinal = 0;
+		let generation = 0;
+		let dispatch = null;
+		const redactedHash = () => {
+			const hash = new scope.URL(scope.location.href).hash;
+			const separator = hash.indexOf("?");
+			if (separator < 0) return hash;
+			const query = hash.slice(separator + 1).split("&").filter(Boolean).filter((entry) => {
+				const key = entry.split("=", 1)[0];
+				try { return decodeURIComponent(key).toLowerCase() !== "token"; }
+				catch { return key.toLowerCase() !== "token"; }
+			}).join("&");
+			return hash.slice(0, separator) + (query ? `?${query}` : "");
+		};
+		scope.addEventListener("hashchange", (event) => {
+			generation += 1;
+			const current = { event, targetHash: redactedHash() };
+			dispatch = current;
+			scope.setTimeout(() => { if (dispatch === current) dispatch = null; }, 0);
+		}, { passive: true });
+		scope.__pointbreakClientAbortProvenance = {
+			take(token) {
+				const record = records.get(token);
+				records.delete(token);
+				if (invalid || !record || !token.startsWith(`${nonce}:`)) return null;
+				return { ...record };
+			},
+		};
+		scope.fetch = function (input, options) {
+			const request = input instanceof scope.Request ? input : null;
+			const signal = options?.signal !== undefined ? options.signal : request?.signal;
+			const method = options?.method ?? request?.method ?? "GET";
+			let url;
+			try { url = new scope.URL(request?.url ?? input, scope.location.href); }
+			catch { return originalFetch.call(this, input, options); }
+			if (url.origin !== origin || url.pathname === "/api/v2/profile" ||
+				method !== "GET" || !(signal instanceof scope.AbortSignal)) {
+				return originalFetch.call(this, input, options);
+			}
+			const headers = new scope.Headers(options?.headers ?? request?.headers);
+			if (headers.has(header)) {
+				invalid = true;
+				return originalFetch.call(this, input, options);
+			}
+			ordinal += 1;
+			const token = `${nonce}:${ordinal}`;
+			headers.set(header, token);
+			const record = { sourceHash: redactedHash(), sourceGeneration: generation, signalBearing: true };
+			if (records.size >= limit) invalid = true;
+			if (!invalid) records.set(token, record);
+			const aborted = () => {
+				record.reason = typeof signal.reason === "string" ? signal.reason : null;
+				record.abortHash = redactedHash();
+				record.abortGeneration = generation;
+				// The event's live dispatch state excludes a previously queued timeout even
+				// if it runs before our zero-delay cleanup task. No elapsed-time allowance.
+				record.dispatchOpen = dispatch !== null && dispatch.event.currentTarget === scope &&
+					dispatch.event.eventPhase !== 0 && dispatch.targetHash === record.abortHash;
+			};
+			signal.addEventListener("abort", aborted, { once: true });
+			if (signal.aborted) aborted();
+			const cleanup = (keep) => {
+				signal.removeEventListener("abort", aborted);
+				if (!keep) records.delete(token);
+			};
+			let result;
+			try { result = originalFetch.call(this, input, { ...options, headers }); }
+			catch (error) { cleanup(false); throw error; }
+			// Observe settlement without substituting the Promise returned to the client.
+			void result.then(() => cleanup(false), () => cleanup(signal.aborted));
+			return result;
+		};
+	}
+	const clientAbortInitScript = (config) =>
+		`(${installClientAbortProvenanceBridge.toString()})(globalThis, ${JSON.stringify(config)});`;
+
+	function clientSupersessionEndpoint(url, primaryBaseUrl) {
+		if (typeof url !== "string" || typeof primaryBaseUrl !== "string") return null;
+		const origin = primaryBaseUrl.replace(/\/$/, "");
+		if (!url.startsWith(`${origin}/`) || url.includes("#")) return null;
+		const relative = url.slice(origin.length);
+		const separator = relative.indexOf("?");
+		const path = separator < 0 ? relative : relative.slice(0, separator);
+		const query = Object.create(null);
+		try {
+			for (const pair of (separator < 0 ? [] : relative.slice(separator + 1).split("&"))) {
+				const [key, ...value] = pair.split("=");
+				const name = decodeURIComponent(key.replace(/\+/g, " "));
+				if (!name || name in query || value.length !== 1) return null;
+				query[name] = decodeURIComponent(value[0].replace(/\+/g, " "));
+			}
+			if (path.split("/").slice(1).some((part) => !decodeURIComponent(part))) return null;
+		} catch { return null; }
+		const keys = Object.keys(query);
+		const only = (allowed) => keys.every((key) => allowed.includes(key));
+		const exactQuery = (required) => only(required) && required.every((key) => query[key]);
+		const bounded = /^\d+$/.test(query.limit ?? "") && Number(query.limit) >= 1 && Number(query.limit) <= 100;
+		if (path === "/api/v2/changes" || path === "/api/v2/attention") {
+			if (!bounded || query.order !== "change_id_asc" ||
+				!only(["limit", "order", "after", "q", "topology", "lifecycle", "attention", "availability"])) return null;
+			const enums = {
+				topology: ["initial", "replacement", "replacement_divergent", "consolidation", "parallel_current", "mixed", "incomplete", "cycle_conflicted"],
+				lifecycle: ["incomplete", "conflicted", "in_progress", "accepted"],
+				attention: ["clear", "in_progress", "incomplete", "conflicted"],
+				availability: ["available", "incomplete"],
+			};
+			if (keys.some((key) => key !== "q" && !query[key])) return null;
+			if (Object.entries(enums).some(([key, values]) => query[key] !== undefined && !values.includes(query[key]))) return null;
+			return path.endsWith("/changes") ? "changes" : "attention";
+		}
+		if (path === "/api/v2/history") {
+			if (!bounded || !["asc", "desc"].includes(query.order) ||
+				!only(["limit", "order", "q", "after", "at", "track", "change", "revision", "artifactHash", "type"]) ||
+				("after" in query && "at" in query) || ("revision" in query) !== ("artifactHash" in query) ||
+				keys.some((key) => key !== "q" && !query[key])) return null;
+			return "history";
+		}
+		if (/^\/api\/v2\/changes\/[^/]+$/.test(path) && keys.length === 0) return "change";
+		if (/^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+$/.test(path) && exactQuery(["artifactHash"])) return "revision";
+		if (/^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+\/resource$/.test(path) && exactQuery(["artifactHash"])) return "resource";
+		if (/^\/api\/v2\/changes\/[^/]+\/interdiff\/[^/]+\/[^/]+$/.test(path) && exactQuery(["fromArtifactHash", "toArtifactHash"])) return "interdiff";
+		return null;
+	}
+
+	function isAdmissibleClientSupersessionFailure(failure, lifecycle, primaryBaseUrl) {
+		const proof = lifecycle?.clientSupersessionProof(failure);
+		if (!proof || failure.retired || failure.method !== "GET" || failure.resourceType !== "fetch" ||
+			failure.error !== "net::ERR_ABORTED" || clientSupersessionEndpoint(failure.url, primaryBaseUrl) === null) return false;
+		return proof.lookupStatus === "complete" && proof.signalBearing === true && proof.reason === "superseded" &&
+			proof.dispatchOpen === true && Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 0 &&
+			proof.abortGeneration === proof.sourceGeneration + 1 && proof.sourceHash === proof.observedSourceHash &&
+			proof.abortHash === proof.targetHash && proof.sourceHash !== proof.targetHash && proof.terminalHash === proof.targetHash &&
+			proof.documentGeneration === proof.terminalDocumentGeneration;
+	}
+
 	function createProfileRequestLifecycle({
 		page,
 		primaryBaseUrl,
@@ -150,6 +294,11 @@
 			: primaryBaseUrl;
 		const recordsByRequest = new Map();
 		const transitionByRequest = new Map();
+		const clientRecords = new WeakMap();
+		const clientFailures = new WeakMap();
+		const clientTokens = new Map();
+		const clientFailureInspections = new Set();
+		let clientInspectionOverflow = false;
 		const routeVisitDiagnostics = new WeakMap();
 		let committedDocumentGeneration = 0;
 		let nextRequestOrdinal = 0;
@@ -176,6 +325,52 @@
 			} catch {
 				return fallback;
 			}
+		};
+		const inspectClientFailure = (failure, record, wasOutstanding) => {
+			const client = clientRecords.get(record);
+			if (!client) return;
+			client.failureCount += 1;
+			client.invalid ||= !wasOutstanding;
+			clientFailures.set(failure, { client, record });
+			failure.clientSupersession = {
+				lookupStatus: "unavailable", observedSourceHash: record.sourceHash,
+				targetHash: client.targetHash, terminalHash: capabilityRedactedHash(page.url()),
+				documentGeneration: record.documentGeneration,
+				terminalDocumentGeneration: committedDocumentGeneration,
+			};
+			if (client.invalid || typeof page.evaluate !== "function") return;
+			if (clientFailureInspections.size >= 512) { clientInspectionOverflow = true; return; }
+			// A bounded join owns late evaluation completion; timeout cannot later gain admission.
+			let finish;
+			let timer = null;
+			let settled = false;
+			const inspection = new Promise((resolve) => {
+				finish = (value) => {
+					if (settled) return;
+					settled = true;
+					if (timer !== null) clearTimer(timer);
+					if (value !== null && typeof value === "object") {
+						Object.assign(failure.clientSupersession, {
+							lookupStatus: "complete", sourceHash: value.sourceHash,
+							sourceGeneration: value.sourceGeneration, signalBearing: value.signalBearing,
+							reason: value.reason, abortHash: value.abortHash,
+							abortGeneration: value.abortGeneration, dispatchOpen: value.dispatchOpen,
+						});
+					}
+					resolve();
+				};
+			});
+			clientFailureInspections.add(inspection);
+			timer = setTimer(() => finish(null), 1000);
+			try {
+				void Promise.resolve(page.evaluate((token) =>
+					globalThis.__pointbreakClientAbortProvenance?.take(token) ?? null,
+					client.token)).then(finish, () => finish(null));
+			} catch { finish(null); }
+			void inspection.then(() => clientFailureInspections.delete(inspection));
+		};
+		const settleClientFailureInspections = async () => {
+			while (clientFailureInspections.size > 0) await Promise.all([...clientFailureInspections]);
 		};
 		const requestInitiator = (request, navigation) => {
 			try {
@@ -588,6 +783,20 @@
 			};
 			nextRequestOrdinal += 1;
 			recordsByRequest.set(request, record);
+			const clientToken = safeRequestValue(request, "headers", null)?.["x-pointbreak-browser-provenance"];
+			if (typeof clientToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/.test(clientToken) &&
+				record.url !== `${primaryOrigin}/api/v2/profile`) {
+				const previous = clientTokens.get(clientToken);
+				if (previous) clientRecords.get(previous).invalid = true;
+				if (clientTokens.size >= 512) clientInspectionOverflow = true;
+				const client = {
+					token: clientToken, frame: safeRequestValue(request, "frame", null),
+					targetHash: null, invalid: Boolean(previous) || initiator !== "main-frame" || navigation,
+					failureCount: 0,
+				};
+				clientRecords.set(record, client);
+				if (!clientInspectionOverflow) clientTokens.set(clientToken, record);
+			}
 			if (navigation && initiator === "main-frame") {
 				if (activeRouteVisitDiagnostic !== null) {
 					activeRouteVisitDiagnostic.mainFrameNavigationRequestCount += 1;
@@ -647,6 +856,7 @@
 				return;
 			}
 			const wasRetired = record.retired;
+			const wasOutstanding = record.status === "outstanding";
 			record.terminalHistory.push({
 				outcome,
 				ageMs: elapsedAge(record.startedAt),
@@ -663,7 +873,7 @@
 			if (record.status === "outstanding") record.status = "terminal";
 			if (wasRetired) record.status = "retired-terminal";
 			if (outcome === "requestfailed") {
-				onRequestFailure({
+				const failure = {
 					request,
 					transition: wasRetired ? null : transition,
 					method: record.method,
@@ -673,7 +883,12 @@
 						safeRequestValue(request, "failure", null)?.errorText ??
 						"unknown request failure",
 					retired: wasRetired,
-				});
+				};
+				inspectClientFailure(failure, record, wasOutstanding);
+				onRequestFailure(failure);
+			} else {
+				const client = clientRecords.get(record);
+				if (client && client.failureCount === 0 && clientTokens.get(client.token) === record) clientTokens.delete(client.token);
 			}
 		};
 		const frameNavigated = (frame) => {
@@ -698,6 +913,14 @@
 			}
 			const diagnostic = activeRouteVisitDiagnostic;
 			const tracedVisit = diagnostic?.visit ?? null;
+			for (const record of recordsByRequest.values()) {
+				const client = clientRecords.get(record);
+				if (!client || record.status !== "outstanding") continue;
+				if (pendingNavigation !== null || client.frame !== frame || !actionFrameHashAvailable ||
+					record.documentGeneration !== committedDocumentGeneration) client.invalid = true;
+				if (client.targetHash !== null && client.targetHash !== frameHash) client.invalid = true;
+				if (client.targetHash === null && frameHash !== record.sourceHash) client.targetHash = frameHash;
+			}
 			const visitStateBefore = tracedVisit?.state ?? null;
 			const routeObservedBefore = tracedVisit?.routeObserved ?? false;
 			const currentVisitIdBefore = currentRouteVisit?.id ?? null;
@@ -790,6 +1013,10 @@
 			}
 		};
 		const domContentLoaded = () => {
+			for (const record of recordsByRequest.values()) {
+				const client = clientRecords.get(record);
+				if (client && record.status === "outstanding") client.invalid = true;
+			}
 			if (activeRouteVisitDiagnostic !== null) {
 				activeRouteVisitDiagnostic.domContentLoadedCount += 1;
 			}
@@ -1092,6 +1319,16 @@
 
 		return {
 			abandonRouteVisitIntent: retireRouteVisit,
+			settleClientFailureInspections,
+			clientSupersessionProof: (failure) => {
+				const entry = clientFailures.get(failure);
+				if (!entry || clientInspectionOverflow) return null;
+				const { record, client } = entry;
+				if (client.invalid || client.failureCount !== 1 || client.targetHash === null ||
+					failure.request !== record.request || recordsByRequest.get(failure.request) !== record ||
+					clientTokens.get(client.token) !== record || record.retired) return null;
+				return failure.clientSupersession;
+			},
 			activateRouteVisit,
 			awaitRequiredProfileRequest,
 			certifyChangesVisit,
@@ -1218,6 +1455,7 @@
 	function createRequestHealthSnapshot({
 		requestFailures,
 		isAdmissibleRequestFailure,
+		isAdmissibleClientFailure = () => false,
 	}) {
 		const admissibleProfileSupersessionFailures = requestFailures.filter(
 			isAdmissibleRequestFailure,
@@ -1227,6 +1465,12 @@
 		const admittedRequestFailures = profileSupersessionAdmissionWithinBound
 			? new Set(admissibleProfileSupersessionFailures)
 			: new Set();
+		for (const failure of requestFailures) {
+			// D69 membership is independently bounded and can never be subtracted by D83.
+			if (!admissibleProfileSupersessionFailures.includes(failure) && isAdmissibleClientFailure(failure)) {
+				admittedRequestFailures.add(failure);
+			}
+		}
 		const unexpectedRequestFailures = requestFailures.filter(
 			(failure) => !admittedRequestFailures.has(failure),
 		);
@@ -1235,6 +1479,7 @@
 			resourceType: failure.resourceType,
 			url: failure.url,
 			error: failure.error,
+			...(failure.clientSupersession ? { clientSupersession: { ...failure.clientSupersession } } : {}),
 			profileSupersession: failure.transition
 				? {
 						arm: failure.transition.arm,
@@ -1252,6 +1497,7 @@
 		);
 		return {
 			admissibleProfileSupersessionFailures,
+			clientSupersessionFailureEvidence: requestFailures.filter((failure) => failure.clientSupersession).map(requestFailureEvidence),
 			profileSupersessionAdmissionWithinBound,
 			unexpectedRequestFailures,
 			unexpectedRequestFailureEvidence,
@@ -1481,6 +1727,10 @@
 
 	if (typeof config.__pointbreakD70Selftest === "function") {
 		return config.__pointbreakD70Selftest({
+			clientAbortInitScript,
+			clientSupersessionEndpoint,
+			installClientAbortProvenanceBridge,
+			isAdmissibleClientSupersessionFailure,
 			classifyRouteVisitAction,
 			classifyRouteVisitActionResult,
 			createD78RepairBaseProof,
@@ -1685,6 +1935,8 @@
 	const requestHealthSnapshot = () =>
 		createRequestHealthSnapshot({
 			requestFailures,
+			isAdmissibleClientFailure: (failure) => requestLifecycleOwner.isActive() &&
+				isAdmissibleClientSupersessionFailure(failure, requestLifecycleOwner.active(), config.server.baseUrl),
 			isAdmissibleRequestFailure: (failure) =>
 				isAdmissibleProfileSupersessionFailure(
 					failure,
@@ -1710,6 +1962,7 @@
 		};
 		return lastFocusedRequestHealth;
 	};
+	await page.addInitScript({ content: clientAbortInitScript({ primaryBaseUrl: config.server.baseUrl }) });
 	await page.goto(bootstrapUrl(config.server), {
 		waitUntil: "domcontentloaded",
 	});
@@ -1731,6 +1984,9 @@
 			if (document.activeElement instanceof HTMLElement)
 				document.activeElement.blur();
 		});
+		// Every focused mode's final section uses this teardown before its synchronous
+		// health snapshot; keep the pinned journey/call-site bytes unchanged.
+		if (requestLifecycleOwner.isActive()) await requestLifecycleOwner.active().settleClientFailureInspections();
 	};
 	// The instrumented bootstrap has moved the one-time fragment capability into
 	// origin-scoped sessionStorage. Route changes are same-document navigation
@@ -8147,6 +8403,7 @@
 	});
 
 	await settleResponseInspections();
+	await requestLifecycleOwner.active().settleClientFailureInspections();
 	const deliberateTransitionResponses = serviceUnavailableResponses.filter(
 		(response) =>
 			isDeliberateChangeProjectionTransition(response, config.server.baseUrl) ||

@@ -298,6 +298,265 @@ async function runD70BrowserSelftest(hook) {
 		: await programOrResult;
 }
 
+test("D83 binds only exact client route-dispatch supersession across the closed read set", async () => {
+	await runD70BrowserSelftest(async (helpers) => {
+		const base = "http://127.0.0.1:4173";
+		const sourceHash = "#/changes/change%3Ac/revisions/rev%3Ar?artifactHash=sha256%3Aa";
+		const targetHash = "#/changes?limit=100&order=change_id_asc";
+		const exact = "/api/v2/changes/change%3Ac/revisions/rev%3Ar?artifactHash=sha256%3Aa";
+		const token = "00000000-0000-4000-8000-000000000001:1";
+		const header = "x-pointbreak-browser-provenance";
+		const provenance = () => ({
+			sourceHash, sourceGeneration: 2, signalBearing: true,
+			reason: "superseded", abortHash: targetHash, abortGeneration: 3,
+			dispatchOpen: true,
+		});
+		const replay = async (options = {}) => {
+			const page = new FakePage(`${base}/${sourceHash}`);
+			const failures = [];
+			const timers = new ManualTimers();
+			page.evaluate = options.lookup ?? (async () => options.provenance ?? provenance());
+			if (options.noEvaluate) delete page.evaluate;
+			const lifecycle = helpers.createProfileRequestLifecycle({
+				page, primaryBaseUrl: base, now: () => timers.now,
+				setTimer: timers.setTimeout, clearTimer: timers.clearTimeout,
+				onRequestFailure: (failure) => failures.push(failure),
+			});
+			const request = new FakeRequest({
+				url: options.url ?? `${base}${exact}`, frame: options.subframe ? {} : page.mainFrame(),
+				method: options.method ?? "GET", resourceType: options.resourceType ?? "fetch",
+				failure: options.error ?? "net::ERR_ABORTED",
+			});
+			request.headers = () => ({ [header]: options.token ?? token });
+			if (options.noToken) request.headers = () => ({});
+			if (!options.unrecorded) page.emit("request", request);
+			if (options.duplicateToken) {
+				const duplicate = new FakeRequest({ frame: page.mainFrame(), url: request.url() });
+				duplicate.headers = request.headers;
+				page.emit("request", duplicate);
+			}
+			if (options.responseFirst) page.emit("response", new FakeResponse(request));
+			if (options.reload) page.emit("request", new FakeRequest({
+				frame: page.mainFrame(), navigation: true, resourceType: "document",
+			}));
+			page.setUrl(`${base}/${options.target ?? targetHash}`);
+			if (options.replaceFrame) page.setMainFrame(new FakeFrame(() => page.url()));
+			if (!options.noTransition) page.emit("framenavigated", page.mainFrame());
+			if (options.reload || options.dcl) page.emit("domcontentloaded");
+			if (options.displaced) {
+				page.setUrl(`${base}/#/attention`);
+				page.emit("framenavigated", page.mainFrame());
+				page.setUrl(`${base}/${targetHash}`);
+				page.emit("framenavigated", page.mainFrame());
+			}
+			if (options.terminalElsewhere) page.setUrl(`${base}/#/attention`);
+			page.emit("requestfailed", request);
+			if (options.duplicateTerminal) page.emit("requestfailed", request);
+			if (options.timeout) timers.advanceTo(5000);
+			await lifecycle.settleClientFailureInspections?.();
+			if (options.swapRequest) failures[0].request = {};
+			const health = helpers.createRequestHealthSnapshot({
+				requestFailures: failures,
+				isAdmissibleRequestFailure: () => false,
+				isAdmissibleClientFailure: (failure) =>
+					helpers.isAdmissibleClientSupersessionFailure?.(failure, lifecycle, base) ?? false,
+			});
+			return { page, lifecycle, failures, health, timers };
+		};
+		const first = await replay();
+		assert.equal(first.health.unexpectedRequestFailures.length, 0,
+			"attempt-11-shaped exact Revision cancellation must be admitted by production lifecycle health");
+
+		const families = [
+			["changes", "/api/v2/changes?limit=100&order=change_id_asc"],
+			["attention", "/api/v2/attention?limit=100&order=change_id_asc"],
+			["history", "/api/v2/history?limit=100&order=desc"],
+			["change", "/api/v2/changes/change%3Ac"],
+			["revision", exact],
+			["resource", exact.replace("?", "/resource?")],
+			["interdiff", "/api/v2/changes/change%3Ac/interdiff/rev%3Aa/rev%3Ab?fromArtifactHash=sha256%3Aa&toArtifactHash=sha256%3Ab"],
+		];
+		for (const [family, path] of families) {
+			assert.equal(helpers.clientSupersessionEndpoint(`${base}${path}`, base), family);
+			assert.equal((await replay({ url: `${base}${path}` })).health.unexpectedRequestFailures.length, 0, family);
+		}
+		const negatives = [
+			["missing token", { noToken: true }], ["malformed token", { token: "bad" }],
+			["duplicate token", { duplicateToken: true }], ["unknown token", { lookup: async () => null }],
+			["absent evaluation", { noEvaluate: true }], ["failed lookup", { lookup: async () => { throw Error("lookup"); } }],
+			["unsettled lookup", { lookup: () => new Promise(() => {}), timeout: true }],
+			["unrecorded Request", { unrecorded: true }], ["different Request", { swapRequest: true }],
+			["not outstanding", { responseFirst: true }], ["missing transition", { noTransition: true }],
+			["same source target", { target: sourceHash }], ["displaced target", { displaced: true }],
+			["terminal elsewhere", { terminalElsewhere: true }], ["subframe", { subframe: true }],
+			["different main frame", { replaceFrame: true }], ["reload", { reload: true }],
+			["document changed without root", { dcl: true }], ["duplicate terminal", { duplicateTerminal: true }],
+			["wrong origin", { url: `http://127.0.0.1:4174${exact}` }],
+			["POST", { method: "POST" }], ["document", { resourceType: "document" }],
+			["other error", { error: "net::ERR_FAILED" }], ["profile overlap", { url: `${base}/api/v2/profile` }],
+			["identity", { url: `${base}/api/identity` }],
+		];
+		for (const reason of ["hard_budget", "postflight_budget", "refresh_expiry", "cancelled", "stopped", "unknown"]) {
+			negatives.push([reason, { provenance: { ...provenance(), reason } }]);
+		}
+		for (const [name, field, value] of [
+			["signal-less", "signalBearing", false], ["outside dispatch", "dispatchOpen", false],
+			["source inequality", "sourceHash", "#/attention"], ["abort inequality", "abortHash", "#/attention"],
+			["poll timeout at source", "abortHash", sourceHash], ["skipped generation", "abortGeneration", 4],
+			["missing generation", "sourceGeneration", null],
+		]) negatives.push([name, { provenance: { ...provenance(), [field]: value } }]);
+		for (const [name, options] of negatives) {
+			const result = await replay(options);
+			assert.ok(result.health.unexpectedRequestFailures.length > 0, name);
+			assert.equal(result.timers.now <= 5000, true);
+		}
+		assert.equal(helpers.isAdmissibleClientSupersessionFailure(first.failures[0], (await replay()).lifecycle, base), false, "different lifecycle");
+		for (const path of [
+			"/api/v2/profile", "/api/identity", "/api/v2/changes-extra", "/api/v2/changes/",
+			"/api/v2/changes?limit=101&order=change_id_asc", "/api/v2/changes?limit=100&order=desc",
+			"/api/v2/changes?limit=100&order=change_id_asc&unknown=x",
+			"/api/v2/history?limit=100&order=desc&at=a&after=b",
+			"/api/v2/history?limit=100&order=desc&revision=r", "/api/v2/history?limit=100&order=no",
+			`${exact}&artifactHash=b`, `${exact}&extra=x`, exact.split("?")[0],
+			`${exact}#fragment`, "/api/v2/changes/c/revisions//resource?artifactHash=a",
+			"/api/v2/changes/c/interdiff/a/b?fromArtifactHash=a",
+		]) assert.equal(helpers.clientSupersessionEndpoint(`${base}${path}`, base), null, path);
+
+		// Exercise the actual serialized browser function with isolated browser dependencies.
+		const makeScope = (limit = 32) => {
+			const listeners = [];
+			const timers = new ManualTimers();
+			const calls = [];
+			const scope = {
+				URL, Headers, Request, AbortSignal, crypto: { randomUUID: () => token.split(":")[0] },
+				location: { href: `${base}/${sourceHash}` },
+				setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
+				addEventListener: (name, callback, options) => {
+					assert.equal(name, "hashchange"); assert.equal(options.passive, true); listeners.push(callback);
+				},
+				fetch: function (...args) {
+					let resolve, reject;
+					const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+					calls.push({ args, promise, resolve, reject, receiver: this });
+					return promise;
+				},
+			};
+			const config = { primaryBaseUrl: base, recordLimit: limit };
+			const content = helpers.clientAbortInitScript(config);
+			assert.doesNotThrow(() => new Function(content));
+			helpers.installClientAbortProvenanceBridge(scope, config);
+			assert.equal(listeners.length, 1);
+			const take = (value) => scope.__pointbreakClientAbortProvenance.take(value);
+			const dispatch = (callback, hash = targetHash) => {
+				scope.location.href = `${base}/${hash}`;
+				const event = { currentTarget: scope, eventPhase: 2 };
+				listeners[0](event);
+				callback(); // The product's later listener in the same dispatch.
+				event.currentTarget = null; event.eventPhase = 0;
+			};
+			return { scope, calls, timers, dispatch, take };
+		};
+		for (const [path, options] of [
+			[`${base}/api/v2/profile`, { signal: new AbortController().signal }],
+			[`${base}${exact}`, {}], [`http://elsewhere.test${exact}`, { signal: new AbortController().signal }],
+			[`${base}${exact}`, { method: "POST", signal: new AbortController().signal }],
+		]) {
+			const fixture = makeScope();
+			options.headers = { Authorization: "Bearer test-only" };
+			const promise = fixture.scope.fetch(path, options);
+			assert.equal(promise, fixture.calls[0].promise);
+			assert.equal(fixture.calls[0].args[0], path);
+			assert.equal(fixture.calls[0].args[1], options, "ineligible options identity");
+			fixture.calls[0].resolve({}); await promise;
+		}
+		const fixture = makeScope();
+		const controller = new AbortController();
+		const options = { method: "GET", signal: controller.signal, headers: { Authorization: "Bearer test-only" }, cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" };
+		const promise = fixture.scope.fetch(exact, options);
+		const call = fixture.calls[0];
+		assert.equal(promise, call.promise);
+		assert.equal(call.receiver, fixture.scope);
+		assert.equal(call.args[0], exact);
+		for (const key of Object.keys(options).filter((key) => key !== "headers")) assert.equal(call.args[1][key], options[key], key);
+		assert.equal(call.args[1].headers.get("authorization"), "Bearer test-only");
+		assert.deepEqual([...call.args[1].headers.keys()].sort(), ["authorization", header]);
+		assert.deepEqual(options.headers, { Authorization: "Bearer test-only" });
+		const actualToken = call.args[1].headers.get(header);
+		assert.match(actualToken, /^[0-9a-f-]{36}:\d+$/);
+		fixture.dispatch(() => controller.abort("superseded"));
+		call.reject(Error("aborted")); await promise.catch(() => {});
+		const observed = fixture.take(actualToken);
+		assert.equal(observed.reason, "superseded"); assert.equal(observed.dispatchOpen, true);
+		assert.equal(observed.abortGeneration, observed.sourceGeneration + 1);
+		assert.equal(observed.abortHash, targetHash); assert.equal(observed.sourceHash, sourceHash);
+		assert.equal((await replay({ provenance: observed })).health.unexpectedRequestFailures.length, 0,
+			"actual bridge provenance is accepted by the production lifecycle");
+		assert.equal(fixture.take(actualToken), null, "one-shot lookup");
+		assert.equal(fixture.take("ffffffff-ffff-4fff-8fff-ffffffffffff:1"), null, "other document");
+		const disabledSignal = makeScope();
+		const requestInput = new Request(`${base}${exact}`, { signal: new AbortController().signal });
+		const disabledOptions = { signal: null };
+		const disabledPromise = disabledSignal.scope.fetch(requestInput, disabledOptions);
+		assert.equal(disabledSignal.calls[0].args[0], requestInput);
+		assert.equal(disabledSignal.calls[0].args[1], disabledOptions, "null disables the Request signal");
+		disabledSignal.calls[0].resolve({}); await disabledPromise;
+		for (const later of [false, true]) {
+			const scope = makeScope(); const abort = new AbortController();
+			const pending = scope.scope.fetch(exact, { signal: abort.signal });
+			scope.dispatch(() => {});
+			if (later) scope.timers.advanceTo(1);
+			abort.abort("superseded");
+			scope.calls[0].reject(Error("aborted")); await pending.catch(() => {});
+			assert.equal(scope.take(scope.calls[0].args[1].headers.get(header)).dispatchOpen, false, "later task, including before cleanup callback");
+		}
+		for (const reject of [false, true]) {
+			const scope = makeScope(); const controller = new AbortController();
+			const pending = scope.scope.fetch(exact, { signal: controller.signal });
+			const call = scope.calls[0];
+			if (reject) call.reject(Error("network")); else call.resolve({});
+			await pending.catch(() => {}); controller.abort("superseded");
+			assert.equal(scope.take(call.args[1].headers.get(header)), null, "terminal cleanup");
+		}
+		const overflow = makeScope(1);
+		for (let index = 0; index < 2; index += 1) {
+			const controller = new AbortController();
+			const pending = overflow.scope.fetch(exact, { signal: controller.signal });
+			overflow.dispatch(() => controller.abort("superseded"));
+			overflow.calls[index].reject(Error("abort")); await pending.catch(() => {});
+		}
+		assert.equal(overflow.take(token), null, "overflow invalidates even earlier records");
+		const evidence = JSON.stringify(first.health);
+		assert.equal(evidence.includes(token), false, "opaque correlation excluded from evidence");
+		const combined = helpers.createRequestHealthSnapshot({
+			requestFailures: first.failures,
+			isAdmissibleRequestFailure: () => true,
+			isAdmissibleClientFailure: () => true,
+		});
+		assert.equal(combined.unexpectedRequestFailures.length, 0, "exact Set union");
+		const overProfileBound = helpers.createRequestHealthSnapshot({
+			requestFailures: [first.failures[0], { ...first.failures[0] }],
+			isAdmissibleRequestFailure: () => true, isAdmissibleClientFailure: () => true,
+		});
+		assert.equal(overProfileBound.profileSupersessionAdmissionWithinBound, false);
+		assert.equal(overProfileBound.unexpectedRequestFailures.length, 2, "D83 cannot remove D69 bound members");
+		const protocol = await readFile(new URL("../src/cli/inspect/web/src/change-protocol.ts", import.meta.url), "utf8");
+		const reading = await readFile(new URL("../src/cli/inspect/web/src/change-inspector-reading.ts", import.meta.url), "utf8");
+		const composition = await readFile(new URL("../src/cli/inspect/web/src/change-inspector.ts", import.meta.url), "utf8");
+		assert.match(protocol, /return `\/api\/v2\/\$\{lens\}\?\$\{params\}`/);
+		assert.match(protocol, /return `\/api\/v2\/history\?\$\{params\}`/);
+		assert.equal((reading.match(/await fetchChangeInspectorJSON\(/g) ?? []).length, 4);
+		assert.match(reading, /revisions\/\$\{encoded\(revision\.revisionId\)\}\?artifactHash=/);
+		assert.match(reading, /revisions\/\$\{encoded\(revision\.revisionId\)\}\/resource\?artifactHash=/);
+		assert.match(reading, /\/interdiff\/\$\{encoded\(route\.from\.revisionId\)\}\/\$\{encoded\(route\.to\.revisionId\)\}/);
+		assert.match(composition, /fetchChangeInspectorJSON\(request, \{ signal \}\)/);
+		assert.deepEqual(families.map(([name]) => name).sort(), ["attention", "change", "changes", "history", "interdiff", "resource", "revision"]);
+		const browser = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
+		assert.ok(browser.indexOf("await page.addInitScript(") < browser.indexOf("await page.goto(bootstrapUrl(config.server)"), "bridge precedes bootstrap");
+		assert.match(browser, /const teardownSection = async[\s\S]*?settleClientFailureInspections\(\)/, "focused snapshots follow joined teardown");
+		assert.match(browser, /await settleResponseInspections\(\);\n\tawait requestLifecycleOwner\.active\(\)\.settleClientFailureInspections\(\);\n\tconst deliberateTransitionResponses/, "final join stays outside the synchronous D82 source slice");
+	});
+});
+
 test("D71 production lifecycle defaults execute in the Playwright sparse VM", async () => {
 	const page = new FakePage(
 		"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",
