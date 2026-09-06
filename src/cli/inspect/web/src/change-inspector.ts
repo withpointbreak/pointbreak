@@ -65,7 +65,9 @@ import {
 } from "./change-protocol";
 import {
   configureConnectionActions,
+  getConnectionSnapshot,
   initConnectionControls,
+  markRequestFailure,
   setRefreshState,
 } from "./connection";
 import { createDisclosure, type DisclosureController } from "./disclosure";
@@ -109,6 +111,7 @@ const EXACT_READING_SOFT_BUDGET_MS = 10_000;
 const EXACT_READING_HARD_BUDGET_MS = 30_000;
 const EXACT_POSTFLIGHT_TIMEOUT_MS = 3_000;
 const IDENTITY_TIMEOUT_MS = 3_000;
+const GENERATION_LOAD_TIMEOUT_MS = 30_000;
 const POLL_HEALTHY_INTERVAL_MS = 3_000;
 const POLL_BACKOFF_CAP_MS = 30_000;
 const POLL_CYCLE_TIMEOUT_MS = 15_000;
@@ -231,6 +234,57 @@ class ReadingAttempt {
   }
 }
 
+type GenerationAbortReason = "superseded" | "stopped" | "generation_budget";
+
+/** Cancellation and settlement for one generation phase, subordinate to requestEpoch. */
+class GenerationAttempt {
+  private readonly controller = new AbortController();
+  private readonly timer = setTimeout(
+    () => this.abort("generation_budget"),
+    GENERATION_LOAD_TIMEOUT_MS,
+  );
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  run<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.signal.aborted) {
+      return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+    }
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        this.signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () =>
+        finish(() => reject(new ChangeInspectorRequestFailure("aborted")));
+      this.signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        operation().then(
+          (value) => finish(() => resolve(value)),
+          (error: unknown) => finish(() => reject(error)),
+        );
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    });
+  }
+
+  abort(reason: GenerationAbortReason): void {
+    clearTimeout(this.timer);
+    if (!this.signal.aborted) this.controller.abort(reason);
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    if (activeGenerationAttempt === this) activeGenerationAttempt = null;
+  }
+}
+
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let routeListener: (() => void) | null = null;
 let filterInput: HTMLInputElement | null = null;
@@ -245,6 +299,7 @@ let refreshSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let requestEpoch = 0;
 let compositionEpoch = 0;
 let activeReadingAttempt: ReadingAttempt | null = null;
+let activeGenerationAttempt: GenerationAttempt | null = null;
 let activePollCycleController: AbortController | null = null;
 
 function advanceRequestEpoch(
@@ -254,6 +309,7 @@ function advanceRequestEpoch(
   requestEpoch += 1;
   if (abortPollCycle) activePollCycleController?.abort(reason);
   activeReadingAttempt?.abort(reason);
+  activeGenerationAttempt?.abort(reason);
   return requestEpoch;
 }
 
@@ -560,6 +616,7 @@ export async function bootstrapChangeInspector(
   let releaseQueuedPoll: () => void = () => {};
   let revalidateIdentityForCurrentSession: () => void = () => {};
   let pollRequiresFullValidation = false;
+  let generationNeedsRetry = false;
 
   const readingKey = (
     route: ChangeInspectorExactRoute,
@@ -740,6 +797,20 @@ export async function bootstrapChangeInspector(
   ): Promise<GenerationLoadOutcome> => {
     const credentialVersion = sessionCredentialVersion();
     const epoch = advanceRequestEpoch("superseded", origin !== "poll");
+    const generationAttempt =
+      origin === "poll" ? null : new GenerationAttempt();
+    if (generationAttempt !== null) activeGenerationAttempt = generationAttempt;
+    const phaseSignal = generationAttempt?.signal ?? signal;
+    const generationJSON = (path: string): Promise<unknown> => {
+      if (epoch !== requestEpoch || phaseSignal?.aborted) {
+        return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+      }
+      const fetchDocument = () =>
+        fetchChangeInspectorJSON(path, { signal: phaseSignal });
+      return generationAttempt === null
+        ? fetchDocument()
+        : generationAttempt.run(fetchDocument);
+    };
     let refreshAttempt: ReadingAttempt | null = null;
     let refreshPendingToken: symbol | null = null;
     try {
@@ -748,9 +819,9 @@ export async function bootstrapChangeInspector(
       // as the visible request.
       const request = requestKey(route);
       const profile = decodeReaderProfile(
-        await fetchChangeInspectorJSON("/api/v2/profile", { signal }),
+        await generationJSON("/api/v2/profile"),
       );
-      if (epoch !== requestEpoch) return "superseded";
+      if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
       if (profile.availability !== "ready") {
         if (origin !== "route" && state.snapshot().generation !== null) {
           showPollFailure();
@@ -789,28 +860,23 @@ export async function bootstrapChangeInspector(
         activeLens === "attention" ? query : firstPageQuery(query);
       const historyRequest =
         route.kind === "timeline" || route.kind === "event"
-          ? fetchChangeInspectorJSON(request, { signal }).then(
-              decodeEventHistory,
-            )
+          ? generationJSON(request).then(decodeEventHistory)
           : Promise.resolve(null);
       const [changes, attention, history] = await Promise.all([
-        fetchChangeInspectorJSON(buildChangePageUrl("changes", changesQuery), {
-          signal,
-        }).then((value) =>
-          decodeChangePage(value, { lens: "changes", bounded: true }),
+        generationJSON(buildChangePageUrl("changes", changesQuery)).then(
+          (value) =>
+            decodeChangePage(value, { lens: "changes", bounded: true }),
         ),
-        fetchChangeInspectorJSON(
-          buildChangePageUrl("attention", attentionQuery),
-          { signal },
-        ).then((value) =>
-          decodeChangePage(value, { lens: "attention", bounded: true }),
+        generationJSON(buildChangePageUrl("attention", attentionQuery)).then(
+          (value) =>
+            decodeChangePage(value, { lens: "attention", bounded: true }),
         ),
         historyRequest,
       ]);
       const postflight = decodeReaderProfile(
-        await fetchChangeInspectorJSON("/api/v2/profile", { signal }),
+        await generationJSON("/api/v2/profile"),
       );
-      if (epoch !== requestEpoch) return "superseded";
+      if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
       const staged = stageGeneration(
         profile,
         changes,
@@ -818,6 +884,7 @@ export async function bootstrapChangeInspector(
         postflight,
         history,
       );
+      generationAttempt?.dispose();
       const hasExactReading =
         route.kind !== "lens" &&
         route.kind !== "timeline" &&
@@ -869,7 +936,8 @@ export async function bootstrapChangeInspector(
           );
           attempt.clearTimer(refreshBudget);
           const result = { loaded, readingPostflight };
-          if (epoch !== requestEpoch) return "superseded";
+          if (epoch !== requestEpoch || phaseSignal?.aborted)
+            return "superseded";
           const browserRoute = currentRoute();
           if (
             browserRoute.kind === "invalid" ||
@@ -925,6 +993,30 @@ export async function bootstrapChangeInspector(
       return "published";
     } catch (error) {
       if (epoch !== requestEpoch) return "superseded";
+      const timedOut = generationAttempt?.signal.reason === "generation_budget";
+      if (phaseSignal?.aborted && !timedOut) return "superseded";
+      // Cancel unfinished siblings before retry, refusal, or connection presentation.
+      generationAttempt?.abort("superseded");
+      generationAttempt?.dispose();
+      if (timedOut) {
+        generationNeedsRetry = true;
+        if (origin === "recovery" && state.snapshot().generation !== null) {
+          showPollFailure();
+        } else {
+          clearVisibleRequest();
+          pendingTimelineSearchFocus = false;
+          clearReading();
+          state.clearGeneration();
+          if (getConnectionSnapshot().connection === "connecting") {
+            markRequestFailure("unreachable");
+          }
+          setRefreshState("degraded");
+          renderChangeInspectorRefusal(
+            new ChangeInspectorTimeout("generation loading timed out"),
+          );
+        }
+        return "failed";
+      }
       const sessionChanged =
         error instanceof ChangeInspectorSessionChanged && origin === "route";
       if (
@@ -956,6 +1048,7 @@ export async function bootstrapChangeInspector(
       renderChangeInspectorRefusal(error);
       return "failed";
     } finally {
+      generationAttempt?.dispose();
       refreshAttempt?.dispose();
       if (refreshPendingToken !== null) {
         if (pendingReading?.token === refreshPendingToken) {
@@ -967,6 +1060,7 @@ export async function bootstrapChangeInspector(
   };
 
   const onRoute = async (): Promise<void> => {
+    generationNeedsRetry = false;
     // Lightweight panels are transient chrome for the route being inspected.
     // Dismiss them without restoring focus before route focus management runs;
     // otherwise a hash-only navigation can leave a high-z-index panel covering
@@ -1083,6 +1177,7 @@ export async function bootstrapChangeInspector(
     void hydrateIdentity();
   };
   const reloadCurrent = async (): Promise<void> => {
+    generationNeedsRetry = false;
     const route = currentRoute();
     if (route.kind === "invalid") {
       await onRoute();
@@ -1358,7 +1453,11 @@ export async function bootstrapChangeInspector(
         schedulePoll(pollDelayMs);
         return;
       }
-      if (pendingAuthorityTraversal?.epoch === requestEpoch) {
+      if (
+        activeGenerationAttempt !== null ||
+        generationNeedsRetry ||
+        pendingAuthorityTraversal?.epoch === requestEpoch
+      ) {
         pollRequested = false;
         schedulePoll(pollDelayMs);
         return;

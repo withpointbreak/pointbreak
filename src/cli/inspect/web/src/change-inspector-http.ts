@@ -118,6 +118,7 @@ async function fetchOnce(
     }
     throw failure("protocol", response.status, reportConnection);
   }
+  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
   if (!response.ok)
     throw (
       typedPageFailure(data, response.status) ??

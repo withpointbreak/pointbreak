@@ -5427,6 +5427,7 @@ describe("Change-first composition", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector();
+    control.signals.length = 0;
     control.generation = 2;
     control.changesMode = "stale_once";
     control.onStaleChanges = () => {
@@ -5537,6 +5538,7 @@ describe("Change-first composition", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector();
+    control.signals.length = 0;
     control.generation = 2;
     control.changesMode = "hang";
 

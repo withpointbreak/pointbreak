@@ -263,6 +263,10 @@
     connection: "connecting",
     refresh: "idle"
   };
+  function getConnectionSnapshot() {
+    return { ...snapshot };
+  }
+  __name(getConnectionSnapshot, "getConnectionSnapshot");
   function connectionPresentation(state) {
     const refreshLabel = state.refresh === "degraded" ? "response error" : state.refresh;
     switch (state.connection) {
@@ -455,6 +459,7 @@
       }
       throw failure("protocol", response.status, reportConnection);
     }
+    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
     if (!response.ok)
       throw typedPageFailure(data, response.status) ?? failure("protocol", response.status, reportConnection);
     if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error)) {
@@ -10286,6 +10291,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var EXACT_READING_HARD_BUDGET_MS = 3e4;
   var EXACT_POSTFLIGHT_TIMEOUT_MS = 3e3;
   var IDENTITY_TIMEOUT_MS = 3e3;
+  var GENERATION_LOAD_TIMEOUT_MS = 3e4;
   var POLL_HEALTHY_INTERVAL_MS = 3e3;
   var POLL_BACKOFF_CAP_MS = 3e4;
   var POLL_CYCLE_TIMEOUT_MS = 15e3;
@@ -10390,6 +10396,51 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       if (activeReadingAttempt === this) activeReadingAttempt = null;
     }
   };
+  var GenerationAttempt = class {
+    static {
+      __name(this, "GenerationAttempt");
+    }
+    controller = new AbortController();
+    timer = setTimeout(
+      () => this.abort("generation_budget"),
+      GENERATION_LOAD_TIMEOUT_MS
+    );
+    get signal() {
+      return this.controller.signal;
+    }
+    run(operation) {
+      if (this.signal.aborted) {
+        return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+      }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = /* @__PURE__ */ __name((callback) => {
+          if (settled) return;
+          settled = true;
+          this.signal.removeEventListener("abort", onAbort);
+          callback();
+        }, "finish");
+        const onAbort = /* @__PURE__ */ __name(() => finish(() => reject(new ChangeInspectorRequestFailure("aborted"))), "onAbort");
+        this.signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          operation().then(
+            (value) => finish(() => resolve(value)),
+            (error) => finish(() => reject(error))
+          );
+        } catch (error) {
+          finish(() => reject(error));
+        }
+      });
+    }
+    abort(reason) {
+      clearTimeout(this.timer);
+      if (!this.signal.aborted) this.controller.abort(reason);
+    }
+    dispose() {
+      clearTimeout(this.timer);
+      if (activeGenerationAttempt === this) activeGenerationAttempt = null;
+    }
+  };
   var pollTimer = null;
   var routeListener = null;
   var filterInput = null;
@@ -10404,11 +10455,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var requestEpoch = 0;
   var compositionEpoch = 0;
   var activeReadingAttempt = null;
+  var activeGenerationAttempt = null;
   var activePollCycleController = null;
   function advanceRequestEpoch(reason = "superseded", abortPollCycle = true) {
     requestEpoch += 1;
     if (abortPollCycle) activePollCycleController?.abort(reason);
     activeReadingAttempt?.abort(reason);
+    activeGenerationAttempt?.abort(reason);
     return requestEpoch;
   }
   __name(advanceRequestEpoch, "advanceRequestEpoch");
@@ -10641,6 +10694,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     let revalidateIdentityForCurrentSession = /* @__PURE__ */ __name(() => {
     }, "revalidateIdentityForCurrentSession");
     let pollRequiresFullValidation = false;
+    let generationNeedsRetry = false;
     const readingKey = /* @__PURE__ */ __name((route, projectionStamp) => `${formatChangeInspectorRoute(route)}\0${projectionStamp}`, "readingKey");
     const clearReading = /* @__PURE__ */ __name(() => {
       reading = null;
@@ -10763,14 +10817,24 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route", signal, allowUnchangedPoll = false) => {
       const credentialVersion2 = sessionCredentialVersion();
       const epoch = advanceRequestEpoch("superseded", origin !== "poll");
+      const generationAttempt = origin === "poll" ? null : new GenerationAttempt();
+      if (generationAttempt !== null) activeGenerationAttempt = generationAttempt;
+      const phaseSignal = generationAttempt?.signal ?? signal;
+      const generationJSON = /* @__PURE__ */ __name((path) => {
+        if (epoch !== requestEpoch || phaseSignal?.aborted) {
+          return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+        }
+        const fetchDocument = /* @__PURE__ */ __name(() => fetchChangeInspectorJSON(path, { signal: phaseSignal }), "fetchDocument");
+        return generationAttempt === null ? fetchDocument() : generationAttempt.run(fetchDocument);
+      }, "generationJSON");
       let refreshAttempt = null;
       let refreshPendingToken = null;
       try {
         const request = requestKey(route);
         const profile = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile", { signal })
+          await generationJSON("/api/v2/profile")
         );
-        if (epoch !== requestEpoch) return "superseded";
+        if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
         if (profile.availability !== "ready") {
           if (origin !== "route" && state.snapshot().generation !== null) {
             showPollFailure();
@@ -10791,27 +10855,20 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const activeLens = lensForRoute(route);
         const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
         const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
-        const historyRequest = route.kind === "timeline" || route.kind === "event" ? fetchChangeInspectorJSON(request, { signal }).then(
-          decodeEventHistory
-        ) : Promise.resolve(null);
+        const historyRequest = route.kind === "timeline" || route.kind === "event" ? generationJSON(request).then(decodeEventHistory) : Promise.resolve(null);
         const [changes, attention, history2] = await Promise.all([
-          fetchChangeInspectorJSON(buildChangePageUrl("changes", changesQuery), {
-            signal
-          }).then(
+          generationJSON(buildChangePageUrl("changes", changesQuery)).then(
             (value) => decodeChangePage(value, { lens: "changes", bounded: true })
           ),
-          fetchChangeInspectorJSON(
-            buildChangePageUrl("attention", attentionQuery),
-            { signal }
-          ).then(
+          generationJSON(buildChangePageUrl("attention", attentionQuery)).then(
             (value) => decodeChangePage(value, { lens: "attention", bounded: true })
           ),
           historyRequest
         ]);
         const postflight = decodeReaderProfile(
-          await fetchChangeInspectorJSON("/api/v2/profile", { signal })
+          await generationJSON("/api/v2/profile")
         );
-        if (epoch !== requestEpoch) return "superseded";
+        if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
         const staged = stageGeneration(
           profile,
           changes,
@@ -10819,6 +10876,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           postflight,
           history2
         );
+        generationAttempt?.dispose();
         const hasExactReading = route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event";
         const holdsManualReadingRetry = origin !== "route" && hasExactReading && exactReadingPresentation?.kind === "retryable_failure";
         const refreshesExactReading = origin !== "route" && hasExactReading && !holdsManualReadingRetry;
@@ -10860,7 +10918,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             );
             attempt.clearTimer(refreshBudget);
             const result = { loaded, readingPostflight };
-            if (epoch !== requestEpoch) return "superseded";
+            if (epoch !== requestEpoch || phaseSignal?.aborted)
+              return "superseded";
             const browserRoute2 = currentRoute();
             if (browserRoute2.kind === "invalid" || formatChangeInspectorRoute(browserRoute2) !== formatChangeInspectorRoute(route) || !sameProfileGeneration(staged.profile, result.readingPostflight)) {
               throw new ChangeInspectorGenerationChanged();
@@ -10904,6 +10963,29 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         return "published";
       } catch (error) {
         if (epoch !== requestEpoch) return "superseded";
+        const timedOut = generationAttempt?.signal.reason === "generation_budget";
+        if (phaseSignal?.aborted && !timedOut) return "superseded";
+        generationAttempt?.abort("superseded");
+        generationAttempt?.dispose();
+        if (timedOut) {
+          generationNeedsRetry = true;
+          if (origin === "recovery" && state.snapshot().generation !== null) {
+            showPollFailure();
+          } else {
+            clearVisibleRequest();
+            pendingTimelineSearchFocus = false;
+            clearReading();
+            state.clearGeneration();
+            if (getConnectionSnapshot().connection === "connecting") {
+              markRequestFailure("unreachable");
+            }
+            setRefreshState("degraded");
+            renderChangeInspectorRefusal(
+              new ChangeInspectorTimeout("generation loading timed out")
+            );
+          }
+          return "failed";
+        }
         const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
         if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged || sessionChanged) && consumeProjectionRetry(retryBudget)) {
           if (sessionChanged) revalidateIdentityForCurrentSession();
@@ -10927,6 +11009,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         renderChangeInspectorRefusal(error);
         return "failed";
       } finally {
+        generationAttempt?.dispose();
         refreshAttempt?.dispose();
         if (refreshPendingToken !== null) {
           if (pendingReading?.token === refreshPendingToken) {
@@ -10937,6 +11020,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
     }, "loadGeneration");
     const onRoute = /* @__PURE__ */ __name(async () => {
+      generationNeedsRetry = false;
       filterDisclosure?.close();
       viewDisclosure?.close();
       const capability2 = bootstrapCapability();
@@ -11034,6 +11118,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       void hydrateIdentity();
     }, "revalidateIdentityForCurrentSession");
     const reloadCurrent = /* @__PURE__ */ __name(async () => {
+      generationNeedsRetry = false;
       const route = currentRoute();
       if (route.kind === "invalid") {
         await onRoute();
@@ -11265,7 +11350,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           schedulePoll(pollDelayMs);
           return;
         }
-        if (pendingAuthorityTraversal?.epoch === requestEpoch) {
+        if (activeGenerationAttempt !== null || generationNeedsRetry || pendingAuthorityTraversal?.epoch === requestEpoch) {
           pollRequested = false;
           schedulePoll(pollDelayMs);
           return;

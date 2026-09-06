@@ -99,6 +99,29 @@ describe("Change Inspector HTTP cancellation", () => {
     expect(markRequestSuccess).not.toHaveBeenCalled();
   });
 
+  it.each([
+    500, 200,
+  ])("late error body at status %s remains aborted without health marks", async (status) => {
+    const controller = new AbortController();
+    let finish!: (body: string) => void;
+    const body = new Promise<string>((resolve) => {
+      finish = resolve;
+    });
+    const text = vi.fn(() => body);
+    globalThis.fetch = vi.fn(
+      async () => ({ ok: status === 200, status, text }) as unknown as Response,
+    ) as typeof fetch;
+    const pending = fetchChangeInspectorJSON(requestPath, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(text).toHaveBeenCalledOnce());
+    controller.abort();
+    finish(JSON.stringify({ error: "late failure" }));
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+    expect(markRequestSuccess).not.toHaveBeenCalled();
+    expect(markRequestFailure).not.toHaveBeenCalled();
+  });
+
   it("an abort observed with a 401 skips unauthorized recovery", async () => {
     const controller = new AbortController();
     globalThis.fetch = vi.fn(async () => {
