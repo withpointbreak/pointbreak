@@ -10814,17 +10814,17 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         releaseQueuedPoll();
       }
     }, "loadReading");
-    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route", signal, allowUnchangedPoll = false) => {
+    const loadGeneration = /* @__PURE__ */ __name(async (route, retryBudget, pollDraft = null, origin = "route", parentSignal, allowUnchangedPoll = false) => {
       const credentialVersion2 = sessionCredentialVersion();
       const epoch = advanceRequestEpoch("superseded", origin !== "poll");
       const generationAttempt = origin === "poll" ? null : new GenerationAttempt();
       if (generationAttempt !== null) activeGenerationAttempt = generationAttempt;
-      const phaseSignal = generationAttempt?.signal ?? signal;
-      const generationJSON = /* @__PURE__ */ __name((path) => {
-        if (epoch !== requestEpoch || phaseSignal?.aborted) {
+      const signal = generationAttempt?.signal ?? parentSignal;
+      const generationJSON = /* @__PURE__ */ __name((request) => {
+        if (epoch !== requestEpoch || signal?.aborted) {
           return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
         }
-        const fetchDocument = /* @__PURE__ */ __name(() => fetchChangeInspectorJSON(path, { signal: phaseSignal }), "fetchDocument");
+        const fetchDocument = /* @__PURE__ */ __name(() => fetchChangeInspectorJSON(request, { signal }), "fetchDocument");
         return generationAttempt === null ? fetchDocument() : generationAttempt.run(fetchDocument);
       }, "generationJSON");
       let refreshAttempt = null;
@@ -10834,7 +10834,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const profile = decodeReaderProfile(
           await generationJSON("/api/v2/profile")
         );
-        if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
+        if (epoch !== requestEpoch || signal?.aborted) return "superseded";
         if (profile.availability !== "ready") {
           if (origin !== "route" && state.snapshot().generation !== null) {
             showPollFailure();
@@ -10868,7 +10868,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const postflight = decodeReaderProfile(
           await generationJSON("/api/v2/profile")
         );
-        if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
+        if (epoch !== requestEpoch || signal?.aborted) return "superseded";
         const staged = stageGeneration(
           profile,
           changes,
@@ -10896,7 +10896,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               ),
               token: refreshPendingToken
             };
-            const attempt = activateReadingAttempt(signal);
+            const attempt = activateReadingAttempt(parentSignal);
             refreshAttempt = attempt;
             const refreshBudget = attempt.schedule(
               () => attempt.abort("refresh_expiry"),
@@ -10918,8 +10918,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             );
             attempt.clearTimer(refreshBudget);
             const result = { loaded, readingPostflight };
-            if (epoch !== requestEpoch || phaseSignal?.aborted)
-              return "superseded";
+            if (epoch !== requestEpoch || signal?.aborted) return "superseded";
             const browserRoute2 = currentRoute();
             if (browserRoute2.kind === "invalid" || formatChangeInspectorRoute(browserRoute2) !== formatChangeInspectorRoute(route) || !sameProfileGeneration(staged.profile, result.readingPostflight)) {
               throw new ChangeInspectorGenerationChanged();
@@ -10964,7 +10963,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       } catch (error) {
         if (epoch !== requestEpoch) return "superseded";
         const timedOut = generationAttempt?.signal.reason === "generation_budget";
-        if (phaseSignal?.aborted && !timedOut) return "superseded";
+        if (signal?.aborted && !timedOut) return "superseded";
         generationAttempt?.abort("superseded");
         generationAttempt?.dispose();
         if (timedOut) {
@@ -10994,7 +10993,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             retryBudget,
             pollDraft,
             origin,
-            signal,
+            parentSignal,
             false
           );
         }

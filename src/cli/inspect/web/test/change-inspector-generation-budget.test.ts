@@ -221,7 +221,7 @@ function navigate(hash: string) {
 }
 beforeEach(() => {
   vi.resetModules();
-  vi.useFakeTimers();
+  vi.useFakeTimers({ now: 0 });
   localStorage.clear();
   sessionStorage.clear();
   mountInspectorDom();

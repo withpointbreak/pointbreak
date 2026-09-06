@@ -792,7 +792,7 @@ export async function bootstrapChangeInspector(
     retryBudget: ProjectionRetryBudget,
     pollDraft: FocusedFilterDraft | null = null,
     origin: GenerationLoadOrigin = "route",
-    signal?: AbortSignal,
+    parentSignal?: AbortSignal,
     allowUnchangedPoll = false,
   ): Promise<GenerationLoadOutcome> => {
     const credentialVersion = sessionCredentialVersion();
@@ -800,13 +800,12 @@ export async function bootstrapChangeInspector(
     const generationAttempt =
       origin === "poll" ? null : new GenerationAttempt();
     if (generationAttempt !== null) activeGenerationAttempt = generationAttempt;
-    const phaseSignal = generationAttempt?.signal ?? signal;
-    const generationJSON = (path: string): Promise<unknown> => {
-      if (epoch !== requestEpoch || phaseSignal?.aborted) {
+    const signal = generationAttempt?.signal ?? parentSignal;
+    const generationJSON = (request: string): Promise<unknown> => {
+      if (epoch !== requestEpoch || signal?.aborted) {
         return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
       }
-      const fetchDocument = () =>
-        fetchChangeInspectorJSON(path, { signal: phaseSignal });
+      const fetchDocument = () => fetchChangeInspectorJSON(request, { signal });
       return generationAttempt === null
         ? fetchDocument()
         : generationAttempt.run(fetchDocument);
@@ -821,7 +820,7 @@ export async function bootstrapChangeInspector(
       const profile = decodeReaderProfile(
         await generationJSON("/api/v2/profile"),
       );
-      if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
+      if (epoch !== requestEpoch || signal?.aborted) return "superseded";
       if (profile.availability !== "ready") {
         if (origin !== "route" && state.snapshot().generation !== null) {
           showPollFailure();
@@ -876,7 +875,7 @@ export async function bootstrapChangeInspector(
       const postflight = decodeReaderProfile(
         await generationJSON("/api/v2/profile"),
       );
-      if (epoch !== requestEpoch || phaseSignal?.aborted) return "superseded";
+      if (epoch !== requestEpoch || signal?.aborted) return "superseded";
       const staged = stageGeneration(
         profile,
         changes,
@@ -914,7 +913,7 @@ export async function bootstrapChangeInspector(
                   ),
             token: refreshPendingToken,
           };
-          const attempt = activateReadingAttempt(signal);
+          const attempt = activateReadingAttempt(parentSignal);
           refreshAttempt = attempt;
           const refreshBudget = attempt.schedule(
             () => attempt.abort("refresh_expiry"),
@@ -936,8 +935,7 @@ export async function bootstrapChangeInspector(
           );
           attempt.clearTimer(refreshBudget);
           const result = { loaded, readingPostflight };
-          if (epoch !== requestEpoch || phaseSignal?.aborted)
-            return "superseded";
+          if (epoch !== requestEpoch || signal?.aborted) return "superseded";
           const browserRoute = currentRoute();
           if (
             browserRoute.kind === "invalid" ||
@@ -994,7 +992,7 @@ export async function bootstrapChangeInspector(
     } catch (error) {
       if (epoch !== requestEpoch) return "superseded";
       const timedOut = generationAttempt?.signal.reason === "generation_budget";
-      if (phaseSignal?.aborted && !timedOut) return "superseded";
+      if (signal?.aborted && !timedOut) return "superseded";
       // Cancel unfinished siblings before retry, refusal, or connection presentation.
       generationAttempt?.abort("superseded");
       generationAttempt?.dispose();
@@ -1033,7 +1031,7 @@ export async function bootstrapChangeInspector(
           retryBudget,
           pollDraft,
           origin,
-          signal,
+          parentSignal,
           false,
         );
       }
