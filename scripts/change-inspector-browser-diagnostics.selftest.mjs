@@ -583,6 +583,111 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 	});
 });
 
+test("request failure attribution composes the actual fetch bridge and lifecycle without widening admission", async (t) => {
+	await runD70BrowserSelftest(async (helpers) => {
+		const base = "http://127.0.0.1:4173";
+		const sourceHash = "#/changes?limit=100&order=change_id_asc";
+		const targetHash = "#/timeline?limit=100&order=desc";
+		const cases = [
+			["instrumented read", {}, "present", true],
+			["product profile", { profile: true }, "profile-excluded", false],
+			["harness profile without signal", { profile: true, noSignal: true }, "profile-excluded", false],
+			["harness read without signal", { noSignal: true }, "token-missing", false],
+			["fetch before instrumentation", { bridgeLate: true }, "token-missing", false],
+			["request before lifecycle activation", { activateLate: true }, "request-missing", false],
+			["failure before lifecycle activation", { preamble: true }, "lifecycle-inactive", false],
+			["request event absent", { unrecorded: true }, "request-missing", false],
+			["malformed token", { malformed: true }, "token-invalid", false],
+			["headers unavailable", { headersUnavailable: true }, "headers-unavailable", false],
+			["late terminal after response", { responseFirst: true }, "present", false],
+			["retired document", { reload: true }, "present", false],
+			["lookup unavailable", { noLookup: true }, "present", false],
+			["outside route dispatch", { outsideDispatch: true }, "present", false],
+			["subframe", { subframe: true }, "present", false],
+			["other origin", { otherOrigin: true }, "token-missing", false],
+		];
+		for (const [name, options, status, admitted] of cases) await t.test(name, async () => {
+			const page = new FakePage(`${base}/${sourceHash}&token=route-secret`);
+			const timers = new ManualTimers(); const failures = []; const listeners = [];
+			const owner = helpers.createProfileRequestLifecycleActivationOwner({
+				page, primaryBaseUrl: base, now: () => timers.now,
+				setTimer: timers.setTimeout, clearTimer: timers.clearTimeout,
+				onRequestFailure: (failure) => failures.push(failure),
+			});
+			if (!options.activateLate && !options.preamble) owner.start();
+			let request, rejectFetch;
+			const scope = {
+				URL, Headers, Request, AbortSignal, crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
+				location: { href: page.url() }, setTimeout: timers.setTimeout,
+				addEventListener: (_name, listener) => listeners.push(listener),
+				fetch: (input, init) => {
+					request = new FakeRequest({ url: input, frame: options.subframe ? {} : page.mainFrame() });
+					request.headers = () => {
+						if (options.headersUnavailable) throw Error("unavailable");
+						return Object.fromEntries(new Headers(init?.headers));
+					};
+					if (!options.unrecorded) page.emit("request", request);
+					return new Promise((_resolve, reject) => { rejectFetch = reject; });
+				},
+			};
+			const install = () => helpers.installClientAbortProvenanceBridge(scope, { primaryBaseUrl: base });
+			if (!options.bridgeLate) install();
+			page.evaluate = async (_callback, token) => options.noLookup ? null : scope.__pointbreakClientAbortProvenance.take(token);
+			const controller = new AbortController();
+			const pending = scope.fetch(`${options.otherOrigin ? "http://other.test" : base}${options.profile ? "/api/v2/profile" : "/api/v2/history?limit=100&order=desc"}`, {
+				...(options.noSignal ? {} : { signal: controller.signal }),
+				headers: { Authorization: "Bearer header-secret", ...(options.malformed ? { "x-pointbreak-browser-provenance": "bad" } : {}) },
+			});
+			if (options.bridgeLate) install();
+			if (options.activateLate) owner.start();
+			if (options.responseFirst) page.emit("response", new FakeResponse(request));
+			if (options.reload) page.emit("request", new FakeRequest({ frame: page.mainFrame(), navigation: true, resourceType: "document" }));
+			page.setUrl(`${base}/${targetHash}&token=terminal-secret`); scope.location.href = page.url();
+			page.emit("framenavigated", page.mainFrame());
+			if (options.reload) page.emit("domcontentloaded");
+			const event = { currentTarget: scope, eventPhase: 2 };
+			listeners[0](event);
+			if (options.outsideDispatch) { event.currentTarget = null; event.eventPhase = 0; }
+			controller.abort("superseded"); event.currentTarget = null; event.eventPhase = 0;
+			rejectFetch(Error("aborted")); await pending.catch(() => {});
+			timers.advanceTo(12); page.emit("requestfailed", request);
+			if (owner.isActive()) await owner.active().settleClientFailureInspections();
+			const health = helpers.createRequestHealthSnapshot({ requestFailures: failures,
+				isAdmissibleRequestFailure: () => false,
+				isAdmissibleClientFailure: (failure) => owner.isActive() && helpers.isAdmissibleClientSupersessionFailure(failure, owner.active(), base),
+			});
+			assert.equal(health.unexpectedRequestFailures.length, admitted ? 0 : 1, JSON.stringify(health.clientSupersessionFailureEvidence));
+			const evidence = admitted ? health.clientSupersessionFailureEvidence[0] : health.unexpectedRequestFailureEvidence[0];
+			assert.equal(evidence.attribution.clientRecordStatus, status);
+			assert.equal(evidence.attribution.requestOrdinal, ["request-missing", "lifecycle-inactive"].includes(status) ? null : 0);
+			assert.equal(evidence.attribution.terminalHash, targetHash);
+			assert.equal(evidence.attribution.originCategory, ["request-missing", "lifecycle-inactive"].includes(status) ? "unknown" : options.otherOrigin ? "other-origin" : "primary-origin");
+			assert.equal(evidence.attribution.callerCategory, "unattributed", "a fetch marker is not proof of product versus harness authorship");
+			assert.equal(evidence.attribution.initiator, ["request-missing", "lifecycle-inactive"].includes(status) ? "unavailable" : options.subframe ? "subframe" : "main-frame");
+			assert.equal(evidence.attribution.lifecyclePhase, options.preamble ? "preamble" : "active");
+			if (options.reload) {
+				assert.equal(evidence.attribution.retired, true);
+				assert.equal(evidence.attribution.documentGeneration, 0);
+				assert.equal(evidence.attribution.terminalDocumentGeneration, 1);
+			}
+			if (options.responseFirst) assert.equal(evidence.attribution.requestState, "terminal");
+			if (options.noLookup) assert.equal(evidence.clientSupersession.lookupStatus, "unavailable");
+			page.setUrl(`${base}/#/later`);
+			assert.equal(evidence.attribution.terminalHash, targetHash, "failure-time context stays frozen");
+			const serialized = JSON.stringify(evidence);
+			for (const secret of ["route-secret", "terminal-secret", "header-secret", "00000000-0000-4000-8000-000000000001", "Authorization"]) assert.equal(serialized.includes(secret), false);
+		});
+		const bound = createBoundProfileTransition(helpers);
+		bound.page.emit("requestfailed", bound.request);
+		assert.equal(bound.requestFailures[0].transition, bound.arm.transition, "existing profile proof stays bound to the exact Request");
+		assert.equal(bound.requestFailures[0].attribution.routeVisitId, bound.arm.transition.requestRecord.routeVisitId);
+		bound.page.setUrl(`${base}/#/changes?q=${"x".repeat(800)}&token=long-secret`);
+		bound.page.emit("requestfailed", new FakeRequest());
+		assert.equal(bound.requestFailures[1].attribution.terminalHash.length, 512);
+		assert.equal(JSON.stringify(bound.requestFailures[1].attribution).includes("long-secret"), false);
+	});
+});
+
 test("D71 production lifecycle defaults execute in the Playwright sparse VM", async () => {
 	const page = new FakePage(
 		"http://127.0.0.1:4173/#/changes?limit=100&order=change_id_asc",

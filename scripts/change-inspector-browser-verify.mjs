@@ -280,6 +280,32 @@
 			proof.documentGeneration === proof.terminalDocumentGeneration;
 	}
 
+	// Observed failure-time facts only: a fetch token does not establish caller authorship.
+	function requestFailureAttribution(record, primaryBaseUrl, terminal) {
+		const missingRecordStatus = terminal.phase === "preamble" ? "lifecycle-inactive" : "request-missing";
+		const primaryPrefix = `${primaryBaseUrl.replace(/\/$/, "")}/`;
+		const originCategory = !record?.url ? "unknown" :
+			record.url.startsWith(primaryPrefix) ? "primary-origin" : "other-origin";
+		return {
+			lifecyclePhase: terminal.phase,
+			requestOrdinal: record?.ordinal ?? null,
+			requestState: record?.status ?? "unobserved",
+			clientRecordStatus: record?.clientRecordStatus ?? missingRecordStatus,
+			originCategory,
+			callerCategory: "unattributed",
+			initiator: record?.initiator ?? "unavailable",
+			documentGeneration: record?.documentGeneration ?? null,
+			terminalDocumentGeneration: terminal.generation ?? null,
+			routeVisitId: record?.routeVisitId ?? null,
+			terminalRouteVisitId: terminal.visitId ?? null,
+			terminalOwnedVisitId: terminal.ownedVisitId ?? null,
+			sourceHash: record?.sourceHash?.slice(0, 512) ?? null,
+			terminalHash: capabilityRedactedHash(terminal.url).slice(0, 512),
+			retired: record?.retired ?? null,
+			pendingNavigation: terminal.pendingNavigation ?? null,
+		};
+	}
+
 	function createProfileRequestLifecycle({
 		page,
 		primaryBaseUrl,
@@ -783,7 +809,10 @@
 			};
 			nextRequestOrdinal += 1;
 			recordsByRequest.set(request, record);
-			const clientToken = safeRequestValue(request, "headers", null)?.["x-pointbreak-browser-provenance"];
+			const headers = safeRequestValue(request, "headers", null);
+			const clientToken = headers?.["x-pointbreak-browser-provenance"];
+			record.clientRecordStatus = record.url === `${primaryOrigin}/api/v2/profile` ? "profile-excluded" :
+				headers === null ? "headers-unavailable" : clientToken === undefined ? "token-missing" : "token-invalid";
 			if (typeof clientToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/.test(clientToken) &&
 				record.url !== `${primaryOrigin}/api/v2/profile`) {
 				const previous = clientTokens.get(clientToken);
@@ -795,6 +824,7 @@
 					failureCount: 0,
 				};
 				clientRecords.set(record, client);
+				record.clientRecordStatus = "present";
 				if (!clientInspectionOverflow) clientTokens.set(clientToken, record);
 			}
 			if (navigation && initiator === "main-frame") {
@@ -834,10 +864,16 @@
 		};
 		const requestTerminated = (request, outcome) => {
 			const record = recordsByRequest.get(request);
+			const attribution = outcome === "requestfailed" ? requestFailureAttribution(record, primaryBaseUrl, {
+				phase: "active", url: page.url(), generation: committedDocumentGeneration,
+				visitId: currentRouteVisit?.id, ownedVisitId: ownedRouteVisitId,
+				pendingNavigation: pendingNavigation !== null,
+			}) : null;
 			if (!record) {
 				if (outcome === "requestfailed") {
 					onRequestFailure({
 						transition: null,
+						attribution,
 						method: safeRequestValue(request, "method", "unknown"),
 						resourceType: safeRequestValue(
 							request,
@@ -876,6 +912,7 @@
 				const failure = {
 					request,
 					transition: wasRetired ? null : transition,
+					attribution,
 					method: record.method,
 					resourceType: record.resourceType,
 					url: record.url,
@@ -1375,6 +1412,7 @@
 		const recordPreambleRequestFailure = (request) => {
 			onRequestFailure({
 				transition: null,
+				attribution: requestFailureAttribution(null, primaryBaseUrl, { phase: "preamble", url: page.url() }),
 				method: safeRequestValue(request, "method", "unknown"),
 				resourceType: safeRequestValue(
 					request,
@@ -1479,6 +1517,7 @@
 			resourceType: failure.resourceType,
 			url: failure.url,
 			error: failure.error,
+			...(failure.attribution ? { attribution: { ...failure.attribution } } : {}),
 			...(failure.clientSupersession ? { clientSupersession: { ...failure.clientSupersession } } : {}),
 			profileSupersession: failure.transition
 				? {
