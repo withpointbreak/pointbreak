@@ -149,6 +149,13 @@ append_browser_stage_heartbeat() {
   printf '%s\n' "$document" >>"$6"
 }
 
+record_browser_stage_internal() {
+  # Reasons are fixed labels; use one append so concurrent failures retain their own facts.
+  printf '{"reason":"%s","observedSeconds":%s,"deadlineSeconds":%s}\n' \
+    "$1" "$(date +%s)" "${2:-null}" >>"$stage_internal_log" || true
+  kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+}
+
 browser_stage_heartbeat_deadline_guard() {
   local next_deadline="$1"
   local supervisor_pid="$2"
@@ -184,7 +191,7 @@ browser_stage_heartbeat_deadline_guard() {
     wait "$guard_timer_pid" || exit 0
     guard_timer_pid=""
   done
-  kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+  record_browser_stage_internal render-deadline "$next_deadline"
 }
 
 browser_stage_heartbeat_worker() {
@@ -264,8 +271,8 @@ browser_stage_heartbeat_worker() {
       timer_pid=""
     fi
     now_seconds="$(date +%s)"
-    if [ "$now_seconds" -gt "$dispatch_at" ]; then
-      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+    if [ "$now_seconds" -gt "$next_deadline" ]; then
+      record_browser_stage_internal dispatch-deadline "$next_deadline"
       exit 1
     fi
     browser_stage_heartbeat_deadline_guard "$next_deadline" "$supervisor_pid" &
@@ -277,7 +284,7 @@ browser_stage_heartbeat_worker() {
         ;;
     esac
     if [ "${POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_FAILURE:-}" = 1 ]; then
-      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      record_browser_stage_internal worker-failed "$next_deadline"
       exit 1
     fi
     if [ -n "${POINTBREAK_BROWSER_STAGE_SELFTEST_HEARTBEAT_DELAY_SECONDS:-}" ]; then
@@ -300,19 +307,19 @@ browser_stage_heartbeat_worker() {
     if ! wait "$render_pid"; then
       render_pid=""
       rm -f -- "$render_output"
-      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      record_browser_stage_internal render-failed "$next_deadline"
       exit 1
     fi
     render_pid=""
     document="$(<"$render_output")"
     rm -f -- "$render_output"
     printf '%s\n' "$document" >>"$stage_heartbeat_log" || {
-      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      record_browser_stage_internal publish-failed "$next_deadline"
       exit 1
     }
     now_seconds="$(date +%s)"
     if [ "$now_seconds" -gt "$next_deadline" ]; then
-      kill -USR2 "$supervisor_pid" >/dev/null 2>&1 || true
+      record_browser_stage_internal publication-deadline "$next_deadline"
       exit 1
     fi
     stop_heartbeat_guard
@@ -475,6 +482,7 @@ run_browser_program_stage() {
 
   local stage_start="$stage_log_dir/browser-stage-start.json"
   local stage_heartbeats="$stage_log_dir/browser-stage-heartbeat.log"
+  local stage_internal_log="$stage_log_dir/browser-stage-internal-failures.jsonl"
   local stage_terminal="$stage_log_dir/browser-stage-terminal.json"
   local stage_gate_log="$stage_log_dir/browser-gate.log"
   local launch_gate="$stage_log_dir/.browser-stage-launch.$$.$RANDOM"
@@ -493,6 +501,7 @@ run_browser_program_stage() {
   local gate_log_bytes
   local terminal_document
   local start_document
+  local internal_failures="[]"
   local supervisor_pid="$$"
 
   browser_stage_terminal_kind=""
@@ -553,7 +562,7 @@ run_browser_program_stage() {
   append_browser_stage_heartbeat \
     "$stage_mode" "$started_seconds" "$child_pid" \
     "$stage_artifact_dir" "$stage_gate_log" "$stage_heartbeats" || {
-      observe_browser_stage_terminal internal 125 "" || true
+      record_browser_stage_internal initial-heartbeat-failed
     }
   browser_stage_heartbeat_worker \
     "$stage_mode" "$started_seconds" "$child_pid" \
@@ -587,6 +596,9 @@ run_browser_program_stage() {
 
   stop_browser_stage_worker "$heartbeat_pid"
   stop_browser_stage_worker "$watchdog_pid"
+  if [ "$browser_stage_terminal_kind" = internal ] && [ -f "$stage_internal_log" ]; then
+    internal_failures="$(jq -sc . "$stage_internal_log")" || internal_failures="null"
+  fi
   rm -f -- "$launch_gate"
   if ! cleanup_browser_stage_group \
     "$child_pid" "$child_group_id" "$cleanup_seconds"; then
@@ -605,6 +617,7 @@ run_browser_program_stage() {
     --arg terminalSignal "$browser_stage_terminal_signal" \
     --arg latestScreenshot "$latest" \
     --arg cleanup "$cleanup_status" \
+    --argjson internalFailures "$internal_failures" \
     --argjson elapsedSeconds "$((SECONDS - started_seconds))" \
     --argjson timeoutSeconds "$timeout_seconds" \
     --argjson childPid "$child_pid" \
@@ -621,7 +634,7 @@ run_browser_program_stage() {
       screenshotCount: $screenshotCount,
       latestScreenshot: (if $latestScreenshot == "" then null else $latestScreenshot end),
       gateLogBytes: $gateLogBytes, runCodeGroupCleanup: $cleanup,
-      browserSessionCleanup: "pending"}')"
+      browserSessionCleanup: "pending", internalFailures: $internalFailures}')"
   if ! atomic_publish_stage_json "$stage_terminal" "$terminal_document"; then
     trap - INT TERM USR1 USR2
     return 125

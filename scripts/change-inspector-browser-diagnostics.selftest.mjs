@@ -3291,8 +3291,8 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"8593aa717cd2a92a4d870053fcaef3af119b4ca3f34a46f5251190dc55105a96",
-		"approved failure-retention shell outside D78 proof plumbing must remain byte-pinned",
+		"46ede97829420255633389b548d6805f44f44daff3f91418222da986fc541340",
+		"heartbeat deadline and failure-retention shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
@@ -4626,6 +4626,88 @@ test("D70 shell stage helper publishes live terminal evidence and reaps its proc
 	}
 });
 
+test("heartbeat worker judges delayed dispatch against the publication deadline", async (t) => {
+	const shell = await readFile(
+		new URL("./change-inspector-browser-verify.sh", import.meta.url),
+		"utf8",
+	);
+	const helpers = shell.slice(
+		shell.indexOf("atomic_publish_stage_json()"),
+		shell.indexOf("browser_stage_watchdog_worker()"),
+	);
+	for (const [name, dispatch, publication, renderCode, reason] of [
+		["late dispatch within reserve", 114, 114, 0, null],
+		["publication at deadline", 115, 115, 0, null],
+		["dispatch past deadline", 116, 116, 0, "dispatch-deadline"],
+		["publication past deadline", 113, 116, 0, "publication-deadline"],
+		["render failure", 113, 113, 7, "render-failed"],
+	]) {
+		await t.test(name, async () => {
+			const root = await mkdtemp(join(tmpdir(), "pointbreak-heartbeat-clock-"));
+			try {
+				const child = spawn(
+					process.env.POINTBREAK_BROWSER_STAGE_SELFTEST_BASH ?? "bash",
+					[
+						"-c",
+						`
+set -euo pipefail
+${helpers}
+probe_root="$1"
+stage_internal_log="$probe_root/internal.jsonl"
+printf '0' >"$probe_root/clock-call"
+: >"$probe_root/heartbeat"
+date() {
+  local call="$(<"$probe_root/clock-call")"
+  printf '%s' "$((call + 1))" >"$probe_root/clock-call"
+  case "$call" in 0|1) printf '100';; 2) printf '${dispatch}';; *) printf '${publication}';; esac
+}
+# Control scheduling only; the integration tests below exercise the real guard/process tree.
+browser_stage_heartbeat_deadline_guard() { :; }
+render_browser_stage_heartbeat() { printf '{}\\n'; return ${renderCode}; }
+sleep() { if [ -s "$probe_root/heartbeat" ]; then kill -TERM "$$"; fi; }
+trap ':' USR2
+browser_stage_heartbeat_worker selftest 0 "$$" "$probe_root" /dev/null "$probe_root/heartbeat" 15 2 "$$"
+`,
+						"heartbeat-clock",
+						root,
+					],
+					{ stdio: ["ignore", "pipe", "pipe"], timeout: 2_000 },
+				);
+				let stderr = "";
+				child.stderr.on("data", (chunk) => {
+					stderr += chunk;
+				});
+				const exit = await new Promise((resolve, reject) => {
+					child.once("error", reject);
+					child.once("close", (code, signal) => resolve({ code, signal }));
+				});
+				assert.deepEqual(exit, { code: reason ? 1 : 0, signal: null }, stderr);
+				const heartbeat = await readFile(join(root, "heartbeat"), "utf8");
+				if (reason === null) {
+					assert.equal(heartbeat, "{}\n");
+					await assert.rejects(
+						readFile(join(root, "internal.jsonl")),
+						/ENOENT/,
+					);
+				} else {
+					const failures = (
+						await readFile(join(root, "internal.jsonl"), "utf8")
+					)
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line));
+					assert.deepEqual(failures, [
+						{ reason, observedSeconds: publication, deadlineSeconds: 115 },
+					]);
+					if (reason !== "publication-deadline") assert.equal(heartbeat, "");
+				}
+			} finally {
+				await rm(root, { recursive: true, force: true });
+			}
+		});
+	}
+});
+
 test("D79 heartbeat reserve publishes bounded work and fails a hung render internally", async () => {
 	const caseNames = ["heartbeat-render-bounded", "heartbeat-render-deadline"];
 	const executions = await Promise.all(
@@ -4752,6 +4834,15 @@ test("D79 heartbeat reserve publishes bounded work and fails a hung render inter
 	}
 
 	const bounded = results[0];
+	assert.deepEqual(bounded.terminal.internalFailures, []);
+	assert.equal(
+		results[1].terminal.internalFailures[0].reason,
+		"render-deadline",
+	);
+	assert.ok(
+		results[1].terminal.internalFailures[0].observedSeconds >
+			results[1].terminal.internalFailures[0].deadlineSeconds,
+	);
 	await readFile(
 		join(bounded.execution.root, "heartbeat-render-bounded-published"),
 	);
@@ -4807,7 +4898,7 @@ test("D70 stage contracts are production-bounded, inventoried, and documented", 
 	);
 	assert.ok(
 		heartbeatGuard.indexOf('wait "$guard_timer_pid"') <
-			heartbeatGuard.indexOf('kill -USR2 "$supervisor_pid"'),
+			heartbeatGuard.indexOf('record_browser_stage_internal render-deadline'),
 		"the guard must prove the first recorded second after the deadline before signaling",
 	);
 	const heartbeatWorker = shell.slice(
@@ -4844,6 +4935,7 @@ test("D70 stage contracts are production-bounded, inventoried, and documented", 
 	);
 	const latenessCheck = heartbeatWorker.indexOf(
 		'if [ "$now_seconds" -gt "$next_deadline" ]',
+		append,
 	);
 	const guardStop = heartbeatWorker.indexOf(
 		"    stop_heartbeat_guard",
