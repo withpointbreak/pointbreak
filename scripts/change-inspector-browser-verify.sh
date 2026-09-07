@@ -848,6 +848,7 @@ stop_background_process() {
 }
 
 cleanup() {
+  local exit_status=$?
   local mode="${1:-best-effort}"
   local browser_close_status=0
   local root_cleanup_status=0
@@ -864,7 +865,31 @@ cleanup() {
     stop_background_process "$pid"
   done
   background_pids=()
+  local failed_shakedown=false
+  if [ -n "$shakedown_root" ] && { [ "$exit_status" -ne 0 ] || [ "$browser_close_status" -ne 0 ]; }; then
+    failed_shakedown=true
+    node - "$log_dir" "${browser_result:-}" 2>/dev/null <<'NODE' || printf '%s\n' '{"gate":"change-inspector-browser-failure","retention":"failed"}' >&2
+const fs = require('node:fs');
+const [logs, reportPath] = process.argv.slice(2);
+const secrets = fs.readdirSync(logs).filter(name => name.endsWith('-startup.json'))
+  .map(name => JSON.parse(fs.readFileSync(`${logs}/${name}`, 'utf8')).token).filter(Boolean);
+const redact = value => {
+  if (typeof value === 'string') {
+    for (const secret of secrets) value = value.replaceAll(secret, 'REDACTED').replaceAll(encodeURIComponent(secret), 'REDACTED');
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(redact);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key.toLowerCase() === 'token' ? 'REDACTED' : redact(item)]));
+  return value;
+};
+const report = reportPath && fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, 'utf8')) : null;
+console.log(JSON.stringify({gate:'change-inspector-browser-failure', report:redact(report)}));
+NODE
+  fi
   cleanup_shakedown_root || root_cleanup_status=$?
+  if [ "$failed_shakedown" = true ]; then
+    printf '{"gate":"change-inspector-browser-cleanup","browserCloseStatus":%s,"rootCleanupStatus":%s}\n' "$browser_close_status" "$root_cleanup_status"
+  fi
   if [ "$mode" = strict ] && [ "$browser_close_status" -ne 0 ]; then
     return "$browser_close_status"
   fi
@@ -1675,10 +1700,12 @@ jq -e '
   (.sections | all(.status == "passed" and .failureCount == 0))
 ' "$browser_result" >/dev/null \
   || {
-    jq -r '
-      .failures[]? |
-      "[\(.section)] \(.label): \(.detail)\n  expected=\(.expected | tojson) actual=\(.actual | tojson)\n  route=\(.route) screenshot=\(.screenshot)"
-    ' "$browser_result" >&2
+    if [ -z "$shakedown_root" ]; then
+      jq -r '
+        .failures[]? |
+        "[\(.section)] \(.label): \(.detail)\n  expected=\(.expected | tojson) actual=\(.actual | tojson)\n  route=\(.route) screenshot=\(.screenshot)"
+      ' "$browser_result" >&2
+    fi
     die "browser diagnostic report did not pass"
   }
 case "$mode" in

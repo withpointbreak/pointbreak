@@ -3773,12 +3773,6 @@
 					expected: [],
 					actual: pageErrors,
 				});
-				expect(
-					requestFailures.length === 0,
-					"shakedown browser requests",
-					JSON.stringify(requestFailures),
-					{ expected: [], actual: requestFailures },
-				);
 				await screenshot("shakedown-exact-reading");
 			},
 			teardown: teardownSection,

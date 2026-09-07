@@ -311,6 +311,15 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			reason: "superseded", abortHash: targetHash, abortGeneration: 3,
 			dispatchOpen: true,
 		});
+		const verifier = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
+		const baseBranch = verifier.slice(verifier.indexOf('if (config.mode === "shakedown")'));
+		const tailStart = baseBranch.indexOf("await settleResponseInspections();");
+		const tailEnd = baseBranch.indexOf("recordCurrentFocusedRequestHealth();") + "recordCurrentFocusedRequestHealth();".length;
+		const teardown = verifier.slice(verifier.indexOf("const teardownSection = async"), verifier.indexOf("\n\t// The instrumented bootstrap"));
+		const accounting = new Function("scope", `with (scope) { return (async () => {
+			${teardown}
+			await diagnostics.section("base accounting", { run: async () => { ${baseBranch.slice(tailStart, tailEnd)}
+		})(); }`);
 		const replay = async (options = {}) => {
 			const page = new FakePage(`${base}/${sourceHash}`);
 			const failures = [];
@@ -353,16 +362,33 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			page.emit("requestfailed", request);
 			if (options.duplicateTerminal) page.emit("requestfailed", request);
 			if (options.timeout) timers.advanceTo(5000);
-			await lifecycle.settleClientFailureInspections?.();
 			if (options.swapRequest) failures[0].request = {};
-			const health = helpers.createRequestHealthSnapshot({
+			const snapshot = () => helpers.createRequestHealthSnapshot({
 				requestFailures: failures,
 				isAdmissibleRequestFailure: () => false,
 				isAdmissibleClientFailure: (failure) =>
 					helpers.isAdmissibleClientSupersessionFailure?.(failure, lifecycle, base) ?? false,
 			});
+			const rejected = [];
+			const expect = (condition, label) => { if (!condition) rejected.push(label); };
+			let health;
+			await accounting({
+				page: { evaluate: async () => {} },
+				requestLifecycleOwner: { isActive: () => true, active: () => lifecycle },
+				diagnostics: { section: async (_name, section) => { await section.run(); await section.teardown(); } },
+				settleResponseInspections: async () => {}, screenshot: async () => {}, expect,
+				consoleErrors: [], serviceUnavailableResponses: [], pageErrors: [], requestFailures: failures,
+				recordCurrentFocusedRequestHealth: () => {
+					health = snapshot();
+					helpers.recordFocusedRequestHealth({ diagnostics: { expect }, requestLifecycleFailures: [], requestHealth: health });
+				},
+			});
+			assert.equal(rejected.length > 0, health.unexpectedRequestFailures.length > 0,
+				"base mode must use joined shared admission, without a contradictory raw-failure assertion");
 			return { page, lifecycle, failures, health, timers };
 		};
+		const joined = await replay({ lookup: () => new Promise((resolve) => setImmediate(() => resolve(provenance()))) });
+		assert.equal(joined.health.unexpectedRequestFailures.length, 0, "base teardown must join a pending proof lookup");
 		const first = await replay();
 		assert.equal(first.health.unexpectedRequestFailures.length, 0,
 			"attempt-11-shaped exact Revision cancellation must be admitted by production lifecycle health");
@@ -3265,8 +3291,8 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"69191fc499ff600360a8f5e65f3b8427fd8933b2c48c6916de56084f69f66d76",
-		"D79-authorized shell outside D78 proof plumbing must remain byte-pinned",
+		"8593aa717cd2a92a4d870053fcaef3af119b4ca3f34a46f5251190dc55105a96",
+		"approved failure-retention shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
@@ -3295,7 +3321,13 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		'\t\t\t\t),\n' +
 		'\t\t\trun: async () => {\n' +
 		approvedReloadOpen;
-	const canonicalBranch = branch
+	// Reconstruct only the removed contradictory assertion; every other base byte stays pinned.
+	const oldRawAssertion = [
+		'expect(', 'requestFailures.length === 0,', '"shakedown browser requests",',
+		'JSON.stringify(requestFailures),', '{ expected: [], actual: requestFailures },', ');',
+	].map((line, index) => "\t\t\t\t" + (index > 0 && index < 5 ? "\t" : "") + line + "\n").join("");
+	assert.equal(branch.includes('requestFailures.length === 0'), false);
+	const canonicalBranch = branch.replace('\t\t\t\tawait screenshot("shakedown-exact-reading");', oldRawAssertion + '\t\t\t\tawait screenshot("shakedown-exact-reading");')
 		.replace(
 			/\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_BEGIN\n\s*let repairBaseSetupOpen[\s\S]*?\n\s*\/\/ POINTBREAK_D78_BASE_SETUP_PLUMBING_END\n/,
 			"\n",
@@ -6953,4 +6985,39 @@ test("completion manifests bind a sorted SHA-256 inventory of retained browser e
 		/already exists/i,
 	);
 	assert.deepEqual(await readFile(validManifestPath), publishedBytes);
+});
+
+
+test("failed shakedown retains redacted aggregate and actual cleanup outcome", async () => {
+	const shell = await readFile(new URL("./change-inspector-browser-verify.sh", import.meta.url), "utf8");
+	const rootCleanup = shell.slice(shell.indexOf("cleanup_shakedown_root() {"), shell.indexOf('\nwhile [ "$#" -gt 0 ]'));
+	const cleanup = shell.slice(shell.indexOf("cleanup() {"), shell.indexOf("\ntrap cleanup EXIT"));
+	const parent = await mkdtemp(join(tmpdir(), "browser-failure-selftest-"));
+	const report = {status:"failed", sections:[{name:"exact", requests:[{error:"net::ERR_ABORTED"}]}], failures:[{detail:"Bearer secret:a", route:"#/?token=secret%3Aa"}], unrelated:{retained:[1,2,3]}};
+	try {
+		for (const [closeStatus, rootRefused] of [[0, false], [7, false], [0, true]]) {
+			const root = join(parent, `pointbreak-change-inspector-shakedown.${closeStatus}-${rootRefused}`);
+			await mkdir(join(root,"logs"), {recursive:true});
+			await writeFile(join(root,"logs","inspect-startup.json"), JSON.stringify({token:"secret:a"}));
+			await writeFile(join(root,"report.json"), JSON.stringify(report));
+			const child = spawn("bash", ["-c", `set -euo pipefail
+shakedown_parent="$1"; shakedown_root="$2"; log_dir="$2/logs"; browser_result="$2/report.json"
+browser_cleanup_enabled=true; background_pids=(); close_status="$3"
+run_pw() { return "$close_status"; }
+stop_background_process() { :; }
+${rootCleanup}
+${cleanup}
+trap cleanup EXIT
+exit 9`, "failure-test", rootRefused ? join(parent,"wrong-parent") : parent, root, String(closeStatus)]);
+			let output=""; for(const stream of [child.stdout,child.stderr]) stream.on("data", b=>output+=b);
+			assert.equal(await new Promise((yes,no)=>{child.on("error",no);child.on("close",yes);}),9);
+			assert.ok(!output.includes("secret:a") && !output.includes("secret%3Aa"), output);
+			const lines=output.trim().split("\n").filter(Boolean).map(JSON.parse);
+			assert.deepEqual(lines.find(x=>x.gate==="change-inspector-browser-failure").report, JSON.parse(JSON.stringify(report).replaceAll("secret:a","REDACTED").replaceAll("secret%3Aa","REDACTED")));
+			const outcome=lines.find(x=>x.gate==="change-inspector-browser-cleanup");
+			assert.equal(outcome.browserCloseStatus,closeStatus); assert.equal(outcome.rootCleanupStatus,rootRefused ? 1 : 0);
+			if (rootRefused) assert.equal(JSON.parse(await readFile(join(root,"report.json"),"utf8")).status,"failed");
+			else await assert.rejects(readFile(join(root,"report.json")), {code:"ENOENT"});
+		}
+	} finally { await rm(parent,{recursive:true,force:true}); }
 });
