@@ -3596,10 +3596,13 @@ mod counted {
 
     fn counted_http_get(
         inspector: &Inspector,
+        baseline_inspector: &Inspector,
         path: &str,
         ordinal: u64,
     ) -> (String, LongitudinalCounterReceiptV1) {
-        let baseline = inspector.get_text(path);
+        // Collect expected bytes in another process so this uncounted request
+        // cannot warm the measured Inspector's serialized exact-document cache.
+        let baseline = baseline_inspector.get_text(path);
         let semantic_result_sha256 = format!("{:x}", Sha256::digest(baseline.as_bytes()));
         let request = serde_json::json!({
             "runIdentity": format!("{:064x}", ordinal + 1),
@@ -3667,6 +3670,7 @@ mod counted {
     fn exact_inspector_derived_routes_open_no_authoritative_carriers() {
         let fixture = change_reads_fixture();
         fixture.build_derived();
+        let baseline_inspector = Inspector::spawn_current(fixture.repo.path());
         let inspector = Inspector::spawn_current(fixture.repo.path());
         let changes = inspector.get_json("/api/v2/changes");
         let change = changes["changes"]
@@ -3705,7 +3709,8 @@ mod counted {
         .into_iter()
         .enumerate()
         {
-            let (_, receipt) = counted_http_get(&inspector, path, 100 + ordinal as u64);
+            let (_, receipt) =
+                counted_http_get(&inspector, &baseline_inspector, path, 100 + ordinal as u64);
             assert_eq!(
                 receipt.counters.event_decodes, 0,
                 "{label} decodes no event"
@@ -3721,12 +3726,13 @@ mod counted {
         }
     }
 
-    /// Post-Green counted-HTTP verification that each derived exact route
-    /// decodes only carriers selected for the Change seek and revision components.
+    /// Each uncached derived exact route decodes only carriers selected for the
+    /// Change seek and revision components; a cached repeat decodes none.
     #[test]
     fn exact_inspector_derived_revision_routes_stay_component_bounded() {
         let fixture = exact_read_fixture();
         fixture.build_derived();
+        let baseline_inspector = Inspector::spawn_current(fixture.repo.path());
         let inspector = Inspector::spawn_current(fixture.repo.path());
         let revision_path = format!(
             "/api/v2/changes/{}/revisions/{}?artifactHash={}",
@@ -3748,7 +3754,12 @@ mod counted {
         .into_iter()
         .enumerate()
         {
-            let (_, receipt) = counted_http_get(&inspector, path, 120 + ordinal as u64);
+            let (_, receipt) = counted_http_get(
+                &inspector,
+                &baseline_inspector,
+                path,
+                120 + ordinal as u64 * 2,
+            );
             let counters = &receipt.counters;
             assert_eq!(
                 counters.strict_journal_inspections, 0,
@@ -3756,13 +3767,37 @@ mod counted {
             );
             assert!(
                 counters.event_decodes > 0,
-                "{label}: selected exact-read carriers are decoded"
+                "{label}: selected exact-read carriers are decoded on a cache miss; \
+                 counters={counters:#?}"
             );
             assert!(
                 counters.event_decodes
                     <= counters.change_seek_fact_rows_selected + counters.fact_sqlite_rows_selected,
                 "{label}: carrier decodes stay bounded by selected Change and component rows; \
                  counters={counters:#?}"
+            );
+
+            let (_, cached) = counted_http_get(
+                &inspector,
+                &baseline_inspector,
+                path,
+                121 + ordinal as u64 * 2,
+            );
+            assert_eq!(
+                cached.counters.strict_journal_inspections, 0,
+                "{label}: cache hit performs no strict Journal inspection"
+            );
+            assert_eq!(
+                cached.counters.event_decodes, 0,
+                "{label}: cache hit decodes no event"
+            );
+            assert_eq!(
+                cached.counters.change_seek_fact_rows_selected, 0,
+                "{label}: cache hit selects no Change seek rows"
+            );
+            assert_eq!(
+                cached.counters.fact_sqlite_rows_selected, 0,
+                "{label}: cache hit selects no revision component rows"
             );
         }
     }
