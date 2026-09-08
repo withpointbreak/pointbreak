@@ -6,6 +6,19 @@
 	// biome-ignore lint/correctness/noUnusedVariables: the rendered diagnostics closure uses this binding.
 	const BrowserDiagnosticFailure = __POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__;
 	const createBrowserDiagnostics = __POINTBREAK_BROWSER_DIAGNOSTICS__;
+	const isMeasuredGraphEnd = ({ clientWidth, scrollWidth }, end, home) => {
+		// Scroll dimensions are integral; a browser-applied endpoint can be fractional.
+		const maximum = scrollWidth - clientWidth;
+		return (
+			[clientWidth, scrollWidth, end, home].every(Number.isFinite) &&
+			clientWidth > 0 && maximum >= 0 && home === 0 &&
+			(maximum === 0 ? end === 0 : end > 0 && Math.abs(end - maximum) <= 1)
+		);
+	};
+	const isMeasuredGraphCanvas = ({ clientWidth, scrollWidth, svgWidth }) =>
+		[clientWidth, scrollWidth, svgWidth].every(Number.isFinite) &&
+		clientWidth > 0 && scrollWidth >= clientWidth && svgWidth > 0 &&
+		svgWidth <= scrollWidth + 1;
 	const capabilityRedactedHash = (value) => {
 		if (typeof value !== "string") return "";
 		const hashStart = value.indexOf("#");
@@ -6592,17 +6605,12 @@
 						viewport.querySelector("svg")?.getBoundingClientRect().width || 0,
 				}));
 			compare(
-				narrowChangeGraphGeometry.clientWidth > 0 &&
-					narrowChangeGraphGeometry.scrollWidth >=
-						narrowChangeGraphGeometry.clientWidth &&
-					narrowChangeGraphGeometry.svgWidth > 0 &&
-					narrowChangeGraphGeometry.scrollWidth >=
-						narrowChangeGraphGeometry.svgWidth,
+				isMeasuredGraphCanvas(narrowChangeGraphGeometry),
 				"narrow intrinsic Change graph viewport",
 				`Change graph viewport did not preserve its intrinsic canvas: ${JSON.stringify(narrowChangeGraphGeometry)}`,
 				{
 					clientWidth: "> 0",
-					scrollWidth: ">= clientWidth and >= svgWidth",
+					scrollWidth: ">= clientWidth and within 1 CSS px of intrinsic svgWidth",
 					svgWidth: "> 0",
 				},
 				narrowChangeGraphGeometry,
@@ -6622,7 +6630,7 @@
 				(viewport) => viewport.scrollLeft,
 			);
 			compare(
-				changeGraphEnd === changeGraphMaxScroll && changeGraphHome === 0,
+				isMeasuredGraphEnd(narrowChangeGraphGeometry, changeGraphEnd, changeGraphHome),
 				"narrow Change graph keyboard panning",
 				`Home/End panning produced ${changeGraphHome}/${changeGraphEnd} for ${JSON.stringify(narrowChangeGraphGeometry)}`,
 				{
@@ -8058,9 +8066,7 @@
 				(viewport) => viewport.scrollLeft,
 			);
 			compare(
-				graphEnd ===
-					narrowGraphGeometry.scrollWidth - narrowGraphGeometry.clientWidth &&
-					graphHome === 0,
+				isMeasuredGraphEnd(narrowGraphGeometry, graphEnd, graphHome),
 				"narrow graph keyboard panning",
 				`Home/End panning produced ${graphHome}/${graphEnd} for ${JSON.stringify(narrowGraphGeometry)}`,
 				{

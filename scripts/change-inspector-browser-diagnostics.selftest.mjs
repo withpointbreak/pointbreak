@@ -3712,7 +3712,10 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 			start + 1,
 		);
 		assert.notEqual(next, -1, `missing boundary after full section ${name}`);
-		return browser.slice(start, next + 1).replace("\t\t\tawait page.keyboard.press(\"3\");\n\t\t\t// A history URL changes before its profile and destination have hydrated.\n\t\t\tconst attentionReady = await page.waitForFunction(() => {\n\t\t\t\tconst master = document.querySelector(\"#master\");\n\t\t\t\tconst refusal = master?.textContent?.trim();\n\t\t\t\tif (refusal?.startsWith(\"Reader refused:\")) return { state: \"refused\", detail: refusal };\n\t\t\t\tif (!location.hash.startsWith(\"#/attention?\") || !document.querySelector(\"#master h1\")) return false;\n\t\t\t\ttry { return JSON.parse(master?.dataset.changeListKey ?? \"null\")?.lens === \"attention\" ? { state: \"ready\" } : false; }\n\t\t\t\tcatch { return false; }\n\t\t\t});\n\t\t\tconst attentionReadiness = await attentionReady.jsonValue();\n\t\t\tawait attentionReady.dispose();\n\t\t\tif (attentionReadiness.state === \"refused\") fail(\"exact history Attention destination\", attentionReadiness.detail);\n\t\t\tawait page.goBack();\n\t\t\tconst historyRevisionReady = await page.waitForFunction(\n\t\t\t\tisAcceptedExactReadingInPage,\n\t\t\t\t{ expectedHash: revisionHash, expectedRoute: revisionRoute },\n\t\t\t);\n\t\t\tconst historyRevisionReadiness = await historyRevisionReady.jsonValue();\n\t\t\tawait historyRevisionReady.dispose();\n\t\t\tif (historyRevisionReadiness.state === \"refused\") fail(\"exact history Revision destination\", historyRevisionReadiness.detail);\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n", "\t\t\tawait page.keyboard.press(\"3\");\n\t\t\tawait page.waitForFunction(() =>\n\t\t\t\tlocation.hash.startsWith(\"#/attention?\"),\n\t\t\t);\n\t\t\tawait page.goBack();\n\t\t\tawait page.waitForFunction(() => location.hash.includes(\"/revisions/\"));\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n");
+		let content = browser.slice(start, next + 1);
+		// Keep the historical floor; normalize only the approved pixel comparisons.
+		for (const [current, original] of [["isMeasuredGraphCanvas(narrowChangeGraphGeometry),", "narrowChangeGraphGeometry.clientWidth > 0 &&\n\t\t\t\t\tnarrowChangeGraphGeometry.scrollWidth >=\n\t\t\t\t\t\tnarrowChangeGraphGeometry.clientWidth &&\n\t\t\t\t\tnarrowChangeGraphGeometry.svgWidth > 0 &&\n\t\t\t\t\tnarrowChangeGraphGeometry.scrollWidth >=\n\t\t\t\t\t\tnarrowChangeGraphGeometry.svgWidth,"], ["isMeasuredGraphEnd(narrowChangeGraphGeometry, changeGraphEnd, changeGraphHome)", "changeGraphEnd === changeGraphMaxScroll && changeGraphHome === 0"], ["isMeasuredGraphEnd(narrowGraphGeometry, graphEnd, graphHome)", "graphEnd ===\n\t\t\t\t\tnarrowGraphGeometry.scrollWidth - narrowGraphGeometry.clientWidth &&\n\t\t\t\t\tgraphHome === 0"], ["scrollWidth: \">= clientWidth and within 1 CSS px of intrinsic svgWidth\"", "scrollWidth: \">= clientWidth and >= svgWidth\""]]) content = content.replace(current, original);
+		return content.replace("\t\t\tawait page.keyboard.press(\"3\");\n\t\t\t// A history URL changes before its profile and destination have hydrated.\n\t\t\tconst attentionReady = await page.waitForFunction(() => {\n\t\t\t\tconst master = document.querySelector(\"#master\");\n\t\t\t\tconst refusal = master?.textContent?.trim();\n\t\t\t\tif (refusal?.startsWith(\"Reader refused:\")) return { state: \"refused\", detail: refusal };\n\t\t\t\tif (!location.hash.startsWith(\"#/attention?\") || !document.querySelector(\"#master h1\")) return false;\n\t\t\t\ttry { return JSON.parse(master?.dataset.changeListKey ?? \"null\")?.lens === \"attention\" ? { state: \"ready\" } : false; }\n\t\t\t\tcatch { return false; }\n\t\t\t});\n\t\t\tconst attentionReadiness = await attentionReady.jsonValue();\n\t\t\tawait attentionReady.dispose();\n\t\t\tif (attentionReadiness.state === \"refused\") fail(\"exact history Attention destination\", attentionReadiness.detail);\n\t\t\tawait page.goBack();\n\t\t\tconst historyRevisionReady = await page.waitForFunction(\n\t\t\t\tisAcceptedExactReadingInPage,\n\t\t\t\t{ expectedHash: revisionHash, expectedRoute: revisionRoute },\n\t\t\t);\n\t\t\tconst historyRevisionReadiness = await historyRevisionReady.jsonValue();\n\t\t\tawait historyRevisionReady.dispose();\n\t\t\tif (historyRevisionReadiness.state === \"refused\") fail(\"exact history Revision destination\", historyRevisionReadiness.detail);\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n", "\t\t\tawait page.keyboard.press(\"3\");\n\t\t\tawait page.waitForFunction(() =>\n\t\t\t\tlocation.hash.startsWith(\"#/attention?\"),\n\t\t\t);\n\t\t\tawait page.goBack();\n\t\t\tawait page.waitForFunction(() => location.hash.includes(\"/revisions/\"));\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n");
 	};
 	const preservation = createHash("sha256");
 	for (const name of frozenSectionNames) {
@@ -7385,4 +7388,63 @@ test("parallel history completes destination hydration before Back and Escape", 
 				assert.ok(disposed >= 2);
 			}
 		});
+});
+
+// Evaluate the literal comparisons used by the full browser program.
+async function graphGeometryContract(label, values) {
+	const source = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
+	const labelIndex = source.indexOf(`"${label}"`);
+	const start = source.lastIndexOf("\n\t\t\tcompare(", labelIndex);
+	assert.ok(start >= 0 && labelIndex > start);
+	const expression = source.slice(start + "\n\t\t\tcompare(".length, labelIndex).trim().replace(/,$/, "");
+	const helpersStart = source.indexOf("\tconst isMeasuredGraphEnd =");
+	const helpers = helpersStart < 0 ? "" : source.slice(helpersStart, source.indexOf("\tconst capabilityRedactedHash =", helpersStart));
+	return runInNewContext(`(() => { ${helpers}; return (${expression}); })()`, values);
+}
+
+test("graph geometry accepts measured fractional endpoints in both full checks", async (t) => {
+	for (const [label, change] of [["narrow graph keyboard panning", false], ["narrow Change graph keyboard panning", true]]) {
+		await t.test(label, async () => {
+			for (const end of [7061.5, 7062, 7063]) {
+				const geometry = { clientWidth: 357, scrollWidth: 7419, svgWidth: 7418.640625 };
+				assert.equal(await graphGeometryContract(label, change ? {
+					narrowChangeGraphGeometry: geometry, changeGraphMaxScroll: 7062, changeGraphEnd: end, changeGraphHome: 0,
+				} : { narrowGraphGeometry: geometry, graphEnd: end, graphHome: 0 }), true, `endpoint ${end}`);
+			}
+		});
+	}
+});
+
+test("graph geometry rejects broken panning and invalid measurements", async (t) => {
+	for (const [label, change] of [["narrow graph keyboard panning", false], ["narrow Change graph keyboard panning", true]]) {
+		await t.test(label, async () => {
+			for (const [clientWidth, scrollWidth, end, home] of [
+				[357, 7419, 0, 0], [357, 7419, -1, 0], [357, 7419, 7060.99, 0],
+				[357, 7419, 7063.01, 0], [357, 7419, 7062, 0.5],
+				[357, 7419, NaN, 0], [357, 7419, Infinity, 0],
+				[0, 0, 0, 0], [-1, -1, 0, 0], [357, 356, -1, 0],
+				[Infinity, Infinity, NaN, 0], [357, Infinity, Infinity, 0],
+			]) {
+				const geometry = {clientWidth, scrollWidth, svgWidth: 7418.640625};
+				assert.equal(await graphGeometryContract(label, change ? {
+					narrowChangeGraphGeometry: geometry, changeGraphMaxScroll: scrollWidth-clientWidth, changeGraphEnd:end, changeGraphHome:home,
+				} : {narrowGraphGeometry:geometry, graphEnd:end, graphHome:home}), false, JSON.stringify({clientWidth,scrollWidth,end,home}));
+			}
+		});
+	}
+});
+
+test("graph geometry preserves the Change graph zero-range contract", async () => {
+	const values = {narrowChangeGraphGeometry:{clientWidth:357,scrollWidth:357,svgWidth:356.5},changeGraphMaxScroll:0,changeGraphEnd:0,changeGraphHome:0};
+	assert.equal(await graphGeometryContract("narrow Change graph keyboard panning", values), true);
+	assert.equal(await graphGeometryContract("narrow Change graph keyboard panning", {...values,changeGraphEnd:0.5}), false);
+});
+
+test("graph geometry bounds integer to fractional intrinsic-width rounding", async () => {
+	for (const [clientWidth, scrollWidth, svgWidth, expected] of [
+		[357, 7419, 7419.5, true], [357, 7419, 7420, true], [357, 7419, 7420.01, false],
+		[357, 7419, 7418.640625, true], [357, 357, 356.5, true],
+		[0, 7419, 7419.5, false], [357, 356, 355, false], [357,7419,0,false],
+		[357,Infinity,7419,false], [357,7419,Infinity,false], [357,7419,NaN,false],
+	]) assert.equal(await graphGeometryContract("narrow intrinsic Change graph viewport", {narrowChangeGraphGeometry:{clientWidth,scrollWidth,svgWidth}}),expected,JSON.stringify({clientWidth,scrollWidth,svgWidth}));
 });
