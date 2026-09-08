@@ -3626,7 +3626,7 @@ fn browser_program_checks_narrow_keyboard_bounds_for_both_relationship_graphs() 
             focus.as_str(),
             "keyboard.press(\"End\")",
             "keyboard.press(\"Home\")",
-            "scrollWidth >",
+            "isMeasuredGraphEnd(",
         ] {
             assert!(
                 block.contains(marker),
