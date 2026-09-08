@@ -3712,7 +3712,7 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 			start + 1,
 		);
 		assert.notEqual(next, -1, `missing boundary after full section ${name}`);
-		return browser.slice(start, next + 1);
+		return browser.slice(start, next + 1).replace("\t\t\tawait page.keyboard.press(\"3\");\n\t\t\t// A history URL changes before its profile and destination have hydrated.\n\t\t\tconst attentionReady = await page.waitForFunction(() => {\n\t\t\t\tconst master = document.querySelector(\"#master\");\n\t\t\t\tconst refusal = master?.textContent?.trim();\n\t\t\t\tif (refusal?.startsWith(\"Reader refused:\")) return { state: \"refused\", detail: refusal };\n\t\t\t\tif (!location.hash.startsWith(\"#/attention?\") || !document.querySelector(\"#master h1\")) return false;\n\t\t\t\ttry { return JSON.parse(master?.dataset.changeListKey ?? \"null\")?.lens === \"attention\" ? { state: \"ready\" } : false; }\n\t\t\t\tcatch { return false; }\n\t\t\t});\n\t\t\tconst attentionReadiness = await attentionReady.jsonValue();\n\t\t\tawait attentionReady.dispose();\n\t\t\tif (attentionReadiness.state === \"refused\") fail(\"exact history Attention destination\", attentionReadiness.detail);\n\t\t\tawait page.goBack();\n\t\t\tconst historyRevisionReady = await page.waitForFunction(\n\t\t\t\tisAcceptedExactReadingInPage,\n\t\t\t\t{ expectedHash: revisionHash, expectedRoute: revisionRoute },\n\t\t\t);\n\t\t\tconst historyRevisionReadiness = await historyRevisionReady.jsonValue();\n\t\t\tawait historyRevisionReady.dispose();\n\t\t\tif (historyRevisionReadiness.state === \"refused\") fail(\"exact history Revision destination\", historyRevisionReadiness.detail);\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n", "\t\t\tawait page.keyboard.press(\"3\");\n\t\t\tawait page.waitForFunction(() =>\n\t\t\t\tlocation.hash.startsWith(\"#/attention?\"),\n\t\t\t);\n\t\t\tawait page.goBack();\n\t\t\tawait page.waitForFunction(() => location.hash.includes(\"/revisions/\"));\n\t\t\tawait page.keyboard.press(\"Escape\");\n\t\t\tawait page.waitForFunction(() => location.hash.startsWith(\"#/changes?\"));\n");
 	};
 	const preservation = createHash("sha256");
 	for (const name of frozenSectionNames) {
@@ -7217,4 +7217,172 @@ exit 9`, "failure-test", rootRefused ? join(parent,"wrong-parent") : parent, roo
 			else await assert.rejects(readFile(join(root,"report.json")), {code:"ENOENT"});
 		}
 	} finally { await rm(parent,{recursive:true,force:true}); }
+});
+
+
+
+test("parallel history completes destination hydration before Back and Escape", async (t) => {
+	const source = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	const section = source.slice(
+		source.indexOf(
+			'await diagnostics.section("Exact Revision selection and history"',
+		),
+		source.indexOf('await diagnostics.section("Shared Revision membership"'),
+	);
+	const start = section.lastIndexOf('await page.keyboard.press("3");');
+	const end = section.indexOf("const historyOriginHash", start);
+	assert.ok(start >= 0 && end > start);
+	const sequence = section.slice(start, end);
+	const predicateStart = source.indexOf(
+		"function isAcceptedExactReadingInPage(",
+	);
+	const predicateEnd = source.indexOf(
+		"\n\tconst currentRouteMatches",
+		predicateStart,
+	);
+	for (const scenario of ["attention pending", "revision pending", "refused"])
+		await t.test(scenario, async () => {
+			const refused = scenario === "refused";
+			const revisionHash = "#/changes/c/revisions/r?artifactHash=a";
+			const state = {
+				hash: revisionHash,
+				ready: false,
+				lens: "changes",
+				reading: revisionHash.slice(2) + ":sha256:p",
+				text: "Revision",
+				heading: "Revision",
+			};
+			let back = 0,
+				escaped = 0,
+				disposed = 0;
+			const master = {
+				get dataset() {
+					return { changeListKey: JSON.stringify({ lens: state.lens }) };
+				},
+				get textContent() {
+					return refused && state.lens === "attention"
+						? "Reader refused: fixture"
+						: "Ready";
+				},
+			};
+			const detail = {
+				get dataset() {
+					return { changeReadingKey: state.reading };
+				},
+				get textContent() {
+					return state.text;
+				},
+				querySelector: () => ({ textContent: state.heading }),
+			};
+			const sandbox = {
+				URLSearchParams,
+				location: {
+					get hash() {
+						return state.hash;
+					},
+				},
+				document: {
+					querySelector: (selector) =>
+						selector === "#master"
+							? master
+							: selector === "#master h1"
+								? state.ready
+									? {}
+									: null
+								: selector === "#stat-hash"
+									? { textContent: "sha256:p" }
+									: selector === "#detail-body"
+										? detail
+										: null,
+				},
+			};
+			const page = {
+				keyboard: {
+					press: async (key) => {
+						if (key === "3") {
+							state.hash = "#/attention?limit=100";
+							state.ready = scenario === "revision pending";
+							state.lens = state.ready ? "attention" : "changes";
+						}
+						if (key === "Escape") {
+							assert.equal(
+								state.ready,
+								true,
+								"Escape interrupted returned Revision hydration",
+							);
+							escaped++;
+							state.hash = "#/changes?limit=100";
+						}
+					},
+				},
+				goBack: async () => {
+					assert.equal(
+						state.ready,
+						true,
+						"Back interrupted Attention hydration",
+					);
+					back++;
+					state.hash = revisionHash;
+					state.ready = false;
+					state.reading = undefined;
+					state.text = "Loading Revision";
+					state.heading = "";
+				},
+				waitForFunction: async (fn, arg) => {
+					let value = fn(arg);
+					if (!value) {
+						await delay(1);
+						state.ready = true;
+						state.lens = state.hash.startsWith("#/attention")
+							? "attention"
+							: "changes";
+						state.reading = revisionHash.slice(2) + ":sha256:p";
+						state.text = "Revision";
+						state.heading = "Revision";
+						value = fn(arg);
+					}
+					assert.ok(
+						value,
+						"destination predicate never accepted its completed view",
+					);
+					return {
+						jsonValue: async () => value,
+						dispose: async () => {
+							disposed++;
+						},
+					};
+				},
+			};
+			const run = runInNewContext(
+				`(async () => { ${source.slice(predicateStart, predicateEnd)}; ${sequence} })`,
+				{
+					...sandbox,
+					page,
+					revisionHash,
+					revisionRoute: revisionHash.slice(2),
+					hash: async () => state.hash,
+					fail: (label, detail) => {
+						throw new Error(detail);
+					},
+					waitForRetainedMasterDestination: async () => ({
+						dispose: async () => {
+							disposed++;
+						},
+					}),
+				},
+			);
+			if (refused) {
+				await assert.rejects(run(), /Reader refused/);
+				assert.equal(back, 0);
+				assert.equal(escaped, 0);
+			} else {
+				await run();
+				assert.equal(back, 1);
+				assert.equal(escaped, 1);
+				assert.ok(disposed >= 2);
+			}
+		});
 });

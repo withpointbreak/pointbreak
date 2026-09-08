@@ -6986,11 +6986,26 @@
 				fail("parallel-current Revision return", revisionReadiness.detail);
 			}
 			await page.keyboard.press("3");
-			await page.waitForFunction(() =>
-				location.hash.startsWith("#/attention?"),
-			);
+			// A history URL changes before its profile and destination have hydrated.
+			const attentionReady = await page.waitForFunction(() => {
+				const master = document.querySelector("#master");
+				const refusal = master?.textContent?.trim();
+				if (refusal?.startsWith("Reader refused:")) return { state: "refused", detail: refusal };
+				if (!location.hash.startsWith("#/attention?") || !document.querySelector("#master h1")) return false;
+				try { return JSON.parse(master?.dataset.changeListKey ?? "null")?.lens === "attention" ? { state: "ready" } : false; }
+				catch { return false; }
+			});
+			const attentionReadiness = await attentionReady.jsonValue();
+			await attentionReady.dispose();
+			if (attentionReadiness.state === "refused") fail("exact history Attention destination", attentionReadiness.detail);
 			await page.goBack();
-			await page.waitForFunction(() => location.hash.includes("/revisions/"));
+			const historyRevisionReady = await page.waitForFunction(
+				isAcceptedExactReadingInPage,
+				{ expectedHash: revisionHash, expectedRoute: revisionRoute },
+			);
+			const historyRevisionReadiness = await historyRevisionReady.jsonValue();
+			await historyRevisionReady.dispose();
+			if (historyRevisionReadiness.state === "refused") fail("exact history Revision destination", historyRevisionReadiness.detail);
 			await page.keyboard.press("Escape");
 			await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
 			const historyOriginHash = await hash();
