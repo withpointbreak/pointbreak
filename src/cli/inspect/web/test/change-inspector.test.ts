@@ -3463,6 +3463,166 @@ describe("Change-first composition", () => {
     );
   });
 
+  it("parks once while repeated Timeline keyboard selection preserves filter chrome", async () => {
+    history.replaceState(null, "", "/#/timeline?q=review&limit=20");
+    const requests = serveComposition(stagedPage(), stagedPageProfile);
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const filter = document.querySelector<HTMLSelectElement>(
+      "#timeline-filter-change",
+    );
+    if (filter === null) throw new Error("missing Timeline filter");
+    const filterPaint = vi.spyOn(filter, "value", "set");
+    const timeline = document.querySelector<HTMLElement>("#timeline");
+    timeline?.focus();
+    const loaded = requests.length;
+    timeline?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(filterPaint).toHaveBeenCalledTimes(1);
+    const first = timeline?.getAttribute("aria-activedescendant");
+    timeline?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(timeline?.getAttribute("aria-activedescendant")).not.toBe(first);
+    timeline?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+    );
+    expect(timeline?.getAttribute("aria-activedescendant")).toBe(first);
+    expect(filterPaint).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(timeline);
+    expect(requests).toHaveLength(loaded);
+  });
+
+  const diffRoute =
+    "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone/diff?artifactHash=sha256%3Aartifact";
+
+  it("reuses an accepted diff for file, fact and search focus without a loading paint or HTTP read", async () => {
+    history.replaceState(null, "", `/${diffRoute}`);
+    const requests = serveComposition(activationHistoryPage());
+    const renderer = await import("../src/change-inspector-render");
+    const paint = vi.spyOn(renderer, "renderChangeInspector");
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const loaded = requests.length;
+    for (const refinement of [
+      "&file=src%2Fone.rs",
+      "&fact=obs%3Aone",
+      "&fq=one",
+      "",
+    ]) {
+      paint.mockClear();
+      routeTo(diffRoute + refinement);
+      await vi.waitFor(() => expect(paint).toHaveBeenCalled());
+      expect(requests).toHaveLength(loaded);
+      for (const call of paint.mock.calls) {
+        expect(call[2]?.reading?.kind).toBe("diff");
+        expect(call[2]?.exactReading).toBeNull();
+      }
+    }
+  });
+
+  it.each([
+    "artifact",
+    "query",
+    "credentials",
+    "route kind",
+  ])("does not reuse an accepted diff after changing %s", async (boundary) => {
+    history.replaceState(null, "", `/${diffRoute}`);
+    const requests = serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const loaded = requests.filter(isExactRevisionPath).length;
+    const auth = await import("../src/auth");
+    let destination = `${diffRoute}&file=src%2Fone.rs`;
+    if (boundary === "artifact")
+      destination = destination.replace(
+        "artifactHash=sha256%3Aartifact",
+        "artifactHash=sha256%3Aother",
+      );
+    if (boundary === "query") destination += "&q=changed";
+    if (boundary === "credentials")
+      auth.setSessionToken("rotated-navigation-token");
+    if (boundary === "route kind")
+      destination = destination.replace("/diff?", "?");
+    routeTo(destination);
+    await vi.waitFor(() =>
+      expect(requests.filter(isExactRevisionPath).length).toBeGreaterThan(
+        loaded,
+      ),
+    );
+    auth.resetAuthForTests();
+  });
+
+  it.each([
+    "payload",
+    "postflight",
+  ])("supersedes a pending diff %s on focus navigation instead of reusing it", async (pendingPhase) => {
+    history.replaceState(null, "", `/${diffRoute}`);
+    const renderer = await import("../src/change-inspector-render");
+    const paint = vi.spyOn(renderer, "renderChangeInspector");
+    let release!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    let exactReads = 0;
+    let profiles = 0;
+    let heldSignal: AbortSignal | null | undefined;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input);
+        if (path === "/api/v2/profile") {
+          profiles += 1;
+          if (pendingPhase === "postflight" && profiles === 3) {
+            heldSignal = init?.signal;
+            return pending;
+          }
+          return new Response(JSON.stringify(profile));
+        }
+        if (path.startsWith("/api/v2/changes?"))
+          return new Response(JSON.stringify(page("changes")));
+        if (path.startsWith("/api/v2/attention?"))
+          return new Response(JSON.stringify(page("attention")));
+        if (isExactRevisionPath(path)) {
+          exactReads += 1;
+          if (pendingPhase === "payload" && exactReads === 1) {
+            heldSignal = init?.signal;
+            return pending;
+          }
+          return new Response(JSON.stringify(revisionDetail()));
+        }
+        throw new Error(`unexpected ${path}`);
+      },
+    ) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const startup = bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() => expect(heldSignal).toBeDefined());
+    routeTo(`${diffRoute}&file=src%2Ftwo.rs`);
+    await vi.waitFor(() => expect(exactReads).toBe(2));
+    await vi.waitFor(() =>
+      expect(paint.mock.lastCall?.[2]?.reading?.kind).toBe("diff"),
+    );
+    expect(heldSignal?.aborted).toBe(true);
+    const acceptedPaints = paint.mock.calls.length;
+    release(
+      new Response(
+        JSON.stringify(pendingPhase === "payload" ? revisionDetail() : profile),
+      ),
+    );
+    await startup;
+    await Promise.resolve();
+    expect(paint.mock.calls.length).toBe(acceptedPaints);
+    expect(location.hash).toContain("file=src%2Ftwo.rs");
+  });
+
   it("reuses a coherent generation for exact navigation with the same query", async () => {
     const requests: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {

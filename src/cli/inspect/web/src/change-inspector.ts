@@ -494,9 +494,13 @@ export async function bootstrapChangeInspector(
   };
   // Reader activity is a presentation-only reason to hold a live head page.
   // The monitor's `park` operation is idempotent and never changes the route
-  // or server authority; repainting merely keeps the held window visible.
+  // or server authority. Only the follow-to-park transition needs a repaint;
+  // selection and reveal already update their own Timeline presentation.
   const parkTimelineMonitoring = () => {
-    if (timelineMonitor.park() !== null) paint();
+    if (timelineMonitor.snapshot()?.mode === "following") {
+      timelineMonitor.park();
+      paint();
+    }
   };
   const paint = (pollDraft: FocusedFilterDraft | null = null) => {
     // A poll snapshots an uncommitted search before its asynchronous read
@@ -621,7 +625,14 @@ export async function bootstrapChangeInspector(
   const readingKey = (
     route: ChangeInspectorExactRoute,
     projectionStamp: string,
-  ): string => `${formatChangeInspectorRoute(route)}\u0000${projectionStamp}`;
+    credentialVersion: number,
+  ): string => {
+    // File/fact/search focus refines presentation of an accepted document.
+    // Keep the full route separately for ownership of every in-flight read.
+    const documentRoute =
+      "focus" in route ? { ...route, focus: undefined } : route;
+    return `${formatChangeInspectorRoute(documentRoute)}\u0000${projectionStamp}\u0000${credentialVersion}`;
+  };
 
   const clearReading = (): void => {
     reading = null;
@@ -667,7 +678,11 @@ export async function bootstrapChangeInspector(
     // Exact contextual documents are projections, not route-owned cache
     // entries. The same deep link must be hydrated again when a poll stages a
     // newer projection generation or it can retain stale facts indefinitely.
-    const requestedReading = readingKey(route, expectedProjectionStamp);
+    const requestedReading = readingKey(
+      route,
+      expectedProjectionStamp,
+      credentialVersion,
+    );
     if (visibleReading === requestedReading && reading !== null) return;
     reading = null;
     readingRefusal = null;
@@ -897,7 +912,11 @@ export async function bootstrapChangeInspector(
       let acceptedReading: ChangeInspectorReading | null = null;
       let acceptedReadingKey = "";
       if (refreshesExactReading) {
-        acceptedReadingKey = readingKey(route, changes.projectionStamp);
+        acceptedReadingKey = readingKey(
+          route,
+          changes.projectionStamp,
+          credentialVersion,
+        );
         if (visibleReading === acceptedReadingKey && reading !== null) {
           acceptedReading = reading;
         } else {
@@ -910,6 +929,7 @@ export async function bootstrapChangeInspector(
                 : readingKey(
                     route,
                     displayedGeneration.changes.projectionStamp,
+                    credentialVersion,
                   ),
             token: refreshPendingToken,
           };
@@ -952,7 +972,11 @@ export async function bootstrapChangeInspector(
         throw new ChangeInspectorSessionChanged();
       }
       if (origin === "route" && hasExactReading) {
-        const requestedReading = readingKey(route, changes.projectionStamp);
+        const requestedReading = readingKey(
+          route,
+          changes.projectionStamp,
+          credentialVersion,
+        );
         if (visibleReading !== requestedReading) {
           // Never paint a detail from the prior generation beside a newly
           // published list. loadReading will replace this loading state only
@@ -1467,7 +1491,11 @@ export async function bootstrapChangeInspector(
         route.kind !== "event" &&
         generation !== null &&
         pendingReading?.key ===
-          readingKey(route, generation.changes.projectionStamp)
+          readingKey(
+            route,
+            generation.changes.projectionStamp,
+            sessionCredentialVersion(),
+          )
       ) {
         pollRequested = false;
         schedulePoll(pollDelayMs);

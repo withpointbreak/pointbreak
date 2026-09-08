@@ -10619,7 +10619,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       );
     }, "timelineSearchFocusIntentStop");
     const parkTimelineMonitoring = /* @__PURE__ */ __name(() => {
-      if (timelineMonitor.park() !== null) paint();
+      if (timelineMonitor.snapshot()?.mode === "following") {
+        timelineMonitor.park();
+        paint();
+      }
     }, "parkTimelineMonitoring");
     const paint = /* @__PURE__ */ __name((pollDraft = null) => {
       const draft = pollDraft !== null && filterInput === pollDraft.input ? snapshotFilterDraft(
@@ -10695,7 +10698,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }, "revalidateIdentityForCurrentSession");
     let pollRequiresFullValidation = false;
     let generationNeedsRetry = false;
-    const readingKey = /* @__PURE__ */ __name((route, projectionStamp) => `${formatChangeInspectorRoute(route)}\0${projectionStamp}`, "readingKey");
+    const readingKey = /* @__PURE__ */ __name((route, projectionStamp, credentialVersion2) => {
+      const documentRoute = "focus" in route ? { ...route, focus: void 0 } : route;
+      return `${formatChangeInspectorRoute(documentRoute)}\0${projectionStamp}\0${credentialVersion2}`;
+    }, "readingKey");
     const clearReading = /* @__PURE__ */ __name(() => {
       reading = null;
       readingRefusal = null;
@@ -10720,7 +10726,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         return;
       }
       const requested = formatChangeInspectorRoute(route);
-      const requestedReading = readingKey(route, expectedProjectionStamp);
+      const requestedReading = readingKey(
+        route,
+        expectedProjectionStamp,
+        credentialVersion2
+      );
       if (visibleReading === requestedReading && reading !== null) return;
       reading = null;
       readingRefusal = null;
@@ -10883,7 +10893,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         let acceptedReading = null;
         let acceptedReadingKey = "";
         if (refreshesExactReading) {
-          acceptedReadingKey = readingKey(route, changes.projectionStamp);
+          acceptedReadingKey = readingKey(
+            route,
+            changes.projectionStamp,
+            credentialVersion2
+          );
           if (visibleReading === acceptedReadingKey && reading !== null) {
             acceptedReading = reading;
           } else {
@@ -10892,7 +10906,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             pendingReading = {
               key: displayedGeneration === null ? visibleReading : readingKey(
                 route,
-                displayedGeneration.changes.projectionStamp
+                displayedGeneration.changes.projectionStamp,
+                credentialVersion2
               ),
               token: refreshPendingToken
             };
@@ -10930,7 +10945,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           throw new ChangeInspectorSessionChanged();
         }
         if (origin === "route" && hasExactReading) {
-          const requestedReading = readingKey(route, changes.projectionStamp);
+          const requestedReading = readingKey(
+            route,
+            changes.projectionStamp,
+            credentialVersion2
+          );
           if (visibleReading !== requestedReading) {
             reading = null;
             readingRefusal = null;
@@ -11355,7 +11374,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           return;
         }
         const generation = state.snapshot().generation;
-        if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event" && generation !== null && pendingReading?.key === readingKey(route, generation.changes.projectionStamp)) {
+        if (route.kind !== "lens" && route.kind !== "timeline" && route.kind !== "event" && generation !== null && pendingReading?.key === readingKey(
+          route,
+          generation.changes.projectionStamp,
+          sessionCredentialVersion()
+        )) {
           pollRequested = false;
           schedulePoll(pollDelayMs);
           return;
