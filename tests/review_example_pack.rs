@@ -287,8 +287,9 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     );
     assert!(
         browser_program.contains("const changeGraphMaxScroll = Math.max(")
-            && browser_program.contains("changeGraphEnd === changeGraphMaxScroll")
-            && browser_program.contains("changeGraphHome === 0"),
+            && browser_program.contains(
+                "isMeasuredGraphEnd(narrowChangeGraphGeometry, changeGraphEnd, changeGraphHome)"
+            ),
         "a narrow Change graph may fit its viewport, but Home and End must still stay within its scroll bounds"
     );
     assert!(
