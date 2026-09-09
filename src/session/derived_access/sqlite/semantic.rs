@@ -112,6 +112,14 @@ pub(crate) struct ExactRevisionFactReadSnapshot {
     pub(crate) state: SemanticStateSnapshot,
 }
 
+/// The single read context a legacy product route derives its response from.
+pub(crate) struct LegacyReadContext {
+    pub(crate) connection: rusqlite::Connection,
+    pub(crate) state: SemanticStateSnapshot,
+    /// The one locator checkpoint every checkpoint-dependent field derives from.
+    pub(crate) as_of: TruthCursor,
+}
+
 impl ExactRevisionFactReadSnapshot {
     pub(crate) fn finish(self) -> Result<(), SqliteSemanticError> {
         self.connection
@@ -2186,13 +2194,26 @@ impl SqliteSemantic {
             });
         }
         let state = query_materialized_state(&connection)?;
+        let as_of = checkpoint.applied;
         let facts = query_materialized_compact_facts(
             &connection,
-            observed.epoch,
-            observed.sequence,
+            as_of.epoch,
+            as_of.sequence,
             None,
             MaterializedFactFamilies::Attention,
         )?;
+        // The state and fact reads ran in separate implicit snapshots after the
+        // checkpoint read, and the sequence bound does not freeze representative
+        // rows a later canonical carrier can replace. Re-read the checkpoint last
+        // and refuse when anything moved, so every field names one checkpoint.
+        let settled = read_locator_checkpoint(&connection)?;
+        if settled.applied != as_of || u64::try_from(state.event_count).ok() != Some(as_of.sequence)
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: settled.applied,
+                observed,
+            });
+        }
         let supersession =
             crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?;
         let attention = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts_with_supersession(
@@ -2200,7 +2221,7 @@ impl SqliteSemantic {
             &supersession,
         )?;
         Ok(LocatorRead::Ready(MaterializedAttentionSnapshot {
-            as_of: observed,
+            as_of,
             state,
             supersession,
             attention,
@@ -2551,6 +2572,66 @@ impl SqliteSemantic {
         }
         let state = query_materialized_state(&connection)?;
         Ok(LocatorRead::Ready((connection, state)))
+    }
+
+    /// One checkpoint read for the legacy product routes. No transaction is
+    /// held across the response; the route derives every checkpoint-dependent
+    /// field from the returned `as_of`, and the legacy guard still admits a
+    /// checkpoint ahead of the observed truth head.
+    pub(crate) fn legacy_read_context(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<LegacyReadContext>, SqliteSemanticError> {
+        self.legacy_read_context_inner(observed, || {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_read_context_with_hook(
+        &self,
+        observed: TruthCursor,
+        hook: impl FnMut(),
+    ) -> Result<LocatorRead<LegacyReadContext>, SqliteSemanticError> {
+        self.legacy_read_context_inner(observed, hook)
+    }
+
+    /// The hook fires between the two statements of the state read, the one
+    /// window inside this helper where a governed write can land.
+    fn legacy_read_context_inner(
+        &self,
+        observed: TruthCursor,
+        hook: impl FnMut(),
+    ) -> Result<LocatorRead<LegacyReadContext>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        validate_product_history_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state_with_hook(&connection, hook)?;
+        // The state read is two statements in separate implicit snapshots, and
+        // the checkpoint was read in a third. Re-read the checkpoint after the
+        // state and require the whole context to name one checkpoint; a write
+        // that landed anywhere in between is a refusal, never a mixed context.
+        let settled = read_locator_checkpoint(&connection)?;
+        if settled.applied != checkpoint.applied
+            || u64::try_from(state.event_count).ok() != Some(checkpoint.applied.sequence)
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: settled.applied,
+                observed,
+            });
+        }
+        Ok(LocatorRead::Ready(LegacyReadContext {
+            connection,
+            state,
+            as_of: checkpoint.applied,
+        }))
     }
 
     pub(crate) fn exact_revision_fact_read_snapshot(
@@ -4117,6 +4198,16 @@ fn adjust_request_state_counts(
 fn query_materialized_state(
     connection: &rusqlite::Connection,
 ) -> Result<SemanticStateSnapshot, SqliteSemanticError> {
+    query_materialized_state_with_hook(connection, || {})
+}
+
+/// The state read is two statements: the singleton state row, then the
+/// duplicate projection. `hook` fires between them so a test can land a write
+/// in that window.
+fn query_materialized_state_with_hook(
+    connection: &rusqlite::Connection,
+    mut hook: impl FnMut(),
+) -> Result<SemanticStateSnapshot, SqliteSemanticError> {
     let row = connection
         .query_row(
             "SELECT journal_id, current_revision_id, current_object_id,
@@ -4155,6 +4246,7 @@ fn query_materialized_state(
         open_input_request_count: to_usize(row.9, "open input request count")?,
         open_operative_input_request_count: to_usize(row.10, "open operative input request count")?,
     };
+    hook();
     let mut statement = connection
         .prepare(
             "SELECT family, semantic_key, event_count, event_ids_json

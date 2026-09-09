@@ -1043,6 +1043,7 @@ impl QualificationDerivedAccessPhaseOperationV1 {
                 Phase::CheckpointAndWal,
                 Phase::RevisionPageOverviewConstruction,
                 Phase::RevisionPageSnapshotSummaries,
+                Phase::CheckpointAndWal,
             ],
             Self::Bootstrap => &[
                 Phase::BootstrapPopulation,

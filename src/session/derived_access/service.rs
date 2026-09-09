@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
     AppendCrashPoint, BootstrapPopulationEntry, CursorLedgerError, CursorLedgerIdentity,
-    CursorLedgerInventory, HydratedLocatorRow, LocatorInventory, MaterializedChangeProjection,
-    ProductHistoryFact, ProposalCarrierLocator, SemanticInventory, SqliteCursorLedger,
-    SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
+    CursorLedgerInventory, HydratedLocatorRow, LegacyReadContext, LocatorInventory,
+    MaterializedChangeProjection, ProductHistoryFact, ProposalCarrierLocator, SemanticInventory,
+    SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError,
+    StoreWriterLock,
 };
 use super::support::support_event_ids;
 use crate::error::Result as ShoreResult;
@@ -556,17 +557,24 @@ impl DerivedAccessService {
         }
     }
 
-    pub(super) fn product_history_connection(
+    /// One checkpoint read for the legacy product routes (see
+    /// `SqliteSemantic::legacy_read_context`).
+    pub(crate) fn legacy_read_context(
         &self,
-    ) -> Result<
-        LocatorRead<(
-            rusqlite::Connection,
-            crate::session::derived_access::semantic::state::SemanticStateSnapshot,
-        )>,
-        DerivedAccessServiceError,
-    > {
+    ) -> Result<LocatorRead<LegacyReadContext>, DerivedAccessServiceError> {
         let observed = self.cursor.head()?.cursor;
-        Ok(self.semantic.product_history_connection(observed)?)
+        Ok(self.semantic.legacy_read_context(observed)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_read_context_with_hook(
+        &self,
+        hook: impl FnMut(),
+    ) -> Result<LocatorRead<LegacyReadContext>, DerivedAccessServiceError> {
+        let observed = self.cursor.head()?.cursor;
+        Ok(self
+            .semantic
+            .legacy_read_context_with_hook(observed, hook)?)
     }
 
     pub(crate) fn product_history_read_snapshot_at(
@@ -735,8 +743,12 @@ impl DerivedAccessService {
             .proposal_carrier_locators_for_exact_revisions(selected, observed)?)
     }
 
-    pub(crate) fn semantic_materialized_attention_snapshot(
+    /// The attention snapshot read, with a hook between the truth-head
+    /// observation and the semantic read so tests can land an authoritative
+    /// write at exactly that boundary. Production callers pass `|| {}`.
+    pub(super) fn semantic_materialized_attention_snapshot_inner(
         &self,
+        mut hook: impl FnMut(),
     ) -> Result<
         LocatorRead<crate::session::derived_access::semantic::MaterializedAttentionSnapshot>,
         DerivedAccessServiceError,
@@ -749,6 +761,7 @@ impl DerivedAccessService {
                 );
             self.cursor.head()?.cursor
         };
+        hook();
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let _selection_phase = crate::bench_support::longitudinal::enter_derived_access_phase_v1(
             crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::SqliteSelection,

@@ -886,7 +886,11 @@ fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() 
     let mut flattened = receipt.clone();
     flattened
         .phases
-        .last_mut()
+        .iter_mut()
+        .find(|sample| {
+            sample.phase
+                == crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries
+        })
         .expect("revision-page receipt has a snapshot-summary phase")
         .parent_ordinal = None;
     flattened

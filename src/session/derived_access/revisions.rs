@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use super::history::DerivedHistoryMode;
 use super::history::{
     CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, hydrate_events,
-    projection_stamp, state_diagnostics,
+    legacy_terminal, projection_stamp, state_diagnostics,
 };
 use super::locator::LocatorRead;
+use super::sqlite::LegacyReadContext;
 use super::support::support_event_ids;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
@@ -23,6 +24,7 @@ use crate::bench_support::longitudinal::{
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::RevisionId;
+use crate::session::derived_access::semantic::state::SemanticStateSnapshot;
 use crate::session::event::ShoreEvent;
 use crate::session::workflow::{
     RevisionListOptions, RevisionListResult, RevisionOverview, RevisionShowOptions,
@@ -256,6 +258,14 @@ pub(super) const REVISION_COMPONENT_EVENT_IDS_SQL: &str =
            AND event.revision_id IN (SELECT revision_id FROM component)
          ORDER BY locator.replay_key, locator.event_id";
 
+/// Read boundary inside the legacy revision-page route where an authoritative
+/// write can land between two derived reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) enum LegacyRevisionReadBoundary {
+    CheckpointRead,
+    DetailContextRead,
+}
+
 impl DerivedHistoryAccess {
     /// Read one snapshot-bound page of revision summaries from the active
     /// bodyless generation. Page selection is index-backed and examines only
@@ -269,6 +279,29 @@ impl DerivedHistoryAccess {
         snapshot_summaries: Arc<SnapshotSummaryCache>,
         request: &RevisionPageRequest,
     ) -> Result<DerivedRevisionPageRoute, String> {
+        self.revisions_page_inner(repo, trust_set, snapshot_summaries, request, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::session) fn revisions_page_with_hook(
+        &self,
+        repo: &Path,
+        trust_set: TrustSet,
+        snapshot_summaries: Arc<SnapshotSummaryCache>,
+        request: &RevisionPageRequest,
+        hook: impl FnMut(LegacyRevisionReadBoundary),
+    ) -> Result<DerivedRevisionPageRoute, String> {
+        self.revisions_page_inner(repo, trust_set, snapshot_summaries, request, hook)
+    }
+
+    fn revisions_page_inner(
+        &self,
+        repo: &Path,
+        trust_set: TrustSet,
+        snapshot_summaries: Arc<SnapshotSummaryCache>,
+        request: &RevisionPageRequest,
+        mut hook: impl FnMut(LegacyRevisionReadBoundary),
+    ) -> Result<DerivedRevisionPageRoute, String> {
         let Some((store_identity, backend)) = self.active_context() else {
             return Ok(DerivedRevisionPageRoute::Off);
         };
@@ -279,8 +312,8 @@ impl DerivedHistoryAccess {
             }
         };
         let service = current.service();
-        let (connection, state) = match service
-            .product_history_connection()
+        let context = match service
+            .legacy_read_context()
             .map_err(|error| error.to_string())?
         {
             LocatorRead::Ready(context) => context,
@@ -288,9 +321,12 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedRevisionPageRoute::Unavailable(catching_up_status()));
             }
         };
-        let as_of = service
-            .locator_checkpoint()
-            .map_err(|error| error.to_string())?;
+        hook(LegacyRevisionReadBoundary::CheckpointRead);
+        let LegacyReadContext {
+            connection,
+            state,
+            as_of,
+        } = context;
         let projection_stamp = projection_stamp(store_identity, as_of)?;
         let cursor = match request.cursor(ACTIVE_REVISION_PAGE_PROFILE, &projection_stamp) {
             Ok(cursor) => cursor,
@@ -301,10 +337,47 @@ impl DerivedHistoryAccess {
                 return Err("invalid revision page token".to_owned());
             }
         };
+        let outcome = revision_page_body(
+            service,
+            backend,
+            repo,
+            &trust_set,
+            snapshot_summaries.as_ref(),
+            request,
+            &connection,
+            &state,
+            as_of,
+            projection_stamp,
+            cursor,
+        );
+        legacy_terminal(
+            service,
+            as_of,
+            outcome.map(DerivedRevisionPageRoute::Ready),
+            || DerivedRevisionPageRoute::Unavailable(catching_up_status()),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn revision_page_body(
+    service: &super::service::DerivedAccessService,
+    backend: &crate::session::store::backend::StoreBackend,
+    repo: &Path,
+    trust_set: &TrustSet,
+    snapshot_summaries: &SnapshotSummaryCache,
+    request: &RevisionPageRequest,
+    connection: &rusqlite::Connection,
+    state: &SemanticStateSnapshot,
+    as_of: super::cursor::TruthCursor,
+    projection_stamp: String,
+    cursor: Option<RevisionPageCursor>,
+) -> Result<DerivedRevisionPage, String> {
+    {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let sql_selection_phase = enter_derived_access_phase_v1(Phase::RevisionPageSqlSelection);
         let mut rows = revision_page_rows(
-            &connection,
+            connection,
             as_of,
             cursor.as_ref(),
             request.limit().saturating_add(1),
@@ -321,13 +394,13 @@ impl DerivedHistoryAccess {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let event_id_expansion_phase =
             enter_derived_access_phase_v1(Phase::RevisionPageEventIdExpansion);
-        let selected_event_ids = page_revision_event_ids(&connection, as_of, &selected_ids)?;
+        let selected_event_ids = page_revision_event_ids(connection, as_of, &selected_ids)?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(event_id_expansion_phase);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let carrier_hydration_phase =
             enter_derived_access_phase_v1(Phase::RevisionPageCarrierHydrationValidation);
-        let events = hydrate_revision_events(service, &connection, selected_event_ids, as_of)?;
+        let events = hydrate_revision_events(service, connection, selected_event_ids, as_of)?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(carrier_hydration_phase);
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -361,8 +434,8 @@ impl DerivedHistoryAccess {
         }
         result.event_count = usize::try_from(as_of.sequence)
             .map_err(|_| "derived revision event count does not fit usize".to_owned())?;
-        result.revision_count = indexed_revision_count(&connection)?;
-        result.diagnostics.extend(state_diagnostics(&state)?);
+        result.revision_count = state.revision_count;
+        result.diagnostics.extend(state_diagnostics(state)?);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(list_projection_phase);
         let revision_ids = result
@@ -375,7 +448,7 @@ impl DerivedHistoryAccess {
             enter_derived_access_phase_v1(Phase::RevisionPageSupersederSupportExpansion);
         let mut overview_events = events;
         let support_event_ids =
-            page_revision_superseder_event_ids(&connection, as_of, &revision_ids)?;
+            page_revision_superseder_event_ids(connection, as_of, &revision_ids)?;
         overview_events.extend(hydrate_events(service, &support_event_ids, as_of)?);
         normalize_hydrated_events(&mut overview_events);
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -387,9 +460,9 @@ impl DerivedHistoryAccess {
             backend,
             overview_events,
             &revision_ids,
-            &trust_set,
+            trust_set,
             RemovalPolicy::default(),
-            Some(snapshot_summaries.as_ref()),
+            Some(snapshot_summaries),
         )
         .map_err(|error| error.to_string())?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -398,7 +471,7 @@ impl DerivedHistoryAccess {
             .then(|| rows.last())
             .flatten()
             .map(|cursor| request.next(ACTIVE_REVISION_PAGE_PROFILE, &projection_stamp, cursor));
-        Ok(DerivedRevisionPageRoute::Ready(DerivedRevisionPage {
+        Ok(DerivedRevisionPage {
             as_of: projection_stamp.clone(),
             projection_stamp,
             next,
@@ -408,13 +481,34 @@ impl DerivedHistoryAccess {
             },
             result,
             overviews,
-        }))
+        })
     }
+}
 
+impl DerivedHistoryAccess {
     pub fn revision_detail(
         &self,
         revision_id: &RevisionId,
         options: RevisionShowOptions,
+    ) -> Result<DerivedRevisionDetailRoute, String> {
+        self.revision_detail_inner(revision_id, options, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::session) fn revision_detail_with_hook(
+        &self,
+        revision_id: &RevisionId,
+        options: RevisionShowOptions,
+        hook: impl FnMut(LegacyRevisionReadBoundary),
+    ) -> Result<DerivedRevisionDetailRoute, String> {
+        self.revision_detail_inner(revision_id, options, hook)
+    }
+
+    fn revision_detail_inner(
+        &self,
+        revision_id: &RevisionId,
+        options: RevisionShowOptions,
+        mut hook: impl FnMut(LegacyRevisionReadBoundary),
     ) -> Result<DerivedRevisionDetailRoute, String> {
         let Some((store_identity, backend)) = self.active_context() else {
             return Ok(DerivedRevisionDetailRoute::Off);
@@ -426,8 +520,8 @@ impl DerivedHistoryAccess {
             }
         };
         let service = current.service();
-        let (connection, _) = match service
-            .product_history_connection()
+        let context = match service
+            .legacy_read_context()
             .map_err(|error| error.to_string())?
         {
             LocatorRead::Ready(context) => context,
@@ -435,33 +529,60 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedRevisionDetailRoute::ExactFallback);
             }
         };
-        let as_of = service
-            .locator_checkpoint()
-            .map_err(|error| error.to_string())?;
-        if !revision_exists(&connection, revision_id, as_of)? {
-            return Ok(DerivedRevisionDetailRoute::Ready(None));
-        }
-        let events = hydrate_revision_events(
-            service,
-            &connection,
-            revision_event_ids(&connection, as_of.epoch, as_of.sequence, Some(revision_id))?,
+        hook(LegacyRevisionReadBoundary::DetailContextRead);
+        let LegacyReadContext {
+            connection,
+            state: _,
             as_of,
-        )?;
-        let supersession =
-            SupersessionView::from_events(&events).map_err(|error| error.to_string())?;
-        let mut result = show_revision_from_selected_events(options, backend, events)
-            .map_err(|error| error.to_string())?;
-        result.event_count = usize::try_from(as_of.sequence)
-            .map_err(|_| "derived revision event count does not fit usize".to_owned())?;
-        Ok(DerivedRevisionDetailRoute::Ready(Some(Box::new(
-            DerivedRevisionDetail {
-                projection_stamp: projection_stamp(store_identity, as_of)?,
-                result,
-                supersession,
-            },
-        ))))
+        } = context;
+        let outcome = revision_detail_body(
+            service,
+            backend,
+            store_identity,
+            &connection,
+            as_of,
+            revision_id,
+            options,
+        );
+        legacy_terminal(service, as_of, outcome, || {
+            DerivedRevisionDetailRoute::ExactFallback
+        })
     }
 }
+
+fn revision_detail_body(
+    service: &super::service::DerivedAccessService,
+    backend: &crate::session::store::backend::StoreBackend,
+    store_identity: &str,
+    connection: &rusqlite::Connection,
+    as_of: super::cursor::TruthCursor,
+    revision_id: &RevisionId,
+    options: RevisionShowOptions,
+) -> Result<DerivedRevisionDetailRoute, String> {
+    if !revision_exists(connection, revision_id, as_of)? {
+        return Ok(DerivedRevisionDetailRoute::Ready(None));
+    }
+    let events = hydrate_revision_events(
+        service,
+        connection,
+        revision_event_ids(connection, as_of.epoch, as_of.sequence, Some(revision_id))?,
+        as_of,
+    )?;
+    let supersession = SupersessionView::from_events(&events).map_err(|error| error.to_string())?;
+    let mut result = show_revision_from_selected_events(options, backend, events)
+        .map_err(|error| error.to_string())?;
+    result.event_count = usize::try_from(as_of.sequence)
+        .map_err(|_| "derived revision event count does not fit usize".to_owned())?;
+    Ok(DerivedRevisionDetailRoute::Ready(Some(Box::new(
+        DerivedRevisionDetail {
+            projection_stamp: projection_stamp(store_identity, as_of)?,
+            result,
+            supersession,
+        },
+    ))))
+}
+
+impl DerivedHistoryAccess {}
 
 fn revision_page_rows(
     connection: &rusqlite::Connection,
@@ -514,17 +635,6 @@ fn revision_page_query(
     sql.push_str(" ORDER BY revision.captured_at_millis DESC, revision.revision_id DESC LIMIT ?");
     parameters.push(Value::Integer(to_sql_integer(limit)?));
     Ok((sql, parameters))
-}
-
-fn indexed_revision_count(connection: &rusqlite::Connection) -> Result<usize, String> {
-    let count = connection
-        .query_row(
-            "SELECT revision_count FROM semantic_state_projection WHERE singleton = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|error| error.to_string())?;
-    usize::try_from(count).map_err(|_| "derived revision count does not fit usize".to_owned())
 }
 
 fn page_revision_event_ids(
@@ -807,12 +917,14 @@ mod tests {
     use super::*;
     use crate::documents::revision_show_document;
     use crate::model::JournalId;
+    use crate::session::derived_access::cursor::TruthCursor;
+    use crate::session::derived_access::history::DerivedHistoryAvailability;
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         ArtifactRemovedPayload, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent,
-        WorkObjectProposedPayload, Writer,
+        WorkObjectProposal, WorkObjectProposedPayload, Writer,
     };
     use crate::session::store::resolution::resolve_read_store;
     use crate::session::workflow::{
@@ -1000,6 +1112,274 @@ mod tests {
         revision_proposal_at("2000-01-01T00:00:00Z")
     }
 
+    /// A second, governed writer on the same store: every append catches the
+    /// published generation up synchronously on the calling thread.
+    fn governed_append_fixture(store_dir: &Path) -> EventStore {
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            store_dir,
+            "store:test",
+        )
+        .expect("open governed lifecycle");
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).expect("admit governed writer");
+        EventStore::open(store_dir).with_coordinator(coordinator)
+    }
+
+    fn current_checkpoint(access: &DerivedHistoryAccess) -> TruthCursor {
+        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
+            panic!("fixture generation must remain current");
+        };
+        current
+            .service()
+            .locator_checkpoint()
+            .expect("read fixture checkpoint")
+    }
+
+    /// A distinct proposal carrier for an already-proposed revision whose event id
+    /// sorts before the stored one, so the semantic representative for that
+    /// revision moves to the new carrier when it is applied.
+    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
+        let proposes = |event: &ShoreEvent| {
+            event.event_type == EventType::WorkObjectProposed
+                && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
+                    .ok()
+                    .is_some_and(|payload| {
+                        matches!(
+                            &payload.work_object,
+                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
+                        )
+                    })
+        };
+        let stored = store
+            .list_events()
+            .expect("list store events")
+            .into_iter()
+            .find(proposes)
+            .expect("stored proposal for the revision");
+        let payload: WorkObjectProposedPayload =
+            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
+        (0..1024u32)
+            .map(|nonce| {
+                ShoreEvent::new(
+                    EventType::WorkObjectProposed,
+                    format!("work_object_proposed:replacement:{nonce}"),
+                    stored.target.clone(),
+                    stored.writer.clone(),
+                    payload.clone(),
+                    stored.occurred_at.clone(),
+                )
+                .expect("mint replacement carrier")
+            })
+            .find(|candidate| candidate.event_id < stored.event_id)
+            .expect("a canonically earlier carrier within the nonce budget")
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_revision_page_refuses_a_representative_replacement_after_the_context_read() {
+        let (repo, access, revision_id) = active_captured_repo();
+        let read_store = resolve_read_store(repo.path()).expect("resolve store");
+        let store = EventStore::open(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir());
+        let replacement = earlier_carrier_for(&store, &revision_id);
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let request = RevisionPageRequest::new(None, None).unwrap();
+        let DerivedRevisionPageRoute::Ready(initial) = access
+            .revisions_page(
+                repo.path(),
+                TrustSet::default(),
+                Arc::clone(&summaries),
+                &request,
+            )
+            .expect("read initial revision page")
+        else {
+            panic!("published generation should serve a revision page");
+        };
+        let revision_count_before = initial.result.revision_count;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .revisions_page_with_hook(
+                repo.path(),
+                TrustSet::default(),
+                Arc::clone(&summaries),
+                &request,
+                |boundary| {
+                    assert_eq!(boundary, LegacyRevisionReadBoundary::CheckpointRead);
+                    assert_eq!(
+                        governed
+                            .record_event_once(&replacement)
+                            .expect("governed replacement append"),
+                        EventWriteOutcome::Created
+                    );
+                    assert_eq!(
+                        current_checkpoint(&access).sequence,
+                        before + 1,
+                        "fixture: the replacement must advance the checkpoint by one"
+                    );
+                },
+            )
+            .unwrap();
+        match route {
+            DerivedRevisionPageRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedRevisionPageRoute::Ready(page) => panic!(
+                "a write after the context read must refuse, not serve {} entries",
+                page.result.entries.len()
+            ),
+            DerivedRevisionPageRoute::Off | DerivedRevisionPageRoute::RestartRequired => {
+                panic!("active revision page should route through the derived generation")
+            }
+        }
+        let DerivedRevisionPageRoute::Ready(settled) = access
+            .revisions_page(
+                repo.path(),
+                TrustSet::default(),
+                Arc::clone(&summaries),
+                &request,
+            )
+            .expect("read settled revision page")
+        else {
+            panic!("settled generation should serve a revision page");
+        };
+        assert_eq!(settled.result.revision_count, revision_count_before);
+        assert!(
+            settled
+                .result
+                .entries
+                .iter()
+                .any(|entry| entry.revision_id == revision_id),
+            "the replaced representative still lists the revision"
+        );
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_revision_detail_refuses_a_write_after_the_context_read() {
+        let (repo, access, revision_id) = active_captured_repo();
+        let read_store = resolve_read_store(repo.path()).expect("resolve store");
+        let store = EventStore::open(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir());
+        let replacement = earlier_carrier_for(&store, &revision_id);
+        let options = || {
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(revision_id.clone())
+                .with_exact(true)
+                .with_read_for_display(true)
+                .with_verification_policy(crate::session::EventVerificationPolicy::advisory())
+        };
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .revision_detail_with_hook(&revision_id, options(), |boundary| {
+                assert_eq!(boundary, LegacyRevisionReadBoundary::DetailContextRead);
+                assert_eq!(
+                    governed
+                        .record_event_once(&replacement)
+                        .expect("governed replacement append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(
+                    current_checkpoint(&access).sequence,
+                    before + 1,
+                    "fixture: the replacement must advance the checkpoint by one"
+                );
+            })
+            .unwrap();
+        assert!(
+            matches!(route, DerivedRevisionDetailRoute::ExactFallback),
+            "a write after the context read must fall back, never serve detail"
+        );
+        assert!(matches!(
+            access
+                .revision_detail(&revision_id, options())
+                .expect("read settled detail"),
+            DerivedRevisionDetailRoute::Ready(Some(_))
+        ));
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_revision_page_ready_response_derives_from_one_checkpoint() {
+        let (repo, access, _) = active_captured_repo();
+        let read_store = resolve_read_store(repo.path()).expect("resolve store");
+        let governed = governed_append_fixture(read_store.store_dir());
+        let (event, _revision_id) = revision_proposal_at("2026-07-28T14:00:00Z");
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let request = RevisionPageRequest::new(None, None).unwrap();
+        let DerivedRevisionPageRoute::Ready(initial) = access
+            .revisions_page(
+                repo.path(),
+                TrustSet::default(),
+                Arc::clone(&summaries),
+                &request,
+            )
+            .expect("read initial revision page")
+        else {
+            panic!("published generation should serve a revision page");
+        };
+        let revision_count_before = initial.result.revision_count;
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .revisions_page_with_hook(
+                repo.path(),
+                TrustSet::default(),
+                Arc::clone(&summaries),
+                &request,
+                |boundary| {
+                    assert_eq!(boundary, LegacyRevisionReadBoundary::CheckpointRead);
+                    assert_eq!(
+                        governed.record_event_once(&event).expect("governed append"),
+                        EventWriteOutcome::Created
+                    );
+                    assert_eq!(
+                        current_checkpoint(&access).sequence,
+                        before + 1,
+                        "fixture: append must advance the checkpoint by one"
+                    );
+                },
+            )
+            .unwrap();
+        match route {
+            DerivedRevisionPageRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedRevisionPageRoute::Ready(page) => {
+                let expected = projection_stamp(
+                    "store:test",
+                    TruthCursor::new(epoch, u64::try_from(page.result.event_count).unwrap()),
+                )
+                .unwrap();
+                assert_eq!(
+                    page.projection_stamp, expected,
+                    "stamp and event_count must derive from one checkpoint"
+                );
+                let expected_revisions =
+                    if u64::try_from(page.result.event_count).unwrap() == before {
+                        revision_count_before
+                    } else {
+                        revision_count_before + 1
+                    };
+                assert_eq!(
+                    page.result.revision_count, expected_revisions,
+                    "revision_count must be bounded to the stamp's checkpoint"
+                );
+            }
+            DerivedRevisionPageRoute::Off | DerivedRevisionPageRoute::RestartRequired => {
+                panic!("active revision page should route through the derived generation")
+            }
+        }
+    }
+
     #[test]
     fn active_exact_detail_matches_authoritative_projection_and_supersession() {
         let (repo, access, revision_id) = active_captured_repo();
@@ -1101,13 +1481,16 @@ mod tests {
             panic!("published generation should be current");
         };
         let service = current.service();
-        let LocatorRead::Ready((connection, _)) = service
-            .product_history_connection()
-            .expect("open product history")
+        let LocatorRead::Ready(LegacyReadContext {
+            connection,
+            state: _,
+            as_of,
+        }) = service
+            .legacy_read_context()
+            .expect("open legacy read context")
         else {
             panic!("published generation should not require catch-up");
         };
-        let as_of = service.locator_checkpoint().expect("read checkpoint");
         let mut statement = connection
             .prepare(&format!(
                 "EXPLAIN QUERY PLAN {REVISION_COMPONENT_EVENT_IDS_SQL}"
@@ -1410,13 +1793,16 @@ mod tests {
             panic!("published generation should be current");
         };
         let service = current.service();
-        let LocatorRead::Ready((connection, _)) = service
-            .product_history_connection()
-            .expect("open product history")
+        let LocatorRead::Ready(LegacyReadContext {
+            connection,
+            state: _,
+            as_of,
+        }) = service
+            .legacy_read_context()
+            .expect("open legacy read context")
         else {
             panic!("published generation should not require catch-up");
         };
-        let as_of = service.locator_checkpoint().expect("read checkpoint");
 
         let (event_sql, event_parameters) =
             page_revision_event_query(as_of, std::slice::from_ref(&revision_id))
@@ -1542,6 +1928,7 @@ mod tests {
                 Some(9),
                 None,
                 Some(11),
+                None,
             ]
         );
         assert_eq!(first.result.entries.len(), 1);
@@ -1624,13 +2011,16 @@ mod tests {
             panic!("published generation should be current");
         };
         let service = current.service();
-        let LocatorRead::Ready((connection, _)) = service
-            .product_history_connection()
-            .expect("open product history")
+        let LocatorRead::Ready(LegacyReadContext {
+            connection,
+            state: _,
+            as_of,
+        }) = service
+            .legacy_read_context()
+            .expect("open legacy read context")
         else {
             panic!("published generation should not require catch-up");
         };
-        let as_of = service.locator_checkpoint().expect("read checkpoint");
         for cursor in [
             None,
             Some(RevisionPageCursor {

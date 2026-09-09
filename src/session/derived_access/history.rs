@@ -25,6 +25,7 @@ pub(super) use super::runtime::DerivedAccessMode as DerivedHistoryMode;
 use super::runtime::{
     DerivedAccessMaintenance as DerivedHistoryMaintenance, DerivedAccessRuntime, RuntimeCurrentRead,
 };
+use super::sqlite::LegacyReadContext;
 use super::support::support_event_ids;
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::session::ProjectionDiagnostic;
@@ -216,6 +217,14 @@ pub struct DerivedHistoryLifecycleReceipt {
     pub retained_reader_generation_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+}
+
+/// Read boundaries inside the legacy history and new-count routes where an
+/// authoritative write can land between two derived reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) enum LegacyHistoryReadBoundary {
+    ContextRead,
+    CheckpointRead,
 }
 
 #[doc(hidden)]
@@ -579,6 +588,27 @@ impl DerivedHistoryAccess {
         page: &HistoryPage,
         config: &BaseProjectionConfig,
     ) -> Result<DerivedHistoryRoute<DerivedHistoryPage>, String> {
+        self.history_inner(query, page, config, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::session) fn history_with_hook(
+        &self,
+        query: &HistoryQuery,
+        page: &HistoryPage,
+        config: &BaseProjectionConfig,
+        hook: impl FnMut(LegacyHistoryReadBoundary),
+    ) -> Result<DerivedHistoryRoute<DerivedHistoryPage>, String> {
+        self.history_inner(query, page, config, hook)
+    }
+
+    fn history_inner(
+        &self,
+        query: &HistoryQuery,
+        page: &HistoryPage,
+        config: &BaseProjectionConfig,
+        mut hook: impl FnMut(LegacyHistoryReadBoundary),
+    ) -> Result<DerivedHistoryRoute<DerivedHistoryPage>, String> {
         let Some((store_identity, backend)) = self.runtime.active_context() else {
             return Ok(DerivedHistoryRoute::Off);
         };
@@ -592,8 +622,8 @@ impl DerivedHistoryAccess {
             }
         };
         let service = current.service();
-        let (connection, state) = match service
-            .product_history_connection()
+        let context = match service
+            .legacy_read_context()
             .map_err(|error| error.to_string())?
         {
             LocatorRead::Ready(context) => context,
@@ -601,40 +631,58 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedHistoryRoute::Unavailable(catching_up_status()));
             }
         };
-        let as_of = service
-            .locator_checkpoint()
-            .map_err(|error| error.to_string())?;
-        let selection = select_history_rows(&connection, query, page)?;
-        let selected = hydrate_events(service, &selection.event_ids, as_of)?;
-        let support_ids = support_event_ids(&connection, &selected, as_of)?;
-        let mut support = selected.clone();
-        support.extend(hydrate_events(service, &support_ids, as_of)?);
-        support.sort_by(|left, right| left.event_id.cmp(&right.event_id));
-        support.dedup_by(|left, right| left.event_id == right.event_id);
-        let (entries, body_diagnostics) =
-            history_entries_from_selected_events(&selected, &support, config, backend)
-                .map_err(|error| error.to_string())?;
-        let mut diagnostics = state_diagnostics(&state)?;
-        diagnostics.extend(body_diagnostics);
-        record_active_ownership(&entries);
-        Ok(DerivedHistoryRoute::Ready(DerivedHistoryPage {
-            projection_stamp: projection_stamp(store_identity, as_of)?,
-            event_count: state.event_count,
-            entries,
-            facets: selection.facets,
-            match_count: selection.match_count,
-            offset: selection.offset,
-            match_index: selection.match_index,
-            diagnostics,
-            query_notices: Vec::new(),
-            distinct_values: selection.distinct_values,
-        }))
+        hook(LegacyHistoryReadBoundary::ContextRead);
+        let LegacyReadContext {
+            connection,
+            state,
+            as_of,
+        } = context;
+        let outcome = history_page_body(
+            service,
+            backend,
+            store_identity,
+            &connection,
+            &state,
+            as_of,
+            query,
+            page,
+            config,
+        );
+        let route = legacy_terminal(
+            service,
+            as_of,
+            outcome.map(DerivedHistoryRoute::Ready),
+            || DerivedHistoryRoute::Unavailable(catching_up_status()),
+        )?;
+        if let DerivedHistoryRoute::Ready(page) = &route {
+            record_active_ownership(&page.entries);
+        }
+        Ok(route)
     }
 
     pub fn new_count(
         &self,
         query: &HistoryQuery,
         since: &HistoryCursor,
+    ) -> Result<DerivedHistoryRoute<DerivedHistoryNewCount>, String> {
+        self.new_count_inner(query, since, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::session) fn new_count_with_hook(
+        &self,
+        query: &HistoryQuery,
+        since: &HistoryCursor,
+        hook: impl FnMut(LegacyHistoryReadBoundary),
+    ) -> Result<DerivedHistoryRoute<DerivedHistoryNewCount>, String> {
+        self.new_count_inner(query, since, hook)
+    }
+
+    fn new_count_inner(
+        &self,
+        query: &HistoryQuery,
+        since: &HistoryCursor,
+        mut hook: impl FnMut(LegacyHistoryReadBoundary),
     ) -> Result<DerivedHistoryRoute<DerivedHistoryNewCount>, String> {
         let Some((store_identity, _)) = self.runtime.active_context() else {
             return Ok(DerivedHistoryRoute::Off);
@@ -649,8 +697,8 @@ impl DerivedHistoryAccess {
             }
         };
         let service = current.service();
-        let (connection, _) = match service
-            .product_history_connection()
+        let context = match service
+            .legacy_read_context()
             .map_err(|error| error.to_string())?
         {
             LocatorRead::Ready(context) => context,
@@ -658,14 +706,24 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedHistoryRoute::Unavailable(catching_up_status()));
             }
         };
-        let as_of = service
-            .locator_checkpoint()
-            .map_err(|error| error.to_string())?;
-        let new_count = count_new_rows(&connection, query, since)?;
-        Ok(DerivedHistoryRoute::Ready(DerivedHistoryNewCount {
-            projection_stamp: projection_stamp(store_identity, as_of)?,
-            new_count,
-        }))
+        hook(LegacyHistoryReadBoundary::CheckpointRead);
+        let LegacyReadContext {
+            connection,
+            state: _,
+            as_of,
+        } = context;
+        let outcome = count_new_rows(&connection, query, since).and_then(|new_count| {
+            Ok(DerivedHistoryNewCount {
+                projection_stamp: projection_stamp(store_identity, as_of)?,
+                new_count,
+            })
+        });
+        legacy_terminal(
+            service,
+            as_of,
+            outcome.map(DerivedHistoryRoute::Ready),
+            || DerivedHistoryRoute::Unavailable(catching_up_status()),
+        )
     }
 
     pub fn freshness(&self) -> Result<DerivedHistoryRoute<DerivedHistoryFreshness>, String> {
@@ -1448,6 +1506,75 @@ fn status(
     }
 }
 
+/// True when the locator checkpoint still equals the checkpoint a legacy
+/// response was derived from.
+fn legacy_postflight(
+    service: &super::service::DerivedAccessService,
+    as_of: TruthCursor,
+) -> Result<bool, String> {
+    let now = service
+        .locator_checkpoint()
+        .map_err(|error| error.to_string())?;
+    Ok(now == as_of)
+}
+
+/// Terminal decision for a legacy response: the checkpoint is re-read as the
+/// last statement before a `Ready`. The reads between the context and this
+/// point run in separate implicit snapshots, some carry no checkpoint bound,
+/// and a `sequence <= as_of` bound does not freeze representative rows that a
+/// later canonical carrier replaces; so any movement turns the outcome, whether
+/// a built response or a body error caused by that movement, into the route's
+/// existing refusal instead of a response mixing two checkpoints.
+pub(super) fn legacy_terminal<T>(
+    service: &super::service::DerivedAccessService,
+    as_of: TruthCursor,
+    outcome: Result<T, String>,
+    stale: impl FnOnce() -> T,
+) -> Result<T, String> {
+    if !legacy_postflight(service, as_of)? {
+        return Ok(stale());
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
+fn history_page_body(
+    service: &super::service::DerivedAccessService,
+    backend: &StoreBackend,
+    store_identity: &str,
+    connection: &rusqlite::Connection,
+    state: &SemanticStateSnapshot,
+    as_of: TruthCursor,
+    query: &HistoryQuery,
+    page: &HistoryPage,
+    config: &BaseProjectionConfig,
+) -> Result<DerivedHistoryPage, String> {
+    let selection = select_history_rows(connection, query, page)?;
+    let selected = hydrate_events(service, &selection.event_ids, as_of)?;
+    let support_ids = support_event_ids(connection, &selected, as_of)?;
+    let mut support = selected.clone();
+    support.extend(hydrate_events(service, &support_ids, as_of)?);
+    support.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+    support.dedup_by(|left, right| left.event_id == right.event_id);
+    let (entries, body_diagnostics) =
+        history_entries_from_selected_events(&selected, &support, config, backend)
+            .map_err(|error| error.to_string())?;
+    let mut diagnostics = state_diagnostics(state)?;
+    diagnostics.extend(body_diagnostics);
+    Ok(DerivedHistoryPage {
+        projection_stamp: projection_stamp(store_identity, as_of)?,
+        event_count: state.event_count,
+        entries,
+        facets: selection.facets,
+        match_count: selection.match_count,
+        offset: selection.offset,
+        match_index: selection.match_index,
+        diagnostics,
+        query_notices: Vec::new(),
+        distinct_values: selection.distinct_values,
+    })
+}
+
 pub(super) fn catching_up_status() -> DerivedHistoryStatus {
     status(
         DerivedHistoryAvailability::CatchingUp,
@@ -1494,9 +1621,13 @@ mod tests {
         EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId, ObservationId,
         ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, WorkObjectId,
     };
+    use crate::session::derived_access::attention::{
+        DerivedAttentionRoute, LegacyAttentionReadBoundary,
+    };
     use crate::session::derived_access::generation::{GenerationProgress, GenerationProgressPhase};
     use crate::session::derived_access::lifecycle::LifecycleControl;
     use crate::session::derived_access::sqlite::StoreWriterLock;
+    use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, InputRequestResponseOutcome,
         ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision, ShoreEvent,
@@ -1522,6 +1653,335 @@ mod tests {
         let lifecycle = access.lifecycle().expect("test access is active");
         lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
         (temp, access)
+    }
+
+    /// A second, governed writer on the same store: every append catches the
+    /// published generation up synchronously on the calling thread.
+    fn governed_append_fixture(store_dir: &Path) -> EventStore {
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            store_dir,
+            "store:test",
+        )
+        .expect("open governed lifecycle");
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).expect("admit governed writer");
+        EventStore::open(store_dir).with_coordinator(coordinator)
+    }
+
+    fn current_checkpoint(access: &DerivedHistoryAccess) -> TruthCursor {
+        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
+            panic!("fixture generation must remain current");
+        };
+        current
+            .service()
+            .locator_checkpoint()
+            .expect("read fixture checkpoint")
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_history_ready_response_derives_from_one_checkpoint() {
+        let (temp, access) = active_history(2);
+        let governed = governed_append_fixture(temp.path());
+        let event = review_initialized(2);
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let config = BaseProjectionConfig::default();
+        let route = access
+            .history_with_hook(
+                &HistoryQuery::default(),
+                &HistoryPage::default(),
+                &config,
+                |boundary| {
+                    assert_eq!(boundary, LegacyHistoryReadBoundary::ContextRead);
+                    assert_eq!(
+                        governed.record_event_once(&event).expect("governed append"),
+                        EventWriteOutcome::Created
+                    );
+                    assert_eq!(
+                        current_checkpoint(&access).sequence,
+                        before + 1,
+                        "fixture: append must advance the checkpoint by one"
+                    );
+                },
+            )
+            .unwrap();
+        match route {
+            DerivedHistoryRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedHistoryRoute::Ready(page) => {
+                let expected = projection_stamp(
+                    "store:test",
+                    TruthCursor::new(epoch, u64::try_from(page.event_count).unwrap()),
+                )
+                .unwrap();
+                assert_eq!(
+                    page.projection_stamp, expected,
+                    "stamp and event_count must derive from one checkpoint"
+                );
+                assert_eq!(
+                    page.match_count, 2,
+                    "selection counts must be bounded to the stamp's checkpoint"
+                );
+            }
+            DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+                panic!("active history should route through the derived generation")
+            }
+        }
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_new_count_ready_response_derives_from_one_checkpoint() {
+        let (temp, access) = active_history(2);
+        let governed = governed_append_fixture(temp.path());
+        let event = review_initialized(2);
+        let first = review_initialized(0);
+        let since = HistoryCursor {
+            occurred_at: first.occurred_at.clone(),
+            event_id: first.event_id.clone(),
+        };
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .new_count_with_hook(&HistoryQuery::default(), &since, |boundary| {
+                assert_eq!(boundary, LegacyHistoryReadBoundary::CheckpointRead);
+                assert_eq!(
+                    governed.record_event_once(&event).expect("governed append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(
+                    current_checkpoint(&access).sequence,
+                    before + 1,
+                    "fixture: append must advance the checkpoint by one"
+                );
+            })
+            .unwrap();
+        match route {
+            DerivedHistoryRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedHistoryRoute::Ready(count) => {
+                let stamped_at =
+                    projection_stamp("store:test", TruthCursor::new(epoch, before)).unwrap();
+                assert_eq!(
+                    count.projection_stamp, stamped_at,
+                    "the stamp was read before the append and must name that checkpoint"
+                );
+                assert_eq!(
+                    count.new_count, 1,
+                    "new_count must be bounded to the stamp's checkpoint"
+                );
+            }
+            DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+                panic!("active new-count should route through the derived generation")
+            }
+        }
+    }
+
+    /// A distinct proposal carrier for an already-proposed revision whose event id
+    /// sorts before the stored one, so the semantic representative for that
+    /// revision moves to the new carrier when it is applied.
+    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
+        let proposes = |event: &ShoreEvent| {
+            event.event_type == EventType::WorkObjectProposed
+                && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
+                    .ok()
+                    .is_some_and(|payload| {
+                        matches!(
+                            &payload.work_object,
+                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
+                        )
+                    })
+        };
+        let stored = store
+            .list_events()
+            .expect("list store events")
+            .into_iter()
+            .find(proposes)
+            .expect("stored proposal for the revision");
+        let payload: WorkObjectProposedPayload =
+            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
+        (0..1024u32)
+            .map(|nonce| {
+                ShoreEvent::new(
+                    EventType::WorkObjectProposed,
+                    format!("work_object_proposed:replacement:{nonce}"),
+                    stored.target.clone(),
+                    stored.writer.clone(),
+                    payload.clone(),
+                    stored.occurred_at.clone(),
+                )
+                .expect("mint replacement carrier")
+            })
+            .find(|candidate| candidate.event_id < stored.event_id)
+            .expect("a canonically earlier carrier within the nonce budget")
+    }
+
+    fn active_history_with_revision() -> (TempDir, DerivedHistoryAccess, RevisionId) {
+        let revision_id = RevisionId::new(format!("rev:sha256:{}", "ab".repeat(32)));
+        let object_id = ObjectId::new(format!("object:sha256:{}", "cd".repeat(32)));
+        let (temp, access) = active_history_from_events(vec![
+            review_initialized(0),
+            captured_revision(&revision_id, &object_id, "2026-07-28T00:00:01Z"),
+        ]);
+        (temp, access, revision_id)
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_history_refuses_a_representative_replacement_after_the_context_read() {
+        let (temp, access, revision_id) = active_history_with_revision();
+        let governed = governed_append_fixture(temp.path());
+        let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let config = BaseProjectionConfig::default();
+        let route = access
+            .history_with_hook(
+                &HistoryQuery::default(),
+                &HistoryPage::default(),
+                &config,
+                |boundary| {
+                    assert_eq!(boundary, LegacyHistoryReadBoundary::ContextRead);
+                    assert_eq!(
+                        governed
+                            .record_event_once(&replacement)
+                            .expect("governed replacement append"),
+                        EventWriteOutcome::Created
+                    );
+                    assert_eq!(current_checkpoint(&access).sequence, before + 1);
+                },
+            )
+            .unwrap();
+        match route {
+            DerivedHistoryRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedHistoryRoute::Ready(page) => panic!(
+                "a write after the context read must refuse, not serve {} entries",
+                page.entries.len()
+            ),
+            DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+                panic!("active history should route through the derived generation")
+            }
+        }
+        let DerivedHistoryRoute::Ready(settled) = access
+            .history(&HistoryQuery::default(), &HistoryPage::default(), &config)
+            .unwrap()
+        else {
+            panic!("settled generation should serve history");
+        };
+        assert_eq!(
+            settled.projection_stamp,
+            projection_stamp("store:test", TruthCursor::new(epoch, before + 1)).unwrap()
+        );
+        assert_eq!(settled.event_count, usize::try_from(before + 1).unwrap());
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_attention_refuses_a_write_after_the_snapshot_read() {
+        let (temp, access, revision_id) = active_history_with_revision();
+        let governed = governed_append_fixture(temp.path());
+        let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .attention_with_hook(None, |boundary| {
+                if boundary != LegacyAttentionReadBoundary::SnapshotRead {
+                    return;
+                }
+                assert_eq!(
+                    governed
+                        .record_event_once(&replacement)
+                        .expect("governed replacement append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(current_checkpoint(&access).sequence, before + 1);
+            })
+            .unwrap();
+        match route {
+            DerivedAttentionRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedAttentionRoute::Ready(attention) => panic!(
+                "a write after the snapshot read must refuse, not serve {} items",
+                attention.items.len()
+            ),
+            DerivedAttentionRoute::Off => {
+                panic!("active attention should route through the derived generation")
+            }
+        }
+        let DerivedAttentionRoute::Ready(settled) = access.attention(None).unwrap() else {
+            panic!("settled generation should serve attention");
+        };
+        assert_eq!(
+            settled.projection_stamp,
+            projection_stamp("store:test", TruthCursor::new(epoch, before + 1)).unwrap()
+        );
+        assert_eq!(settled.event_count, usize::try_from(before + 1).unwrap());
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_attention_ready_response_derives_from_one_checkpoint() {
+        let (temp, access) = active_history(2);
+        let governed = governed_append_fixture(temp.path());
+        let event = review_initialized(2);
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .attention_with_hook(None, |boundary| {
+                if boundary != LegacyAttentionReadBoundary::HeadObserved {
+                    return;
+                }
+                assert_eq!(
+                    governed.record_event_once(&event).expect("governed append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(
+                    current_checkpoint(&access).sequence,
+                    before + 1,
+                    "fixture: append must advance the checkpoint by one"
+                );
+            })
+            .unwrap();
+        match route {
+            DerivedAttentionRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedAttentionRoute::Ready(attention) => {
+                let expected = projection_stamp(
+                    "store:test",
+                    TruthCursor::new(epoch, u64::try_from(attention.event_count).unwrap()),
+                )
+                .unwrap();
+                assert_eq!(
+                    attention.projection_stamp, expected,
+                    "stamp and event_count must derive from one checkpoint"
+                );
+            }
+            DerivedAttentionRoute::Off => {
+                panic!("active attention should route through the derived generation")
+            }
+        }
     }
 
     #[test]

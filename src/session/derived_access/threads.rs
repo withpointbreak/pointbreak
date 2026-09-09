@@ -3,10 +3,11 @@
 use std::collections::BTreeMap;
 
 use super::history::{
-    CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, projection_stamp,
-    state_diagnostics,
+    CurrentRead, DerivedHistoryAccess, DerivedHistoryStatus, catching_up_status, legacy_terminal,
+    projection_stamp, state_diagnostics,
 };
 use super::locator::LocatorRead;
+use super::sqlite::LegacyReadContext;
 use crate::model::RevisionId;
 use crate::session::{ProjectionDiagnostic, SupersessionView};
 
@@ -26,8 +27,30 @@ pub struct DerivedThreads {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+/// Read boundary inside the legacy threads route where an authoritative write
+/// can land between two derived reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) enum LegacyThreadsReadBoundary {
+    ContextRead,
+}
+
 impl DerivedHistoryAccess {
     pub fn threads(&self) -> Result<DerivedThreadsRoute, String> {
+        self.threads_inner(|_| {})
+    }
+
+    #[cfg(test)]
+    pub(in crate::session) fn threads_with_hook(
+        &self,
+        hook: impl FnMut(LegacyThreadsReadBoundary),
+    ) -> Result<DerivedThreadsRoute, String> {
+        self.threads_inner(hook)
+    }
+
+    fn threads_inner(
+        &self,
+        mut hook: impl FnMut(LegacyThreadsReadBoundary),
+    ) -> Result<DerivedThreadsRoute, String> {
         let Some((store_identity, _)) = self.active_context() else {
             return Ok(DerivedThreadsRoute::Off);
         };
@@ -38,8 +61,8 @@ impl DerivedHistoryAccess {
             }
         };
         let service = current.service();
-        let (connection, state) = match service
-            .product_history_connection()
+        let context = match service
+            .legacy_read_context()
             .map_err(|error| error.to_string())?
         {
             LocatorRead::Ready(context) => context,
@@ -47,19 +70,32 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedThreadsRoute::Unavailable(catching_up_status()));
             }
         };
-        let as_of = service
-            .locator_checkpoint()
-            .map_err(|error| error.to_string())?;
-        let supersession = materialized_supersession(&connection, as_of)?;
-        let mut diagnostics = supersession.diagnostics.clone();
-        diagnostics.extend(state_diagnostics(&state)?);
-        record_active_ownership();
-        Ok(DerivedThreadsRoute::Ready(DerivedThreads {
-            projection_stamp: projection_stamp(store_identity, as_of)?,
-            event_count: state.event_count,
-            supersession,
-            diagnostics,
-        }))
+        hook(LegacyThreadsReadBoundary::ContextRead);
+        let LegacyReadContext {
+            connection,
+            state,
+            as_of,
+        } = context;
+        let outcome = materialized_supersession(&connection, as_of).and_then(|supersession| {
+            let mut diagnostics = supersession.diagnostics.clone();
+            diagnostics.extend(state_diagnostics(&state)?);
+            Ok(DerivedThreads {
+                projection_stamp: projection_stamp(store_identity, as_of)?,
+                event_count: state.event_count,
+                supersession,
+                diagnostics,
+            })
+        });
+        let route = legacy_terminal(
+            service,
+            as_of,
+            outcome.map(DerivedThreadsRoute::Ready),
+            || DerivedThreadsRoute::Unavailable(catching_up_status()),
+        )?;
+        if matches!(route, DerivedThreadsRoute::Ready(_)) {
+            record_active_ownership();
+        }
+        Ok(route)
     }
 }
 
@@ -131,7 +167,8 @@ mod tests {
     use super::*;
     use crate::model::{EngagementId, JournalId, ObjectId, RevisionId};
     use crate::session::derived_access::attention::DerivedAttentionRoute;
-    use crate::session::derived_access::history::DerivedHistoryMode;
+    use crate::session::derived_access::cursor::TruthCursor;
+    use crate::session::derived_access::history::{DerivedHistoryAvailability, DerivedHistoryMode};
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
@@ -146,6 +183,233 @@ mod tests {
     use crate::session::{
         EventStore, EventWriteOutcome, SupersessionView, read_events_for_display,
     };
+
+    /// A second, governed writer on the same store: every append catches the
+    /// published generation up synchronously on the calling thread.
+    fn governed_append_fixture(store_dir: &Path) -> EventStore {
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            store_dir,
+            "store:test",
+        )
+        .expect("open governed lifecycle");
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).expect("admit governed writer");
+        EventStore::open(store_dir).with_coordinator(coordinator)
+    }
+
+    fn current_checkpoint(access: &DerivedHistoryAccess) -> TruthCursor {
+        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
+            panic!("fixture generation must remain current");
+        };
+        current
+            .service()
+            .locator_checkpoint()
+            .expect("read fixture checkpoint")
+    }
+
+    /// A distinct proposal carrier for an already-proposed revision whose event id
+    /// sorts before the stored one, so the semantic representative for that
+    /// revision moves to the new carrier when it is applied.
+    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
+        let proposes = |event: &ShoreEvent| {
+            event.event_type == EventType::WorkObjectProposed
+                && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
+                    .ok()
+                    .is_some_and(|payload| {
+                        matches!(
+                            &payload.work_object,
+                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
+                        )
+                    })
+        };
+        let stored = store
+            .list_events()
+            .expect("list store events")
+            .into_iter()
+            .find(proposes)
+            .expect("stored proposal for the revision");
+        let payload: WorkObjectProposedPayload =
+            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
+        (0..1024u32)
+            .map(|nonce| {
+                ShoreEvent::new(
+                    EventType::WorkObjectProposed,
+                    format!("work_object_proposed:replacement:{nonce}"),
+                    stored.target.clone(),
+                    stored.writer.clone(),
+                    payload.clone(),
+                    stored.occurred_at.clone(),
+                )
+                .expect("mint replacement carrier")
+            })
+            .find(|candidate| candidate.event_id < stored.event_id)
+            .expect("a canonically earlier carrier within the nonce budget")
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_threads_refuses_a_representative_replacement_after_the_context_read() {
+        let (repo, access) = active_forked_repo();
+        let read_store = resolve_read_store(repo.path()).expect("resolve store");
+        let store = EventStore::open(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir());
+        let DerivedThreadsRoute::Ready(initial) = access.threads().expect("read initial threads")
+        else {
+            panic!("published generation should serve initial threads");
+        };
+        let revision_id = initial
+            .supersession
+            .components
+            .iter()
+            .flatten()
+            .next()
+            .cloned()
+            .expect("fixture revision");
+        let replacement = earlier_carrier_for(&store, &revision_id);
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .threads_with_hook(|boundary| {
+                assert_eq!(boundary, LegacyThreadsReadBoundary::ContextRead);
+                assert_eq!(
+                    governed
+                        .record_event_once(&replacement)
+                        .expect("governed replacement append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(
+                    current_checkpoint(&access).sequence,
+                    before + 1,
+                    "fixture: the replacement must advance the checkpoint by one"
+                );
+            })
+            .unwrap();
+        match route {
+            DerivedThreadsRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedThreadsRoute::Ready(threads) => panic!(
+                "a write after the context read must refuse, not serve {} components",
+                threads.supersession.components.len()
+            ),
+            DerivedThreadsRoute::Off => {
+                panic!("active threads should route through the derived generation")
+            }
+        }
+        let DerivedThreadsRoute::Ready(settled) = access.threads().expect("read settled threads")
+        else {
+            panic!("settled generation should serve threads");
+        };
+        assert_eq!(settled.event_count, usize::try_from(before + 1).unwrap());
+        assert_eq!(
+            settled.projection_stamp,
+            projection_stamp("store:test", TruthCursor::new(epoch, before + 1)).unwrap()
+        );
+        assert!(
+            settled
+                .supersession
+                .components
+                .iter()
+                .any(|component| component.contains(&revision_id)),
+            "the replaced representative still names the revision"
+        );
+    }
+
+    fn fresh_revision_proposal() -> (ShoreEvent, RevisionId) {
+        let revision_id = RevisionId::new(format!("review-unit:sha256:{}", "ab".repeat(32)));
+        let event = ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            format!("work_object_proposed:{}", revision_id.as_str()),
+            EventTarget::for_revision(
+                JournalId::new("journal:concurrent"),
+                revision_id.clone(),
+                None,
+            )
+            .expect("build revision target"),
+            Writer::shore_local("test"),
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!("engagement:sha256:{}", "cd".repeat(32))),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id.clone(),
+                        object_id: ObjectId::new(format!("obj:sha256:{}", "ef".repeat(32))),
+                        git_provenance: None,
+                    },
+                    summary: None,
+                    object_artifact_content_hash: format!("sha256:{}", "12".repeat(32)),
+                    supersedes: Vec::new(),
+                },
+            },
+            "2026-07-28T14:00:00Z",
+        )
+        .expect("build concurrent event");
+        (event, revision_id)
+    }
+
+    #[cfg_attr(
+        windows,
+        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
+    )]
+    #[test]
+    fn legacy_threads_ready_response_derives_from_one_checkpoint() {
+        let (repo, access) = active_forked_repo();
+        let read_store = resolve_read_store(repo.path()).expect("resolve store");
+        let governed = governed_append_fixture(read_store.store_dir());
+        let (event, _revision_id) = fresh_revision_proposal();
+        let DerivedThreadsRoute::Ready(initial) = access.threads().expect("read initial threads")
+        else {
+            panic!("published generation should serve initial threads");
+        };
+        let initial_thread_count = initial.supersession.components.len();
+        let epoch = current_checkpoint(&access).epoch;
+        let before = current_checkpoint(&access).sequence;
+        let route = access
+            .threads_with_hook(|boundary| {
+                assert_eq!(boundary, LegacyThreadsReadBoundary::ContextRead);
+                assert_eq!(
+                    governed.record_event_once(&event).expect("governed append"),
+                    EventWriteOutcome::Created
+                );
+                assert_eq!(
+                    current_checkpoint(&access).sequence,
+                    before + 1,
+                    "fixture: append must advance the checkpoint by one"
+                );
+            })
+            .unwrap();
+        match route {
+            DerivedThreadsRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+            }
+            DerivedThreadsRoute::Ready(threads) => {
+                let expected = projection_stamp(
+                    "store:test",
+                    TruthCursor::new(epoch, u64::try_from(threads.event_count).unwrap()),
+                )
+                .unwrap();
+                assert_eq!(
+                    threads.projection_stamp, expected,
+                    "stamp and event_count must derive from one checkpoint"
+                );
+                let expected_components = if u64::try_from(threads.event_count).unwrap() == before {
+                    initial_thread_count
+                } else {
+                    initial_thread_count + 1
+                };
+                assert_eq!(
+                    threads.supersession.components.len(),
+                    expected_components,
+                    "supersession must be bounded to the stamp's checkpoint"
+                );
+            }
+            DerivedThreadsRoute::Off => {
+                panic!("active threads should route through the derived generation")
+            }
+        }
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let status = Command::new("git")

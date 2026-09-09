@@ -2788,6 +2788,69 @@ fn canonical_earlier_semantic_fact_replaces_a_later_representative() {
 }
 
 #[test]
+fn legacy_read_context_refuses_state_that_disagrees_with_its_checkpoint() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    append(&adapter, &initialized_event("journal:legacy-context:a"), 0);
+    append(&adapter, &initialized_event("journal:legacy-context:b"), 1);
+    let checkpoint = adapter.locator_checkpoint().expect("locator checkpoint");
+    assert_eq!(checkpoint, TruthCursor::new(1, 2));
+
+    let context = ready(adapter.legacy_read_context().expect("read legacy context"));
+    assert_eq!(context.as_of, checkpoint);
+    assert_eq!(
+        u64::try_from(context.state.event_count).expect("event count fits"),
+        checkpoint.sequence
+    );
+    drop(context);
+
+    // The window inside the helper: the state row already reflects K+1 while
+    // the checkpoint still names K. One checkpoint must govern both, so the
+    // read refuses instead of serving a mixed context.
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
+    connection
+        .execute(
+            "UPDATE semantic_state_projection SET event_count = event_count + 1 WHERE singleton = 1",
+            [],
+        )
+        .expect("advance the state row ahead of its checkpoint");
+    drop(connection);
+    assert!(matches!(
+        adapter.legacy_read_context().expect("read legacy context"),
+        LocatorRead::CatchUpRequired { .. }
+    ));
+}
+
+#[test]
+fn legacy_read_context_refuses_a_write_between_its_state_statements() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    append(&adapter, &initialized_event("journal:legacy-context:a"), 0);
+    let checkpoint = adapter.locator_checkpoint().expect("locator checkpoint");
+    assert_eq!(checkpoint, TruthCursor::new(1, 1));
+
+    // The state read is two statements; a governed append landing between them
+    // leaves the cached counts at K while the duplicate diagnostics and the
+    // checkpoint already name K+1. The context must refuse, not mix them.
+    let read = adapter
+        .legacy_read_context_with_hook(|| {
+            append(&adapter, &initialized_event("journal:legacy-context:b"), 1);
+        })
+        .expect("read legacy context");
+    assert!(matches!(
+        read,
+        LocatorRead::CatchUpRequired {
+            applied: TruthCursor { sequence: 2, .. },
+            ..
+        }
+    ));
+    let settled = ready(adapter.legacy_read_context().expect("read settled context"));
+    assert_eq!(settled.as_of, TruthCursor::new(1, 2));
+    assert_eq!(settled.state.event_count, 2);
+}
+
+#[test]
 fn semantic_delta_and_locator_checkpoint_commit_atomically() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
