@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseChangeInspectorRoute } from "../src/change-inspector-router";
+import {
+  formatChangeInspectorRoute,
+  parseChangeInspectorRoute,
+} from "../src/change-inspector-router";
 import type { ChangeInspectorSnapshot } from "../src/change-inspector-state";
 import {
   CHANGE_READER_DOCUMENTS,
@@ -436,6 +439,250 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   resetDom();
+});
+
+describe("published generation reuse", () => {
+  const timeline = "#/timeline?limit=20&at=evt%3Asha256%3Aactivation&q=review";
+  const exact =
+    "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
+  const change = "#/changes/change%3Asha256%3Aone";
+  const paired = (requests: string[]) =>
+    requests.filter((path) => /^\/api\/v2\/(changes|attention)\?/.test(path));
+  const navigate = (route: string) => {
+    location.hash = route;
+  };
+  const accepted = () =>
+    vi.waitFor(() => {
+      expect(document.querySelector("#detail-body > h2")).not.toBeNull();
+      const route = parseChangeInspectorRoute(location.hash);
+      if (route.kind === "invalid") throw new Error(route.message);
+      expect(
+        document.querySelector<HTMLElement>("#detail-body")?.dataset
+          .changeReadingKey,
+      ).toContain(formatChangeInspectorRoute(route));
+    });
+  async function start(route = timeline) {
+    history.replaceState(null, "", `/${route}`);
+    const requests = serveComposition(activationHistoryPage());
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    return requests;
+  }
+
+  it.each([
+    change,
+    exact,
+  ])("reuses the published pair for %s and retains the located history page", async (route) => {
+    const requests = await start();
+    const boundary = requests.length;
+    navigate(route);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toEqual([]);
+    expect(
+      requests.slice(boundary).filter((path) => path === "/api/v2/profile"),
+    ).toHaveLength(1);
+
+    navigate(timeline);
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>("#timeline")?.dataset.timelineRoute,
+      ).toBe(timeline),
+    );
+    expect(
+      requests
+        .slice(boundary)
+        .some((path) => path.startsWith("/api/v2/history?")),
+    ).toBe(true);
+  });
+
+  it.each([
+    "limit=100",
+    "q=other",
+    "after=opaque-page",
+    "lifecycle=accepted",
+  ])("reloads a pair for a changed %s", async (query) => {
+    const requests = await start();
+    const boundary = requests.length;
+    navigate(`${exact}&${query}`);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toHaveLength(2);
+  });
+
+  it("normalizes an explicit default page order without a generation reload", async () => {
+    const requests = await start();
+    const boundary = requests.length;
+    navigate(`${exact}&order=change_id_asc`);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toEqual([]);
+  });
+
+  it("does not transfer the same opaque cursor between Attention and Changes", async () => {
+    const requests = await start("#/attention?after=opaque-page");
+    const boundary = requests.length;
+    navigate(`${exact}&after=opaque-page`);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toEqual([
+      "/api/v2/changes?limit=50&after=opaque-page&order=change_id_asc",
+      "/api/v2/attention?limit=50&order=change_id_asc",
+    ]);
+  });
+
+  it("rejects a changed credential session before reusing the published pair", async () => {
+    const requests = await start();
+    const boundary = requests.length;
+    navigate(`${exact}&token=replacement_capability_0123456789abcdef`);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toHaveLength(2);
+    expect(location.hash).toBe(exact);
+  });
+
+  it("keeps contextual exact membership authoritative when both bounded pages omit the Change", async () => {
+    history.replaceState(null, "", `/${timeline}`);
+    const requests = serveComposition(activationHistoryPage());
+    const fetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await fetch(input, init);
+        if (paired([String(input)]).length) {
+          const body = await response.json();
+          return new Response(JSON.stringify({ ...body, changes: [] }));
+        }
+        return response;
+      },
+    );
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    const boundary = requests.length;
+    navigate(exact);
+    await accepted();
+    expect(paired(requests.slice(boundary))).toEqual([]);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Exact Revision",
+    );
+  });
+
+  it("uses exact postflight to restart a changed projection once after pair reuse", async () => {
+    const requests = await start();
+    const fetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const response = await fetch(input, init);
+        return String(input) === "/api/v2/profile"
+          ? new Response(
+              JSON.stringify({
+                ...profile,
+                authorityCursor: authorityCursor(2),
+              }),
+            )
+          : response;
+      },
+    );
+    const boundary = requests.length;
+    navigate(exact);
+    await accepted();
+    const reads = requests.slice(boundary);
+    expect(reads.filter(isExactRevisionPath)).toHaveLength(2);
+    expect(paired(reads)).toHaveLength(2);
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Reader refused",
+    );
+  });
+
+  it("aborts an exact read started from the pair when history supersedes it", async () => {
+    const requests = await start();
+    const fetch = globalThis.fetch;
+    let signal: AbortSignal | null | undefined;
+    let release!: (response: Response) => void;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (isExactRevisionPath(String(input))) {
+        signal = init?.signal;
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return fetch(input, init);
+    });
+    const boundary = requests.length;
+    navigate(exact);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    navigate(timeline);
+    await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+    release(new Response(JSON.stringify(revisionDetail())));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      document.querySelector<HTMLElement>("#timeline")?.dataset.timelineRoute,
+    ).toBe(timeline);
+    expect(document.querySelector("#detail-body")?.textContent).not.toContain(
+      "Exact Revision",
+    );
+    expect(paired(requests.slice(boundary))).toHaveLength(2);
+  });
+
+  it("does not reuse a pair while its replacement generation is half staged", async () => {
+    const requests = await start();
+    const fetch = globalThis.fetch;
+    let held = false;
+    let signal: AbortSignal | null | undefined;
+    let release!: (response: Response) => void;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (!held && String(input).startsWith("/api/v2/attention?")) {
+        held = true;
+        signal = init?.signal;
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      }
+      return fetch(input, init);
+    });
+    navigate("#/timeline?q=replacement");
+    await vi.waitFor(() => expect(held).toBe(true));
+    const boundary = requests.length;
+    navigate(exact);
+    await accepted();
+    expect(signal?.aborted).toBe(true);
+    expect(paired(requests.slice(boundary))).toHaveLength(2);
+    release(new Response(JSON.stringify(page("attention", "sha256:stale"))));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(document.querySelector("#stat-hash")?.textContent).toBe(
+      "sha256:generation",
+    );
+    expect(document.querySelector("#detail-body > h2")).not.toBeNull();
+  });
+
+  it("keeps explicit exact Retry available after reusing a generation", async () => {
+    const requests = await start();
+    vi.useFakeTimers();
+    const fetch = globalThis.fetch;
+    let fail = true;
+    let pendingReads = 0;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (fail && isExactRevisionPath(String(input))) {
+        pendingReads += 1;
+        return new Promise<Response>(() => {});
+      }
+      return fetch(input, init);
+    });
+    const boundary = requests.length;
+    navigate(exact);
+    await vi.waitFor(() => expect(pendingReads).toBeGreaterThan(0));
+    await vi.advanceTimersByTimeAsync(31_000);
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("[data-exact-reading-retry]"),
+        document.querySelector("#detail-body")?.textContent,
+      ).not.toBeNull(),
+    );
+    fail = false;
+    document
+      .querySelector<HTMLButtonElement>("[data-exact-reading-retry]")
+      ?.click();
+    await accepted();
+    expect(paired(requests.slice(boundary))).toEqual([]);
+  });
 });
 
 describe("Change-first composition", () => {

@@ -10684,10 +10684,26 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       });
     }, "historyPageUrl");
     const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? historyPageUrl(route) : buildChangePageUrl("changes", route.query), "requestKey");
+    const generationPageRequests = /* @__PURE__ */ __name((route) => {
+      const query = route.kind === "timeline" || route.kind === "event" ? {} : route.query;
+      const activeLens = lensForRoute(route);
+      return {
+        changes: buildChangePageUrl(
+          "changes",
+          activeLens === "changes" ? query : firstPageQuery(query)
+        ),
+        attention: buildChangePageUrl(
+          "attention",
+          activeLens === "attention" ? query : firstPageQuery(query)
+        )
+      };
+    }, "generationPageRequests");
     let visibleRequest = "";
+    let visiblePageRequests = null;
     let visibleHistoryFilters = "";
     const clearVisibleRequest = /* @__PURE__ */ __name(() => {
       visibleRequest = "";
+      visiblePageRequests = null;
       visibleHistoryFilters = "";
     }, "clearVisibleRequest");
     let pendingReading = null;
@@ -10861,16 +10877,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (origin === "poll" && allowUnchangedPoll && !pollRequiresFullValidation && browserRoute.kind !== "invalid" && formatChangeInspectorRoute(browserRoute) === formatChangeInspectorRoute(route) && !credentialSessionChanged(credentialVersion2) && state.matchesPublishedProfile(profile, credentialVersion2)) {
           return "quiet";
         }
-        const query = route.kind === "timeline" || route.kind === "event" ? {} : route.query;
-        const activeLens = lensForRoute(route);
-        const changesQuery = activeLens === "changes" ? query : firstPageQuery(query);
-        const attentionQuery = activeLens === "attention" ? query : firstPageQuery(query);
+        const pageRequests = generationPageRequests(route);
         const historyRequest = route.kind === "timeline" || route.kind === "event" ? generationJSON(request).then(decodeEventHistory) : Promise.resolve(null);
         const [changes, attention, history2] = await Promise.all([
-          generationJSON(buildChangePageUrl("changes", changesQuery)).then(
+          generationJSON(pageRequests.changes).then(
             (value) => decodeChangePage(value, { lens: "changes", bounded: true })
           ),
-          generationJSON(buildChangePageUrl("attention", attentionQuery)).then(
+          generationJSON(pageRequests.attention).then(
             (value) => decodeChangePage(value, { lens: "attention", bounded: true })
           ),
           historyRequest
@@ -10965,6 +10978,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           timelineMonitor.observe(route, history2);
         }
         visibleRequest = request;
+        visiblePageRequests = pageRequests;
         visibleHistoryFilters = (route.kind === "timeline" || route.kind === "event") && history2 !== null ? eventHistoryFilters(route.historyQuery) : "";
         paint(pollDraft);
         if (!refreshesExactReading && !holdsManualReadingRetry) {
@@ -11055,26 +11069,32 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         return;
       }
       let request;
+      let pageRequests;
       try {
         request = requestKey(route);
+        pageRequests = generationPageRequests(route);
       } catch (error) {
         state.clearGeneration();
         renderChangeInspectorRefusal(error);
         return;
       }
-      if (request === visibleRequest) {
-        const generation = state.snapshot().generation;
-        if (generation === null) {
-          await loadGeneration(route, newProjectionRetryBudget());
-        } else {
-          await loadReading(
-            route,
-            generation.changes.projectionStamp,
-            requestEpoch,
-            newProjectionRetryBudget()
-          );
-          paint();
+      const generation = state.snapshot().generation;
+      const matchesRequest = route.kind === "timeline" || route.kind === "event" ? request === visibleRequest : pageRequests.changes === visiblePageRequests?.changes && pageRequests.attention === visiblePageRequests?.attention;
+      if (generation !== null && matchesRequest && state.matchesPublishedProfile(
+        generation.profile,
+        sessionCredentialVersion()
+      )) {
+        if (route.kind !== "timeline" && route.kind !== "event") {
+          visibleRequest = request;
+          visibleHistoryFilters = "";
         }
+        await loadReading(
+          route,
+          generation.changes.projectionStamp,
+          requestEpoch,
+          newProjectionRetryBudget()
+        );
+        paint();
       } else {
         clearVisibleRequest();
         clearReading();

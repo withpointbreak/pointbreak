@@ -608,11 +608,33 @@ export async function bootstrapChangeInspector(
     route.kind === "timeline" || route.kind === "event"
       ? historyPageUrl(route)
       : buildChangePageUrl("changes", route.query);
+  const generationPageRequests = (
+    route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+  ): { changes: string; attention: string } => {
+    const query =
+      route.kind === "timeline" || route.kind === "event" ? {} : route.query;
+    const activeLens = lensForRoute(route);
+    // A continuation belongs only to its own lens. The companion is page one.
+    return {
+      changes: buildChangePageUrl(
+        "changes",
+        activeLens === "changes" ? query : firstPageQuery(query),
+      ),
+      attention: buildChangePageUrl(
+        "attention",
+        activeLens === "attention" ? query : firstPageQuery(query),
+      ),
+    };
+  };
   let visibleRequest = "";
+  // Request identities belong to the one published generation, not a cache.
+  let visiblePageRequests: ReturnType<typeof generationPageRequests> | null =
+    null;
   /** The filter identity of the history page `visibleRequest` loaded. */
   let visibleHistoryFilters = "";
   const clearVisibleRequest = (): void => {
     visibleRequest = "";
+    visiblePageRequests = null;
     visibleHistoryFilters = "";
   };
   let pendingReading: { key: string; token: symbol } | null = null;
@@ -861,29 +883,17 @@ export async function bootstrapChangeInspector(
       ) {
         return "quiet";
       }
-      const query =
-        route.kind === "timeline" || route.kind === "event" ? {} : route.query;
-      const activeLens = lensForRoute(route);
-      // Continuations are signed to one exact lens/query/projection tuple.
-      // Stage the active page beside the companion lens's first page; sending
-      // one lens's opaque cursor to the other would make pagination refuse the
-      // entire generation even though both pages share its projection stamp.
-      const changesQuery =
-        activeLens === "changes" ? query : firstPageQuery(query);
-      const attentionQuery =
-        activeLens === "attention" ? query : firstPageQuery(query);
+      const pageRequests = generationPageRequests(route);
       const historyRequest =
         route.kind === "timeline" || route.kind === "event"
           ? generationJSON(request).then(decodeEventHistory)
           : Promise.resolve(null);
       const [changes, attention, history] = await Promise.all([
-        generationJSON(buildChangePageUrl("changes", changesQuery)).then(
-          (value) =>
-            decodeChangePage(value, { lens: "changes", bounded: true }),
+        generationJSON(pageRequests.changes).then((value) =>
+          decodeChangePage(value, { lens: "changes", bounded: true }),
         ),
-        generationJSON(buildChangePageUrl("attention", attentionQuery)).then(
-          (value) =>
-            decodeChangePage(value, { lens: "attention", bounded: true }),
+        generationJSON(pageRequests.attention).then((value) =>
+          decodeChangePage(value, { lens: "attention", bounded: true }),
         ),
         historyRequest,
       ]);
@@ -995,6 +1005,7 @@ export async function bootstrapChangeInspector(
         timelineMonitor.observe(route, history);
       }
       visibleRequest = request;
+      visiblePageRequests = pageRequests;
       visibleHistoryFilters =
         (route.kind === "timeline" || route.kind === "event") &&
         history !== null
@@ -1110,29 +1121,44 @@ export async function bootstrapChangeInspector(
       return;
     }
     let request: string;
+    let pageRequests: ReturnType<typeof generationPageRequests>;
     try {
       request = requestKey(route);
+      pageRequests = generationPageRequests(route);
     } catch (error) {
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
       return;
     }
-    // A query change cannot display the prior semantic generation beneath its
-    // new URL. Lens/detail routes with the same query reuse the already-staged
-    // pair because both pages were atomically published together.
-    if (request === visibleRequest) {
-      const generation = state.snapshot().generation;
-      if (generation === null) {
-        await loadGeneration(route, newProjectionRetryBudget());
-      } else {
-        await loadReading(
-          route,
-          generation.changes.projectionStamp,
-          requestEpoch,
-          newProjectionRetryBudget(),
-        );
-        paint();
+    // A history page already publishes both companion lenses atomically.
+    // Reuse only their matching request identities in the same credential
+    // session. Exact document/postflight validation still belongs to
+    // loadReading; returning to history retains its existing reload path.
+    const generation = state.snapshot().generation;
+    const matchesRequest =
+      route.kind === "timeline" || route.kind === "event"
+        ? request === visibleRequest
+        : pageRequests.changes === visiblePageRequests?.changes &&
+          pageRequests.attention === visiblePageRequests?.attention;
+    if (
+      generation !== null &&
+      matchesRequest &&
+      state.matchesPublishedProfile(
+        generation.profile,
+        sessionCredentialVersion(),
+      )
+    ) {
+      if (route.kind !== "timeline" && route.kind !== "event") {
+        visibleRequest = request;
+        visibleHistoryFilters = "";
       }
+      await loadReading(
+        route,
+        generation.changes.projectionStamp,
+        requestEpoch,
+        newProjectionRetryBudget(),
+      );
+      paint();
     } else {
       clearVisibleRequest();
       clearReading();
