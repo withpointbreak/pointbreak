@@ -1544,6 +1544,49 @@ mod tests {
     }
 
     #[test]
+    fn change_create_leaves_legacy_state_projection_stale() {
+        // Two captures materialized `state.json`; the store is then activated to L2.
+        let root = ready_repo();
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(root.path()).unwrap();
+        let state_path = store.store_dir().join("state.json");
+        let bytes_before = std::fs::read(&state_path).unwrap();
+        let projected_before: serde_json::Value = serde_json::from_slice(&bytes_before).unwrap();
+        let event_count_before = projected_before["eventCount"].as_u64().unwrap();
+        let event_store = crate::session::EventStore::from_backend(store.backend());
+        let change_events_before = event_store.list_change_events().unwrap().len();
+
+        let receipt = create_change(ChangeCreateOptions::new(
+            root.path(),
+            "change-operation:test-stale-projection",
+            ChangeIdentityDescriptorV1::opaque_nonce([0x42; 32]),
+        ))
+        .unwrap();
+
+        assert!(receipt.complete);
+        assert_eq!(receipt.events.len(), 1);
+        assert_eq!(
+            receipt.events[0].outcome,
+            ChangeOperationEventOutcomeV1::Created
+        );
+        assert_eq!(
+            event_store.list_change_events().unwrap().len(),
+            change_events_before + 1,
+            "the Change event is durable"
+        );
+        // The receipt carries no diagnostics channel at all, and the legacy
+        // projection is neither refreshed nor marked: its bytes and count are
+        // exactly what the last capture published.
+        assert_eq!(std::fs::read(&state_path).unwrap(), bytes_before);
+        let projected_after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            projected_after["eventCount"].as_u64().unwrap(),
+            event_count_before
+        );
+    }
+
+    #[test]
     fn initial_capture_refuses_l0_before_proposal_or_operation_state() {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "--quiet"]);

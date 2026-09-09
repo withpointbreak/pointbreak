@@ -1912,3 +1912,41 @@ fn review_capture_path_composes_with_base_and_target() {
     assert_eq!(json["revision"]["base"]["kind"], "git_commit");
     assert_eq!(json["revision"]["target"]["kind"], "git_commit");
 }
+
+/// A `state.json` replacement that fails after the capture is durable is
+/// reported as a text advisory line as well as in the JSON receipt.
+#[cfg(unix)]
+#[test]
+fn capture_text_reports_a_failed_projection_refresh() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn v() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn v() -> u32 { 2 }\n");
+    let _ = capture_document(&repo);
+    let state_path = support::common_dir_store(repo.path()).join("state.json");
+    std::fs::remove_file(&state_path).unwrap();
+    std::fs::create_dir(&state_path).unwrap();
+    repo.write("src/lib.rs", "pub fn v() -> u32 { 3 }\n");
+
+    let text = pointbreak_env(
+        [
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--format",
+            "text",
+        ],
+        OFF,
+    );
+    let _ = std::fs::remove_dir(&state_path);
+    assert!(
+        text.status.success(),
+        "durable truth is acknowledged as success: {}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.contains("advisory: legacy state projection was not refreshed"),
+        "text receipt:\n{stdout}"
+    );
+}

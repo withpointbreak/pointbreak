@@ -36,7 +36,7 @@ pub use engagement::{EngagementGrouping, EngagementLifecycle, EngagementView};
 pub use event_history::rebind_event_history_source_projection_stamp;
 pub use id_index::{StoreIdIndex, store_id_index};
 pub use liveness::{LivenessScope, LivenessToken};
-pub(crate) use read::skipped_to_diagnostics;
+pub(crate) use read::{publish_legacy_state_projection, skipped_to_diagnostics};
 pub use read::{read_events, read_events_for_display, rebuild_state};
 pub use revisions_by_base::RevisionsByBase;
 pub use state::{ProjectionDiagnostic, SessionState};

@@ -22,6 +22,7 @@ use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
     validated_track_id,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -33,7 +34,7 @@ use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssessmentAddOptions {
@@ -369,16 +370,13 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
 
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(competing_candidates);
     diagnostics.extend(cross_actor_replacement);
     diagnostics.extend(unlinked_follow_up);
+    diagnostics.extend(projection_refresh);
 
     let result = AssessmentAddResult {
         revision_id: resolved.revision_id,

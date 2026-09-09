@@ -1209,13 +1209,17 @@ fn remove(
         options = signed;
         skip = signer_skip;
     }
-    let result = remove_content(options)?;
+    let mut result = remove_content(options)?;
     surface_best_effort_skip(&skip, stderr);
+    // The removal claim is durable before the workflow's projection diagnostics
+    // exist; carry them into the receipt instead of dropping them.
+    let diagnostics = std::mem::take(&mut result.diagnostics);
     let body = StoreRemoveBody::from(result);
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
-    let text = matches!(format.format, output::OutputFormat::Text)
-        .then(|| render_store_remove_text(&body));
-    let document = json::DiagnosticDocument::new("pointbreak.store-remove", body, vec![]);
+    let text = matches!(format.format, output::OutputFormat::Text).then(|| {
+        crate::cli::common::with_advisory_lines(render_store_remove_text(&body), &diagnostics)
+    });
+    let document = json::DiagnosticDocument::new("pointbreak.store-remove", body, diagnostics);
     output::write_document(stdout, format, &document, || {
         text.expect("text lane resolves the digest source")
     })

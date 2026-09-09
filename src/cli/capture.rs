@@ -185,7 +185,7 @@ fn render_change_capture_text(capture: &pointbreak::session::ChangeCaptureReceip
         "{} {file_word} · +{}/−{}",
         capture.diffstat.file_count, capture.diffstat.added_lines, capture.diffstat.removed_lines
     ));
-    lines.join("\n")
+    crate::cli::common::with_advisory_lines(lines.join("\n"), &capture.diagnostics)
 }
 
 fn random_operation_id() -> Result<String, Box<dyn std::error::Error>> {

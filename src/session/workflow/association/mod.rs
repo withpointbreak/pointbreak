@@ -26,6 +26,7 @@ use crate::session::event::{
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_read_store, resolve_write_store,
@@ -37,7 +38,7 @@ use crate::session::{
     WithdrawnCommitAssociation, WithdrawnRefAssociation, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 /// Which axis a listing or filter applies to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -891,11 +892,9 @@ where
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(projection_refresh);
 
     Ok(AssociationWriteOutcome {
         revision_id,
@@ -903,7 +902,7 @@ where
         events_created,
         events_existing,
         events_created_by_type,
-        diagnostics: state.diagnostics,
+        diagnostics,
         events,
     })
 }

@@ -8,6 +8,7 @@ use crate::session::event::{
     EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, resolve_effective_signer,
     stamp_ingest_provenance,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::EventWriteBatch;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -18,7 +19,7 @@ use crate::session::{
     SystemIngestClock, TrustSet, current_timestamp, gate_cosignature_for_store, is_valid_actor_id,
     verify_events_for_ingest, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 #[cfg(any(test, feature = "bench"))]
 std::thread_local! {
@@ -258,14 +259,13 @@ impl<'a> IngestBatchSession<'a> {
         drop(carrier_targets);
         let events = event_store.list_events()?;
         let state = SessionState::from_events(&events)?;
-        storage.write_json_atomic(
-            &store_dir.join("state.json"),
-            &state,
-            Durability::Projection,
-        )?;
+        // Publish the projection before releasing the batch authority; a failed
+        // replacement is reported, never a failed batch.
+        let projection_refresh = publish_legacy_state_projection(storage, store_dir, &state);
         drop(batch_writer);
         let mut diagnostics = state.diagnostics.clone();
         diagnostics.extend(ingest_diagnostics);
+        diagnostics.extend(projection_refresh);
         Ok(IngestBatchCompletion {
             events_created,
             events_existing,
@@ -2029,6 +2029,37 @@ mod tests {
         assert_eq!(
             verify_event_signature(&stored[0], &trust).unwrap(),
             EventVerificationStatus::Valid
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ingest_batch_reports_legacy_state_refresh_failure_without_failing_truth() {
+        let (_origin, events) = origin_events();
+        let total = events.len();
+        let dest = dest_repo();
+        let store = resolved_store_dir(dest.path());
+        // The batch publishes the projection before releasing its authority
+        // lock; a directory in the projection's place fails only that rename.
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir(store.join("state.json")).unwrap();
+
+        let outcome = ingest_events(IngestEventsOptions::new(dest.path(), events));
+        let _ = std::fs::remove_dir(store.join("state.json"));
+
+        assert_eq!(
+            EventStore::open(&store).list_events().unwrap().len(),
+            total,
+            "truth is durable regardless of the projection"
+        );
+        let outcome = outcome.expect("durable truth must be acknowledged as success");
+        assert_eq!(outcome.events_created, total);
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "legacy_state_projection_refresh_failed" }),
+            "a failed projection refresh degrades to a diagnostic, never an error"
         );
     }
 

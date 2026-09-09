@@ -450,6 +450,50 @@ mod tests {
         assert_eq!(on_disk, replay, "Existing path drifted from full replay");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn observation_add_reports_legacy_state_refresh_failure_without_failing_truth() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let store = resolved_store_dir(repo.path());
+        record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_track("agent:codex")
+                .with_title("materializes the projection")
+                .with_body("first"),
+        )
+        .unwrap();
+        let events_before = EventStore::open(&store).list_events().unwrap().len();
+
+        // Make the projection un-replaceable while events/ and the authority
+        // lock file stay writable.
+        std::fs::remove_file(store.join("state.json")).unwrap();
+        std::fs::create_dir(store.join("state.json")).unwrap();
+
+        let outcome = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_track("agent:codex")
+                .with_title("distinct observation")
+                .with_body("second"),
+        );
+        let _ = std::fs::remove_dir(store.join("state.json"));
+
+        assert_eq!(
+            EventStore::open(&store).list_events().unwrap().len(),
+            events_before + 1,
+            "truth is durable regardless of the projection"
+        );
+        let outcome = outcome.expect("durable truth must be acknowledged as success");
+        assert_eq!(outcome.events_created, 1);
+        assert!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "legacy_state_projection_refresh_failed" }),
+            "a failed projection refresh degrades to a diagnostic, never an error"
+        );
+    }
+
     #[test]
     fn explicit_same_idempotency_key_with_different_payload_conflicts() {
         let repo = modified_repo();

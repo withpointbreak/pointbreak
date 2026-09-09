@@ -18,6 +18,7 @@ use crate::session::event::{
     BodyContentType, EventTarget, EventType, ShoreEvent, ValidationCheckRecordedPayload,
     review_subject_id,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -28,7 +29,7 @@ use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidationAddOptions {
@@ -410,11 +411,9 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(projection_refresh);
 
     Ok(ValidationAddResult {
         revision_id: input.resolved.revision_id,
@@ -427,7 +426,7 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
         events_created,
         events_existing,
         events_created_by_type,
-        diagnostics: state.diagnostics,
+        diagnostics,
     })
 }
 

@@ -15,6 +15,7 @@ use crate::session::event::{
     InputRequestResponseOutcome, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::observation::staged_body;
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -25,7 +26,7 @@ use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestRespondOptions {
@@ -272,11 +273,9 @@ pub fn respond_input_request(
     } else {
         event_store.list_events()?
     })?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(projection_refresh);
 
     let result = InputRequestRespondResult {
         input_request_id: request_payload.input_request_id,
@@ -287,7 +286,7 @@ pub fn respond_input_request(
         events_created,
         events_existing,
         events_created_by_type,
-        diagnostics: state.diagnostics,
+        diagnostics,
     };
     Ok(result)
 }

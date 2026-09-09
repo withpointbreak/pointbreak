@@ -41,6 +41,32 @@ pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
     Ok(state)
 }
 
+/// Diagnostic code carried in a write result when the legacy `state.json`
+/// projection could not be replaced after the authoritative event was durable.
+pub(crate) const LEGACY_STATE_PROJECTION_REFRESH_FAILED: &str =
+    "legacy_state_projection_refresh_failed";
+
+/// Best-effort publication of the legacy `state.json` projection. The
+/// authoritative event is already durable when this runs, so a failed
+/// replacement never fails the enclosing command: it is returned as one
+/// diagnostic for the result's `diagnostics`, and the next successful
+/// projection-producing write (or `rebuild_state`) regenerates the file.
+pub(crate) fn publish_legacy_state_projection(
+    storage: &LocalStorage,
+    store_dir: &Path,
+    state: &SessionState,
+) -> Option<ProjectionDiagnostic> {
+    match storage.write_json_atomic(&store_dir.join("state.json"), state, Durability::Projection) {
+        Ok(()) => None,
+        Err(error) => Some(ProjectionDiagnostic {
+            code: LEGACY_STATE_PROJECTION_REFRESH_FAILED.to_owned(),
+            message: format!(
+                "legacy state projection was not refreshed after durable truth: {error}"
+            ),
+        }),
+    }
+}
+
 pub fn read_events(repo: impl AsRef<Path>) -> Result<Vec<ShoreEvent>> {
     let read_store = resolve_read_store(repo.as_ref())?;
     EventStore::from_backend(read_store.backend()).list_events()
@@ -112,6 +138,26 @@ mod tests {
         assert_eq!(diags[0].code, "unsupported_event_type");
         assert!(diags[0].message.contains("review_disposition_recorded"));
         assert!(diags[0].message.contains("#legacy-disposition-events"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publish_legacy_state_projection_reports_replacement_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(dir.path());
+        let state = SessionState::from_events(&[review_initialized()]).unwrap();
+        // A directory in the projection's place: the temp file still lands in
+        // the parent, only the final rename onto `state.json` fails.
+        std::fs::create_dir(dir.path().join("state.json")).unwrap();
+
+        let diagnostic = publish_legacy_state_projection(&storage, dir.path(), &state)
+            .expect("a failed replacement must yield a diagnostic");
+        assert_eq!(diagnostic.code, LEGACY_STATE_PROJECTION_REFRESH_FAILED);
+        assert!(diagnostic.message.contains("rename temp file"));
+
+        std::fs::remove_dir(dir.path().join("state.json")).unwrap();
+        assert!(publish_legacy_state_projection(&storage, dir.path(), &state).is_none());
+        assert!(dir.path().join("state.json").is_file());
     }
 
     #[test]

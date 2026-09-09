@@ -98,15 +98,18 @@ pub(super) fn run(
     // Bespoke text lane: a one-line receipt naming the endorsed event and the
     // attesting signer.
     let text = matches!(format.format, output::OutputFormat::Text).then(|| {
-        format!(
-            "endorsed {} · signer {} · {} created ({} existing)",
-            output::short_ref(&body.target_event_id),
-            body.attesting_signer,
-            crate::cli::common::count_label(body.events_created, "event", "events"),
-            body.events_existing,
+        crate::cli::common::with_advisory_lines(
+            format!(
+                "endorsed {} · signer {} · {} created ({} existing)",
+                output::short_ref(&body.target_event_id),
+                body.attesting_signer,
+                crate::cli::common::count_label(body.events_created, "event", "events"),
+                body.events_existing,
+            ),
+            &result.diagnostics,
         )
     });
-    let document = DiagnosticDocument::new("pointbreak.review-endorse", body, Vec::new());
+    let document = DiagnosticDocument::new("pointbreak.review-endorse", body, result.diagnostics);
     output::write_document(stdout, format, &document, || {
         text.expect("text lane resolves the digest source")
     })

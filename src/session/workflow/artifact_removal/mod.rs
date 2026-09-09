@@ -31,6 +31,7 @@ use crate::session::event::{
 };
 use crate::session::object_artifact::decode_and_validate_object_artifact;
 use crate::session::projection::cosignature::CosignatureIndex;
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -40,7 +41,7 @@ use crate::session::{
     current_timestamp, enrich_liveness, referenced_artifacts, sign_event_if_requested,
     writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage, RemoveOutcome};
+use crate::storage::{LocalStorage, RemoveOutcome};
 
 /// Which content a removal targets. Every variant resolves to a set of
 /// `content_hash`es before any event is emitted.
@@ -187,17 +188,15 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     // change SessionState; the rebuild keeps state.json fresh for concurrent
     // writers, never as the authority).
     let state = SessionState::from_events(&event_store.list_events()?)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, &store_dir, &state);
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(projection_refresh);
 
     Ok(RemoveResult {
         removed,
         events_created,
         events_existing,
-        diagnostics: state.diagnostics,
+        diagnostics,
     })
 }
 

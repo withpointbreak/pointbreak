@@ -258,3 +258,55 @@ fn text_endorse_receipt_names_target_and_signer() {
     assert!(stdout.contains("evt:"), "short target event id: {stdout}");
     assert!(stdout.contains("did:key:z"), "attesting signer: {stdout}");
 }
+
+/// A `state.json` replacement that fails after the endorsement carrier is
+/// durable is reported in the document's `diagnostics` and as a text advisory
+/// line, never as a command error.
+#[cfg(unix)]
+#[test]
+fn endorse_reports_a_failed_projection_refresh_in_json_and_text() {
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    let _ = pointbreak_env(
+        ["key", "init", "--name", "default"],
+        &[("POINTBREAK_HOME", home_str)],
+    );
+    let (repo, target) = capture_target(home_str);
+    let repo_arg = repo.path().to_str().unwrap();
+    let state_path = support::common_dir_store(repo.path()).join("state.json");
+    std::fs::remove_file(&state_path).unwrap();
+    std::fs::create_dir(&state_path).unwrap();
+
+    let json = pointbreak_env(
+        ["endorse", &target, "--repo", repo_arg, "--format", "json"],
+        &[("POINTBREAK_HOME", home_str)],
+    );
+    assert!(
+        json.status.success(),
+        "durable truth is acknowledged as success: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let document: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(document["eventsCreated"], 1);
+    assert!(
+        document["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "legacy_state_projection_refresh_failed"),
+        "diagnostics: {}",
+        document["diagnostics"]
+    );
+
+    let text = pointbreak_env(
+        ["endorse", &target, "--repo", repo_arg, "--format", "text"],
+        &[("POINTBREAK_HOME", home_str)],
+    );
+    let _ = std::fs::remove_dir(&state_path);
+    assert!(text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.contains("advisory: legacy state projection was not refreshed"),
+        "text receipt:\n{stdout}"
+    );
+}

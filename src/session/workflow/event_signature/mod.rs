@@ -30,6 +30,7 @@ use crate::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
     ShoreEvent, Writer, event_signature_pre_authentication_encoding,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
@@ -38,7 +39,7 @@ use crate::session::{
     CosignatureGateDecision, EventStore, EventWriteOutcome, TrustSet, current_timestamp,
     gate_cosignature_for_store, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 /// Options for recording a detached co-signature over an existing target event.
 ///
@@ -166,13 +167,10 @@ pub fn record_event_signature(
     };
 
     let state = SessionState::from_events(&event_store.list_events()?)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
 
-    let diagnostics = state.diagnostics;
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(projection_refresh);
 
     Ok(EventSignatureRecordResult {
         event_id,

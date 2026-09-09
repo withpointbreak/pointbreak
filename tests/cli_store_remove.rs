@@ -548,3 +548,63 @@ fn text_store_remove_digest_reports_claim_receipt() {
     assert!(stdout.contains("sha256:"), "content hash: {stdout}");
     assert!(stdout.contains("event"), "event receipt: {stdout}");
 }
+
+/// A `state.json` replacement that fails after the removal claim is durable is
+/// reported in the JSON document's `diagnostics` and as a text advisory line,
+/// never as a command error.
+#[cfg(unix)]
+#[test]
+fn store_remove_reports_a_failed_projection_refresh_in_json_and_text() {
+    let repo = modified_repo();
+    let captured = capture(repo.path());
+    let snapshot_id = captured["revision"]["objectId"].as_str().unwrap();
+    let repo_arg = repo.path().to_str().unwrap();
+    let state_path = support::common_dir_store(repo.path()).join("state.json");
+    fs::remove_file(&state_path).unwrap();
+    fs::create_dir(&state_path).unwrap();
+
+    let json = pointbreak([
+        "store",
+        "remove",
+        "--repo",
+        repo_arg,
+        "--snapshot",
+        snapshot_id,
+        "--format",
+        "json",
+    ]);
+    assert!(
+        json.status.success(),
+        "durable truth is acknowledged as success: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let document = parse_json(&json.stdout);
+    assert_eq!(document["eventsCreated"], 1);
+    assert!(
+        document["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "legacy_state_projection_refresh_failed"),
+        "diagnostics: {}",
+        document["diagnostics"]
+    );
+
+    let text = pointbreak([
+        "store",
+        "remove",
+        "--repo",
+        repo_arg,
+        "--snapshot",
+        snapshot_id,
+        "--format",
+        "text",
+    ]);
+    let _ = fs::remove_dir(&state_path);
+    assert!(text.status.success());
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.contains("advisory: legacy state projection was not refreshed"),
+        "text receipt:\n{stdout}"
+    );
+}

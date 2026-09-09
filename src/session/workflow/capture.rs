@@ -21,6 +21,7 @@ use crate::session::fingerprint::{
     ResolvedCommitEndpoint, ResolvedIndexEndpoint, ResolvedStagedBaseEndpoint,
     ResolvedTreeEndpoint, RevisionFingerprint, engagement_id_from_root, engagement_id_provisional,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_write_store,
     resolve_write_validation_store,
@@ -30,7 +31,7 @@ use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, ProjectionDiagnostic,
     SessionState, current_timestamp, sign_event_if_requested, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 /// Commit-range capture input: a base rev and an optional target rev (defaults
 /// to `HEAD`). Revs are resolved to commit OIDs at capture time; the spellings
@@ -626,16 +627,13 @@ fn capture_review_with_policy(
         CaptureWritePolicy::Change => event_store.list_change_events()?,
     };
     let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &store_dir.join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh = publish_legacy_state_projection(&storage, &store_dir, &state);
     // Write-through (INV-1) lands the capture in the store reads already resolve,
     // so there is no longer a batch-only diagnostic telling the user to run
     // `pointbreak store link` before their own capture is visible.
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(auto_record_diagnostics);
+    diagnostics.extend(projection_refresh);
 
     Ok(CaptureResult {
         journal_id,
@@ -2267,6 +2265,47 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "ref_association_auto_record_skipped"),
             "a failed auto-record degrades to a diagnostic, never an error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_reports_legacy_state_refresh_failure_without_failing_truth() {
+        let repo = committed_repo();
+        repo.git(["branch", "-M", "main"]);
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let first = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let store = resolved_store_dir(repo.path());
+        let events_before = EventStore::open(&store).list_events().unwrap().len();
+
+        // Make the projection un-replaceable while `events/` and the authority
+        // lock file stay writable: only the final rename onto `state.json` fails.
+        fs::remove_file(store.join("state.json")).unwrap();
+        fs::create_dir(store.join("state.json")).unwrap();
+
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+        let again = capture_worktree_review(CaptureOptions::new(repo.path()));
+
+        // Restore a plain path so the tempdir can clean up regardless of outcome.
+        let _ = fs::remove_dir(store.join("state.json"));
+
+        // On a named branch each distinct capture publishes two events: the
+        // proposal and the auto-recorded ref association.
+        let events_after = EventStore::open(&store).list_events().unwrap().len();
+        assert_eq!(
+            events_after,
+            events_before + 2,
+            "truth is durable regardless of the projection"
+        );
+        let again = again.expect("durable truth must be acknowledged as success");
+        assert_ne!(again.revision_id, first.revision_id);
+        assert_eq!(again.events_created, 2);
+        assert!(
+            again
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "legacy_state_projection_refresh_failed" }),
+            "a failed projection refresh degrades to a diagnostic, never an error"
         );
     }
 
