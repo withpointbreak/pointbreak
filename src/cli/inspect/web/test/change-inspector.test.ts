@@ -461,8 +461,14 @@ describe("published generation reuse", () => {
           .changeReadingKey,
       ).toContain(formatChangeInspectorRoute(route));
     });
-  async function start(route = timeline) {
+  async function setInitialRoute(route: string) {
     history.replaceState(null, "", `/${route}`);
+    // Happy DOM queues hashchange for replaceState. Settle fixture navigation
+    // before bootstrap installs the listener for the user action under test.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  async function start(route = timeline) {
+    await setInitialRoute(route);
     const requests = serveComposition(activationHistoryPage());
     const { bootstrapChangeInspector } = await import(
       "../src/change-inspector"
@@ -539,7 +545,7 @@ describe("published generation reuse", () => {
   });
 
   it("keeps contextual exact membership authoritative when both bounded pages omit the Change", async () => {
-    history.replaceState(null, "", `/${timeline}`);
+    await setInitialRoute(timeline);
     const requests = serveComposition(activationHistoryPage());
     const fetch = globalThis.fetch;
     globalThis.fetch = vi.fn(
