@@ -1627,7 +1627,9 @@ mod tests {
     use crate::session::derived_access::generation::{GenerationProgress, GenerationProgressPhase};
     use crate::session::derived_access::lifecycle::LifecycleControl;
     use crate::session::derived_access::sqlite::StoreWriterLock;
-    use crate::session::derived_access::writer::DerivedWriteCoordinator;
+    use crate::session::derived_access::writer::{
+        DerivedWriteCoordinator, take_process_diagnostics,
+    };
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, InputRequestResponseOutcome,
         ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision, ShoreEvent,
@@ -1655,9 +1657,11 @@ mod tests {
         (temp, access)
     }
 
-    /// A second, governed writer on the same store: every append catches the
-    /// published generation up synchronously on the calling thread.
-    fn governed_append_fixture(store_dir: &Path) -> EventStore {
+    /// Keep checkpoint movement under the hook's control. A Ready read can
+    /// otherwise schedule native-cursor maintenance that competes with the
+    /// product writer's intentionally nonblocking derived admission.
+    fn governed_append_fixture(store_dir: &Path, access: &DerivedHistoryAccess) -> EventStore {
+        access.pause_background_worker_for_test();
         let lifecycle = DerivedAccessLifecycle::new(
             DerivedAccessProfile::SqliteWalBodylessV1,
             store_dir,
@@ -1665,12 +1669,23 @@ mod tests {
         )
         .expect("open governed lifecycle");
         let coordinator = DerivedWriteCoordinator::new(lifecycle).expect("admit governed writer");
+        let diagnostics = coordinator.take_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "fixture writer admission failed: {diagnostics:#?}"
+        );
         EventStore::open(store_dir).with_coordinator(coordinator)
     }
 
     fn current_checkpoint(access: &DerivedHistoryAccess) -> TruthCursor {
-        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
-            panic!("fixture generation must remain current");
+        let current = match access.current().expect("read current generation") {
+            CurrentRead::Ready(current) => current,
+            CurrentRead::Unavailable(status) => panic!(
+                "fixture checkpoint unavailable ({:?}: {:?}); append diagnostics: {:#?}",
+                status.availability,
+                status.detail,
+                take_process_diagnostics()
+            ),
         };
         current
             .service()
@@ -1678,14 +1693,10 @@ mod tests {
             .expect("read fixture checkpoint")
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_history_ready_response_derives_from_one_checkpoint() {
         let (temp, access) = active_history(2);
-        let governed = governed_append_fixture(temp.path());
+        let governed = governed_append_fixture(temp.path(), &access);
         let event = review_initialized(2);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
@@ -1734,14 +1745,10 @@ mod tests {
         }
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_new_count_ready_response_derives_from_one_checkpoint() {
         let (temp, access) = active_history(2);
-        let governed = governed_append_fixture(temp.path());
+        let governed = governed_append_fixture(temp.path(), &access);
         let event = review_initialized(2);
         let first = review_initialized(0);
         let since = HistoryCursor {
@@ -1835,14 +1842,10 @@ mod tests {
         (temp, access, revision_id)
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_history_refuses_a_representative_replacement_after_the_context_read() {
         let (temp, access, revision_id) = active_history_with_revision();
-        let governed = governed_append_fixture(temp.path());
+        let governed = governed_append_fixture(temp.path(), &access);
         let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
@@ -1889,14 +1892,10 @@ mod tests {
         assert_eq!(settled.event_count, usize::try_from(before + 1).unwrap());
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_attention_refuses_a_write_after_the_snapshot_read() {
         let (temp, access, revision_id) = active_history_with_revision();
-        let governed = governed_append_fixture(temp.path());
+        let governed = governed_append_fixture(temp.path(), &access);
         let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
@@ -1936,14 +1935,10 @@ mod tests {
         assert_eq!(settled.event_count, usize::try_from(before + 1).unwrap());
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_attention_ready_response_derives_from_one_checkpoint() {
         let (temp, access) = active_history(2);
-        let governed = governed_append_fixture(temp.path());
+        let governed = governed_append_fixture(temp.path(), &access);
         let event = review_initialized(2);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;

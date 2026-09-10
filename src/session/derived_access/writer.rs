@@ -749,6 +749,49 @@ mod tests {
     }
 
     #[test]
+    fn product_write_publishes_while_derived_writer_is_busy() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(0)).unwrap();
+        let lifecycle = active_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).unwrap();
+        assert!(coordinator.take_diagnostics().is_empty());
+        let store_root = root.path().to_path_buf();
+        let appended = event(1);
+        let idempotency_key = appended.idempotency_key.clone();
+
+        // Keep the contender locked until the product write has responded. The
+        // timeout releases it even if a regression starts waiting for this lock.
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        let (result_tx, result_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            let store = EventStore::open(&store_root).with_coordinator(coordinator);
+            let outcome = store.record_event_once(&appended);
+            result_tx
+                .send((outcome, store.take_write_diagnostics()))
+                .unwrap();
+        });
+        let result = result_rx.recv_timeout(Duration::from_secs(5));
+        let published_while_busy = truth.event_exists(&idempotency_key).unwrap();
+        drop(held);
+        writer.join().unwrap();
+
+        let (outcome, diagnostics) =
+            result.expect("product truth publication must not require the derived lock");
+        assert_eq!(outcome.unwrap(), EventWriteOutcome::Created);
+        assert!(published_while_busy);
+        assert_eq!(truth.list_events().unwrap().len(), 2);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "derived_access_generation_unavailable");
+        assert!(
+            diagnostics[0]
+                .message
+                .contains("derived-access writer is busy")
+        );
+    }
+
+    #[test]
     fn qualification_write_waits_for_a_busy_writer_before_publishing_truth() {
         let root = TempDir::new().unwrap();
         let truth = EventStore::open(root.path());

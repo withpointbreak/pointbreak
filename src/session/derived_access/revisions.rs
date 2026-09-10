@@ -921,7 +921,9 @@ mod tests {
     use crate::session::derived_access::history::DerivedHistoryAvailability;
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
-    use crate::session::derived_access::writer::DerivedWriteCoordinator;
+    use crate::session::derived_access::writer::{
+        DerivedWriteCoordinator, take_process_diagnostics,
+    };
     use crate::session::event::{
         ArtifactRemovedPayload, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent,
         WorkObjectProposal, WorkObjectProposedPayload, Writer,
@@ -1112,9 +1114,11 @@ mod tests {
         revision_proposal_at("2000-01-01T00:00:00Z")
     }
 
-    /// A second, governed writer on the same store: every append catches the
-    /// published generation up synchronously on the calling thread.
-    fn governed_append_fixture(store_dir: &Path) -> EventStore {
+    /// Keep checkpoint movement under the hook's control. A Ready read can
+    /// otherwise schedule native-cursor maintenance that competes with the
+    /// product writer's intentionally nonblocking derived admission.
+    fn governed_append_fixture(store_dir: &Path, access: &DerivedHistoryAccess) -> EventStore {
+        access.pause_background_worker_for_test();
         let lifecycle = DerivedAccessLifecycle::new(
             DerivedAccessProfile::SqliteWalBodylessV1,
             store_dir,
@@ -1122,12 +1126,23 @@ mod tests {
         )
         .expect("open governed lifecycle");
         let coordinator = DerivedWriteCoordinator::new(lifecycle).expect("admit governed writer");
+        let diagnostics = coordinator.take_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "fixture writer admission failed: {diagnostics:#?}"
+        );
         EventStore::open(store_dir).with_coordinator(coordinator)
     }
 
     fn current_checkpoint(access: &DerivedHistoryAccess) -> TruthCursor {
-        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
-            panic!("fixture generation must remain current");
+        let current = match access.current().expect("read current generation") {
+            CurrentRead::Ready(current) => current,
+            CurrentRead::Unavailable(status) => panic!(
+                "fixture checkpoint unavailable ({:?}: {:?}); append diagnostics: {:#?}",
+                status.availability,
+                status.detail,
+                take_process_diagnostics()
+            ),
         };
         current
             .service()
@@ -1174,16 +1189,12 @@ mod tests {
             .expect("a canonically earlier carrier within the nonce budget")
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_revision_page_refuses_a_representative_replacement_after_the_context_read() {
         let (repo, access, revision_id) = active_captured_repo();
         let read_store = resolve_read_store(repo.path()).expect("resolve store");
         let store = EventStore::open(read_store.store_dir());
-        let governed = governed_append_fixture(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir(), &access);
         let replacement = earlier_carrier_for(&store, &revision_id);
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let request = RevisionPageRequest::new(None, None).unwrap();
@@ -1256,16 +1267,12 @@ mod tests {
         );
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_revision_detail_refuses_a_write_after_the_context_read() {
         let (repo, access, revision_id) = active_captured_repo();
         let read_store = resolve_read_store(repo.path()).expect("resolve store");
         let store = EventStore::open(read_store.store_dir());
-        let governed = governed_append_fixture(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir(), &access);
         let replacement = earlier_carrier_for(&store, &revision_id);
         let options = || {
             RevisionShowOptions::new(repo.path())
@@ -1303,15 +1310,11 @@ mod tests {
         ));
     }
 
-    #[cfg_attr(
-        windows,
-        ignore = "the governed writer's catch-up is not applied synchronously on Windows CI; see #743"
-    )]
     #[test]
     fn legacy_revision_page_ready_response_derives_from_one_checkpoint() {
         let (repo, access, _) = active_captured_repo();
         let read_store = resolve_read_store(repo.path()).expect("resolve store");
-        let governed = governed_append_fixture(read_store.store_dir());
+        let governed = governed_append_fixture(read_store.store_dir(), &access);
         let (event, _revision_id) = revision_proposal_at("2026-07-28T14:00:00Z");
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let request = RevisionPageRequest::new(None, None).unwrap();
