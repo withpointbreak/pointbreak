@@ -15,6 +15,7 @@ use crate::git::{capture_commit_range_diff_files, git_commit_tree_oid, git_rev_p
 use crate::model::{
     ActorId, DiffFile, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource, TargetRef,
 };
+use crate::session::acknowledgement::{DerivedWriteAggregate, EventWriteAcknowledgement};
 use crate::session::event::{
     EventTarget, EventType, RelationProofStatusV1, RevisionRelationAttestationDraftV1,
     SemanticRevisionRelationV1, ShoreEvent, build_commit_association_id,
@@ -25,15 +26,17 @@ use crate::session::evidence::{
     RelationProofManifestV1, canonical_candidate_diff_entries, canonical_diff_entries,
     evaluate_relation_proof_v1,
 };
+use crate::session::projection::{LegacyProjectionRefresh, publish_legacy_state_projection};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
-    AssociateCommitOptions, BestEffortSkipSink, EventSigningOptions, EventWriteOutcome,
-    ReviewCursorV1, RevisionShowOptions, SessionState, associate_commit, current_timestamp,
+    AssociateCommitOptions, AssociateCommitResult, BestEffortSkipSink, EventSigningOptions,
+    EventWriteOutcome, LegacyProjectionStateV1, ProjectionDiagnostic, ReviewCursorV1,
+    RevisionShowOptions, SessionState, WriteAcknowledgementV1, associate_commit, current_timestamp,
     show_revision_for_change_reader, sign_event_if_requested, validated_track_id,
     writer_from_options,
 };
-use crate::storage::{CreateOutcome, Durability, LocalStorage};
+use crate::storage::{CreateOutcome, LocalStorage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LandCommitOptions {
@@ -111,9 +114,18 @@ pub struct LandCommitResultV1 {
     pub relation_attestation_id: crate::model::RevisionRelationAttestationId,
     pub relation_attestation_created: bool,
     pub message: String,
+    pub acknowledgement: WriteAcknowledgementV1,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
+    land_commit_with_after_association(options, || {})
+}
+
+fn land_commit_with_after_association(
+    options: LandCommitOptions,
+    after_association: impl FnOnce(),
+) -> Result<LandCommitResultV1> {
     if options.allow_extension && options.provenance_only {
         return Err(ShoreError::WorkflowInputInvalid {
             reason: "--allow-extension cannot be combined with --provenance-only".to_owned(),
@@ -235,6 +247,8 @@ pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
         ));
     }
 
+    after_association();
+
     let attestation = build_revision_relation_attested(RevisionRelationAttestationDraftV1 {
         revision: revision.clone(),
         commit_association_id: association_id.clone(),
@@ -270,14 +284,18 @@ pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
     )?;
     sign_event_if_requested(&mut event, &options.signing)?;
     let event_store = write_store.event_store()?;
-    let attestation_outcome = event_store.record_change_event_once(&event)?;
+    let attestation_acknowledgement = event_store.record_change_event_once_acknowledged(&event)?;
+    let attestation_outcome = attestation_acknowledgement.outcome;
     let events = event_store.list_change_events()?;
     let state = SessionState::from_events(&events)?;
-    storage.write_json_atomic(
-        &write_store.store_dir().join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh =
+        publish_legacy_state_projection(&storage, write_store.store_dir(), &state);
+    let (acknowledgement, diagnostics) = landing_acknowledgement(
+        proof_outcome,
+        &association,
+        attestation_acknowledgement,
+        projection_refresh,
+    );
 
     let message = match proof.result.semantic_relation {
         SemanticRevisionRelationV1::ExactMaterialization => {
@@ -314,7 +332,40 @@ pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
         relation_attestation_id: attestation.relation_attestation_id,
         relation_attestation_created: attestation_outcome == EventWriteOutcome::Created,
         message,
+        acknowledgement,
+        diagnostics,
     })
+}
+
+/// Proof storage has no derived write; only the two event calls contribute tokens.
+fn landing_acknowledgement(
+    proof: CreateOutcome,
+    association: &AssociateCommitResult,
+    attestation: EventWriteAcknowledgement,
+    refresh: LegacyProjectionRefresh,
+) -> (WriteAcknowledgementV1, Vec<ProjectionDiagnostic>) {
+    let mut derived = DerivedWriteAggregate::default();
+    let mut diagnostics = association.diagnostics.clone();
+    derived.add(association.acknowledgement.derived.clone(), []);
+    let attestation_created = derived.record(attestation) == EventWriteOutcome::Created;
+    let proof_created = proof == CreateOutcome::Created;
+    let legacy = if association.acknowledgement.legacy_projection_state
+        == LegacyProjectionStateV1::RefreshFailed
+    {
+        LegacyProjectionStateV1::RefreshFailed
+    } else {
+        refresh.state
+    };
+    let acknowledgement = derived.finish(
+        association.events_created + usize::from(proof_created) + usize::from(attestation_created),
+        association.events_existing
+            + usize::from(!proof_created)
+            + usize::from(!attestation_created),
+        legacy,
+        &mut diagnostics,
+    );
+    diagnostics.extend(refresh.diagnostic);
+    (acknowledgement, diagnostics)
 }
 
 fn attribution_inputs(
@@ -466,6 +517,45 @@ mod tests {
 
     #[test]
     fn exact_landing_publishes_proof_before_retry_stable_relation_state() {
+        let (root, selected) = landing_fixture();
+        let first = land_commit(LandCommitOptions::new(
+            root.path(),
+            &selected,
+            "track:author",
+            "HEAD",
+        ))
+        .unwrap();
+        assert_eq!(
+            first.proof.result.semantic_relation,
+            SemanticRevisionRelationV1::ExactMaterialization
+        );
+        assert_eq!(
+            first.acknowledgement.authority_outcome,
+            crate::session::AuthorityWriteOutcomeV1::Created
+        );
+        assert!(first.diagnostics.is_empty());
+        assert!(first.proof_created);
+        assert!(first.structural_association_created);
+        assert!(first.relation_attestation_created);
+
+        let retry = land_commit(LandCommitOptions::new(
+            root.path(),
+            selected,
+            "track:author",
+            "HEAD",
+        ))
+        .unwrap();
+        assert_eq!(first.proof, retry.proof);
+        assert_eq!(
+            retry.acknowledgement.authority_outcome,
+            crate::session::AuthorityWriteOutcomeV1::Existing
+        );
+        assert!(!retry.proof_created);
+        assert!(!retry.structural_association_created);
+        assert!(!retry.relation_attestation_created);
+    }
+
+    fn landing_fixture() -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "--quiet"]);
         git(root.path(), &["config", "user.name", "Pointbreak Test"]);
@@ -528,32 +618,156 @@ mod tests {
             commit_binding,
         )
         .unwrap();
-        let first = land_commit(LandCommitOptions::new(
-            root.path(),
-            &selected.token,
-            "track:author",
-            "HEAD",
-        ))
-        .unwrap();
-        assert_eq!(
-            first.proof.result.semantic_relation,
-            SemanticRevisionRelationV1::ExactMaterialization
-        );
-        assert!(first.proof_created);
-        assert!(first.structural_association_created);
-        assert!(first.relation_attestation_created);
 
-        let retry = land_commit(LandCommitOptions::new(
+        (root, selected.token)
+    }
+
+    #[test]
+    fn landing_acknowledgement_mixes_existing_association_with_new_proof_and_attestation() {
+        let (root, selected) = landing_fixture();
+        associate_commit(
+            AssociateCommitOptions::new(root.path(), "HEAD")
+                .with_review_cursor(selected.clone())
+                .with_track("track:author"),
+        )
+        .unwrap();
+        let result = land_commit(LandCommitOptions::new(
             root.path(),
-            selected.token,
+            selected,
             "track:author",
             "HEAD",
         ))
         .unwrap();
-        assert_eq!(first.proof, retry.proof);
-        assert!(!retry.proof_created);
-        assert!(!retry.structural_association_created);
-        assert!(!retry.relation_attestation_created);
+        assert!(result.proof_created);
+        assert!(!result.structural_association_created);
+        assert!(result.relation_attestation_created);
+        assert_eq!(
+            result.acknowledgement.authority_outcome,
+            crate::session::AuthorityWriteOutcomeV1::Mixed
+        );
+    }
+
+    #[test]
+    fn landing_acknowledgement_merges_only_compatible_event_tokens() {
+        use crate::session::acknowledgement::EventWriteAcknowledgement;
+        use crate::session::projection::LegacyProjectionRefresh;
+        use crate::session::{
+            DerivedVisibilityTokenV1, DerivedWriteAcknowledgementV1, DerivedWriteAvailabilityV1,
+            LegacyProjectionStateV1,
+        };
+        let (root, selected) = landing_fixture();
+        let mut association = associate_commit(
+            AssociateCommitOptions::new(root.path(), "HEAD")
+                .with_review_cursor(selected)
+                .with_track("track:author"),
+        )
+        .unwrap();
+        for (generation, epoch, expected) in [
+            ("g1", 3, DerivedWriteAvailabilityV1::CatchingUp),
+            ("g2", 3, DerivedWriteAvailabilityV1::Unavailable),
+            ("g1", 4, DerivedWriteAvailabilityV1::Unavailable),
+        ] {
+            association.acknowledgement.derived = DerivedWriteAcknowledgementV1::new(
+                DerivedWriteAvailabilityV1::Current,
+                Some(DerivedVisibilityTokenV1 {
+                    generation_id: "g1".into(),
+                    epoch: 3,
+                    head_sequence: 5,
+                }),
+            )
+            .unwrap();
+            let attestation = EventWriteAcknowledgement::new(
+                EventWriteOutcome::Created,
+                DerivedWriteAvailabilityV1::CatchingUp,
+                Some(DerivedVisibilityTokenV1 {
+                    generation_id: generation.into(),
+                    epoch,
+                    head_sequence: 9,
+                }),
+                Vec::new(),
+            );
+            let (ack, diagnostics) = landing_acknowledgement(
+                CreateOutcome::Created,
+                &association,
+                attestation,
+                LegacyProjectionRefresh {
+                    state: LegacyProjectionStateV1::Refreshed,
+                    diagnostic: None,
+                },
+            );
+            assert_eq!(ack.derived.availability, expected);
+            if expected == DerivedWriteAvailabilityV1::CatchingUp {
+                assert_eq!(ack.derived.token.unwrap().head_sequence, 9);
+            } else {
+                assert!(ack.derived.token.is_none());
+                assert!(
+                    diagnostics
+                        .iter()
+                        .any(|d| d.code == "derived_write_token_conflict")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn landing_acknowledgement_preserves_each_refresh_failure() {
+        use crate::session::LegacyProjectionStateV1;
+        for (structural_fails, final_fails) in [(true, false), (false, true), (true, true)] {
+            let (root, selected) = landing_fixture();
+            let write_store = resolve_change_write_store(root.path()).unwrap();
+            let path = write_store.store_dir().join("state.json");
+            if structural_fails {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+            let result = land_commit_with_after_association(
+                LandCommitOptions::new(root.path(), &selected, "track:author", "HEAD"),
+                || {
+                    if structural_fails && !final_fails {
+                        std::fs::remove_dir(&path).unwrap();
+                    }
+                    if !structural_fails && final_fails {
+                        std::fs::remove_file(&path).unwrap();
+                        std::fs::create_dir(&path).unwrap();
+                    }
+                },
+            )
+            .expect("legacy refresh failure follows durable truth and is advisory");
+            assert!(result.relation_attestation_created);
+            assert_eq!(
+                result.acknowledgement.legacy_projection_state,
+                LegacyProjectionStateV1::RefreshFailed
+            );
+            let failures: Vec<_> = result
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
+                .collect();
+            assert_eq!(
+                failures.len(),
+                usize::from(structural_fails) + usize::from(final_fails)
+            );
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(json["schema"], "pointbreak.association-land.v1");
+            assert_eq!(json["message"], result.message);
+            assert!(json["acknowledgement"].is_object());
+            assert!(json["diagnostics"].is_array());
+            if final_fails {
+                std::fs::remove_dir(&path).unwrap();
+            }
+            let retry = land_commit(LandCommitOptions::new(
+                root.path(),
+                selected,
+                "track:author",
+                "HEAD",
+            ))
+            .unwrap();
+            assert!(!retry.relation_attestation_created);
+            assert_eq!(
+                retry.acknowledgement.legacy_projection_state,
+                LegacyProjectionStateV1::Refreshed
+            );
+        }
     }
 
     #[test]
