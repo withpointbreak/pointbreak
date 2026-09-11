@@ -937,10 +937,119 @@ impl GitBackend for SubprocessBackend {
         git_rev_parse_peeled(repo, commit_oid, "tree", "commit tree oid")
     }
 
+    fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
+        let cannot_read = || {
+            ShoreError::Message(format!(
+                "cannot read commit parents for '{commit_oid}' in this repository"
+            ))
+        };
+        let valid_oid =
+            |oid: &[u8]| oid.len() == commit_oid.len() && oid.iter().all(u8::is_ascii_hexdigit);
+        if !matches!(commit_oid.len(), 40 | 64) || !valid_oid(commit_oid.as_bytes()) {
+            return Err(cannot_read());
+        }
+        // Exact object reads must not peel tags or consult replacement objects.
+        let kind = run_git(repo, ["--no-replace-objects", "cat-file", "-t", commit_oid])
+            .map_err(|_| cannot_read())?;
+        if kind.stdout != b"commit\n" {
+            return Err(cannot_read());
+        }
+        let output = run_git(
+            repo,
+            ["--no-replace-objects", "cat-file", "commit", commit_oid],
+        )
+        .map_err(|_| cannot_read())?;
+        let header_end = output
+            .stdout
+            .windows(2)
+            .position(|bytes| bytes == b"\n\n")
+            .ok_or_else(cannot_read)?;
+        let mut lines = output.stdout[..header_end].split(|byte| *byte == b'\n');
+        let tree = lines
+            .next()
+            .and_then(|line| line.strip_prefix(b"tree "))
+            .ok_or_else(cannot_read)?;
+        if !valid_oid(tree) {
+            return Err(cannot_read());
+        }
+        let mut parents = Vec::new();
+        for line in lines.by_ref() {
+            if let Some(parent) = line.strip_prefix(b"parent ") {
+                if !valid_oid(parent) {
+                    return Err(cannot_read());
+                }
+                parents.push(
+                    String::from_utf8(parent.to_ascii_lowercase()).map_err(|_| cannot_read())?,
+                );
+            } else {
+                if !line
+                    .strip_prefix(b"author ")
+                    .is_some_and(valid_commit_signature)
+                    || !lines
+                        .next()
+                        .and_then(|line| line.strip_prefix(b"committer "))
+                        .is_some_and(valid_commit_signature)
+                {
+                    return Err(cannot_read());
+                }
+                let mut lines = lines.peekable();
+                if lines
+                    .peek()
+                    .is_some_and(|line| line.starts_with(b"encoding "))
+                {
+                    lines.next();
+                }
+                let mut can_continue = false;
+                for line in lines {
+                    if line.starts_with(b" ") {
+                        if !can_continue {
+                            return Err(cannot_read());
+                        }
+                    } else if line
+                        .iter()
+                        .position(|byte| *byte == b' ')
+                        .is_some_and(|index| index > 0)
+                    {
+                        can_continue = true;
+                    } else {
+                        return Err(cannot_read());
+                    }
+                }
+                return Ok(parents);
+            }
+        }
+        Err(cannot_read())
+    }
+
     fn empty_tree_oid(&self, repo: &Path) -> Result<String> {
         let output = run_git_with_stdin(repo, ["hash-object", "-t", "tree", "--stdin"], b"", &[0])?;
         git_stdout_string(repo, &output.stdout, "empty tree oid")
     }
+}
+
+/// Commit signatures permit opaque name/email bytes and Git's raw time spelling.
+fn valid_commit_signature(value: &[u8]) -> bool {
+    let Some(close) = value.iter().rposition(|byte| *byte == b'>') else {
+        return false;
+    };
+    let Some(open) = value[..close].iter().position(|byte| *byte == b'<') else {
+        return false;
+    };
+    let email_start = open
+        + value[open..]
+            .iter()
+            .take_while(|byte| **byte == b'<')
+            .count();
+    let email_end = close
+        - value[..close]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'>')
+            .count();
+    email_start <= email_end
+        && value[close + 1..]
+            .iter()
+            .all(|byte| matches!(byte, b'+' | b'-' | b'0'..=b'9' | b' ' | b'\t'))
 }
 
 impl SubprocessBackend {

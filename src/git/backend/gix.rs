@@ -855,6 +855,28 @@ impl GitBackend for GixBackend {
         Ok(tree_id.detach().to_string())
     }
 
+    fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
+        let cannot_read = || {
+            ShoreError::Message(format!(
+                "cannot read commit parents for '{commit_oid}' in this repository"
+            ))
+        };
+        let mut repository = open(repo).map_err(|_| cannot_read())?;
+        repository.objects.ignore_replacements = true;
+        let oid = parse_oid(commit_oid).map_err(|_| cannot_read())?;
+        let commit = repository.find_commit(oid).map_err(|_| cannot_read())?;
+        let decoded = commit.decode().map_err(|_| cannot_read())?;
+        decoded
+            .parents
+            .iter()
+            .map(|parent| {
+                parse_oid(std::str::from_utf8(parent).map_err(|_| cannot_read())?)
+                    .map(|oid| oid.to_string())
+                    .map_err(|_| cannot_read())
+            })
+            .collect()
+    }
+
     fn empty_tree_oid(&self, repo: &Path) -> Result<String> {
         let repository = open(repo)?;
         Ok(::gix::ObjectId::empty_tree(repository.object_hash()).to_string())

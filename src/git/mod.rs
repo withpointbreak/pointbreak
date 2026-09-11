@@ -12,6 +12,9 @@ mod raw;
 /// re-exported; it is not part of the supported library surface.
 #[doc(hidden)]
 pub use backend::validate_backend_selector;
+// Consumed by landing preparation once its dependency is integrated.
+#[allow(unused_imports)]
+pub(crate) use command::git_commit_parent_oids;
 #[cfg(test)]
 pub(crate) use command::git_info_exclude_path;
 pub(crate) use command::{

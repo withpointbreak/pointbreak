@@ -222,6 +222,14 @@ pub(crate) fn git_commit_tree_oid(repo: &Path, commit_oid: &str) -> Result<Strin
     dispatch(BackendClass::IdentityScalars)?.commit_tree_oid(repo, commit_oid)
 }
 
+/// Read the ordered parent headers of an exact commit object, even at a shallow
+/// boundary. A root returns no parents; invalid or unavailable objects fail.
+// Consumed by landing preparation once its dependency is integrated.
+#[allow(dead_code)]
+pub(crate) fn git_commit_parent_oids(repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
+    dispatch(BackendClass::IdentityScalars)?.commit_parent_oids(repo, commit_oid)
+}
+
 /// Compute the empty tree OID using the repository's configured object format.
 /// This deliberately asks Git instead of embedding the SHA-1 empty-tree
 /// constant, so SHA-256 repositories use their own empty-tree identity.
@@ -308,6 +316,43 @@ mod tests {
     };
     use crate::git::ingest::{diff_funnel_spawns, reset_diff_funnel_spawns};
     use crate::git::ingest_tracked_diff;
+
+    #[test]
+    fn commit_parent_oids_dispatches_and_preserves_root_identity() {
+        use crate::git::backend::{BackendSelector, inject_selector, reset_selector};
+        let repo = TwoCommitRepo::new();
+        let root = git_rev_parse_commit_oid(repo.path(), "HEAD~1").unwrap();
+        let head = git_head_oid(repo.path()).unwrap();
+        let mut selectors = vec![BackendSelector::ForceSubprocess];
+        if cfg!(feature = "gix") {
+            selectors.push(BackendSelector::ForceGix);
+        }
+        for selector in selectors {
+            inject_selector(selector);
+            reset_backend_tag();
+            assert_eq!(
+                crate::git::git_commit_parent_oids(repo.path(), &head).unwrap(),
+                vec![root.clone()]
+            );
+            assert_eq!(
+                last_backend_tag(),
+                Some(match selector {
+                    #[cfg(feature = "gix")]
+                    BackendSelector::ForceGix => BackendTag::Gix,
+                    _ => BackendTag::Subprocess,
+                })
+            );
+            assert!(
+                git_commit_parent_oids(repo.path(), &root)
+                    .unwrap()
+                    .is_empty()
+            );
+            for oid in ["--batch", "HEAD", "abc"] {
+                assert!(git_commit_parent_oids(repo.path(), oid).is_err());
+            }
+        }
+        reset_selector();
+    }
 
     #[test]
     fn routable_helpers_dispatch_through_a_backend() {

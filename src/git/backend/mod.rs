@@ -77,6 +77,7 @@ pub(crate) trait GitBackend: Send + Sync {
     fn head_commit_oid_optional(&self, repo: &Path) -> Result<Option<String>>;
     fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String>;
     fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String>;
+    fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>>;
     fn empty_tree_oid(&self, repo: &Path) -> Result<String>;
 }
 
@@ -224,6 +225,10 @@ impl GitBackend for GitBackendKind {
 
     fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String> {
         self.as_backend().commit_tree_oid(repo, commit_oid)
+    }
+
+    fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
+        self.as_backend().commit_parent_oids(repo, commit_oid)
     }
 
     fn empty_tree_oid(&self, repo: &Path) -> Result<String> {

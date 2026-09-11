@@ -366,7 +366,152 @@ fn identity_scalar_vectors() -> Vec<VectorVerdict> {
         }));
     }
 
+    verdicts.extend(commit_parent_vectors(&root_commit_fixture()));
+    if let Some(sha256) = maybe_sha256_repo_fixture() {
+        verdicts.extend(commit_parent_vectors(&sha256));
+    }
     verdicts
+}
+
+/// Exercise object headers rather than graph traversal, including unavailable parents.
+fn commit_parent_vectors(fixture: &GitFixture) -> Vec<VectorVerdict> {
+    let path = fixture.path();
+    let root = rev(path, "HEAD");
+    let tree = rev(path, "HEAD^{tree}");
+    let make_commit = |parents: &[&str]| {
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", "parent fixture"];
+        for parent in parents {
+            args.extend(["-p", parent]);
+        }
+        String::from_utf8(run_git(path, args).unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let child = make_commit(&[&root]);
+    let merge = make_commit(&[&child, &root]);
+    let mut verdicts = Vec::new();
+    for (oid, expected) in [
+        (&root, vec![]),
+        (&child, vec![root.clone()]),
+        (&merge, vec![child.clone(), root.clone()]),
+    ] {
+        verdicts.push(qualify_op(fixture, |backend, path| {
+            let actual = backend.commit_parent_oids(path, oid)?;
+            assert_eq!(actual, expected, "ordered parents for {oid}");
+            Ok(actual)
+        }));
+    }
+    let malformed = format!(
+        "tree {tree}\nparent invalid\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\n\nbad\n"
+    );
+    let bad_oid = String::from_utf8(
+        run_git_with_stdin(
+            path,
+            [
+                "hash-object",
+                "--literally",
+                "-w",
+                "-t",
+                "commit",
+                "--stdin",
+            ],
+            malformed.as_bytes(),
+            &[0],
+        )
+        .unwrap()
+        .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let missing = "f".repeat(root.len());
+    for oid in [&tree, &bad_oid, &missing, "--batch", "HEAD", "abc"] {
+        verdicts.push(qualify_op(fixture, |backend, path| {
+            let error = backend.commit_parent_oids(path, oid).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("cannot read commit parents for '{oid}' in this repository")
+            );
+            Err::<Vec<String>, _>(error)
+        }));
+    }
+    for contents in [
+        format!(
+            "tree {tree}\nparent {root}\nauthor broken\ncommitter A <a@example.com> 1 +0000\n\nbad\n"
+        ),
+        format!(
+            "tree {tree}\nparent {root}\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\nbroken\n\nbad\n"
+        ),
+        format!(
+            "tree {tree}\nparent {root}\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\n"
+        ),
+        format!(
+            "tree {tree}\nparent {root}\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 +0000\nencoding UTF-8\n invalid continuation\n\nbad\n"
+        ),
+    ] {
+        let oid = String::from_utf8(
+            run_git_with_stdin(
+                path,
+                [
+                    "hash-object",
+                    "--literally",
+                    "-w",
+                    "-t",
+                    "commit",
+                    "--stdin",
+                ],
+                contents.as_bytes(),
+                &[0],
+            )
+            .unwrap()
+            .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        verdicts.push(qualify_op(fixture, |backend, path| {
+            let error = backend.commit_parent_oids(path, &oid).unwrap_err();
+            Err::<Vec<String>, _>(error)
+        }));
+    }
+    // A local replacement must not change the parents of the named object.
+    git(path, ["replace", &child, &root]);
+    // Exercise the gix version's configured replacement-object path as well.
+    git(path, ["config", "core.useReplaceRefs", "false"]);
+    verdicts.push(qualify_op(fixture, |backend, path| {
+        let actual = backend.commit_parent_oids(path, &child)?;
+        assert_eq!(actual, vec![root.clone()]);
+        Ok(actual)
+    }));
+    git(path, ["replace", "-d", &child]);
+    // Mark the child shallow and remove its loose parent object. Its parent header
+    // remains authoritative even though no graph walk can visit that parent.
+    std::fs::write(path.join(".git/shallow"), format!("{child}\n")).unwrap();
+    std::fs::remove_file(path.join(".git/objects").join(&root[..2]).join(&root[2..])).unwrap();
+    verdicts.push(qualify_op(fixture, |backend, path| {
+        let actual = backend.commit_parent_oids(path, &child)?;
+        assert_eq!(actual, vec![root.clone()]);
+        Ok(actual)
+    }));
+    verdicts
+}
+
+#[test]
+fn git_backend_parity_commit_parent_oids() {
+    let mut verdicts = commit_parent_vectors(&root_commit_fixture());
+    if let Some(sha256) = maybe_sha256_repo_fixture() {
+        verdicts.extend(commit_parent_vectors(&sha256));
+    }
+    eprintln!(
+        "commit parent vectors: {} (SHA-1 and available SHA-256)",
+        verdicts.len()
+    );
+    assert!(
+        verdicts
+            .iter()
+            .all(|verdict| *verdict == VectorVerdict::Match)
+    );
 }
 
 // ---------- diagnostic (non-routable) probes ----------
