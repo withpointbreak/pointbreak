@@ -11,17 +11,20 @@ use serde::Serialize;
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, ReviewTargetRef, RevisionRefV1, TargetRef};
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     EventTarget, EventType, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1, ShoreEvent,
     build_review_fact_ported,
 };
+use crate::session::projection::publish_legacy_state_projection;
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, InputRequestStatus, ReviewCursorV1,
-    RevisionShowOptions, SessionState, current_timestamp, show_revision_for_change_reader,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, InputRequestStatus,
+    ProjectionDiagnostic, ReviewCursorV1, RevisionShowOptions, SessionState,
+    WriteAcknowledgementV1, current_timestamp, show_revision_for_change_reader,
     sign_event_if_requested, validated_track_id, writer_from_options,
 };
-use crate::storage::{Durability, LocalStorage};
+use crate::storage::LocalStorage;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FactPortOptions {
@@ -102,6 +105,8 @@ pub struct FactPortResultV1 {
     pub relation: FactPortRelationV1,
     pub event_id: crate::model::EventId,
     pub created: bool,
+    pub acknowledgement: WriteAcknowledgementV1,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
@@ -184,13 +189,20 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
     )?;
     sign_event_if_requested(&mut event, &options.signing)?;
     let event_store = write_store.event_store()?;
-    let outcome = event_store.record_change_event_once(&event)?;
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(event_store.record_change_event_once_acknowledged(&event)?);
     let state = SessionState::from_events(&event_store.list_change_events()?)?;
-    storage.write_json_atomic(
-        &write_store.store_dir().join("state.json"),
-        &state,
-        Durability::Projection,
-    )?;
+    let projection_refresh =
+        publish_legacy_state_projection(&storage, write_store.store_dir(), &state);
+    let mut diagnostics = state.diagnostics;
+    let created = outcome == EventWriteOutcome::Created;
+    let acknowledgement = derived.finish(
+        usize::from(created),
+        usize::from(!created),
+        projection_refresh.state,
+        &mut diagnostics,
+    );
+    diagnostics.extend(projection_refresh.diagnostic);
     Ok(FactPortResultV1 {
         schema: "pointbreak.review-fact-port.v1".to_owned(),
         port_id: payload.port_id,
@@ -198,7 +210,9 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
         target_revision: actual_target,
         relation: options.relation,
         event_id: event.event_id,
-        created: outcome == EventWriteOutcome::Created,
+        created,
+        acknowledgement,
+        diagnostics,
     })
 }
 
@@ -362,6 +376,15 @@ mod tests {
         ))
         .unwrap();
         assert!(first_port.created);
+        assert_eq!(
+            first_port.acknowledgement.authority_outcome,
+            crate::session::AuthorityWriteOutcomeV1::Created
+        );
+        assert_eq!(
+            first_port.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::Refreshed
+        );
+        assert!(first_port.diagnostics.is_empty());
         assert_eq!(first_port.origin_revision, origin);
         assert_eq!(first_port.target_revision.revision_id, second.revision_id);
 
@@ -376,6 +399,69 @@ mod tests {
         .unwrap();
         assert_eq!(retry.port_id, first_port.port_id);
         assert!(!retry.created);
+        assert_eq!(
+            retry.acknowledgement.authority_outcome,
+            crate::session::AuthorityWriteOutcomeV1::Existing
+        );
+        let json = serde_json::to_value(&retry).unwrap();
+        assert_eq!(json["schema"], "pointbreak.review-fact-port.v1");
+        assert_eq!(json["created"], false);
+        assert!(json["acknowledgement"].is_object());
+        assert!(json["diagnostics"].is_array());
+    }
+
+    #[test]
+    fn fact_port_acknowledgement_keeps_durable_truth_when_refresh_fails() {
+        let fixture = carried_open_fixture();
+        let write_store = resolve_change_write_store(fixture.root.path()).unwrap();
+        let path = write_store.store_dir().join("state.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let options = FactPortOptions::new(
+            fixture.root.path(),
+            fixture.origin,
+            FactRefV1::InputRequest {
+                input_request_id: fixture.origin_request_id,
+            },
+            fixture.target_cursor,
+            FactPortRelationV1::ContextOnly,
+            "track:author",
+        );
+        let first = port_review_fact(options.clone()).expect("refresh cannot fail a durable port");
+        assert!(first.created);
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::RefreshFailed
+        );
+        assert_eq!(
+            first
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
+                .count(),
+            1
+        );
+        std::fs::remove_dir(&path).unwrap();
+        let retry = port_review_fact(options).unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.event_id, first.event_id);
+        assert_eq!(
+            retry.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::Refreshed
+        );
+        let expected = SessionState::from_events(
+            &write_store
+                .event_store()
+                .unwrap()
+                .list_change_events()
+                .unwrap(),
+        )
+        .unwrap();
+        let actual: SessionState = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     #[test]
