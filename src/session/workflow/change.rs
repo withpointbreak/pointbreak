@@ -749,11 +749,7 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
     } else {
         None
     };
-    let receipt_state = if existing_checkpoint.is_some() {
-        OperationReceiptStateV1::Existing
-    } else {
-        OperationReceiptStateV1::Recorded
-    };
+    let mut receipt_state = OperationReceiptStateV1::NotRecorded;
     let (change_id, graph_preconditions, predecessors) =
         if let Some(checkpoint) = &existing_checkpoint {
             validate_graph_precondition_values(&repo, &checkpoint.graph_preconditions, &[])?;
@@ -786,7 +782,7 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
                     "capture source changed after the operation was prepared; restore the original source or use a new operation id",
                 ));
             }
-            persist_capture_checkpoint(&checkpoint_path, &checkpoint)?;
+            receipt_state = persist_capture_checkpoint(&checkpoint_path, &checkpoint)?;
             prepared_checkpoint = Some(checkpoint);
             Ok(())
         },
@@ -1433,7 +1429,10 @@ fn read_matching_checkpoint(
     Ok(checkpoint)
 }
 
-fn persist_capture_checkpoint(path: &Path, checkpoint: &ChangeCaptureCheckpointV1) -> Result<()> {
+fn persist_capture_checkpoint(
+    path: &Path,
+    checkpoint: &ChangeCaptureCheckpointV1,
+) -> Result<OperationReceiptStateV1> {
     let parent = path.parent().expect("capture checkpoint path has a parent");
     fs::create_dir_all(parent)
         .map_err(|error| io_error("create Change operation directory", parent, error))?;
@@ -1449,13 +1448,13 @@ fn persist_capture_checkpoint(path: &Path, checkpoint: &ChangeCaptureCheckpointV
                 .map_err(|error| io_error("write Change capture checkpoint", path, error))?;
             file.sync_all()
                 .map_err(|error| io_error("sync Change capture checkpoint", path, error))?;
-            Ok(())
+            Ok(OperationReceiptStateV1::Recorded)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing =
                 read_matching_checkpoint(path, &checkpoint.operation_id, &checkpoint.request_hash)?;
             if existing == *checkpoint {
-                Ok(())
+                Ok(OperationReceiptStateV1::Existing)
             } else {
                 Err(invalid_input(
                     "operation id raced with a different exact capture source",
@@ -1565,6 +1564,34 @@ mod tests {
     use crate::session::store::capabilities::{
         CapabilityFixtureState, write_capability_fixture_for_test,
     };
+
+    #[test]
+    fn capture_binding_acknowledgement_uses_create_once_outcome() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("operation.capture.json");
+        let checkpoint = ChangeCaptureCheckpointV1 {
+            schema: CHANGE_CAPTURE_CHECKPOINT_SCHEMA_V1.into(),
+            operation_id: "operation:binding-test".into(),
+            request_hash: "request".into(),
+            change_id: ChangeId::new("change:binding-test"),
+            revision: RevisionRefV1 {
+                revision_id: crate::model::RevisionId::new("rev:binding-test"),
+                object_artifact_content_hash: format!("sha256:{}", "ab".repeat(32)),
+            },
+            graph_preconditions: vec![],
+            predecessors: vec![],
+        };
+        assert_eq!(
+            persist_capture_checkpoint(&path, &checkpoint).unwrap(),
+            OperationReceiptStateV1::Recorded
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            persist_capture_checkpoint(&path, &checkpoint).unwrap(),
+            OperationReceiptStateV1::Existing
+        );
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
 
     #[test]
     fn create_change_retries_with_one_claim_identity() {
