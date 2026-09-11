@@ -364,17 +364,10 @@ mod tests {
         let result = CaptureResult {
             acknowledgement: pointbreak::session::WriteAcknowledgementV1 {
                 authority_outcome: pointbreak::session::AuthorityWriteOutcomeV1::Created,
-                derived: pointbreak::session::DerivedWriteAcknowledgementV1::new(
-                    pointbreak::session::DerivedWriteAvailabilityV1::Off,
-                    None,
-                )
-                .unwrap(),
+                derived: pointbreak::session::DerivedWriteAcknowledgementV1::off(),
                 legacy_projection_state: pointbreak::session::LegacyProjectionStateV1::Refreshed,
-                operation_receipt: pointbreak::session::OperationReceiptAcknowledgementV1::new(
-                    pointbreak::session::OperationReceiptStateV1::NotRecorded,
-                    None,
-                )
-                .unwrap(),
+                operation_receipt:
+                    pointbreak::session::OperationReceiptAcknowledgementV1::not_recorded(),
             },
             journal_id: JournalId::new("journal:default"),
             revision_id: RevisionId::new(format!("rev:sha256:{}", "ab".repeat(32))),

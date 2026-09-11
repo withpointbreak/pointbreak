@@ -92,17 +92,10 @@ mod tests {
         CaptureResult {
             acknowledgement: crate::session::WriteAcknowledgementV1 {
                 authority_outcome: crate::session::AuthorityWriteOutcomeV1::Created,
-                derived: crate::session::DerivedWriteAcknowledgementV1::new(
-                    crate::session::DerivedWriteAvailabilityV1::Off,
-                    None,
-                )
-                .unwrap(),
+                derived: crate::session::DerivedWriteAcknowledgementV1::off(),
                 legacy_projection_state: crate::session::LegacyProjectionStateV1::Refreshed,
-                operation_receipt: crate::session::OperationReceiptAcknowledgementV1::new(
-                    crate::session::OperationReceiptStateV1::NotRecorded,
-                    None,
-                )
-                .unwrap(),
+                operation_receipt: crate::session::OperationReceiptAcknowledgementV1::not_recorded(
+                ),
             },
             journal_id: JournalId::new("journal:default"),
             revision_id: RevisionId::new("rev:sha256:abc123"),

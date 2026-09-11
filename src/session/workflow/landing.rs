@@ -667,15 +667,12 @@ mod tests {
             ("g2", 3, DerivedWriteAvailabilityV1::Unavailable),
             ("g1", 4, DerivedWriteAvailabilityV1::Unavailable),
         ] {
-            association.acknowledgement.derived = DerivedWriteAcknowledgementV1::new(
-                DerivedWriteAvailabilityV1::Current,
-                Some(DerivedVisibilityTokenV1 {
+            association.acknowledgement.derived =
+                DerivedWriteAcknowledgementV1::current(DerivedVisibilityTokenV1 {
                     generation_id: "g1".into(),
                     epoch: 3,
                     head_sequence: 5,
-                }),
-            )
-            .unwrap();
+                });
             let attestation = EventWriteAcknowledgement::new(
                 EventWriteOutcome::Created,
                 DerivedWriteAvailabilityV1::CatchingUp,

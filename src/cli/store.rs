@@ -1636,11 +1636,16 @@ mod tests {
     use super::*;
 
     fn acknowledgement_fixture() -> pointbreak::session::WriteAcknowledgementV1 {
-        serde_json::from_value(serde_json::json!({
-            "authorityOutcome":"created", "derived":{"availability":"off"},
-            "legacyProjectionState":"refresh_failed", "operationReceipt":{"state":"not_recorded"}
-        }))
-        .unwrap()
+        use pointbreak::session::{
+            AuthorityWriteOutcomeV1, DerivedWriteAcknowledgementV1, LegacyProjectionStateV1,
+            OperationReceiptAcknowledgementV1, WriteAcknowledgementV1,
+        };
+        WriteAcknowledgementV1 {
+            authority_outcome: AuthorityWriteOutcomeV1::Created,
+            derived: DerivedWriteAcknowledgementV1::off(),
+            legacy_projection_state: LegacyProjectionStateV1::RefreshFailed,
+            operation_receipt: OperationReceiptAcknowledgementV1::not_recorded(),
+        }
     }
 
     #[test]

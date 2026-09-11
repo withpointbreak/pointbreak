@@ -14,12 +14,12 @@ pub struct WriteAcknowledgementV1 {
 
 impl WriteAcknowledgementV1 {
     pub(crate) fn unchanged() -> Self {
-        DerivedWriteAggregate::default().finish(
-            0,
-            0,
-            LegacyProjectionStateV1::NotAttempted,
-            &mut Vec::new(),
-        )
+        Self {
+            authority_outcome: AuthorityWriteOutcomeV1::Unchanged,
+            derived: DerivedWriteAcknowledgementV1::not_observed(),
+            legacy_projection_state: LegacyProjectionStateV1::NotAttempted,
+            operation_receipt: OperationReceiptAcknowledgementV1::not_recorded(),
+        }
     }
 }
 
@@ -52,6 +52,41 @@ pub struct DerivedWriteAcknowledgementV1 {
 }
 
 impl DerivedWriteAcknowledgementV1 {
+    pub fn off() -> Self {
+        Self {
+            availability: DerivedWriteAvailabilityV1::Off,
+            token: None,
+        }
+    }
+
+    pub fn not_observed() -> Self {
+        Self {
+            availability: DerivedWriteAvailabilityV1::NotObserved,
+            token: None,
+        }
+    }
+
+    pub fn unavailable() -> Self {
+        Self {
+            availability: DerivedWriteAvailabilityV1::Unavailable,
+            token: None,
+        }
+    }
+
+    pub fn current(token: DerivedVisibilityTokenV1) -> Self {
+        Self {
+            availability: DerivedWriteAvailabilityV1::Current,
+            token: Some(token),
+        }
+    }
+
+    pub fn catching_up(token: DerivedVisibilityTokenV1) -> Self {
+        Self {
+            availability: DerivedWriteAvailabilityV1::CatchingUp,
+            token: Some(token),
+        }
+    }
+
     pub fn new(
         availability: DerivedWriteAvailabilityV1,
         token: Option<DerivedVisibilityTokenV1>,
@@ -106,6 +141,27 @@ pub struct OperationReceiptAcknowledgementV1 {
 }
 
 impl OperationReceiptAcknowledgementV1 {
+    pub fn not_recorded() -> Self {
+        Self {
+            state: OperationReceiptStateV1::NotRecorded,
+            receipt_id: None,
+        }
+    }
+
+    pub fn recorded(receipt_id: String) -> Self {
+        Self {
+            state: OperationReceiptStateV1::Recorded,
+            receipt_id: Some(receipt_id),
+        }
+    }
+
+    pub fn existing(receipt_id: String) -> Self {
+        Self {
+            state: OperationReceiptStateV1::Existing,
+            receipt_id: Some(receipt_id),
+        }
+    }
+
     pub fn new(
         state: OperationReceiptStateV1,
         receipt_id: Option<String>,
@@ -135,11 +191,7 @@ pub(crate) struct DerivedWriteAggregate {
 impl Default for DerivedWriteAggregate {
     fn default() -> Self {
         Self {
-            derived: DerivedWriteAcknowledgementV1::new(
-                DerivedWriteAvailabilityV1::NotObserved,
-                None,
-            )
-            .unwrap(),
+            derived: DerivedWriteAcknowledgementV1::not_observed(),
             diagnostics: Vec::new(),
             observed_token: None,
         }
@@ -175,11 +227,7 @@ impl DerivedWriteAggregate {
             authority_outcome: AuthorityWriteOutcomeV1::from_counts(created, existing),
             derived: self.derived,
             legacy_projection_state,
-            operation_receipt: OperationReceiptAcknowledgementV1::new(
-                OperationReceiptStateV1::NotRecorded,
-                None,
-            )
-            .unwrap(),
+            operation_receipt: OperationReceiptAcknowledgementV1::not_recorded(),
         }
     }
 
@@ -527,11 +575,9 @@ mod tests {
         }
         let ack = WriteAcknowledgementV1 {
             authority_outcome: AuthorityWriteOutcomeV1::Mixed,
-            derived: DerivedWriteAcknowledgementV1::new(CatchingUp, Some(token("g", 3, 9)))
-                .unwrap(),
+            derived: DerivedWriteAcknowledgementV1::catching_up(token("g", 3, 9)),
             legacy_projection_state: LegacyProjectionStateV1::RefreshFailed,
-            operation_receipt: OperationReceiptAcknowledgementV1::new(Recorded, Some("op".into()))
-                .unwrap(),
+            operation_receipt: OperationReceiptAcknowledgementV1::recorded("op".into()),
         };
         let wire = json!({"acknowledgement": ack});
         assert_eq!(
@@ -542,6 +588,64 @@ mod tests {
             serde_json::from_value::<WriteAcknowledgementV1>(wire["acknowledgement"].clone())
                 .unwrap(),
             ack
+        );
+    }
+
+    #[test]
+    fn acknowledgement_named_component_constructors_preserve_wire_contract() {
+        let observed = token("g", 3, 9);
+        for (derived, expected) in [
+            (
+                DerivedWriteAcknowledgementV1::off(),
+                json!({"availability": "off"}),
+            ),
+            (
+                DerivedWriteAcknowledgementV1::not_observed(),
+                json!({"availability": "not_observed"}),
+            ),
+            (
+                DerivedWriteAcknowledgementV1::unavailable(),
+                json!({"availability": "unavailable"}),
+            ),
+            (
+                DerivedWriteAcknowledgementV1::current(observed.clone()),
+                json!({"availability": "current", "token": {"generationId": "g", "epoch": 3, "headSequence": 9}}),
+            ),
+            (
+                DerivedWriteAcknowledgementV1::catching_up(observed),
+                json!({"availability": "catching_up", "token": {"generationId": "g", "epoch": 3, "headSequence": 9}}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(derived).unwrap(), expected);
+        }
+        for (receipt, expected) in [
+            (
+                OperationReceiptAcknowledgementV1::not_recorded(),
+                json!({"state": "not_recorded"}),
+            ),
+            (
+                OperationReceiptAcknowledgementV1::recorded("op".into()),
+                json!({"state": "recorded", "receiptId": "op"}),
+            ),
+            (
+                OperationReceiptAcknowledgementV1::existing("op".into()),
+                json!({"state": "existing", "receiptId": "op"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(receipt).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn acknowledgement_unchanged_reports_no_write_or_observation() {
+        assert_eq!(
+            serde_json::to_value(WriteAcknowledgementV1::unchanged()).unwrap(),
+            json!({
+                "authorityOutcome": "unchanged",
+                "derived": {"availability": "not_observed"},
+                "legacyProjectionState": "not_attempted",
+                "operationReceipt": {"state": "not_recorded"}
+            })
         );
     }
 
@@ -579,12 +683,9 @@ mod tests {
         assert_eq!(aggregate.derived.token, Some(token("g", 3, 9)));
         assert_eq!(aggregate.diagnostics.len(), 1);
         assert_eq!(aggregate.diagnostics[0].message, "2");
-        aggregate.add(DerivedWriteAcknowledgementV1::new(Off, None).unwrap(), []);
+        aggregate.add(DerivedWriteAcknowledgementV1::off(), []);
         assert_eq!(aggregate.derived.availability, CatchingUp);
-        aggregate.add(
-            DerivedWriteAcknowledgementV1::new(Unavailable, None).unwrap(),
-            [],
-        );
+        aggregate.add(DerivedWriteAcknowledgementV1::unavailable(), []);
         assert_eq!(aggregate.derived.availability, Unavailable);
         assert!(aggregate.derived.token.is_none());
     }
@@ -594,14 +695,7 @@ mod tests {
         for other in [token("other", 3, 9), token("g", 4, 9)] {
             let mut aggregate = DerivedWriteAggregate::default();
             for t in [token("g", 3, 2), other] {
-                aggregate.add(
-                    DerivedWriteAcknowledgementV1::new(
-                        DerivedWriteAvailabilityV1::Current,
-                        Some(t),
-                    )
-                    .unwrap(),
-                    [],
-                );
+                aggregate.add(DerivedWriteAcknowledgementV1::current(t), []);
             }
             assert_eq!(
                 aggregate.derived.availability,
