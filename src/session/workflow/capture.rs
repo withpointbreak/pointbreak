@@ -633,7 +633,7 @@ fn capture_review_with_policy(
     // `pointbreak store link` before their own capture is visible.
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(auto_record_diagnostics);
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(CaptureResult {
         journal_id,

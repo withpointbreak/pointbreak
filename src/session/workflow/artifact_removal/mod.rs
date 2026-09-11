@@ -190,7 +190,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let state = SessionState::from_events(&event_store.list_events()?)?;
     let projection_refresh = publish_legacy_state_projection(&storage, &store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(RemoveResult {
         removed,

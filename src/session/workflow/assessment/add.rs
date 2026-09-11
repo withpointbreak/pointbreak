@@ -376,7 +376,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     diagnostics.extend(competing_candidates);
     diagnostics.extend(cross_actor_replacement);
     diagnostics.extend(unlinked_follow_up);
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     let result = AssessmentAddResult {
         revision_id: resolved.revision_id,

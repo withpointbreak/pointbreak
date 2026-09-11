@@ -324,7 +324,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     let result = InputRequestOpenResult {
         revision_id: resolved.revision_id,

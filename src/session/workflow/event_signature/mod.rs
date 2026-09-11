@@ -170,7 +170,7 @@ pub fn record_event_signature(
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
 
     let mut diagnostics = state.diagnostics;
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(EventSignatureRecordResult {
         event_id,

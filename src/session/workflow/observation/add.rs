@@ -381,7 +381,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    diagnostics.extend(projection_refresh);
+    diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(ObservationAddResult {
         revision_id: input.resolved.revision_id,

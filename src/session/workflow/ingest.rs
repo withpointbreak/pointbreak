@@ -265,7 +265,7 @@ impl<'a> IngestBatchSession<'a> {
         drop(batch_writer);
         let mut diagnostics = state.diagnostics.clone();
         diagnostics.extend(ingest_diagnostics);
-        diagnostics.extend(projection_refresh);
+        diagnostics.extend(projection_refresh.diagnostic);
         Ok(IngestBatchCompletion {
             events_created,
             events_existing,

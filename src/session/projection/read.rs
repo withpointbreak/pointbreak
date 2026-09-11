@@ -51,19 +51,30 @@ pub(crate) const LEGACY_STATE_PROJECTION_REFRESH_FAILED: &str =
 /// replacement never fails the enclosing command: it is returned as one
 /// diagnostic for the result's `diagnostics`, and the next successful
 /// projection-producing write (or `rebuild_state`) regenerates the file.
+pub(crate) struct LegacyProjectionRefresh {
+    pub(crate) state: crate::session::LegacyProjectionStateV1,
+    pub(crate) diagnostic: Option<ProjectionDiagnostic>,
+}
+
 pub(crate) fn publish_legacy_state_projection(
     storage: &LocalStorage,
     store_dir: &Path,
     state: &SessionState,
-) -> Option<ProjectionDiagnostic> {
+) -> LegacyProjectionRefresh {
     match storage.write_json_atomic(&store_dir.join("state.json"), state, Durability::Projection) {
-        Ok(()) => None,
-        Err(error) => Some(ProjectionDiagnostic {
-            code: LEGACY_STATE_PROJECTION_REFRESH_FAILED.to_owned(),
-            message: format!(
-                "legacy state projection was not refreshed after durable truth: {error}"
-            ),
-        }),
+        Ok(()) => LegacyProjectionRefresh {
+            state: crate::session::LegacyProjectionStateV1::Refreshed,
+            diagnostic: None,
+        },
+        Err(error) => LegacyProjectionRefresh {
+            state: crate::session::LegacyProjectionStateV1::RefreshFailed,
+            diagnostic: Some(ProjectionDiagnostic {
+                code: LEGACY_STATE_PROJECTION_REFRESH_FAILED.to_owned(),
+                message: format!(
+                    "legacy state projection was not refreshed after durable truth: {error}"
+                ),
+            }),
+        },
     }
 }
 
@@ -150,13 +161,32 @@ mod tests {
         // the parent, only the final rename onto `state.json` fails.
         std::fs::create_dir(dir.path().join("state.json")).unwrap();
 
-        let diagnostic = publish_legacy_state_projection(&storage, dir.path(), &state)
+        let refresh = publish_legacy_state_projection(&storage, dir.path(), &state);
+        assert_eq!(
+            refresh.state,
+            crate::session::LegacyProjectionStateV1::RefreshFailed
+        );
+        let diagnostic = refresh
+            .diagnostic
             .expect("a failed replacement must yield a diagnostic");
         assert_eq!(diagnostic.code, LEGACY_STATE_PROJECTION_REFRESH_FAILED);
         assert!(diagnostic.message.contains("rename temp file"));
 
         std::fs::remove_dir(dir.path().join("state.json")).unwrap();
-        assert!(publish_legacy_state_projection(&storage, dir.path(), &state).is_none());
+        let refresh = publish_legacy_state_projection(&storage, dir.path(), &state);
+        assert_eq!(
+            refresh.state,
+            crate::session::LegacyProjectionStateV1::Refreshed
+        );
+        assert!(refresh.diagnostic.is_none());
+        let expected = dir.path().join("expected.json");
+        storage
+            .write_json_atomic(&expected, &state, Durability::Projection)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(expected).unwrap(),
+            std::fs::read(dir.path().join("state.json")).unwrap()
+        );
         assert!(dir.path().join("state.json").is_file());
     }
 

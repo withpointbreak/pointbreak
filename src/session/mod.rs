@@ -4,6 +4,12 @@
 //! use pointbreak::session::{DerivedAccessRuntime, SqliteLocator};
 //! ```
 
+mod acknowledgement;
+pub use acknowledgement::{
+    AuthorityWriteOutcomeV1, DerivedVisibilityTokenV1, DerivedWriteAcknowledgementV1,
+    DerivedWriteAvailabilityV1, LegacyProjectionStateV1, OperationReceiptAcknowledgementV1,
+    OperationReceiptStateV1, WriteAcknowledgementV1,
+};
 pub mod adapter;
 #[cfg(feature = "bench")]
 pub(crate) mod benchmark;
