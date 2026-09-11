@@ -757,9 +757,10 @@ fn rebuild_target_state(
 ) -> Result<LegacyProjectionRefresh> {
     let events = target_store.list_events()?;
     let state = SessionState::from_events(&events)?;
+    // Storage already roots this relative state.json path at the import destination.
     let refresh = publish_legacy_state_projection(
         &LocalStorage::new(target_store_dir),
-        target_store_dir,
+        Path::new(""),
         &state,
     );
     Ok(refresh)
@@ -1520,6 +1521,37 @@ mod tests {
         assert_eq!(mixed.events_existing, 0);
         assert!(mixed.artifacts_existing > 0);
         assert_eq!(mixed.acknowledgement.authority_outcome, Authority::Mixed);
+    }
+
+    #[test]
+    fn bundle_acknowledgement_keeps_relative_target_projection_path() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let target = tempfile::Builder::new()
+            .prefix("ack-relative-")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let relative = Path::new(target.path().file_name().unwrap());
+        let result = import_store_bundle_into_with_verification(
+            resolved_store_dir(repo.path()),
+            relative,
+            &EventStore::open(target.path()),
+            EventVerificationPolicy::advisory(),
+            TrustSet::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::Refreshed
+        );
+        assert!(
+            target.path().join("state.json").is_file(),
+            "projection must use the same target root as artifacts and events"
+        );
+        assert!(
+            !target.path().join(relative).exists(),
+            "target root must not be applied twice"
+        );
     }
 
     #[test]
