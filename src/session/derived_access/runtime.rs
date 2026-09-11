@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Condvar;
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -22,6 +24,101 @@ use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_REBUILD_REQUIRED_CONFIRMATION: Duration = Duration::from_millis(250);
 const BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum BackgroundWorkerStage {
+    NotStarted,
+    SpawnPending,
+    EnteringChildScope,
+    TestGate,
+    Status,
+    Maintenance,
+    RebuildConfirmation,
+    Rebuild,
+    RebuildProgressReported,
+    RebuildReturned,
+    CompletingChildScope,
+    WorkerReturning,
+    WaitingForMaintenance,
+    WaitingForConfirmation,
+    WaitingForWriter,
+    WaitingAfterRebuildBusy,
+    WaitingAfterTruthChanged,
+}
+
+#[cfg(test)]
+impl BackgroundWorkerStage {
+    fn label(code: u8) -> &'static str {
+        // Keep in discriminant order; both stage bytes use this table.
+        const LABELS: &[&str] = &[
+            "not_started",
+            "spawn_pending",
+            "entering_child_scope",
+            "test_gate",
+            "status",
+            "maintenance",
+            "rebuild_confirmation",
+            "rebuild",
+            "rebuild_progress_reported",
+            "rebuild_returned",
+            "completing_child_scope",
+            "worker_returning",
+            "waiting_for_maintenance",
+            "waiting_for_confirmation",
+            "waiting_for_writer",
+            "waiting_after_rebuild_busy",
+            "waiting_after_truth_changed",
+        ];
+        LABELS.get(usize::from(code)).copied().unwrap_or("unknown")
+    }
+}
+
+// Failure-only test observation: low bytes hold stage and last rebuild retry;
+// the upper 48 bits count retry decisions, saturating rather than wrapping.
+// The worker is the sole writer between serialized starts. These relaxed
+// accesses never publish product state or participate in worker synchronization.
+#[cfg(test)]
+#[derive(Default)]
+struct BackgroundWorkerDiagnostic(AtomicU64);
+
+#[cfg(test)]
+impl BackgroundWorkerDiagnostic {
+    fn reset(&self) {
+        self.0
+            .store(BackgroundWorkerStage::NotStarted as u64, Ordering::Relaxed);
+    }
+
+    fn stage(&self, stage: BackgroundWorkerStage) {
+        let current = self.0.load(Ordering::Relaxed);
+        self.0
+            .store((current & !0xff) | stage as u64, Ordering::Relaxed);
+    }
+
+    fn retry(&self, stage: BackgroundWorkerStage) {
+        let count = ((self.0.load(Ordering::Relaxed) >> 16) + 1).min(u64::MAX >> 16);
+        self.0.store(
+            (count << 16) | ((stage as u64) << 8) | stage as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn snapshot(&self) -> String {
+        let current = self.0.load(Ordering::Relaxed);
+        let retry = (current >> 8) as u8;
+        format!(
+            "stage={} rebuild_retry_count={} last_rebuild_retry={}",
+            BackgroundWorkerStage::label(current as u8),
+            current >> 16,
+            if retry == 0 {
+                "none"
+            } else {
+                BackgroundWorkerStage::label(retry)
+            },
+        )
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct DerivedAccessMaintenance {
@@ -60,6 +157,8 @@ pub(crate) struct DerivedAccessRuntime {
     background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
     background_worker_test_gate: Arc<(Mutex<bool>, Condvar)>,
+    #[cfg(test)]
+    background_worker_diagnostic: Arc<BackgroundWorkerDiagnostic>,
 }
 
 pub(super) enum RuntimeCurrentRead {
@@ -127,6 +226,8 @@ impl DerivedAccessRuntime {
             background_rebuild_handle: Mutex::new(None),
             #[cfg(test)]
             background_worker_test_gate: Arc::new((Mutex::new(false), Condvar::new())),
+            #[cfg(test)]
+            background_worker_diagnostic: Arc::new(BackgroundWorkerDiagnostic::default()),
         })
     }
 
@@ -256,6 +357,21 @@ impl DerivedAccessRuntime {
     #[cfg(test)]
     pub(super) fn maintenance_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) != BackgroundWorkState::Idle as u8
+    }
+
+    #[cfg(test)]
+    pub(super) fn assert_background_worker_before_deadline(
+        &self,
+        context: &str,
+        started: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{context} worker did not finish; wait_elapsed={:?}; {}",
+            started.elapsed(),
+            self.background_worker_diagnostic.snapshot(),
+        );
     }
 
     pub(super) fn rebuild_paused(&self) -> bool {
@@ -544,21 +660,45 @@ impl DerivedAccessRuntime {
         let child_reservation = reserve_interaction_child_scope_v1(policy.interaction_actor());
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let spawned_child_reservation = child_reservation.clone();
+        #[cfg(test)]
+        let diagnostic = Arc::clone(&self.background_worker_diagnostic);
+        #[cfg(test)]
+        {
+            // The prior worker has been joined; cancellation retries must not
+            // leave their diagnostic counts on a replacement worker.
+            diagnostic.reset();
+            diagnostic.stage(BackgroundWorkerStage::SpawnPending);
+        }
         let spawned = std::thread::Builder::new()
             .name("pointbreak-derived-rebuild".to_owned())
             .spawn(move || {
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::EnteringChildScope);
                 #[cfg(any(test, feature = "longitudinal-counting"))]
                 let child_execution = spawned_child_reservation.map(|reservation| {
                     reservation.enter("derived background worker exited before source completion")
                 });
                 let _guard = BackgroundWorkerGuard(Arc::clone(&work_state));
                 #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::TestGate);
+                #[cfg(test)]
                 wait_for_background_worker_test_gate(&background_worker_test_gate, &cancel);
-                background_rebuild(lifecycle, policy, &work_state, cancel);
+                background_rebuild(
+                    lifecycle,
+                    policy,
+                    &work_state,
+                    cancel,
+                    #[cfg(test)]
+                    &diagnostic,
+                );
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::CompletingChildScope);
                 #[cfg(any(test, feature = "longitudinal-counting"))]
                 if let Some(child_execution) = child_execution {
                     child_execution.complete();
                 }
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::WorkerReturning);
             });
         match spawned {
             Ok(handle) => {
@@ -650,6 +790,7 @@ fn background_rebuild(
     policy: BackgroundWorkPolicy,
     work_state: &AtomicU8,
     cancel: Arc<AtomicBool>,
+    #[cfg(test)] diagnostic: &BackgroundWorkerDiagnostic,
 ) {
     let mut truth_changed_retry_interval = BACKGROUND_REBUILD_RETRY_INTERVAL;
     let mut rebuild_required_confirmed = false;
@@ -658,9 +799,13 @@ fn background_rebuild(
             return;
         }
         if !policy.allows_rebuild() {
+            #[cfg(test)]
+            diagnostic.stage(BackgroundWorkerStage::Maintenance);
             match lifecycle.maintain_current_generation() {
                 Ok(true) => return,
                 Ok(false) => {
+                    #[cfg(test)]
+                    diagnostic.stage(BackgroundWorkerStage::WaitingForMaintenance);
                     if wait_or_cancel(&cancel, BACKGROUND_REBUILD_RETRY_INTERVAL) {
                         return;
                     }
@@ -675,6 +820,8 @@ fn background_rebuild(
                 }
             }
         }
+        #[cfg(test)]
+        diagnostic.stage(BackgroundWorkerStage::Status);
         match lifecycle.status() {
             Ok(status)
                 if matches!(
@@ -682,9 +829,13 @@ fn background_rebuild(
                     DerivedAccessAvailability::Current | DerivedAccessAvailability::CatchingUp
                 ) =>
             {
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::Maintenance);
                 match lifecycle.maintain_current_generation() {
                     Ok(true) => return,
                     Ok(false) => {
+                        #[cfg(test)]
+                        diagnostic.stage(BackgroundWorkerStage::WaitingForMaintenance);
                         if wait_or_cancel(&cancel, BACKGROUND_REBUILD_RETRY_INTERVAL) {
                             return;
                         }
@@ -704,15 +855,21 @@ fn background_rebuild(
                     && !rebuild_required_confirmed =>
             {
                 rebuild_required_confirmed = true;
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::WaitingForConfirmation);
                 if wait_or_cancel(&cancel, BACKGROUND_REBUILD_REQUIRED_CONFIRMATION) {
                     return;
                 }
                 continue;
             }
             Ok(status) if status.availability == DerivedAccessAvailability::RebuildRequired => {
+                #[cfg(test)]
+                diagnostic.stage(BackgroundWorkerStage::RebuildConfirmation);
                 match lifecycle.rebuild_required_while_writer_idle() {
                     Ok(true) => {}
                     Ok(false) => {
+                        #[cfg(test)]
+                        diagnostic.stage(BackgroundWorkerStage::WaitingForWriter);
                         if wait_or_cancel(&cancel, BACKGROUND_REBUILD_REQUIRED_CONFIRMATION) {
                             return;
                         }
@@ -735,12 +892,16 @@ fn background_rebuild(
         }
         work_state.store(BackgroundWorkState::Rebuild as u8, Ordering::Release);
         let progress = |_| {
+            #[cfg(test)]
+            diagnostic.stage(BackgroundWorkerStage::RebuildProgressReported);
             if cancel.load(Ordering::Acquire) {
                 LifecycleControl::Cancel
             } else {
                 LifecycleControl::Continue
             }
         };
+        #[cfg(test)]
+        diagnostic.stage(BackgroundWorkerStage::Rebuild);
         let rebuild = match policy {
             BackgroundWorkPolicy::RebuildWhenRequired => {
                 lifecycle.try_automatic_legacy_rebuild(progress)
@@ -752,14 +913,20 @@ fn background_rebuild(
                 unreachable!("maintenance-only background work returns before rebuild admission")
             }
         };
+        #[cfg(test)]
+        diagnostic.stage(BackgroundWorkerStage::RebuildReturned);
         match rebuild {
             Ok(_) => return,
             Err(LifecycleError::RebuildBusy) => {
+                #[cfg(test)]
+                diagnostic.retry(BackgroundWorkerStage::WaitingAfterRebuildBusy);
                 if wait_or_cancel(&cancel, BACKGROUND_REBUILD_RETRY_INTERVAL) {
                     return;
                 }
             }
             Err(LifecycleError::TruthChanged) => {
+                #[cfg(test)]
+                diagnostic.retry(BackgroundWorkerStage::WaitingAfterTruthChanged);
                 if wait_or_cancel(&cancel, truth_changed_retry_interval) {
                     return;
                 }
@@ -838,4 +1005,60 @@ fn clear_current_if_same(
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_worker_timeout_diagnostic_self_check() {
+        let runtime = DerivedAccessRuntime::from_mode(DerivedAccessMode::Off);
+        let other = DerivedAccessRuntime::from_mode(DerivedAccessMode::Off);
+        let diagnostic = Arc::clone(&runtime.background_worker_diagnostic);
+        std::thread::spawn(move || {
+            diagnostic.retry(BackgroundWorkerStage::WaitingAfterRebuildBusy);
+            diagnostic.retry(BackgroundWorkerStage::WaitingAfterTruthChanged);
+            diagnostic.stage(BackgroundWorkerStage::Status);
+        })
+        .join()
+        .unwrap();
+
+        let expected =
+            "stage=status rebuild_retry_count=2 last_rebuild_retry=waiting_after_truth_changed";
+        assert_eq!(runtime.background_worker_diagnostic.snapshot(), expected);
+        assert_eq!(
+            other.background_worker_diagnostic.snapshot(),
+            "stage=not_started rebuild_retry_count=0 last_rebuild_retry=none"
+        );
+
+        // Exercise the actual timeout assertion with a synthetic expired
+        // deadline. The original callers keep their 30-second deadline.
+        let started = std::time::Instant::now();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.assert_background_worker_before_deadline(
+                "diagnostic self-check",
+                started,
+                started - Duration::from_secs(1),
+            );
+        }))
+        .expect_err("expired diagnostic deadline should panic");
+        let message = failure.downcast_ref::<String>().expect("formatted panic");
+        assert!(message.starts_with("diagnostic self-check worker did not finish; wait_elapsed="));
+        assert!(message.ends_with(expected));
+
+        runtime.background_worker_diagnostic.reset();
+        runtime
+            .background_worker_diagnostic
+            .stage(BackgroundWorkerStage::SpawnPending);
+        assert_eq!(
+            runtime.background_worker_diagnostic.snapshot(),
+            "stage=spawn_pending rebuild_retry_count=0 last_rebuild_retry=none"
+        );
+        runtime.assert_background_worker_before_deadline(
+            "unexpired diagnostic deadline",
+            started,
+            started + Duration::from_secs(30),
+        );
+    }
 }

@@ -2125,12 +2125,12 @@ mod tests {
     }
 
     fn wait_for_background_rebuild(access: &DerivedHistoryAccess, context: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(30);
         while access.maintenance_in_flight() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{context} worker did not finish"
-            );
+            access
+                .runtime
+                .assert_background_worker_before_deadline(context, started, deadline);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
