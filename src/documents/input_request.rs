@@ -14,6 +14,7 @@ use crate::session::{
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputRequestOpenBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     input_request_id: String,
     event_id: String,
@@ -45,6 +46,7 @@ pub struct InputRequestFetchBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InputRequestRespondBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     input_request_id: String,
     input_request_response_id: String,
     event_id: String,
@@ -73,6 +75,7 @@ pub fn input_request_open_document(
     EventWriteDocument::new(
         "pointbreak.review-input-request-open",
         InputRequestOpenBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             input_request_id: result.input_request_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
@@ -145,6 +148,7 @@ pub fn input_request_respond_document(
     EventWriteDocument::new(
         "pointbreak.review-input-request-respond",
         InputRequestRespondBody {
+            acknowledgement: result.acknowledgement,
             input_request_id: result.input_request_id.as_str().to_owned(),
             input_request_response_id: result.input_request_response_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),

@@ -13,6 +13,7 @@ pub mod git_repo;
 pub mod inspect;
 #[allow(dead_code)]
 pub mod snapshots;
+mod write_acknowledgement;
 
 #[allow(dead_code)]
 pub fn pointbreak<I, S>(args: I) -> Output
@@ -42,6 +43,9 @@ where
         .env_remove("BAT_THEME")
         .output()
         .expect("run pointbreak binary");
+    if output.status.success() {
+        write_acknowledgement::assert_contract(&output.stdout);
+    }
     remember_change_capture(&args, &output);
     if output.status.success()
         && let Some(repo) = repo_argument(&args)

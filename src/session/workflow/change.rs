@@ -18,6 +18,7 @@ use crate::model::{
     ActorId, ChangeId, ChangeIdentityDescriptorV1, ChangeMembershipClaimId,
     ChangeRevisionRelationClaimId, JournalId, ObjectId, ReviewEndpoint, RevisionId, RevisionRefV1,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     ChangeLinkRelationV1, EventPayload, EventTarget, ShoreEvent, build_change_declared,
     build_change_link_asserted, build_membership_asserted, build_membership_withdrawn,
@@ -26,8 +27,9 @@ use crate::session::event::{
 use crate::session::store::capabilities::preflight_change_writer;
 use crate::session::store::resolution::resolve_change_write_store;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, LegacyProjectionStateV1,
+    OperationReceiptAcknowledgementV1, OperationReceiptStateV1, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 
 pub const CHANGE_OPERATION_SCHEMA_V1: &str = "pointbreak.change-operation.v1";
@@ -356,6 +358,7 @@ impl ChangeCaptureOptions {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangeCaptureReceiptV1 {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub schema: String,
     pub version: u32,
     pub operation_id: String,
@@ -725,7 +728,13 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
             .capture_revision
             .clone()
             .ok_or_else(|| invalid_input("capture operation plan has no exact Revision"))?;
-        let operation = execute_operation_plan(&repo, &write_store, plan)?;
+        let (receipt, derived) =
+            execute_operation_plan_acknowledged(&repo, &write_store, plan, None)?;
+        let operation = CaptureOperationEvidence {
+            receipt,
+            derived,
+            receipt_state: OperationReceiptStateV1::Existing,
+        };
         return capture_receipt(&repo, revision, None, 0, 1, operation);
     }
 
@@ -739,6 +748,11 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
         )?)
     } else {
         None
+    };
+    let receipt_state = if existing_checkpoint.is_some() {
+        OperationReceiptStateV1::Existing
+    } else {
+        OperationReceiptStateV1::Recorded
     };
     let (change_id, graph_preconditions, predecessors) =
         if let Some(checkpoint) = &existing_checkpoint {
@@ -860,7 +874,7 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
     let revision_events_created = capture.events_created;
     let revision_events_existing = capture.events_existing;
     #[cfg(test)]
-    let operation = execute_operation_plan_with_limit(
+    let (receipt, derived) = execute_operation_plan_acknowledged(
         &repo,
         &write_store,
         plan,
@@ -869,7 +883,12 @@ pub fn capture_change_revision(options: ChangeCaptureOptions) -> Result<ChangeCa
             .map(|append_count| append_count.saturating_sub(1)),
     )?;
     #[cfg(not(test))]
-    let operation = execute_operation_plan(&repo, &write_store, plan)?;
+    let (receipt, derived) = execute_operation_plan_acknowledged(&repo, &write_store, plan, None)?;
+    let operation = CaptureOperationEvidence {
+        receipt,
+        derived,
+        receipt_state,
+    };
     capture_receipt(
         &repo,
         revision,
@@ -939,14 +958,25 @@ fn capture_transition_inputs(
     }
 }
 
+struct CaptureOperationEvidence {
+    receipt: ChangeOperationReceiptV1,
+    derived: DerivedWriteAggregate,
+    receipt_state: OperationReceiptStateV1,
+}
+
 fn capture_receipt(
     repo: &Path,
     revision: RevisionRefV1,
     capture: Option<crate::session::CaptureResult>,
     revision_events_created: usize,
     revision_events_existing: usize,
-    operation: ChangeOperationReceiptV1,
+    operation: CaptureOperationEvidence,
 ) -> Result<ChangeCaptureReceiptV1> {
+    let CaptureOperationEvidence {
+        receipt: operation,
+        derived: operation_derived,
+        receipt_state,
+    } = operation;
     let ready = ready_for_mutation(repo)?;
     let change = change_for_mutation(&ready, &operation.change_id)?;
     let shown = crate::session::show_revision_for_change_reader(
@@ -1025,7 +1055,30 @@ fn capture_receipt(
                 .to_owned(),
         });
     }
+    let mut derived = DerivedWriteAggregate::default();
+    let legacy_state = if let Some(capture) = &capture {
+        derived.add(capture.acknowledgement.derived.clone(), []);
+        capture.acknowledgement.legacy_projection_state.clone()
+    } else {
+        LegacyProjectionStateV1::NotAttempted
+    };
+    derived.add(operation_derived.derived, operation_derived.diagnostics);
+    let change_created = operation
+        .events
+        .iter()
+        .filter(|event| event.outcome == ChangeOperationEventOutcomeV1::Created)
+        .count();
+    let mut acknowledgement = derived.finish(
+        revision_events_created + change_created,
+        revision_events_existing + operation.events.len() - change_created,
+        legacy_state,
+        &mut diagnostics,
+    );
+    acknowledgement.operation_receipt =
+        OperationReceiptAcknowledgementV1::new(receipt_state, Some(operation.operation_id.clone()))
+            .unwrap();
     Ok(ChangeCaptureReceiptV1 {
+        acknowledgement,
         schema: "pointbreak.change-capture-receipt.v1".to_owned(),
         version: 1,
         operation_id: operation.operation_id,
@@ -1223,12 +1276,23 @@ fn execute_operation_plan_with_limit(
     plan: ChangeOperationPlanV1,
     interruption_after_event: Option<usize>,
 ) -> Result<ChangeOperationReceiptV1> {
+    execute_operation_plan_acknowledged(repo, write_store, plan, interruption_after_event)
+        .map(|(receipt, _)| receipt)
+}
+
+fn execute_operation_plan_acknowledged(
+    repo: &Path,
+    write_store: &crate::session::store::resolution::WriteStore,
+    plan: ChangeOperationPlanV1,
+    interruption_after_event: Option<usize>,
+) -> Result<(ChangeOperationReceiptV1, DerivedWriteAggregate)> {
+    let mut derived = DerivedWriteAggregate::default();
     validate_graph_preconditions(repo, &plan)?;
     preflight_change_writer(write_store.backend().journal().as_ref())?;
     let event_store = write_store.event_store()?;
     let mut events = Vec::with_capacity(plan.events.len());
     for event in &plan.events {
-        let outcome = event_store.record_change_event_once(event)?;
+        let outcome = derived.record(event_store.record_change_event_once_acknowledged(event)?);
         events.push(event_receipt(event, outcome));
         if interruption_after_event == Some(events.len()) {
             return Err(invalid_input(format!(
@@ -1237,13 +1301,16 @@ fn execute_operation_plan_with_limit(
             )));
         }
     }
-    Ok(ChangeOperationReceiptV1 {
-        schema: CHANGE_OPERATION_SCHEMA_V1.to_owned(),
-        operation_id: plan.operation_id,
-        change_id: plan.change_id,
-        events,
-        complete: true,
-    })
+    Ok((
+        ChangeOperationReceiptV1 {
+            schema: CHANGE_OPERATION_SCHEMA_V1.to_owned(),
+            operation_id: plan.operation_id,
+            change_id: plan.change_id,
+            events,
+            complete: true,
+        },
+        derived,
+    ))
 }
 
 fn validate_graph_preconditions(repo: &Path, plan: &ChangeOperationPlanV1) -> Result<()> {
@@ -1743,6 +1810,34 @@ mod tests {
             ChangeIdentityDescriptorV1::opaque_nonce([0x61; 32]),
         ))
         .unwrap();
+        assert_eq!(
+            initial.acknowledgement.operation_receipt.state,
+            OperationReceiptStateV1::Recorded
+        );
+        assert_eq!(
+            initial
+                .acknowledgement
+                .operation_receipt
+                .receipt_id
+                .as_deref(),
+            Some(initial.operation_id.as_str())
+        );
+        assert_eq!(
+            retry.acknowledgement.operation_receipt.state,
+            OperationReceiptStateV1::Existing
+        );
+        assert_eq!(
+            retry
+                .acknowledgement
+                .operation_receipt
+                .receipt_id
+                .as_deref(),
+            Some(retry.operation_id.as_str())
+        );
+        assert_eq!(
+            retry.acknowledgement.legacy_projection_state,
+            LegacyProjectionStateV1::NotAttempted
+        );
         assert_eq!(retry.revision, initial.revision);
         assert!(
             retry

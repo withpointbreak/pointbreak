@@ -17,6 +17,7 @@ use crate::model::{
     ActorId, CommitAssociationId, EventId, RefAssociationId, ReviewEndpoint, ReviewTargetRef,
     RevisionId, TargetRef,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     EventPayload, EventTarget, EventType, RevisionCommitAssociatedPayload,
     RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload, RevisionRefWithdrawnPayload,
@@ -35,7 +36,7 @@ use crate::session::store::resolution::{
 use crate::session::{
     BestEffortSkipSink, CurrentCommitAssociation, CurrentRefAssociation, EventSigningOptions,
     EventStore, EventWriteOutcome, RevisionCommitRangeProjection, RevisionCommitRangeView,
-    WithdrawnCommitAssociation, WithdrawnRefAssociation, current_timestamp,
+    WithdrawnCommitAssociation, WithdrawnRefAssociation, WriteAcknowledgementV1, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
@@ -171,6 +172,7 @@ association_write_builders!(WithdrawRefOptions);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssociateCommitResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub commit_association_id: CommitAssociationId,
     pub commit_oid: String,
@@ -184,6 +186,7 @@ pub struct AssociateCommitResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawCommitResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub commit_withdrawal_id: crate::model::CommitWithdrawalId,
     pub commit_association_id: CommitAssociationId,
@@ -196,6 +199,7 @@ pub struct WithdrawCommitResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssociateRefResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub ref_association_id: RefAssociationId,
     pub ref_name: String,
@@ -209,6 +213,7 @@ pub struct AssociateRefResult {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WithdrawRefResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub ref_withdrawal_id: crate::model::RefWithdrawalId,
     pub ref_association_id: RefAssociationId,
@@ -408,6 +413,7 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
         diagnostics.push(diagnostic);
     }
     Ok(AssociateCommitResult {
+        acknowledgement: outcome.acknowledgement,
         revision_id: outcome.revision_id,
         commit_association_id: association_id.expect("build closure set the association id"),
         commit_oid,
@@ -623,6 +629,7 @@ pub fn withdraw_commit(options: WithdrawCommitOptions) -> Result<WithdrawCommitR
         },
     )?;
     Ok(WithdrawCommitResult {
+        acknowledgement: outcome.acknowledgement,
         revision_id: outcome.revision_id,
         commit_withdrawal_id: withdrawal_id.expect("build closure set the withdrawal id"),
         commit_association_id: options.commit_association_id,
@@ -666,6 +673,7 @@ pub fn associate_ref(options: AssociateRefOptions) -> Result<AssociateRefResult>
         },
     )?;
     Ok(AssociateRefResult {
+        acknowledgement: outcome.acknowledgement,
         revision_id: outcome.revision_id,
         ref_association_id: association_id.expect("build closure set the association id"),
         ref_name: full_ref,
@@ -704,6 +712,7 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
         },
     )?;
     Ok(WithdrawRefResult {
+        acknowledgement: outcome.acknowledgement,
         revision_id: outcome.revision_id,
         ref_withdrawal_id: withdrawal_id.expect("build closure set the withdrawal id"),
         ref_association_id: options.ref_association_id,
@@ -773,6 +782,7 @@ fn empty_view(revision_id: RevisionId) -> RevisionCommitRangeView {
 }
 
 struct AssociationWriteOutcome {
+    pub acknowledgement: WriteAcknowledgementV1,
     revision_id: RevisionId,
     event_id: EventId,
     events_created: usize,
@@ -872,11 +882,12 @@ where
     sign_event_if_requested(&mut event, signing)?;
     let event_id = event.event_id.clone();
 
-    let outcome = if change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(if change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let mut events_created_by_type = BTreeMap::new();
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
@@ -894,9 +905,16 @@ where
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(AssociationWriteOutcome {
+        acknowledgement,
         revision_id,
         event_id,
         events_created,

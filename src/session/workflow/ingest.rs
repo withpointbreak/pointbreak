@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use super::event_signature::assemble_and_record_cosignature_with_writer;
 use crate::crypto::EventVerificationStatus;
 use crate::error::{Result, ShoreError};
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, resolve_effective_signer,
     stamp_ingest_provenance,
@@ -16,8 +17,8 @@ use crate::session::{
     COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
     COSIGNATURE_UNTRUSTED_SIGNER_CODE, CosignatureGateDecision, EventStore,
     EventVerificationPolicy, EventWriteOutcome, IngestClock, IngestEventVerification,
-    SystemIngestClock, TrustSet, current_timestamp, gate_cosignature_for_store, is_valid_actor_id,
-    verify_events_for_ingest, writer_from_options,
+    SystemIngestClock, TrustSet, WriteAcknowledgementV1, current_timestamp,
+    gate_cosignature_for_store, is_valid_actor_id, verify_events_for_ingest, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -106,6 +107,7 @@ impl ImportEventOptions {
 /// events, and the projection diagnostics after the rebuild.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IngestEventsResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub events_created: usize,
     pub events_existing: usize,
     pub events_created_by_type: BTreeMap<String, usize>,
@@ -121,6 +123,7 @@ pub struct IngestEventsResult {
 /// incrementally. It retains the authority lock and carrier target index, but
 /// owns no whole-batch event buffer.
 pub(crate) struct IngestBatchSession<'a> {
+    derived: DerivedWriteAggregate,
     event_store: &'a EventStore,
     batch_writer: EventWriteBatch<'a>,
     worktree_root: &'a Path,
@@ -137,6 +140,7 @@ pub(crate) struct IngestBatchSession<'a> {
     reason = "complete replay state is consumed by the bench-gated deterministic stream writer"
 )]
 pub(crate) struct IngestBatchCompletion {
+    pub(crate) acknowledgement: WriteAcknowledgementV1,
     pub(crate) events_created: usize,
     pub(crate) events_existing: usize,
     pub(crate) events_created_by_type: BTreeMap<String, usize>,
@@ -152,6 +156,7 @@ impl<'a> IngestBatchSession<'a> {
         trust: &'a TrustSet,
     ) -> Result<Self> {
         Ok(Self {
+            derived: DerivedWriteAggregate::default(),
             event_store,
             batch_writer: event_store.begin_current_product_batch()?,
             worktree_root,
@@ -183,6 +188,7 @@ impl<'a> IngestBatchSession<'a> {
                     event,
                     CarrierIngestContext {
                         targets: &mut self.carrier_targets,
+                        derived: &mut self.derived,
                     },
                     self.trust,
                     verification,
@@ -201,7 +207,9 @@ impl<'a> IngestBatchSession<'a> {
 
             let row_index = verified_row_cursor;
             verified_row_cursor += 1;
-            let outcome = self.batch_writer.record_event_once(event)?;
+            let outcome = self
+                .derived
+                .record(self.batch_writer.record_event_once_acknowledged(event)?);
             self.carrier_targets
                 .observe_batch_write(self.event_store, event, outcome)?;
             verification[row_index].write_outcome = Some(outcome);
@@ -222,7 +230,10 @@ impl<'a> IngestBatchSession<'a> {
                         event,
                         self.worktree_root,
                         self.trust,
-                        &mut self.carrier_targets,
+                        CarrierIngestContext {
+                            targets: &mut self.carrier_targets,
+                            derived: &mut self.derived,
+                        },
                         &mut self.ingest_diagnostics,
                     )?;
                     self.events_existing += existing;
@@ -247,6 +258,7 @@ impl<'a> IngestBatchSession<'a> {
         store_dir: &Path,
     ) -> Result<IngestBatchCompletion> {
         let Self {
+            derived,
             event_store,
             batch_writer,
             carrier_targets,
@@ -265,8 +277,15 @@ impl<'a> IngestBatchSession<'a> {
         drop(batch_writer);
         let mut diagnostics = state.diagnostics.clone();
         diagnostics.extend(ingest_diagnostics);
+        let acknowledgement = derived.finish(
+            events_created,
+            events_existing,
+            projection_refresh.state,
+            &mut diagnostics,
+        );
         diagnostics.extend(projection_refresh.diagnostic);
         Ok(IngestBatchCompletion {
+            acknowledgement,
             events_created,
             events_existing,
             events_created_by_type,
@@ -360,6 +379,7 @@ pub(crate) fn ingest_events_with_clock(
     }
 
     Ok(IngestEventsResult {
+        acknowledgement: completed.acknowledgement,
         events_created: completed.events_created,
         events_existing: completed.events_existing,
         events_created_by_type: completed.events_created_by_type,
@@ -374,6 +394,7 @@ pub(crate) fn ingest_events_with_clock(
 /// any drop/authorization diagnostics. A carrier is an ordinary event: when stored
 /// it rides the same event-set machinery as every event, with no separate channel.
 struct CarrierIngestContext<'a> {
+    derived: &'a mut DerivedWriteAggregate,
     targets: &'a mut CarrierTargetIndex,
 }
 
@@ -399,7 +420,9 @@ fn ingest_detached_cosignature(
 
     match decision {
         CosignatureGateDecision::Store(status) => {
-            let outcome = batch_writer.record_event_once(event)?;
+            let outcome = context
+                .derived
+                .record(batch_writer.record_event_once_acknowledged(event)?);
             context
                 .targets
                 .observe_batch_write(event_store, event, outcome)?;
@@ -585,7 +608,7 @@ fn transcribe_divergent_signature(
     event: &ShoreEvent,
     worktree_root: &Path,
     trust: &TrustSet,
-    carrier_targets: &mut CarrierTargetIndex,
+    context: CarrierIngestContext<'_>,
     diagnostics: &mut Vec<ProjectionDiagnostic>,
 ) -> Result<(usize, usize)> {
     // The divergent outcome required a stored event under the same idempotencyKey;
@@ -619,7 +642,7 @@ fn transcribe_divergent_signature(
         writer,
         trust,
         current_timestamp(),
-        |carrier| batch_writer.record_event_once(carrier),
+        |carrier| batch_writer.record_event_once_acknowledged(carrier),
     )?;
 
     match record.decision {
@@ -627,7 +650,14 @@ fn transcribe_divergent_signature(
             let outcome = record
                 .write_outcome
                 .expect("a stored decision yields a write outcome");
-            carrier_targets.observe_recorded_event(event_store, &record.carrier)?;
+            context.derived.record(
+                record
+                    .acknowledgement
+                    .expect("stored carrier yields acknowledgement"),
+            );
+            context
+                .targets
+                .observe_recorded_event(event_store, &record.carrier)?;
             let counts = match outcome {
                 EventWriteOutcome::Created => (1, 0),
                 EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
@@ -2054,6 +2084,10 @@ mod tests {
         );
         let outcome = outcome.expect("durable truth must be acknowledged as success");
         assert_eq!(outcome.events_created, total);
+        assert_eq!(
+            outcome.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::RefreshFailed
+        );
         assert!(
             outcome
                 .diagnostics

@@ -14,6 +14,7 @@ use crate::model::{
     ActorId, EventId, ReviewTargetRef, RevisionId, TrackId, ValidationCheckId, ValidationStatus,
     ValidationTarget, ValidationTrigger, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     BodyContentType, EventTarget, EventType, ShoreEvent, ValidationCheckRecordedPayload,
     review_subject_id,
@@ -26,8 +27,8 @@ use crate::session::store::resolution::{
     resolve_write_validation_store,
 };
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -181,6 +182,7 @@ impl ValidationAddOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidationAddResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub validation_check_id: ValidationCheckId,
     pub event_id: EventId,
@@ -392,11 +394,12 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = if input.change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(if input.change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("validation_check_recorded".to_owned(), 1);
@@ -413,9 +416,16 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(ValidationAddResult {
+        acknowledgement,
         revision_id: input.resolved.revision_id,
         validation_check_id,
         event_id,

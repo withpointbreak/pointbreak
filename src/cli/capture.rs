@@ -362,6 +362,20 @@ mod tests {
     #[test]
     fn capture_receipt_surfaces_projection_diagnostics() {
         let result = CaptureResult {
+            acknowledgement: pointbreak::session::WriteAcknowledgementV1 {
+                authority_outcome: pointbreak::session::AuthorityWriteOutcomeV1::Created,
+                derived: pointbreak::session::DerivedWriteAcknowledgementV1::new(
+                    pointbreak::session::DerivedWriteAvailabilityV1::Off,
+                    None,
+                )
+                .unwrap(),
+                legacy_projection_state: pointbreak::session::LegacyProjectionStateV1::Refreshed,
+                operation_receipt: pointbreak::session::OperationReceiptAcknowledgementV1::new(
+                    pointbreak::session::OperationReceiptStateV1::NotRecorded,
+                    None,
+                )
+                .unwrap(),
+            },
             journal_id: JournalId::new("journal:default"),
             revision_id: RevisionId::new(format!("rev:sha256:{}", "ab".repeat(32))),
             object_id: ObjectId::new(format!("obj:sha256:{}", "ab".repeat(32))),

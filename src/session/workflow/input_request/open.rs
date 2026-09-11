@@ -10,6 +10,7 @@ use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, InputRequestId, ReviewTargetRef, RevisionId, TargetRef, TrackId, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     AssertionMode, BodyContentType, EventTarget, EventType, InputRequestOpenedPayload,
     InputRequestReasonCode, ShoreEvent, review_subject_id,
@@ -26,8 +27,8 @@ use crate::session::store::resolution::{
     resolve_write_validation_store,
 };
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -150,6 +151,7 @@ impl InputRequestOpenOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestOpenResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub input_request_id: InputRequestId,
     pub event_id: EventId,
@@ -303,11 +305,12 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = if change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(if change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("input_request_opened".to_owned(), 1);
@@ -324,9 +327,16 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     let result = InputRequestOpenResult {
+        acknowledgement,
         revision_id: resolved.revision_id,
         input_request_id,
         event_id,

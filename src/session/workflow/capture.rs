@@ -14,6 +14,7 @@ use crate::model::{
     JournalId, ObjectId, ReviewEndpoint, ReviewId, ReviewTargetRef, RevisionId, RevisionRefV1,
     RevisionSource, TargetRef, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
 };
@@ -29,7 +30,8 @@ use crate::session::store::resolution::{
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, ProjectionDiagnostic,
-    SessionState, current_timestamp, sign_event_if_requested, writer_from_options,
+    SessionState, WriteAcknowledgementV1, current_timestamp, sign_event_if_requested,
+    writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -334,6 +336,7 @@ impl CaptureOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub journal_id: JournalId,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
@@ -633,9 +636,16 @@ fn capture_review_with_policy(
     // `pointbreak store link` before their own capture is visible.
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(auto_record_diagnostics);
+    let acknowledgement = recorder.derived.finish(
+        recorder.events_created,
+        recorder.events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(CaptureResult {
+        acknowledgement,
         journal_id,
         revision_id: fingerprint.revision_id,
         object_id: fingerprint.object_id,
@@ -1149,6 +1159,7 @@ fn preflight_capture_proposal(
 
 #[derive(Default)]
 struct CaptureRecorder {
+    derived: DerivedWriteAggregate,
     events_created: usize,
     events_existing: usize,
     events_created_by_type: BTreeMap<String, usize>,
@@ -1166,10 +1177,12 @@ impl CaptureRecorder {
         write_policy: CaptureWritePolicy,
     ) -> Result<()> {
         let event_type = event.event_type;
-        let outcome = match write_policy {
-            CaptureWritePolicy::EventOnly => event_store.record_event_once(&event)?,
-            CaptureWritePolicy::Change => event_store.record_change_event_once(&event)?,
-        };
+        let outcome = self.derived.record(match write_policy {
+            CaptureWritePolicy::EventOnly => event_store.record_event_once_acknowledged(&event)?,
+            CaptureWritePolicy::Change => {
+                event_store.record_change_event_once_acknowledged(&event)?
+            }
+        });
         match outcome {
             EventWriteOutcome::Created => {
                 self.events_created += 1;
@@ -2300,6 +2313,10 @@ mod tests {
         let again = again.expect("durable truth must be acknowledged as success");
         assert_ne!(again.revision_id, first.revision_id);
         assert_eq!(again.events_created, 2);
+        assert_eq!(
+            again.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::RefreshFailed
+        );
         assert!(
             again
                 .diagnostics

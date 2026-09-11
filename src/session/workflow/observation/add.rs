@@ -14,6 +14,7 @@ use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, ObservationId, ReviewTargetRef, RevisionId, TargetRef, TrackId, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     BodyContentType, EventTarget, EventType, ReviewObservationRecordedPayload, ShoreEvent,
     review_subject_id,
@@ -28,8 +29,8 @@ use crate::session::store::resolution::{
 use crate::session::store_init::RepositoryPaths;
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -167,6 +168,7 @@ impl ObservationAddOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationAddResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub observation_id: ObservationId,
     pub event_id: EventId,
@@ -360,11 +362,12 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = if input.change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(if input.change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("review_observation_recorded".to_owned(), 1);
@@ -381,9 +384,16 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
     let state = SessionState::from_events(&events)?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(ObservationAddResult {
+        acknowledgement,
         revision_id: input.resolved.revision_id,
         observation_id,
         event_id,

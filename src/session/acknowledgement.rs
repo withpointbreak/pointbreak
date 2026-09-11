@@ -136,6 +136,42 @@ impl Default for DerivedWriteAggregate {
 }
 
 impl DerivedWriteAggregate {
+    pub(crate) fn record(
+        &mut self,
+        acknowledgement: EventWriteAcknowledgement,
+    ) -> crate::session::EventWriteOutcome {
+        let outcome = acknowledgement.outcome;
+        self.add(acknowledgement.derived, acknowledgement.diagnostics);
+        outcome
+    }
+
+    pub(crate) fn finish(
+        self,
+        created: usize,
+        existing: usize,
+        legacy_projection_state: LegacyProjectionStateV1,
+        diagnostics: &mut Vec<ProjectionDiagnostic>,
+    ) -> WriteAcknowledgementV1 {
+        for diagnostic in self.diagnostics {
+            if !diagnostics
+                .iter()
+                .any(|previous| previous.code == diagnostic.code)
+            {
+                diagnostics.push(diagnostic);
+            }
+        }
+        WriteAcknowledgementV1 {
+            authority_outcome: AuthorityWriteOutcomeV1::from_counts(created, existing),
+            derived: self.derived,
+            legacy_projection_state,
+            operation_receipt: OperationReceiptAcknowledgementV1::new(
+                OperationReceiptStateV1::NotRecorded,
+                None,
+            )
+            .unwrap(),
+        }
+    }
+
     pub(crate) fn add(
         &mut self,
         derived: DerivedWriteAcknowledgementV1,
@@ -318,6 +354,28 @@ mod tests {
             "pointbreak.store-migrate",
         ),
     ];
+
+    #[test]
+    fn acknowledgement_slice_a_public_field_types() {
+        use crate::session::*;
+        macro_rules! field { ($($result:ty),* $(,)?) => { $(let _: fn(&$result) -> &WriteAcknowledgementV1 = |result| &result.acknowledgement;)* }; }
+        field!(
+            CaptureResult,
+            ChangeCaptureReceiptV1,
+            AssociateCommitResult,
+            WithdrawCommitResult,
+            AssociateRefResult,
+            WithdrawRefResult,
+            IngestEventsResult,
+            AssessmentAddResult,
+            ObservationAddResult,
+            RemoveResult,
+            InputRequestOpenResult,
+            InputRequestRespondResult,
+            EventSignatureRecordResult,
+            ValidationAddResult
+        );
+    }
 
     #[test]
     fn acknowledgement_live_producer_matrix() {

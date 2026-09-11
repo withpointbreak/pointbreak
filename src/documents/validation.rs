@@ -10,6 +10,7 @@ use crate::session::{DelegationMap, ValidationAddResult, ValidationListResult};
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationAddBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     validation_check_id: String,
     event_id: String,
@@ -46,6 +47,7 @@ pub fn validation_add_document(
     EventWriteDocument::new(
         "pointbreak.review-validation-add",
         ValidationAddBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             validation_check_id: result.validation_check_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),

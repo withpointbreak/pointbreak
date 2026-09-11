@@ -12,6 +12,7 @@ use crate::session::{
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssessmentAddBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     assessment_id: String,
     event_id: String,
@@ -49,6 +50,7 @@ pub fn assessment_add_document(
     EventWriteDocument::new(
         schema,
         AssessmentAddBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             assessment_id: result.assessment_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),

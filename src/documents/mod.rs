@@ -432,6 +432,20 @@ mod tests {
 
         let revision_id = RevisionId::new("review-unit:sha256:one");
         let doc = validation_add_document(ValidationAddResult {
+            acknowledgement: crate::session::WriteAcknowledgementV1 {
+                authority_outcome: crate::session::AuthorityWriteOutcomeV1::Created,
+                derived: crate::session::DerivedWriteAcknowledgementV1::new(
+                    crate::session::DerivedWriteAvailabilityV1::Off,
+                    None,
+                )
+                .unwrap(),
+                legacy_projection_state: crate::session::LegacyProjectionStateV1::Refreshed,
+                operation_receipt: crate::session::OperationReceiptAcknowledgementV1::new(
+                    crate::session::OperationReceiptStateV1::NotRecorded,
+                    None,
+                )
+                .unwrap(),
+            },
             revision_id: revision_id.clone(),
             validation_check_id: ValidationCheckId::new("validation:sha256:one"),
             event_id: EventId::new("evt:sha256:one"),

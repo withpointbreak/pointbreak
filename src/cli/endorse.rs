@@ -39,6 +39,7 @@ pub(super) struct EndorseArgs {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EndorseBody {
+    acknowledgement: pointbreak::session::WriteAcknowledgementV1,
     event_id: String,
     target_event_id: String,
     target_event_record_hash: String,
@@ -86,6 +87,7 @@ pub(super) fn run(
     )?;
 
     let body = EndorseBody {
+        acknowledgement: result.acknowledgement,
         event_id: result.event_id.as_str().to_owned(),
         target_event_id: result.target_event_id.as_str().to_owned(),
         target_event_record_hash: result.target_event_record_hash,

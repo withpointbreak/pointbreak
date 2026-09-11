@@ -13,6 +13,7 @@ use crate::model::{
     ActorId, AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, RevisionId,
     TargetRef, TrackId, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     BodyContentType, EventTarget, EventType, ReviewAssessment, ReviewAssessmentRecordedPayload,
     ReviewObservationRecordedPayload, ShoreEvent, decode_input_request_opened_payload,
@@ -31,8 +32,8 @@ use crate::session::store::resolution::{
 };
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -168,6 +169,7 @@ impl AssessmentAddOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssessmentAddResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub revision_id: RevisionId,
     pub assessment_id: AssessmentId,
     pub event_id: EventId,
@@ -351,11 +353,12 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = if change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let outcome = derived.record(if change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("review_assessment_recorded".to_owned(), 1);
@@ -376,9 +379,16 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     diagnostics.extend(competing_candidates);
     diagnostics.extend(cross_actor_replacement);
     diagnostics.extend(unlinked_follow_up);
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     let result = AssessmentAddResult {
+        acknowledgement,
         revision_id: resolved.revision_id,
         assessment_id,
         event_id,

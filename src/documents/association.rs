@@ -9,6 +9,7 @@ use crate::session::{
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssociateCommitBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     commit_association_id: String,
     commit_oid: String,
@@ -19,6 +20,7 @@ pub struct AssociateCommitBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawCommitBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     commit_withdrawal_id: String,
     commit_association_id: String,
@@ -28,6 +30,7 @@ pub struct WithdrawCommitBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssociateRefBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     ref_association_id: String,
     ref_name: String,
@@ -38,6 +41,7 @@ pub struct AssociateRefBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawRefBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     ref_withdrawal_id: String,
     ref_association_id: String,
@@ -61,6 +65,7 @@ pub fn associate_commit_document(
     EventWriteDocument::new(
         "pointbreak.review-association-commit",
         AssociateCommitBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             commit_association_id: result.commit_association_id.as_str().to_owned(),
             commit_oid: result.commit_oid,
@@ -80,6 +85,7 @@ pub fn withdraw_commit_document(
     EventWriteDocument::new(
         "pointbreak.review-association-commit-withdrawn",
         WithdrawCommitBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             commit_withdrawal_id: result.commit_withdrawal_id.as_str().to_owned(),
             commit_association_id: result.commit_association_id.as_str().to_owned(),
@@ -96,6 +102,7 @@ pub fn associate_ref_document(result: AssociateRefResult) -> EventWriteDocument<
     EventWriteDocument::new(
         "pointbreak.review-association-ref",
         AssociateRefBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             ref_association_id: result.ref_association_id.as_str().to_owned(),
             ref_name: result.ref_name,
@@ -113,6 +120,7 @@ pub fn withdraw_ref_document(result: WithdrawRefResult) -> EventWriteDocument<Wi
     EventWriteDocument::new(
         "pointbreak.review-association-ref-withdrawn",
         WithdrawRefBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             ref_withdrawal_id: result.ref_withdrawal_id.as_str().to_owned(),
             ref_association_id: result.ref_association_id.as_str().to_owned(),

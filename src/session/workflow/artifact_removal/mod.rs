@@ -22,6 +22,7 @@ use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 use crate::git::{git_rev_list_range, git_rev_parse_commit_oid};
 use crate::model::{ActorId, JournalId, ObjectId, RevisionId, id_prefix};
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::body_artifact::{
     note_body_content_hash_from_path, validate_note_body_artifact_bytes,
 };
@@ -38,8 +39,8 @@ use crate::session::store::resolution::{prepare_write_landing, resolve_write_sto
 use crate::session::{
     ArtifactRemovalProjection, CommitGraphCondition, EventSigningOptions, EventWriteOutcome,
     RemovalOperativeStatus, RemovalPolicy, RevisionCommitRangeProjection, TrustSet,
-    current_timestamp, enrich_liveness, referenced_artifacts, sign_event_if_requested,
-    writer_from_options,
+    WriteAcknowledgementV1, current_timestamp, enrich_liveness, referenced_artifacts,
+    sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{LocalStorage, RemoveOutcome};
 
@@ -121,6 +122,7 @@ pub struct RemovedContent {
 /// The outcome of a [`remove_content`] call.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoveResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub removed: Vec<RemovedContent>,
     pub events_created: usize,
     pub events_existing: usize,
@@ -148,6 +150,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let session_id = JournalId::new(format!("{}:default", id_prefix::JOURNAL));
     let writer = writer_from_options(&worktree_root, options.actor_id.as_ref());
 
+    let mut derived = DerivedWriteAggregate::default();
     let mut removed = Vec::new();
     let mut events_created = 0;
     let mut events_existing = 0;
@@ -163,7 +166,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
             current_timestamp(),
         )?;
         sign_event_if_requested(&mut event, &options.signing)?;
-        let created = match event_store.record_event_once(&event)? {
+        let created = match derived.record(event_store.record_event_once_acknowledged(&event)?) {
             EventWriteOutcome::Created => {
                 events_created += 1;
                 true
@@ -190,9 +193,16 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let state = SessionState::from_events(&event_store.list_events()?)?;
     let projection_refresh = publish_legacy_state_projection(&storage, &store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(RemoveResult {
+        acknowledgement,
         removed,
         events_created,
         events_existing,

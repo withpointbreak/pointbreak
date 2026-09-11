@@ -7,6 +7,7 @@ use crate::session::CaptureResult;
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision: CaptureRevisionDocument,
     /// Additive per-file diff tallies (ADR-0029 soft shell; fields may be added
     /// within a document `version`). The consumed `.revision.id` path is unmoved.
@@ -46,6 +47,7 @@ pub fn capture_document(result: CaptureResult) -> EventWriteDocument<CaptureBody
     EventWriteDocument::new(
         "pointbreak.review-capture",
         CaptureBody {
+            acknowledgement: result.acknowledgement,
             revision: CaptureRevisionDocument {
                 id: result.revision_id.as_str().to_owned(),
                 summary: result.summary,
@@ -88,6 +90,20 @@ mod tests {
 
     fn sample_capture_result() -> CaptureResult {
         CaptureResult {
+            acknowledgement: crate::session::WriteAcknowledgementV1 {
+                authority_outcome: crate::session::AuthorityWriteOutcomeV1::Created,
+                derived: crate::session::DerivedWriteAcknowledgementV1::new(
+                    crate::session::DerivedWriteAvailabilityV1::Off,
+                    None,
+                )
+                .unwrap(),
+                legacy_projection_state: crate::session::LegacyProjectionStateV1::Refreshed,
+                operation_receipt: crate::session::OperationReceiptAcknowledgementV1::new(
+                    crate::session::OperationReceiptStateV1::NotRecorded,
+                    None,
+                )
+                .unwrap(),
+            },
             journal_id: JournalId::new("journal:default"),
             revision_id: RevisionId::new("rev:sha256:abc123"),
             object_id: ObjectId::new("obj:sha256:def456"),

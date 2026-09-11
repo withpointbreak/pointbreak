@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::crypto::{EventSigner, SignerId};
 use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, EventId};
+use crate::session::acknowledgement::{DerivedWriteAggregate, EventWriteAcknowledgement};
 use crate::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
     ShoreEvent, Writer, event_signature_pre_authentication_encoding,
@@ -36,8 +37,8 @@ use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
 };
 use crate::session::{
-    CosignatureGateDecision, EventStore, EventWriteOutcome, TrustSet, current_timestamp,
-    gate_cosignature_for_store, writer_from_options,
+    CosignatureGateDecision, EventStore, EventWriteOutcome, TrustSet, WriteAcknowledgementV1,
+    current_timestamp, gate_cosignature_for_store, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -77,6 +78,7 @@ impl EventSignatureRecordOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventSignatureRecordResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     /// The carrier's `eventId`.
     pub event_id: EventId,
     pub target_event_id: EventId,
@@ -170,9 +172,22 @@ pub fn record_event_signature(
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
 
     let mut diagnostics = state.diagnostics;
+    let mut derived = DerivedWriteAggregate::default();
+    derived.record(
+        record
+            .acknowledgement
+            .expect("stored carrier yields acknowledgement"),
+    );
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     Ok(EventSignatureRecordResult {
+        acknowledgement,
         event_id,
         target_event_id: target.event_id,
         target_event_record_hash,
@@ -191,6 +206,7 @@ pub(crate) struct CosignatureRecord {
     pub carrier: ShoreEvent,
     pub decision: CosignatureGateDecision,
     pub write_outcome: Option<EventWriteOutcome>,
+    pub acknowledgement: Option<EventWriteAcknowledgement>,
 }
 
 /// Assemble a co-signature carrier over `target` from an attestation already in
@@ -216,7 +232,7 @@ pub(crate) fn assemble_and_record_cosignature(
         writer,
         trust,
         occurred_at,
-        |carrier| event_store.record_event_once(carrier),
+        |carrier| event_store.record_event_once_acknowledged(carrier),
     )
 }
 
@@ -230,7 +246,7 @@ pub(crate) fn assemble_and_record_cosignature_with_writer(
     writer: Writer,
     trust: &TrustSet,
     occurred_at: String,
-    record_event_once: impl FnOnce(&ShoreEvent) -> Result<EventWriteOutcome>,
+    record_event_once: impl FnOnce(&ShoreEvent) -> Result<EventWriteAcknowledgement>,
 ) -> Result<CosignatureRecord> {
     let target_event_record_hash = target.event_record_hash()?;
     let payload = EventSignatureRecordedPayload {
@@ -257,13 +273,15 @@ pub(crate) fn assemble_and_record_cosignature_with_writer(
     )?;
 
     let decision = gate_cosignature_for_store(&payload, Some(target), trust)?;
-    let write_outcome = if decision.stores() {
+    let acknowledgement = if decision.stores() {
         Some(record_event_once(&carrier)?)
     } else {
         None
     };
 
+    let write_outcome = acknowledgement.as_ref().map(|ack| ack.outcome);
     Ok(CosignatureRecord {
+        acknowledgement,
         carrier,
         decision,
         write_outcome,

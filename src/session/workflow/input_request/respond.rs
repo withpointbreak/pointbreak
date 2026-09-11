@@ -10,6 +10,7 @@ use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TargetRef, id_prefix,
 };
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{
     BodyContentType, EventTarget, EventType, InputRequestRespondedPayload,
     InputRequestResponseOutcome, ShoreEvent, decode_input_request_opened_payload,
@@ -23,8 +24,8 @@ use crate::session::store::resolution::{
     resolve_write_validation_store,
 };
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
-    sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, WriteAcknowledgementV1,
+    current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -103,6 +104,7 @@ impl InputRequestRespondOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestRespondResult {
+    pub acknowledgement: WriteAcknowledgementV1,
     pub input_request_id: InputRequestId,
     pub input_request_response_id: InputRequestResponseId,
     pub event_id: EventId,
@@ -255,11 +257,12 @@ pub fn respond_input_request(
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let write_outcome = if change_write {
-        event_store.record_change_event_once(&event)?
+    let mut derived = DerivedWriteAggregate::default();
+    let write_outcome = derived.record(if change_write {
+        event_store.record_change_event_once_acknowledged(&event)?
     } else {
-        event_store.record_event_once(&event)?
-    };
+        event_store.record_event_once_acknowledged(&event)?
+    });
     let (events_created, events_existing) = match write_outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("input_request_responded".to_owned(), 1);
@@ -275,9 +278,16 @@ pub fn respond_input_request(
     })?;
     let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
+    let acknowledgement = derived.finish(
+        events_created,
+        events_existing,
+        projection_refresh.state,
+        &mut diagnostics,
+    );
     diagnostics.extend(projection_refresh.diagnostic);
 
     let result = InputRequestRespondResult {
+        acknowledgement,
         input_request_id: request_payload.input_request_id,
         input_request_response_id,
         event_id,

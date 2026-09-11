@@ -259,6 +259,7 @@ fn normalize(raw: &str, repo_path: &str) -> String {
     let text = normalize_hashes(&text);
     let text = normalize_timestamps(&text);
     let text = normalize_generated_string(&text, "operationId", "<operationId>");
+    let text = normalize_generated_string(&text, "receiptId", "<operationId>");
     let text = normalize_generated_string(&text, "token", "<reviewCursor>");
     let text = normalize_producer_for_historical_snapshot(&text);
     let text = normalize_cli_version(&text);
@@ -334,6 +335,40 @@ fn run_command(repo: &GitRepo, args: &[&str]) -> String {
 
 #[track_caller]
 fn assert_snapshot(name: &str, normalized: &str) {
+    let document: Value = serde_json::from_str(normalized).expect("JSON document");
+    let schema = document["schema"].as_str().unwrap();
+    if matches!(
+        schema,
+        "pointbreak.review-capture"
+            | "pointbreak.change-capture-receipt.v1"
+            | "pointbreak.review-association-commit"
+            | "pointbreak.review-association-commit-withdrawn"
+            | "pointbreak.review-association-ref"
+            | "pointbreak.review-association-ref-withdrawn"
+            | "pointbreak.review-assessment-add"
+            | "pointbreak.review-observation-add"
+            | "pointbreak.store-remove"
+            | "pointbreak.review-input-request-open"
+            | "pointbreak.review-input-request-respond"
+            | "pointbreak.review-endorse"
+            | "pointbreak.review-validation-add"
+    ) {
+        assert!(
+            document["acknowledgement"].is_object(),
+            "{schema} requires typed acknowledgement"
+        );
+        assert_eq!(normalized.matches("\"acknowledgement\":").count(), 1);
+        assert_eq!(normalized.matches("\"diagnostics\":").count(), 1);
+        assert!(document["acknowledgement"]["authorityOutcome"].is_string());
+        assert_eq!(
+            document["acknowledgement"]["operationReceipt"]["state"],
+            if schema == "pointbreak.change-capture-receipt.v1" {
+                "recorded"
+            } else {
+                "not_recorded"
+            }
+        );
+    }
     let path = snapshot_dir().join(format!("{name}.snap"));
     if std::env::var_os("BLESS").is_some() {
         fs::create_dir_all(snapshot_dir()).expect("create snapshot dir");

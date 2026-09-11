@@ -36,6 +36,10 @@ pub(crate) struct EventWriteBatch<'a> {
 }
 
 impl EventWriteBatch<'_> {
+    #[allow(
+        dead_code,
+        reason = "preserve the outcome-only streaming writer API for callers that do not consume acknowledgements"
+    )]
     pub(crate) fn record_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
         self.record_event_once_acknowledged(event)
             .map(|ack| ack.outcome)

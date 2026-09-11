@@ -430,6 +430,7 @@ struct StoreModeBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoreRemoveBody {
+    acknowledgement: pointbreak::session::WriteAcknowledgementV1,
     removed: Vec<RemovedContentBody>,
     events_created: usize,
     events_existing: usize,
@@ -1553,6 +1554,7 @@ impl From<StoreListEntry> for StoreListEntryBody {
 impl From<RemoveResult> for StoreRemoveBody {
     fn from(result: RemoveResult) -> Self {
         Self {
+            acknowledgement: result.acknowledgement,
             removed: result
                 .removed
                 .into_iter()

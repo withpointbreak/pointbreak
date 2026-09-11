@@ -7,6 +7,7 @@ use crate::session::{DelegationMap, ObservationAddResult, ObservationListResult}
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservationAddBody {
+    acknowledgement: crate::session::WriteAcknowledgementV1,
     revision_id: String,
     observation_id: String,
     event_id: String,
@@ -43,6 +44,7 @@ pub fn observation_add_document(
     EventWriteDocument::new(
         "pointbreak.review-observation-add",
         ObservationAddBody {
+            acknowledgement: result.acknowledgement,
             revision_id: result.revision_id.as_str().to_owned(),
             observation_id: result.observation_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
