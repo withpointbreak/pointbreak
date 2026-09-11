@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::model::id_prefix;
+use crate::session::acknowledgement::EventWriteAcknowledgement;
 use crate::session::derived_access::writer::{DerivedWriteCoordinator, DerivedWriteDiagnostic};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
 use crate::session::store::authority_lock::StoreAuthorityLock;
@@ -36,13 +37,24 @@ pub(crate) struct EventWriteBatch<'a> {
 
 impl EventWriteBatch<'_> {
     pub(crate) fn record_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        self.record_event_once_acknowledged(event)
+            .map(|ack| ack.outcome)
+    }
+
+    pub(crate) fn record_event_once_acknowledged(
+        &self,
+        event: &ShoreEvent,
+    ) -> Result<EventWriteAcknowledgement> {
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;
         if let Some(coordinator) = &self.store.coordinator {
-            return coordinator
-                .record_event_once(event, || self.store.publish_validated_event(event, &bytes));
+            return coordinator.record_event_once_acknowledged(event, || {
+                self.store.publish_validated_event(event, &bytes)
+            });
         }
-        self.store.publish_validated_event(event, &bytes)
+        self.store
+            .publish_validated_event(event, &bytes)
+            .map(EventWriteAcknowledgement::off)
     }
 }
 
@@ -131,6 +143,14 @@ impl EventStore {
     }
 
     pub fn record_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        self.record_event_once_acknowledged(event)
+            .map(|ack| ack.outcome)
+    }
+
+    pub(crate) fn record_event_once_acknowledged(
+        &self,
+        event: &ShoreEvent,
+    ) -> Result<EventWriteAcknowledgement> {
         let span = tracing::debug_span!(
             "event_store.record_event_once",
             event_id = event.event_id.as_str(),
@@ -139,7 +159,8 @@ impl EventStore {
         );
         let _entered = span.enter();
 
-        self.begin_current_product_batch()?.record_event_once(event)
+        self.begin_current_product_batch()?
+            .record_event_once_acknowledged(event)
     }
 
     /// Admit a current-product writer once, then accept events incrementally
@@ -192,6 +213,14 @@ impl EventStore {
     /// workflows must refuse both an unactivated store and a partially migrated
     /// one before validating or publishing event bytes.
     pub(crate) fn record_change_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        self.record_change_event_once_acknowledged(event)
+            .map(|ack| ack.outcome)
+    }
+
+    pub(crate) fn record_change_event_once_acknowledged(
+        &self,
+        event: &ShoreEvent,
+    ) -> Result<EventWriteAcknowledgement> {
         let _authority = self
             .files
             .as_ref()
@@ -201,10 +230,12 @@ impl EventStore {
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;
         if let Some(coordinator) = &self.coordinator {
-            return coordinator
-                .record_event_once(event, || self.publish_validated_event(event, &bytes));
+            return coordinator.record_event_once_acknowledged(event, || {
+                self.publish_validated_event(event, &bytes)
+            });
         }
         self.publish_validated_event(event, &bytes)
+            .map(EventWriteAcknowledgement::off)
     }
 
     /// List validated events only from a complete Change-capable Journal.

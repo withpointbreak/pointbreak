@@ -33,8 +33,11 @@ use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
 };
 use crate::error::{Result, ShoreError};
-use crate::session::EventWriteOutcome;
+use crate::session::acknowledgement::EventWriteAcknowledgement;
 use crate::session::event::ShoreEvent;
+use crate::session::{
+    DerivedVisibilityTokenV1, DerivedWriteAvailabilityV1, EventWriteOutcome, ProjectionDiagnostic,
+};
 
 const MAX_DIAGNOSTICS: usize = 8;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
@@ -49,6 +52,15 @@ static PROCESS_DIAGNOSTICS: OnceLock<Mutex<VecDeque<DerivedWriteDiagnostic>>> = 
 pub(crate) struct DerivedWriteDiagnostic {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+}
+
+impl From<DerivedWriteDiagnostic> for ProjectionDiagnostic {
+    fn from(diagnostic: DerivedWriteDiagnostic) -> Self {
+        Self {
+            code: diagnostic.code.into(),
+            message: diagnostic.message,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,15 +164,37 @@ impl DerivedWriteCoordinator {
         coordinator
     }
 
+    #[cfg(test)]
     pub(crate) fn record_event_once(
         &self,
         event: &ShoreEvent,
         publish: impl FnOnce() -> Result<EventWriteOutcome>,
     ) -> Result<EventWriteOutcome> {
+        self.record_event_once_acknowledged(event, publish)
+            .map(|ack| ack.outcome)
+    }
+
+    pub(crate) fn record_event_once_acknowledged(
+        &self,
+        event: &ShoreEvent,
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+    ) -> Result<EventWriteAcknowledgement> {
         if DerivedWriteMode::load(&self.mode) == DerivedWriteMode::DegradedLoose {
-            return self.publish_degraded(publish);
+            return self.publish_degraded(publish).map(|outcome| {
+                EventWriteAcknowledgement::new(
+                    outcome,
+                    DerivedWriteAvailabilityV1::Unavailable,
+                    None,
+                    Vec::new(),
+                )
+            });
         }
-        self.record_event_once_with_hook(event, |_| {}, publish, catch_up_after_publication)
+        self.record_event_once_acknowledged_with_hook(
+            event,
+            |_| {},
+            publish,
+            catch_up_after_publication,
+        )
     }
 
     #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -204,9 +238,10 @@ impl DerivedWriteCoordinator {
                     .message
             )));
         }
-        Ok(outcome)
+        Ok(outcome.outcome)
     }
 
+    #[cfg(test)]
     fn record_event_once_with_hook(
         &self,
         event: &ShoreEvent,
@@ -214,6 +249,17 @@ impl DerivedWriteCoordinator {
         publish: impl FnOnce() -> Result<EventWriteOutcome>,
         catch_up: impl FnOnce(&super::service::DerivedAccessService) -> std::result::Result<(), String>,
     ) -> Result<EventWriteOutcome> {
+        self.record_event_once_acknowledged_with_hook(event, hook, publish, catch_up)
+            .map(|ack| ack.outcome)
+    }
+
+    fn record_event_once_acknowledged_with_hook(
+        &self,
+        event: &ShoreEvent,
+        hook: impl FnMut(AppendCrashPoint),
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+        catch_up: impl FnOnce(&super::service::DerivedAccessService) -> std::result::Result<(), String>,
+    ) -> Result<EventWriteAcknowledgement> {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let admission_phase = enter_derived_access_phase_v1(Phase::GovernedWriteAdmission);
         let lifecycle = self
@@ -223,21 +269,21 @@ impl DerivedWriteCoordinator {
         let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
             Ok(lock) => lock,
             Err(error) => {
-                self.record_unavailable(&error.to_string());
-                return self.publish_degraded(publish);
+                let diagnostic = self.record_unavailable(&error.to_string());
+                return self.publish_unavailable(publish, diagnostic);
             }
         };
         let current = match lifecycle.open_current_for_write_locked(&writer_lock) {
             Ok(Some(current)) => current,
             Ok(None) => {
                 drop(writer_lock);
-                self.record_unavailable("no usable derived generation is current");
-                return self.publish_degraded(publish);
+                let diagnostic = self.record_unavailable("no usable derived generation is current");
+                return self.publish_unavailable(publish, diagnostic);
             }
             Err(error) => {
                 drop(writer_lock);
-                self.record_unavailable(&error.to_string());
-                return self.publish_degraded(publish);
+                let diagnostic = self.record_unavailable(&error.to_string());
+                return self.publish_unavailable(publish, diagnostic);
             }
         };
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -260,7 +306,7 @@ impl DerivedWriteCoordinator {
         catch_up: impl FnOnce(&super::service::DerivedAccessService) -> std::result::Result<(), String>,
         writer_lock: StoreWriterLock,
         current: super::lifecycle::CurrentGeneration,
-    ) -> Result<EventWriteOutcome> {
+    ) -> Result<EventWriteAcknowledgement> {
         let publication = Cell::new(None);
         let attempt_token = next_attempt_token(event);
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -295,8 +341,13 @@ impl DerivedWriteCoordinator {
                     );
                     drop(writer_lock);
                     self.enter_degraded(diagnostic.clone());
-                    enqueue_process_diagnostic(diagnostic);
-                    return Ok(outcome);
+                    enqueue_process_diagnostic(diagnostic.clone());
+                    return Ok(EventWriteAcknowledgement::new(
+                        outcome,
+                        DerivedWriteAvailabilityV1::Unavailable,
+                        None,
+                        vec![diagnostic.into()],
+                    ));
                 }
                 if let Some(publish) = publish.take() {
                     drop(current);
@@ -307,23 +358,29 @@ impl DerivedWriteCoordinator {
                     );
                     drop(writer_lock);
                     let diagnostic = unavailable_diagnostic(&quarantine.message);
-                    self.enter_degraded(diagnostic);
-                    return self.publish_degraded(publish);
+                    self.enter_degraded(diagnostic.clone());
+                    return self.publish_unavailable(publish, diagnostic);
                 }
                 return Err(ShoreError::Message(error.to_string()));
             }
         };
-        let outcome = match resolution {
-            AppendResolution::Created(_) => EventWriteOutcome::Created,
-            AppendResolution::Existing(_) => {
-                publication.get().unwrap_or(EventWriteOutcome::Existing)
-            }
+        let (outcome, cursor) = match resolution {
+            AppendResolution::Created(cursor) => (EventWriteOutcome::Created, cursor),
+            AppendResolution::Existing(cursor) => (
+                publication.get().unwrap_or(EventWriteOutcome::Existing),
+                cursor,
+            ),
             AppendResolution::Conflict(_) => {
                 return Err(ShoreError::Message(format!(
                     "event conflict for idempotency key {}",
                     event.idempotency_key
                 )));
             }
+        };
+        let token = DerivedVisibilityTokenV1 {
+            generation_id: current.generation_id().to_owned(),
+            epoch: cursor.epoch,
+            head_sequence: cursor.sequence,
         };
         drop(writer_lock);
 
@@ -333,14 +390,31 @@ impl DerivedWriteCoordinator {
             Ok(lock) => lock,
             Err(error) => {
                 drop(current);
-                self.record_catch_up_pending(&error.to_string());
-                return Ok(outcome);
+                let diagnostic = self.record_catch_up_pending(&error.to_string());
+                return Ok(EventWriteAcknowledgement::new(
+                    outcome,
+                    DerivedWriteAvailabilityV1::CatchingUp,
+                    Some(token),
+                    vec![diagnostic.into()],
+                ));
             }
         };
+        let mut acknowledgement = EventWriteAcknowledgement::new(
+            outcome,
+            DerivedWriteAvailabilityV1::Current,
+            Some(token.clone()),
+            Vec::new(),
+        );
         if let Err(error) = catch_up(current.service()) {
             drop(catch_up_lock);
             drop(current);
-            self.record_catch_up_pending(&error);
+            let diagnostic = self.record_catch_up_pending(&error);
+            acknowledgement = EventWriteAcknowledgement::new(
+                outcome,
+                DerivedWriteAvailabilityV1::CatchingUp,
+                Some(token),
+                vec![diagnostic.into()],
+            );
         }
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(catch_up_phase);
@@ -348,7 +422,7 @@ impl DerivedWriteCoordinator {
         let response_phase = enter_derived_access_phase_v1(Phase::GovernedWriteResponse);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(response_phase);
-        Ok(outcome)
+        Ok(acknowledgement)
     }
 
     #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -498,18 +572,36 @@ impl DerivedWriteCoordinator {
         self.push_diagnostic(diagnostic);
     }
 
-    fn record_unavailable(&self, detail: &str) {
-        self.enter_degraded(unavailable_diagnostic(detail));
+    fn publish_unavailable(
+        &self,
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+        diagnostic: DerivedWriteDiagnostic,
+    ) -> Result<EventWriteAcknowledgement> {
+        self.publish_degraded(publish).map(|outcome| {
+            EventWriteAcknowledgement::new(
+                outcome,
+                DerivedWriteAvailabilityV1::Unavailable,
+                None,
+                vec![diagnostic.into()],
+            )
+        })
     }
 
-    fn record_catch_up_pending(&self, detail: &str) {
+    fn record_unavailable(&self, detail: &str) -> DerivedWriteDiagnostic {
+        let diagnostic = unavailable_diagnostic(detail);
+        self.enter_degraded(diagnostic.clone());
+        diagnostic
+    }
+
+    fn record_catch_up_pending(&self, detail: &str) -> DerivedWriteDiagnostic {
         let diagnostic = diagnostic(
             "derived_access_projection_catch_up_deferred",
             detail,
             "derived generation remains published as CatchingUp",
         );
         self.push_diagnostic(diagnostic.clone());
-        enqueue_process_diagnostic(diagnostic);
+        enqueue_process_diagnostic(diagnostic.clone());
+        diagnostic
     }
 }
 
@@ -678,6 +770,153 @@ mod tests {
     use crate::session::{
         AuthorityCursorV2, EventStore, EventVerificationPolicy, EventWriteOutcome, TrustSet,
     };
+
+    #[test]
+    fn acknowledged_write_off_and_current_keep_exact_call_coordinates() {
+        use crate::session::DerivedWriteAvailabilityV1::{Current, Off};
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let off = truth.record_event_once_acknowledged(&event(0)).unwrap();
+        assert_eq!(off.outcome, EventWriteOutcome::Created);
+        assert_eq!(off.derived.availability, Off);
+        assert!(off.derived.token.is_none());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let current = lifecycle.open_current().unwrap().unwrap();
+        let generation = current.generation_id().to_owned();
+        let cursor = current.service().truth_head().unwrap().cursor;
+        drop(current);
+        let store = EventStore::open(root.path())
+            .with_coordinator(DerivedWriteCoordinator::new(lifecycle).unwrap());
+        for expected in [EventWriteOutcome::Created, EventWriteOutcome::Existing] {
+            let ack = store.record_event_once_acknowledged(&event(1)).unwrap();
+            assert_eq!(ack.outcome, expected);
+            assert_eq!(ack.derived.availability, Current);
+            let token = ack.derived.token.unwrap();
+            assert_eq!(token.generation_id, generation);
+            assert_eq!(token.epoch, cursor.epoch);
+            assert_eq!(token.head_sequence, cursor.sequence + 1);
+            assert!(ack.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn acknowledged_unavailable_is_not_reattributed_after_degradation() {
+        use crate::session::DerivedWriteAvailabilityV1::Unavailable;
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle).unwrap();
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        for index in 0..2 {
+            let ack = coordinator
+                .record_event_once_acknowledged(&event(index), || {
+                    truth.record_event_once(&event(index))
+                })
+                .unwrap();
+            assert_eq!(ack.outcome, EventWriteOutcome::Created);
+            assert_eq!(ack.derived.availability, Unavailable);
+            assert!(ack.derived.token.is_none());
+            assert_eq!(ack.diagnostics.len(), usize::from(index == 0));
+            if index == 0 {
+                assert_eq!(
+                    ack.diagnostics[0].code,
+                    "derived_access_generation_unavailable"
+                );
+            }
+        }
+        drop(held);
+        assert!(
+            !coordinator.take_diagnostics().is_empty(),
+            "acknowledgement does not drain compatibility diagnostics"
+        );
+    }
+
+    #[test]
+    fn acknowledged_post_truth_finalization_failure_keeps_success() {
+        use crate::session::DerivedWriteAvailabilityV1::Unavailable;
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        active_product_lifecycle(&root)
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+        let coordinator = DerivedWriteCoordinator::new(active_product_lifecycle(&root)).unwrap();
+        let ack = coordinator
+            .record_event_once_acknowledged_with_hook(
+                &event(0),
+                |point| {
+                    if point == AppendCrashPoint::AfterEventPublication {
+                        truth.record_event_once(&event(1)).unwrap();
+                    }
+                },
+                || truth.record_event_once(&event(0)),
+                catch_up_after_publication,
+            )
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(ack.derived.availability, Unavailable);
+        assert!(ack.derived.token.is_none());
+        assert_eq!(
+            ack.diagnostics[0].code,
+            "derived_access_receipt_finalization_failed"
+        );
+        assert_eq!(truth.list_events().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn acknowledged_overlapping_calls_keep_their_own_diagnostics() {
+        use std::sync::Arc;
+
+        use crate::session::DerivedWriteAvailabilityV1::{CatchingUp, Unavailable};
+        let root = TempDir::new().unwrap();
+        active_product_lifecycle(&root)
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+        let coordinator =
+            Arc::new(DerivedWriteCoordinator::new(active_product_lifecycle(&root)).unwrap());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_coordinator = coordinator.clone();
+        let store_root = root.path().to_path_buf();
+        let first = thread::spawn(move || {
+            first_coordinator
+                .record_event_once_acknowledged_with_hook(
+                    &event(0),
+                    |_| {},
+                    || EventStore::open(&store_root).record_event_once(&event(0)),
+                    |_| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Err("first call catch-up failure".into())
+                    },
+                )
+                .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = coordinator
+            .record_event_once_acknowledged(&event(1), || {
+                EventStore::open(root.path()).record_event_once(&event(1))
+            })
+            .unwrap();
+        release_tx.send(()).unwrap();
+        let first = first.join().unwrap();
+        assert_eq!(first.derived.availability, CatchingUp);
+        assert_eq!(first.derived.token.unwrap().head_sequence, 1);
+        assert_eq!(first.diagnostics.len(), 1);
+        assert_eq!(
+            first.diagnostics[0].code,
+            "derived_access_projection_catch_up_deferred"
+        );
+        assert_eq!(second.derived.availability, Unavailable);
+        assert!(second.derived.token.is_none());
+        assert_eq!(second.diagnostics.len(), 1);
+        assert_eq!(
+            second.diagnostics[0].code,
+            "derived_access_generation_unavailable"
+        );
+        assert_eq!(coordinator.take_diagnostics().len(), 2);
+    }
 
     #[test]
     fn governed_write_advances_once_and_out_of_band_append_requires_rebuild() {

@@ -202,6 +202,32 @@ fn rank(availability: &DerivedWriteAvailabilityV1) -> u8 {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct EventWriteAcknowledgement {
+    pub(crate) outcome: crate::session::EventWriteOutcome,
+    pub(crate) derived: DerivedWriteAcknowledgementV1,
+    pub(crate) diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+impl EventWriteAcknowledgement {
+    pub(crate) fn new(
+        outcome: crate::session::EventWriteOutcome,
+        availability: DerivedWriteAvailabilityV1,
+        token: Option<DerivedVisibilityTokenV1>,
+        diagnostics: Vec<ProjectionDiagnostic>,
+    ) -> Self {
+        Self {
+            outcome,
+            derived: DerivedWriteAcknowledgementV1::new(availability, token)
+                .expect("writer branch supplies a valid token"),
+            diagnostics,
+        }
+    }
+    pub(crate) fn off(outcome: crate::session::EventWriteOutcome) -> Self {
+        Self::new(outcome, DerivedWriteAvailabilityV1::Off, None, Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
