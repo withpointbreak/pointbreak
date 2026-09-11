@@ -49,6 +49,8 @@ use crate::session::store::capabilities::{
 };
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
+const WAL_OBSERVATION_ATTEMPTS: usize = 4;
+const WAL_OBSERVATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 const BOOTSTRAP_PROJECTION_BATCH: usize = 512;
 const CHANGE_ACTIVATION_LOGICAL_KEY: &str =
     "store_capability_activation:review_change_revision_v1:root";
@@ -166,6 +168,12 @@ pub(crate) enum LifecycleError {
     WriterLock(#[from] WriterLockError),
     #[error("authoritative truth read failed: {0}")]
     Truth(String),
+    #[error("derived generation read failed while {operation} at {path}: {source}")]
+    DerivedRead {
+        path: PathBuf,
+        operation: &'static str,
+        source: std::io::Error,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -2082,19 +2090,39 @@ fn validate_published(
 }
 
 fn validate_wal_shape(generation_root: &Path) -> Result<(), LifecycleError> {
+    validate_wal_shape_with_hook(generation_root, |_| {})
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalObservationBoundary {
+    BeforeOpen,
+    AfterMetadata,
+    BeforeRetry,
+}
+
+fn validate_wal_shape_with_hook(
+    generation_root: &Path,
+    mut hook: impl FnMut(WalObservationBoundary),
+) -> Result<(), LifecycleError> {
     let database = generation_root.join("cursor.sqlite3");
     let mut database_header = [0_u8; 16];
     use std::io::Read as _;
     match std::fs::File::open(&database) {
-        Ok(mut file) => file
-            .read_exact(&mut database_header)
-            .map_err(|error| LifecycleError::Validation(error.to_string()))?,
+        Ok(mut file) => file.read_exact(&mut database_header).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                LifecycleError::Validation(
+                    "published generation database header is truncated".to_owned(),
+                )
+            } else {
+                derived_read_error(&database, "read database header", error)
+            }
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(LifecycleError::Validation(
                 "published generation database is absent".to_owned(),
             ));
         }
-        Err(error) => return Err(LifecycleError::Truth(error.to_string())),
+        Err(error) => return Err(derived_read_error(&database, "open database", error)),
     }
     if &database_header != b"SQLite format 3\0" {
         return Err(LifecycleError::Validation(
@@ -2103,11 +2131,93 @@ fn validate_wal_shape(generation_root: &Path) -> Result<(), LifecycleError> {
     }
 
     let path = generation_root.join("cursor.sqlite3-wal");
-    let length = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(LifecycleError::Truth(error.to_string())),
-    };
+    for attempt in 0..WAL_OBSERVATION_ATTEMPTS {
+        hook(WalObservationBoundary::BeforeOpen);
+        // SQLite may delete the WAL when its last connection closes. Open first
+        // and keep this handle for both metadata and bytes: a generation lease
+        // protects the directory, not this disposable SQLite companion's name.
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if cfg!(windows)
+                    && error.raw_os_error() == Some(5)
+                    && attempt + 1 < WAL_OBSERVATION_ATTEMPTS =>
+            {
+                // ERROR_ACCESS_DENIED also describes a delete-pending file.
+                // It is never success: require a fresh successful observation
+                // or confirmed absence, and retain persistent denial as I/O.
+                hook(WalObservationBoundary::BeforeRetry);
+                std::thread::sleep(WAL_OBSERVATION_RETRY_DELAY);
+                continue;
+            }
+            Err(error) => return Err(derived_read_error(&path, "open WAL", error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| derived_read_error(&path, "read WAL metadata", error))?;
+        if !metadata.is_file() {
+            return Err(derived_read_error(
+                &path,
+                "read WAL metadata",
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "WAL is not a regular file"),
+            ));
+        }
+        let length = metadata.len();
+        hook(WalObservationBoundary::AfterMetadata);
+        let mut header = [0_u8; 32];
+        let read = if length >= 32 {
+            file.read_exact(&mut header)
+        } else {
+            Ok(())
+        };
+        let confirmed_length = file
+            .metadata()
+            .map_err(|error| derived_read_error(&path, "confirm WAL metadata", error))?
+            .len();
+        if length != confirmed_length {
+            // Checkpoint truncation (or a concurrent append) invalidates this
+            // length/header pairing. Do not quarantine bytes from a moving
+            // observation, or reinterpret an arbitrary read failure as cleanup.
+            if let Err(error) = read
+                && error.kind() != std::io::ErrorKind::UnexpectedEof
+            {
+                return Err(derived_read_error(&path, "read WAL header", error));
+            }
+            drop(file);
+            if attempt + 1 == WAL_OBSERVATION_ATTEMPTS {
+                return Err(derived_read_error(
+                    &path,
+                    "observe stable WAL length",
+                    std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "WAL length changed repeatedly",
+                    ),
+                ));
+            }
+            hook(WalObservationBoundary::BeforeRetry);
+            std::thread::sleep(WAL_OBSERVATION_RETRY_DELAY);
+            continue;
+        }
+        read.map_err(|error| derived_read_error(&path, "read WAL header", error))?;
+        return validate_wal_header(length, &header);
+    }
+    unreachable!("the final WAL observation returns success or an error")
+}
+
+fn derived_read_error(
+    path: &Path,
+    operation: &'static str,
+    source: std::io::Error,
+) -> LifecycleError {
+    LifecycleError::DerivedRead {
+        path: path.to_path_buf(),
+        operation,
+        source,
+    }
+}
+
+fn validate_wal_header(length: u64, header: &[u8; 32]) -> Result<(), LifecycleError> {
     if length == 0 {
         return Ok(());
     }
@@ -2116,10 +2226,6 @@ fn validate_wal_shape(generation_root: &Path) -> Result<(), LifecycleError> {
             "SQLite WAL is shorter than its 32-byte header: {length}"
         )));
     }
-    let mut header = [0_u8; 32];
-    std::fs::File::open(&path)
-        .and_then(|mut file| file.read_exact(&mut header))
-        .map_err(|error| LifecycleError::Truth(error.to_string()))?;
     let magic = u32::from_be_bytes(header[0..4].try_into().expect("four-byte WAL magic"));
     if !matches!(magic, 0x377f_0682 | 0x377f_0683) {
         return Err(LifecycleError::Validation(format!(
@@ -2139,7 +2245,7 @@ fn validate_wal_shape(generation_root: &Path) -> Result<(), LifecycleError> {
         )));
     }
     let frame_size = page_size + 24;
-    if (length - 32) % frame_size != 0 {
+    if !(length - 32).is_multiple_of(frame_size) {
         return Err(LifecycleError::Validation(format!(
             "SQLite WAL length {length} is not an integral number of {frame_size}-byte frames"
         )));
@@ -3860,6 +3966,242 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn wal_validation_preserves_shape_checks() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        validate_wal_shape(temp.path()).unwrap();
+        for bytes in [Vec::new(), wal_test_header().to_vec()] {
+            fs::write(&wal, bytes).unwrap();
+            validate_wal_shape(temp.path()).unwrap();
+        }
+        let mut full_frame = wal_test_header().to_vec();
+        full_frame.resize(32 + 4096 + 24, 0);
+        fs::write(&wal, full_frame).unwrap();
+        validate_wal_shape(temp.path()).unwrap();
+
+        let mut bad_page_size = wal_test_header();
+        bad_page_size[8..12].copy_from_slice(&513_u32.to_be_bytes());
+        let mut partial_frame = wal_test_header().to_vec();
+        partial_frame.push(0);
+        for (bytes, message) in [
+            (b"corrupt WAL".to_vec(), "shorter than"),
+            (vec![0; 32], "unsupported magic"),
+            (bad_page_size.to_vec(), "invalid page size"),
+            (partial_frame, "not an integral number"),
+        ] {
+            fs::write(&wal, bytes).unwrap();
+            let error = validate_wal_shape(temp.path()).unwrap_err();
+            assert!(matches!(error, LifecycleError::Validation(_)), "{error}");
+            assert!(error.to_string().contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn wal_validation_keeps_the_open_file_when_cleanup_removes_its_name() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let mut observations = 0;
+        validate_wal_shape_with_hook(temp.path(), |boundary| {
+            if boundary == WalObservationBoundary::AfterMetadata {
+                observations += 1;
+                fs::remove_file(&wal).unwrap();
+            }
+        })
+        .unwrap();
+        assert_eq!(observations, 1);
+        assert!(!wal.exists());
+    }
+
+    #[test]
+    fn wal_validation_reobserves_checkpoint_truncation() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let mut observations = 0;
+        let mut retries = 0;
+        validate_wal_shape_with_hook(temp.path(), |boundary| match boundary {
+            WalObservationBoundary::AfterMetadata => {
+                observations += 1;
+                if observations == 1 {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .open(&wal)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                }
+            }
+            WalObservationBoundary::BeforeRetry => retries += 1,
+            WalObservationBoundary::BeforeOpen => {}
+        })
+        .unwrap();
+        assert_eq!((observations, retries), (2, 1));
+    }
+
+    #[test]
+    fn wal_validation_does_not_hide_corruption_after_a_moving_observation() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let mut observations = 0;
+        let error = validate_wal_shape_with_hook(temp.path(), |boundary| {
+            if boundary == WalObservationBoundary::AfterMetadata {
+                observations += 1;
+                if observations == 1 {
+                    fs::write(&wal, b"corrupt WAL").unwrap();
+                }
+            }
+        })
+        .unwrap_err();
+        assert_eq!(observations, 2);
+        assert!(matches!(error, LifecycleError::Validation(_)), "{error}");
+    }
+
+    #[test]
+    fn wal_validation_bounds_repeated_length_changes_without_quarantining() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let mut observations = 0;
+        let error = validate_wal_shape_with_hook(temp.path(), |boundary| {
+            if boundary == WalObservationBoundary::AfterMetadata {
+                observations += 1;
+                let length = if observations % 2 == 1 { 0 } else { 32 };
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(&wal)
+                    .unwrap()
+                    .set_len(length)
+                    .unwrap();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(observations, WAL_OBSERVATION_ATTEMPTS);
+        assert!(
+            matches!(error, LifecycleError::DerivedRead { .. }),
+            "{error}"
+        );
+        assert!(!lifecycle_error_requires_quarantine(&error));
+        assert!(error.to_string().contains("observe stable WAL length"));
+    }
+
+    #[test]
+    fn wal_validation_reports_io_as_derived_and_preserves_unavailable_status() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::create_dir(&wal).unwrap();
+        let error = validate_wal_shape(temp.path()).unwrap_err();
+        assert!(
+            matches!(error, LifecycleError::DerivedRead { .. }),
+            "{error}"
+        );
+        let detail = error.to_string();
+        assert!(detail.contains(wal.to_str().unwrap()), "{detail}");
+        assert!(detail.contains("WAL"), "{detail}");
+        assert!(!detail.contains("authoritative truth"), "{detail}");
+        let status = active_lifecycle(temp.path())
+            .lifecycle_error_status(error, true)
+            .unwrap();
+        assert_eq!(status.availability, DerivedAccessAvailability::Unavailable);
+        assert_eq!(status.detail.as_deref(), Some(detail.as_str()));
+        assert!(
+            wal.is_dir(),
+            "an I/O failure must not quarantine the generation"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wal_validation_reobserves_delete_pending_until_absence_is_confirmed() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let mut keeper = Some(mark_wal_delete_pending(&wal));
+        assert_eq!(fs::File::open(&wal).unwrap_err().raw_os_error(), Some(5));
+        let mut opens = 0;
+        validate_wal_shape_with_hook(temp.path(), |boundary| match boundary {
+            WalObservationBoundary::BeforeOpen => opens += 1,
+            WalObservationBoundary::BeforeRetry => drop(keeper.take()),
+            WalObservationBoundary::AfterMetadata => panic!("the WAL should be absent"),
+        })
+        .unwrap();
+        assert_eq!(opens, 2);
+        assert!(!wal.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wal_validation_preserves_persistent_access_denial() {
+        let temp = wal_validation_fixture();
+        let wal = temp.path().join("cursor.sqlite3-wal");
+        fs::write(&wal, wal_test_header()).unwrap();
+        let _keeper = mark_wal_delete_pending(&wal);
+        assert_eq!(fs::File::open(&wal).unwrap_err().raw_os_error(), Some(5));
+        let mut opens = 0;
+        let error = validate_wal_shape_with_hook(temp.path(), |boundary| {
+            if boundary == WalObservationBoundary::BeforeOpen {
+                opens += 1;
+            }
+        })
+        .unwrap_err();
+        assert_eq!(opens, WAL_OBSERVATION_ATTEMPTS);
+        assert!(!lifecycle_error_requires_quarantine(&error));
+        assert!(matches!(
+            error,
+            LifecycleError::DerivedRead { path, operation: "open WAL", source }
+                if path == wal && source.raw_os_error() == Some(5)
+        ));
+    }
+
+    #[cfg(windows)]
+    fn mark_wal_delete_pending(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetFileInformationByHandle(
+                handle: *mut std::ffi::c_void,
+                class: i32,
+                info: *const std::ffi::c_void,
+                size: u32,
+            ) -> i32;
+        }
+        let keeper = fs::OpenOptions::new()
+            .access_mode(0x8000_0000 | 0x0001_0000) // GENERIC_READ | DELETE
+            .share_mode(1 | 2 | 4) // FILE_SHARE_READ | WRITE | DELETE
+            .open(path)
+            .unwrap();
+        let delete_file = 1_u8;
+        // Classic FileDispositionInfo, not POSIX unlink: retain the handle so
+        // new opens deterministically encounter Windows ERROR_ACCESS_DENIED.
+        let result = unsafe {
+            SetFileInformationByHandle(
+                keeper.as_raw_handle(),
+                4,
+                (&delete_file as *const u8).cast(),
+                1,
+            )
+        };
+        assert_ne!(result, 0, "{}", std::io::Error::last_os_error());
+        keeper
+    }
+
+    fn wal_validation_fixture() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("cursor.sqlite3"), b"SQLite format 3\0").unwrap();
+        temp
+    }
+
+    fn wal_test_header() -> [u8; 32] {
+        let mut header = [0_u8; 32];
+        header[0..4].copy_from_slice(&0x377f_0682_u32.to_be_bytes());
+        header[8..12].copy_from_slice(&4096_u32.to_be_bytes());
+        header
     }
 
     #[test]

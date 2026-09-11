@@ -2025,6 +2025,7 @@ pub(crate) fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChan
         | LifecycleError::Cancelled
         | LifecycleError::RebuildBusy
         | LifecycleError::WriterLock(_)
+        | LifecycleError::DerivedRead { .. }
         | LifecycleError::Truth(_) => DerivedChangeOutcomeV1::retryable(
             DerivedProjectionFailureCodeV1::ProjectionUnstable,
             detail,
@@ -3329,6 +3330,27 @@ mod tests {
         );
         assert!(document.is_retryable());
         assert_eq!(serde_json::to_value(document).unwrap()["retryable"], true);
+    }
+
+    #[test]
+    fn derived_wal_io_keeps_the_retryable_projection_failure_axis() {
+        let error = LifecycleError::DerivedRead {
+            path: PathBuf::from("generation/cursor.sqlite3-wal"),
+            operation: "open WAL",
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let expected_detail = error.to_string();
+        let DerivedChangeOutcomeV1::Retryable(document) = lifecycle_failure_outcome::<()>(error)
+        else {
+            panic!("derived WAL I/O must remain a retryable projection failure");
+        };
+        assert_eq!(
+            document.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+        assert!(document.is_retryable());
+        let json = serde_json::to_value(document).unwrap();
+        assert_eq!(json["message"], expected_detail);
     }
 
     #[test]
