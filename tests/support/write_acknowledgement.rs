@@ -53,6 +53,10 @@ pub fn assert_contract(bytes: &[u8]) {
             | "pointbreak.review-input-request-respond"
             | "pointbreak.review-endorse"
             | "pointbreak.review-validation-add"
+            | "pointbreak.association-land.v1"
+            | "pointbreak.review-fact-port.v1"
+            | "pointbreak.store-link"
+            | "pointbreak.store-migrate"
     ) {
         return;
     }

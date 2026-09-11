@@ -38,6 +38,51 @@ Document-emitting commands accept `--format <fmt>`, where `<fmt>` is `json`, `js
 `text`. Compact `json` is the default and the machine contract; `json-pretty` is the same document
 indented for manual inspection; `text` is a disposable human rendering that scripts should not parse.
 
+## Write acknowledgements
+
+Capture, association writes (including `association land`), observation/assessment/validation adds,
+input-request open/respond, endorsement, fact port, artifact removal, and store link/migrate results
+include an `acknowledgement`. The Rust ingest result uses the same type. Existing store-profile,
+proof, and command-admission checks still apply.
+
+A successful write confirms its durable authoritative outcomes. It does not promise that derived
+views are current. The four independent fields describe only this invocation:
+
+| Field | Meaning |
+| --- | --- |
+| `authorityOutcome` | `created` when all attempted authoritative components were new; `existing` when all were already present; `mixed` when both occurred; `unchanged` when none were attempted. Existing IDs, booleans, and counts remain the detailed result. |
+| `derived.availability` | `off` when the event writer had no derived coordinator; `current` when that write's catch-up succeeded; `catching_up` when its truth is durable but catch-up was deferred; `unavailable` when no usable derived observation could be returned; `not_observed` when no event write occurred. |
+| `legacyProjectionState` | `refreshed`, `refresh_failed`, or `not_attempted`. The synchronous `state.json` replacement remains best effort after durable truth. A failed replacement reports an advisory diagnostic and does not undo the write. |
+| `operationReceipt` | `{ "state": "not_recorded" }` unless the invocation created or reused an existing durable operation binding. A response is not itself a durable operation receipt. |
+
+`current` and `catching_up` include `derived.token` with `generationId`, `epoch`, and `headSequence`;
+the other states omit it. This is a coordinate obtained from the event write, not a promise about a
+later read. Compare head sequences only within the same generation and epoch. A composite result
+retains the highest compatible head sequence; incompatible generations or epochs yield `unavailable`
+and a diagnostic. For multiple writes, unavailable dominates catching-up, then current, then off.
+An empty import/fold reports unchanged authority, not-observed derived state, no attempted legacy
+refresh, and no recorded operation receipt.
+
+Change capture names its existing durable recovery binding using `operationReceipt.receiptId`, equal
+to its `operationId`: state `recorded` means this invocation created that binding, and `existing`
+means it reused it. Reuse does **not** imply the requested Change operation had already completed;
+`complete` remains the completion detail. Other acknowledgement-bearing surfaces report
+`not_recorded` and omit `receiptId`. These fields create no new durable carrier and authorize no
+later action.
+
+Call-specific diagnostics appear once in the existing top-level `diagnostics` array, never inside
+`acknowledgement`. Multi-event derived diagnostics retain the first occurrence of each code. Land
+retains diagnostics from both legacy refresh attempts, even if the second refresh succeeds. Store
+link/migrate append their existing warnings after workflow diagnostics.
+
+These are additive v1 JSON fields: consumers must tolerate unknown fields. Strict decoders may need
+updating, and Rust callers constructing public result structs must supply the new fields. Existing
+text without diagnostics is unchanged. Text renderers that already consume result diagnostics may
+add advisory lines for derived catch-up or unavailability; land, fact port, link, and migrate keep
+their existing message/body text. The process-global stderr advisory channel remains unchanged, so
+a call-specific derived diagnostic can appear in both result text and stderr. Cross-channel
+suppression is not part of this contract.
+
 ## Global Tracing Flags
 
 Most commands accept optional tracing flags:

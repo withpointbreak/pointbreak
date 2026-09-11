@@ -367,7 +367,7 @@ mod tests {
     ];
 
     #[test]
-    fn acknowledgement_slice_a_public_field_types() {
+    fn acknowledgement_all_public_field_types() {
         use crate::session::*;
         macro_rules! field { ($($result:ty),* $(,)?) => { $(let _: fn(&$result) -> &WriteAcknowledgementV1 = |result| &result.acknowledgement;)* }; }
         field!(
@@ -384,7 +384,11 @@ mod tests {
             InputRequestOpenResult,
             InputRequestRespondResult,
             EventSignatureRecordResult,
-            ValidationAddResult
+            ValidationAddResult,
+            LandCommitResultV1,
+            FactPortResultV1,
+            StoreLinkResult,
+            MigrateToCommonDirResult
         );
     }
 
@@ -459,6 +463,39 @@ mod tests {
             generation_id: generation.into(),
             epoch,
             head_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn acknowledgement_public_documentation_contract() {
+        let cli = include_str!("../../docs/cli-reference.md");
+        let section = cli
+            .split("## Write acknowledgements")
+            .nth(1)
+            .expect("canonical public contract section")
+            .split("\n## ")
+            .next()
+            .unwrap();
+        for field in [
+            "authorityOutcome",
+            "legacyProjectionState",
+            "operationReceipt",
+            "generationId",
+            "headSequence",
+            "not_observed",
+            "not_attempted",
+            "catching_up",
+        ] {
+            assert!(
+                section.contains(field),
+                "missing documented field/state {field}"
+            );
+        }
+        for document in [
+            include_str!("../../docs/review-workflow.md"),
+            include_str!("../../docs/storage-model.md"),
+        ] {
+            assert!(document.contains("cli-reference.md#write-acknowledgements"));
         }
     }
 

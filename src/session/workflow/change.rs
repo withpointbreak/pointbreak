@@ -1070,9 +1070,11 @@ fn capture_receipt(
         legacy_state,
         &mut diagnostics,
     );
+    let receipt_id = (receipt_state != OperationReceiptStateV1::NotRecorded)
+        .then(|| operation.operation_id.clone());
     acknowledgement.operation_receipt =
-        OperationReceiptAcknowledgementV1::new(receipt_state, Some(operation.operation_id.clone()))
-            .unwrap();
+        OperationReceiptAcknowledgementV1::new(receipt_state, receipt_id)
+            .expect("receipt ID is paired with its state at construction");
     Ok(ChangeCaptureReceiptV1 {
         acknowledgement,
         schema: "pointbreak.change-capture-receipt.v1".to_owned(),

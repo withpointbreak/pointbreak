@@ -4328,3 +4328,104 @@ fn assert_success(output: &Output) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn fact_port_public_acknowledgement_reports_call_bound_derived_states() {
+    let fixture = exact_read_fixture();
+    let repo = fixture.repo.path().to_str().unwrap();
+    let selection = pointbreak_env(
+        [
+            "change",
+            "select",
+            &fixture.accepted_change_id,
+            "--repo",
+            repo,
+            "--revision",
+            &fixture.accepted_revision_id,
+        ],
+        OFF,
+    );
+    assert_success(&selection);
+    let cursor = parse_json(&selection.stdout)["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let origin = format!(
+        "{}@{}",
+        fixture.ported_origin_revision_id, fixture.ported_origin_artifact_hash
+    );
+    for (index, expected) in ["off", "unavailable", "current", "catching_up"]
+        .into_iter()
+        .enumerate()
+    {
+        if expected == "current" {
+            let rebuilt = pointbreak_env(["store", "derived", "rebuild", "--repo", repo], ACTIVE);
+            assert_success(&rebuilt);
+        }
+        if expected == "catching_up" {
+            let store = support::common_dir_store(fixture.repo.path());
+            let generation = std::fs::read_dir(store.join("derived/generations"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.join("cursor.sqlite3").is_file())
+                .expect("one disposable generation");
+            rusqlite::Connection::open(generation.join("cursor.sqlite3")).unwrap().execute_batch("CREATE TRIGGER defer_public_locator BEFORE UPDATE ON locator_checkpoint BEGIN SELECT RAISE(FAIL, 'public fixture deferred'); END;").unwrap();
+        }
+        let output = pointbreak_env(
+            [
+                "fact",
+                "port",
+                "--repo",
+                repo,
+                "--origin-revision",
+                &origin,
+                "--origin-fact",
+                &fixture.ported_origin_observation_id,
+                "--review-cursor",
+                &cursor,
+                "--relation",
+                "context-only",
+                "--track",
+                &format!("test:ack-{index}"),
+            ],
+            if expected == "off" { OFF } else { ACTIVE },
+        );
+        assert_success(&output);
+        let document = parse_json(&output.stdout);
+        let derived = &document["acknowledgement"]["derived"];
+        assert_eq!(document["schema"], "pointbreak.review-fact-port.v1");
+        assert_eq!(document["acknowledgement"]["authorityOutcome"], "created");
+        if expected == "current" {
+            assert!(matches!(
+                derived["availability"].as_str(),
+                Some("current" | "catching_up")
+            ));
+        } else {
+            assert_eq!(derived["availability"], expected);
+        }
+        if matches!(expected, "current" | "catching_up") {
+            assert!(
+                !derived["token"]["generationId"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(derived["token"]["epoch"].as_u64().is_some());
+            assert!(derived["token"]["headSequence"].as_u64().unwrap() > 0);
+        } else {
+            assert!(derived.get("token").is_none());
+        }
+        if expected == "catching_up" {
+            assert_eq!(
+                document["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|d| d["code"] == "derived_access_projection_catch_up_deferred")
+                    .count(),
+                1
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("public fixture deferred"));
+        }
+    }
+}

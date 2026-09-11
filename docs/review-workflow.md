@@ -7,6 +7,11 @@ executable journey — install to first Review to the complete paired author/rev
 [cli-reference.md](cli-reference.md). If the change was authored by a coding agent, start with
 [Agent authoring handoffs](agent-authoring.md) for the capture-at-end-of-work loop.
 
+Write results separate durable authority, derived visibility, legacy projection refresh, and durable
+operation bindings through the [write acknowledgement contract](cli-reference.md#write-acknowledgements).
+A successful capture or fact write can carry an advisory refresh failure; inspect its diagnostics and
+acknowledgement without treating the response as a new review fact, acceptance, or landing authority.
+
 ## The five stages
 
 Every review answers five questions, in this order:

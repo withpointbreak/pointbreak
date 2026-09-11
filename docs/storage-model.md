@@ -50,6 +50,13 @@ These are the only authoritative durable storage in V1. Everything else is a cac
 They may be deleted and regenerated. Freshness against the current event set is verified through
 `eventSetHash`, not through the projection's existence or `eventCount` alone.
 
+Write responses report authority and projection outcomes separately through the
+[write acknowledgement contract](cli-reference.md#write-acknowledgements). Ordinary projection-producing
+writes still attempt `state.json` replacement synchronously, after authoritative publication. Replacement
+failure is advisory, and neither a successful response nor a refreshed legacy file proves derived views
+are current. A response is not durable storage; Change capture may name its existing recovery binding
+without creating another authority or receipt carrier.
+
 **Consumer contract.** Stable automation should depend on Pointbreak commands and named JSON documents,
 not on raw storage paths. Commands and documents expose semantic IDs, content hashes, and freshness
 metadata as the public surface. Event filenames, artifact paths, fan-out layout, the internal shape
