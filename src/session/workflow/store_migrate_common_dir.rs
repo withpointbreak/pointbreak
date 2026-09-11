@@ -26,7 +26,9 @@ use crate::session::store::resolution::{clone_local_store_dir, event_store_for_e
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
 use crate::session::store::store_config::{StoreMode, resolve_store_mode};
 use crate::session::store::store_init::RepositoryPaths;
-use crate::session::{EventVerificationPolicy, TrustSet};
+use crate::session::{
+    EventVerificationPolicy, ProjectionDiagnostic, TrustSet, WriteAcknowledgementV1,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MigrateToCommonDirOptions {
@@ -66,6 +68,8 @@ impl MigrateToCommonDirOptions {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateToCommonDirResult {
+    pub acknowledgement: WriteAcknowledgementV1,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
     pub events_created: usize,
     pub events_existing: usize,
     pub artifacts_created: usize,
@@ -149,6 +153,8 @@ pub fn migrate_store_to_common_dir(
                     })?;
                 }
                 return Ok(MigrateToCommonDirResult {
+                    acknowledgement: WriteAcknowledgementV1::unchanged(),
+                    diagnostics: Vec::new(),
                     events_created: 0,
                     events_existing: 0,
                     artifacts_created: 0,
@@ -175,6 +181,8 @@ pub fn migrate_store_to_common_dir(
     // Nothing to migrate if the worktree has no local store yet.
     if !source.join("events").exists() {
         return Ok(MigrateToCommonDirResult {
+            acknowledgement: WriteAcknowledgementV1::unchanged(),
+            diagnostics: Vec::new(),
             events_created: 0,
             events_existing: 0,
             artifacts_created: 0,
@@ -280,6 +288,8 @@ fn count_durable_files(dir: &Path) -> Result<usize> {
 impl MigrateToCommonDirResult {
     fn from_import(imported: ImportBundleResult) -> Self {
         Self {
+            acknowledgement: imported.acknowledgement,
+            diagnostics: imported.diagnostics,
             events_created: imported.events_created,
             events_existing: imported.events_existing,
             artifacts_created: imported.artifacts_created,
@@ -515,6 +525,32 @@ mod tests {
     }
 
     #[test]
+    fn migrate_acknowledgement_keeps_retirement_verification_after_failed_refresh() {
+        let repo = modified_repo();
+        seed_worktree_local_capture(&repo);
+        let target = git_common_dir(repo.path()).unwrap().join("pointbreak");
+        fs::create_dir_all(target.join("state.json")).unwrap();
+        let result = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .unwrap();
+        assert!(result.source_retired);
+        assert!(result.verified_events > 0 && result.verified_artifacts > 0);
+        assert_eq!(
+            result.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::RefreshFailed
+        );
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn default_migrate_still_never_deletes_the_source() {
         let repo = modified_repo();
         seed_worktree_local_capture(&repo);
@@ -555,6 +591,7 @@ mod tests {
         )
         .unwrap();
 
+        fs::create_dir_all(common.join("state.json")).unwrap();
         let error = migrate_store_to_common_dir(
             MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
         )

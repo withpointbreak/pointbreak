@@ -51,6 +51,7 @@ pub(crate) const LEGACY_STATE_PROJECTION_REFRESH_FAILED: &str =
 /// replacement never fails the enclosing command: it is returned as one
 /// diagnostic for the result's `diagnostics`, and the next successful
 /// projection-producing write (or `rebuild_state`) regenerates the file.
+#[must_use = "retain both the refresh state and its advisory diagnostic"]
 pub(crate) struct LegacyProjectionRefresh {
     pub(crate) state: crate::session::LegacyProjectionStateV1,
     pub(crate) diagnostic: Option<ProjectionDiagnostic>,

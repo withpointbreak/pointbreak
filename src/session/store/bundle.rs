@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::{portable_sha256_file_stem, sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::id_prefix;
+use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{EventType, IngestVia, ShoreEvent, stamp_ingest_provenance};
 use crate::session::object_artifact::decode_and_validate_object_artifact;
-use crate::session::projection::ArtifactRemovalProjection;
+use crate::session::projection::{
+    ArtifactRemovalProjection, LegacyProjectionRefresh, publish_legacy_state_projection,
+};
 use crate::session::store::body_artifact::{NoteBodyEnvelope, body_artifact_field};
 use crate::session::store::{EventStore, ObjectArtifact};
 use crate::session::{
-    EventVerificationPolicy, IngestEventVerification, SessionState, TrustSet, current_timestamp,
-    verify_events_for_ingest,
+    EventVerificationPolicy, IngestEventVerification, ProjectionDiagnostic, SessionState, TrustSet,
+    WriteAcknowledgementV1, current_timestamp, verify_events_for_ingest,
 };
 use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
@@ -79,6 +82,8 @@ pub(crate) struct ExportManifestDiagnostic {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImportBundleResult {
+    pub acknowledgement: WriteAcknowledgementV1,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
     pub events_created: usize,
     pub events_existing: usize,
     pub artifacts_created: usize,
@@ -246,21 +251,39 @@ pub(crate) fn import_store_bundle_into_with_verification(
     preflight_event_conflicts(target_event_store, &events)?;
 
     let (artifacts_created, artifacts_existing) = commit_artifacts(target_store_dir, &artifacts)?;
-    let (events_created, events_existing) = commit_events(target_event_store, &events)?;
-    rebuild_target_state(target_store_dir, target_event_store)?;
+    let (events_created, events_existing, derived) = commit_events(target_event_store, &events)?;
+    let mut diagnostics = Vec::new();
+    let (acknowledgement, commit_order) = if events.is_empty() && artifacts.is_empty() {
+        (WriteAcknowledgementV1::unchanged(), Vec::new())
+    } else {
+        let refresh = rebuild_target_state(target_store_dir, target_event_store)?;
+        let acknowledgement = derived.finish(
+            artifacts_created + events_created,
+            artifacts_existing + events_existing,
+            refresh.state,
+            &mut diagnostics,
+        );
+        diagnostics.extend(refresh.diagnostic);
+        (
+            acknowledgement,
+            vec![
+                ImportCommitStep::Artifacts,
+                ImportCommitStep::Events,
+                ImportCommitStep::State,
+            ],
+        )
+    };
 
     Ok(ImportBundleResult {
+        acknowledgement,
+        diagnostics,
         events_created,
         events_existing,
         artifacts_created,
         artifacts_existing,
         absent_artifact_count,
         verification,
-        commit_order: vec![
-            ImportCommitStep::Artifacts,
-            ImportCommitStep::Events,
-            ImportCommitStep::State,
-        ],
+        commit_order,
     })
 }
 
@@ -706,32 +729,40 @@ fn commit_artifacts(
     Ok((created, existing))
 }
 
-fn commit_events(target_store: &EventStore, events: &[SourceEvent]) -> Result<(usize, usize)> {
+fn commit_events(
+    target_store: &EventStore,
+    events: &[SourceEvent],
+) -> Result<(usize, usize, DerivedWriteAggregate)> {
     let source_events: Vec<ShoreEvent> = events.iter().map(|source| source.event.clone()).collect();
     let stamped =
         stamp_ingest_provenance(&source_events, IngestVia::BundleApply, &current_timestamp());
     let mut created = 0;
     let mut existing = 0;
 
+    let mut derived = DerivedWriteAggregate::default();
     for event in &stamped {
-        match target_store.record_event_once(event)? {
+        match derived.record(target_store.record_event_once_acknowledged(event)?) {
             crate::session::EventWriteOutcome::Created => created += 1,
             crate::session::EventWriteOutcome::Existing
             | crate::session::EventWriteOutcome::ExistingDivergentSignature => existing += 1,
         }
     }
 
-    Ok((created, existing))
+    Ok((created, existing, derived))
 }
 
-fn rebuild_target_state(target_store_dir: &Path, target_store: &EventStore) -> Result<()> {
+fn rebuild_target_state(
+    target_store_dir: &Path,
+    target_store: &EventStore,
+) -> Result<LegacyProjectionRefresh> {
     let events = target_store.list_events()?;
     let state = SessionState::from_events(&events)?;
-    LocalStorage::new(target_store_dir).write_json_atomic(
-        Path::new("state.json"),
+    let refresh = publish_legacy_state_projection(
+        &LocalStorage::new(target_store_dir),
+        target_store_dir,
         &state,
-        Durability::Projection,
-    )
+    );
+    Ok(refresh)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1439,6 +1470,137 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn bundle_acknowledgement_counts_artifacts_and_retains_advisory_refresh_failure() {
+        use crate::session::{
+            AuthorityWriteOutcomeV1 as Authority, DerivedWriteAvailabilityV1 as Derived,
+            LegacyProjectionStateV1 as Legacy,
+        };
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let source = resolved_store_dir(repo.path());
+        let target = tempfile::tempdir().unwrap();
+        let blocked = target.path().join("state.json");
+        fs::create_dir(&blocked).unwrap();
+        let first = import_store_bundle(&source, target.path())
+            .expect("durable import survives state refresh failure");
+        assert!(first.artifacts_created > 0 && first.events_created > 0);
+        assert_eq!(first.acknowledgement.authority_outcome, Authority::Created);
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            Legacy::RefreshFailed
+        );
+        assert_eq!(first.acknowledgement.derived.availability, Derived::Off);
+        assert_eq!(
+            first
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
+                .count(),
+            1
+        );
+        fs::remove_dir(&blocked).unwrap();
+        let retry = import_store_bundle(&source, target.path()).unwrap();
+        assert_eq!(retry.acknowledgement.authority_outcome, Authority::Existing);
+        assert_eq!(
+            retry.acknowledgement.legacy_projection_state,
+            Legacy::Refreshed
+        );
+        let bytes = fs::read(&blocked).unwrap();
+        import_store_bundle(&source, target.path()).unwrap();
+        assert_eq!(bytes, fs::read(&blocked).unwrap());
+        // Existing artifacts plus all-new events must be mixed, not created.
+        let mixed_target = tempfile::tempdir().unwrap();
+        let manifest = build_export_manifest(&source).unwrap();
+        let artifacts = read_source_artifacts(&source, &manifest).unwrap();
+        commit_artifacts(mixed_target.path(), &artifacts).unwrap();
+        let mixed = import_store_bundle(&source, mixed_target.path()).unwrap();
+        assert_eq!(mixed.events_existing, 0);
+        assert!(mixed.artifacts_existing > 0);
+        assert_eq!(mixed.acknowledgement.authority_outcome, Authority::Mixed);
+    }
+
+    #[test]
+    fn bundle_acknowledgement_empty_source_observes_no_write() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let result = import_store_bundle(source.path(), target.path()).unwrap();
+        assert_eq!(
+            result.acknowledgement,
+            crate::session::WriteAcknowledgementV1::unchanged()
+        );
+        assert!(result.diagnostics.is_empty());
+        assert!(!target.path().join("state.json").exists());
+    }
+
+    #[test]
+    fn bundle_acknowledgement_aggregates_current_deferred_and_unavailable_writes() {
+        use crate::session::DerivedWriteAvailabilityV1 as Availability;
+        use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
+        use crate::session::derived_access::product_contract::DerivedAccessProfile;
+        use crate::session::store::resolution::{
+            event_store_for_explicit_target, opaque_path_identity,
+        };
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let source = resolved_store_dir(repo.path());
+        for expected in [
+            Availability::Current,
+            Availability::CatchingUp,
+            Availability::Unavailable,
+        ] {
+            let target = tempfile::tempdir().unwrap();
+            let lifecycle = DerivedAccessLifecycle::new(
+                DerivedAccessProfile::SqliteWalBodylessV1,
+                target.path(),
+                opaque_path_identity("store", target.path()).unwrap(),
+            )
+            .unwrap();
+            if expected != Availability::Unavailable {
+                lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+            }
+            let store = event_store_for_explicit_target(
+                target.path(),
+                DerivedAccessProfile::SqliteWalBodylessV1,
+            )
+            .unwrap();
+            if expected == Availability::CatchingUp {
+                let publication = lifecycle.paths().current_publication().unwrap().unwrap();
+                let database = lifecycle
+                    .paths()
+                    .generation(&publication.generation_id)
+                    .join("cursor.sqlite3");
+                rusqlite::Connection::open(database).unwrap().execute_batch("CREATE TRIGGER defer_locator BEFORE UPDATE ON locator_checkpoint BEGIN SELECT RAISE(FAIL, 'fixture catch-up deferred'); END;").unwrap();
+            }
+            let result = import_store_bundle_into_with_verification(
+                &source,
+                target.path(),
+                &store,
+                EventVerificationPolicy::advisory(),
+                TrustSet::default(),
+            )
+            .unwrap();
+            assert!(result.events_created > 1, "multi-event fixture");
+            assert_eq!(result.acknowledgement.derived.availability, expected);
+            if expected == Availability::Unavailable {
+                assert!(result.acknowledgement.derived.token.is_none());
+            } else {
+                let token = result.acknowledgement.derived.token.unwrap();
+                assert!(!token.generation_id.is_empty());
+                assert_eq!(token.head_sequence as usize, result.events_created);
+            }
+            if expected == Availability::CatchingUp {
+                let deferred: Vec<_> = result
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.code == "derived_access_projection_catch_up_deferred")
+                    .collect();
+                assert_eq!(deferred.len(), 1);
+                assert!(deferred[0].message.contains("fixture catch-up deferred"));
+            }
+        }
     }
 
     #[test]

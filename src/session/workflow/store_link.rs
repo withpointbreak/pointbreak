@@ -27,7 +27,9 @@ use crate::session::store::user_level::{
     deregister_clone, ensure_family_store_scaffold, flag_unsupported_filesystem,
     read_family_manifest, register_clone, user_level_store_dir, validate_family_slug,
 };
-use crate::session::{EventStore, EventVerificationPolicy, TrustSet};
+use crate::session::{
+    EventStore, EventVerificationPolicy, ProjectionDiagnostic, TrustSet, WriteAcknowledgementV1,
+};
 
 /// The sentinel `scan_worktree_sensitivity` emits for a worktree that must not be
 /// fanned into a family store without an explicit override (mirrors migrate).
@@ -81,6 +83,8 @@ impl StoreLinkOptions {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreLinkResult {
+    pub acknowledgement: WriteAcknowledgementV1,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
     pub family_ref: String,
     pub clone_ref: String,
     /// True when this link created the family (a new `family.json` was written).
@@ -258,6 +262,8 @@ pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult
     set_family_binding_for_repo(&options.repo, &plan.slug, &plan.clone_ref)?;
 
     Ok(StoreLinkResult {
+        acknowledgement: fold.acknowledgement,
+        diagnostics: fold.diagnostics,
         family_ref: plan.slug,
         clone_ref: plan.clone_ref,
         created_family,
@@ -439,6 +445,8 @@ fn suggest_family_slug(worktree_root: &Path) -> Option<String> {
 
 /// Counts a fold produces.
 struct FoldOutcome {
+    acknowledgement: WriteAcknowledgementV1,
+    diagnostics: Vec<ProjectionDiagnostic>,
     events_created: usize,
     events_existing: usize,
     artifacts_created: usize,
@@ -450,6 +458,8 @@ struct FoldOutcome {
 impl FoldOutcome {
     fn empty() -> Self {
         Self {
+            acknowledgement: WriteAcknowledgementV1::unchanged(),
+            diagnostics: Vec::new(),
             events_created: 0,
             events_existing: 0,
             artifacts_created: 0,
@@ -506,6 +516,8 @@ fn fold_source_forward(
     )?;
 
     let mut outcome = FoldOutcome {
+        acknowledgement: imported.acknowledgement,
+        diagnostics: imported.diagnostics,
         events_created: imported.events_created,
         events_existing: imported.events_existing,
         artifacts_created: imported.artifacts_created,
@@ -1006,6 +1018,11 @@ mod tests {
         })
         .unwrap();
 
+        assert_eq!(
+            result.acknowledgement,
+            crate::session::WriteAcknowledgementV1::unchanged()
+        );
+        assert!(result.diagnostics.is_empty());
         assert_eq!(result.folded_events_created, 0);
         assert_eq!(result.folded_removal_event_count, 0);
         assert!(

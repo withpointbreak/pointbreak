@@ -12,6 +12,17 @@ pub struct WriteAcknowledgementV1 {
     pub operation_receipt: OperationReceiptAcknowledgementV1,
 }
 
+impl WriteAcknowledgementV1 {
+    pub(crate) fn unchanged() -> Self {
+        DerivedWriteAggregate::default().finish(
+            0,
+            0,
+            LegacyProjectionStateV1::NotAttempted,
+            &mut Vec::new(),
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityWriteOutcomeV1 {
@@ -403,8 +414,8 @@ mod tests {
             .iter()
             .filter(|(_, source)| {
                 source.lines().any(|line| {
-                    line.contains("= publish_legacy_state_projection(")
-                        || line.trim() == "Durability::Projection,"
+                    line.contains("publish_legacy_state_projection(")
+                        || line.contains("Durability::Projection")
                 })
             })
             .map(|(path, _)| path.strip_prefix(&workflow).unwrap().to_str().unwrap())

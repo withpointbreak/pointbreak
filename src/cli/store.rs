@@ -296,6 +296,7 @@ struct StoreCompactArgs {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoreMigrateBody {
+    acknowledgement: pointbreak::session::WriteAcknowledgementV1,
     events_created: usize,
     events_existing: usize,
     artifacts_created: usize,
@@ -313,6 +314,7 @@ struct StoreMigrateBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoreLinkBody {
+    acknowledgement: pointbreak::session::WriteAcknowledgementV1,
     family_ref: String,
     clone_ref: String,
     created_family: bool,
@@ -861,8 +863,20 @@ fn migrate(
             .with_include_ephemeral(args.include_ephemeral)
             .with_retire_source(args.retire_source),
     )?;
+    let document = store_migrate_document(result);
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let text = matches!(format.format, output::OutputFormat::Text)
+        .then(|| render_store_migrate_text(document.body()));
+    output::write_document(stdout, format, &document, || {
+        text.expect("text lane resolves the digest source")
+    })
+}
+
+fn store_migrate_document(
+    mut result: MigrateToCommonDirResult,
+) -> json::DiagnosticDocument<StoreMigrateBody> {
+    let mut diagnostics = std::mem::take(&mut result.diagnostics);
     let body = StoreMigrateBody::from(result);
-    let mut diagnostics = Vec::new();
     if body.folded_absent_artifact_count > 0 {
         diagnostics.push(ProjectionDiagnostic {
             code: "family_fold_absent_artifact".to_owned(),
@@ -873,13 +887,7 @@ fn migrate(
             ),
         });
     }
-    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
-    let text = matches!(format.format, output::OutputFormat::Text)
-        .then(|| render_store_migrate_text(&body));
-    let document = json::DiagnosticDocument::new("pointbreak.store-migrate", body, diagnostics);
-    output::write_document(stdout, format, &document, || {
-        text.expect("text lane resolves the digest source")
-    })
+    json::DiagnosticDocument::new("pointbreak.store-migrate", body, diagnostics)
 }
 
 /// Bespoke text lane for `store migrate`: a bounded fold receipt — created vs.
@@ -994,9 +1002,17 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
     }
 
     let result = link_store_to_family(options)?;
-    let body = StoreLinkBody::from(result);
+    let document = store_link_document(result);
+    let digest = matches!(format.format, output::OutputFormat::Text)
+        .then(|| render_store_link_text(document.body()));
+    output::write_document(stdout, format, &document, || {
+        digest.expect("text lane resolves the digest")
+    })
+}
 
-    let mut diagnostics = Vec::new();
+fn store_link_document(mut result: StoreLinkResult) -> json::DiagnosticDocument<StoreLinkBody> {
+    let mut diagnostics = std::mem::take(&mut result.diagnostics);
+    let body = StoreLinkBody::from(result);
     if body.folded_removal_event_count > 0 {
         diagnostics.push(ProjectionDiagnostic {
             code: "family_fold_removal_possession_lost".to_owned(),
@@ -1030,12 +1046,7 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
         });
     }
 
-    let digest =
-        matches!(format.format, output::OutputFormat::Text).then(|| render_store_link_text(&body));
-    let document = json::DiagnosticDocument::new("pointbreak.store-link", body, diagnostics);
-    output::write_document(stdout, format, &document, || {
-        digest.expect("text lane resolves the digest")
-    })
+    json::DiagnosticDocument::new("pointbreak.store-link", body, diagnostics)
 }
 
 /// The text digest for `store link`: a bounded, path-free summary naming the
@@ -1434,6 +1445,7 @@ fn selector_from_args(
 impl From<MigrateToCommonDirResult> for StoreMigrateBody {
     fn from(result: MigrateToCommonDirResult) -> Self {
         Self {
+            acknowledgement: result.acknowledgement,
             events_created: result.events_created,
             events_existing: result.events_existing,
             artifacts_created: result.artifacts_created,
@@ -1470,6 +1482,7 @@ impl From<StoreStatusResult> for StoreStatusBody {
 impl From<StoreLinkResult> for StoreLinkBody {
     fn from(result: StoreLinkResult) -> Self {
         Self {
+            acknowledgement: result.acknowledgement,
             family_ref: result.family_ref,
             clone_ref: result.clone_ref,
             created_family: result.created_family,
@@ -1621,6 +1634,91 @@ impl From<SweptBlob> for SweptBlobBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acknowledgement_fixture() -> pointbreak::session::WriteAcknowledgementV1 {
+        serde_json::from_value(serde_json::json!({
+            "authorityOutcome":"created", "derived":{"availability":"off"},
+            "legacyProjectionState":"refresh_failed", "operationReceipt":{"state":"not_recorded"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn store_write_documents_keep_workflow_diagnostics_before_warnings_and_text_unchanged() {
+        let diagnostic = ProjectionDiagnostic {
+            code: "legacy_state_projection_refresh_failed".into(),
+            message: "fixture refresh failure".into(),
+        };
+        let migrate = store_migrate_document(MigrateToCommonDirResult {
+            acknowledgement: acknowledgement_fixture(),
+            diagnostics: vec![diagnostic.clone()],
+            events_created: 2,
+            events_existing: 1,
+            artifacts_created: 1,
+            artifacts_existing: 0,
+            source_empty: false,
+            source_retired: false,
+            verified_events: 0,
+            verified_artifacts: 0,
+            absent_artifact_count: 1,
+            sensitivity_excluded_path_count: None,
+        });
+        assert_eq!(
+            render_store_migrate_text(migrate.body()),
+            "folded 2 events (1 existing) · 1 artifact (0 existing)\nverified 0 events · 0 artifacts\n1 artifact absent from the source · folded without content"
+        );
+        let link = store_link_document(StoreLinkResult {
+            acknowledgement: acknowledgement_fixture(),
+            diagnostics: vec![diagnostic],
+            family_ref: "family".into(),
+            clone_ref: "clone".into(),
+            created_family: true,
+            folded_events_created: 2,
+            folded_events_existing: 1,
+            folded_artifacts_created: 1,
+            folded_removal_event_count: 1,
+            folded_absent_artifact_count: 1,
+            source_retired: false,
+            filesystem_warning: Some("filesystem warning".into()),
+            history_overlap_warning: Some("history warning".into()),
+        });
+        assert_eq!(
+            render_store_link_text(link.body()),
+            "linked to family: family\nfamily store created\nfolded 2 event(s), 1 already present\nwarning: history warning"
+        );
+        for (wire, expected) in [
+            (
+                serde_json::to_string(&migrate).unwrap(),
+                vec![
+                    "legacy_state_projection_refresh_failed",
+                    "family_fold_absent_artifact",
+                ],
+            ),
+            (
+                serde_json::to_string(&link).unwrap(),
+                vec![
+                    "legacy_state_projection_refresh_failed",
+                    "family_fold_removal_possession_lost",
+                    "family_fold_absent_artifact",
+                    "family_store_filesystem_warning",
+                    "family_history_overlap_warning",
+                ],
+            ),
+        ] {
+            assert_eq!(wire.matches("\"diagnostics\":").count(), 1);
+            assert_eq!(wire.matches("\"acknowledgement\":").count(), 1);
+            let json: serde_json::Value = serde_json::from_str(&wire).unwrap();
+            assert_eq!(
+                json["diagnostics"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d["code"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 
     fn swept(outcome: &str) -> SweptBlobBody {
         SweptBlobBody {
