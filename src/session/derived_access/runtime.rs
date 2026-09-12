@@ -350,6 +350,50 @@ impl DerivedAccessRuntime {
             .map_err(|error| error.to_string())
     }
 
+    /// Read-only serving probe (INV-2). Never installs or clears the reader
+    /// slot, never requests the worker, never renames. Arms: (1) a cached
+    /// reader for the currently published generation is validated in place;
+    /// (2) otherwise the published generation is opened through the
+    /// observation-class `open_current` (shared read lease only) and must be
+    /// caught up to the authority head.
+    pub(super) fn observe_current_readable(&self) -> Result<bool, String> {
+        let DerivedAccessMode::Active {
+            lifecycle: configured_lifecycle,
+            current,
+            ..
+        } = &self.mode
+        else {
+            return Ok(false);
+        };
+        let refreshed_lifecycle;
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => {
+                refreshed_lifecycle = maintenance.lifecycle()?;
+                &refreshed_lifecycle
+            }
+            None => configured_lifecycle,
+        };
+        let Some(published) = lifecycle
+            .published_generation_identity_read_only()
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let cached = lock(current).as_ref().map(Arc::clone);
+        if let Some(cached) = cached.as_ref()
+            && cached.generation_id() == published.generation_id.as_str()
+        {
+            return Ok(lifecycle
+                .validate_cached_current(cached)
+                .map(|validation| validation.locator_applied == validation.authority.head.cursor)
+                .unwrap_or(false));
+        }
+        Ok(match lifecycle.open_current() {
+            Ok(Some(opened)) => opened.locator_applied() == opened.authority_head(),
+            Ok(None) | Err(_) => false,
+        })
+    }
+
     pub(super) fn rebuild_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) == BackgroundWorkState::Rebuild as u8
     }
