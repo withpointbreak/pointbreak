@@ -1090,6 +1090,7 @@
           label: "observation",
           title: detail.title,
           body: detail.body,
+          bodyContentType: detail.bodyContentType,
           fields: fields(
             field("observation", detail.observationId),
             field("target", eventTargetLabel(detail.target)),
@@ -1106,6 +1107,7 @@
           label: "assessment",
           title: `Assessment: ${words(detail.assessment)}`,
           body: detail.summary,
+          bodyContentType: detail.summaryContentType,
           fields: fields(
             field("assessment", detail.assessmentId),
             field("target", eventTargetLabel(detail.target)),
@@ -1121,6 +1123,7 @@
           label: "input requested",
           title: detail.title,
           body: detail.body,
+          bodyContentType: detail.bodyContentType,
           fields: fields(
             field("input request", detail.inputRequestId),
             field("reason", words(detail.reasonCode)),
@@ -1134,6 +1137,7 @@
           label: "input response",
           title: `Input request ${words(detail.outcome)}`,
           body: detail.reason,
+          bodyContentType: detail.reasonContentType,
           fields: fields(
             field("response", detail.inputRequestResponseId),
             field("input request", detail.inputRequestId),
@@ -1203,6 +1207,7 @@
           label: "validation",
           title: `${detail.checkName}: ${words(detail.status)}`,
           body: detail.summary,
+          bodyContentType: detail.summaryContentType,
           fields: fields(
             field("validation", detail.validationCheckId),
             field("target", eventTargetLabel(detail.target)),
@@ -1510,6 +1515,12 @@
     "input-request",
     "validation"
   ];
+  var FACT_FAMILIES = [
+    "observation",
+    "input_request",
+    "assessment",
+    "validation"
+  ];
   var DIFF_ROW_KINDS = ["added", "removed", "context"];
   var TOKEN_KINDS = [
     "keyword",
@@ -1594,6 +1605,7 @@
   ];
   var annoContainerClass = /* @__PURE__ */ __name((kind) => `anno anno-${kind}`, "annoContainerClass");
   var annoKindClass = /* @__PURE__ */ __name((kind) => `anno-kind anno-kind-${kind}`, "annoKindClass");
+  var factFamilyClass = /* @__PURE__ */ __name((family) => `fact-family fact-family-${family.replaceAll("_", "-")}`, "factFamilyClass");
   var drowClass = /* @__PURE__ */ __name((kind, noted) => `drow drow-${kind}${noted ? " drow-noted" : ""}`, "drowClass");
   var tokClass = /* @__PURE__ */ __name((kind) => `tok tok-${kind}`, "tokClass");
   var diffStatusClass = /* @__PURE__ */ __name((status) => `dstatus s-${status}`, "diffStatusClass");
@@ -1616,6 +1628,7 @@
         ...Object.values(CLASS),
         ...ANNO_KINDS.map((k) => annoContainerClass(k)),
         ...ANNO_KINDS.map((k) => annoKindClass(k)),
+        ...FACT_FAMILIES.map((f) => factFamilyClass(f)),
         ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
         ...TOKEN_KINDS.map((k) => tokClass(k)),
         ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
@@ -4480,6 +4493,10 @@
     return isFactTarget(value);
   }
   __name(isReviewTargetSummary, "isReviewTargetSummary");
+  function isOptionalDeclaredContentType(value) {
+    return value === void 0 || value === "text/plain" || value === "text/markdown";
+  }
+  __name(isOptionalDeclaredContentType, "isOptionalDeclaredContentType");
   function isEventHistorySummary(value, eventType) {
     if (!isRecord(value) || value.kind !== eventType) return false;
     if (eventType === "review_initialized" || eventType === "review_note_imported") {
@@ -4491,13 +4508,13 @@
       case "work_object_proposed":
         return nonEmptyString2(details.engagementId) && isRecord(details.revision) && nonEmptyString2(details.revision.id) && nonEmptyString2(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString2(details.objectArtifactContentHash) && isStringArray(details.supersedes);
       case "review_observation_recorded":
-        return nonEmptyString2(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds);
+        return nonEmptyString2(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds) && isOptionalDeclaredContentType(details.bodyContentType);
       case "review_assessment_recorded":
-        return nonEmptyString2(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds);
+        return nonEmptyString2(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds) && isOptionalDeclaredContentType(details.summaryContentType);
       case "input_request_opened":
-        return nonEmptyString2(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString2(details.title) && optionalString(details.body);
+        return nonEmptyString2(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalDeclaredContentType(details.bodyContentType);
       case "input_request_responded":
-        return nonEmptyString2(details.inputRequestResponseId) && nonEmptyString2(details.inputRequestId) && nonEmptyString2(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason);
+        return nonEmptyString2(details.inputRequestResponseId) && nonEmptyString2(details.inputRequestId) && nonEmptyString2(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason) && isOptionalDeclaredContentType(details.reasonContentType);
       case "revision_ref_associated":
         return nonEmptyString2(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refName) && nonEmptyString2(details.headOid);
       case "revision_ref_withdrawn":
@@ -4507,7 +4524,7 @@
       case "revision_commit_withdrawn":
         return nonEmptyString2(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.commitAssociationId);
       case "validation_check_recorded":
-        return nonEmptyString2(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString2(details.target.revisionId) && nonEmptyString2(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary);
+        return nonEmptyString2(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString2(details.target.revisionId) && nonEmptyString2(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary) && isOptionalDeclaredContentType(details.summaryContentType);
       case "change_declared":
         return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString2(details.declarationClaimId) && nonEmptyString2(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString2(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString2(details.identityDescriptor.revision_id)) && nonEmptyString2(details.claimNonce);
       case "change_membership_asserted":
@@ -8162,7 +8179,15 @@
     identity.dataset.eventId = event.eventId;
     const summary = document.createElement("section");
     summary.className = "event-detail-summary";
-    if (presentation.body) summary.append(detailLine(presentation.body));
+    if (presentation.body) {
+      const body = document.createElement("div");
+      body.className = "anno-body";
+      body.innerHTML = renderBodyContent(
+        presentation.body,
+        presentation.bodyContentType ?? "text/plain"
+      );
+      summary.append(body);
+    }
     const summaryFacts = document.createElement("dl");
     summaryFacts.className = "kv";
     for (const item of presentation.fields) {
@@ -8415,6 +8440,104 @@
     return body;
   }
   __name(renderedFactBody, "renderedFactBody");
+  function renderedInputRequestResponses(content) {
+    if (content.kind !== "input_request") return null;
+    const responses = content.responses ?? [];
+    if (responses.length === 0) return null;
+    const nest = document.createElement("div");
+    nest.className = "fact-responses";
+    for (const response of responses) {
+      const entry = document.createElement("div");
+      entry.className = "fact-response";
+      const head = document.createElement("div");
+      head.className = "anno-head";
+      const outcome = document.createElement("span");
+      outcome.className = "outcome";
+      outcome.textContent = response.outcome;
+      head.append(outcome);
+      entry.append(
+        head,
+        detailLine(
+          `response: ${shortRef(response.responseId)} · ${response.bodyContentState.replaceAll("_", " ")} · ${response.availability.replaceAll("_", " ")}`
+        )
+      );
+      if (response.bodyContentState === "present" && response.reason) {
+        const reason = document.createElement("div");
+        reason.className = "anno-body";
+        reason.innerHTML = renderBodyContent(
+          response.reason,
+          response.contentType
+        );
+        entry.append(reason);
+      }
+      nest.append(entry);
+    }
+    return nest;
+  }
+  __name(renderedInputRequestResponses, "renderedInputRequestResponses");
+  function documentFactIds(facts) {
+    return new Set(facts.map((fact2) => fact2.factId));
+  }
+  __name(documentFactIds, "documentFactIds");
+  function factReferenceControl(label2, factId, activate) {
+    const button2 = document.createElement("button");
+    button2.type = "button";
+    button2.className = "ghost mono";
+    button2.textContent = label2;
+    button2.title = factId;
+    button2.dataset.relationFactId = factId;
+    button2.addEventListener("click", () => activate(factId));
+    return button2;
+  }
+  __name(factReferenceControl, "factReferenceControl");
+  function targetFactId(target) {
+    return target.kind === "observation" ? target.observationId : target.kind === "input_request" ? target.inputRequestId : target.kind === "assessment" ? target.assessmentId : void 0;
+  }
+  __name(targetFactId, "targetFactId");
+  function factTargetLine(target, present, activate) {
+    const line = detailLine("target: ", "fact-rel");
+    const factId = targetFactId(target);
+    if (factId !== void 0 && present.has(factId)) {
+      line.append(factReferenceControl(shortRef(factId), factId, activate));
+      return line;
+    }
+    line.append(document.createTextNode(eventTargetLabel(target)));
+    return line;
+  }
+  __name(factTargetLine, "factTargetLine");
+  function factRelationLines(factId, graph, present, activate) {
+    if (!graph) return [];
+    const lines = [];
+    const relate = /* @__PURE__ */ __name((label2, edges) => {
+      for (const edge of edges) {
+        if (edge.fromFactId !== factId) continue;
+        const line = detailLine(`${label2} `, "fact-rel");
+        if (present.has(edge.toFactId)) {
+          line.append(
+            factReferenceControl(
+              shortRef(edge.toFactId),
+              edge.toFactId,
+              activate
+            )
+          );
+        } else {
+          const named = document.createElement("code");
+          named.textContent = shortRef(edge.toFactId);
+          named.title = edge.toFactId;
+          line.append(named);
+        }
+        lines.push(line);
+      }
+    }, "relate");
+    relate("supersedes", graph.observationSupersedes);
+    relate("replaces", graph.assessmentReplaces);
+    return lines;
+  }
+  __name(factRelationLines, "factRelationLines");
+  function factStatusText(content) {
+    return content.kind === "input_request" || content.kind === "validation" ? content.status : content.kind === "assessment" ? content.assessment : void 0;
+  }
+  __name(factStatusText, "factStatusText");
   function renderFacts(reading, route, actions2) {
     const facts = document.createElement("section");
     facts.className = "detail-facts";
@@ -8425,15 +8548,39 @@
       family.push(fact2);
       groups.set(fact2.family, family);
     }
+    const presentFactIds = documentFactIds(reading.document.factPresentations);
+    const focusFact2 = /* @__PURE__ */ __name((factId) => actions2.navigate({
+      kind: route.kind,
+      changeId: route.changeId,
+      revision: route.revision,
+      query: queryForExactNavigation(route),
+      focus: { factId }
+    }), "focusFact");
     for (const [family, items] of groups) {
+      const familyLabel = family.replaceAll("_", " ");
       const group = document.createElement("section");
-      group.append(detailHeading(family.replaceAll("_", " "), 4));
+      group.className = factFamilyClass(family);
+      group.append(detailHeading(`${familyLabel} (${items.length})`, 4));
       for (const fact2 of items) {
         const card = document.createElement("article");
         card.className = "unit-card";
         card.dataset.factId = fact2.factId;
         card.tabIndex = -1;
         const content = reading.document.factContentPresentations?.[fact2.factId];
+        const head = document.createElement("div");
+        head.className = "anno-head";
+        const kind = document.createElement("span");
+        kind.className = annoKindClass(family.replaceAll("_", "-"));
+        kind.textContent = familyLabel;
+        head.append(kind);
+        const status = content ? factStatusText(content.content) : void 0;
+        if (status !== void 0) {
+          const chip = document.createElement("span");
+          chip.className = factStatusClass(status);
+          chip.textContent = status;
+          head.append(chip);
+        }
+        card.append(head);
         if (content) {
           const heading = content.content.kind === "assessment" ? `Assessment: ${content.content.assessment}` : content.content.kind === "validation" ? content.content.checkName : content.content.title;
           card.append(detailHeading(heading, 5));
@@ -8454,6 +8601,17 @@
             `family: ${fact2.familyState.replaceAll("_", " ")} · availability: ${fact2.availability.replaceAll("_", " ")} · actor: ${fact2.actorId}${fact2.trackId ? ` · track: ${fact2.trackId}` : ""}`
           )
         );
+        if (fact2.target) {
+          card.append(factTargetLine(fact2.target, presentFactIds, focusFact2));
+        }
+        card.append(
+          ...factRelationLines(
+            fact2.factId,
+            reading.document.inspectorPresentation?.factGraph,
+            presentFactIds,
+            focusFact2
+          )
+        );
         const presentedInRevision = fact2.presentedInRevision;
         if (presentedInRevision) {
           const applicablePort = reading.document.factPorts.find(
@@ -8466,27 +8624,20 @@
           );
         }
         if (content) {
+          const responses = renderedInputRequestResponses(content.content);
           card.append(
             detailLine(
               `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`
             ),
-            renderedFactBody(content.content, content.contentType)
+            renderedFactBody(content.content, content.contentType),
+            ...responses ? [responses] : []
           );
         }
         const focus = document.createElement("button");
         focus.type = "button";
         focus.className = "ghost";
         focus.textContent = "Focus fact";
-        focus.addEventListener(
-          "click",
-          () => actions2.navigate({
-            kind: route.kind,
-            changeId: route.changeId,
-            revision: route.revision,
-            query: queryForExactNavigation(route),
-            focus: { factId: fact2.factId }
-          })
-        );
+        focus.addEventListener("click", () => focusFact2(fact2.factId));
         card.append(focus);
         group.append(card);
       }
@@ -9222,13 +9373,15 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
       const monitor = route.kind === "timeline" ? presentation.timeline ?? null : null;
       const history2 = monitor?.display ?? snapshot2.generation.history;
+      const followState = presentation.timeline ?? null;
       const follow = document.querySelector("#follow-toggle");
       if (follow) {
-        follow.classList.toggle("hidden", monitor === null);
-        if (monitor !== null) {
-          const parked = monitor.mode === "parked";
+        follow.classList.toggle("hidden", followState === null);
+        follow.disabled = route.kind !== "timeline";
+        if (followState !== null) {
+          const parked = followState.mode === "parked";
           follow.setAttribute("aria-pressed", String(!parked));
-          follow.textContent = parked ? monitor.newCount > 0 ? `Show ${monitor.newCount} new ${monitor.newCount === 1 ? "event" : "events"}` : "Parked" : "Following";
+          follow.textContent = parked ? followState.newCount > 0 ? `Show ${followState.newCount} new ${followState.newCount === 1 ? "event" : "events"}` : "Parked" : "Following";
           follow.setAttribute(
             "aria-label",
             parked ? "Show the latest filtered Timeline events and resume following" : "Park the Timeline at the current events"
