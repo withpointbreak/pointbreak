@@ -747,6 +747,58 @@ describe("bounded Change protocol", () => {
     ).toThrow("invalid changes Change page DTO");
   });
 
+  it("accepts, rejects empty, and tolerates an absent server presentation label", () => {
+    const revision = {
+      revisionId: "rev:sha256:a",
+      objectArtifactContentHash: "sha256:artifact-a",
+    };
+    const withLabel = (
+      label: string | undefined,
+      hasMember: boolean,
+    ): unknown => {
+      const value = page("pointbreak.inspect-changes-page");
+      const row = (value.changes as ChangeSummary[])[0];
+      if (!row) throw new Error("fixture must include a Change row");
+      row.currentRevisionRefs = [revision];
+      const presentation = value.presentations?.["change:sha256:a"] as
+        | ChangePresentation
+        | undefined;
+      if (!presentation) throw new Error("fixture must include a presentation");
+      presentation.currentRevisions = [
+        {
+          revision,
+          summarySource: "absent",
+          ...(hasMember ? { label } : {}),
+        } as ChangePresentation["currentRevisions"][number],
+      ];
+      return value;
+    };
+
+    // A server-supplied finished display string is accepted and preserved.
+    expect(
+      decodeChangePage(withLabel("No summary at capture", true), {
+        lens: "changes",
+        bounded: true,
+      }).presentations?.["change:sha256:a"]?.currentRevisions[0]?.label,
+    ).toBe("No summary at capture");
+
+    // An older server that sends no label still decodes.
+    expect(() =>
+      decodeChangePage(withLabel(undefined, false), {
+        lens: "changes",
+        bounded: true,
+      }),
+    ).not.toThrow();
+
+    // An empty label is a malformed presentation, not a valid "no label".
+    expect(() =>
+      decodeChangePage(withLabel("", true), {
+        lens: "changes",
+        bounded: true,
+      }),
+    ).toThrow("invalid changes Change page DTO");
+  });
+
   it("rejects malformed nested Change and exact-Revision DTOs", () => {
     const revision = {
       revisionId: "rev:sha256:a",

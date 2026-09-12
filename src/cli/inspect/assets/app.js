@@ -4816,7 +4816,9 @@
   }
   __name(sameAttentionReason, "sameAttentionReason");
   function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
+    // non-empty string when present. summarySource validation is unchanged.
+    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
@@ -5442,7 +5444,10 @@
       const identity = exactRevisionAccessibleIdentity(revision2);
       return {
         revision: revision2,
-        label: summaryLabel || "Current Revision",
+        // Server-owned when supplied (a proposal summary or the absent-summary
+        // label). The generic string remains only for an older server that sends
+        // no `label`, which is shipped behavior, not client-minted meaning.
+        label: entry?.label ?? (summaryLabel || "Current Revision"),
         visibleIdentity: shortExactRevision(revision2),
         accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
         title: identity,
@@ -9438,7 +9443,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             const choose = document.createElement("button");
             choose.type = "button";
             choose.className = "ghost change-card-peer-open";
-            choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+            choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
             choose.title = peer.title;
             choose.setAttribute(
               "aria-label",

@@ -150,7 +150,10 @@ export function changeCardPresentation(
     const identity = exactRevisionAccessibleIdentity(revision);
     return {
       revision,
-      label: summaryLabel || "Current Revision",
+      // Server-owned when supplied (a proposal summary or the absent-summary
+      // label). The generic string remains only for an older server that sends
+      // no `label`, which is shipped behavior, not client-minted meaning.
+      label: entry?.label ?? (summaryLabel || "Current Revision"),
       visibleIdentity: shortExactRevision(revision),
       accessibleName: summaryLabel
         ? `Current Revision — ${summaryLabel}; ${identity}`
