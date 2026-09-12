@@ -12,7 +12,7 @@ use pointbreak::session::{
     CommitGraphCondition, LandCommitOptions, ListAssociationsOptions, ListAssociationsResult,
     RevisionCommitRangeView, WithdrawCommitOptions, WithdrawRefOptions, associate_commit,
     associate_ref, effective_integration_ref, enrich_liveness, land_commit, list_associations,
-    withdraw_commit, withdraw_ref,
+    preview_land_commit, withdraw_commit, withdraw_ref,
 };
 
 use crate::cli::common::{SignableOptions, SigningSkip, count_label};
@@ -59,6 +59,18 @@ struct AssociationLandArgs {
     /// Record honest provenance without claiming content equivalence.
     #[arg(long, group = "landing_policy")]
     provenance_only: bool,
+
+    /// Compare an eligible single-parent candidate against its actual parent.
+    #[arg(long, group = "landing_policy")]
+    candidate_parent: bool,
+
+    /// Return the complete proof without preparing or writing landing records.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Require this preview proof hash when recording (required with --candidate-parent).
+    #[arg(long)]
+    expect_proof: Option<String>,
 
     #[arg(long)]
     sign_key: Option<String>,
@@ -219,13 +231,23 @@ fn land_run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let options = LandCommitOptions::new(&args.repo, args.review_cursor, args.track, args.commit)
-        .with_allow_extension(args.allow_extension)
-        .with_provenance_only(args.provenance_only);
+    let mut options =
+        LandCommitOptions::new(&args.repo, args.review_cursor, args.track, args.commit)
+            .with_allow_extension(args.allow_extension)
+            .with_provenance_only(args.provenance_only)
+            .with_candidate_parent(args.candidate_parent);
+    if let Some(hash) = args.expect_proof {
+        options = options.with_expected_proof(hash);
+    }
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    if args.dry_run {
+        let result = preview_land_commit(options)?;
+        let message = result.message.clone();
+        return output::write_document(stdout, format, &result, || message);
+    }
     let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
     let result = land_commit(options)?;
     crate::cli::common::surface_best_effort_skip(&skip, stderr);
-    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let message = result.message.clone();
     output::write_document(stdout, format, &result, || message)
 }

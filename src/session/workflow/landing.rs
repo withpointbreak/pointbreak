@@ -196,6 +196,13 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
                 .to_owned(),
         });
     }
+    if options.candidate_parent
+        && shown.snapshot_content_state != crate::session::SnapshotContentState::Present
+    {
+        return Err(unsupported_parent(
+            "the frozen source artifact is not available",
+        ));
+    }
 
     let worktree_root = git_worktree_root(&options.repo)?;
     let worktree_root = worktree_root.as_path();
@@ -253,6 +260,11 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
                 == SemanticRevisionRelationV1::ContentPreservingExtension
                 && !options.allow_extension
             {
+                if options.candidate_parent {
+                    return Err(unsupported_parent(
+                        "the candidate adds unreviewed content; capture and review a new Revision",
+                    ));
+                }
                 return Err(ShoreError::WorkflowInputInvalid {
                     reason: "the candidate preserves the reviewed scope but adds unreviewed content; retry with --allow-extension or capture a new Revision".to_owned(),
                 });
@@ -295,15 +307,24 @@ fn land_commit_with_after_association(
     options: LandCommitOptions,
     after_association: impl FnOnce(),
 ) -> Result<LandCommitResultV1> {
+    land_commit_with_hooks(options, || {}, after_association)
+}
+
+fn land_commit_with_hooks(
+    options: LandCommitOptions,
+    before_publication: impl FnOnce(),
+    after_association: impl FnOnce(),
+) -> Result<LandCommitResultV1> {
     let prepared = prepare_landing(&options)?;
-    if options.candidate_parent
+    if (options.candidate_parent || options.expected_proof.is_some())
         && options.expected_proof.as_deref()
             != Some(prepared.preview.proof.evidence_sha256.as_str())
     {
         return Err(ShoreError::WorkflowInputInvalid {
-            reason: "--candidate-parent recording requires --expect-proof matching the current preview proof.evidenceSha256".to_owned(),
+            reason: "recording requires --expect-proof matching the current preview proof.evidenceSha256 (mandatory with --candidate-parent)".to_owned(),
         });
     }
+    let expected_preview = prepared.preview.clone();
     let PreparedLanding {
         shown,
         cursor,
@@ -323,6 +344,16 @@ fn land_commit_with_after_association(
     let worktree_root = write_store.worktree_root();
     let storage = LocalStorage::new(write_store.store_dir());
     prepare_write_landing(&write_store, &storage)?;
+
+    before_publication();
+    // Re-read the exact graph/artifact and resolve the original candidate spelling
+    // immediately before the first publication. Git and the Journal are separate
+    // authorities; this check does not promise a transaction across them.
+    if options.candidate_parent && prepare_landing(&options)?.preview != expected_preview {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "landing inputs changed before publication; preview again and supply the new --expect-proof".to_owned(),
+        });
+    }
 
     let proof_outcome =
         ContentArtifacts::from_backend(write_store.backend()).put_relation_proof(&proof)?;
@@ -399,7 +430,12 @@ fn land_commit_with_after_association(
         }
         SemanticRevisionRelationV1::EquivalentRewrite => {
             format!(
-                "landed as a verified equivalent rewrite of {}",
+                "{} {}",
+                if options.candidate_parent {
+                    "recorded verified scoped equivalent rewrite of"
+                } else {
+                    "landed as a verified equivalent rewrite of"
+                },
                 revision.revision_id.as_str()
             )
         }
@@ -1565,5 +1601,254 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned()
+    }
+    #[test]
+    fn parent_record_rechecks_symbolic_candidate_before_publication() {
+        let (root, token, _, _) = rewrite_fixture(false);
+        let options = LandCommitOptions::new(root.path(), token, "track:author", "HEAD")
+            .with_candidate_parent(true);
+        let preview = preview_land_commit(options.clone()).unwrap();
+        let before = store_inventory(root.path());
+        let result = land_commit_with_hooks(
+            options.with_expected_proof(preview.proof.evidence_sha256),
+            || {
+                git(
+                    root.path(),
+                    &["commit", "--amend", "-m", "changed identity"],
+                );
+            },
+            || {},
+        );
+        assert!(
+            result.is_err(),
+            "candidate movement must refuse publication"
+        );
+        assert_eq!(before, store_inventory(root.path()));
+    }
+    #[test]
+    fn parent_record_readback_binds_all_three_facts_and_requires_available_proof() {
+        use crate::session::event::{
+            RevisionCommitAssociatedPayload, RevisionRelationAttestedPayload,
+        };
+        use crate::session::evidence::{
+            EvidenceAvailabilityV1, project_revision_relation_evidence_v1,
+        };
+        let (root, token, a, b) = rewrite_fixture(false);
+        let options = LandCommitOptions::new(root.path(), token, "track:author", "HEAD")
+            .with_candidate_parent(true);
+        let preview = preview_land_commit(options.clone()).unwrap();
+        let store = resolve_change_write_store(root.path()).unwrap();
+        let events_before = store.event_store().unwrap().list_change_events().unwrap();
+        let recorded =
+            land_commit(options.with_expected_proof(&preview.proof.evidence_sha256)).unwrap();
+        let proof_path = store.store_dir().join("artifacts/proofs").join(format!(
+            "{}.json",
+            preview
+                .proof
+                .evidence_sha256
+                .strip_prefix("sha256:")
+                .unwrap()
+        ));
+        let proof: RelationProofManifestV1 =
+            serde_json::from_slice(&std::fs::read(&proof_path).unwrap()).unwrap();
+        assert_eq!(proof, preview.proof);
+        let events = store.event_store().unwrap().list_change_events().unwrap();
+        let new_events: Vec<_> = events
+            .iter()
+            .filter(|e| !events_before.contains(e))
+            .collect();
+        assert_eq!(
+            new_events.len(),
+            2,
+            "no capture, assessment or validation facts are added"
+        );
+        let association: RevisionCommitAssociatedPayload = serde_json::from_value(
+            new_events
+                .iter()
+                .find(|e| e.event_type == EventType::RevisionCommitAssociated)
+                .unwrap()
+                .payload
+                .clone(),
+        )
+        .unwrap();
+        let attestation: RevisionRelationAttestedPayload = serde_json::from_value(
+            new_events
+                .iter()
+                .find(|e| e.event_type == EventType::RevisionRelationAttested)
+                .unwrap()
+                .payload
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(association.commit_association_id, proof.association_id);
+        assert_eq!(
+            association.commit,
+            ReviewEndpoint::GitCommit {
+                commit_oid: recorded.commit_oid.clone(),
+                tree_oid: preview.tree_oid.clone()
+            }
+        );
+        assert_eq!(
+            association.target,
+            ReviewTargetRef::Revision {
+                revision_id: recorded.revision.revision_id.clone()
+            }
+        );
+        assert_eq!(attestation.revision, recorded.revision);
+        assert_eq!(attestation.commit_association_id, proof.association_id);
+        assert_eq!(
+            attestation.comparison_base_or_parent.as_deref(),
+            Some(a.as_str())
+        );
+        assert_eq!(proof.candidate.base_or_parent.as_deref(), Some(b.as_str()));
+        let mut expected_endpoints = vec![recorded.commit_oid, preview.tree_oid];
+        expected_endpoints.sort();
+        assert_eq!(attestation.endpoint_oids, expected_endpoints);
+        assert_eq!(
+            attestation.evidence_content_hash.as_ref(),
+            Some(&proof.evidence_sha256)
+        );
+        assert_eq!(attestation.result_digest, proof.result_digest().unwrap());
+        let proofs = [(
+            proof.evidence_sha256.clone(),
+            (proof, EvidenceAvailabilityV1::Available),
+        )]
+        .into();
+        let qualified = project_revision_relation_evidence_v1(
+            recorded.revision.clone(),
+            recorded.commit_association_id.clone(),
+            std::slice::from_ref(&attestation),
+            &proofs,
+        )
+        .unwrap();
+        assert!(qualified.content_qualified);
+        std::fs::remove_file(proof_path).unwrap();
+        let unavailable = project_revision_relation_evidence_v1(
+            recorded.revision,
+            recorded.commit_association_id,
+            &[attestation],
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(!unavailable.content_qualified);
+    }
+
+    #[test]
+    fn parent_record_rechecks_artifact_and_graph_before_publication() {
+        for artifact in [true, false] {
+            let (root, token, _, _) = rewrite_fixture(false);
+            let options = LandCommitOptions::new(root.path(), &token, "track:author", "HEAD")
+                .with_candidate_parent(true);
+            let preview = preview_land_commit(options.clone()).unwrap();
+            let mut after_mutation = None;
+            let result = land_commit_with_hooks(
+                options.with_expected_proof(&preview.proof.evidence_sha256),
+                || {
+                    if artifact {
+                        let store = resolve_change_write_store(root.path()).unwrap();
+                        let path =
+                            crate::session::store::object_artifact::object_artifact_path_for_hash(
+                                store.store_dir(),
+                                &preview.revision.object_artifact_content_hash,
+                            );
+                        std::fs::remove_file(path).unwrap();
+                    } else {
+                        std::fs::write(root.path().join("sample.txt"), "parallel content\n")
+                            .unwrap();
+                        crate::session::capture_change_revision(
+                            crate::session::ChangeCaptureOptions::advance(
+                                "change-operation:landing-stale-graph",
+                                crate::session::CaptureOptions::new(root.path()),
+                                token.clone(),
+                                crate::session::ChangeAdvanceV1::Parallel,
+                            ),
+                        )
+                        .unwrap();
+                    }
+                    after_mutation = Some(store_inventory(root.path()));
+                },
+                || {},
+            );
+            let error = result.unwrap_err().to_string();
+            assert!(
+                if artifact {
+                    error.contains("artifact") || error.contains("content")
+                } else {
+                    error.contains("change_graph_stale")
+                },
+                "{error}"
+            );
+            assert_eq!(after_mutation.unwrap(), store_inventory(root.path()));
+        }
+    }
+    #[test]
+    fn parent_comparison_refutes_same_hunk_when_upstream_changes_the_before_blob() {
+        let (root, token) = landing_fixture();
+        let repo = root.path();
+        let base: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(repo.join("sample.txt"), &base).unwrap();
+        git(repo, &["add", "sample.txt"]);
+        git(repo, &["commit", "-m", "long base"]);
+        let a = git_stdout(repo, &["rev-parse", "HEAD"]);
+        std::fs::write(
+            repo.join("sample.txt"),
+            base.replace("line 1\n", "reviewed change\n"),
+        )
+        .unwrap();
+        git(repo, &["commit", "-am", "reviewed"]);
+        let c = git_stdout(repo, &["rev-parse", "HEAD"]);
+        let files = capture_commit_range_diff_files(repo, &a, &c, &[]).unwrap();
+        let provenance = crate::session::event::GitProvenance {
+            source: RevisionSource::GitCommitRange {
+                mode: crate::model::CommitRangeCaptureMode::BaseTreeToTargetTree,
+                pathspecs: vec![],
+            },
+            base: ReviewEndpoint::GitCommit {
+                commit_oid: a.clone(),
+                tree_oid: git_commit_tree_oid(repo, &a).unwrap(),
+            },
+            target: ReviewEndpoint::GitCommit {
+                commit_oid: c.clone(),
+                tree_oid: git_commit_tree_oid(repo, &c).unwrap(),
+            },
+        };
+        git(repo, &["checkout", "--detach", &a]);
+        std::fs::write(
+            repo.join("sample.txt"),
+            base.replace("line 30\n", "upstream change\n"),
+        )
+        .unwrap();
+        git(repo, &["commit", "-am", "same file upstream"]);
+        let b = git_stdout(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["cherry-pick", &c]);
+        let candidate = git_stdout(repo, &["rev-parse", "HEAD"]);
+        let reviewed_hunk = git_stdout(repo, &["diff", "--no-ext-diff", "--unified=0", &a, &c]);
+        let candidate_hunk = git_stdout(
+            repo,
+            &["diff", "--no-ext-diff", "--unified=0", &b, &candidate],
+        );
+        assert_eq!(
+            reviewed_hunk.split("@@").skip(1).collect::<Vec<_>>(),
+            candidate_hunk.split("@@").skip(1).collect::<Vec<_>>()
+        );
+        let (source, compared, _) = proof_inputs(
+            repo,
+            Some(&provenance),
+            &files,
+            &candidate,
+            &git_commit_tree_oid(repo, &candidate).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_ne!(source.entries[0].old_oid, compared.entries[0].old_oid);
+        let proof = evaluate_relation_proof_v1(
+            ReviewCursorV1::decode_token(&token).unwrap().revision,
+            crate::model::CommitAssociationId::new("assoc-commit:sha256:before-blob"),
+            RelationProofAlgorithmV1::CanonicalEquivalentRewrite,
+            source,
+            compared,
+        )
+        .unwrap();
+        assert_eq!(proof.result.proof_status, RelationProofStatusV1::Refuted);
     }
 }

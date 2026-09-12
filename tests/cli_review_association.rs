@@ -1165,3 +1165,180 @@ fn text_association_withdraw_receipts() {
         "receipt verb: {ref_out}"
     );
 }
+
+fn rewrite_land(repo: &GitRepo, token: &str, commit: &str, extra: &[&str]) -> std::process::Output {
+    // Invoke directly: the general fixture helper refreshes legacy mirrors after
+    // success, which would obscure whether preview itself writes anything.
+    std::process::Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+        .args([
+            "association",
+            "land",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--review-cursor",
+            token,
+            "--track",
+            "agent:author",
+            "--commit",
+            commit,
+            "--format",
+            "json",
+        ])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+fn rewrite_inventory(repo: &GitRepo) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        path: &std::path::Path,
+        out: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, out);
+            } else {
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let root = repo.path().join(".git/pointbreak");
+    let mut out = std::collections::BTreeMap::new();
+    visit(&root, &root, &mut out);
+    out
+}
+
+fn assert_rewrite_success(output: &std::process::Output) -> Value {
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+#[test]
+fn parent_rewrite_preview_record_retry_and_persisted_proof() {
+    let repo = modified_repo();
+    let a = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    let captured = assert_rewrite_success(&pointbreak([
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]));
+    let change = captured["changeId"].as_str().unwrap();
+    let revision = captured["revision"]["revisionId"].as_str().unwrap();
+    let selection = assert_rewrite_success(&pointbreak([
+        "change",
+        "select",
+        change,
+        "--revision",
+        revision,
+        "--source",
+        "captured",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]));
+    let token = selection["token"].as_str().unwrap();
+    repo.commit_all("original");
+    let c = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    let original = assert_rewrite_success(&rewrite_land(&repo, token, &c, &[]));
+    repo.git(["checkout", "--detach", &a]);
+    repo.write("upstream.txt", "upstream\n");
+    repo.commit_all("upstream");
+    let b = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    repo.git(["cherry-pick", &c]);
+    let candidate = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    let before = rewrite_inventory(&repo);
+    let preview_output = rewrite_land(
+        &repo,
+        token,
+        &candidate,
+        &[
+            "--candidate-parent",
+            "--dry-run",
+            "--sign-key",
+            "definitely-missing-key",
+        ],
+    );
+    let preview = assert_rewrite_success(&preview_output);
+    assert!(
+        preview_output.stderr.is_empty(),
+        "preview must not load signing keys"
+    );
+    assert_eq!(preview["schema"], "pointbreak.association-land-preview.v1");
+    assert_eq!(preview["revision"]["revisionId"], revision);
+    assert_eq!(preview["commitOid"], candidate);
+    assert_eq!(preview["proof"]["source"]["baseOrParent"], a);
+    assert_eq!(preview["proof"]["candidate"]["baseOrParent"], b);
+    assert!(preview.get("acknowledgement").is_none());
+    assert!(preview.get("proofCreated").is_none());
+    assert_eq!(before, rewrite_inventory(&repo));
+    let hash = preview["proof"]["evidenceSha256"].as_str().unwrap();
+    for flags in [
+        vec!["--candidate-parent"],
+        vec!["--candidate-parent", "--expect-proof", "sha256:wrong"],
+    ] {
+        let failed = rewrite_land(&repo, token, &candidate, &flags);
+        assert!(!failed.status.success());
+        assert!(String::from_utf8_lossy(&failed.stderr).contains("--expect-proof"));
+        assert_eq!(before, rewrite_inventory(&repo));
+    }
+    // Same delta/tree but another commit identity must not reuse the preview hash.
+    repo.git(["commit", "--amend", "-m", "different identity"]);
+    let failed = rewrite_land(
+        &repo,
+        token,
+        "HEAD",
+        &["--candidate-parent", "--expect-proof", hash],
+    );
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("--expect-proof"));
+    assert_eq!(before, rewrite_inventory(&repo));
+    let recorded = assert_rewrite_success(&rewrite_land(
+        &repo,
+        token,
+        &candidate,
+        &["--candidate-parent", "--expect-proof", hash],
+    ));
+    assert_eq!(recorded["proof"], preview["proof"]);
+    assert_eq!(recorded["acknowledgement"]["authorityOutcome"], "created");
+    assert!(
+        recorded["message"]
+            .as_str()
+            .unwrap()
+            .contains("recorded verified scoped equivalent rewrite")
+    );
+    let proof_path = repo
+        .path()
+        .join(".git/pointbreak/artifacts/proofs")
+        .join(format!("{}.json", hash.strip_prefix("sha256:").unwrap()));
+    let stored: Value = serde_json::from_slice(&std::fs::read(proof_path).unwrap()).unwrap();
+    assert_eq!(stored, preview["proof"]);
+    let after = rewrite_inventory(&repo);
+    let retry = assert_rewrite_success(&rewrite_land(
+        &repo,
+        token,
+        &candidate,
+        &["--candidate-parent", "--expect-proof", hash],
+    ));
+    assert_eq!(
+        retry["commitAssociationId"],
+        recorded["commitAssociationId"]
+    );
+    assert_eq!(
+        retry["relationAttestationId"],
+        recorded["relationAttestationId"]
+    );
+    assert_eq!(retry["acknowledgement"]["authorityOutcome"], "existing");
+    assert_eq!(after, rewrite_inventory(&repo));
+    assert_ne!(
+        original["commitAssociationId"],
+        recorded["commitAssociationId"]
+    );
+}
