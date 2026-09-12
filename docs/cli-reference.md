@@ -1321,6 +1321,9 @@ blob identities, modes, paths, status and content kinds must match, including un
 An identical text hunk with different before/after blobs fails. Changes outside an explicitly captured
 path scope are outside this claim. Advancing the base produces equivalent rewrite, not exact materialization.
 This mode cannot combine with `--allow-extension` or `--provenance-only`.
+Candidate resolution, parent/tree identity, ancestry, candidate diff and structural endpoint recording
+ignore Git replacement objects in this mode. Ordinary capture and landing retain their configured
+behavior. The policy is local to each read; it does not change process environment or repository settings.
 
 With an existing exact Change/Revision and an eligible committed candidate, run:
 

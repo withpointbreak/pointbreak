@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
-use crate::git::{git_commit_tree_oid, git_rev_parse_commit_oid};
+use crate::git::{GitObjectPolicy, git_commit_endpoint};
 use crate::model::{
     ActorId, CommitAssociationId, EventId, RefAssociationId, ReviewEndpoint, ReviewTargetRef,
     RevisionId, TargetRef,
@@ -106,6 +106,7 @@ pub struct AssociateCommitOptions {
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
     commit: String,
+    object_policy: GitObjectPolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +147,11 @@ pub struct WithdrawRefOptions {
 }
 
 impl AssociateCommitOptions {
+    pub(crate) fn with_object_policy(mut self, policy: GitObjectPolicy) -> Self {
+        self.object_policy = policy;
+        self
+    }
+
     pub fn new(repo: impl AsRef<Path>, commit: impl Into<String>) -> Self {
         Self {
             repo: repo.as_ref().to_path_buf(),
@@ -156,6 +162,7 @@ impl AssociateCommitOptions {
             actor_id: None,
             signing: EventSigningOptions::default(),
             commit: commit.into(),
+            object_policy: GitObjectPolicy::Configured,
         }
     }
 
@@ -382,8 +389,8 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
         options.actor_id.as_ref(),
         &options.signing,
         |revision_id, worktree_root| {
-            let commit_oid = git_rev_parse_commit_oid(worktree_root, &options.commit)?;
-            let tree_oid = git_commit_tree_oid(worktree_root, &commit_oid)?;
+            let (commit_oid, tree_oid) =
+                git_commit_endpoint(worktree_root, &options.commit, options.object_policy)?;
             let commit_association_id = build_commit_association_id(revision_id, &commit_oid)?;
             let key = RevisionCommitAssociatedPayload::idempotency_key(revision_id, &commit_oid);
             let payload = RevisionCommitAssociatedPayload {

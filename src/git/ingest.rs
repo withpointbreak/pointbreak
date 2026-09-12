@@ -194,19 +194,38 @@ fn diff_files_for_args(
     endpoint_args: &[&str],
     pathspecs: &[String],
 ) -> Result<Vec<DiffFile>> {
+    diff_files_for_args_with_policy(
+        repo,
+        endpoint_args,
+        pathspecs,
+        crate::git::GitObjectPolicy::Configured,
+    )
+}
+
+fn diff_files_for_args_with_policy(
+    repo: &Path,
+    endpoint_args: &[&str],
+    pathspecs: &[String],
+    policy: crate::git::GitObjectPolicy,
+) -> Result<Vec<DiffFile>> {
+    let args = |mode: &[&str]| {
+        policy
+            .git_prefix()
+            .iter()
+            .map(OsString::from)
+            .chain(diff_args(mode, endpoint_args, pathspecs))
+            .collect::<Vec<_>>()
+    };
     #[cfg(test)]
     record_diff_funnel_spawn();
     // Freeze full object identities in every snapshot. Git reports an all-zero
     // new-side oid for mutable worktree entries; those are hydrated below from
     // the exact path bytes. Full-width committed and mutable oids then compare
     // directly when a reviewed worktree is committed unchanged.
-    let raw_output = run_git(
-        repo,
-        diff_args(&["--raw", "-z", "--abbrev=64"], endpoint_args, pathspecs),
-    )?;
+    let raw_output = run_git(repo, args(&["--raw", "-z", "--abbrev=64"]))?;
     #[cfg(test)]
     record_diff_funnel_spawn();
-    let patch_output = run_git(repo, diff_args(&["--patch"], endpoint_args, pathspecs))?;
+    let patch_output = run_git(repo, args(&["--patch"]))?;
 
     let raw_files = parse_raw(&raw_output.stdout)?;
     let patch_files =
@@ -575,6 +594,17 @@ fn metadata_rows(
         });
     }
     rows
+}
+
+/// Permanent subprocess diff, with original object reads for proof-backed rewrites.
+pub(crate) fn capture_commit_range_diff_files_with_policy(
+    repo: &Path,
+    base: &str,
+    target: &str,
+    pathspecs: &[String],
+    policy: crate::git::GitObjectPolicy,
+) -> Result<Vec<DiffFile>> {
+    diff_files_for_args_with_policy(repo, &[base, target], pathspecs, policy)
 }
 
 #[cfg(test)]

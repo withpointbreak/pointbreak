@@ -54,7 +54,9 @@ through the association and proof. A descendant-base delta with identical canoni
 `equivalent_rewrite`; it does not relabel the original capture or carry its validation forward. The
 read-only preview document is not a new stored resource schema or capability. The
 [CLI contract](../cli-reference.md#single-commit-rewrites-and-read-only-preview) defines admission,
-expected-proof recording and external exact-candidate receipts.
+expected-proof recording and external exact-candidate receipts. New-mode Git reads and structural
+endpoint recording use original object bytes consistently, ignoring replacement objects without changing
+ordinary capture/landing policy.
 
 ### D2. Proof lifecycle is separate from relation history
 

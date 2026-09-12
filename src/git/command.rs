@@ -5,7 +5,9 @@ use crate::error::{Result, ShoreError};
 #[cfg(test)]
 pub(crate) use crate::git::backend::subprocess::git_info_exclude_path;
 pub(crate) use crate::git::backend::subprocess::{GitOutput, run_git, run_git_allowing_statuses};
-use crate::git::backend::{BackendClass, GitBackend, dispatch, subprocess_backend};
+use crate::git::backend::{
+    BackendClass, GitBackend, GitObjectPolicy, dispatch, subprocess_backend,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitWorktree {
@@ -299,6 +301,28 @@ pub(crate) fn git_rev_list_range(repo: &Path, range: &str) -> Result<Vec<String>
 
 pub(crate) fn git_worktree_list(repo: &Path) -> Result<Vec<GitWorktree>> {
     dispatch(BackendClass::ReadGraphRefs)?.worktree_list(repo)
+}
+
+/// Resolve both endpoint identities under one explicit object policy.
+pub(crate) fn git_commit_endpoint(
+    repo: &Path,
+    rev: &str,
+    policy: GitObjectPolicy,
+) -> Result<(String, String)> {
+    let backend = dispatch(BackendClass::IdentityScalars)?;
+    let oid = backend.rev_parse_commit_oid_with_policy(repo, rev, policy)?;
+    let tree = backend.commit_tree_oid_with_policy(repo, &oid, policy)?;
+    Ok((oid, tree))
+}
+
+pub(crate) fn git_is_ancestor_with_policy(
+    repo: &Path,
+    ancestor: &str,
+    descendant: &str,
+    policy: GitObjectPolicy,
+) -> Result<Ancestry> {
+    dispatch(BackendClass::ReadGraphRefs)?
+        .is_ancestor_with_policy(repo, ancestor, descendant, policy)
 }
 
 #[cfg(test)]

@@ -24,6 +24,24 @@ pub(crate) mod subprocess;
 use gix::GixBackend;
 use subprocess::SubprocessBackend;
 
+/// Whether Git reads use configured replacement objects or actual object bytes.
+/// The original-object policy is per call and never mutates process environment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GitObjectPolicy {
+    #[default]
+    Configured,
+    Original,
+}
+
+impl GitObjectPolicy {
+    pub(crate) fn git_prefix(self) -> &'static [&'static str] {
+        match self {
+            Self::Configured => &[],
+            Self::Original => &["--no-replace-objects"],
+        }
+    }
+}
+
 /// One method per routable git operation, each mirroring the existing typed
 /// return so the three-valued/allowed-status exit semantics stay absorbed inside
 /// the operation and no exit code crosses the seam. Object-safe by construction
@@ -39,6 +57,20 @@ pub(crate) trait GitBackend: Send + Sync {
         repo: &Path,
         ancestor_oid: &str,
         descendant_oid: &str,
+    ) -> Result<Ancestry> {
+        self.is_ancestor_with_policy(
+            repo,
+            ancestor_oid,
+            descendant_oid,
+            GitObjectPolicy::Configured,
+        )
+    }
+    fn is_ancestor_with_policy(
+        &self,
+        repo: &Path,
+        ancestor_oid: &str,
+        descendant_oid: &str,
+        policy: GitObjectPolicy,
     ) -> Result<Ancestry>;
     fn independent_commits(&self, repo: &Path, oids: &[String]) -> Result<Vec<String>>;
     fn commit_changed_paths(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>>;
@@ -75,8 +107,24 @@ pub(crate) trait GitBackend: Send + Sync {
     fn head_ref(&self, repo: &Path) -> Result<Option<String>>;
     fn head_oid(&self, repo: &Path) -> Result<String>;
     fn head_commit_oid_optional(&self, repo: &Path) -> Result<Option<String>>;
-    fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String>;
-    fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String>;
+    fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String> {
+        self.rev_parse_commit_oid_with_policy(repo, rev, GitObjectPolicy::Configured)
+    }
+    fn rev_parse_commit_oid_with_policy(
+        &self,
+        repo: &Path,
+        rev: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String>;
+    fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String> {
+        self.commit_tree_oid_with_policy(repo, commit_oid, GitObjectPolicy::Configured)
+    }
+    fn commit_tree_oid_with_policy(
+        &self,
+        repo: &Path,
+        commit_oid: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String>;
     fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>>;
     fn empty_tree_oid(&self, repo: &Path) -> Result<String>;
 }
@@ -121,14 +169,15 @@ impl GitBackend for GitBackendKind {
         self.as_backend().common_dir(repo)
     }
 
-    fn is_ancestor(
+    fn is_ancestor_with_policy(
         &self,
         repo: &Path,
         ancestor_oid: &str,
         descendant_oid: &str,
+        policy: GitObjectPolicy,
     ) -> Result<Ancestry> {
         self.as_backend()
-            .is_ancestor(repo, ancestor_oid, descendant_oid)
+            .is_ancestor_with_policy(repo, ancestor_oid, descendant_oid, policy)
     }
 
     fn independent_commits(&self, repo: &Path, oids: &[String]) -> Result<Vec<String>> {
@@ -219,12 +268,24 @@ impl GitBackend for GitBackendKind {
         self.as_backend().head_commit_oid_optional(repo)
     }
 
-    fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String> {
-        self.as_backend().rev_parse_commit_oid(repo, rev)
+    fn rev_parse_commit_oid_with_policy(
+        &self,
+        repo: &Path,
+        rev: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        self.as_backend()
+            .rev_parse_commit_oid_with_policy(repo, rev, policy)
     }
 
-    fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String> {
-        self.as_backend().commit_tree_oid(repo, commit_oid)
+    fn commit_tree_oid_with_policy(
+        &self,
+        repo: &Path,
+        commit_oid: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        self.as_backend()
+            .commit_tree_oid_with_policy(repo, commit_oid, policy)
     }
 
     fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>> {

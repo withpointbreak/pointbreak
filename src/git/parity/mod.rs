@@ -1243,3 +1243,97 @@ fn git_backend_microbench() {
         );
     }
 }
+
+#[test]
+fn git_backend_parity_original_object_policy() {
+    use crate::git::{Ancestry, GitObjectPolicy};
+    let mut fixtures = vec![root_commit_fixture()];
+    if let Some(fixture) = maybe_sha256_repo_fixture() {
+        fixtures.push(fixture);
+    }
+    let mut verdicts = vec![];
+    for fixture in fixtures {
+        let repo = fixture.path();
+        let root = rev(repo, "HEAD");
+        let tree = rev(repo, "HEAD^{tree}");
+        let foreign_tree = String::from_utf8(
+            run_git_with_stdin(
+                repo,
+                ["hash-object", "-w", "-t", "tree", "--stdin"],
+                b"",
+                &[0],
+            )
+            .unwrap()
+            .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let child = String::from_utf8(
+            run_git(repo, ["commit-tree", &tree, "-p", &root, "-m", "child"])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        let foreign = String::from_utf8(
+            run_git(repo, ["commit-tree", &foreign_tree, "-m", "foreign root"])
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        git(repo, ["replace", &child, &foreign]);
+        for config in ["true", "false"] {
+            git(repo, ["config", "core.useReplaceRefs", config]);
+            verdicts.push(qualify_op(&fixture, |backend, repo| {
+                let actual = backend.is_ancestor_with_policy(
+                    repo,
+                    &root,
+                    &child,
+                    GitObjectPolicy::Original,
+                )?;
+                assert_eq!(actual, Ancestry::Ancestor);
+                Ok(actual)
+            }));
+            verdicts.push(qualify_op(&fixture, |backend, repo| {
+                let actual = backend.rev_parse_commit_oid_with_policy(
+                    repo,
+                    &format!("{child}~1"),
+                    GitObjectPolicy::Original,
+                )?;
+                assert_eq!(actual, root);
+                Ok(actual)
+            }));
+            verdicts.push(qualify_op(&fixture, |backend, repo| {
+                let actual =
+                    backend.commit_tree_oid_with_policy(repo, &child, GitObjectPolicy::Original)?;
+                assert_eq!(actual, tree);
+                Ok(actual)
+            }));
+        }
+        git(repo, ["replace", "-d", &child]);
+        // A replacement must not manufacture ancestry for an unrelated object.
+        git(repo, ["replace", &foreign, &child]);
+        verdicts.push(qualify_op(&fixture, |backend, repo| {
+            let actual = backend.is_ancestor_with_policy(
+                repo,
+                &root,
+                &foreign,
+                GitObjectPolicy::Original,
+            )?;
+            assert_eq!(actual, Ancestry::NotAncestor);
+            Ok(actual)
+        }));
+        let missing = "0".repeat(root.len());
+        verdicts.push(qualify_op(&fixture, |backend, repo| {
+            backend.commit_tree_oid_with_policy(repo, &missing, GitObjectPolicy::Original)
+        }));
+        verdicts.push(qualify_op(&fixture, |backend, repo| {
+            backend.rev_parse_commit_oid_with_policy(repo, "no-such-ref", GitObjectPolicy::Original)
+        }));
+    }
+    assert!(verdicts.iter().all(|v| *v == VectorVerdict::Match));
+}

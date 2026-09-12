@@ -12,9 +12,11 @@ use serde::Serialize;
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::git::{
-    Ancestry, capture_commit_range_diff_files, git_commit_parent_oids, git_commit_tree_oid,
-    git_is_ancestor, git_rev_parse_commit_oid, git_worktree_root,
+    Ancestry, GitObjectPolicy, capture_commit_range_diff_files_with_policy, git_commit_endpoint,
+    git_commit_parent_oids, git_is_ancestor_with_policy, git_worktree_root,
 };
+#[cfg(test)]
+use crate::git::{capture_commit_range_diff_files, git_commit_tree_oid};
 use crate::model::{
     ActorId, DiffFile, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource, TargetRef,
 };
@@ -73,6 +75,14 @@ impl LandCommitOptions {
             expected_proof: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
+        }
+    }
+
+    fn object_policy(&self) -> GitObjectPolicy {
+        if self.candidate_parent {
+            GitObjectPolicy::Original
+        } else {
+            GitObjectPolicy::Configured
         }
     }
 
@@ -206,8 +216,8 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
 
     let worktree_root = git_worktree_root(&options.repo)?;
     let worktree_root = worktree_root.as_path();
-    let commit_oid = git_rev_parse_commit_oid(worktree_root, &options.commit)?;
-    let commit_tree_oid = git_commit_tree_oid(worktree_root, &commit_oid)?;
+    let (commit_oid, commit_tree_oid) =
+        git_commit_endpoint(worktree_root, &options.commit, options.object_policy())?;
     let association_id = build_commit_association_id(&revision.revision_id, &commit_oid)?;
 
     let (source, candidate, exact_endpoint) = if options.provenance_only {
@@ -359,7 +369,8 @@ fn land_commit_with_hooks(
         ContentArtifacts::from_backend(write_store.backend()).put_relation_proof(&proof)?;
     let mut association_options = AssociateCommitOptions::new(&options.repo, &commit_oid)
         .with_review_cursor(options.review_cursor.clone())
-        .with_track(options.track.clone());
+        .with_track(options.track.clone())
+        .with_object_policy(options.object_policy());
     if let Some(actor_id) = options.actor_id.clone() {
         association_options = association_options.with_actor_id(actor_id);
     }
@@ -554,11 +565,16 @@ fn proof_inputs(
     } else {
         base.clone()
     };
-    let candidate_files = capture_commit_range_diff_files(
+    let candidate_files = capture_commit_range_diff_files_with_policy(
         repo,
         &candidate_base,
         candidate_commit,
         &path_scope_for_git(&path_scope),
+        if candidate_parent {
+            GitObjectPolicy::Original
+        } else {
+            GitObjectPolicy::Configured
+        },
     )?;
     let source = CanonicalProofInputV1 {
         capture_mode,
@@ -638,7 +654,9 @@ fn parent_comparison_base(
             "--candidate-parent requires a candidate with exactly one parent",
         ));
     };
-    if git_is_ancestor(repo, source_base, parent)? != Ancestry::Ancestor {
+    if git_is_ancestor_with_policy(repo, source_base, parent, GitObjectPolicy::Original)?
+        != Ancestry::Ancestor
+    {
         return Err(unsupported_parent(
             "the captured base must be a known ancestor of the candidate parent",
         ));
@@ -1850,5 +1868,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(proof.result.proof_status, RelationProofStatusV1::Refuted);
+    }
+    #[test]
+    fn parent_preview_does_not_certify_replacement_bytes_as_the_candidate() {
+        let (root, token, _, _) = rewrite_fixture(false);
+        let good = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(root.path().join("sample.txt"), "unreviewed candidate\n").unwrap();
+        git(
+            root.path(),
+            &["commit", "--amend", "-am", "different content"],
+        );
+        let bad = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+        git(root.path(), &["replace", &bad, &good]);
+        let before = store_inventory(root.path());
+        let result = preview_land_commit(
+            LandCommitOptions::new(root.path(), token, "track:author", bad)
+                .with_candidate_parent(true),
+        );
+        assert!(
+            result.is_err(),
+            "replacement bytes must not qualify the original candidate OID"
+        );
+        assert_eq!(before, store_inventory(root.path()));
+    }
+    #[test]
+    fn parent_original_policy_preserves_proof_and_structural_tree_under_replacements() {
+        for replace_parent in [false, true] {
+            let (root, token, _, parent) = rewrite_fixture(false);
+            let candidate = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+            let options = LandCommitOptions::new(root.path(), token, "track:author", &candidate)
+                .with_candidate_parent(true);
+            let preview = preview_land_commit(options.clone()).unwrap();
+            std::fs::write(root.path().join("sample.txt"), "other object bytes\n").unwrap();
+            git(root.path(), &["commit", "--amend", "-am", "replacement"]);
+            let replacement = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+            git(
+                root.path(),
+                &[
+                    "replace",
+                    if replace_parent { &parent } else { &candidate },
+                    &replacement,
+                ],
+            );
+            assert_eq!(preview, preview_land_commit(options.clone()).unwrap());
+            let recorded =
+                land_commit(options.with_expected_proof(&preview.proof.evidence_sha256)).unwrap();
+            let store = resolve_change_write_store(root.path()).unwrap();
+            let events = store.event_store().unwrap().list_change_events().unwrap();
+            let associated = events
+                .iter()
+                .find(|e| {
+                    e.event_type == EventType::RevisionCommitAssociated
+                        && e.payload["commitAssociationId"].as_str()
+                            == Some(recorded.commit_association_id.as_str())
+                })
+                .unwrap();
+            assert_eq!(
+                associated.payload["commit"]["treeOid"].as_str(),
+                Some(preview.tree_oid.as_str())
+            );
+        }
     }
 }

@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use crate::error::{Result, ShoreError};
-use crate::git::backend::GitBackend;
+use crate::git::backend::{GitBackend, GitObjectPolicy};
 use crate::git::command::{Ancestry, GitInventoryPath, GitReflogEntry, GitWorktree, RefEntry};
 
 /// The `git`-subprocess backend: every routable operation shells out to the
@@ -548,15 +548,21 @@ fn git_ls_files_inventory<const N: usize>(
 /// Substitutes an honest, rev-naming error for git's noisy stderr on failure:
 /// one message covers both unknown and non-`peel` objects ("cannot resolve
 /// '<rev>' to a <peel>").
-fn git_rev_parse_peeled(repo: &Path, rev: &str, peel: &str, description: &str) -> Result<String> {
+fn git_rev_parse_peeled_with_policy(
+    repo: &Path,
+    rev: &str,
+    peel: &str,
+    description: &str,
+    policy: GitObjectPolicy,
+) -> Result<String> {
     let output = run_git(
         repo,
-        [
+        policy.git_prefix().iter().copied().chain([
             "rev-parse",
             "--verify",
             "--end-of-options",
             &format!("{rev}^{{{peel}}}"),
-        ],
+        ]),
     )
     .map_err(|_| {
         ShoreError::Message(format!(
@@ -590,15 +596,21 @@ impl GitBackend for SubprocessBackend {
         })
     }
 
-    fn is_ancestor(
+    fn is_ancestor_with_policy(
         &self,
         repo: &Path,
         ancestor_oid: &str,
         descendant_oid: &str,
+        policy: GitObjectPolicy,
     ) -> Result<Ancestry> {
         let (code, _) = run_git_status(
             repo,
-            ["merge-base", "--is-ancestor", ancestor_oid, descendant_oid],
+            policy.git_prefix().iter().copied().chain([
+                "merge-base",
+                "--is-ancestor",
+                ancestor_oid,
+                descendant_oid,
+            ]),
             &[0, 1, 128],
         )?;
         Ok(match code {
@@ -929,12 +941,22 @@ impl GitBackend for SubprocessBackend {
         }
     }
 
-    fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String> {
-        git_rev_parse_peeled(repo, rev, "commit", "commit oid")
+    fn rev_parse_commit_oid_with_policy(
+        &self,
+        repo: &Path,
+        rev: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        git_rev_parse_peeled_with_policy(repo, rev, "commit", "commit oid", policy)
     }
 
-    fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String> {
-        git_rev_parse_peeled(repo, commit_oid, "tree", "commit tree oid")
+    fn commit_tree_oid_with_policy(
+        &self,
+        repo: &Path,
+        commit_oid: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        git_rev_parse_peeled_with_policy(repo, commit_oid, "tree", "commit tree oid", policy)
     }
 
     fn commit_parent_oids(&self, repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
@@ -1190,7 +1212,16 @@ mod tests {
         let expected = git_hash_object_tree_from_stdin(repo.path(), b"").unwrap();
 
         assert_eq!(oid, expected);
-        assert!(git_rev_parse_peeled(repo.path(), &oid, "tree", "tree oid").is_ok());
+        assert!(
+            git_rev_parse_peeled_with_policy(
+                repo.path(),
+                &oid,
+                "tree",
+                "tree oid",
+                GitObjectPolicy::Configured
+            )
+            .is_ok()
+        );
     }
 
     #[test]

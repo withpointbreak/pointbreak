@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use ::gix::bstr::ByteSlice;
 
 use crate::error::{Result, ShoreError};
-use crate::git::backend::GitBackend;
+use crate::git::backend::{GitBackend, GitObjectPolicy};
 use crate::git::command::{Ancestry, GitInventoryPath, GitReflogEntry, GitWorktree, RefEntry};
 
 /// The in-process gix backend. A unit struct: gix repository handles are opened
@@ -72,6 +72,14 @@ pub(crate) fn reset_gix_open_count() {
 /// error. Uses ancestor discovery (not a bare open) so a path *inside* a
 /// worktree resolves the repository exactly as a subprocess `git` run from that
 /// directory would (`--repo <subdir>` and nested-cwd use).
+fn open_with_policy(repo: &Path, policy: GitObjectPolicy) -> GixResult<::gix::Repository> {
+    let mut repository = open(repo)?;
+    if policy == GitObjectPolicy::Original {
+        repository.objects.ignore_replacements = true;
+    }
+    Ok(repository)
+}
+
 fn open(repo: &Path) -> GixResult<::gix::Repository> {
     #[cfg(all(test, feature = "gix-parity"))]
     GIX_OPEN_COUNT.with(|cell| cell.set(cell.get() + 1));
@@ -262,13 +270,14 @@ impl GitBackend for GixBackend {
         Ok(to_git_observed_path(canonicalize(repository.common_dir())?))
     }
 
-    fn is_ancestor(
+    fn is_ancestor_with_policy(
         &self,
         repo: &Path,
         ancestor_oid: &str,
         descendant_oid: &str,
+        policy: GitObjectPolicy,
     ) -> Result<Ancestry> {
-        let repository = open(repo)?;
+        let repository = open_with_policy(repo, policy)?;
         let (Ok(ancestor), Ok(descendant)) = (parse_oid(ancestor_oid), parse_oid(descendant_oid))
         else {
             return Ok(Ancestry::MissingObject);
@@ -829,8 +838,13 @@ impl GitBackend for GixBackend {
         Ok(head.id().map(|id| id.to_string()))
     }
 
-    fn rev_parse_commit_oid(&self, repo: &Path, rev: &str) -> Result<String> {
-        let repository = open(repo)?;
+    fn rev_parse_commit_oid_with_policy(
+        &self,
+        repo: &Path,
+        rev: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        let repository = open_with_policy(repo, policy)?;
         let cannot_resolve = || {
             ShoreError::Message(format!(
                 "cannot resolve '{rev}' to a commit in this repository"
@@ -842,8 +856,13 @@ impl GitBackend for GixBackend {
         Ok(object.detach().to_string())
     }
 
-    fn commit_tree_oid(&self, repo: &Path, commit_oid: &str) -> Result<String> {
-        let repository = open(repo)?;
+    fn commit_tree_oid_with_policy(
+        &self,
+        repo: &Path,
+        commit_oid: &str,
+        policy: GitObjectPolicy,
+    ) -> Result<String> {
+        let repository = open_with_policy(repo, policy)?;
         let cannot_resolve = || {
             ShoreError::Message(format!(
                 "cannot resolve '{commit_oid}' to a tree in this repository"
