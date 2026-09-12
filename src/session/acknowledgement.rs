@@ -470,9 +470,12 @@ mod tests {
                         || line.contains("Durability::Projection")
                 })
             })
-            .map(|(path, _)| path.strip_prefix(&workflow).unwrap().to_str().unwrap())
+            .map(|(path, _)| path.strip_prefix(&workflow).unwrap())
             .collect();
-        assert_eq!(sites, PRODUCERS.iter().map(|row| row.0).collect());
+        assert_eq!(
+            sites,
+            PRODUCERS.iter().map(|row| Path::new(row.0)).collect()
+        );
         assert_eq!(sites.len(), 13);
         assert_eq!(PRODUCERS.len(), 18);
         assert_eq!(
