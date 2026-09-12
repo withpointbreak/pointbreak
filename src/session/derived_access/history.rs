@@ -2411,6 +2411,46 @@ mod tests {
     }
 
     #[test]
+    fn request_reader_reports_quarantine_class_without_renaming_and_still_requests_maintenance() {
+        let (_temp, access) = active_history(1);
+        access.pause_background_worker_for_test();
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("setup rebuild publishes a generation");
+        std::fs::write(
+            lifecycle
+                .paths()
+                .generation(&generation_id)
+                .join("cursor.sqlite3"),
+            b"not sqlite",
+        )
+        .unwrap();
+
+        let read = access.current().unwrap();
+
+        assert!(
+            matches!(
+                read,
+                CurrentRead::Unavailable(DerivedHistoryStatus {
+                    availability: DerivedHistoryAvailability::Quarantined,
+                    ..
+                })
+            ),
+            "reader must classify without recovering"
+        );
+        assert!(
+            lifecycle.paths().root().exists(),
+            "a request reader must not move the derived root aside"
+        );
+        assert!(
+            access.maintenance_in_flight(),
+            "the reader still requests the existing background worker"
+        );
+    }
+
+    #[test]
     fn active_access_joins_a_contended_background_rebuild_without_restart() {
         let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
         let lifecycle = access.lifecycle().expect("test access is active");
