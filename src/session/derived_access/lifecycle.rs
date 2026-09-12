@@ -268,10 +268,17 @@ impl DerivedAccessLifecycle {
         Ok(Some(authority))
     }
 
+    /// Recovery classifier: reports lifecycle availability and moves invalid
+    /// disposable state aside (under the derived writer lock). Only recovery
+    /// actors call it — rebuild-capable background workers, explicit
+    /// `store derived build`, and the writer-idle rebuild confirmation. Request
+    /// readers and status observers use `status_read_only`.
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
         self.status_with_quarantine(true)
     }
 
+    /// Observation classifier: the same classification as `status()` but it
+    /// never renames, never takes an exclusive lock and never requests work.
     pub(crate) fn status_read_only(&self) -> Result<LifecycleStatus, LifecycleError> {
         self.status_with_quarantine(false)
     }
@@ -1055,25 +1062,30 @@ impl DerivedAccessLifecycle {
         })
     }
 
+    /// Open the published generation as an observation primitive: the caller may
+    /// read it, but this path never moves invalid disposable state aside, never
+    /// requests background work and takes only the shared generation read lease.
+    /// Quarantine-class and rebuild-class failures are reported as typed errors;
+    /// the recovery classifier `status()` owns the rename.
     pub(crate) fn open_current(&self) -> Result<Option<CurrentGeneration>, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off {
             return Ok(None);
         }
         let Some((paths, publication, lease)) = self
             .stable_current_publication()
-            .map_err(|error| self.generation_open_error(error))?
+            .map_err(observe_generation_error)?
         else {
             return Ok(None);
         };
         let descriptor = paths
             .descriptor(&publication)
-            .map_err(|error| self.generation_open_error(error))?;
+            .map_err(observe_generation_error)?;
         self.validate_descriptor(&descriptor)
-            .map_err(|error| self.quarantine_error(error.to_string()))?;
+            .map_err(|error| LifecycleError::Quarantined(error.to_string()))?;
         let generation_root = paths.generation(&publication.generation_id);
         if let Err(error) = validate_wal_shape(&generation_root) {
             return Err(if lifecycle_error_requires_quarantine(&error) {
-                self.quarantine_error(error.to_string())
+                LifecycleError::Quarantined(error.to_string())
             } else {
                 error
             });
@@ -1083,24 +1095,10 @@ impl DerivedAccessLifecycle {
             &generation_root,
             CursorLedgerIdentity::new(self.store_id.clone()),
         )
-        .map_err(|error| {
-            if service_error_requires_rebuild(&error) {
-                LifecycleError::RebuildRequired(error.to_string())
-            } else if service_error_requires_quarantine(&error) {
-                self.quarantine_error(error.to_string())
-            } else {
-                LifecycleError::Service(error)
-            }
-        })?;
-        let publication_snapshot = service.publication_validation_snapshot().map_err(|error| {
-            if service_error_requires_rebuild(&error) {
-                LifecycleError::RebuildRequired(error.to_string())
-            } else if service_error_requires_quarantine(&error) {
-                self.quarantine_error(error.to_string())
-            } else {
-                LifecycleError::Service(error)
-            }
-        })?;
+        .map_err(observe_service_error)?;
+        let publication_snapshot = service
+            .publication_validation_snapshot()
+            .map_err(observe_service_error)?;
         let reader_receipt = self
             .validate_change_reader_publication(
                 &generation_root,
@@ -1118,7 +1116,7 @@ impl DerivedAccessLifecycle {
             &authority.snapshot,
             publication_snapshot.locator_applied,
         )
-        .map_err(|error| self.quarantine_error(error.to_string()))?;
+        .map_err(|error| LifecycleError::Quarantined(error.to_string()))?;
         Ok(Some(CurrentGeneration {
             publication_identity: publication,
             service,
@@ -2253,6 +2251,30 @@ fn validate_wal_header(length: u64, header: &[u8; 32]) -> Result<(), LifecycleEr
     Ok(())
 }
 
+/// Classify a generation error for an observation-class caller: the same
+/// rebuild/quarantine classes the recovery classifier uses, without renaming.
+fn observe_generation_error(error: GenerationError) -> LifecycleError {
+    if generation_error_requires_rebuild(&error) {
+        LifecycleError::RebuildRequired(error.to_string())
+    } else if generation_error_requires_quarantine(&error) {
+        LifecycleError::Quarantined(error.to_string())
+    } else {
+        LifecycleError::Generation(error)
+    }
+}
+
+/// Classify a service error for an observation-class caller (see
+/// [`observe_generation_error`]).
+fn observe_service_error(error: DerivedAccessServiceError) -> LifecycleError {
+    if service_error_requires_rebuild(&error) {
+        LifecycleError::RebuildRequired(error.to_string())
+    } else if service_error_requires_quarantine(&error) {
+        LifecycleError::Quarantined(error.to_string())
+    } else {
+        LifecycleError::Service(error)
+    }
+}
+
 fn generation_error_requires_quarantine(error: &GenerationError) -> bool {
     matches!(
         error,
@@ -3081,6 +3103,71 @@ mod tests {
             EventStore::open(temp.path()).list_events().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn open_current_reports_corrupt_generation_without_renaming() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        std::fs::write(generation.join("cursor.sqlite3"), b"not sqlite").unwrap();
+
+        let error = lifecycle.open_current().unwrap_err();
+
+        assert!(matches!(error, LifecycleError::Quarantined(_)), "{error:?}");
+        assert!(
+            lifecycle.paths().root().exists(),
+            "observation must not rename the root"
+        );
+        assert!(
+            !lifecycle
+                .paths()
+                .root()
+                .join("quarantine-reason.txt")
+                .exists()
+        );
+        // The recovery classifier still owns the rename.
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Quarantined
+        );
+        assert!(!lifecycle.paths().root().exists());
+        assert_eq!(
+            EventStore::open(temp.path()).list_events().unwrap().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn open_current_reports_store_identity_mismatch_without_renaming() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let database = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap())
+            .join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE cursor_meta SET store_id = 'store:other' WHERE singleton = 1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = lifecycle.open_current().unwrap_err();
+
+        assert!(matches!(error, LifecycleError::Quarantined(_)), "{error:?}");
+        assert!(lifecycle.paths().root().exists());
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Quarantined
+        );
+        assert!(!lifecycle.paths().root().exists());
     }
 
     #[test]
