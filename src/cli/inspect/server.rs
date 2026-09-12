@@ -2492,6 +2492,200 @@ mod tests {
         assert_source_order(route, "static_response(path)", "if !is_api_path(path)");
     }
 
+    /// The status producer is observation-only by source: it may call only the
+    /// read-only serving probe and the read-only lifecycle status, never
+    /// discovery or a worker start. Together with the library-level proofs on
+    /// those two producers this pins that status polling starts no worker,
+    /// installs no reader and moves no state aside.
+    #[test]
+    fn derived_access_status_producer_uses_only_observation_primitives() {
+        let producer = source_between(
+            API_SOURCE,
+            "pub(super) fn derived_access_status_json(",
+            "struct RevisionsPayload {",
+        );
+        assert!(producer.contains("observe_serving_current()"));
+        assert!(producer.contains("lifecycle_status()"));
+        assert!(
+            !producer.contains("current_readable"),
+            "status must not run discovery"
+        );
+        assert!(!producer.contains(".current()"));
+        assert!(!producer.contains("request_background_rebuild"));
+        assert!(!producer.contains("start_background_rebuild"));
+    }
+
+    struct DerivedStatusFixture {
+        _repo: tempfile::TempDir,
+        state: Arc<InspectState>,
+        store_root: std::path::PathBuf,
+    }
+
+    fn derived_status_fixture(publish: bool) -> DerivedStatusFixture {
+        let fixture = exact_change_fixture(false);
+        let store_root = pointbreak::session::store_paths_for_repo(fixture._repo.path())
+            .expect("resolve the fixture store")
+            .common_store()
+            .to_path_buf();
+        if publish {
+            // Publish through an independent access so the state under test has
+            // never selected a reader.
+            pointbreak::session::DerivedHistoryAccess::resolve(fixture._repo.path())
+                .expect("resolve an independent derived access")
+                .build(|_| pointbreak::session::DerivedHistoryControl::Continue)
+                .expect("publish the fixture generation");
+        }
+        DerivedStatusFixture {
+            _repo: fixture._repo,
+            state: Arc::new(fixture.state),
+            store_root,
+        }
+    }
+
+    fn quarantine_siblings(store_root: &std::path::Path) -> usize {
+        std::fs::read_dir(store_root)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with("derived.quarantine-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn status_document(state: &Arc<InspectState>) -> serde_json::Value {
+        let response = route(state, false, "GET", "/api/derived-access/status", None);
+        assert_eq!(response.status, "200 OK");
+        serde_json::from_slice(&response.body).unwrap()
+    }
+
+    #[test]
+    fn derived_access_status_reports_absent_without_creating_state() {
+        let fixture = derived_status_fixture(false);
+        let derived_root = fixture.store_root.join("derived");
+
+        let body = status_document(&fixture.state);
+
+        assert_eq!(body["availability"], "absent");
+        assert_eq!(body["servingCurrent"], false);
+        assert_eq!(body["rebuildInFlight"], false);
+        assert!(
+            !derived_root.exists(),
+            "status must not create the derived root"
+        );
+    }
+
+    #[test]
+    fn derived_access_status_route_does_not_rename_a_corrupt_generation() {
+        let fixture = derived_status_fixture(true);
+        let derived_root = fixture.store_root.join("derived");
+        let generation_id =
+            pointbreak::session::DerivedHistoryAccess::resolve(fixture._repo.path())
+                .unwrap()
+                .lifecycle_status()
+                .generation_id
+                .expect("published generation");
+        std::fs::write(
+            derived_root
+                .join("generations")
+                .join(&generation_id)
+                .join("cursor.sqlite3"),
+            b"not sqlite",
+        )
+        .unwrap();
+
+        let body = status_document(&fixture.state);
+
+        assert_eq!(
+            quarantine_siblings(&fixture.store_root),
+            0,
+            "observation must not move the root aside"
+        );
+        assert!(derived_root.exists());
+        assert_eq!(body["availability"], "quarantined");
+        assert_eq!(body["servingCurrent"], false);
+        assert_eq!(
+            body["actions"],
+            serde_json::json!(["authoritative_fallback", "retry"])
+        );
+    }
+
+    #[test]
+    fn derived_access_status_reports_serving_current_after_publication_without_a_data_route() {
+        let fixture = derived_status_fixture(true);
+
+        let body = status_document(&fixture.state);
+
+        assert_eq!(body["availability"], "current");
+        assert_eq!(body["servingCurrent"], true);
+        assert_eq!(body["rebuildInFlight"], false);
+        let profile = route(&fixture.state, false, "GET", "/api/v2/profile", None);
+        assert_eq!(profile.status, "200 OK");
+    }
+
+    #[test]
+    fn derived_access_retry_still_quarantines_and_publishes() {
+        let fixture = derived_status_fixture(true);
+        let derived_root = fixture.store_root.join("derived");
+        let generation_id =
+            pointbreak::session::DerivedHistoryAccess::resolve(fixture._repo.path())
+                .unwrap()
+                .lifecycle_status()
+                .generation_id
+                .expect("published generation");
+        std::fs::write(
+            derived_root
+                .join("generations")
+                .join(&generation_id)
+                .join("cursor.sqlite3"),
+            b"not sqlite",
+        )
+        .unwrap();
+        assert_eq!(
+            status_document(&fixture.state)["availability"],
+            "quarantined"
+        );
+
+        let retry = route(
+            &fixture.state,
+            false,
+            "POST",
+            "/api/derived-access/retry",
+            None,
+        );
+        assert_eq!(retry.status, "200 OK");
+        let retry_body: serde_json::Value = serde_json::from_slice(&retry.body).unwrap();
+        assert_eq!(
+            retry_body["schema"],
+            "pointbreak.inspect-derived-access-status"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let published = loop {
+            let body = status_document(&fixture.state);
+            if body["availability"] == "current" && body["rebuildInFlight"] == false {
+                break body;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "explicit retry did not publish a replacement: {body}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_ne!(published["generationId"], serde_json::json!(generation_id));
+        assert_eq!(published["servingCurrent"], true);
+        assert_eq!(
+            quarantine_siblings(&fixture.store_root),
+            1,
+            "explicit recovery moved the invalid root aside"
+        );
+    }
+
     fn route_for(method: &str, path: &str) -> Response {
         // The active default resolves the repository before serving even a
         // store-independent route. Use one real empty repository so these

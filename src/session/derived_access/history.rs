@@ -544,14 +544,6 @@ impl DerivedHistoryAccess {
         })
     }
 
-    /// Whether an active data route can truthfully serve a validated current
-    /// generation now. During a replacement build this may remain true even
-    /// though lifecycle availability is `bootstrapping`.
-    #[doc(hidden)]
-    pub fn current_readable(&self) -> bool {
-        self.is_active() && matches!(self.current(), Ok(CurrentRead::Ready(_)))
-    }
-
     /// Whether an active data route would serve a validated current generation
     /// now, observed without discovery side effects (INV-2).
     #[doc(hidden)]
