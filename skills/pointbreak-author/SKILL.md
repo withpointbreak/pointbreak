@@ -153,6 +153,21 @@ this command returns a verified relation. `pointbreak association record` is the
 provenance escape; it does not prove content equivalence. `--provenance-only` records the same honest
 limited claim when proof inputs are unavailable.
 
+## Bounded single-commit rewrite evidence
+
+For an eligible single-commit replay onto a descendant base, follow the
+[rewrite decision table and command sequence](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview):
+select `--source captured`, preview `association land --candidate-parent --dry-run`, then record the
+exact candidate with `--candidate-parent --expect-proof` using the actual preview hash. Preview writes
+nothing and has no write acknowledgement. The independent canonical comparison is required; a captured
+cursor alone does not authorize equivalence. Ordinary same-base materialization uses a fresh commit-source cursor.
+
+Original validation and Accepted facts remain historical. Keep rewritten-candidate checks in external
+receipts naming exact commit/tree/parent, proof hash, environment, command, result and attempt identity;
+never attach them to the old Revision. Upstream context can still require fresh review. Changed reviewed
+bytes or unsupported source/candidate shapes require the ordinary replacement-Revision workflow. A scoped
+proof is not whole-tree readiness, and recording it does not authorize push, PR creation or merge.
+
 ## Hard rules
 
 - Do not self-assess.

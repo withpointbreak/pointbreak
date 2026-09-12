@@ -48,6 +48,14 @@ The algorithms are versioned `exact_materialization`, `canonical_equivalent_rewr
 and exact additions. Candidate signals such as ancestry, path overlap, and stable patch ID always remain
 `unknown + unverified` until a canonical algorithm runs.
 
+As built, the single-parent rewrite workflow uses these existing proof fields and algorithms: `source`
+retains the captured base A, `candidate` binds the actual sole parent B and candidate endpoint identities
+through the association and proof. A descendant-base delta with identical canonical entries is an
+`equivalent_rewrite`; it does not relabel the original capture or carry its validation forward. The
+read-only preview document is not a new stored resource schema or capability. The
+[CLI contract](../cli-reference.md#single-commit-rewrites-and-read-only-preview) defines admission,
+expected-proof recording and external exact-candidate receipts.
+
 ### D2. Proof lifecycle is separate from relation history
 
 The proof resource has `available | removed | missing` lifecycle states. Only an available, verified proof

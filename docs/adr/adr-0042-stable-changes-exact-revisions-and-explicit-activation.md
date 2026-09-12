@@ -106,9 +106,12 @@ association only after D4's proof-first landing succeeds.
 
 Commit/ref association records historical structure for one exact Revision. Strong statements such as exact
 materialization, equivalent rewrite, or extension require independent exact-Revision-bound relation evidence
-under ADR-0038. `pointbreak association land` selects a commit-bound cursor, proves the relation before any
-association write, and records the proof/attestation plus structural association. A changed or mismatched
-candidate refuses before recording facts.
+under ADR-0038. Ordinary `pointbreak association land` uses a commit-bound cursor and proves the relation
+before any association write. The bounded single-parent rewrite route uses a captured cursor, a read-only
+preview and an expected proof hash, independently comparing the frozen scoped delta against the candidate’s
+actual parent. Both routes record the proof/attestation plus structural association. A changed or mismatched
+candidate refuses before recording facts. See the [as-built command contract](../cli-reference.md#single-commit-rewrites-and-read-only-preview).
+Original review facts never become validation or assessment of the rewritten candidate.
 
 `pointbreak association record` remains the explicit low-level provenance escape. It records an unverified
 structural association and cannot authorize content-qualified wording. A landing commit may truthfully

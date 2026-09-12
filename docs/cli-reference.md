@@ -1251,7 +1251,8 @@ pointbreak association record --track <track-id> (--commit <rev> | --ref <name> 
   [--revision <revision-id> | --exact-revision <revision-id> | --review-cursor <token>] \
   [--sign-key <name|path>] [--repo <path>]
 pointbreak association land --review-cursor <token> --track <track-id> --commit <rev> \
-  [--allow-extension | --provenance-only] [--sign-key <name|path>] [--repo <path>]
+  [--allow-extension | --provenance-only | --candidate-parent] \
+  [--dry-run] [--expect-proof <hash>] [--sign-key <name|path>] [--repo <path>]
 pointbreak association withdraw <association-id> --track <track-id> \
   [--revision <revision-id> | --exact-revision <revision-id> | --review-cursor <token>] \
   [--sign-key <name|path>] [--repo <path>]
@@ -1301,6 +1302,62 @@ pointbreak association land --review-cursor "$landing_cursor" \
 - The write forms emit `pointbreak.review-association-commit`, `pointbreak.review-association-commit-withdrawn`,
   `pointbreak.review-association-ref`, and `pointbreak.review-association-ref-withdrawn` JSON with the new
   association id and write counts.
+
+### Single-commit rewrites and read-only preview
+
+| Situation | Route | Evidence boundary |
+|---|---|---|
+| Commit materializes the same reviewed state against its original base | Fresh `--source commit:<oid>` cursor, ordinary `association land` | Existing exact-materialization proof |
+| One commit replays an identical scoped delta on a descendant base | `--source captured`, then `--candidate-parent --dry-run`, then record with `--expect-proof` | Verified scoped equivalent rewrite; original review facts stay historical |
+| Changed blobs, modes, paths, status, kind, or included scope | Capture and review a replacement Revision in the same Change | Fresh validation and assessment |
+| Root/merge candidate, multi-commit source, staged/unstaged/root capture, non-commit base, unrelated or unavailable history | Use an applicable ordinary route or capture/review a replacement Revision | Parent-relative mode refuses |
+| Provenance only, without content equivalence | Structural `association record` or ordinary `land --provenance-only` | No content-qualified claim |
+
+`--candidate-parent` admits only combined worktree captures or a committed range whose source commit
+has exactly one parent equal to the captured base A. The candidate C′ must have exactly one actual
+commit-object parent B, and A must be an ancestor of B (equality is allowed). It compares the frozen
+artifact's canonical entries with B..C′ using the original capture mode and path scope. Full old/new
+blob identities, modes, paths, status and content kinds must match, including untracked-add normalization.
+An identical text hunk with different before/after blobs fails. Changes outside an explicitly captured
+path scope are outside this claim. Advancing the base produces equivalent rewrite, not exact materialization.
+This mode cannot combine with `--allow-extension` or `--provenance-only`.
+
+With an existing exact Change/Revision and an eligible committed candidate, run:
+
+```bash
+candidate=$(git rev-parse --verify 'HEAD^{commit}')
+rewrite_cursor=$(pointbreak change select "$change_id" \
+  --revision "$revision_id" --source captured --format json | jq -r '.token')
+pointbreak association land --review-cursor "$rewrite_cursor" --track "$track" \
+  --commit "$candidate" --candidate-parent --dry-run --format json > rewrite-preview.json
+proof_hash=$(jq -er '.proof.evidenceSha256' rewrite-preview.json)
+pointbreak association land --review-cursor "$rewrite_cursor" --track "$track" \
+  --commit "$candidate" --candidate-parent --expect-proof "$proof_hash"
+```
+
+`--dry-run` also works on the ordinary route. It returns `pointbreak.association-land-preview.v1` with
+exact Revision, commit/tree OIDs and the full canonical proof. It performs no write-store preparation,
+signing-key load, artifact/event publication, `state.json` refresh, migration, rebuild or activation.
+There is no write acknowledgement or created/landed claim. Preview does not require `--expect-proof`;
+recording in parent mode requires the hash emitted by the current preview. Any supplied expected hash
+on ordinary recording is checked too. Preview JSON is evidence for inspection, never trusted input.
+Recording recomputes the proof, revalidates graph/artifact and resolves the candidate again immediately
+before publication. Drift refuses before publishing a new proof, association or attestation. Git and the
+Journal remain separate authorities; there is no transaction excluding arbitrary external mutation.
+The writer uses the resolved commit OID and retains ordered, idempotent proof → association → attestation
+publication, truthful partial failures, write acknowledgements and advisory post-truth refresh diagnostics.
+
+A captured cursor is safe here because the independent canonical comparison binds the candidate. It does
+not permit recording candidate tests or assessments against the old Revision. Original Accepted and
+validation facts still describe the original captured bytes. Retain candidate validation **externally**:
+record exact candidate commit, tree, parent, proof hash, environment/tool identities, commands, result,
+and attempt identity. This slice adds no candidate-validation command or automatic readiness decision.
+Upstream changes may still require reviewer attention even when the scoped proof succeeds.
+
+Existing associations remain historical; each proof qualifies one association. Multiple live associations
+can remain ambiguous, and no whole-tree equivalence follows from a scoped proof. No derived rebuild or new
+stored schema/capability is required. Push, PR creation and merge need their own authorization. Broader
+multi-commit rewriting, automatic readiness and candidate-validation storage remain outside this #747 slice.
 
 Divergent or dangling associations surface as advisory diagnostics on the read surfaces
 (`divergent_commit_association` when two or more distinct current commit OIDs claim one revision;

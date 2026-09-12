@@ -149,6 +149,21 @@ If the proof is refuted, capture and review a new Revision. If it is indetermina
 is needed, use `--provenance-only` or the low-level structural `association record` command and avoid
 content-qualified wording. An allowed extension must be explicit and remains partly unreviewed.
 
+## Bounded single-commit rewrite evidence
+
+For an eligible single-commit replay onto a descendant base, follow the
+[rewrite decision table and command sequence](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview):
+select `--source captured`, preview `association land --candidate-parent --dry-run`, then record the
+exact candidate with `--candidate-parent --expect-proof` using the actual preview hash. Preview writes
+nothing and has no write acknowledgement. The independent canonical comparison is required; a captured
+cursor alone does not authorize equivalence. Ordinary same-base materialization uses a fresh commit-source cursor.
+
+Original validation and Accepted facts remain historical. Keep rewritten-candidate checks in external
+receipts naming exact commit/tree/parent, proof hash, environment, command, result and attempt identity;
+never attach them to the old Revision. Upstream context can still require fresh review. Changed reviewed
+bytes or unsupported source/candidate shapes require the ordinary replacement-Revision workflow. A scoped
+proof is not whole-tree readiness, and recording it does not authorize push, PR creation or merge.
+
 ## Hard rules
 
 - Never assess from the author role.
