@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AttentionItem } from "../src/store";
 import {
@@ -409,5 +411,17 @@ describe("copyWorkflowCommand (clipboard-only, advisory)", () => {
 
     await copyWorkflowCommand(button);
     expect(button.textContent).toBe("copy failed");
+  });
+});
+
+describe("the command producer carries no legacy aggregate-store dependency", () => {
+  it("declares its own attention shape instead of importing ./store", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src/workflow-handoff.ts"),
+      "utf8",
+    );
+    expect(source).not.toMatch(/from\s+["']\.\/store["']/);
+    expect(source).not.toMatch(/from\s+["']\.\/model["']/);
+    expect(source).toContain("export interface WorkflowAttentionItem");
   });
 });
