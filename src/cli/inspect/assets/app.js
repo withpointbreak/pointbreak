@@ -1649,6 +1649,334 @@
   }
   __name(createLensHeading, "createLensHeading");
 
+  // src/format.ts
+  var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+  function parseRfc3339UtcMillis(value) {
+    const match = value.match(RFC3339_UTC);
+    if (!match) return null;
+    const [
+      ,
+      yearText,
+      monthText,
+      dayText,
+      hourText,
+      minuteText,
+      secondText,
+      fraction
+    ] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    const leapYear = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+    const daysInMonth = [
+      31,
+      leapYear ? 29 : 28,
+      31,
+      30,
+      31,
+      30,
+      31,
+      31,
+      30,
+      31,
+      30,
+      31
+    ];
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 60) {
+      return null;
+    }
+    const millis = Number((fraction ?? "").padEnd(3, "0").slice(0, 3));
+    const date = /* @__PURE__ */ new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(hour, minute, Math.min(second, 59), millis);
+    return date.getTime() + (second === 60 ? 1e3 : 0);
+  }
+  __name(parseRfc3339UtcMillis, "parseRfc3339UtcMillis");
+  function parseMs(occurredAt) {
+    if (typeof occurredAt !== "string") return null;
+    if (occurredAt.startsWith("unix-ms:")) {
+      const unixMillis = occurredAt.match(/^unix-ms:([+-]?\d+)$/);
+      return unixMillis ? Number(unixMillis[1]) : null;
+    }
+    if (/^\d{4}-\d{2}-\d{2}T/.test(occurredAt))
+      return parseRfc3339UtcMillis(occurredAt);
+    const match = occurredAt.match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : null;
+  }
+  __name(parseMs, "parseMs");
+  function fmtDateTime(occurredAt) {
+    const ms = parseMs(occurredAt);
+    if (ms == null) return occurredAt || "";
+    return new Date(ms).toLocaleString([], { hour12: false });
+  }
+  __name(fmtDateTime, "fmtDateTime");
+
+  // src/types.ts
+  var TYPES = [
+    { id: "review_initialized", label: "init", color: "var(--evt-init)" },
+    { id: "work_object_proposed", label: "capture", color: "var(--evt-capture)" },
+    {
+      id: "review_observation_recorded",
+      label: "observation",
+      color: "var(--evt-observation)"
+    },
+    {
+      id: "review_assessment_recorded",
+      label: "assessment",
+      color: "var(--evt-assessment)"
+    },
+    { id: "input_request_opened", label: "request", color: "var(--evt-request)" },
+    {
+      id: "input_request_responded",
+      label: "response",
+      color: "var(--evt-response)"
+    },
+    { id: "review_note_imported", label: "note", color: "var(--evt-note)" },
+    {
+      id: "validation_check_recorded",
+      label: "validation",
+      color: "var(--evt-validation)"
+    }
+  ];
+  var TYPE_MAP = Object.fromEntries(TYPES.map((type) => [type.id, type]));
+  var VERIFICATION_LABELS = {
+    valid: "signature valid",
+    invalid: "signature invalid",
+    untrusted_key: "untrusted key",
+    unsigned: "unsigned"
+  };
+  var ENDORSEMENT_LABELS = {
+    "endorsement-trusted": "trusted endorsement",
+    unknown_endorser: "unknown endorser",
+    ambiguous_endorser: "ambiguous endorser"
+  };
+  var ASSESSMENT_LABELS = {
+    accepted: "accepted",
+    accepted_with_follow_up: "accepted-with-follow-up",
+    needs_changes: "needs-changes",
+    needs_clarification: "needs-clarification"
+  };
+  var EVENT_QUERY_FIELDS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after"
+  ];
+  var CHANGE_TIMELINE_QUERY_FIELDS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "change",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after"
+  ];
+  var REVISION_QUERY_FIELDS = [
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "assessment",
+    "is",
+    "tag",
+    "attention",
+    "before",
+    "after"
+  ];
+  var KNOWN_QUERY_KEYS = [
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "attention",
+    "before",
+    "after",
+    "status",
+    "object",
+    "rev",
+    "change"
+  ];
+  var REVISION_ATTENTION_VALUES = [
+    "open-request",
+    "unassessed",
+    "validation-context",
+    "follow-up",
+    "stale-fact"
+  ];
+  var DEFAULT_OPEN_FILES = 10;
+  var LARGE_FILE_ROWS = 500;
+
+  // src/query.ts
+  function tokenizeQuery(q) {
+    const out = [];
+    const re = /-?(?:[a-z]+:)?"[^"]*"|\S+/gi;
+    let m = re.exec(q);
+    while (m !== null) {
+      out.push(m[0]);
+      m = re.exec(q);
+    }
+    return out;
+  }
+  __name(tokenizeQuery, "tokenizeQuery");
+  var EVENT_VALUE_SETS = {
+    is: ["open", "answered"]
+  };
+  var REVISION_VALUE_SETS = {
+    is: [
+      "open",
+      "answered",
+      "unassessed",
+      "stale",
+      "follow-up",
+      "contested",
+      "superseded"
+    ],
+    attention: REVISION_ATTENTION_VALUES
+  };
+  function parseSearchQueryFor(q, surface) {
+    const fields2 = surface === "revision" ? REVISION_QUERY_FIELDS : surface === "change-timeline" ? CHANGE_TIMELINE_QUERY_FIELDS : EVENT_QUERY_FIELDS;
+    const valueSets = surface === "revision" ? REVISION_VALUE_SETS : EVENT_VALUE_SETS;
+    const clauses = [];
+    const diagnostics = [];
+    for (let tok of tokenizeQuery(q || "")) {
+      let negate = false;
+      if (tok.length > 1 && tok[0] === "-") {
+        negate = true;
+        tok = tok.slice(1);
+      }
+      const colon = tok.indexOf(":");
+      const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+      if (!key) {
+        pushText(clauses, tok, negate);
+        continue;
+      }
+      const value = tok.slice(colon + 1).replace(/^"|"$/g, "").toLowerCase();
+      const [field2, deprecatedFrom] = resolveAlias(key, surface);
+      if (fields2.includes(field2)) {
+        if (isIdentityField(field2) && (value === "" || /\s/.test(value))) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key,
+            message: value === "" ? `\`${key}:\` requires an identity fragment` : `\`${key}:\` identity fragments cannot contain whitespace`
+          });
+          continue;
+        }
+        const allowed = valueSets[field2];
+        if (allowed && !allowed.includes(value)) {
+          diagnostics.push({
+            code: "unsupported-value",
+            key: field2,
+            message: `\`${field2}:${value}\` — expected one of: ${allowed.join(", ")}`
+          });
+          continue;
+        }
+        if (deprecatedFrom)
+          diagnostics.push({
+            code: "deprecated-qualifier",
+            key: deprecatedFrom,
+            message: `\`${deprecatedFrom}:\` is deprecated; use \`${field2}:\``
+          });
+        clauses.push({
+          kind: "field",
+          field: field2,
+          value: canonicalizeFieldValue(field2, value),
+          negate
+        });
+      } else if (KNOWN_QUERY_KEYS.includes(key)) {
+        diagnostics.push({
+          code: "unsupported-qualifier",
+          key,
+          message: `\`${key}:\` is not a filter on the ${surface === "revision" ? "revisions" : "timeline"} view`
+        });
+      } else {
+        pushText(clauses, tok, negate);
+      }
+    }
+    return { clauses, diagnostics };
+  }
+  __name(parseSearchQueryFor, "parseSearchQueryFor");
+  function canonicalizeFieldValue(field2, value) {
+    if (field2 === "actor" && value && !value.startsWith("actor:") && !value.startsWith("did:key:"))
+      return `actor:${value}`;
+    return value;
+  }
+  __name(canonicalizeFieldValue, "canonicalizeFieldValue");
+  function pushText(clauses, tok, negate) {
+    const term = tok.replace(/^"|"$/g, "").toLowerCase();
+    if (term) clauses.push({ kind: "text", value: term, negate });
+  }
+  __name(pushText, "pushText");
+  function resolveAlias(key, surface) {
+    if (key === "object") return ["snapshot", null];
+    if (key === "rev") return ["revision", null];
+    if (key === "status")
+      return [surface === "revision" ? "assessment" : "check", "status"];
+    return [key, null];
+  }
+  __name(resolveAlias, "resolveAlias");
+  function isIdentityField(field2) {
+    return field2 === "revision" || field2 === "change";
+  }
+  __name(isIdentityField, "isIdentityField");
+
+  // src/chips.ts
+  function filterChipsFor(filterText, surface) {
+    const chips = [];
+    tokenizeQuery(filterText).forEach((raw, tokenIndex) => {
+      const clause = parseSearchQueryFor(raw, surface).clauses[0];
+      if (clause && clause.kind === "field") {
+        chips.push({
+          tokenIndex,
+          field: clause.field,
+          value: clause.value,
+          negate: clause.negate
+        });
+      }
+    });
+    return chips;
+  }
+  __name(filterChipsFor, "filterChipsFor");
+  function removeFilterChipToken(filterText, tokenIndex) {
+    const tokens = tokenizeQuery(filterText);
+    tokens.splice(tokenIndex, 1);
+    return tokens.join(" ");
+  }
+  __name(removeFilterChipToken, "removeFilterChipToken");
+  function appendActorFilterClause(filterText, actorId, surface) {
+    const current = filterText.trim();
+    const short = actorId.replace(/^actor:/, "");
+    if (!short || short.includes('"')) return current;
+    const clause = /\s/.test(short) ? `actor:"${short}"` : `actor:${short}`;
+    const minted = parseSearchQueryFor(clause, surface).clauses[0];
+    if (minted?.kind !== "field" || minted.field !== "actor") return current;
+    const already = parseSearchQueryFor(current, surface).clauses.some(
+      (existing) => existing.kind === "field" && existing.field === "actor" && !existing.negate && existing.value === minted.value
+    );
+    if (already) return current;
+    return current ? `${current} ${clause}` : clause;
+  }
+  __name(appendActorFilterClause, "appendActorFilterClause");
+
   // src/dom.ts
   function $(sel) {
     return document.querySelector(sel);
@@ -1940,13 +2268,51 @@
     return spacer;
   }
   __name(rowSpacer, "rowSpacer");
-  function appendChip(row, text) {
-    const chip = document.createElement("span");
-    chip.className = "badge";
-    chip.textContent = text;
-    row.append(chip);
+  function appendActorFilterLink(parent, actorId, route) {
+    const q = appendActorFilterClause(
+      route.historyQuery.q ?? "",
+      actorId,
+      "change-timeline"
+    );
+    const link = appendTimelineLink(
+      parent,
+      actorId,
+      "actor",
+      formatChangeInspectorRoute({
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          after: void 0,
+          at: void 0,
+          q: q || void 0
+        }
+      })
+    );
+    link.textContent = actorId;
+    link.title = `writer ${actorId}`;
+    link.setAttribute("aria-label", `Filter Timeline to writer ${actorId}`);
   }
-  __name(appendChip, "appendChip");
+  __name(appendActorFilterLink, "appendActorFilterLink");
+  function appendTrackFilterLink(parent, trackId, route) {
+    const link = appendTimelineLink(
+      parent,
+      trackId,
+      "track",
+      formatChangeInspectorRoute({
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          after: void 0,
+          at: void 0,
+          track: trackId
+        }
+      })
+    );
+    link.textContent = `track ${trackId}`;
+    link.title = `track ${trackId}`;
+    link.setAttribute("aria-label", `Filter Timeline to track ${trackId}`);
+  }
+  __name(appendTrackFilterLink, "appendTrackFilterLink");
   function appendVerificationChip(row, status) {
     const chip = document.createElement("span");
     chip.className = `verify verify-${status}`;
@@ -2014,11 +2380,9 @@
     eventType.style.color = eventTypeColor(entry.eventType);
     meta.append(eventType);
     appendVerificationChip(meta, entry.verificationStatus);
-    if (entry.trackId) appendChip(meta, `track ${entry.trackId}`);
-    const actor = document.createElement("span");
-    actor.textContent = entry.writer.actorId;
-    actor.title = `writer ${entry.writer.actorId}`;
-    meta.append(actor);
+    if (entry.trackId) appendTrackFilterLink(meta, entry.trackId, route);
+    if (entry.writer.actorId)
+      appendActorFilterLink(meta, entry.writer.actorId, route);
     appendTimelineLink(
       meta,
       entry.eventId,
@@ -5479,71 +5843,6 @@
   }
   __name(changeCardPresentation, "changeCardPresentation");
 
-  // src/format.ts
-  var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
-  function parseRfc3339UtcMillis(value) {
-    const match = value.match(RFC3339_UTC);
-    if (!match) return null;
-    const [
-      ,
-      yearText,
-      monthText,
-      dayText,
-      hourText,
-      minuteText,
-      secondText,
-      fraction
-    ] = match;
-    const year = Number(yearText);
-    const month = Number(monthText);
-    const day = Number(dayText);
-    const hour = Number(hourText);
-    const minute = Number(minuteText);
-    const second = Number(secondText);
-    const leapYear = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
-    const daysInMonth = [
-      31,
-      leapYear ? 29 : 28,
-      31,
-      30,
-      31,
-      30,
-      31,
-      31,
-      30,
-      31,
-      30,
-      31
-    ];
-    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 60) {
-      return null;
-    }
-    const millis = Number((fraction ?? "").padEnd(3, "0").slice(0, 3));
-    const date = /* @__PURE__ */ new Date(0);
-    date.setUTCFullYear(year, month - 1, day);
-    date.setUTCHours(hour, minute, Math.min(second, 59), millis);
-    return date.getTime() + (second === 60 ? 1e3 : 0);
-  }
-  __name(parseRfc3339UtcMillis, "parseRfc3339UtcMillis");
-  function parseMs(occurredAt) {
-    if (typeof occurredAt !== "string") return null;
-    if (occurredAt.startsWith("unix-ms:")) {
-      const unixMillis = occurredAt.match(/^unix-ms:([+-]?\d+)$/);
-      return unixMillis ? Number(unixMillis[1]) : null;
-    }
-    if (/^\d{4}-\d{2}-\d{2}T/.test(occurredAt))
-      return parseRfc3339UtcMillis(occurredAt);
-    const match = occurredAt.match(/(\d+)\s*$/);
-    return match ? Number(match[1]) : null;
-  }
-  __name(parseMs, "parseMs");
-  function fmtDateTime(occurredAt) {
-    const ms = parseMs(occurredAt);
-    if (ms == null) return occurredAt || "";
-    return new Date(ms).toLocaleString([], { hour12: false });
-  }
-  __name(fmtDateTime, "fmtDateTime");
-
   // src/markdown.ts
   function renderBodyContent(text, contentType) {
     if (!text) return "";
@@ -5680,231 +5979,6 @@
     return codePoint >= 33 && codePoint <= 47 || codePoint >= 58 && codePoint <= 64 || codePoint >= 91 && codePoint <= 96 || codePoint >= 123 && codePoint <= 126;
   }
   __name(isAsciiPunctuation, "isAsciiPunctuation");
-
-  // src/types.ts
-  var TYPES = [
-    { id: "review_initialized", label: "init", color: "var(--evt-init)" },
-    { id: "work_object_proposed", label: "capture", color: "var(--evt-capture)" },
-    {
-      id: "review_observation_recorded",
-      label: "observation",
-      color: "var(--evt-observation)"
-    },
-    {
-      id: "review_assessment_recorded",
-      label: "assessment",
-      color: "var(--evt-assessment)"
-    },
-    { id: "input_request_opened", label: "request", color: "var(--evt-request)" },
-    {
-      id: "input_request_responded",
-      label: "response",
-      color: "var(--evt-response)"
-    },
-    { id: "review_note_imported", label: "note", color: "var(--evt-note)" },
-    {
-      id: "validation_check_recorded",
-      label: "validation",
-      color: "var(--evt-validation)"
-    }
-  ];
-  var TYPE_MAP = Object.fromEntries(TYPES.map((type) => [type.id, type]));
-  var VERIFICATION_LABELS = {
-    valid: "signature valid",
-    invalid: "signature invalid",
-    untrusted_key: "untrusted key",
-    unsigned: "unsigned"
-  };
-  var ENDORSEMENT_LABELS = {
-    "endorsement-trusted": "trusted endorsement",
-    unknown_endorser: "unknown endorser",
-    ambiguous_endorser: "ambiguous endorser"
-  };
-  var ASSESSMENT_LABELS = {
-    accepted: "accepted",
-    accepted_with_follow_up: "accepted-with-follow-up",
-    needs_changes: "needs-changes",
-    needs_clarification: "needs-clarification"
-  };
-  var EVENT_QUERY_FIELDS = [
-    "type",
-    "track",
-    "actor",
-    "revision",
-    "snapshot",
-    "check",
-    "assessment",
-    "is",
-    "tag",
-    "before",
-    "after"
-  ];
-  var CHANGE_TIMELINE_QUERY_FIELDS = [
-    "type",
-    "track",
-    "actor",
-    "revision",
-    "change",
-    "snapshot",
-    "check",
-    "assessment",
-    "is",
-    "tag",
-    "before",
-    "after"
-  ];
-  var REVISION_QUERY_FIELDS = [
-    "track",
-    "actor",
-    "revision",
-    "snapshot",
-    "assessment",
-    "is",
-    "tag",
-    "attention",
-    "before",
-    "after"
-  ];
-  var KNOWN_QUERY_KEYS = [
-    "type",
-    "track",
-    "actor",
-    "revision",
-    "snapshot",
-    "check",
-    "assessment",
-    "is",
-    "tag",
-    "attention",
-    "before",
-    "after",
-    "status",
-    "object",
-    "rev",
-    "change"
-  ];
-  var REVISION_ATTENTION_VALUES = [
-    "open-request",
-    "unassessed",
-    "validation-context",
-    "follow-up",
-    "stale-fact"
-  ];
-  var DEFAULT_OPEN_FILES = 10;
-  var LARGE_FILE_ROWS = 500;
-
-  // src/query.ts
-  function tokenizeQuery(q) {
-    const out = [];
-    const re = /-?(?:[a-z]+:)?"[^"]*"|\S+/gi;
-    let m = re.exec(q);
-    while (m !== null) {
-      out.push(m[0]);
-      m = re.exec(q);
-    }
-    return out;
-  }
-  __name(tokenizeQuery, "tokenizeQuery");
-  var EVENT_VALUE_SETS = {
-    is: ["open", "answered"]
-  };
-  var REVISION_VALUE_SETS = {
-    is: [
-      "open",
-      "answered",
-      "unassessed",
-      "stale",
-      "follow-up",
-      "contested",
-      "superseded"
-    ],
-    attention: REVISION_ATTENTION_VALUES
-  };
-  function parseSearchQueryFor(q, surface) {
-    const fields2 = surface === "revision" ? REVISION_QUERY_FIELDS : surface === "change-timeline" ? CHANGE_TIMELINE_QUERY_FIELDS : EVENT_QUERY_FIELDS;
-    const valueSets = surface === "revision" ? REVISION_VALUE_SETS : EVENT_VALUE_SETS;
-    const clauses = [];
-    const diagnostics = [];
-    for (let tok of tokenizeQuery(q || "")) {
-      let negate = false;
-      if (tok.length > 1 && tok[0] === "-") {
-        negate = true;
-        tok = tok.slice(1);
-      }
-      const colon = tok.indexOf(":");
-      const key = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
-      if (!key) {
-        pushText(clauses, tok, negate);
-        continue;
-      }
-      const value = tok.slice(colon + 1).replace(/^"|"$/g, "").toLowerCase();
-      const [field2, deprecatedFrom] = resolveAlias(key, surface);
-      if (fields2.includes(field2)) {
-        if (isIdentityField(field2) && (value === "" || /\s/.test(value))) {
-          diagnostics.push({
-            code: "unsupported-value",
-            key,
-            message: value === "" ? `\`${key}:\` requires an identity fragment` : `\`${key}:\` identity fragments cannot contain whitespace`
-          });
-          continue;
-        }
-        const allowed = valueSets[field2];
-        if (allowed && !allowed.includes(value)) {
-          diagnostics.push({
-            code: "unsupported-value",
-            key: field2,
-            message: `\`${field2}:${value}\` — expected one of: ${allowed.join(", ")}`
-          });
-          continue;
-        }
-        if (deprecatedFrom)
-          diagnostics.push({
-            code: "deprecated-qualifier",
-            key: deprecatedFrom,
-            message: `\`${deprecatedFrom}:\` is deprecated; use \`${field2}:\``
-          });
-        clauses.push({
-          kind: "field",
-          field: field2,
-          value: canonicalizeFieldValue(field2, value),
-          negate
-        });
-      } else if (KNOWN_QUERY_KEYS.includes(key)) {
-        diagnostics.push({
-          code: "unsupported-qualifier",
-          key,
-          message: `\`${key}:\` is not a filter on the ${surface === "revision" ? "revisions" : "timeline"} view`
-        });
-      } else {
-        pushText(clauses, tok, negate);
-      }
-    }
-    return { clauses, diagnostics };
-  }
-  __name(parseSearchQueryFor, "parseSearchQueryFor");
-  function canonicalizeFieldValue(field2, value) {
-    if (field2 === "actor" && value && !value.startsWith("actor:") && !value.startsWith("did:key:"))
-      return `actor:${value}`;
-    return value;
-  }
-  __name(canonicalizeFieldValue, "canonicalizeFieldValue");
-  function pushText(clauses, tok, negate) {
-    const term = tok.replace(/^"|"$/g, "").toLowerCase();
-    if (term) clauses.push({ kind: "text", value: term, negate });
-  }
-  __name(pushText, "pushText");
-  function resolveAlias(key, surface) {
-    if (key === "object") return ["snapshot", null];
-    if (key === "rev") return ["revision", null];
-    if (key === "status")
-      return [surface === "revision" ? "assessment" : "check", "status"];
-    return [key, null];
-  }
-  __name(resolveAlias, "resolveAlias");
-  function isIdentityField(field2) {
-    return field2 === "revision" || field2 === "change";
-  }
-  __name(isIdentityField, "isIdentityField");
 
   // src/projection.ts
   function verificationChip(status) {
@@ -7510,30 +7584,6 @@
     return figure;
   }
   __name(renderFactRelationshipGraph, "renderFactRelationshipGraph");
-
-  // src/chips.ts
-  function filterChipsFor(filterText, surface) {
-    const chips = [];
-    tokenizeQuery(filterText).forEach((raw, tokenIndex) => {
-      const clause = parseSearchQueryFor(raw, surface).clauses[0];
-      if (clause && clause.kind === "field") {
-        chips.push({
-          tokenIndex,
-          field: clause.field,
-          value: clause.value,
-          negate: clause.negate
-        });
-      }
-    });
-    return chips;
-  }
-  __name(filterChipsFor, "filterChipsFor");
-  function removeFilterChipToken(filterText, tokenIndex) {
-    const tokens = tokenizeQuery(filterText);
-    tokens.splice(tokenIndex, 1);
-    return tokens.join(" ");
-  }
-  __name(removeFilterChipToken, "removeFilterChipToken");
 
   // src/change-inspector-render.ts
   function routeForLens(lens, current) {
