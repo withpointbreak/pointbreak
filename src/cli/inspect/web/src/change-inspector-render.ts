@@ -7,6 +7,7 @@ import {
 } from "./change-inspector-diff";
 import {
   eventSubjectLabel,
+  eventTargetLabel,
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
@@ -37,6 +38,9 @@ import type {
   EventHistoryEntry,
   EventHistoryQuery,
   FactContent,
+  FactRelationshipEdge,
+  FactRelationshipGraphPresentation,
+  FactTarget,
   RevisionRef,
   RevisionResource,
 } from "./change-protocol";
@@ -1134,6 +1138,135 @@ function renderedFactBody(
   return body;
 }
 
+/**
+ * Responses the server already nested inside their input request. Each response
+ * declares its own content type; the request's type never stands in for it, and
+ * a body that is not present is stated, never rendered.
+ */
+function renderedInputRequestResponses(
+  content: FactContent,
+): HTMLElement | null {
+  if (content.kind !== "input_request") return null;
+  const responses = content.responses ?? [];
+  if (responses.length === 0) return null;
+  const nest = document.createElement("div");
+  nest.className = "fact-responses";
+  for (const response of responses) {
+    const entry = document.createElement("div");
+    entry.className = "fact-response";
+    const head = document.createElement("div");
+    head.className = "anno-head";
+    const outcome = document.createElement("span");
+    outcome.className = "outcome";
+    outcome.textContent = response.outcome;
+    head.append(outcome);
+    entry.append(
+      head,
+      detailLine(
+        `response: ${shortRef(response.responseId)} · ${response.bodyContentState.replaceAll("_", " ")} · ${response.availability.replaceAll("_", " ")}`,
+      ),
+    );
+    if (response.bodyContentState === "present" && response.reason) {
+      const reason = document.createElement("div");
+      reason.className = "anno-body";
+      reason.innerHTML = renderBodyContent(
+        response.reason,
+        response.contentType,
+      );
+      entry.append(reason);
+    }
+    nest.append(entry);
+  }
+  return nest;
+}
+
+/** The fact identities this exact response itself carries. */
+function documentFactIds(
+  facts: Array<{ factId: string }>,
+): ReadonlySet<string> {
+  return new Set(facts.map((fact) => fact.factId));
+}
+
+/**
+ * An activation for one identity the same exact response already carries. It
+ * deliberately avoids `data-fact-id`, which the exact focus resolver matches.
+ */
+function factReferenceControl(
+  label: string,
+  factId: string,
+  activate: (factId: string) => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost mono";
+  button.textContent = label;
+  button.title = factId;
+  button.dataset.relationFactId = factId;
+  button.addEventListener("click", () => activate(factId));
+  return button;
+}
+
+/** The fact id a review target names, when the target names a fact at all. */
+function targetFactId(target: FactTarget): string | undefined {
+  return target.kind === "observation"
+    ? target.observationId
+    : target.kind === "input_request"
+      ? target.inputRequestId
+      : target.kind === "assessment"
+        ? target.assessmentId
+        : undefined;
+}
+
+function factTargetLine(
+  target: FactTarget,
+  present: ReadonlySet<string>,
+  activate: (factId: string) => void,
+): HTMLParagraphElement {
+  const line = detailLine("target: ", "fact-rel");
+  const factId = targetFactId(target);
+  if (factId !== undefined && present.has(factId)) {
+    line.append(factReferenceControl(shortRef(factId), factId, activate));
+    return line;
+  }
+  line.append(document.createTextNode(eventTargetLabel(target)));
+  return line;
+}
+
+/**
+ * Inline relation lines for one fact, read only from the fact graph this exact
+ * response carries. An identity absent from this response is named but never
+ * activated.
+ */
+function factRelationLines(
+  factId: string,
+  graph: FactRelationshipGraphPresentation | undefined,
+  present: ReadonlySet<string>,
+  activate: (factId: string) => void,
+): HTMLParagraphElement[] {
+  if (!graph) return [];
+  const lines: HTMLParagraphElement[] = [];
+  const relate = (label: string, edges: FactRelationshipEdge[]): void => {
+    for (const edge of edges) {
+      if (edge.fromFactId !== factId) continue;
+      const line = detailLine(`${label} `, "fact-rel");
+      if (present.has(edge.toFactId)) {
+        line.append(
+          factReferenceControl(shortRef(edge.toFactId), edge.toFactId, activate),
+        );
+      } else {
+        const named = document.createElement("code");
+        named.textContent = shortRef(edge.toFactId);
+        named.title = edge.toFactId;
+        line.append(named);
+      }
+      lines.push(line);
+    }
+  };
+  relate("supersedes", graph.observationSupersedes);
+  relate("replaces", graph.assessmentReplaces);
+  return lines;
+}
+
 /** The status a fact content declares, when it declares one. */
 function factStatusText(content: FactContent): string | undefined {
   return content.kind === "input_request" || content.kind === "validation"
@@ -1159,6 +1292,15 @@ function renderFacts(
     family.push(fact);
     groups.set(fact.family, family);
   }
+  const presentFactIds = documentFactIds(reading.document.factPresentations);
+  const focusFact = (factId: string): void =>
+    actions.navigate({
+      kind: route.kind,
+      changeId: route.changeId,
+      revision: route.revision,
+      query: queryForExactNavigation(route),
+      focus: { factId },
+    });
   for (const [family, items] of groups) {
     const familyLabel = family.replaceAll("_", " ");
     const group = document.createElement("section");
@@ -1209,6 +1351,17 @@ function renderFacts(
           `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`,
         ),
       );
+      if (fact.target) {
+        card.append(factTargetLine(fact.target, presentFactIds, focusFact));
+      }
+      card.append(
+        ...factRelationLines(
+          fact.factId,
+          reading.document.inspectorPresentation?.factGraph,
+          presentFactIds,
+          focusFact,
+        ),
+      );
       const presentedInRevision = fact.presentedInRevision;
       if (presentedInRevision) {
         const applicablePort = reading.document.factPorts.find(
@@ -1229,26 +1382,20 @@ function renderFacts(
         );
       }
       if (content) {
+        const responses = renderedInputRequestResponses(content.content);
         card.append(
           detailLine(
             `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`,
           ),
           renderedFactBody(content.content, content.contentType),
+          ...(responses ? [responses] : []),
         );
       }
       const focus = document.createElement("button");
       focus.type = "button";
       focus.className = "ghost";
       focus.textContent = "Focus fact";
-      focus.addEventListener("click", () =>
-        actions.navigate({
-          kind: route.kind,
-          changeId: route.changeId,
-          revision: route.revision,
-          query: queryForExactNavigation(route),
-          focus: { factId: fact.factId },
-        }),
-      );
+      focus.addEventListener("click", () => focusFact(fact.factId));
       card.append(focus);
       group.append(card);
     }
