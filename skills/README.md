@@ -70,6 +70,13 @@ The canonical skills stay plain Markdown with only `name` and `description` fron
 optional `claude-extras/` overlay with Claude-only conveniences such as tool pre-approval could be
 added later.
 
+Each skill directory is an independent package. Keep required guidance in its own `references/`
+directory and use links within that package; installed skills cannot assume the repository docs or
+sibling skills are present. The bundled single-commit rewrite guides intentionally repeat the shared
+contract so each role installs independently. When that contract changes, update all three guides
+alongside the CLI reference, preserving the reviewer's read-only sequence. Check both copied packages
+and `skills-link` installations; frontmatter validation alone does not check resource lookup.
+
 CI validates the canonical skills with the upstream Python `skills-ref` validator. Run the same
 check locally with:
 

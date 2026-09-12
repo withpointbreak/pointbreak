@@ -134,7 +134,7 @@ Stand down; implementation belongs to the author role.
 ## Bounded single-commit rewrite evidence
 
 When reviewing an author's single-commit rewrite claim, verify it read-only using the
-[rewrite decision table](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview).
+[rewrite decision table](references/single-commit-rewrites.md).
 Select `--source captured` and recompute `association land --candidate-parent --dry-run` for the exact
 candidate. Compare the preview's `proof.evidenceSha256` with the available stored proof artifact and
 the attestation's `evidenceContentHash`; confirm the stored proof bytes match the preview. Preview

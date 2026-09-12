@@ -156,7 +156,7 @@ limited claim when proof inputs are unavailable.
 ## Bounded single-commit rewrite evidence
 
 For an eligible single-commit replay onto a descendant base, follow the
-[rewrite decision table and command sequence](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview):
+[rewrite decision table and command sequence](references/single-commit-rewrites.md):
 select `--source captured`, preview `association land --candidate-parent --dry-run`, then record the
 exact candidate with `--candidate-parent --expect-proof` using the actual preview hash. Preview writes
 nothing and has no write acknowledgement. The independent canonical comparison is required; a captured
