@@ -300,8 +300,6 @@ export function prepareChangeInspectorShell(
   document.querySelector("#derived-access-status")?.classList.add("hidden");
   const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
   if (follow) {
-    // Blanket hide; the Timeline/event branch below re-shows it whenever a
-    // retained monitor snapshot exists. Keep this before that branch.
     follow.classList.add("hidden");
     follow.onclick = () => actions.toggleTimelineMonitoring?.();
   }
@@ -2256,6 +2254,9 @@ export function renderChangeInspector(
     actions,
   );
   if (snapshot.route.kind !== "timeline") {
+    // Blanket hide on every render; the Timeline/event branch below re-shows
+    // the control whenever a retained monitor snapshot exists, so this must
+    // stay ahead of that branch.
     document.querySelector("#follow-toggle")?.classList.add("hidden");
   }
   clearError();

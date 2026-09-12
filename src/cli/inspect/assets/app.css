@@ -514,6 +514,13 @@ main {
   color: var(--accent);
   background: var(--bg-row);
 }
+/* Readable but not operable off the Timeline: the state text stays in the
+   accessibility tree, and the muted presentation says the toggle will not act. */
+.follow-toggle[aria-disabled="true"] {
+  color: var(--fg-dim);
+  background: transparent;
+  cursor: default;
+}
 
 /* Compact app controls disclose low-frequency settings in anchored panels. They
    stay outside the modal overlay stack so the timeline remains navigable while
