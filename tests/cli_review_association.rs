@@ -1280,7 +1280,21 @@ fn parent_rewrite_preview_record_retry_and_persisted_proof() {
     assert!(preview.get("proofCreated").is_none());
     assert_eq!(before, rewrite_inventory(&repo));
     let hash = preview["proof"]["evidenceSha256"].as_str().unwrap();
+    let confirmed = assert_rewrite_success(&rewrite_land(
+        &repo,
+        token,
+        &candidate,
+        &["--candidate-parent", "--dry-run", "--expect-proof", hash],
+    ));
+    assert_eq!(confirmed, preview);
+    assert_eq!(before, rewrite_inventory(&repo));
     for flags in [
+        vec![
+            "--candidate-parent",
+            "--dry-run",
+            "--expect-proof",
+            "sha256:wrong",
+        ],
         vec!["--candidate-parent"],
         vec!["--candidate-parent", "--expect-proof", "sha256:wrong"],
     ] {

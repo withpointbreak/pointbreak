@@ -271,9 +271,7 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
                 && !options.allow_extension
             {
                 if options.candidate_parent {
-                    return Err(unsupported_parent(
-                        "the candidate adds unreviewed content; capture and review a new Revision",
-                    ));
+                    return Err(unsupported_parent("the candidate adds unreviewed content"));
                 }
                 return Err(ShoreError::WorkflowInputInvalid {
                     reason: "the candidate preserves the reviewed scope but adds unreviewed content; retry with --allow-extension or capture a new Revision".to_owned(),
@@ -291,6 +289,14 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
                 reason: "landing proof refuted the reviewed-content relation; capture and review a new Revision or record only structural provenance".to_owned(),
             });
         }
+    }
+
+    if let Some(expected) = &options.expected_proof
+        && expected != &proof.evidence_sha256
+    {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "--expect-proof must match the current preview proof.evidenceSha256".to_owned(),
+        });
     }
 
     Ok(PreparedLanding {
@@ -326,10 +332,7 @@ fn land_commit_with_hooks(
     after_association: impl FnOnce(),
 ) -> Result<LandCommitResultV1> {
     let prepared = prepare_landing(&options)?;
-    if (options.candidate_parent || options.expected_proof.is_some())
-        && options.expected_proof.as_deref()
-            != Some(prepared.preview.proof.evidence_sha256.as_str())
-    {
+    if options.candidate_parent && options.expected_proof.is_none() {
         return Err(ShoreError::WorkflowInputInvalid {
             reason: "recording requires --expect-proof matching the current preview proof.evidenceSha256 (mandatory with --candidate-parent)".to_owned(),
         });
@@ -1620,6 +1623,42 @@ mod tests {
         .trim()
         .to_owned()
     }
+
+    #[test]
+    fn preview_checks_optional_expected_proof_on_both_routes_without_writes() {
+        for candidate_parent in [false, true] {
+            let (root, token) = landing_fixture();
+            let options = LandCommitOptions::new(
+                root.path(),
+                captured_cursor(&token),
+                "track:author",
+                "HEAD",
+            )
+            .with_candidate_parent(candidate_parent);
+            let before = store_inventory(root.path());
+            let preview = preview_land_commit(options.clone()).unwrap();
+            let hash = &preview.proof.evidence_sha256;
+            assert_eq!(
+                preview_land_commit(options.clone().with_expected_proof(hash)).unwrap(),
+                preview
+            );
+            let error = preview_land_commit(options.clone().with_expected_proof("sha256:wrong"))
+                .expect_err("preview must reject a supplied mismatched proof hash");
+            assert!(error.to_string().contains("--expect-proof"));
+            assert_eq!(before, store_inventory(root.path()));
+
+            // Same tree and delta, different commit: the hash binds candidate identity too.
+            git(
+                root.path(),
+                &["commit", "--amend", "-m", "changed identity"],
+            );
+            let error = preview_land_commit(options.with_expected_proof(hash))
+                .expect_err("preview must reject a hash for the previous candidate OID");
+            assert!(error.to_string().contains("--expect-proof"));
+            assert_eq!(before, store_inventory(root.path()));
+        }
+    }
+
     #[test]
     fn parent_record_rechecks_symbolic_candidate_before_publication() {
         let (root, token, _, _) = rewrite_fixture(false);

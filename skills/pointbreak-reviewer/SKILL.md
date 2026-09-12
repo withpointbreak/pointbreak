@@ -133,12 +133,15 @@ Stand down; implementation belongs to the author role.
 
 ## Bounded single-commit rewrite evidence
 
-For an eligible single-commit replay onto a descendant base, follow the
-[rewrite decision table and command sequence](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview):
-select `--source captured`, preview `association land --candidate-parent --dry-run`, then record the
-exact candidate with `--candidate-parent --expect-proof` using the actual preview hash. Preview writes
-nothing and has no write acknowledgement. The independent canonical comparison is required; a captured
-cursor alone does not authorize equivalence. Ordinary same-base materialization uses a fresh commit-source cursor.
+When reviewing an author's single-commit rewrite claim, verify it read-only using the
+[rewrite decision table](../../docs/cli-reference.md#single-commit-rewrites-and-read-only-preview).
+Select `--source captured` and recompute `association land --candidate-parent --dry-run` for the exact
+candidate. Compare the preview's `proof.evidenceSha256` with the available stored proof artifact and
+the attestation's `evidenceContentHash`; confirm the stored proof bytes match the preview. Preview
+writes nothing and has no write acknowledgement. The independent canonical comparison is required;
+a captured cursor alone does not authorize equivalence. Do not record a landing from the reviewer role:
+publication of the proof, association and attestation belongs to the author. Ordinary same-base claims
+use the existing commit-source comparison.
 
 Original validation and Accepted facts remain historical. Keep rewritten-candidate checks in external
 receipts naming exact commit/tree/parent, proof hash, environment, command, result and attempt identity;

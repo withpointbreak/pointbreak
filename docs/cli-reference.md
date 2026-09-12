@@ -1341,9 +1341,10 @@ pointbreak association land --review-cursor "$rewrite_cursor" --track "$track" \
 `--dry-run` also works on the ordinary route. It returns `pointbreak.association-land-preview.v1` with
 exact Revision, commit/tree OIDs and the full canonical proof. It performs no write-store preparation,
 signing-key load, artifact/event publication, `state.json` refresh, migration, rebuild or activation.
-There is no write acknowledgement or created/landed claim. Preview does not require `--expect-proof`;
-recording in parent mode requires the hash emitted by the current preview. Any supplied expected hash
-on ordinary recording is checked too. Preview JSON is evidence for inspection, never trusted input.
+There is no write acknowledgement or created/landed claim. Preview does not require `--expect-proof`,
+but checks it when supplied: a mismatched hash refuses without writing anything. Recording in parent
+mode requires the hash emitted by the current preview. Any supplied expected hash on ordinary
+preview or recording is checked too. Preview JSON is evidence for inspection, never trusted input.
 Recording recomputes the proof, revalidates graph/artifact and resolves the candidate again immediately
 before publication. Drift refuses before publishing a new proof, association or attestation. Git and the
 Journal remain separate authorities; there is no transaction excluding arbitrary external mutation.

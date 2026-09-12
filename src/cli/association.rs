@@ -68,7 +68,7 @@ struct AssociationLandArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Require this preview proof hash when recording (required with --candidate-parent).
+    /// Check this proof hash in preview or recording (required when recording with --candidate-parent).
     #[arg(long)]
     expect_proof: Option<String>,
 
