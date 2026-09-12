@@ -18,6 +18,7 @@ import type {
   EventHistoryDocument,
   ReaderProfile,
   RevisionResource,
+  FactContent,
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
@@ -381,6 +382,104 @@ function revisionReading(): Extract<
           assessmentReplaces: [],
           factPorts: [],
           bounds: { w: 160, h: 64 },
+        },
+      },
+    },
+  };
+}
+
+type RevisionReading = Extract<ChangeInspectorReading, { kind: "revision" }>;
+
+// Derive a local reading from the shared fixture without mutating it: eight
+// tests consume `revisionReading()` as-is, so every new fact lives in a patch.
+function readingWith(
+  patch: Partial<RevisionReading["document"]>,
+): RevisionReading {
+  const base = revisionReading();
+  return { ...base, document: { ...base.document, ...patch } };
+}
+
+// The three non-observation facts shared by the reading-restoration tests. No
+// observation is added, so the shared fixture keeps exactly one observation.
+function localFacts(
+  options: {
+    requestResponses?: NonNullable<
+      Extract<FactContent, { kind: "input_request" }>["responses"]
+    >;
+    assessmentTarget?: RevisionReading["document"]["factPresentations"][number]["target"];
+  } = {},
+): Partial<RevisionReading["document"]> {
+  const base = revisionReading().document;
+  const facts: RevisionReading["document"]["factPresentations"] = [
+    ...base.factPresentations,
+    {
+      factId: "input-request:sha256:ask",
+      family: "input_request",
+      originRevision: revision,
+      target: { kind: "revision", revisionId: revision.revisionId },
+      actorId: "reviewer",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+    {
+      factId: "validation:sha256:gate",
+      family: "validation",
+      originRevision: revision,
+      target: { kind: "revision", revisionId: revision.revisionId },
+      actorId: "author",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+    {
+      factId: "assess:sha256:verdict",
+      family: "assessment",
+      originRevision: revision,
+      target: options.assessmentTarget ?? {
+        kind: "revision",
+        revisionId: revision.revisionId,
+      },
+      actorId: "reviewer",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+  ];
+  return {
+    factPresentations: facts,
+    factContentPresentations: {
+      ...base.factContentPresentations,
+      "input-request:sha256:ask": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "input_request",
+          title: "Needs a decision",
+          body: "Plain **not bold** request body",
+          status: "open",
+          ...(options.requestResponses
+            ? { responses: options.requestResponses }
+            : {}),
+        },
+      },
+      "validation:sha256:gate": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "validation",
+          checkName: "just check",
+          status: "passed",
+          summary: "all green",
+        },
+      },
+      "assess:sha256:verdict": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "assessment",
+          assessment: "accepted",
+          summary: "looks right",
         },
       },
     },
@@ -1584,6 +1683,69 @@ describe("Change inspector render", () => {
       '[data-file-path="src/lib.rs"]',
     );
     expect(file?.dataset.exactFocus).toBe("true");
+  });
+
+  it("accents each exact fact family group and names its kind on every fact card", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: revisionReading(), refusal: null },
+    );
+    const group = document.querySelector<HTMLElement>(
+      "#detail-body .detail-facts .fact-family-observation",
+    );
+    expect(group).not.toBeNull();
+    expect(group?.classList.contains("fact-family")).toBe(true);
+    expect(group?.querySelector("h4")?.textContent).toBe("observation (1)");
+    const chip = group?.querySelector<HTMLElement>(".anno-kind-observation");
+    expect(chip?.textContent).toBe("observation");
+    expect(chip?.classList.contains("anno-kind")).toBe(true);
+    // The card keeps its own identity and focus contract unchanged.
+    const card = group?.querySelector<HTMLElement>(
+      '[data-fact-id="obs:sha256:focused"]',
+    );
+    expect(card?.classList.contains("unit-card")).toBe(true);
+  });
+
+  it("names the carried status of each fact that declares one", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: readingWith(localFacts()), refusal: null },
+    );
+    const chipOf = (factId: string) =>
+      document.querySelector<HTMLElement>(
+        `#detail-body .detail-facts [data-fact-id="${factId}"] .fact-status`,
+      );
+    const request = chipOf("input-request:sha256:ask");
+    expect(request?.textContent).toBe("open");
+    expect(request?.classList.contains("open")).toBe(true);
+    expect(chipOf("validation:sha256:gate")?.classList.contains("passed")).toBe(
+      true,
+    );
+    expect(
+      chipOf("assess:sha256:verdict")?.classList.contains("accepted"),
+    ).toBe(true);
+    // An observation declares no status, so it gets no chip rather than a blank one.
+    expect(chipOf("obs:sha256:focused")).toBeNull();
   });
 
   it("renders exact fact Markdown and focuses the requested fact without embedding the diff or selecting a peer", () => {

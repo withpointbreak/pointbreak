@@ -15,7 +15,9 @@ import {
   drowClass,
   ENDORSE_CLASSES,
   endorseClass,
+  FACT_FAMILIES,
   FACT_STATUSES,
+  factFamilyClass,
   factStatusClass,
   REF_KINDS,
   refClass,
@@ -265,5 +267,27 @@ describe("ALL_EMITTABLE_CLASSES", () => {
   test("registers the emphasis class", () => {
     expect(CLASS.emph).toBe("emph");
     expect(ALL_EMITTABLE_CLASSES).toContain("emph");
+  });
+});
+
+describe("fact-family classes", () => {
+  test("spells one fact-family class per server family value", () => {
+    expect(factFamilyClass("observation")).toBe(
+      "fact-family fact-family-observation",
+    );
+    expect(factFamilyClass("input_request")).toBe(
+      "fact-family fact-family-input-request",
+    );
+    expect(factFamilyClass("assessment")).toBe(
+      "fact-family fact-family-assessment",
+    );
+    expect(factFamilyClass("validation")).toBe(
+      "fact-family fact-family-validation",
+    );
+    for (const family of FACT_FAMILIES) {
+      for (const token of factFamilyClass(family).split(" ")) {
+        expect(ALL_EMITTABLE_CLASSES).toContain(token);
+      }
+    }
   });
 });

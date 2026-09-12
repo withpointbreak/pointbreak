@@ -41,7 +41,12 @@ import type {
   RevisionResource,
 } from "./change-protocol";
 import { filterChipsFor, removeFilterChipToken } from "./chips";
-import { CLASS } from "./classNames";
+import {
+  annoKindClass,
+  CLASS,
+  factFamilyClass,
+  factStatusClass,
+} from "./classNames";
 import {
   type DiffArtifact,
   renderDiff,
@@ -1129,6 +1134,15 @@ function renderedFactBody(
   return body;
 }
 
+/** The status a fact content declares, when it declares one. */
+function factStatusText(content: FactContent): string | undefined {
+  return content.kind === "input_request" || content.kind === "validation"
+    ? content.status
+    : content.kind === "assessment"
+      ? content.assessment
+      : undefined;
+}
+
 function renderFacts(
   reading:
     | Extract<ChangeInspectorReading, { kind: "revision" }>
@@ -1146,14 +1160,30 @@ function renderFacts(
     groups.set(fact.family, family);
   }
   for (const [family, items] of groups) {
+    const familyLabel = family.replaceAll("_", " ");
     const group = document.createElement("section");
-    group.append(detailHeading(family.replaceAll("_", " "), 4));
+    group.className = factFamilyClass(family);
+    group.append(detailHeading(`${familyLabel} (${items.length})`, 4));
     for (const fact of items) {
       const card = document.createElement("article");
       card.className = "unit-card";
       card.dataset.factId = fact.factId;
       card.tabIndex = -1;
       const content = reading.document.factContentPresentations?.[fact.factId];
+      const head = document.createElement("div");
+      head.className = "anno-head";
+      const kind = document.createElement("span");
+      kind.className = annoKindClass(family.replaceAll("_", "-"));
+      kind.textContent = familyLabel;
+      head.append(kind);
+      const status = content ? factStatusText(content.content) : undefined;
+      if (status !== undefined) {
+        const chip = document.createElement("span");
+        chip.className = factStatusClass(status);
+        chip.textContent = status;
+        head.append(chip);
+      }
+      card.append(head);
       if (content) {
         const heading =
           content.content.kind === "assessment"
