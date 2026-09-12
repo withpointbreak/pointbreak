@@ -350,6 +350,50 @@ impl DerivedAccessRuntime {
             .map_err(|error| error.to_string())
     }
 
+    /// Read-only serving probe (INV-2). Never installs or clears the reader
+    /// slot, never requests the worker, never renames. Arms: (1) a cached
+    /// reader for the currently published generation is validated in place;
+    /// (2) otherwise the published generation is opened through the
+    /// observation-class `open_current` (shared read lease only) and must be
+    /// caught up to the authority head.
+    pub(super) fn observe_current_readable(&self) -> Result<bool, String> {
+        let DerivedAccessMode::Active {
+            lifecycle: configured_lifecycle,
+            current,
+            ..
+        } = &self.mode
+        else {
+            return Ok(false);
+        };
+        let refreshed_lifecycle;
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => {
+                refreshed_lifecycle = maintenance.lifecycle()?;
+                &refreshed_lifecycle
+            }
+            None => configured_lifecycle,
+        };
+        let Some(published) = lifecycle
+            .published_generation_identity_read_only()
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        let cached = lock(current).as_ref().map(Arc::clone);
+        if let Some(cached) = cached.as_ref()
+            && cached.generation_id() == published.generation_id.as_str()
+        {
+            return Ok(lifecycle
+                .validate_cached_current(cached)
+                .map(|validation| validation.locator_applied == validation.authority.head.cursor)
+                .unwrap_or(false));
+        }
+        Ok(match lifecycle.open_current() {
+            Ok(Some(opened)) => opened.locator_applied() == opened.authority_head(),
+            Ok(None) | Err(_) => false,
+        })
+    }
+
     pub(super) fn rebuild_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) == BackgroundWorkState::Rebuild as u8
     }
@@ -417,7 +461,15 @@ impl DerivedAccessRuntime {
             }
             None => configured_lifecycle,
         };
-        let published_generation_id = match lifecycle.published_generation_id() {
+        // Observation-class publication read: request discovery never uses the
+        // renaming reader or the recovery classifier (see the source guard in
+        // this module's tests). It may still request the existing worker.
+        let published_generation_id_observed = |lifecycle: &DerivedAccessLifecycle| {
+            lifecycle
+                .published_generation_identity_read_only()
+                .map(|publication| publication.map(|publication| publication.generation_id))
+        };
+        let published_generation_id = match published_generation_id_observed(lifecycle) {
             Ok(generation_id) => generation_id,
             Err(error) => {
                 self.request_background_rebuild();
@@ -461,9 +513,8 @@ impl DerivedAccessRuntime {
                     )));
                 }
             };
-            let confirmed_generation_id = lifecycle
-                .published_generation_id()
-                .map_err(|error| error.to_string())?;
+            let confirmed_generation_id =
+                published_generation_id_observed(lifecycle).map_err(|error| error.to_string())?;
             if confirmed_generation_id.as_deref() != Some(existing.generation_id()) {
                 clear_current_if_same(current, &existing);
                 if retry_current_transition {
@@ -493,8 +544,7 @@ impl DerivedAccessRuntime {
         match lifecycle.open_current() {
             Ok(Some(opened)) => {
                 let opened = Arc::new(opened);
-                let confirmed_generation_id = lifecycle
-                    .published_generation_id()
+                let confirmed_generation_id = published_generation_id_observed(lifecycle)
                     .map_err(|error| error.to_string())?;
                 if confirmed_generation_id.as_deref() != Some(opened.generation_id()) {
                     if retry_current_transition {
@@ -532,7 +582,7 @@ impl DerivedAccessRuntime {
                 Ok(RuntimeCurrentRead::Ready(opened))
             }
             Ok(None) => {
-                let observed = lifecycle.status();
+                let observed = lifecycle.status_read_only();
                 if retry_current_transition
                     && matches!(
                         observed.as_ref(),
@@ -556,7 +606,7 @@ impl DerivedAccessRuntime {
                 }))
             }
             Err(error) => {
-                let observed = lifecycle.status();
+                let observed = lifecycle.status_read_only();
                 if retry_current_transition
                     && matches!(
                         observed.as_ref(),
@@ -1010,6 +1060,52 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start_index = source.find(start).expect("start marker");
+        let end_index = source[start_index..]
+            .find(end)
+            .map(|offset| start_index + offset)
+            .expect("end marker");
+        &source[start_index..end_index]
+    }
+
+    /// Request discovery is an observation path: it may request the existing
+    /// worker but never uses the renaming classifier or the renaming
+    /// publication reader. The worker loop keeps the recovery classifier.
+    #[test]
+    fn request_reader_discovery_uses_only_observation_classifiers() {
+        const RUNTIME_SOURCE: &str = include_str!("runtime.rs");
+        let discovery = source_between(
+            RUNTIME_SOURCE,
+            "fn current_with_publication_retry(",
+            "pub(super) fn start_background_rebuild(",
+        );
+        assert!(
+            !discovery.contains("lifecycle.status()"),
+            "discovery must not use the recovery classifier"
+        );
+        assert!(
+            !discovery.contains("published_generation_id()"),
+            "discovery must not use the renaming publication reader"
+        );
+        assert!(discovery.contains("status_read_only()"));
+        assert!(discovery.contains("published_generation_identity_read_only()"));
+        assert!(
+            discovery.contains("request_background_rebuild()"),
+            "the D04 maintenance request stays with the reader"
+        );
+
+        let worker = source_between(
+            RUNTIME_SOURCE,
+            "fn background_rebuild(",
+            "fn wait_or_cancel(",
+        );
+        assert!(
+            worker.contains("lifecycle.status()"),
+            "the worker keeps the recovery classifier"
+        );
+    }
 
     #[test]
     fn background_worker_timeout_diagnostic_self_check() {

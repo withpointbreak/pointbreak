@@ -544,12 +544,16 @@ impl DerivedHistoryAccess {
         })
     }
 
-    /// Whether an active data route can truthfully serve a validated current
-    /// generation now. During a replacement build this may remain true even
-    /// though lifecycle availability is `bootstrapping`.
+    /// Whether an active data route would serve a validated current generation
+    /// now, observed without discovery side effects (INV-2).
     #[doc(hidden)]
-    pub fn current_readable(&self) -> bool {
-        self.is_active() && matches!(self.current(), Ok(CurrentRead::Ready(_)))
+    pub fn observe_serving_current(&self) -> bool {
+        self.is_active() && matches!(self.runtime.observe_current_readable(), Ok(true))
+    }
+
+    #[cfg(test)]
+    fn runtime_cached_current_is_none(&self) -> bool {
+        self.runtime.cached_current().is_none()
     }
 
     /// Start rebuilding a non-current active profile without delaying the
@@ -2411,6 +2415,138 @@ mod tests {
     }
 
     #[test]
+    fn request_reader_reports_quarantine_class_without_renaming_and_still_requests_maintenance() {
+        let (_temp, access) = active_history(1);
+        access.pause_background_worker_for_test();
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("setup rebuild publishes a generation");
+        std::fs::write(
+            lifecycle
+                .paths()
+                .generation(&generation_id)
+                .join("cursor.sqlite3"),
+            b"not sqlite",
+        )
+        .unwrap();
+
+        let read = access.current().unwrap();
+
+        assert!(
+            matches!(
+                read,
+                CurrentRead::Unavailable(DerivedHistoryStatus {
+                    availability: DerivedHistoryAvailability::Quarantined,
+                    ..
+                })
+            ),
+            "reader must classify without recovering"
+        );
+        assert!(
+            lifecycle.paths().root().exists(),
+            "a request reader must not move the derived root aside"
+        );
+        assert!(
+            access.maintenance_in_flight(),
+            "the reader still requests the existing background worker"
+        );
+    }
+
+    #[test]
+    fn observe_serving_current_starts_no_worker_and_installs_no_reader() {
+        let (_temp, access) = active_history(1);
+
+        assert!(access.observe_serving_current());
+        assert!(
+            !access.maintenance_in_flight(),
+            "observation must not start the worker"
+        );
+        assert!(
+            access.runtime_cached_current_is_none(),
+            "observation must not install a reader"
+        );
+    }
+
+    #[test]
+    fn observe_serving_current_is_false_and_side_effect_free_when_absent_or_corrupt() {
+        let (_temp, absent) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let absent_root = absent
+            .lifecycle()
+            .expect("test access is active")
+            .paths()
+            .root()
+            .to_path_buf();
+        assert!(!absent.observe_serving_current());
+        assert!(
+            !absent_root.exists(),
+            "observation must not create the root"
+        );
+        assert!(!absent.maintenance_in_flight());
+
+        let (_temp, corrupt) = active_history(1);
+        let lifecycle = corrupt.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("setup rebuild publishes a generation");
+        std::fs::write(
+            lifecycle
+                .paths()
+                .generation(&generation_id)
+                .join("cursor.sqlite3"),
+            b"not sqlite",
+        )
+        .unwrap();
+        assert!(!corrupt.observe_serving_current());
+        assert!(
+            lifecycle.paths().root().exists(),
+            "observation must not move the root aside"
+        );
+        assert!(!corrupt.maintenance_in_flight());
+        assert_eq!(
+            corrupt.lifecycle_status().availability,
+            DerivedHistoryAvailability::Quarantined
+        );
+    }
+
+    #[test]
+    fn observe_serving_current_reads_the_old_generation_during_replacement_staging() {
+        let (_temp, access) = active_history(1);
+        let lifecycle = access.lifecycle().expect("test access is active").clone();
+        lifecycle.paths().ensure_scaffold().unwrap();
+        let (_, generation_id) = lifecycle.paths().next_generation().unwrap();
+        std::fs::create_dir_all(lifecycle.paths().staging(&generation_id)).unwrap();
+        lifecycle
+            .paths()
+            .record_progress(
+                &generation_id,
+                GenerationProgress::new(
+                    GenerationProgressPhase::CursorPopulation,
+                    0,
+                    1,
+                    0,
+                    0,
+                    None,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            access.lifecycle_status().availability,
+            DerivedHistoryAvailability::Bootstrapping
+        );
+        assert!(
+            access.observe_serving_current(),
+            "the still-published old generation is readable during staging"
+        );
+        assert!(access.runtime_cached_current_is_none());
+        assert!(!access.maintenance_in_flight());
+        assert!(lifecycle.paths().root().exists());
+    }
+
+    #[test]
     fn active_access_joins_a_contended_background_rebuild_without_restart() {
         let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
         let lifecycle = access.lifecycle().expect("test access is active");
@@ -2502,7 +2638,7 @@ mod tests {
             DerivedHistoryAvailability::Bootstrapping
         );
         assert!(
-            access.current_readable(),
+            access.observe_serving_current(),
             "unchanged old current remains readable"
         );
 
@@ -2511,7 +2647,7 @@ mod tests {
             .record_event_once(&review_initialized(2))
             .unwrap();
         assert!(
-            !access.current_readable(),
+            !access.observe_serving_current(),
             "authority drift invalidates the old generation"
         );
         access.cancel_background_rebuild().unwrap();
@@ -2532,7 +2668,10 @@ mod tests {
             assert!(!access.maintenance_in_flight());
             assert!(!access.rebuild_in_flight());
             assert!(access.rebuild_worker_joined());
-            assert!(!access.current_readable());
+            assert!(matches!(
+                access.current().unwrap(),
+                CurrentRead::Unavailable(_)
+            ));
             assert!(
                 !access.maintenance_in_flight(),
                 "status/read discovery must honor explicit cancellation"
@@ -2542,7 +2681,7 @@ mod tests {
         drop(rebuild_lease);
         access.restart_background_rebuild().unwrap();
         wait_for_background_rebuild(&access, "retry after cancellation");
-        assert!(access.current_readable());
+        assert!(access.observe_serving_current());
     }
 
     #[test]
@@ -2615,7 +2754,7 @@ mod tests {
 
         wait_for_background_rebuild(&access, "activation-interlocked automatic rebuild");
         assert_eq!(lifecycle.published_generation_id().unwrap(), None);
-        assert!(!access.current_readable());
+        assert!(!access.observe_serving_current());
     }
 
     fn review_initialized(index: usize) -> ShoreEvent {

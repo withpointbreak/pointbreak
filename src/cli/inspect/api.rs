@@ -1179,10 +1179,10 @@ pub(super) fn derived_access_status_json(
     derived: &DerivedHistoryAccess,
     fallback_in_flight: bool,
 ) -> Result<String, String> {
-    let serving_current = derived.current_readable();
-    // `current_readable` may discover an absent/stale generation and start the
-    // recovery worker. Observe lifecycle second so `rebuildInFlight` and the
-    // returned actions describe that same post-discovery state.
+    // Observation only: neither producer starts the worker, installs a reader
+    // or moves disposable state aside. The same document answers the POST
+    // retry/cancel control routes after they have acted on the worker.
+    let serving_current = derived.observe_serving_current();
     let lifecycle = derived.lifecycle_status();
     let mut actions = Vec::new();
     if lifecycle.active && !serving_current {
