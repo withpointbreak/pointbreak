@@ -9377,7 +9377,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const follow = document.querySelector("#follow-toggle");
       if (follow) {
         follow.classList.toggle("hidden", followState === null);
-        follow.disabled = route.kind !== "timeline";
+        follow.setAttribute("aria-disabled", String(route.kind !== "timeline"));
         if (followState !== null) {
           const parked = followState.mode === "parked";
           follow.setAttribute("aria-pressed", String(!parked));

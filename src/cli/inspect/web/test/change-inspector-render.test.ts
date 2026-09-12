@@ -1063,8 +1063,10 @@ describe("Change inspector render", () => {
     expect(follow?.classList.contains("hidden")).toBe(false);
     expect(follow?.textContent).toBe("Following");
     expect(follow?.getAttribute("aria-pressed")).toBe("true");
-    // Not operable off the Timeline: toggling is timeline-only and stays so.
-    expect(follow?.disabled).toBe(true);
+    // Not operable off the Timeline (toggling is timeline-only and stays so),
+    // but still readable from the keyboard and the accessibility tree.
+    expect(follow?.disabled).toBe(false);
+    expect(follow?.getAttribute("aria-disabled")).toBe("true");
   });
 
   it("keeps the follow control hidden outside the Timeline lens", () => {
@@ -1114,8 +1116,56 @@ describe("Change inspector render", () => {
     const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
     expect(follow?.classList.contains("hidden")).toBe(false);
     expect(follow?.disabled).toBe(false);
+    expect(follow?.getAttribute("aria-disabled")).toBe("false");
     expect(follow?.textContent).toBe("Show 2 new events");
     expect(follow?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps a plain-text event body escaped in the event detail pane", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    const base = eventHistory();
+    const history: EventHistoryDocument = {
+      ...base,
+      facets: { review_observation_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_observation_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_observation_recorded",
+          summary: {
+            kind: "review_observation_recorded",
+            details: {
+              observationId: "obs:sha256:one",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              title: "Readable",
+              body: "<b>not markup</b> and **not bold**",
+            },
+          },
+        },
+      ],
+    };
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    const summary = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary",
+    );
+    expect(summary?.querySelector("b")).toBeNull();
+    expect(summary?.querySelector("strong")).toBeNull();
+    expect(summary?.textContent).toContain(
+      "<b>not markup</b> and **not bold**",
+    );
   });
 
   it("renders a selected Timeline event as an exact readable surface", () => {

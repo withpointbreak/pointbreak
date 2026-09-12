@@ -300,6 +300,8 @@ export function prepareChangeInspectorShell(
   document.querySelector("#derived-access-status")?.classList.add("hidden");
   const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
   if (follow) {
+    // Blanket hide; the Timeline/event branch below re-shows it whenever a
+    // retained monitor snapshot exists. Keep this before that branch.
     follow.classList.add("hidden");
     follow.onclick = () => actions.toggleTimelineMonitoring?.();
   }
@@ -2288,7 +2290,10 @@ export function renderChangeInspector(
     const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
     if (follow) {
       follow.classList.toggle("hidden", followState === null);
-      follow.disabled = route.kind !== "timeline";
+      // `aria-disabled` rather than `disabled`: the state text stays in the
+      // tab order and the accessibility tree, while the toggle handler itself
+      // refuses to act off the Timeline.
+      follow.setAttribute("aria-disabled", String(route.kind !== "timeline"));
       if (followState !== null) {
         const parked = followState.mode === "parked";
         follow.setAttribute("aria-pressed", String(!parked));
