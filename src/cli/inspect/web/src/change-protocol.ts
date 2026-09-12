@@ -545,6 +545,8 @@ export interface ChangePresentation {
     revision: RevisionRef;
     revisionProposalSummary?: string;
     summarySource: "revision_proposal_summary" | "absent";
+    /** Server-owned finished display string. Absent only from an older server. */
+    label?: string;
   }>;
   /** Inspector-only and present exclusively on the Attention lens. */
   attention?: ChangeAttentionPresentation;
@@ -582,6 +584,8 @@ interface ChangePageBase {
 
 export interface ChangesPage extends ChangePageBase {
   schema: "pointbreak.inspect-changes-page";
+  // Version stays 1: the current-Revision presentation `label` (D7) is an
+  // additive optional member, so an older server without it still parses.
   version: 1;
 }
 
@@ -2288,6 +2292,9 @@ function isPresentationRevision(value: unknown): boolean {
   return (
     isRecord(value) &&
     isRevisionRef(value.revision) &&
+    // Server-owned display string (D7): optional for an older server, but a
+    // non-empty string when present. summarySource validation is unchanged.
+    (value.label === undefined || nonEmptyString(value.label)) &&
     ((value.summarySource === "revision_proposal_summary" &&
       nonEmptyString(value.revisionProposalSummary)) ||
       (value.summarySource === "absent" &&

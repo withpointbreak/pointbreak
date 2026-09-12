@@ -1429,12 +1429,16 @@ describe("Change inspector render", () => {
       presentations: {
         "change:sha256:one": {
           currentRevisions: [
-            ...(changes.presentations?.["change:sha256:one"]
-              ?.currentRevisions ?? []),
+            {
+              revision,
+              summarySource: "absent",
+              label: "No summary at capture",
+            },
             {
               revision: secondRevision,
               revisionProposalSummary: "Parallel proposal",
               summarySource: "revision_proposal_summary",
+              label: "Parallel proposal",
             },
           ],
         },
@@ -1453,8 +1457,22 @@ describe("Change inspector render", () => {
       ...document.querySelectorAll<HTMLButtonElement>(".change-card-peer-open"),
     ];
     expect(peerActions).toHaveLength(2);
-    for (const action of peerActions)
-      expect(action.textContent).toMatch(/^Open current Revision · /);
+    // D5: each peer button names the peer once, never "Open current Revision ·
+    // Current Revision · …". Full identity stays in title and aria-label.
+    const firstPeer = peerActions.find(
+      (action) => action.dataset.revisionId === revision.revisionId,
+    );
+    expect(firstPeer?.textContent).toBe(
+      "Open · No summary at capture · revision:sha256:one · sha256:artifact",
+    );
+    expect(firstPeer?.getAttribute("aria-label")).toContain(
+      revision.revisionId,
+    );
+    expect(firstPeer?.title).toContain(revision.objectArtifactContentHash);
+    for (const action of peerActions) {
+      expect(action.textContent?.startsWith("Open · ")).toBe(true);
+      expect(action.textContent).not.toContain("Current Revision");
+    }
     const secondPeer = peerActions.find(
       (action) => action.dataset.revisionId === secondRevision.revisionId,
     );

@@ -2340,7 +2340,7 @@ export function renderChangeInspector(
           const choose = document.createElement("button");
           choose.type = "button";
           choose.className = "ghost change-card-peer-open";
-          choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+          choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
           choose.title = peer.title;
           choose.setAttribute(
             "aria-label",

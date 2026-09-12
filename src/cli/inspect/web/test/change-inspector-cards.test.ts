@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { changeCardPresentation } from "../src/change-inspector-cards";
+import {
+  changeCardPresentation,
+  exactRevisionAccessibleIdentity,
+} from "../src/change-inspector-cards";
 import type {
   ChangeAttentionReason,
   ChangePresentation,
@@ -117,6 +120,35 @@ describe("Change cards", () => {
       kind: "open_change",
       label: "Review Change",
     });
+  });
+
+  it("leads an absent-summary card with the server label", () => {
+    const card = changeCardPresentation(
+      summary([first]),
+      presentation([
+        {
+          revision: first,
+          summarySource: "absent",
+          label: "No summary at capture",
+        },
+      ]),
+    );
+
+    expect(card.headline).toBe("No summary at capture");
+    expect(card.peers[0]?.label).toBe("No summary at capture");
+    // The accessible name stays identity-led when no summary was supplied.
+    expect(card.peers[0]?.accessibleName).toBe(
+      `Current Revision — ${exactRevisionAccessibleIdentity(first)}`,
+    );
+  });
+
+  it("keeps the shipped generic label when an older server sends none", () => {
+    const card = changeCardPresentation(
+      summary([first]),
+      presentation([{ revision: first, summarySource: "absent" }]),
+    );
+
+    expect(card.headline).toBe("Current Revision");
   });
 });
 
