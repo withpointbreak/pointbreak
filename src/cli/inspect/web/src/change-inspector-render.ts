@@ -1261,7 +1261,11 @@ function factRelationLines(
       const line = detailLine(`${label} `, "fact-rel");
       if (present.has(edge.toFactId)) {
         line.append(
-          factReferenceControl(shortRef(edge.toFactId), edge.toFactId, activate),
+          factReferenceControl(
+            shortRef(edge.toFactId),
+            edge.toFactId,
+            activate,
+          ),
         );
       } else {
         const named = document.createElement("code");
@@ -2270,18 +2274,27 @@ export function renderChangeInspector(
       renderDetail(snapshot, actions, presentation);
       return;
     }
+    // Which history the master pane paints stays a Timeline-only decision: an
+    // event route deliberately reads the loaded page, not a parked window.
     const monitor =
       route.kind === "timeline" ? (presentation.timeline ?? null) : null;
     const history = monitor?.display ?? snapshot.generation.history;
+    // Whether the reader can still see that the Timeline is following is a
+    // separate, presentation-only question. Opening an event detail never
+    // changes follow state, so the control stays readable while it is open,
+    // reflecting the retained monitor snapshot; it is operable only on the
+    // Timeline itself because toggling is timeline-only.
+    const followState = presentation.timeline ?? null;
     const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
     if (follow) {
-      follow.classList.toggle("hidden", monitor === null);
-      if (monitor !== null) {
-        const parked = monitor.mode === "parked";
+      follow.classList.toggle("hidden", followState === null);
+      follow.disabled = route.kind !== "timeline";
+      if (followState !== null) {
+        const parked = followState.mode === "parked";
         follow.setAttribute("aria-pressed", String(!parked));
         follow.textContent = parked
-          ? monitor.newCount > 0
-            ? `Show ${monitor.newCount} new ${monitor.newCount === 1 ? "event" : "events"}`
+          ? followState.newCount > 0
+            ? `Show ${followState.newCount} new ${followState.newCount === 1 ? "event" : "events"}`
             : "Parked"
           : "Following";
         follow.setAttribute(

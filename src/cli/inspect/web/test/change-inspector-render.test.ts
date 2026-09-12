@@ -16,10 +16,10 @@ import type {
   ChangeDetail,
   ChangesPage,
   EventHistoryDocument,
-  ReaderProfile,
-  RevisionResource,
   FactContent,
   FactRelationshipGraphNode,
+  ReaderProfile,
+  RevisionResource,
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
@@ -1022,16 +1022,100 @@ describe("Change inspector render", () => {
         },
       ],
     };
-    state.publish(stageGeneration(profile, changes, attention, profile, history));
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
     renderChangeInspector(state.snapshot(), { navigate });
     const summary = document.querySelector<HTMLElement>(
       "#detail-body .event-detail-summary",
     );
     expect(summary?.querySelector("strong")?.textContent).toBe("Bold");
     // The one-line Timeline excerpt stays plain text.
-    const excerpt = document.querySelector<HTMLElement>("#master li.event .body");
+    const excerpt = document.querySelector<HTMLElement>(
+      "#master li.event .body",
+    );
     expect(excerpt?.querySelector("strong")).toBeNull();
     expect(excerpt?.textContent).toContain("**Bold**");
+  });
+
+  it("keeps the Timeline follow state readable while an event detail is open", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: null,
+        refusal: null,
+        timeline: { mode: "following", newCount: 0, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(false);
+    expect(follow?.textContent).toBe("Following");
+    expect(follow?.getAttribute("aria-pressed")).toBe("true");
+    // Not operable off the Timeline: toggling is timeline-only and stays so.
+    expect(follow?.disabled).toBe(true);
+  });
+
+  it("keeps the follow control hidden outside the Timeline lens", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: revisionReading(),
+        refusal: null,
+        timeline: { mode: "following", newCount: 0, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("leaves the Timeline follow control operable on the Timeline itself", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: null,
+        refusal: null,
+        timeline: { mode: "parked", newCount: 2, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(false);
+    expect(follow?.disabled).toBe(false);
+    expect(follow?.textContent).toBe("Show 2 new events");
+    expect(follow?.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("renders a selected Timeline event as an exact readable surface", () => {
@@ -1926,7 +2010,8 @@ describe("Change inspector render", () => {
         refusal: null,
       },
     );
-    const focused = document.querySelectorAll<HTMLElement>("[data-exact-focus]");
+    const focused =
+      document.querySelectorAll<HTMLElement>("[data-exact-focus]");
     expect(focused.length).toBe(1);
     expect(focused[0].dataset.factId).toBe("obs:sha256:focused");
     expect(focused[0].tagName).toBe("ARTICLE");
@@ -1947,7 +2032,12 @@ describe("Change inspector render", () => {
     if (!graph) throw new Error("fixture graph missing");
     const verdictNode = factNode("assess:sha256:verdict", "assessment", 80, 90);
     // A predecessor with a graph node but no presentation on this Revision.
-    const retiredNode = factNode("assess:sha256:retired", "assessment", 80, 150);
+    const retiredNode = factNode(
+      "assess:sha256:retired",
+      "assessment",
+      80,
+      150,
+    );
     renderChangeInspector(
       state.snapshot(),
       { navigate },

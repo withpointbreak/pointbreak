@@ -66,7 +66,7 @@ function cssClassSelectors(css: string): Set<string> {
 // `selector`, or null when no such rule exists. Used to assert that a new rule
 // expresses colour only through theme tokens.
 function cssRuleBody(css: string, selector: string): string | null {
-  const escaped = selector.replace(/[.\-]/g, (ch) => `\\${ch}`);
+  const escaped = selector.replace(/[.-]/g, (ch) => `\\${ch}`);
   const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
   return match ? match[1] : null;
 }

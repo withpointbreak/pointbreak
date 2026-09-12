@@ -227,9 +227,7 @@ describe("typed Timeline presentation", () => {
     expect(plain.bodyContentType).toBeUndefined();
 
     // A system-authored body carries no declared type and must never gain one.
-    const initialized = presentEvent(
-      event({ kind: "review_initialized" }),
-    );
+    const initialized = presentEvent(event({ kind: "review_initialized" }));
     expect(initialized.bodyContentType).toBeUndefined();
   });
 });
