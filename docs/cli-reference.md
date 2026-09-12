@@ -635,6 +635,18 @@ derived-path registry.
 - `rebuild` synchronously constructs and publishes a replacement generation even when the old generation
   remains readable. It emits a `pointbreak.store-derived-rebuild` receipt after publication.
 
+Who may do what to the disposable derived generation is fixed by the actor's role:
+
+| Role | Commands and routes | May do | Refuses |
+| --- | --- | --- | --- |
+| Observe | `store derived status`; Inspector status | Report availability, namespace and progress | Never creates state, takes an exclusive lock, starts work or moves state aside; `store derived status` is refused on a store that still requires migration, while Inspector routes answer typed documents instead |
+| Maintain | Ordinary bounded reads; Inspector data requests | Serve a validated current generation; after activation, ask the existing background maintenance to catch up | Never replace a generation or move invalid state aside; report it and fall back |
+| Recover | `store derived build`; Inspector `Retry` | Move invalid disposable state aside and build a usable generation | Derived access set to `off`; a deferred or conflicting namespace transition; a store that still requires migration |
+| Replace | `store derived rebuild`; Inspector `Retry`; `change migrate` | Publish a replacement while the old generation stays readable until completion | The same refusals as recover |
+
+On an activated store, invalid disposable state stays in place until an explicit recover or replace action;
+ordinary reads keep reporting it and fall back to authoritative data.
+
 Build and rebuild may scan the complete event history and can therefore be expensive on a large store.
 Progress is written to stderr; stdout contains exactly one completion document, so scripts can consume it
 without parsing progress. A cancellation or failure preserves authoritative loose truth and any previously

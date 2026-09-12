@@ -453,8 +453,9 @@ truth. The historical default decision described here is not the current selecto
 
 `RebuildBusy` waits for the other process to publish, while rebuilds invalidated by changing truth retry with
 capped exponential backoff. Normal governed `CatchingUp` remains an in-place bounded-delta state and never
-starts a competing full rebuild. If the worker thread cannot be spawned, Inspector logs the failure and keeps
-the shell available so a later request can retry. The Inspector owns its local worker handle: cancel, retry,
+starts a competing full rebuild. If the worker thread cannot be spawned, or a worker stops on a transient
+error, Inspector logs the failure and keeps the shell available; a later data request or an explicit
+`Retry` re-requests the worker, while status polling never does. The Inspector owns its local worker handle: cancel, retry,
 and orderly server-state shutdown cooperatively interrupt the worker at bounded progress/retry boundaries and
 join it. Explicit cancellation stays latched until retry, so status polling cannot silently restart the worker.
 A cancelled in-progress candidate is discarded; stale staging from an abrupt interruption is discarded when
@@ -464,10 +465,14 @@ the join returns the new current state. Abrupt process termination remains a cra
 `GET /api/derived-access/status` is the generation-independent recovery document. It returns `200` with
 schema `pointbreak.inspect-derived-access-status`, version `1`, including availability, current readability,
 worker/fallback activity, the local rebuild-pause latch, detail, allowed actions, and any durable
-phase/event/byte/time progress. A valid old
-generation may remain readable while a replacement stages; any authority-stamp drift invalidates that option.
-`POST /api/derived-access/cancel` and `/retry` are the only mutating Inspector routes and affect only the
-disposable sidecar worker.
+phase/event/byte/time progress. The route is observation-only: it never starts the worker, installs a
+reader, takes an exclusive lock or moves disposable state aside. `servingCurrent` reports whether a data
+request would serve a validated current generation now, including a still-valid old generation while a
+replacement stages; any authority-stamp drift invalidates that option. Data requests are the routes that
+select readers and may ask the existing maintenance-only worker to catch up after activation; they never
+replace a generation or move disposable state aside. `POST /api/derived-access/cancel` and `/retry` are the
+only control routes and affect only the disposable sidecar worker; `retry` may move invalid disposable state
+aside and publish a replacement. Both answer with the same status document.
 
 First bootstrap never silently switches read models. The web client offers wait or the explicit
 `access=authoritative` selector. That selector runs existing authoritative domain readers with request-local
