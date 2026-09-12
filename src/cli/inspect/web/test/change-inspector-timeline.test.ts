@@ -333,7 +333,11 @@ describe("Change-aware Timeline renderer", () => {
     const contexts = Array.from(
       row.querySelectorAll<HTMLAnchorElement>("a[data-timeline-context-id]"),
     );
+    // The row's track and writer are filter links too, painted in the meta
+    // block ahead of the event, Change and exact Revision context links.
     expect(contexts.map((link) => link.dataset.timelineContextId)).toEqual([
+      "author",
+      "actor:author",
       eventId,
       changeA,
       changeB,
@@ -346,31 +350,135 @@ describe("Change-aware Timeline renderer", () => {
       "-1",
       "-1",
       "-1",
+      "-1",
+      "-1",
     ]);
     expect(contexts.map((link) => link.getAttribute("title"))).toEqual([
+      "track author",
+      "writer actor:author",
       eventId,
       changeA,
       changeB,
       `exact Revision ${revisionA}; artifact ${artifactA}`,
       `exact Revision ${revisionB}; artifact ${artifactB}`,
     ]);
-    expect(contexts[1]?.getAttribute("href")).toContain(
+    expect(contexts[3]?.getAttribute("href")).toContain(
       encodeURIComponent(changeA),
     );
-    expect(contexts[3]?.getAttribute("href")).toContain(
+    expect(contexts[5]?.getAttribute("href")).toContain(
       `revision=${encodeURIComponent(revisionA)}`,
     );
-    expect(contexts[3]?.getAttribute("href")).toContain(
+    expect(contexts[5]?.getAttribute("href")).toContain(
       `artifactHash=${encodeURIComponent(artifactA)}`,
     );
-    expect(contexts[3]?.dataset.revisionId).toBe(revisionA);
-    expect(contexts[3]?.dataset.artifactHash).toBe(artifactA);
-    expect(contexts[3]?.getAttribute("aria-label")).toContain(revisionA);
-    expect(contexts[3]?.getAttribute("aria-label")).toContain(artifactA);
+    expect(contexts[5]?.dataset.revisionId).toBe(revisionA);
+    expect(contexts[5]?.dataset.artifactHash).toBe(artifactA);
+    expect(contexts[5]?.getAttribute("aria-label")).toContain(revisionA);
+    expect(contexts[5]?.getAttribute("aria-label")).toContain(artifactA);
     // The two exact Revision filters stand alone: neither silently picks one
     // of the two explicit Change contexts as their owner.
-    expect(contexts[3]?.getAttribute("href")).not.toContain("change=");
-    expect(contexts[4]?.getAttribute("href")).not.toContain("change=");
+    expect(contexts[5]?.getAttribute("href")).not.toContain("change=");
+    expect(contexts[6]?.getAttribute("href")).not.toContain("change=");
+  });
+
+  it("filters the Timeline to a row's writer without disturbing the rest of the query", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const route = {
+      kind: "timeline" as const,
+      historyQuery: {
+        q: "type:observation",
+        track: "author",
+        order: "asc" as const,
+        after: "page-2",
+      },
+    };
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      route,
+    );
+    const actor = document.querySelector<HTMLAnchorElement>(
+      'li.event a[data-timeline-context-kind="actor"]',
+    );
+    expect(actor?.textContent).toBe("actor:author");
+    expect(actor?.tabIndex).toBe(-1);
+    expect(actor?.getAttribute("aria-label")).toBe(
+      "Filter Timeline to writer actor:author",
+    );
+    // The actor is a q clause; `track` stays the structured param it already
+    // was, and the continuation cursor is dropped.
+    expect(actor?.getAttribute("href")).toBe(
+      "#/timeline?q=type%3Aobservation+actor%3Aauthor&track=author&order=asc",
+    );
+  });
+
+  it("filters the Timeline to a row's track through the structured param", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const route = {
+      kind: "timeline" as const,
+      historyQuery: { q: "type:observation", at: "evt:sha256:one" },
+    };
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      route,
+    );
+    const track = document.querySelector<HTMLAnchorElement>(
+      'li.event a[data-timeline-context-kind="track"]',
+    );
+    expect(track?.textContent).toBe("track author");
+    expect(track?.getAttribute("aria-label")).toBe(
+      "Filter Timeline to track author",
+    );
+    // Never flattened into the query text.
+    expect(track?.getAttribute("href")).toBe(
+      "#/timeline?q=type%3Aobservation&track=author",
+    );
+  });
+
+  it("does not re-append an actor clause that already filters", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: { q: "actor:author" } },
+    );
+    expect(
+      document
+        .querySelector<HTMLAnchorElement>(
+          'li.event a[data-timeline-context-kind="actor"]',
+        )
+        ?.getAttribute("href"),
+    ).toBe("#/timeline?q=actor%3Aauthor");
+  });
+
+  it("keeps a filter link from also opening the event row", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+    );
+    const actor = document.querySelector<HTMLElement>(
+      'li.event a[data-timeline-context-kind="actor"]',
+    );
+    expect(actor?.closest("li.event")).not.toBeNull();
+    expect(actor?.matches("a[href]")).toBe(true);
+    // An actor click writes q only — no `track` param appears.
+    expect(actor?.getAttribute("href")).toBe("#/timeline?q=actor%3Aauthor");
+    expect(document.querySelectorAll("li.event button")).toHaveLength(0);
   });
 
   it("bounds opaque presentation titles without losing their exact source", () => {
