@@ -11,7 +11,10 @@ use serde::Serialize;
 
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
-use crate::git::{capture_commit_range_diff_files, git_commit_tree_oid, git_rev_parse_commit_oid};
+use crate::git::{
+    Ancestry, capture_commit_range_diff_files, git_commit_parent_oids, git_commit_tree_oid,
+    git_is_ancestor, git_rev_parse_commit_oid, git_worktree_root,
+};
 use crate::model::{
     ActorId, DiffFile, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource, TargetRef,
 };
@@ -32,9 +35,9 @@ use crate::session::store::resolution::{prepare_write_landing, resolve_change_wr
 use crate::session::{
     AssociateCommitOptions, AssociateCommitResult, BestEffortSkipSink, EventSigningOptions,
     EventWriteOutcome, LegacyProjectionStateV1, ProjectionDiagnostic, ReviewCursorV1,
-    RevisionShowOptions, SessionState, WriteAcknowledgementV1, associate_commit, current_timestamp,
-    show_revision_for_change_reader, sign_event_if_requested, validated_track_id,
-    writer_from_options,
+    ReviewSourceBindingV1, RevisionShowOptions, RevisionShowResult, SessionState,
+    WriteAcknowledgementV1, associate_commit, current_timestamp, show_revision_for_change_reader,
+    sign_event_if_requested, validated_track_id, writer_from_options,
 };
 use crate::storage::{CreateOutcome, LocalStorage};
 
@@ -46,6 +49,8 @@ pub struct LandCommitOptions {
     commit: String,
     allow_extension: bool,
     provenance_only: bool,
+    candidate_parent: bool,
+    expected_proof: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
 }
@@ -64,6 +69,8 @@ impl LandCommitOptions {
             commit: commit.into(),
             allow_extension: false,
             provenance_only: false,
+            candidate_parent: false,
+            expected_proof: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
         }
@@ -76,6 +83,16 @@ impl LandCommitOptions {
 
     pub fn with_provenance_only(mut self, value: bool) -> Self {
         self.provenance_only = value;
+        self
+    }
+
+    pub fn with_candidate_parent(mut self, value: bool) -> Self {
+        self.candidate_parent = value;
+        self
+    }
+
+    pub fn with_expected_proof(mut self, hash: impl Into<String>) -> Self {
+        self.expected_proof = Some(hash.into());
         self
     }
 
@@ -118,21 +135,45 @@ pub struct LandCommitResultV1 {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
-pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
-    land_commit_with_after_association(options, || {})
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LandCommitPreviewV1 {
+    pub schema: String,
+    pub revision: RevisionRefV1,
+    pub commit_oid: String,
+    pub tree_oid: String,
+    pub proof: RelationProofManifestV1,
+    pub message: String,
 }
 
-fn land_commit_with_after_association(
-    options: LandCommitOptions,
-    after_association: impl FnOnce(),
-) -> Result<LandCommitResultV1> {
+struct PreparedLanding {
+    shown: RevisionShowResult,
+    cursor: ReviewCursorV1,
+    preview: LandCommitPreviewV1,
+}
+
+pub fn preview_land_commit(options: LandCommitOptions) -> Result<LandCommitPreviewV1> {
+    Ok(prepare_landing(&options)?.preview)
+}
+
+fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
     if options.allow_extension && options.provenance_only {
         return Err(ShoreError::WorkflowInputInvalid {
             reason: "--allow-extension cannot be combined with --provenance-only".to_owned(),
         });
     }
-    let track_id = validated_track_id(&options.track)?;
+    validated_track_id(&options.track)?;
     let cursor = ReviewCursorV1::decode_token(&options.review_cursor)?;
+    if options.candidate_parent && (options.allow_extension || options.provenance_only) {
+        return Err(unsupported_parent(
+            "--candidate-parent cannot be combined with --allow-extension or --provenance-only",
+        ));
+    }
+    if options.candidate_parent && cursor.source_binding != ReviewSourceBindingV1::Captured {
+        return Err(unsupported_parent(
+            "--candidate-parent requires a captured-source Review cursor",
+        ));
+    }
     let revision_id =
         super::exact_revision_from_transition_cursor(&options.repo, &options.review_cursor)?;
     if revision_id != cursor.revision.revision_id {
@@ -156,10 +197,8 @@ fn land_commit_with_after_association(
         });
     }
 
-    let write_store = resolve_change_write_store(&options.repo)?;
-    let worktree_root = write_store.worktree_root();
-    let storage = LocalStorage::new(write_store.store_dir());
-    prepare_write_landing(&write_store, &storage)?;
+    let worktree_root = git_worktree_root(&options.repo)?;
+    let worktree_root = worktree_root.as_path();
     let commit_oid = git_rev_parse_commit_oid(worktree_root, &options.commit)?;
     let commit_tree_oid = git_commit_tree_oid(worktree_root, &commit_oid)?;
     let association_id = build_commit_association_id(&revision.revision_id, &commit_oid)?;
@@ -176,6 +215,7 @@ fn land_commit_with_after_association(
             &shown.snapshot.files,
             &commit_oid,
             &commit_tree_oid,
+            options.candidate_parent,
         )?
     };
     let algorithm = if options.provenance_only {
@@ -230,6 +270,59 @@ fn land_commit_with_after_association(
             });
         }
     }
+
+    Ok(PreparedLanding {
+        shown,
+        cursor,
+        preview: LandCommitPreviewV1 {
+            schema: "pointbreak.association-land-preview.v1".to_owned(),
+            revision,
+            commit_oid,
+            tree_oid: commit_tree_oid,
+            proof,
+            message:
+                "preview of the scoped Revision-to-commit relation; no landing records written"
+                    .to_owned(),
+        },
+    })
+}
+
+pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
+    land_commit_with_after_association(options, || {})
+}
+
+fn land_commit_with_after_association(
+    options: LandCommitOptions,
+    after_association: impl FnOnce(),
+) -> Result<LandCommitResultV1> {
+    let prepared = prepare_landing(&options)?;
+    if options.candidate_parent
+        && options.expected_proof.as_deref()
+            != Some(prepared.preview.proof.evidence_sha256.as_str())
+    {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "--candidate-parent recording requires --expect-proof matching the current preview proof.evidenceSha256".to_owned(),
+        });
+    }
+    let PreparedLanding {
+        shown,
+        cursor,
+        preview,
+    } = prepared;
+    let LandCommitPreviewV1 {
+        revision: _,
+        commit_oid,
+        tree_oid: commit_tree_oid,
+        proof,
+        ..
+    } = preview;
+    let revision = cursor.revision;
+    let association_id = proof.association_id.clone();
+    let track_id = validated_track_id(&options.track)?;
+    let write_store = resolve_change_write_store(&options.repo)?;
+    let worktree_root = write_store.worktree_root();
+    let storage = LocalStorage::new(write_store.store_dir());
+    prepare_write_landing(&write_store, &storage)?;
 
     let proof_outcome =
         ContentArtifacts::from_backend(write_store.backend()).put_relation_proof(&proof)?;
@@ -408,6 +501,7 @@ fn proof_inputs(
     source_files: &[DiffFile],
     candidate_commit: &str,
     candidate_tree: &str,
+    candidate_parent: bool,
 ) -> Result<(CanonicalProofInputV1, CanonicalProofInputV1, bool)> {
     let provenance = provenance.ok_or_else(|| ShoreError::WorkflowInputInvalid {
         reason: "the captured Revision has no Git provenance; use --provenance-only".to_owned(),
@@ -419,9 +513,14 @@ fn proof_inputs(
                 "the captured Revision has no immutable Git comparison base; use --provenance-only"
                     .to_owned(),
         })?;
+    let candidate_base = if candidate_parent {
+        parent_comparison_base(repo, provenance, candidate_commit)?
+    } else {
+        base.clone()
+    };
     let candidate_files = capture_commit_range_diff_files(
         repo,
-        &base,
+        &candidate_base,
         candidate_commit,
         &path_scope_for_git(&path_scope),
     )?;
@@ -434,7 +533,7 @@ fn proof_inputs(
     };
     let candidate = CanonicalProofInputV1 {
         capture_mode,
-        base_or_parent: Some(base),
+        base_or_parent: Some(candidate_base),
         path_scope: canonical_scope(&path_scope),
         git_availability: ProofGitAvailabilityV1::Available,
         entries: canonical_candidate_diff_entries(&candidate_files, source_files),
@@ -453,6 +552,62 @@ fn proof_inputs(
         ReviewEndpoint::GitWorkingTree { .. } => true,
     };
     Ok((source, candidate, exact_endpoint))
+}
+
+fn unsupported_parent(reason: &str) -> ShoreError {
+    ShoreError::WorkflowInputInvalid {
+        reason: format!(
+            "{reason}; use an ordinary supported landing comparison or capture and review a new Revision"
+        ),
+    }
+}
+
+fn parent_comparison_base(
+    repo: &Path,
+    provenance: &crate::session::event::GitProvenance,
+    candidate_commit: &str,
+) -> Result<String> {
+    let ReviewEndpoint::GitCommit {
+        commit_oid: source_base,
+        ..
+    } = &provenance.base
+    else {
+        return Err(unsupported_parent(
+            "--candidate-parent requires a captured Git commit base",
+        ));
+    };
+    match &provenance.source {
+        RevisionSource::GitWorktree { .. } => {}
+        RevisionSource::GitCommitRange { .. } => {
+            let ReviewEndpoint::GitCommit { commit_oid, .. } = &provenance.target else {
+                return Err(unsupported_parent(
+                    "--candidate-parent requires a single-commit source range",
+                ));
+            };
+            if git_commit_parent_oids(repo, commit_oid)? != [source_base.clone()] {
+                return Err(unsupported_parent(
+                    "--candidate-parent requires a single-commit source whose sole parent is the captured base",
+                ));
+            }
+        }
+        _ => {
+            return Err(unsupported_parent(
+                "--candidate-parent supports only combined worktree or single-commit range captures",
+            ));
+        }
+    }
+    let parents = git_commit_parent_oids(repo, candidate_commit)?;
+    let [parent] = parents.as_slice() else {
+        return Err(unsupported_parent(
+            "--candidate-parent requires a candidate with exactly one parent",
+        ));
+    };
+    if git_is_ancestor(repo, source_base, parent)? != Ancestry::Ancestor {
+        return Err(unsupported_parent(
+            "the captured base must be a known ancestor of the candidate parent",
+        ));
+    }
+    Ok(parent.clone())
 }
 
 fn source_mode_and_scope(source: &RevisionSource) -> (ProofCaptureModeV1, Vec<String>) {
@@ -926,6 +1081,465 @@ mod tests {
             landed.proof.source,
             landed.proof.candidate,
         );
+    }
+
+    fn captured_cursor(token: &str) -> String {
+        let mut cursor = ReviewCursorV1::decode_token(token).unwrap();
+        cursor.source_binding = crate::session::ReviewSourceBindingV1::Captured;
+        cursor.encode_token().unwrap()
+    }
+
+    fn rewrite_fixture(combined: bool) -> (tempfile::TempDir, String, String, String) {
+        let (root, original) = landing_fixture();
+        let a = git_stdout(root.path(), &["rev-parse", "HEAD~1"]);
+        let c = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+        let token = if combined {
+            git(root.path(), &["reset", "--mixed", &a]);
+            let capture = capture_review(crate::session::CaptureOptions::new(root.path())).unwrap();
+            let old = ReviewCursorV1::decode_token(&original).unwrap();
+            let change = create_change(ChangeCreateOptions::new(
+                root.path(),
+                "change-operation:combined-create",
+                ChangeIdentityDescriptorV1::opaque_nonce([0x74; 32]),
+            ))
+            .unwrap();
+            join_revision_to_change(ChangeMembershipOptions::new(
+                root.path(),
+                "change-operation:combined-join",
+                change.change_id.clone(),
+                capture.revision_id.clone(),
+            ))
+            .unwrap();
+            let ready = crate::session::change_reader_state_for_repo(root.path())
+                .unwrap()
+                .ready()
+                .unwrap()
+                .clone();
+            let token = select_review_cursor(
+                &ready.projection.changes[&change.change_id],
+                &ready.document_projection,
+                Some(&capture.revision_id),
+                false,
+                crate::session::ReviewSourceBindingV1::Captured,
+            )
+            .unwrap()
+            .token;
+            assert_ne!(
+                old.revision,
+                ReviewCursorV1::decode_token(&token).unwrap().revision
+            );
+            git(root.path(), &["reset", "--hard", &c]);
+            token
+        } else {
+            captured_cursor(&original)
+        };
+        git(root.path(), &["checkout", "--detach", &a]);
+        std::fs::write(root.path().join("upstream.txt"), "upstream\n").unwrap();
+        git(root.path(), &["add", "upstream.txt"]);
+        git(root.path(), &["commit", "--quiet", "-m", "upstream"]);
+        let b = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+        git(root.path(), &["cherry-pick", &c]);
+        (root, token, a, b)
+    }
+
+    fn store_inventory(repo: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, out);
+                } else {
+                    out.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        std::fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(repo).unwrap();
+        let mut out = std::collections::BTreeMap::new();
+        visit(store.store_dir(), store.store_dir(), &mut out);
+        out
+    }
+
+    #[test]
+    fn parent_preview_proves_disjoint_rewrites_without_writes_or_acknowledgement() {
+        for combined in [false, true] {
+            let (root, token, a, b) = rewrite_fixture(combined);
+            let before = store_inventory(root.path());
+            let preview = preview_land_commit(
+                LandCommitOptions::new(root.path(), &token, "track:author", "HEAD")
+                    .with_candidate_parent(true),
+            )
+            .unwrap();
+            assert_eq!(
+                preview.revision,
+                ReviewCursorV1::decode_token(&token).unwrap().revision
+            );
+            assert_eq!(
+                preview.proof.source.base_or_parent.as_deref(),
+                Some(a.as_str())
+            );
+            assert_eq!(
+                preview.proof.candidate.base_or_parent.as_deref(),
+                Some(b.as_str())
+            );
+            assert_eq!(
+                preview.proof.source.entries,
+                preview.proof.candidate.entries
+            );
+            assert_eq!(
+                preview.proof.result.semantic_relation,
+                SemanticRevisionRelationV1::EquivalentRewrite
+            );
+            assert_eq!(
+                preview.proof.result.proof_status,
+                RelationProofStatusV1::Verified
+            );
+            let json = serde_json::to_value(&preview).unwrap();
+            assert!(json.get("acknowledgement").is_none());
+            assert!(json.get("proofCreated").is_none());
+            assert_eq!(before, store_inventory(root.path()));
+        }
+    }
+
+    #[test]
+    fn parent_preview_rejects_changed_content_and_unsupported_candidates() {
+        let (root, token, a, _) = rewrite_fixture(false);
+        let options = LandCommitOptions::new(root.path(), &token, "track:author", "HEAD")
+            .with_candidate_parent(true);
+        let before = store_inventory(root.path());
+        for policy in [
+            options.clone().with_allow_extension(true),
+            options.clone().with_provenance_only(true),
+        ] {
+            assert!(
+                preview_land_commit(policy)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("--candidate-parent")
+            );
+        }
+        let root_error = preview_land_commit(
+            LandCommitOptions::new(root.path(), &token, "track:author", &a)
+                .with_candidate_parent(true),
+        )
+        .unwrap_err();
+        assert!(root_error.to_string().contains("exactly one parent"));
+        std::fs::write(root.path().join("sample.txt"), "different\n").unwrap();
+        git(root.path(), &["commit", "--amend", "--no-edit", "-a"]);
+        assert!(
+            preview_land_commit(options)
+                .unwrap_err()
+                .to_string()
+                .contains("refuted")
+        );
+        assert_eq!(before, store_inventory(root.path()));
+    }
+
+    #[test]
+    fn ordinary_preview_matches_existing_proof_and_has_no_store_effects() {
+        let (root, token) = landing_fixture();
+        let options = LandCommitOptions::new(root.path(), token, "track:author", "HEAD");
+        let before = store_inventory(root.path());
+        let preview = preview_land_commit(options.clone()).unwrap();
+        assert_eq!(before, store_inventory(root.path()));
+        let recorded = land_commit(options).unwrap();
+        assert_eq!(preview.proof, recorded.proof);
+    }
+
+    #[test]
+    fn parent_comparison_rejects_unsupported_sources_and_histories() {
+        let (root, token, a, _) = rewrite_fixture(false);
+        let options = LandCommitOptions::new(root.path(), &token, "track:author", "HEAD")
+            .with_candidate_parent(true);
+        let prepared = prepare_landing(&options).unwrap();
+        let original = prepared.shown.revision.git_provenance.unwrap();
+        let head = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+        let tree = git_stdout(root.path(), &["rev-parse", "HEAD^{tree}"]);
+        let merge = git_stdout(
+            root.path(),
+            &["commit-tree", &tree, "-p", &head, "-p", &a, "-m", "merge"],
+        );
+        assert!(
+            parent_comparison_base(root.path(), &original, &merge)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one parent")
+        );
+        let foreign_root = git_stdout(root.path(), &["commit-tree", &tree, "-m", "foreign root"]);
+        let foreign_child = git_stdout(
+            root.path(),
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &foreign_root,
+                "-m",
+                "foreign child",
+            ],
+        );
+        assert!(
+            parent_comparison_base(root.path(), &original, &foreign_child)
+                .unwrap_err()
+                .to_string()
+                .contains("known ancestor")
+        );
+        for source in [
+            RevisionSource::GitStaged {
+                mode: crate::model::StagedCaptureMode::BaseTreeToIndexTree,
+                pathspecs: vec![],
+            },
+            RevisionSource::GitUnstaged {
+                mode: crate::model::UnstagedCaptureMode::IndexTreeToWorkingTree,
+                include_untracked: false,
+                pathspecs: vec![],
+            },
+            RevisionSource::GitRootCommit {
+                mode: crate::model::RootCommitCaptureMode::EmptyTreeToTargetTree,
+                pathspecs: vec![],
+            },
+        ] {
+            let mut provenance = original.clone();
+            provenance.source = source;
+            assert!(
+                parent_comparison_base(root.path(), &provenance, &head)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("only combined worktree or single-commit")
+            );
+        }
+        for base in [
+            ReviewEndpoint::GitTree {
+                tree_oid: tree.clone(),
+            },
+            ReviewEndpoint::GitIndex {
+                tree_oid: tree.clone(),
+            },
+        ] {
+            let mut provenance = original.clone();
+            provenance.base = base;
+            assert!(
+                parent_comparison_base(root.path(), &provenance, &head)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("captured Git commit base")
+            );
+        }
+        for target in [&head, &merge, &a] {
+            let mut provenance = original.clone();
+            provenance.target = ReviewEndpoint::GitCommit {
+                commit_oid: target.clone(),
+                tree_oid: tree.clone(),
+            };
+            assert!(
+                parent_comparison_base(root.path(), &provenance, &head)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("single-commit source")
+            );
+        }
+        let mut bound = ReviewCursorV1::decode_token(&token).unwrap();
+        let original_commit = if let ReviewEndpoint::GitCommit { commit_oid, .. } = original.target
+        {
+            commit_oid
+        } else {
+            unreachable!()
+        };
+        bound.source_binding = crate::session::review_source_binding(
+            root.path(),
+            &bound.revision,
+            crate::session::ReviewSourceRequestV1::Commit(original_commit),
+        )
+        .unwrap();
+        assert!(
+            preview_land_commit(
+                LandCommitOptions::new(
+                    root.path(),
+                    bound.encode_token().unwrap(),
+                    "track:author",
+                    &head
+                )
+                .with_candidate_parent(true)
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("captured-source")
+        );
+    }
+
+    #[test]
+    fn parent_comparison_preserves_canonical_kinds_modes_and_scope() {
+        let (root, _) = landing_fixture();
+        let repo = root.path();
+        let old_link = git_stdout(repo, &["rev-parse", "HEAD~1"]);
+        let new_link = git_stdout(repo, &["rev-parse", "HEAD"]);
+        std::fs::create_dir(repo.join("scope")).unwrap();
+        for (path, bytes) in [
+            ("rename.txt", b"unique rename contents\n".as_slice()),
+            ("delete.txt", b"deleted contents\n"),
+            ("mode.txt", b"executable contents\n"),
+            ("binary.dat", b"\0old binary"),
+        ] {
+            std::fs::write(repo.join("scope").join(path), bytes).unwrap();
+        }
+        git(repo, &["add", "scope"]);
+        let old_blob = git_stdout(repo, &["hash-object", "-w", "scope/rename.txt"]);
+        git(
+            repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "120000",
+                &old_blob,
+                "scope/link",
+            ],
+        );
+        git(
+            repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000",
+                &old_link,
+                "scope/module",
+            ],
+        );
+        git(repo, &["commit", "-m", "rich base"]);
+        let a = git_stdout(repo, &["rev-parse", "HEAD"]);
+        let a_tree = git_stdout(repo, &["rev-parse", "HEAD^{tree}"]);
+        git(repo, &["mv", "scope/rename.txt", "scope/renamed.txt"]);
+        git(repo, &["rm", "scope/delete.txt"]);
+        std::fs::write(repo.join("scope/add.txt"), "new addition\n").unwrap();
+        std::fs::write(repo.join("scope/binary.dat"), b"\0new binary").unwrap();
+        git(repo, &["add", "scope/add.txt", "scope/binary.dat"]);
+        git(repo, &["update-index", "--chmod=+x", "scope/mode.txt"]);
+        let new_blob = git_stdout(repo, &["hash-object", "-w", "scope/add.txt"]);
+        git(
+            repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                "120000",
+                &new_blob,
+                "scope/link",
+            ],
+        );
+        git(
+            repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                "160000",
+                &new_link,
+                "scope/module",
+            ],
+        );
+        git(repo, &["commit", "-m", "rich change"]);
+        let c = git_stdout(repo, &["rev-parse", "HEAD"]);
+        let c_tree = git_stdout(repo, &["rev-parse", "HEAD^{tree}"]);
+        let add_outside = |commit: &str, parent: &str| {
+            git(repo, &["read-tree", commit]);
+            git(
+                repo,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "100644",
+                    &new_blob,
+                    "upstream.txt",
+                ],
+            );
+            let tree = git_stdout(repo, &["write-tree"]);
+            git_stdout(
+                repo,
+                &["commit-tree", &tree, "-p", parent, "-m", "advanced"],
+            )
+        };
+        let b = add_outside(&a, &a);
+        let candidate = add_outside(&c, &b);
+        let candidate_tree = git_commit_tree_oid(repo, &candidate).unwrap();
+        for scope in [vec![], vec!["scope".to_owned()]] {
+            let files = capture_commit_range_diff_files(repo, &a, &c, &scope).unwrap();
+            let provenance = crate::session::event::GitProvenance {
+                source: RevisionSource::GitCommitRange {
+                    mode: crate::model::CommitRangeCaptureMode::BaseTreeToTargetTree,
+                    pathspecs: scope.clone(),
+                },
+                base: ReviewEndpoint::GitCommit {
+                    commit_oid: a.clone(),
+                    tree_oid: a_tree.clone(),
+                },
+                target: ReviewEndpoint::GitCommit {
+                    commit_oid: c.clone(),
+                    tree_oid: c_tree.clone(),
+                },
+            };
+            let (source, compared, exact) = proof_inputs(
+                repo,
+                Some(&provenance),
+                &files,
+                &candidate,
+                &candidate_tree,
+                true,
+            )
+            .unwrap();
+            assert_eq!(source.entries, compared.entries);
+            assert!(!exact);
+            assert_eq!(compared.path_scope, canonical_scope(&scope));
+            assert_eq!(source.entries.len(), 7);
+            use crate::session::evidence::{
+                CanonicalChangeV1 as Change, CanonicalContentKindV1 as Kind,
+            };
+            for kind in [Kind::Text, Kind::Binary, Kind::Symlink, Kind::Submodule] {
+                assert!(
+                    source
+                        .entries
+                        .iter()
+                        .any(|entry| entry.content_kind == kind)
+                );
+            }
+            for change in [
+                Change::Added,
+                Change::Deleted,
+                Change::Renamed,
+                Change::ModeOnly,
+            ] {
+                assert!(source.entries.iter().any(|entry| entry.change == change));
+            }
+            // A candidate-only out-of-scope change is excluded only for scoped captures.
+            git(repo, &["read-tree", &candidate]);
+            git(
+                repo,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "100644",
+                    &new_blob,
+                    "extra.txt",
+                ],
+            );
+            let expanded_tree = git_stdout(repo, &["write-tree"]);
+            let expanded = git_stdout(
+                repo,
+                &["commit-tree", &expanded_tree, "-p", &b, "-m", "extra"],
+            );
+            let (_, expanded_input, _) = proof_inputs(
+                repo,
+                Some(&provenance),
+                &files,
+                &expanded,
+                &expanded_tree,
+                true,
+            )
+            .unwrap();
+            assert_eq!(source.entries == expanded_input.entries, !scope.is_empty());
+        }
     }
 
     fn git(repo: &Path, args: &[&str]) {

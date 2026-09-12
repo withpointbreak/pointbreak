@@ -282,7 +282,9 @@ pub use input_request::{
     fetch_input_request, list_input_requests, list_input_requests_with_public_read_context,
     open_input_request, respond_input_request,
 };
-pub use landing::{LandCommitOptions, LandCommitResultV1, land_commit};
+pub use landing::{
+    LandCommitOptions, LandCommitPreviewV1, LandCommitResultV1, land_commit, preview_land_commit,
+};
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,

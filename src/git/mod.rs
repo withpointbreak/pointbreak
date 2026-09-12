@@ -12,19 +12,17 @@ mod raw;
 /// re-exported; it is not part of the supported library surface.
 #[doc(hidden)]
 pub use backend::validate_backend_selector;
-// Consumed by landing preparation once its dependency is integrated.
-#[allow(unused_imports)]
-pub(crate) use command::git_commit_parent_oids;
 #[cfg(test)]
 pub(crate) use command::git_info_exclude_path;
 pub(crate) use command::{
-    Ancestry, git_commit_changed_paths, git_commit_tree_oid, git_common_dir, git_config_get,
-    git_config_path_get, git_default_branch_ref, git_empty_tree_oid, git_for_each_ref,
-    git_head_commit_oid_optional, git_head_oid, git_head_ref, git_independent_commits,
-    git_is_ancestor, git_object_exists, git_path_is_untracked, git_paths_are_ignored,
-    git_ref_state_lines, git_reflog_entries, git_rev_list_range, git_rev_list_reachable,
-    git_rev_list_reflog_reachable, git_rev_parse_commit_oid, git_tracked_and_untracked_inventory,
-    git_untracked_inventory, git_worktree_list, git_write_index_tree_oid,
+    Ancestry, git_commit_changed_paths, git_commit_parent_oids, git_commit_tree_oid,
+    git_common_dir, git_config_get, git_config_path_get, git_default_branch_ref,
+    git_empty_tree_oid, git_for_each_ref, git_head_commit_oid_optional, git_head_oid, git_head_ref,
+    git_independent_commits, git_is_ancestor, git_object_exists, git_path_is_untracked,
+    git_paths_are_ignored, git_ref_state_lines, git_reflog_entries, git_rev_list_range,
+    git_rev_list_reachable, git_rev_list_reflog_reachable, git_rev_parse_commit_oid,
+    git_tracked_and_untracked_inventory, git_untracked_inventory, git_worktree_list,
+    git_write_index_tree_oid,
 };
 pub use command::{git_commit_subjects, git_worktree_root};
 pub use ingest::{IngestOptions, ingest_tracked_diff, ingest_tracked_diff_with_options};

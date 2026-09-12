@@ -224,8 +224,6 @@ pub(crate) fn git_commit_tree_oid(repo: &Path, commit_oid: &str) -> Result<Strin
 
 /// Read the ordered parent headers of an exact commit object, even at a shallow
 /// boundary. A root returns no parents; invalid or unavailable objects fail.
-// Consumed by landing preparation once its dependency is integrated.
-#[allow(dead_code)]
 pub(crate) fn git_commit_parent_oids(repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
     dispatch(BackendClass::IdentityScalars)?.commit_parent_oids(repo, commit_oid)
 }
