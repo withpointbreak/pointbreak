@@ -988,6 +988,52 @@ describe("Change inspector render", () => {
     });
   });
 
+  it("renders a declared Markdown event body as HTML in the event detail pane", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    const base = eventHistory();
+    const history: EventHistoryDocument = {
+      ...base,
+      facets: { review_observation_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_observation_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_observation_recorded",
+          summary: {
+            kind: "review_observation_recorded",
+            details: {
+              observationId: "obs:sha256:one",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              title: "Readable",
+              body: "**Bold** finding",
+              bodyContentType: "text/markdown",
+            },
+          },
+        },
+      ],
+    };
+    state.publish(stageGeneration(profile, changes, attention, profile, history));
+    renderChangeInspector(state.snapshot(), { navigate });
+    const summary = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary",
+    );
+    expect(summary?.querySelector("strong")?.textContent).toBe("Bold");
+    // The one-line Timeline excerpt stays plain text.
+    const excerpt = document.querySelector<HTMLElement>("#master li.event .body");
+    expect(excerpt?.querySelector("strong")).toBeNull();
+    expect(excerpt?.textContent).toContain("**Bold**");
+  });
+
   it("renders a selected Timeline event as an exact readable surface", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });

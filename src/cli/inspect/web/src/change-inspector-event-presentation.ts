@@ -6,6 +6,7 @@
  */
 
 import type {
+  DeclaredContentType,
   EventHistoryEntry,
   EventHistoryEventType,
   EventHistoryRevisionRef,
@@ -23,6 +24,11 @@ export interface EventPresentation {
   label: string;
   title: string;
   body?: string;
+  /**
+   * The content type the writer declared for `body`, when the event carries
+   * one. Absent means plain text; the reader never infers a type.
+   */
+  bodyContentType?: DeclaredContentType;
   fields: EventPresentationField[];
 }
 
@@ -178,6 +184,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         label: "observation",
         title: detail.title,
         body: detail.body,
+        bodyContentType: detail.bodyContentType,
         fields: fields(
           field("observation", detail.observationId),
           field("target", eventTargetLabel(detail.target)),
@@ -194,6 +201,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         label: "assessment",
         title: `Assessment: ${words(detail.assessment)}`,
         body: detail.summary,
+        bodyContentType: detail.summaryContentType,
         fields: fields(
           field("assessment", detail.assessmentId),
           field("target", eventTargetLabel(detail.target)),
@@ -209,6 +217,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         label: "input requested",
         title: detail.title,
         body: detail.body,
+        bodyContentType: detail.bodyContentType,
         fields: fields(
           field("input request", detail.inputRequestId),
           field("reason", words(detail.reasonCode)),
@@ -222,6 +231,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         label: "input response",
         title: `Input request ${words(detail.outcome)}`,
         body: detail.reason,
+        bodyContentType: detail.reasonContentType,
         fields: fields(
           field("response", detail.inputRequestResponseId),
           field("input request", detail.inputRequestId),
@@ -296,6 +306,7 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
         label: "validation",
         title: `${detail.checkName}: ${words(detail.status)}`,
         body: detail.summary,
+        bodyContentType: detail.summaryContentType,
         fields: fields(
           field("validation", detail.validationCheckId),
           field("target", eventTargetLabel(detail.target)),

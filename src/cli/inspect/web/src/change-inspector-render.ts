@@ -847,7 +847,17 @@ function renderEventDetail(
   identity.dataset.eventId = event.eventId;
   const summary = document.createElement("section");
   summary.className = "event-detail-summary";
-  if (presentation.body) summary.append(detailLine(presentation.body));
+  if (presentation.body) {
+    const body = document.createElement("div");
+    body.className = "anno-body";
+    // Only a content type the writer declared reaches the Markdown renderer;
+    // absent means plain text and stays escaped.
+    body.innerHTML = renderBodyContent(
+      presentation.body,
+      presentation.bodyContentType ?? "text/plain",
+    );
+    summary.append(body);
+  }
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
   for (const item of presentation.fields) {
