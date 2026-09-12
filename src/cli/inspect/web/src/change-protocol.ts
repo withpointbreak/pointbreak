@@ -134,11 +134,19 @@ interface WorkObjectProposedSummary {
   supersedes: string[];
 }
 
+/**
+ * The body content type a writer declared on a prose-bearing event. The wire
+ * omits it when the writer declared plain text, so absent means "text/plain";
+ * the reader never infers a type from the prose itself.
+ */
+export type DeclaredContentType = "text/plain" | "text/markdown";
+
 interface ObservationSummary {
   observationId: string;
   target: FactTarget;
   title: string;
   body?: string;
+  bodyContentType?: DeclaredContentType;
   tags?: string[];
   confidence?: string;
   supersedesObservationIds?: string[];
@@ -154,6 +162,7 @@ interface AssessmentSummary {
     | "needs_changes"
     | "needs_clarification";
   summary?: string;
+  summaryContentType?: DeclaredContentType;
   replacesAssessmentIds?: string[];
   relatedObservationIds?: string[];
   relatedInputRequestIds?: string[];
@@ -174,6 +183,7 @@ interface InputRequestOpenedSummary {
     | "insufficient_evidence";
   title: string;
   body?: string;
+  bodyContentType?: DeclaredContentType;
 }
 
 interface InputRequestRespondedSummary {
@@ -182,6 +192,7 @@ interface InputRequestRespondedSummary {
   revisionId: string;
   outcome: "approved" | "rejected" | "dismissed" | "superseded" | "abandoned";
   reason?: string;
+  reasonContentType?: DeclaredContentType;
 }
 
 interface RevisionRefAssociatedSummary {
@@ -222,6 +233,7 @@ interface ValidationCheckSummary {
   exitCode?: number;
   trigger: "manual" | "push" | "pull_request";
   summary?: string;
+  summaryContentType?: DeclaredContentType;
 }
 
 interface ChangeDeclaredSummary {
@@ -1438,6 +1450,12 @@ function isReviewTargetSummary(value: unknown): value is FactTarget {
   return isFactTarget(value);
 }
 
+function isOptionalDeclaredContentType(value: unknown): boolean {
+  return (
+    value === undefined || value === "text/plain" || value === "text/markdown"
+  );
+}
+
 function isEventHistorySummary(
   value: unknown,
   eventType: EventHistoryEventType,
@@ -1471,7 +1489,8 @@ function isEventHistorySummary(
         isOptionalStringArray(details.tags) &&
         optionalString(details.confidence) &&
         isOptionalStringArray(details.supersedesObservationIds) &&
-        isOptionalStringArray(details.respondsToObservationIds)
+        isOptionalStringArray(details.respondsToObservationIds) &&
+        isOptionalDeclaredContentType(details.bodyContentType)
       );
     case "review_assessment_recorded":
       return (
@@ -1484,7 +1503,8 @@ function isEventHistorySummary(
         optionalString(details.summary) &&
         isOptionalStringArray(details.replacesAssessmentIds) &&
         isOptionalStringArray(details.relatedObservationIds) &&
-        isOptionalStringArray(details.relatedInputRequestIds)
+        isOptionalStringArray(details.relatedInputRequestIds) &&
+        isOptionalDeclaredContentType(details.summaryContentType)
       );
     case "input_request_opened":
       return (
@@ -1500,7 +1520,8 @@ function isEventHistorySummary(
           details.reasonCode === "manual_decision_required" ||
           details.reasonCode === "insufficient_evidence") &&
         nonEmptyString(details.title) &&
-        optionalString(details.body)
+        optionalString(details.body) &&
+        isOptionalDeclaredContentType(details.bodyContentType)
       );
     case "input_request_responded":
       return (
@@ -1512,7 +1533,8 @@ function isEventHistorySummary(
           details.outcome === "dismissed" ||
           details.outcome === "superseded" ||
           details.outcome === "abandoned") &&
-        optionalString(details.reason)
+        optionalString(details.reason) &&
+        isOptionalDeclaredContentType(details.reasonContentType)
       );
     case "revision_ref_associated":
       return (
@@ -1557,7 +1579,8 @@ function isEventHistorySummary(
         (details.trigger === "manual" ||
           details.trigger === "push" ||
           details.trigger === "pull_request") &&
-        optionalString(details.summary)
+        optionalString(details.summary) &&
+        isOptionalDeclaredContentType(details.summaryContentType)
       );
     case "change_declared":
       return (

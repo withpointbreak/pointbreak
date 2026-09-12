@@ -1444,3 +1444,108 @@ describe("bounded Change protocol", () => {
     );
   });
 });
+
+// One event-history document whose single entry carries the given summary. The
+// decoder cross-validates `facets`, `completion.eventTypes` and the entry's
+// `eventType`/`summary.kind`, so all four move together.
+function eventHistoryWith(entry: {
+  eventType: string;
+  details: Record<string, unknown>;
+}) {
+  const base = validEventHistoryValue();
+  return {
+    ...base,
+    facets: { [entry.eventType]: 1 },
+    completion: { ...base.completion, eventTypes: [entry.eventType] },
+    entries: [
+      {
+        ...base.entries[0],
+        eventType: entry.eventType,
+        summary: { kind: entry.eventType, details: entry.details },
+      },
+    ],
+  };
+}
+
+describe("declared event body content types", () => {
+  it("carries the declared body content type for prose-bearing Timeline events", () => {
+    const document = decodeEventHistory(
+      eventHistoryWith({
+        eventType: "review_observation_recorded",
+        details: {
+          observationId: "obs:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          title: "Readable",
+          body: "**Bold** finding",
+          bodyContentType: "text/markdown",
+        },
+      }),
+    );
+    const summary = document.entries[0].summary;
+    expect(summary.kind).toBe("review_observation_recorded");
+    if (summary.kind === "review_observation_recorded") {
+      expect(summary.details.bodyContentType).toBe("text/markdown");
+    }
+  });
+
+  it("treats an omitted event content type as plain text", () => {
+    const document = decodeEventHistory(
+      eventHistoryWith({
+        eventType: "review_assessment_recorded",
+        details: {
+          assessmentId: "assess:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          assessment: "accepted",
+          summary: "plain",
+        },
+      }),
+    );
+    const summary = document.entries[0].summary;
+    expect(summary.kind).toBe("review_assessment_recorded");
+    if (summary.kind === "review_assessment_recorded") {
+      expect(summary.details.summaryContentType).toBeUndefined();
+    }
+  });
+
+  it("rejects an event content type the writer never declares", () => {
+    for (const [eventType, details] of [
+      [
+        "review_observation_recorded",
+        {
+          observationId: "obs:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          title: "Readable",
+          body: "x",
+          bodyContentType: "text/html",
+        },
+      ],
+      [
+        "input_request_responded",
+        {
+          inputRequestResponseId: "input-request-response:sha256:one",
+          inputRequestId: "input-request:sha256:one",
+          revisionId: "rev:sha256:one",
+          outcome: "approved",
+          reason: "x",
+          reasonContentType: "text/html",
+        },
+      ],
+      [
+        "validation_check_recorded",
+        {
+          validationCheckId: "validation:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          checkName: "web",
+          status: "passed",
+          trigger: "manual",
+          summary: "x",
+          summaryContentType: "application/json",
+        },
+      ],
+    ] as const) {
+      expect(() =>
+        decodeEventHistory(eventHistoryWith({ eventType, details })),
+      ).toThrow();
+    }
+  });
+});
