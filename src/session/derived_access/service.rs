@@ -10,9 +10,9 @@ use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
     AppendCrashPoint, BootstrapPopulationEntry, CursorLedgerError, CursorLedgerIdentity,
     CursorLedgerInventory, HydratedLocatorRow, LegacyReadContext, LocatorInventory,
-    MaterializedChangeProjection, ProductHistoryFact, ProposalCarrierLocator, SemanticInventory,
-    SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError,
-    StoreWriterLock,
+    MaterializedChangePageProjection, MaterializedChangeProjection, ProductHistoryFact,
+    ProposalCarrierLocator, SemanticInventory, SqliteCursorLedger, SqliteLocator,
+    SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
 };
 use super::support::support_event_ids;
 use crate::error::Result as ShoreResult;
@@ -681,6 +681,34 @@ impl DerivedAccessService {
         observed: TruthCursor,
     ) -> Result<LocatorRead<MaterializedChangeProjection>, DerivedAccessServiceError> {
         Ok(self.semantic.materialized_change_projection(observed)?)
+    }
+
+    /// The Change-page snapshot: projections plus ordering keys through one
+    /// validated connection at the pinned checkpoint.
+    pub(crate) fn semantic_materialized_change_page_projection_at(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedChangePageProjection>, DerivedAccessServiceError> {
+        Ok(self
+            .semantic
+            .materialized_change_page_projection(observed)?)
+    }
+
+    /// The presentation ordering keys for one Change's seek read at a pinned
+    /// checkpoint; `scope` narrows the activity fold to that Change.
+    pub(crate) fn semantic_change_ordering_at(
+        &self,
+        observed: TruthCursor,
+        semantic: &crate::session::ChangeProjection,
+        source_projection_stamp: &str,
+        scope: Option<&crate::model::ChangeId>,
+    ) -> Result<LocatorRead<crate::documents::ChangeOrderingV1>, DerivedAccessServiceError> {
+        Ok(self.semantic.materialized_change_ordering(
+            observed,
+            semantic,
+            source_projection_stamp,
+            scope,
+        )?)
     }
 
     /// Select one Change's correlated materialized fact rows through the

@@ -362,6 +362,7 @@ impl DerivedChangeAccess {
                     generation.projection().clone(),
                     generation.document_projection().clone(),
                 )?
+                .with_ordering(generation.ordering().clone())?
                 .with_generation_stamp(generation.stamp().to_owned())?
                 .detail_document(change)?;
                 DerivedChangeOutcomeV1::Ready(document)
@@ -416,7 +417,7 @@ impl DerivedChangeAccess {
         let as_of = checkpoint.truth_cursor;
         let materialized = match current
             .service()
-            .semantic_materialized_change_projection_at(as_of)
+            .semantic_materialized_change_page_projection_at(as_of)
         {
             Ok(LocatorRead::Ready(materialized)) => materialized,
             Ok(LocatorRead::CatchUpRequired { .. }) => {
@@ -443,9 +444,11 @@ impl DerivedChangeAccess {
             Ok(stamp) => stamp,
             Err(error) => return Ok(lifecycle_failure_outcome(error)),
         };
+        let ordering = materialized.ordering;
         let generation = DerivedChangeGenerationV1 {
             projection: materialized.projection,
             document_projection: materialized.document_projection,
+            ordering,
             stamp,
             checkpoint_sha256: checkpoint.checkpoint_sha256.clone(),
         };
@@ -773,7 +776,7 @@ impl DerivedChangeAccess {
         let as_of = checkpoint.truth_cursor;
         let materialized = match current
             .service()
-            .semantic_materialized_change_projection_at(as_of)
+            .semantic_materialized_change_page_projection_at(as_of)
         {
             Ok(LocatorRead::Ready(materialized)) => materialized,
             Ok(LocatorRead::CatchUpRequired { .. }) => {
@@ -815,10 +818,13 @@ impl DerivedChangeAccess {
                 "derived Change continuation belongs to a different live checkpoint",
             ));
         }
+        let ordering = materialized.ordering;
         let facade = match ChangeDocumentFacadeV1::new(
             materialized.projection,
             materialized.document_projection,
-        ) {
+        )
+        .and_then(|facade| facade.with_ordering(ordering))
+        {
             Ok(facade) => facade,
             Err(error) => {
                 return Ok(DerivedChangeOutcomeV1::projection_unavailable(
@@ -1397,6 +1403,7 @@ fn bind_strict_change_stamp_with_hook(
 pub struct DerivedChangeGenerationV1 {
     projection: ChangeProjection,
     document_projection: ChangeDocumentProjectionV1,
+    ordering: crate::documents::ChangeOrderingV1,
     stamp: String,
     checkpoint_sha256: String,
 }
@@ -1404,6 +1411,11 @@ pub struct DerivedChangeGenerationV1 {
 impl DerivedChangeGenerationV1 {
     pub fn projection(&self) -> &ChangeProjection {
         &self.projection
+    }
+
+    /// The presentation ordering keys computed for this generation.
+    pub fn ordering(&self) -> &crate::documents::ChangeOrderingV1 {
+        &self.ordering
     }
 
     pub fn document_projection(&self) -> &ChangeDocumentProjectionV1 {
@@ -2271,11 +2283,12 @@ mod tests {
     use crate::session::derived_access::writer::DerivedWriteCoordinator;
     use crate::session::event::{
         ArtifactRemovedPayload, BodyContentType, EventSignature, EventSignatureRecordedPayload,
-        EventTarget, EventToBeSigned, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1,
-        ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision, Writer,
-        build_change_declared, build_membership_asserted, build_membership_withdrawn,
-        build_review_fact_ported, build_revision_relation_asserted,
-        build_revision_relation_withdrawn, event_signature_pre_authentication_encoding,
+        EventTarget, EventToBeSigned, FactPortRelationV1, FactRefV1, InputRequestOpenedPayload,
+        ReviewFactPortDraftV1, ReviewInitializedPayload, ReviewObservationRecordedPayload,
+        Revision, Writer, build_change_declared, build_change_link_asserted,
+        build_membership_asserted, build_membership_withdrawn, build_review_fact_ported,
+        build_revision_relation_asserted, build_revision_relation_withdrawn,
+        event_signature_pre_authentication_encoding,
     };
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::store::backend::StoreBackend;
@@ -2739,6 +2752,313 @@ mod tests {
                 backend: StoreBackend::Local(self._temp.path().to_path_buf()),
             });
             DerivedChangeAccess::from_runtime(runtime)
+        }
+    }
+
+    fn strict_ordering(fixture: &ActiveChangeFixture) -> crate::documents::ChangeOrderingV1 {
+        let events = fixture.store.list_change_events().unwrap();
+        let semantic = crate::session::project_changes(&events).unwrap();
+        let provenance = crate::session::project_change_documents(&events).unwrap();
+        crate::documents::change_ordering_projection(&semantic, &provenance, &events).unwrap()
+    }
+
+    /// The differential guard for the ordering keys: every derived Change
+    /// document (list, Attention, seek-backed detail) must carry exactly the
+    /// keys the authoritative lane derives from the same events.
+    fn assert_derived_ordering_matches_strict(fixture: &ActiveChangeFixture, context: &str) {
+        let strict = strict_ordering(fixture);
+        let DerivedChangeOutcomeV1::Ready(list) = fixture.access.review_list_document().unwrap()
+        else {
+            panic!("{context}: derived list document must be ready");
+        };
+        assert!(!list.changes.is_empty(), "{context}: fixture Changes");
+        for summary in &list.changes {
+            assert_eq!(
+                summary.activity_at,
+                strict.activity.get(&summary.change_id).cloned(),
+                "{context}: activity of {}",
+                summary.change_id.as_str()
+            );
+            assert_eq!(
+                summary.attention_wait_at,
+                strict.attention_wait.get(&summary.change_id).cloned(),
+                "{context}: wait key of {}",
+                summary.change_id.as_str()
+            );
+        }
+        let DerivedChangeOutcomeV1::Ready(attention) =
+            fixture.access.review_attention_document().unwrap()
+        else {
+            panic!("{context}: derived attention document must be ready");
+        };
+        for summary in &attention.document.changes {
+            let listed = list
+                .changes
+                .iter()
+                .find(|candidate| candidate.change_id == summary.change_id)
+                .expect("attention Changes are listed Changes");
+            assert_eq!(
+                summary.activity_at, listed.activity_at,
+                "{context}: attention activity"
+            );
+            assert_eq!(
+                summary.attention_wait_at, listed.attention_wait_at,
+                "{context}: attention wait key"
+            );
+        }
+        for summary in &list.changes {
+            let DerivedChangeOutcomeV1::Ready(detail) = fixture
+                .access
+                .review_detail_document(&summary.change_id)
+                .unwrap()
+            else {
+                panic!("{context}: derived detail must be ready");
+            };
+            assert_eq!(
+                detail.detail.summary.activity_at,
+                summary.activity_at,
+                "{context}: seek detail activity of {}",
+                summary.change_id.as_str()
+            );
+            assert_eq!(
+                detail.detail.summary.attention_wait_at,
+                summary.attention_wait_at,
+                "{context}: seek detail wait key of {}",
+                summary.change_id.as_str()
+            );
+        }
+    }
+
+    fn ordering_observation(revision_id: &RevisionId, key: &str, occurred_at: &str) -> ShoreEvent {
+        let track_id = TrackId::new("track:ordering");
+        ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            format!("ordering:observation:{key}"),
+            EventTarget::for_revision(
+                JournalId::new("journal:change-endpoint"),
+                revision_id.clone(),
+                Some(track_id),
+            )
+            .expect("observation target"),
+            Writer::shore_local("change-endpoint-test"),
+            ReviewObservationRecordedPayload {
+                observation_id: ObservationId::new(format!("obs:sha256:{key}")),
+                target: ReviewTargetRef::Revision {
+                    revision_id: revision_id.clone(),
+                },
+                title: format!("ordering {key}"),
+                body: None,
+                body_content_type: BodyContentType::TextPlain,
+                body_artifact_path: None,
+                body_byte_size: None,
+                body_content_hash: None,
+                tags: Vec::new(),
+                confidence: None,
+                supersedes_observation_ids: Vec::new(),
+                responds_to_observation_ids: Vec::new(),
+            },
+            occurred_at,
+        )
+        .expect("observation event")
+    }
+
+    fn ordering_change_event<P: crate::session::event::EventPayload>(
+        key: &str,
+        payload: P,
+        occurred_at: &str,
+    ) -> ShoreEvent {
+        ShoreEvent::new(
+            payload.event_type(),
+            format!("ordering:change:{key}"),
+            EventTarget::for_journal(JournalId::new("journal:change-endpoint")),
+            Writer::shore_local("change-endpoint-test"),
+            payload,
+            occurred_at,
+        )
+        .expect("change event")
+    }
+
+    fn ordering_request_opened(
+        revision_id: &RevisionId,
+        key: &str,
+        occurred_at: &str,
+    ) -> ShoreEvent {
+        let track_id = TrackId::new("track:ordering");
+        ShoreEvent::new(
+            EventType::InputRequestOpened,
+            format!("ordering:request:{key}"),
+            EventTarget::for_revision(
+                JournalId::new("journal:change-endpoint"),
+                revision_id.clone(),
+                Some(track_id),
+            )
+            .expect("request target"),
+            Writer::shore_local("change-endpoint-test"),
+            InputRequestOpenedPayload {
+                input_request_id: crate::model::InputRequestId::new(format!(
+                    "input-request:sha256:{key}"
+                )),
+                target: ReviewTargetRef::Revision {
+                    revision_id: revision_id.clone(),
+                },
+                task_target: None,
+                reason_code: crate::session::event::InputRequestReasonCode::ManualDecisionRequired,
+                title: format!("request {key}"),
+                body: None,
+                body_content_type: BodyContentType::TextPlain,
+                body_artifact_path: None,
+                body_byte_size: None,
+                body_content_hash: None,
+                target_fingerprint: None,
+            },
+            occurred_at,
+        )
+        .expect("request event")
+    }
+
+    fn derived_activity(fixture: &ActiveChangeFixture, change_id: &ChangeId) -> Option<String> {
+        let DerivedChangeOutcomeV1::Ready(list) = fixture.access.review_list_document().unwrap()
+        else {
+            panic!("derived list document must be ready");
+        };
+        list.changes
+            .into_iter()
+            .find(|summary| &summary.change_id == change_id)
+            .and_then(|summary| summary.activity_at)
+    }
+
+    #[test]
+    fn derived_ordering_keys_match_the_authoritative_lane_across_timeline_families() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("first")], &[Some("second")]]);
+        let first = fixture.changes[0].clone();
+        let second = fixture.changes[1].clone();
+        assert_derived_ordering_matches_strict(&fixture, "declarations and memberships");
+
+        // A review-only event on a member Revision contributes through
+        // membership context, not a Change fact.
+        record_fixture_event(
+            &fixture.store,
+            ordering_observation(
+                &first.revision.revision_id,
+                "member",
+                "2026-09-01T00:00:00Z",
+            ),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "review-only observation");
+        assert_eq!(
+            derived_activity(&fixture, &first.change_id).as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+
+        // An event on an unknown Revision resolves to no Change on either lane.
+        let unknown = RevisionId::new(format!("rev:sha256:{}", "f".repeat(64)));
+        record_fixture_event(
+            &fixture.store,
+            ordering_observation(&unknown, "unknown", "2026-09-02T00:00:00Z"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "unresolved Revision");
+        assert_eq!(
+            derived_activity(&fixture, &first.change_id).as_deref(),
+            Some("2026-09-01T00:00:00Z")
+        );
+
+        // A Change link contributes to both declared Changes.
+        let link = build_change_link_asserted(
+            &first.change_id,
+            &second.change_id,
+            crate::session::event::ChangeLinkRelationV1::RelatedWork,
+            [77; 32],
+        )
+        .expect("link");
+        record_fixture_event(
+            &fixture.store,
+            ordering_change_event("link", link, "2026-09-03T00:00:00Z"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "change link");
+        for change in [&first.change_id, &second.change_id] {
+            assert_eq!(
+                derived_activity(&fixture, change).as_deref(),
+                Some("2026-09-03T00:00:00Z")
+            );
+        }
+
+        // Membership moves which Change an EARLIER event contributes to: the
+        // observation is newer than the membership claim that later admits its
+        // Revision, so the rebuilt map must re-resolve it rather than carry a
+        // frozen attribution.
+        let adopted = RevisionId::new(format!("rev:sha256:{}", "e".repeat(64)));
+        record_fixture_event(
+            &fixture.store,
+            ordering_observation(&adopted, "adopted", "2026-09-05T00:00:00Z"),
+        );
+        let membership =
+            build_membership_asserted(&second.change_id, &adopted, [78; 32]).expect("membership");
+        record_fixture_event(
+            &fixture.store,
+            ordering_change_event("adopt", membership, "2026-08-01T00:00:00Z"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "membership re-resolution");
+        assert_eq!(
+            derived_activity(&fixture, &second.change_id).as_deref(),
+            Some("2026-09-05T00:00:00Z")
+        );
+
+        // An open input request is an anchored attention item: the wait key
+        // appears on both lanes with the item's tier and observed instant.
+        record_fixture_event(
+            &fixture.store,
+            ordering_request_opened(&first.revision.revision_id, "wait", "2026-09-06T00:00:00Z"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "open input request");
+        let strict = strict_ordering(&fixture);
+        assert_eq!(
+            strict
+                .attention_wait
+                .get(&first.change_id)
+                .map(|key| key.oldest_observed_at.as_str()),
+            Some("2026-09-06T00:00:00Z")
+        );
+
+        // A fact port names two Revisions and an explicit context Change.
+        let port = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: first.revision.clone(),
+                origin_fact: FactRefV1::Observation {
+                    observation_id: ObservationId::new("obs:sha256:member"),
+                },
+                target_revision: second.revision.clone(),
+                relation: FactPortRelationV1::ContextOnly,
+                target_fact: None,
+                rationale_content_hash: None,
+                context_change_id: Some(first.change_id.clone()),
+            },
+            &Writer::shore_local("change-endpoint-test").actor_id,
+            &TrackId::new("track:ordering"),
+        )
+        .expect("fact port");
+        record_fixture_event(
+            &fixture.store,
+            ShoreEvent::new(
+                EventType::ReviewFactPorted,
+                "ordering:fact-port",
+                EventTarget::for_revision(
+                    JournalId::new("journal:change-endpoint"),
+                    second.revision.revision_id.clone(),
+                    Some(TrackId::new("track:ordering")),
+                )
+                .expect("port target"),
+                Writer::shore_local("change-endpoint-test"),
+                port,
+                "2026-09-07T00:00:00Z",
+            )
+            .expect("fact port event"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "fact port");
+        for change in [&first.change_id, &second.change_id] {
+            assert_eq!(
+                derived_activity(&fixture, change).as_deref(),
+                Some("2026-09-07T00:00:00Z")
+            );
         }
     }
 
@@ -3990,10 +4310,18 @@ mod tests {
             &event_set_hash_for_events(&events).expect("strict event-set hash"),
         )
         .expect("strict presentation replay");
+        let ordering = crate::documents::change_ordering_projection(
+            &strict_semantic,
+            &strict_documents,
+            &events,
+        )
+        .expect("strict ordering replay");
         let strict = ChangeDocumentFacadeV1::new(strict_semantic, strict_documents)
             .expect("strict Change facade")
             .with_presentations(presentations)
-            .expect("bind strict presentations");
+            .expect("bind strict presentations")
+            .with_ordering(ordering)
+            .expect("bind strict ordering");
         let mut expected_bare = strict
             .list_document_for_inspector_with_presentations()
             .expect("strict bare Changes");
@@ -4349,8 +4677,16 @@ mod tests {
             crate::session::project_changes(&events).expect("project strict Changes");
         let strict_documents = crate::session::project_change_documents(&events)
             .expect("project strict Change documents");
+        let ordering = crate::documents::change_ordering_projection(
+            &strict_projection,
+            &strict_documents,
+            &events,
+        )
+        .expect("strict ordering replay");
         let expected = ChangeDocumentFacadeV1::new(strict_projection, strict_documents)
             .expect("build strict Change facade")
+            .with_ordering(ordering)
+            .expect("bind strict ordering")
             .with_generation_stamp(page.document.document.projection_stamp.clone())
             .expect("bind the staged generation stamp")
             .detail_document(&change_id)
@@ -6780,13 +7116,15 @@ mod tests {
         let checkpoint = current.pin_change_reader_checkpoint().unwrap();
         let LocatorRead::Ready(materialized) = current
             .service()
-            .semantic_materialized_change_projection_at(checkpoint.truth_cursor)
+            .semantic_materialized_change_page_projection_at(checkpoint.truth_cursor)
             .unwrap()
         else {
             panic!("fixture projection must be caught up");
         };
         let authoritative =
             ChangeDocumentFacadeV1::new(materialized.projection, materialized.document_projection)
+                .unwrap()
+                .with_ordering(materialized.ordering)
                 .unwrap();
         let mut expected = authoritative.detail_document(&change_id).unwrap();
         let mut actual = detail.clone();
@@ -7661,6 +7999,7 @@ mod tests {
     "relationWithdrawals": [],
     "schema": "pointbreak.review-change",
     "summary": {
+      "activityAt": "2026-08-10T01:00:59Z",
       "attentionSummary": "in_progress",
       "availabilitySummary": "available",
       "changeId": "change:sha256:94e12f1e0a87f6a5c34d8a201588b1dabc40690cc1ce34859131335550198e32",

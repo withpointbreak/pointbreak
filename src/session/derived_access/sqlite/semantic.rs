@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
+use crate::documents::{
+    ChangeActivityContributionV1, ChangeOrderingV1, attention_wait_keys, fold_change_activity,
+};
 use crate::model::{
     ActorId, ChangeId, EventId, ReviewTargetRef, RevisionId, RevisionRefV1, TrackId,
 };
@@ -102,6 +105,17 @@ pub(crate) struct MaterializedChangeProjection {
     pub(crate) as_of: TruthCursor,
     pub(crate) projection: crate::session::ChangeProjection,
     pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
+}
+
+/// The Change-page snapshot: the whole-generation projections plus the
+/// presentation ordering keys, read through one validated connection at one
+/// checkpoint so the page cannot pair a projection with keys from another
+/// generation.
+pub(crate) struct MaterializedChangePageProjection {
+    pub(crate) as_of: TruthCursor,
+    pub(crate) projection: crate::session::ChangeProjection,
+    pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
+    pub(crate) ordering: ChangeOrderingV1,
 }
 
 /// One exact, connection-local fact read snapshot. The transaction owns the
@@ -2289,6 +2303,74 @@ impl SqliteSemantic {
             projection,
             document_projection,
         }))
+    }
+
+    /// The Change-page read: whole-generation projections plus the
+    /// presentation ordering keys, through one validated connection. Activity
+    /// folds the existing event-to-Change correlation (the same rows the
+    /// derived Timeline filters and attributes by) and wait-time keys come
+    /// from the attention facts, both at the pinned checkpoint. Timeline reads
+    /// keep [`Self::materialized_change_projection`], which pays for neither.
+    pub(crate) fn materialized_change_page_projection(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedChangePageProjection>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let (projection, document_projection) =
+            query_materialized_change_projections(&connection, observed.epoch, observed.sequence)?;
+        let ordering = query_change_ordering(
+            &connection,
+            observed,
+            &projection,
+            &document_projection.projection_stamp,
+            None,
+        )?;
+        Ok(LocatorRead::Ready(MaterializedChangePageProjection {
+            as_of: observed,
+            projection,
+            document_projection,
+            ordering,
+        }))
+    }
+
+    /// The ordering keys for one Change's seek read, with the activity fold
+    /// narrowed to that Change through the Change-keyed correlation index.
+    /// Nothing here is persisted or read by Change semantics.
+    pub(crate) fn materialized_change_ordering(
+        &self,
+        observed: TruthCursor,
+        semantic: &crate::session::ChangeProjection,
+        source_projection_stamp: &str,
+        scope: Option<&ChangeId>,
+    ) -> Result<LocatorRead<ChangeOrderingV1>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        Ok(LocatorRead::Ready(query_change_ordering(
+            &connection,
+            observed,
+            semantic,
+            source_projection_stamp,
+            scope,
+        )?))
     }
 
     /// Test-only eager complete-Change scan probe: the ordered-subset seek
@@ -4731,6 +4813,104 @@ fn query_materialized_change_projections(
     let document_projection = project_change_documents_from_facts(&facts)
         .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))?;
     Ok((projection, document_projection))
+}
+
+/// Both ordering keys over one already-validated connection at one
+/// checkpoint: the correlation fold for activity and the attention facts for
+/// wait-time keys.
+fn query_change_ordering(
+    connection: &rusqlite::Connection,
+    observed: TruthCursor,
+    semantic: &crate::session::ChangeProjection,
+    source_projection_stamp: &str,
+    scope: Option<&ChangeId>,
+) -> Result<ChangeOrderingV1, SqliteSemanticError> {
+    let activity = query_change_activity(connection, observed.epoch, observed.sequence, scope)?;
+    let facts = query_materialized_compact_facts(
+        connection,
+        observed.epoch,
+        observed.sequence,
+        None,
+        MaterializedFactFamilies::Attention,
+    )?;
+    let supersession =
+        crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?;
+    let attention = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts_with_supersession(
+        &facts,
+        &supersession,
+    )?;
+    Ok(ChangeOrderingV1 {
+        activity,
+        attention_wait: attention_wait_keys(&attention.items, semantic),
+        source_projection_stamp: source_projection_stamp.to_owned(),
+    })
+}
+
+/// Fold the newest correlated event instant per Change over the maintained
+/// event-to-Change correlation rows at one checkpoint. The fold runs in Rust
+/// so the comparator is the crate's single instant comparator, not SQL text
+/// order.
+fn query_change_activity(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    scope: Option<&ChangeId>,
+) -> Result<BTreeMap<ChangeId, String>, SqliteSemanticError> {
+    // The `INDEXED BY` clause fences the scoped seek onto the Change-keyed
+    // correlation index, as the seek batch does; the whole-generation fold
+    // walks the correlation table in sequence order.
+    let sql = if scope.is_some() {
+        "SELECT correlation.change_id, event.occurred_at, locator.event_id
+         FROM product_history_change_correlation AS correlation
+              INDEXED BY product_history_change_correlation_change
+         JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+         JOIN semantic_event_fact AS event ON event.sequence = correlation.sequence
+         WHERE correlation.change_id = ?3
+           AND correlation.sequence <= ?2
+           AND locator.epoch = ?1"
+    } else {
+        "SELECT correlation.change_id, event.occurred_at, locator.event_id
+         FROM product_history_change_correlation AS correlation
+         JOIN locator_event_text AS locator ON locator.sequence = correlation.sequence
+         JOIN semantic_event_fact AS event ON event.sequence = correlation.sequence
+         WHERE locator.epoch = ?1 AND correlation.sequence <= ?2"
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| sqlite_error("prepare Change activity correlation", error))?;
+    let epoch = to_i64(epoch, "Change activity epoch")?;
+    let sequence = to_i64(sequence, "Change activity sequence")?;
+    let mut rows = Vec::new();
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    };
+    let mapped = match scope {
+        Some(change_id) => {
+            statement.query_map(params![epoch, sequence, change_id.as_str()], map_row)
+        }
+        None => statement.query_map(params![epoch, sequence], map_row),
+    }
+    .map_err(|error| sqlite_error("query Change activity correlation", error))?;
+    for row in mapped {
+        let (change_id, occurred_at, event_id) =
+            row.map_err(|error| sqlite_error("read Change activity correlation", error))?;
+        rows.push((
+            [ChangeId::new(change_id)],
+            occurred_at,
+            EventId::new(event_id),
+        ));
+    }
+    Ok(fold_change_activity(rows.iter().map(
+        |(change_ids, occurred_at, event_id)| ChangeActivityContributionV1 {
+            change_ids,
+            occurred_at,
+            event_id,
+        },
+    )))
 }
 
 fn query_materialized_change_document_facts(

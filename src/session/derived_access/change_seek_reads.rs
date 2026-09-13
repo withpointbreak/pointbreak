@@ -216,7 +216,28 @@ pub(crate) fn prepare_narrowed_facade(
         Ok(stamp) => stamp,
         Err(error) => return Ok(lifecycle_failure_outcome(error)),
     };
+    let ordering = match current.service().semantic_change_ordering_at(
+        checkpoint.truth_cursor,
+        &narrowed_semantic,
+        &narrowed_document.projection_stamp,
+        Some(change_id),
+    ) {
+        Ok(LocatorRead::Ready(ordering)) => ordering,
+        Ok(LocatorRead::CatchUpRequired { .. }) => {
+            return Ok(DerivedChangeOutcomeV1::retryable(
+                DerivedProjectionFailureCodeV1::ProjectionStale,
+                "derived Change seek ordering moved while its checkpoint was pinned",
+            ));
+        }
+        Err(error) => {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                error.to_string(),
+            ));
+        }
+    };
     let facade = match ChangeDocumentFacadeV1::new(narrowed_semantic, narrowed_document.clone())
+        .and_then(|facade| facade.with_ordering(ordering))
         .and_then(|facade| facade.with_generation_stamp(stamp.clone()))
         .and_then(|facade| facade.with_fact_port_sources(sources))
     {
