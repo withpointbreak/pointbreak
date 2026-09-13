@@ -79,6 +79,18 @@
       "right": "1970-01-01T00:00:00.000Z",
       "expected": "lt",
       "note": "impossible date is unparseable"
+    },
+    {
+      "left": "\ud800\udc00",
+      "right": "\ue000",
+      "expected": "gt",
+      "note": "two unparseable values compare by Unicode scalar (UTF-8 byte) order, not UTF-16 code units"
+    },
+    {
+      "left": "\ue000x",
+      "right": "\ue000",
+      "expected": "gt",
+      "note": "a longer unparseable value sorts after its prefix"
     }
   ],
   "activityDescPages": [
@@ -102,7 +114,9 @@
           "changeId": "change:sha256:7e02",
           "activityAt": "unix-ms:not-a-number"
         },
-        { "changeId": "change:sha256:ffff" }
+        {
+          "changeId": "change:sha256:ffff"
+        }
       ],
       "monotonic": true
     },
@@ -140,7 +154,9 @@
       "note": "absent activity may not precede present activity",
       "order": "activity_desc",
       "changes": [
-        { "changeId": "change:sha256:0a1f" },
+        {
+          "changeId": "change:sha256:0a1f"
+        },
         {
           "changeId": "change:sha256:3b77",
           "activityAt": "2026-09-12T19:20:00.000Z"
@@ -195,9 +211,41 @@
             "oldestObservedAt": "2026-08-01T00:00:00.000Z"
           }
         },
-        { "changeId": "change:sha256:ffff" }
+        {
+          "changeId": "change:sha256:ffff"
+        }
       ],
       "monotonic": true
+    },
+    {
+      "note": "unparseable instants keep their server (scalar) order under activity_desc: U+10000 is the greater instant",
+      "order": "activity_desc",
+      "changes": [
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "\ud800\udc00"
+        },
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "\ue000"
+        }
+      ],
+      "monotonic": true
+    },
+    {
+      "note": "the UTF-16 reading of the same pair is mis-ordered",
+      "order": "activity_desc",
+      "changes": [
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "\ue000"
+        },
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "\ud800\udc00"
+        }
+      ],
+      "monotonic": false
     }
   ]
 }

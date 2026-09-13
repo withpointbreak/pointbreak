@@ -1769,13 +1769,21 @@
       return leftMillis < rightMillis ? -1 : leftMillis > rightMillis ? 1 : 0;
     }
     if (leftMillis === null && rightMillis === null) {
-      return left < right ? -1 : left > right ? 1 : 0;
+      return compareStrings(left, right);
     }
     return leftMillis === null ? -1 : 1;
   }
   __name(compareEventInstants, "compareEventInstants");
   function compareStrings(left, right) {
-    return left < right ? -1 : left > right ? 1 : 0;
+    const leftPoints = Array.from(left, (char) => char.codePointAt(0) ?? 0);
+    const rightPoints = Array.from(right, (char) => char.codePointAt(0) ?? 0);
+    const shared = Math.min(leftPoints.length, rightPoints.length);
+    for (let index = 0; index < shared; index += 1) {
+      const l = leftPoints[index] ?? 0;
+      const r = rightPoints[index] ?? 0;
+      if (l !== r) return l < r ? -1 : 1;
+    }
+    return leftPoints.length === rightPoints.length ? 0 : leftPoints.length < rightPoints.length ? -1 : 1;
   }
   __name(compareStrings, "compareStrings");
   function compareChangeOrder(order, left, right) {
