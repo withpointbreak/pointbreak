@@ -5180,7 +5180,9 @@
   }
   __name(sameAttentionReason, "sameAttentionReason");
   function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
+    // non-empty string when present. summarySource validation is unchanged.
+    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
@@ -5804,11 +5806,15 @@
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       const identity = exactRevisionAccessibleIdentity(revision2);
+      const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
       return {
         revision: revision2,
-        label: summaryLabel || "Current Revision",
+        label: visibleLabel,
         visibleIdentity: shortExactRevision(revision2),
-        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
+        // The accessible name leads with the same visible label the card shows
+        // (never a raw summary that could drift from it), and stays identity-led
+        // for an absent summary so it never claims a summary that was not given.
+        accessibleName: entry?.summarySource === "revision_proposal_summary" ? `Current Revision — ${visibleLabel}; ${identity}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
       };
@@ -7585,6 +7591,52 @@
   }
   __name(renderFactRelationshipGraph, "renderFactRelationshipGraph");
 
+  // src/workflow-handoff.ts
+  function firstReviewHandoff() {
+    return {
+      label: "Capture your first revision",
+      command: 'pointbreak capture --summary "<what changed>"',
+      placeholders: ["<what changed>"]
+    };
+  }
+  __name(firstReviewHandoff, "firstReviewHandoff");
+  function commandHtml(handoff) {
+    let html = escapeHtml(handoff.command);
+    for (const token of new Set(handoff.placeholders)) {
+      const escaped = escapeHtml(token);
+      html = html.split(escaped).join(`<span class="${CLASS.workflowPlaceholder}">${escaped}</span>`);
+    }
+    return html;
+  }
+  __name(commandHtml, "commandHtml");
+  function renderWorkflowHandoff(handoff) {
+    return `<div class="${CLASS.workflowHandoff}" data-workflow-handoff>
+    <span class="${CLASS.workflowHandoffLabel}">${escapeHtml(handoff.label)}</span>
+    <code class="${CLASS.workflowCommand}" data-workflow-command>${commandHtml(handoff)}</code>
+    <button type="button" class="${CLASS.ghost} ${CLASS.workflowCopy}" data-copy-workflow-command aria-label="copy command: ${escapeHtml(handoff.label)}">copy</button>
+  </div>`;
+  }
+  __name(renderWorkflowHandoff, "renderWorkflowHandoff");
+  async function copyWorkflowCommand(button2) {
+    const text = button2.closest(`.${CLASS.workflowHandoff}`)?.querySelector("[data-workflow-command]")?.textContent;
+    if (!text) return;
+    const previous = button2.textContent ?? "copy";
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      button2.textContent = "copied";
+    } catch {
+      button2.textContent = "copy failed";
+    } finally {
+      window.setTimeout(() => {
+        button2.textContent = previous;
+      }, 1200);
+    }
+  }
+  __name(copyWorkflowCommand, "copyWorkflowCommand");
+
   // src/change-inspector-render.ts
   function routeForLens(lens, current) {
     if (lens === "timeline") {
@@ -7660,6 +7712,20 @@
     return element;
   }
   __name(message, "message");
+  function firstCaptureHandoffBlock() {
+    const host = document.createElement("div");
+    host.innerHTML = renderWorkflowHandoff(firstReviewHandoff());
+    const block = host.firstElementChild;
+    if (!(block instanceof HTMLElement)) return null;
+    const copy = block.querySelector("[data-copy-workflow-command]");
+    if (copy) {
+      copy.addEventListener("click", () => {
+        void copyWorkflowCommand(copy);
+      });
+    }
+    return block;
+  }
+  __name(firstCaptureHandoffBlock, "firstCaptureHandoffBlock");
   function selectOption(label2, value, artifactHash, revisionId, title, accessibleName) {
     const option = document.createElement("option");
     option.textContent = label2;
@@ -9313,6 +9379,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }
     const lens = lensForRoute(route);
     const page = lens === "changes" ? snapshot2.generation.changes : snapshot2.generation.attention;
+    const firstCaptureEligible = route.kind === "lens" && lens === "changes" && page.changes.length === 0 && filterValues(route.query).length === 0 && route.query.after === void 0 && page.previous == null && page.next == null;
     const listKey = JSON.stringify({
       lens,
       query: route.query,
@@ -9320,7 +9387,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       previous: page.previous ?? null,
       next: page.next,
       last: page.last ?? null,
-      changes: page.changes.map((change) => change.changeId)
+      changes: page.changes.map((change) => change.changeId),
+      firstCaptureEligible
     });
     if (master.dataset.changeListKey !== listKey) {
       const list = document.createElement("section");
@@ -9488,7 +9556,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             const choose = document.createElement("button");
             choose.type = "button";
             choose.className = "ghost change-card-peer-open";
-            choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+            choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
             choose.title = peer.title;
             choose.setAttribute(
               "aria-label",
@@ -9515,12 +9583,17 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         else list.append(element);
       }
       for (const ungrouped of ungroupedCards) list.append(ungrouped);
-      if (page.changes.length === 0)
+      if (page.changes.length === 0) {
         list.append(
           message(
             lens === "changes" ? "No Changes." : "No Changes need attention."
           )
         );
+        if (firstCaptureEligible) {
+          const handoff = firstCaptureHandoffBlock();
+          if (handoff) list.append(handoff);
+        }
+      }
       const appendPager = /* @__PURE__ */ __name((direction, continuation) => {
         if (continuation == null) return;
         const target = {

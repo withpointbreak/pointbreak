@@ -248,6 +248,12 @@
       "classification": "model-neutral-retained",
       "activeImport": true,
       "reason": "Provides shared pure view constants and structural types consumed by retained exact-resource renderers. It owns no state, transport, route, or Change/Revision resolution."
+    },
+    {
+      "path": "workflow-handoff.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "The one producer of copyable CLI command text. It builds commands from ids passed in as arguments plus visible placeholder tokens, escapes them once, and copies to the clipboard. It owns no route, transport, aggregate store, or Change membership semantics and cannot execute what it displays."
     }
   ]
 }

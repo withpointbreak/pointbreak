@@ -54,6 +54,11 @@ import {
   shortExactRevision,
   shortRef,
 } from "./refs";
+import {
+  copyWorkflowCommand,
+  firstReviewHandoff,
+  renderWorkflowHandoff,
+} from "./workflow-handoff";
 
 export interface ChangeInspectorNavigationActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
@@ -176,6 +181,27 @@ function message(text: string): HTMLParagraphElement {
   element.className = "empty";
   setCompactIdentityText(element, text);
   return element;
+}
+
+/**
+ * Hydrate one handoff block from the ONE command producer and wire its copy
+ * control. The markup, the command text, the escaping, and the clipboard write
+ * all belong to `workflow-handoff.ts`; this seam only adopts the node into the
+ * Change-first tree and binds the click the shell owns. Copying is advisory and
+ * clipboard-only: it never fetches, navigates, or mutates store state.
+ */
+function firstCaptureHandoffBlock(): HTMLElement | null {
+  const host = document.createElement("div");
+  host.innerHTML = renderWorkflowHandoff(firstReviewHandoff());
+  const block = host.firstElementChild;
+  if (!(block instanceof HTMLElement)) return null;
+  const copy = block.querySelector<HTMLElement>("[data-copy-workflow-command]");
+  if (copy) {
+    copy.addEventListener("click", () => {
+      void copyWorkflowCommand(copy);
+    });
+  }
+  return block;
 }
 
 function selectOption(
@@ -2142,6 +2168,22 @@ export function renderChangeInspector(
   // Polling often republishes the same stamped generation. Compute the cache
   // key before allocating card nodes so an unchanged tick does not build and
   // discard the complete bounded tree every three seconds.
+  // The capture suggestion is first-open-only: the Changes lens route itself
+  // (not an exact route that merely maps to this lens), a loaded page with
+  // zero Changes, no filter of any kind, and no continuation in either
+  // direction. A filtered or paged empty view keeps its message and never
+  // suggests a capture, because recapturing is not the answer to a filter
+  // miss or to reading past the end. The eligibility reads the route kind,
+  // which nothing else in the cached tree does, so it joins the cache key:
+  // a same-generation lens/exact transition must repaint rather than reuse.
+  const firstCaptureEligible =
+    route.kind === "lens" &&
+    lens === "changes" &&
+    page.changes.length === 0 &&
+    filterValues(route.query).length === 0 &&
+    route.query.after === undefined &&
+    page.previous == null &&
+    page.next == null;
   const listKey = JSON.stringify({
     lens,
     query: route.query,
@@ -2150,6 +2192,7 @@ export function renderChangeInspector(
     next: page.next,
     last: page.last ?? null,
     changes: page.changes.map((change) => change.changeId),
+    firstCaptureEligible,
   });
   if (master.dataset.changeListKey !== listKey) {
     const list = document.createElement("section");
@@ -2340,7 +2383,7 @@ export function renderChangeInspector(
           const choose = document.createElement("button");
           choose.type = "button";
           choose.className = "ghost change-card-peer-open";
-          choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+          choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
           choose.title = peer.title;
           choose.setAttribute(
             "aria-label",
@@ -2370,12 +2413,17 @@ export function renderChangeInspector(
     // honest h1 → h3 outline (no group h2 above these cards) beats a
     // client-invented heading.
     for (const ungrouped of ungroupedCards) list.append(ungrouped);
-    if (page.changes.length === 0)
+    if (page.changes.length === 0) {
       list.append(
         message(
           lens === "changes" ? "No Changes." : "No Changes need attention.",
         ),
       );
+      if (firstCaptureEligible) {
+        const handoff = firstCaptureHandoffBlock();
+        if (handoff) list.append(handoff);
+      }
+    }
     const appendPager = (
       direction: "previous" | "next" | "last",
       continuation: string | null | undefined,

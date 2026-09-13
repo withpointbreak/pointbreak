@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
 import type { ChangeInspectorReading } from "../src/change-inspector-reading";
 import {
   type ChangeInspectorRenderActions,
@@ -6,7 +14,10 @@ import {
   renderChangeInspectorRefusal,
   renderChangeInspector as renderChangeInspectorSource,
 } from "../src/change-inspector-render";
-import { formatChangeInspectorRoute } from "../src/change-inspector-router";
+import {
+  type ChangeInspectorRoute,
+  formatChangeInspectorRoute,
+} from "../src/change-inspector-router";
 import {
   createChangeInspectorState,
   stageGeneration,
@@ -14,6 +25,7 @@ import {
 import type {
   AttentionPage,
   ChangeDetail,
+  ChangePageQuery,
   ChangesPage,
   EventHistoryDocument,
   ReaderProfile,
@@ -117,6 +129,51 @@ const attention: AttentionPage = {
     },
   },
 };
+
+const emptyChanges: ChangesPage = {
+  ...changes,
+  changes: [],
+  presentations: {},
+  previous: null,
+  next: null,
+  last: null,
+};
+const emptyAttention: AttentionPage = {
+  ...attention,
+  changes: [],
+  presentations: {},
+  previous: null,
+  next: null,
+  last: null,
+};
+
+/** Publish one empty generation on the given lens and paint it. */
+function renderEmptyLens(options: {
+  lens: "changes" | "attention";
+  query?: ChangePageQuery;
+  previous?: string | null;
+  next?: string | null;
+  /** An exact route over the same empty generation (defaults to the lens route). */
+  route?: ChangeInspectorRoute;
+}): void {
+  const { lens, query = {}, previous = null, next = null } = options;
+  const state = createChangeInspectorState(
+    options.route ?? { kind: "lens", lens, query },
+  );
+  state.publish(
+    stageGeneration(
+      profile,
+      { ...emptyChanges, previous, next },
+      { ...emptyAttention, previous, next },
+      profile,
+    ),
+  );
+  renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+}
+
+function handoffBlock(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("#master [data-workflow-handoff]");
+}
 
 const unresolvedRequestsPresentation = {
   cause: {
@@ -1429,12 +1486,16 @@ describe("Change inspector render", () => {
       presentations: {
         "change:sha256:one": {
           currentRevisions: [
-            ...(changes.presentations?.["change:sha256:one"]
-              ?.currentRevisions ?? []),
+            {
+              revision,
+              summarySource: "absent",
+              label: "No summary at capture",
+            },
             {
               revision: secondRevision,
               revisionProposalSummary: "Parallel proposal",
               summarySource: "revision_proposal_summary",
+              label: "Parallel proposal",
             },
           ],
         },
@@ -1453,8 +1514,22 @@ describe("Change inspector render", () => {
       ...document.querySelectorAll<HTMLButtonElement>(".change-card-peer-open"),
     ];
     expect(peerActions).toHaveLength(2);
-    for (const action of peerActions)
-      expect(action.textContent).toMatch(/^Open current Revision · /);
+    // D5: each peer button names the peer once, never "Open current Revision ·
+    // Current Revision · …". Full identity stays in title and aria-label.
+    const firstPeer = peerActions.find(
+      (action) => action.dataset.revisionId === revision.revisionId,
+    );
+    expect(firstPeer?.textContent).toBe(
+      "Open · No summary at capture · revision:sha256:one · sha256:artifact",
+    );
+    expect(firstPeer?.getAttribute("aria-label")).toContain(
+      revision.revisionId,
+    );
+    expect(firstPeer?.title).toContain(revision.objectArtifactContentHash);
+    for (const action of peerActions) {
+      expect(action.textContent?.startsWith("Open · ")).toBe(true);
+      expect(action.textContent).not.toContain("Current Revision");
+    }
     const secondPeer = peerActions.find(
       (action) => action.dataset.revisionId === secondRevision.revisionId,
     );
@@ -2335,6 +2410,147 @@ describe("Change inspector render", () => {
     expect(journal?.getAttribute("title")).toBe(journalId);
     expect(journal?.getAttribute("aria-label")).toBe(`journal ${journalId}`);
     expect(journal?.dataset.journalId).toBe(journalId);
+  });
+
+  describe("the genuinely empty Changes lens offers the first capture", () => {
+    // A timed-out waitFor must not leak stubs into later tests.
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      Reflect.deleteProperty(navigator, "clipboard");
+    });
+
+    it("renders the copyable first-capture handoff beside the empty message", () => {
+      renderEmptyLens({ lens: "changes" });
+
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes.",
+      );
+      const block = handoffBlock();
+      expect(block).not.toBeNull();
+      expect(block?.querySelector(".workflow-handoff-label")?.textContent).toBe(
+        "Capture your first revision",
+      );
+      expect(block?.querySelector("[data-workflow-command]")?.textContent).toBe(
+        'pointbreak capture --summary "<what changed>"',
+      );
+      expect(
+        block?.querySelector("button[data-copy-workflow-command]"),
+      ).not.toBeNull();
+    });
+
+    it("never suggests recapturing when a filter emptied the page", () => {
+      const filters: ChangePageQuery[] = [
+        { q: "unmatched" },
+        { topology: "initial" },
+        { lifecycle: "in_progress" },
+        { attention: "conflicted" },
+        { availability: "incomplete" },
+      ];
+      for (const query of filters) {
+        renderEmptyLens({ lens: "changes", query });
+        expect(document.querySelector("#master .empty")?.textContent).toBe(
+          "No Changes.",
+        );
+        expect(handoffBlock()).toBeNull();
+      }
+    });
+
+    it("never suggests recapturing on an empty page reached by continuation", () => {
+      renderEmptyLens({ lens: "changes", query: { after: "cursor:one" } });
+      expect(handoffBlock()).toBeNull();
+
+      renderEmptyLens({ lens: "changes", previous: "cursor:previous" });
+      expect(handoffBlock()).toBeNull();
+
+      renderEmptyLens({ lens: "changes", next: "cursor:next" });
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("keeps only the message on an exact route over an empty store", () => {
+      renderEmptyLens({
+        lens: "changes",
+        route: { kind: "change", changeId: "change:sha256:missing", query: {} },
+      });
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes.",
+      );
+      expect(handoffBlock()).toBeNull();
+    });
+
+    // The handoff's eligibility depends on the route kind, so a same-generation
+    // transition between an exact route and the Changes lens must repaint the
+    // master list rather than reuse the cached tree.
+    it("inserts the handoff when returning to the lens from an exact route", () => {
+      const state = createChangeInspectorState({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+
+      state.setRoute({ kind: "lens", lens: "changes", query: {} });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+    });
+
+    it("removes the handoff when an exact route opens from the empty lens", () => {
+      const state = createChangeInspectorState({
+        kind: "lens",
+        lens: "changes",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+
+      state.setRoute({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("leaves the empty Attention lens exactly as it is", () => {
+      renderEmptyLens({ lens: "attention" });
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes need attention.",
+      );
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("copies exactly the displayed command when the copy button is clicked", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderEmptyLens({ lens: "changes" });
+      const block = handoffBlock();
+      const button = block?.querySelector<HTMLButtonElement>(
+        "button[data-copy-workflow-command]",
+      );
+      expect(button).not.toBeNull();
+
+      button?.click();
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith(
+          'pointbreak capture --summary "<what changed>"',
+        );
+      });
+      // Copying is clipboard-only: it never fetches, navigates, or writes.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
   });
 });
 
