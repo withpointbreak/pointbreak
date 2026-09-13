@@ -5,6 +5,7 @@
 //! ```
 
 mod acknowledgement;
+mod change_order;
 pub use acknowledgement::{
     AuthorityWriteOutcomeV1, DerivedVisibilityTokenV1, DerivedWriteAcknowledgementV1,
     DerivedWriteAvailabilityV1, LegacyProjectionStateV1, OperationReceiptAcknowledgementV1,
@@ -25,6 +26,10 @@ pub mod transfer;
 mod workflow;
 
 #[doc(hidden)]
+pub use change_order::{
+    AttentionWaitKeyV1, ChangeListOrderV1, ChangeOrderKey, ChangePageKeyV1,
+    compare_change_order, is_strictly_ordered,
+};
 pub use derived_access::attention::{DerivedAttention, DerivedAttentionRoute};
 #[doc(hidden)]
 pub use derived_access::changes::{
