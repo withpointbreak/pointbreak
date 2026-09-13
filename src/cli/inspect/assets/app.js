@@ -4816,7 +4816,9 @@
   }
   __name(sameAttentionReason, "sameAttentionReason");
   function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+    return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
+    // non-empty string when present. summarySource validation is unchanged.
+    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
   }
   __name(isPresentationRevision, "isPresentationRevision");
   function isRevisionRef(value) {
@@ -5440,11 +5442,15 @@
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       const identity = exactRevisionAccessibleIdentity(revision2);
+      const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
       return {
         revision: revision2,
-        label: summaryLabel || "Current Revision",
+        label: visibleLabel,
         visibleIdentity: shortExactRevision(revision2),
-        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
+        // The accessible name leads with the same visible label the card shows
+        // (never a raw summary that could drift from it), and stays identity-led
+        // for an absent summary so it never claims a summary that was not given.
+        accessibleName: entry?.summarySource === "revision_proposal_summary" ? `Current Revision — ${visibleLabel}; ${identity}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
       };
@@ -9500,7 +9506,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             const choose = document.createElement("button");
             choose.type = "button";
             choose.className = "ghost change-card-peer-open";
-            choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+            choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
             choose.title = peer.title;
             choose.setAttribute(
               "aria-label",
