@@ -334,3 +334,43 @@ fn active_and_authoritative_revision_routes_match_across_page_boundaries() {
         active_second["entries"][0]["revisionId"]
     );
 }
+
+#[test]
+fn v2_entry_routes_serve_the_elected_authoritative_fallback_with_the_header() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+
+    let inspector = Inspector::spawn_current_unready(repo.path());
+    for path in [
+        "/api/v2/profile",
+        "/api/v2/changes",
+        "/api/v2/history",
+        "/api/v2/attention",
+    ] {
+        let (head, body) = inspector.raw_get(&format!("{path}?access=authoritative"));
+        assert!(head.starts_with("HTTP/1.1 200"), "{path}: {head}\n{body}");
+        assert!(
+            head.contains("X-Pointbreak-Access-Source: authoritative-fallback"),
+            "{path} must label the elected fallback: {head}"
+        );
+        let (derived_head, _) = inspector.raw_get(&format!("{path}?access=derived"));
+        let (bare_head, _) = inspector.raw_get(path);
+        assert_eq!(
+            derived_head.lines().next(),
+            bare_head.lines().next(),
+            "{path}: access=derived is the default route"
+        );
+    }
+    let (_, changes) = inspector.raw_get("/api/v2/changes?access=authoritative");
+    let changes: serde_json::Value = serde_json::from_str(&changes).expect("changes page json");
+    assert_eq!(changes["schema"], "pointbreak.inspect-changes-page");
+    assert!(
+        changes["changes"]
+            .as_array()
+            .is_some_and(|list| !list.is_empty()),
+        "the elected page lists the captured Change: {changes}"
+    );
+}

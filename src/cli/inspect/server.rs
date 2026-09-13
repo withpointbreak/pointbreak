@@ -1173,7 +1173,13 @@ fn route(
         if !state.derived_changes.is_active() {
             return authoritative_change_v2_profile_response(state);
         }
-        return change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes));
+        return match requested_authoritative_access(query) {
+            Ok(true) => elected_authoritative_change_v2_profile(state),
+            Ok(false) => {
+                change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes))
+            }
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/history" {
         if !state.derived_changes.is_active() {
@@ -1185,32 +1191,48 @@ fn route(
                 &state.page_token_signer,
             ));
         }
-        return change_v2_response(api::event_history_v2_json(
-            repo,
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        // The election member is consumed here; the strict page grammar never sees it.
+        let page_query = strip_access_member(query);
+        return match requested_authoritative_access(query) {
+            Ok(true) => elected_authoritative_event_history_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::event_history_v2_json(
+                repo,
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/changes" {
         if !state.derived_changes.is_active() {
             return authoritative_changes_v2_response(state, query);
         }
-        return change_v2_response(api::changes_v2_json(
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        let page_query = strip_access_member(query);
+        return match requested_authoritative_access(query) {
+            Ok(true) => elected_authoritative_changes_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::changes_v2_json(
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/attention" {
         if !state.derived_changes.is_active() {
             return authoritative_change_attention_v2_response(state, query);
         }
-        return change_v2_response(api::change_attention_v2_json(
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        let page_query = strip_access_member(query);
+        return match requested_authoritative_access(query) {
+            Ok(true) => elected_authoritative_change_attention_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::change_attention_v2_json(
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path.starts_with("/api/v2/changes/") {
         return route_change_v2(state, path, query);
@@ -1667,6 +1689,78 @@ fn explicit_authoritative_routed_response(
         );
     };
     routed_api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+/// Remove every `access` member so the strict Change-first page grammars never
+/// see the election they do not define. A query with nothing else left is
+/// treated as absent, exactly like a bare request.
+fn strip_access_member(query: Option<&str>) -> Option<String> {
+    let query = query?;
+    let kept = query
+        .split('&')
+        .filter(|pair| pair.split('=').next() != Some("access"))
+        .collect::<Vec<_>>()
+        .join("&");
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// The Change-first sibling of `explicit_authoritative_routed_response`: the
+/// caller has already taken the explicit-off early return, so the derived
+/// profile is active and the elected read must hold the single permit.
+fn elected_change_v2_response(
+    state: &InspectState,
+    build: impl FnOnce() -> Result<api::ChangeV2Json, String>,
+) -> Response {
+    let Some(_permit) = state.authoritative_fallback.try_acquire() else {
+        return Response::json_error(
+            "429 Too Many Requests",
+            "an authoritative fallback is already in progress",
+        );
+    };
+    change_v2_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+fn elected_authoritative_change_v2_profile(state: &InspectState) -> Response {
+    explicit_authoritative_response(state, || {
+        api::authoritative_change_v2_profile_json(state.repo.as_path(), &state.change_reader_cache)
+    })
+}
+
+fn elected_authoritative_changes_v2(state: &InspectState, query: Option<&str>) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_changes_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            query,
+            &state.page_token_signer,
+        )
+    })
+}
+
+fn elected_authoritative_change_attention_v2(
+    state: &InspectState,
+    query: Option<&str>,
+) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_change_attention_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            query,
+            &state.page_token_signer,
+        )
+    })
+}
+
+fn elected_authoritative_event_history_v2(state: &InspectState, query: Option<&str>) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_event_history_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            &state.strict_change_stamp,
+            query,
+            &state.page_token_signer,
+        )
+    })
 }
 
 fn derived_access_control_response(state: &InspectState, retry: bool) -> Response {
@@ -2173,23 +2267,26 @@ mod tests {
             "if path == \"/api/v2/attention\"",
             "if path.starts_with(\"/api/v2/changes/\")",
         );
-        for (name, derived_route, authoritative_helper, derived_helper) in [
+        for (name, derived_route, authoritative_helper, elected_helper, derived_helper) in [
             (
                 "Profile",
                 profile,
                 "authoritative_change_v2_profile_response",
+                "elected_authoritative_change_v2_profile",
                 "api::change_v2_profile_json",
             ),
             (
                 "Changes",
                 changes,
                 "authoritative_changes_v2_response",
+                "elected_authoritative_changes_v2",
                 "api::changes_v2_json",
             ),
             (
                 "Attention",
                 attention,
                 "authoritative_change_attention_v2_response",
+                "elected_authoritative_change_attention_v2",
                 "api::change_attention_v2_json",
             ),
         ] {
@@ -2201,13 +2298,34 @@ mod tests {
                 !derived_route.contains("state.change_reader_cache"),
                 "{name} must not enter the strict Change reader cache"
             );
+            assert!(
+                derived_route.contains("requested_authoritative_access(query)"),
+                "{name} must consult the explicit election"
+            );
             assert_source_order(
                 derived_route,
                 "!state.derived_changes.is_active()",
                 authoritative_helper,
             );
-            assert_source_order(derived_route, authoritative_helper, derived_helper);
+            assert_source_order(derived_route, authoritative_helper, elected_helper);
+            assert_source_order(derived_route, elected_helper, derived_helper);
         }
+        let elected_helpers = source_between(
+            SERVER_SOURCE,
+            "fn elected_change_v2_response(",
+            "fn derived_access_control_response(",
+        );
+        assert_eq!(
+            elected_helpers
+                .matches("&state.change_reader_cache")
+                .count(),
+            4,
+            "every elected Change-first entry route must use the strict reader cache"
+        );
+        assert!(
+            !elected_helpers.contains("state.derived_changes"),
+            "elected routing must not enter the derived facade"
+        );
         let explicit_off_helpers = source_between(
             SERVER_SOURCE,
             "fn authoritative_change_v2_profile_response(",
@@ -2238,9 +2356,15 @@ mod tests {
             "!state.derived_changes.is_active()",
             "api::authoritative_event_history_v2_json",
         );
+        assert!(timeline.contains("requested_authoritative_access(query)"));
         assert_source_order(
             timeline,
             "api::authoritative_event_history_v2_json",
+            "elected_authoritative_event_history_v2",
+        );
+        assert_source_order(
+            timeline,
+            "elected_authoritative_event_history_v2",
             "api::event_history_v2_json",
         );
 
@@ -2251,6 +2375,10 @@ mod tests {
         );
         assert!(exact.contains("let cache = &state.change_reader_cache"));
         assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
+        assert!(
+            !exact.contains("requested_authoritative_access"),
+            "member routes are not elected"
+        );
         let detail = source_between(
             exact,
             "[change_id] => {",
@@ -3086,6 +3214,103 @@ mod tests {
             );
             assert_eq!(body["code"], "invalid_exact_selection");
         }
+    }
+
+    #[test]
+    fn v2_entry_routes_honour_the_explicit_authoritative_election() {
+        let fixture = exact_change_fixture(false);
+        let state = Arc::new(fixture.state);
+        for path in [
+            "/api/v2/profile",
+            "/api/v2/changes",
+            "/api/v2/history",
+            "/api/v2/attention",
+        ] {
+            let default = route(&state, true, "GET", path, None);
+            assert_eq!(
+                default.status,
+                "503 Service Unavailable",
+                "{path} default stays derived-unavailable: {}",
+                String::from_utf8_lossy(&default.body)
+            );
+            let elected = route(&state, true, "GET", path, Some("access=authoritative"));
+            assert_eq!(
+                elected.status,
+                "200 OK",
+                "{path}: {}",
+                String::from_utf8_lossy(&elected.body)
+            );
+            assert!(
+                elected
+                    .headers
+                    .iter()
+                    .any(|(name, value)| *name == "X-Pointbreak-Access-Source"
+                        && *value == "authoritative-fallback"),
+                "{path} must label the elected fallback"
+            );
+            let invalid = route(&state, true, "GET", path, Some("access=bogus"));
+            assert_eq!(invalid.status, "400 Bad Request", "{path}?access=bogus");
+            // The deliberate widening: these two values are the default route, not a grammar error.
+            for default_value in ["access=derived", "access="] {
+                let same_as_default = route(&state, true, "GET", path, Some(default_value));
+                assert_eq!(
+                    same_as_default.status,
+                    default.status,
+                    "{path}?{default_value}: {}",
+                    String::from_utf8_lossy(&same_as_default.body)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_election_is_single_flight_and_strips_the_member_before_page_parsing() {
+        let fixture = exact_change_fixture(false);
+        let state = Arc::new(fixture.state);
+        let permit = state
+            .authoritative_fallback
+            .try_acquire()
+            .expect("hold the permit");
+        let busy = route(
+            &state,
+            true,
+            "GET",
+            "/api/v2/changes",
+            Some("limit=5&access=authoritative"),
+        );
+        assert_eq!(busy.status, "429 Too Many Requests");
+        drop(permit);
+        let paged = route(
+            &state,
+            true,
+            "GET",
+            "/api/v2/changes",
+            Some("limit=5&access=authoritative"),
+        );
+        assert_eq!(
+            paged.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&paged.body)
+        );
+        let paged: serde_json::Value = serde_json::from_slice(&paged.body).unwrap();
+        assert_eq!(paged["schema"], "pointbreak.inspect-changes-page");
+        if let Some(next) = paged["next"].as_str() {
+            // A token minted by the elected page is signature-compatible with the default route.
+            let continued = route(
+                &state,
+                true,
+                "GET",
+                "/api/v2/changes",
+                Some(&format!("after={next}")),
+            );
+            assert_ne!(continued.status, "400 Bad Request");
+        }
+        let derived_paged = route(&state, true, "GET", "/api/v2/changes", Some("limit=5"));
+        assert_eq!(
+            derived_paged.status, "503 Service Unavailable",
+            "default paging is unchanged"
+        );
     }
 
     #[test]
