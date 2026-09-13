@@ -1,4 +1,12 @@
-import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
 import type { ChangeInspectorReading } from "../src/change-inspector-reading";
 import {
   type ChangeInspectorRenderActions,
@@ -6,7 +14,10 @@ import {
   renderChangeInspectorRefusal,
   renderChangeInspector as renderChangeInspectorSource,
 } from "../src/change-inspector-render";
-import { formatChangeInspectorRoute } from "../src/change-inspector-router";
+import {
+  type ChangeInspectorRoute,
+  formatChangeInspectorRoute,
+} from "../src/change-inspector-router";
 import {
   createChangeInspectorState,
   stageGeneration,
@@ -14,8 +25,11 @@ import {
 import type {
   AttentionPage,
   ChangeDetail,
+  ChangePageQuery,
   ChangesPage,
   EventHistoryDocument,
+  FactContent,
+  FactRelationshipGraphNode,
   ReaderProfile,
   RevisionResource,
 } from "../src/change-protocol";
@@ -117,6 +131,51 @@ const attention: AttentionPage = {
     },
   },
 };
+
+const emptyChanges: ChangesPage = {
+  ...changes,
+  changes: [],
+  presentations: {},
+  previous: null,
+  next: null,
+  last: null,
+};
+const emptyAttention: AttentionPage = {
+  ...attention,
+  changes: [],
+  presentations: {},
+  previous: null,
+  next: null,
+  last: null,
+};
+
+/** Publish one empty generation on the given lens and paint it. */
+function renderEmptyLens(options: {
+  lens: "changes" | "attention";
+  query?: ChangePageQuery;
+  previous?: string | null;
+  next?: string | null;
+  /** An exact route over the same empty generation (defaults to the lens route). */
+  route?: ChangeInspectorRoute;
+}): void {
+  const { lens, query = {}, previous = null, next = null } = options;
+  const state = createChangeInspectorState(
+    options.route ?? { kind: "lens", lens, query },
+  );
+  state.publish(
+    stageGeneration(
+      profile,
+      { ...emptyChanges, previous, next },
+      { ...emptyAttention, previous, next },
+      profile,
+    ),
+  );
+  renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+}
+
+function handoffBlock(): HTMLElement | null {
+  return document.querySelector<HTMLElement>("#master [data-workflow-handoff]");
+}
 
 const unresolvedRequestsPresentation = {
   cause: {
@@ -385,6 +444,157 @@ function revisionReading(): Extract<
       },
     },
   };
+}
+
+type RevisionReading = Extract<ChangeInspectorReading, { kind: "revision" }>;
+
+// Derive a local reading from the shared fixture without mutating it: eight
+// tests consume `revisionReading()` as-is, so every new fact lives in a patch.
+function readingWith(
+  patch: Partial<RevisionReading["document"]>,
+): RevisionReading {
+  const base = revisionReading();
+  return { ...base, document: { ...base.document, ...patch } };
+}
+
+// The three non-observation facts shared by the reading-restoration tests. No
+// observation is added, so the shared fixture keeps exactly one observation.
+function localFacts(
+  options: {
+    requestResponses?: NonNullable<
+      Extract<FactContent, { kind: "input_request" }>["responses"]
+    >;
+    assessmentTarget?: RevisionReading["document"]["factPresentations"][number]["target"];
+  } = {},
+): Partial<RevisionReading["document"]> {
+  const base = revisionReading().document;
+  const facts: RevisionReading["document"]["factPresentations"] = [
+    ...base.factPresentations,
+    {
+      factId: "input-request:sha256:ask",
+      family: "input_request",
+      originRevision: revision,
+      target: { kind: "revision", revisionId: revision.revisionId },
+      actorId: "reviewer",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+    {
+      factId: "validation:sha256:gate",
+      family: "validation",
+      originRevision: revision,
+      target: { kind: "revision", revisionId: revision.revisionId },
+      actorId: "author",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+    {
+      factId: "assess:sha256:verdict",
+      family: "assessment",
+      originRevision: revision,
+      target: options.assessmentTarget ?? {
+        kind: "revision",
+        revisionId: revision.revisionId,
+      },
+      actorId: "reviewer",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    },
+  ];
+  return {
+    factPresentations: facts,
+    factContentPresentations: {
+      ...base.factContentPresentations,
+      "input-request:sha256:ask": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "input_request",
+          title: "Needs a decision",
+          body: "Plain **not bold** request body",
+          status: "open",
+          ...(options.requestResponses
+            ? { responses: options.requestResponses }
+            : {}),
+        },
+      },
+      "validation:sha256:gate": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "validation",
+          checkName: "just check",
+          status: "passed",
+          summary: "all green",
+        },
+      },
+      "assess:sha256:verdict": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "assessment",
+          assessment: "accepted",
+          summary: "looks right",
+        },
+      },
+    },
+  };
+}
+
+function factNode(
+  factId: string,
+  family: string,
+  x: number,
+  y: number,
+): Extract<FactRelationshipGraphNode, { kind: "fact" }> {
+  return {
+    id: `fact:${revision.revisionId}@${revision.objectArtifactContentHash}:${family}:${factId}`,
+    kind: "fact",
+    revision,
+    factId,
+    family,
+    displayLabel: `${family} · ${factId}`,
+    x,
+    y,
+    w: 140,
+    h: 34,
+    contextAvailability: "available",
+    activationRevision: revision,
+  };
+}
+
+function responses(): NonNullable<
+  Extract<FactContent, { kind: "input_request" }>["responses"]
+> {
+  return [
+    {
+      responseId: "input-request-response:sha256:md",
+      outcome: "approved",
+      reason: "**Bold** answer",
+      contentType: "text/markdown",
+      bodyContentState: "present",
+      availability: "available",
+    },
+    {
+      responseId: "input-request-response:sha256:txt",
+      outcome: "rejected",
+      reason: "<b>not markup</b>",
+      contentType: "text/plain",
+      bodyContentState: "present",
+      availability: "available",
+    },
+    {
+      responseId: "input-request-response:sha256:hidden",
+      outcome: "dismissed",
+      reason: "**never rendered**",
+      contentType: "text/markdown",
+      bodyContentState: "suppressed_present",
+      availability: "available",
+    },
+  ];
 }
 
 function changeReading(): ChangeInspectorReading {
@@ -833,6 +1043,186 @@ describe("Change inspector render", () => {
         artifactHash: duplicate.objectArtifactContentHash,
       },
     });
+  });
+
+  it("renders a declared Markdown event body as HTML in the event detail pane", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    const base = eventHistory();
+    const history: EventHistoryDocument = {
+      ...base,
+      facets: { review_observation_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_observation_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_observation_recorded",
+          summary: {
+            kind: "review_observation_recorded",
+            details: {
+              observationId: "obs:sha256:one",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              title: "Readable",
+              body: "**Bold** finding",
+              bodyContentType: "text/markdown",
+            },
+          },
+        },
+      ],
+    };
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    const summary = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary",
+    );
+    expect(summary?.querySelector("strong")?.textContent).toBe("Bold");
+    // The one-line Timeline excerpt stays plain text.
+    const excerpt = document.querySelector<HTMLElement>(
+      "#master li.event .body",
+    );
+    expect(excerpt?.querySelector("strong")).toBeNull();
+    expect(excerpt?.textContent).toContain("**Bold**");
+  });
+
+  it("keeps the Timeline follow state readable while an event detail is open", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: null,
+        refusal: null,
+        timeline: { mode: "following", newCount: 0, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(false);
+    expect(follow?.textContent).toBe("Following");
+    expect(follow?.getAttribute("aria-pressed")).toBe("true");
+    // Not operable off the Timeline (toggling is timeline-only and stays so),
+    // but still readable from the keyboard and the accessibility tree.
+    expect(follow?.disabled).toBe(false);
+    expect(follow?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("keeps the follow control hidden outside the Timeline lens", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: revisionReading(),
+        refusal: null,
+        timeline: { mode: "following", newCount: 0, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("leaves the Timeline follow control operable on the Timeline itself", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "timeline",
+      historyQuery: {},
+    });
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, eventHistory()),
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: null,
+        refusal: null,
+        timeline: { mode: "parked", newCount: 2, display: eventHistory() },
+      },
+    );
+    const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
+    expect(follow?.classList.contains("hidden")).toBe(false);
+    expect(follow?.disabled).toBe(false);
+    expect(follow?.getAttribute("aria-disabled")).toBe("false");
+    expect(follow?.textContent).toBe("Show 2 new events");
+    expect(follow?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps a plain-text event body escaped in the event detail pane", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: {},
+      query: {},
+    });
+    const base = eventHistory();
+    const history: EventHistoryDocument = {
+      ...base,
+      facets: { review_observation_recorded: 1, change_declared: 0 },
+      completion: {
+        ...base.completion,
+        eventTypes: ["review_observation_recorded", "change_declared"],
+      },
+      entries: [
+        {
+          ...base.entries[0],
+          eventType: "review_observation_recorded",
+          summary: {
+            kind: "review_observation_recorded",
+            details: {
+              observationId: "obs:sha256:one",
+              target: { kind: "revision", revisionId: revision.revisionId },
+              title: "Readable",
+              body: "<b>not markup</b> and **not bold**",
+            },
+          },
+        },
+      ],
+    };
+    state.publish(
+      stageGeneration(profile, changes, attention, profile, history),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    const summary = document.querySelector<HTMLElement>(
+      "#detail-body .event-detail-summary",
+    );
+    expect(summary?.querySelector("b")).toBeNull();
+    expect(summary?.querySelector("strong")).toBeNull();
+    expect(summary?.textContent).toContain(
+      "<b>not markup</b> and **not bold**",
+    );
   });
 
   it("renders a selected Timeline event as an exact readable surface", () => {
@@ -1429,12 +1819,16 @@ describe("Change inspector render", () => {
       presentations: {
         "change:sha256:one": {
           currentRevisions: [
-            ...(changes.presentations?.["change:sha256:one"]
-              ?.currentRevisions ?? []),
+            {
+              revision,
+              summarySource: "absent",
+              label: "No summary at capture",
+            },
             {
               revision: secondRevision,
               revisionProposalSummary: "Parallel proposal",
               summarySource: "revision_proposal_summary",
+              label: "Parallel proposal",
             },
           ],
         },
@@ -1453,8 +1847,22 @@ describe("Change inspector render", () => {
       ...document.querySelectorAll<HTMLButtonElement>(".change-card-peer-open"),
     ];
     expect(peerActions).toHaveLength(2);
-    for (const action of peerActions)
-      expect(action.textContent).toMatch(/^Open current Revision · /);
+    // D5: each peer button names the peer once, never "Open current Revision ·
+    // Current Revision · …". Full identity stays in title and aria-label.
+    const firstPeer = peerActions.find(
+      (action) => action.dataset.revisionId === revision.revisionId,
+    );
+    expect(firstPeer?.textContent).toBe(
+      "Open · No summary at capture · revision:sha256:one · sha256:artifact",
+    );
+    expect(firstPeer?.getAttribute("aria-label")).toContain(
+      revision.revisionId,
+    );
+    expect(firstPeer?.title).toContain(revision.objectArtifactContentHash);
+    for (const action of peerActions) {
+      expect(action.textContent?.startsWith("Open · ")).toBe(true);
+      expect(action.textContent).not.toContain("Current Revision");
+    }
     const secondPeer = peerActions.find(
       (action) => action.dataset.revisionId === secondRevision.revisionId,
     );
@@ -1584,6 +1992,419 @@ describe("Change inspector render", () => {
       '[data-file-path="src/lib.rs"]',
     );
     expect(file?.dataset.exactFocus).toBe("true");
+  });
+
+  it("accents each exact fact family group and names its kind on every fact card", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: revisionReading(), refusal: null },
+    );
+    const group = document.querySelector<HTMLElement>(
+      "#detail-body .detail-facts .fact-family-observation",
+    );
+    expect(group).not.toBeNull();
+    expect(group?.classList.contains("fact-family")).toBe(true);
+    expect(group?.querySelector("h4")?.textContent).toBe("observation (1)");
+    const chip = group?.querySelector<HTMLElement>(".anno-kind-observation");
+    expect(chip?.textContent).toBe("observation");
+    expect(chip?.classList.contains("anno-kind")).toBe(true);
+    // The card keeps its own identity and focus contract unchanged.
+    const card = group?.querySelector<HTMLElement>(
+      '[data-fact-id="obs:sha256:focused"]',
+    );
+    expect(card?.classList.contains("unit-card")).toBe(true);
+  });
+
+  it("names the carried status of each fact that declares one", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: readingWith(localFacts()), refusal: null },
+    );
+    const chipOf = (factId: string) =>
+      document.querySelector<HTMLElement>(
+        `#detail-body .detail-facts [data-fact-id="${factId}"] .fact-status`,
+      );
+    const request = chipOf("input-request:sha256:ask");
+    expect(request?.textContent).toBe("open");
+    expect(request?.classList.contains("open")).toBe(true);
+    expect(chipOf("validation:sha256:gate")?.classList.contains("passed")).toBe(
+      true,
+    );
+    // An assessment's chip is its carried record currency, never its decision:
+    // the decision already heads the card, and a replaced "accepted" must not
+    // read as a live acceptance.
+    const verdict = chipOf("assess:sha256:verdict");
+    expect(verdict?.textContent).toBe("current");
+    expect(verdict?.classList.contains("current")).toBe(true);
+    expect(verdict?.classList.contains("accepted")).toBe(false);
+    // An observation's chip is its record currency too.
+    expect(chipOf("obs:sha256:focused")?.textContent).toBe("current");
+  });
+
+  it("names a stale assessment by its carried currency rather than its decision", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    if (!facts.factPresentations) throw new Error("fixture missing");
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          ...facts,
+          factPresentations: facts.factPresentations.map((fact) =>
+            fact.factId === "assess:sha256:verdict"
+              ? { ...fact, familyState: "stale" }
+              : fact,
+          ),
+        }),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="assess:sha256:verdict"]',
+    );
+    const chip = card?.querySelector<HTMLElement>(".fact-status");
+    expect(chip?.textContent).toBe("stale");
+    expect(chip?.classList.contains("stale")).toBe(true);
+    expect(card?.querySelector("h5")?.textContent).toBe("Assessment: accepted");
+  });
+
+  it("renders each exact fact's carried review target and activates only same-document targets", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith(
+          localFacts({
+            assessmentTarget: {
+              kind: "observation",
+              revisionId: revision.revisionId,
+              observationId: "obs:sha256:focused",
+            },
+          }),
+        ),
+        refusal: null,
+      },
+    );
+    const ranged = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="obs:sha256:focused"] .fact-rel',
+    );
+    expect(ranged?.textContent).toContain("src/lib.rs:1-1");
+    expect(ranged?.querySelector("button")).toBeNull();
+    expect(ranged?.getAttribute("aria-label")).toBeNull();
+
+    const peer = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="assess:sha256:verdict"] .fact-rel',
+    );
+    const control = peer?.querySelector<HTMLButtonElement>("button");
+    expect(control?.type).toBe("button");
+    expect(control?.dataset.relationFactId).toBe("obs:sha256:focused");
+    // The visible text is compact; assistive technology gets the full identity.
+    expect(control?.getAttribute("aria-label")).toBe(
+      "Focus fact obs:sha256:focused",
+    );
+    // A relation control must never shadow a fact card in focus resolution.
+    expect(control?.dataset.factId).toBeUndefined();
+    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
+  });
+
+  it("keeps focus resolution on the fact card when a relation control names the same fact", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith(
+          localFacts({
+            assessmentTarget: {
+              kind: "observation",
+              revisionId: revision.revisionId,
+              observationId: "obs:sha256:focused",
+            },
+          }),
+        ),
+        refusal: null,
+      },
+    );
+    const focused =
+      document.querySelectorAll<HTMLElement>("[data-exact-focus]");
+    expect(focused.length).toBe(1);
+    expect(focused[0].dataset.factId).toBe("obs:sha256:focused");
+    expect(focused[0].tagName).toBe("ARTICLE");
+  });
+
+  it("states carried supersession and replacement relations on the superseding fact card", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    const graph = revisionReading().document.inspectorPresentation?.factGraph;
+    if (!graph) throw new Error("fixture graph missing");
+    const verdictNode = factNode("assess:sha256:verdict", "assessment", 80, 90);
+    // A predecessor with a graph node but no presentation on this Revision.
+    const retiredNode = factNode(
+      "assess:sha256:retired",
+      "assessment",
+      80,
+      150,
+    );
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          ...facts,
+          inspectorPresentation: {
+            factGraph: {
+              ...graph,
+              nodes: [...graph.nodes, verdictNode, retiredNode],
+              assessmentReplaces: [
+                {
+                  from: verdictNode.id,
+                  to: retiredNode.id,
+                  originRevision: revision,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "assess:sha256:retired",
+                  path: [],
+                },
+              ],
+            },
+          },
+        }),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="assess:sha256:verdict"]',
+    );
+    const relations = Array.from(
+      card?.querySelectorAll<HTMLElement>(".fact-rel") ?? [],
+    ).map((line) => line.textContent ?? "");
+    expect(relations.some((text) => text.includes("replaces"))).toBe(true);
+    // Absent from this response: named, but never activatable.
+    expect(
+      card?.querySelector('[data-relation-fact-id="assess:sha256:retired"]'),
+    ).toBeNull();
+    expect(card?.querySelector(".fact-rel button")).toBeNull();
+  });
+
+  it("never renders a relationship the exact response does not carry", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: readingWith(localFacts()), refusal: null },
+    );
+    const facts = document.querySelector<HTMLElement>(
+      "#detail-body .detail-facts",
+    );
+    const text = facts?.textContent ?? "";
+    // These live only on the Timeline wire, never on the exact-Revision response.
+    expect(text).not.toContain("responds to");
+    expect(text).not.toContain("related observations");
+    expect(text).not.toContain("related input requests");
+  });
+
+  it("activates a replacement target the same response carries", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    const graph = revisionReading().document.inspectorPresentation?.factGraph;
+    if (!graph || !facts.factPresentations) throw new Error("fixture missing");
+    const verdictNode = factNode("assess:sha256:verdict", "assessment", 80, 90);
+    const peerNode = factNode("assess:sha256:peer", "assessment", 80, 150);
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          ...facts,
+          factPresentations: [
+            ...facts.factPresentations,
+            {
+              factId: "assess:sha256:peer",
+              family: "assessment",
+              originRevision: revision,
+              actorId: "reviewer",
+              revisionCurrency: "current",
+              familyState: "replaced",
+              availability: "available",
+            },
+          ],
+          inspectorPresentation: {
+            factGraph: {
+              ...graph,
+              nodes: [...graph.nodes, verdictNode, peerNode],
+              assessmentReplaces: [
+                {
+                  from: verdictNode.id,
+                  to: peerNode.id,
+                  originRevision: revision,
+                  fromFactId: "assess:sha256:verdict",
+                  toFactId: "assess:sha256:peer",
+                  path: [],
+                },
+              ],
+            },
+          },
+        }),
+        refusal: null,
+      },
+    );
+    const control = document.querySelector<HTMLButtonElement>(
+      '#detail-body .detail-facts [data-fact-id="assess:sha256:verdict"] .fact-rel button',
+    );
+    expect(control?.dataset.relationFactId).toBe("assess:sha256:peer");
+    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "assess:sha256:peer" },
+    });
+  });
+
+  it("nests input request responses under their request and honors each declared content type", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith(localFacts({ requestResponses: responses() })),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="input-request:sha256:ask"]',
+    );
+    const nest = card?.querySelector<HTMLElement>(".fact-responses");
+    expect(nest).not.toBeNull();
+    const entries = nest?.querySelectorAll<HTMLElement>(".fact-response") ?? [];
+    expect(entries.length).toBe(3);
+    expect(entries[0].querySelector(".outcome")?.textContent).toBe("approved");
+    // Declared markdown renders as HTML.
+    expect(entries[0].querySelector("strong")?.textContent).toBe("Bold");
+    // Declared plain text stays escaped, never parsed as markup.
+    expect(entries[1].querySelector("b")).toBeNull();
+    expect(entries[1].textContent).toContain("<b>not markup</b>");
+    // The request's own plain-text body is not silently upgraded. Scope to the
+    // card's direct child: responses use `.anno-body` too.
+    expect(card?.querySelector(":scope > .anno-body strong")).toBeNull();
+    expect(card?.querySelector(":scope > .anno-body")?.textContent).toContain(
+      "**not bold**",
+    );
+  });
+
+  it("states a suppressed response body without rendering it", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith(localFacts({ requestResponses: responses() })),
+        refusal: null,
+      },
+    );
+    const entries =
+      document.querySelectorAll<HTMLElement>(
+        '#detail-body .detail-facts [data-fact-id="input-request:sha256:ask"] .fact-response',
+      ) ?? [];
+    const hidden = entries[2];
+    expect(hidden.querySelector(".outcome")?.textContent).toBe("dismissed");
+    expect(hidden.textContent).toContain("suppressed present");
+    expect(hidden.querySelector(".anno-body")).toBeNull();
+    expect(hidden.textContent).not.toContain("never rendered");
   });
 
   it("renders exact fact Markdown and focuses the requested fact without embedding the diff or selecting a peer", () => {
@@ -2335,6 +3156,147 @@ describe("Change inspector render", () => {
     expect(journal?.getAttribute("title")).toBe(journalId);
     expect(journal?.getAttribute("aria-label")).toBe(`journal ${journalId}`);
     expect(journal?.dataset.journalId).toBe(journalId);
+  });
+
+  describe("the genuinely empty Changes lens offers the first capture", () => {
+    // A timed-out waitFor must not leak stubs into later tests.
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      Reflect.deleteProperty(navigator, "clipboard");
+    });
+
+    it("renders the copyable first-capture handoff beside the empty message", () => {
+      renderEmptyLens({ lens: "changes" });
+
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes.",
+      );
+      const block = handoffBlock();
+      expect(block).not.toBeNull();
+      expect(block?.querySelector(".workflow-handoff-label")?.textContent).toBe(
+        "Capture your first revision",
+      );
+      expect(block?.querySelector("[data-workflow-command]")?.textContent).toBe(
+        'pointbreak capture --summary "<what changed>"',
+      );
+      expect(
+        block?.querySelector("button[data-copy-workflow-command]"),
+      ).not.toBeNull();
+    });
+
+    it("never suggests recapturing when a filter emptied the page", () => {
+      const filters: ChangePageQuery[] = [
+        { q: "unmatched" },
+        { topology: "initial" },
+        { lifecycle: "in_progress" },
+        { attention: "conflicted" },
+        { availability: "incomplete" },
+      ];
+      for (const query of filters) {
+        renderEmptyLens({ lens: "changes", query });
+        expect(document.querySelector("#master .empty")?.textContent).toBe(
+          "No Changes.",
+        );
+        expect(handoffBlock()).toBeNull();
+      }
+    });
+
+    it("never suggests recapturing on an empty page reached by continuation", () => {
+      renderEmptyLens({ lens: "changes", query: { after: "cursor:one" } });
+      expect(handoffBlock()).toBeNull();
+
+      renderEmptyLens({ lens: "changes", previous: "cursor:previous" });
+      expect(handoffBlock()).toBeNull();
+
+      renderEmptyLens({ lens: "changes", next: "cursor:next" });
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("keeps only the message on an exact route over an empty store", () => {
+      renderEmptyLens({
+        lens: "changes",
+        route: { kind: "change", changeId: "change:sha256:missing", query: {} },
+      });
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes.",
+      );
+      expect(handoffBlock()).toBeNull();
+    });
+
+    // The handoff's eligibility depends on the route kind, so a same-generation
+    // transition between an exact route and the Changes lens must repaint the
+    // master list rather than reuse the cached tree.
+    it("inserts the handoff when returning to the lens from an exact route", () => {
+      const state = createChangeInspectorState({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+
+      state.setRoute({ kind: "lens", lens: "changes", query: {} });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+    });
+
+    it("removes the handoff when an exact route opens from the empty lens", () => {
+      const state = createChangeInspectorState({
+        kind: "lens",
+        lens: "changes",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+
+      state.setRoute({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("leaves the empty Attention lens exactly as it is", () => {
+      renderEmptyLens({ lens: "attention" });
+      expect(document.querySelector("#master .empty")?.textContent).toBe(
+        "No Changes need attention.",
+      );
+      expect(handoffBlock()).toBeNull();
+    });
+
+    it("copies exactly the displayed command when the copy button is clicked", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      renderEmptyLens({ lens: "changes" });
+      const block = handoffBlock();
+      const button = block?.querySelector<HTMLButtonElement>(
+        "button[data-copy-workflow-command]",
+      );
+      expect(button).not.toBeNull();
+
+      button?.click();
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenCalledWith(
+          'pointbreak capture --summary "<what changed>"',
+        );
+      });
+      // Copying is clipboard-only: it never fetches, navigates, or writes.
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
   });
 });
 

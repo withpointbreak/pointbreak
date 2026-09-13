@@ -181,4 +181,53 @@ describe("typed Timeline presentation", () => {
       }),
     ).toContain("Fact port port:sha256:one");
   });
+
+  it("reports the declared content type alongside each prose-bearing event body", () => {
+    const markdown = presentEvent(
+      event({
+        kind: "review_observation_recorded",
+        details: {
+          observationId: "obs:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          title: "Readable",
+          body: "**Bold** finding",
+          bodyContentType: "text/markdown",
+        },
+      }),
+    );
+    expect(markdown.body).toBe("**Bold** finding");
+    expect(markdown.bodyContentType).toBe("text/markdown");
+
+    const response = presentEvent(
+      event({
+        kind: "input_request_responded",
+        details: {
+          inputRequestResponseId: "input-request-response:sha256:one",
+          inputRequestId: "input-request:sha256:one",
+          revisionId: "rev:sha256:one",
+          outcome: "approved",
+          reason: "_because_",
+          reasonContentType: "text/markdown",
+        },
+      }),
+    );
+    expect(response.bodyContentType).toBe("text/markdown");
+
+    const plain = presentEvent(
+      event({
+        kind: "review_assessment_recorded",
+        details: {
+          assessmentId: "assess:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          assessment: "accepted",
+          summary: "plain summary",
+        },
+      }),
+    );
+    expect(plain.bodyContentType).toBeUndefined();
+
+    // A system-authored body carries no declared type and must never gain one.
+    const initialized = presentEvent(event({ kind: "review_initialized" }));
+    expect(initialized.bodyContentType).toBeUndefined();
+  });
 });

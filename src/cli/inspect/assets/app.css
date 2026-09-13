@@ -514,6 +514,13 @@ main {
   color: var(--accent);
   background: var(--bg-row);
 }
+/* Readable but not operable off the Timeline: the state text stays in the
+   accessibility tree, and the muted presentation says the toggle will not act. */
+.follow-toggle[aria-disabled="true"] {
+  color: var(--fg-dim);
+  background: transparent;
+  cursor: default;
+}
 
 /* Compact app controls disclose low-frequency settings in anchored panels. They
    stay outside the modal overlay stack so the timeline remains navigable while
@@ -933,6 +940,28 @@ main {
 .event .type {
   font-family: var(--mono);
   font-size: var(--fs-xs);
+}
+/* A collapsed same-type group is one option row built on the .event grid, so it
+   inherits the narrow layout and stays close to one event row tall for the
+   uniform-height virtual window. Expansion is a DOM splice with no transition,
+   so no prefers-reduced-motion rule is needed here. */
+.timeline-group {
+  background: var(--bg-elev);
+}
+.timeline-group .title {
+  font-weight: 600;
+}
+.timeline-group .type-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* An expanded group is a labelled container whose children are ordinary
+   option rows; it adds no box of its own so each member stays one row tall. */
+.timeline-group-members,
+.timeline-group-members > ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 .event-summary,
 .event-context {
@@ -2959,6 +2988,14 @@ html.compact .unit-card {
 .fact-status.stale {
   color: var(--danger);
 }
+/* Record-currency states the exact Change document carries beyond current/stale. */
+.fact-status.withdrawn,
+.fact-status.unavailable {
+  color: var(--fg-dim);
+}
+.fact-status.conflicted {
+  color: var(--warning);
+}
 .fact-status.passed {
   color: var(--success);
 }
@@ -3025,6 +3062,32 @@ html.compact .unit-card {
 .fact-response .outcome {
   font-family: var(--mono);
   color: var(--teal);
+}
+
+/* Fact-family grouping accent for the exact-Revision reading view. The rule and
+   tint restate the retired reader's per-kind palette without its diff-gutter
+   indent, so the accent reads the same while the card keeps its own box. */
+.fact-family {
+  border-left: 3px solid var(--border);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  padding: 2px 0 2px 10px;
+  margin: 0 0 10px;
+}
+.fact-family-observation {
+  border-left-color: var(--success-deep);
+  background: color-mix(in srgb, var(--success) 7%, transparent);
+}
+.fact-family-input-request {
+  border-left-color: color-mix(in srgb, var(--warning) 60%, var(--bg));
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.fact-family-assessment {
+  border-left-color: color-mix(in srgb, var(--assess) 60%, var(--bg));
+  background: color-mix(in srgb, var(--assess) 8%, transparent);
+}
+.fact-family-validation {
+  border-left-color: color-mix(in srgb, var(--validation) 55%, var(--bg));
+  background: color-mix(in srgb, var(--validation) 8%, transparent);
 }
 
 /* Verification status + endorsement readback (#171) — advisory, reader-relative.

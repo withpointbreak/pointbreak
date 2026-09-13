@@ -1,7 +1,9 @@
-// Applied-filter chip derivation: a pure view over `filterText` (argument-driven,
-// no DOM, no state — the shape of query.ts). The surface-aware parser is the only
-// key-set authority and `tokenizeQuery` the only tokenization authority; this
-// module never re-lists keys or reimplements quoting/negation splitting.
+// Applied-filter chip derivation and clause minting: a pure view over
+// `filterText` (argument-driven, no DOM, no state — the shape of query.ts). The
+// surface-aware parser is the only key-set and canonicalization authority and
+// `tokenizeQuery` the only tokenization authority; this module never re-lists
+// keys or reimplements quoting/negation splitting, and when it mints a clause it
+// asks the parser whether an equivalent clause already filters.
 
 import { parseSearchQueryFor, type QuerySurface, tokenizeQuery } from "./query";
 
@@ -51,4 +53,39 @@ export function removeFilterChipToken(
   const tokens = tokenizeQuery(filterText);
   tokens.splice(tokenIndex, 1);
   return tokens.join(" ");
+}
+
+/**
+ * Append an `actor:<id>` clause to `filterText`, preserving every existing clause.
+ *
+ * The actor is a query clause, never a scope param. The clause mints the short
+ * form because the parser canonicalizes `agent:x` and `actor:agent:x` to the same
+ * value, and quotes a whitespace-bearing id so it tokenizes as one field token. A
+ * repeated call is a no-op: the candidate clause and the existing query are
+ * compared through the parser, so it is the parser — not this module — that
+ * decides what "the same actor" means.
+ */
+export function appendActorFilterClause(
+  filterText: string,
+  actorId: string,
+  surface: QuerySurface,
+): string {
+  const current = filterText.trim();
+  const short = actorId.replace(/^actor:/, "");
+  // The phrase form cannot carry a literal quote, so an id containing one has no
+  // representation in this grammar; leave the query untouched rather than emit a
+  // token that would re-tokenize as something else.
+  if (!short || short.includes('"')) return current;
+  const clause = /\s/.test(short) ? `actor:"${short}"` : `actor:${short}`;
+  const minted = parseSearchQueryFor(clause, surface).clauses[0];
+  if (minted?.kind !== "field" || minted.field !== "actor") return current;
+  const already = parseSearchQueryFor(current, surface).clauses.some(
+    (existing) =>
+      existing.kind === "field" &&
+      existing.field === "actor" &&
+      !existing.negate &&
+      existing.value === minted.value,
+  );
+  if (already) return current;
+  return current ? `${current} ${clause}` : clause;
 }

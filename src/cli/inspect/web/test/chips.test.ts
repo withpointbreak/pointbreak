@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { filterChipsFor, removeFilterChipToken } from "../src/chips";
+import {
+  appendActorFilterClause,
+  filterChipsFor,
+  removeFilterChipToken,
+} from "../src/chips";
+import { parseSearchQueryFor } from "../src/query";
 
 // The applied-filter chips are a pure view of `filterText`: one chip per raw
 // token that parses as a supported field clause on the active surface, each
@@ -75,5 +80,95 @@ describe("removeFilterChipToken", () => {
     expect(
       removeFilterChipToken('actor:"git-name:Kevin Swiber" tag:a', 1),
     ).toBe('actor:"git-name:Kevin Swiber"');
+  });
+});
+
+// Clause minting is the other half of the pure view: the row's writer click
+// appends an `actor:<id>` clause, and the parser — never this suite or the
+// module — decides whether two spellings name the same actor.
+describe("appendActorFilterClause", () => {
+  it("appends an actor clause without repeating the actor: prefix", () => {
+    expect(
+      appendActorFilterClause(
+        "type:observation",
+        "actor:agent:codex-loop",
+        "change-timeline",
+      ),
+    ).toBe("type:observation actor:agent:codex-loop");
+  });
+
+  it("quotes a whitespace-bearing id so the clause survives tokenization", () => {
+    const next = appendActorFilterClause(
+      "",
+      "actor:git-name:Kevin Swiber",
+      "change-timeline",
+    );
+    expect(next).toBe('actor:"git-name:Kevin Swiber"');
+    expect(parseSearchQueryFor(next, "change-timeline").clauses).toEqual([
+      {
+        kind: "field",
+        field: "actor",
+        value: "actor:git-name:kevin swiber",
+        negate: false,
+      },
+    ]);
+  });
+
+  it("is a no-op when the same actor already filters, in any spelling", () => {
+    const once = appendActorFilterClause(
+      "",
+      "actor:agent:codex-loop",
+      "change-timeline",
+    );
+    expect(
+      appendActorFilterClause(
+        once,
+        "actor:agent:codex-loop",
+        "change-timeline",
+      ),
+    ).toBe(once);
+    expect(
+      appendActorFilterClause(
+        "actor:actor:agent:codex-loop",
+        "actor:agent:codex-loop",
+        "change-timeline",
+      ),
+    ).toBe("actor:actor:agent:codex-loop");
+  });
+
+  it("is a no-op for a repeated did:key actor", () => {
+    const did = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+    const once = appendActorFilterClause("", did, "change-timeline");
+    expect(once).toBe(`actor:${did}`);
+    expect(appendActorFilterClause(once, did, "change-timeline")).toBe(once);
+  });
+
+  it("still appends when the existing actor clause is negated", () => {
+    expect(
+      appendActorFilterClause(
+        "-actor:agent:codex-loop",
+        "actor:agent:codex-loop",
+        "change-timeline",
+      ),
+    ).toBe("-actor:agent:codex-loop actor:agent:codex-loop");
+  });
+
+  it("returns the query unchanged for an empty id or an id the grammar cannot express", () => {
+    expect(
+      appendActorFilterClause("type:observation", "", "change-timeline"),
+    ).toBe("type:observation");
+    expect(
+      appendActorFilterClause("", 'actor:weird"quote', "change-timeline"),
+    ).toBe("");
+  });
+
+  it("preserves free text and other clauses in order", () => {
+    expect(
+      appendActorFilterClause(
+        "rebase track:author",
+        "actor:agent:codex",
+        "change-timeline",
+      ),
+    ).toBe("rebase track:author actor:agent:codex");
   });
 });

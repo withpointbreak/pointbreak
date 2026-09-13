@@ -747,6 +747,58 @@ describe("bounded Change protocol", () => {
     ).toThrow("invalid changes Change page DTO");
   });
 
+  it("accepts, rejects empty, and tolerates an absent server presentation label", () => {
+    const revision = {
+      revisionId: "rev:sha256:a",
+      objectArtifactContentHash: "sha256:artifact-a",
+    };
+    const withLabel = (
+      label: string | undefined,
+      hasMember: boolean,
+    ): unknown => {
+      const value = page("pointbreak.inspect-changes-page");
+      const row = (value.changes as ChangeSummary[])[0];
+      if (!row) throw new Error("fixture must include a Change row");
+      row.currentRevisionRefs = [revision];
+      const presentation = value.presentations?.["change:sha256:a"] as
+        | ChangePresentation
+        | undefined;
+      if (!presentation) throw new Error("fixture must include a presentation");
+      presentation.currentRevisions = [
+        {
+          revision,
+          summarySource: "absent",
+          ...(hasMember ? { label } : {}),
+        } as ChangePresentation["currentRevisions"][number],
+      ];
+      return value;
+    };
+
+    // A server-supplied finished display string is accepted and preserved.
+    expect(
+      decodeChangePage(withLabel("No summary at capture", true), {
+        lens: "changes",
+        bounded: true,
+      }).presentations?.["change:sha256:a"]?.currentRevisions[0]?.label,
+    ).toBe("No summary at capture");
+
+    // An older server that sends no label still decodes.
+    expect(() =>
+      decodeChangePage(withLabel(undefined, false), {
+        lens: "changes",
+        bounded: true,
+      }),
+    ).not.toThrow();
+
+    // An empty label is a malformed presentation, not a valid "no label".
+    expect(() =>
+      decodeChangePage(withLabel("", true), {
+        lens: "changes",
+        bounded: true,
+      }),
+    ).toThrow("invalid changes Change page DTO");
+  });
+
   it("rejects malformed nested Change and exact-Revision DTOs", () => {
     const revision = {
       revisionId: "rev:sha256:a",
@@ -1442,5 +1494,110 @@ describe("bounded Change protocol", () => {
     expect(() => decodeChangeRevisionDetail(deadMaterializedFact)).toThrow(
       "Revision detail DTO",
     );
+  });
+});
+
+// One event-history document whose single entry carries the given summary. The
+// decoder cross-validates `facets`, `completion.eventTypes` and the entry's
+// `eventType`/`summary.kind`, so all four move together.
+function eventHistoryWith(entry: {
+  eventType: string;
+  details: Record<string, unknown>;
+}) {
+  const base = validEventHistoryValue();
+  return {
+    ...base,
+    facets: { [entry.eventType]: 1 },
+    completion: { ...base.completion, eventTypes: [entry.eventType] },
+    entries: [
+      {
+        ...base.entries[0],
+        eventType: entry.eventType,
+        summary: { kind: entry.eventType, details: entry.details },
+      },
+    ],
+  };
+}
+
+describe("declared event body content types", () => {
+  it("carries the declared body content type for prose-bearing Timeline events", () => {
+    const document = decodeEventHistory(
+      eventHistoryWith({
+        eventType: "review_observation_recorded",
+        details: {
+          observationId: "obs:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          title: "Readable",
+          body: "**Bold** finding",
+          bodyContentType: "text/markdown",
+        },
+      }),
+    );
+    const summary = document.entries[0].summary;
+    expect(summary.kind).toBe("review_observation_recorded");
+    if (summary.kind === "review_observation_recorded") {
+      expect(summary.details.bodyContentType).toBe("text/markdown");
+    }
+  });
+
+  it("treats an omitted event content type as plain text", () => {
+    const document = decodeEventHistory(
+      eventHistoryWith({
+        eventType: "review_assessment_recorded",
+        details: {
+          assessmentId: "assess:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          assessment: "accepted",
+          summary: "plain",
+        },
+      }),
+    );
+    const summary = document.entries[0].summary;
+    expect(summary.kind).toBe("review_assessment_recorded");
+    if (summary.kind === "review_assessment_recorded") {
+      expect(summary.details.summaryContentType).toBeUndefined();
+    }
+  });
+
+  it("rejects an event content type the writer never declares", () => {
+    for (const [eventType, details] of [
+      [
+        "review_observation_recorded",
+        {
+          observationId: "obs:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          title: "Readable",
+          body: "x",
+          bodyContentType: "text/html",
+        },
+      ],
+      [
+        "input_request_responded",
+        {
+          inputRequestResponseId: "input-request-response:sha256:one",
+          inputRequestId: "input-request:sha256:one",
+          revisionId: "rev:sha256:one",
+          outcome: "approved",
+          reason: "x",
+          reasonContentType: "text/html",
+        },
+      ],
+      [
+        "validation_check_recorded",
+        {
+          validationCheckId: "validation:sha256:one",
+          target: { kind: "revision", revisionId: "rev:sha256:one" },
+          checkName: "web",
+          status: "passed",
+          trigger: "manual",
+          summary: "x",
+          summaryContentType: "application/json",
+        },
+      ],
+    ] as const) {
+      expect(() =>
+        decodeEventHistory(eventHistoryWith({ eventType, details })),
+      ).toThrow();
+    }
   });
 });

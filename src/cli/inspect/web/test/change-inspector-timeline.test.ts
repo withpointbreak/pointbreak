@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  changeInspectorTimelineGroupAt,
+  changeInspectorTimelineNavigableEventIds,
   remeasureChangeInspectorTimelineRows,
   renderChangeInspectorTimeline,
   revealChangeInspectorTimelineEvent,
+  setChangeInspectorTimelineGroupExpanded,
 } from "../src/change-inspector-timeline";
 import type {
   EventHistoryDocument,
   EventHistoryEntry,
+  EventHistoryEventType,
 } from "../src/change-protocol";
+import { ALL_EMITTABLE_CLASSES } from "../src/classNames";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
@@ -125,18 +130,99 @@ function documentValue(): EventHistoryDocument {
 
 function longDocument(count = 100): EventHistoryDocument {
   const timeline = documentValue();
-  const template = timeline.entries[0];
-  if (!template) throw new Error("missing Timeline entry fixture");
+  // Alternate the two fixture templates so no adjacent same-type run reaches
+  // the grouping threshold: these suites exercise virtual geometry over one
+  // visual row per event.
+  const templates = timeline.entries.slice(0, 2);
+  if (templates.length !== 2) throw new Error("missing Timeline entry fixture");
   timeline.eventCount = count;
   timeline.matchCount = count;
   timeline.offset = 0;
   timeline.previous = undefined;
   timeline.next = undefined;
   timeline.entries = Array.from({ length: count }, (_, index) => ({
-    ...template,
+    ...(templates[index % 2] as EventHistoryEntry),
     eventId: `evt:sha256:${index.toString().padStart(3, "0")}`,
   })) satisfies EventHistoryEntry[];
   return timeline;
+}
+
+/** One entry of a supported type, built from the fixture templates. */
+function historyEntry(
+  eventId: string,
+  eventType: Extract<
+    EventHistoryEventType,
+    | "validation_check_recorded"
+    | "change_declared"
+    | "review_observation_recorded"
+  >,
+): EventHistoryEntry {
+  const [validation, declared] = documentValue().entries;
+  if (!validation || !declared) throw new Error("missing fixture entries");
+  if (eventType === "validation_check_recorded") {
+    return { ...validation, eventId };
+  }
+  if (eventType === "change_declared") return { ...declared, eventId };
+  return {
+    ...validation,
+    eventId,
+    eventType,
+    summary: {
+      kind: "review_observation_recorded",
+      details: {
+        observationId: `obs:sha256:${eventId}`,
+        target: { kind: "revision", revisionId: "rev:sha256:one" },
+        title: `Observation ${eventId}`,
+      },
+    },
+  };
+}
+
+function timelineDocument(entries: EventHistoryEntry[]): EventHistoryDocument {
+  const timeline = documentValue();
+  timeline.entries = entries;
+  timeline.eventCount = entries.length;
+  timeline.matchCount = entries.length;
+  timeline.offset = 0;
+  timeline.previous = undefined;
+  timeline.next = undefined;
+  return timeline;
+}
+
+/** ev:a1, then a run of three validations (ev:b2, ev:c3, ev:d4), then ev:e5. */
+function groupedDocument(): EventHistoryDocument {
+  return timelineDocument([
+    historyEntry("ev:a1", "change_declared"),
+    historyEntry("ev:b2", "validation_check_recorded"),
+    historyEntry("ev:c3", "validation_check_recorded"),
+    historyEntry("ev:d4", "validation_check_recorded"),
+    historyEntry("ev:e5", "review_observation_recorded"),
+  ]);
+}
+
+function renderGroupedTimeline(
+  timeline: EventHistoryDocument = groupedDocument(),
+  route: { kind: "timeline"; historyQuery: Record<string, string> } = {
+    kind: "timeline",
+    historyQuery: {},
+  },
+): HTMLElement {
+  mountInspectorDom();
+  const master = document.querySelector<HTMLElement>("#master");
+  if (!master) throw new Error("missing master");
+  renderChangeInspectorTimeline(
+    master,
+    timeline,
+    { navigate: () => undefined },
+    route,
+  );
+  return master;
+}
+
+function renderedEventIds(): string[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("#timeline [data-event-id]"),
+  ).map((row) => row.dataset.eventId ?? "");
 }
 
 function setViewportHeight(list: HTMLOListElement, height: number): void {
@@ -333,7 +419,11 @@ describe("Change-aware Timeline renderer", () => {
     const contexts = Array.from(
       row.querySelectorAll<HTMLAnchorElement>("a[data-timeline-context-id]"),
     );
+    // The row's track and writer are filter links too, painted in the meta
+    // block ahead of the event, Change and exact Revision context links.
     expect(contexts.map((link) => link.dataset.timelineContextId)).toEqual([
+      "author",
+      "actor:author",
       eventId,
       changeA,
       changeB,
@@ -346,31 +436,135 @@ describe("Change-aware Timeline renderer", () => {
       "-1",
       "-1",
       "-1",
+      "-1",
+      "-1",
     ]);
     expect(contexts.map((link) => link.getAttribute("title"))).toEqual([
+      "track author",
+      "writer actor:author",
       eventId,
       changeA,
       changeB,
       `exact Revision ${revisionA}; artifact ${artifactA}`,
       `exact Revision ${revisionB}; artifact ${artifactB}`,
     ]);
-    expect(contexts[1]?.getAttribute("href")).toContain(
+    expect(contexts[3]?.getAttribute("href")).toContain(
       encodeURIComponent(changeA),
     );
-    expect(contexts[3]?.getAttribute("href")).toContain(
+    expect(contexts[5]?.getAttribute("href")).toContain(
       `revision=${encodeURIComponent(revisionA)}`,
     );
-    expect(contexts[3]?.getAttribute("href")).toContain(
+    expect(contexts[5]?.getAttribute("href")).toContain(
       `artifactHash=${encodeURIComponent(artifactA)}`,
     );
-    expect(contexts[3]?.dataset.revisionId).toBe(revisionA);
-    expect(contexts[3]?.dataset.artifactHash).toBe(artifactA);
-    expect(contexts[3]?.getAttribute("aria-label")).toContain(revisionA);
-    expect(contexts[3]?.getAttribute("aria-label")).toContain(artifactA);
+    expect(contexts[5]?.dataset.revisionId).toBe(revisionA);
+    expect(contexts[5]?.dataset.artifactHash).toBe(artifactA);
+    expect(contexts[5]?.getAttribute("aria-label")).toContain(revisionA);
+    expect(contexts[5]?.getAttribute("aria-label")).toContain(artifactA);
     // The two exact Revision filters stand alone: neither silently picks one
     // of the two explicit Change contexts as their owner.
-    expect(contexts[3]?.getAttribute("href")).not.toContain("change=");
-    expect(contexts[4]?.getAttribute("href")).not.toContain("change=");
+    expect(contexts[5]?.getAttribute("href")).not.toContain("change=");
+    expect(contexts[6]?.getAttribute("href")).not.toContain("change=");
+  });
+
+  it("filters the Timeline to a row's writer without disturbing the rest of the query", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const route = {
+      kind: "timeline" as const,
+      historyQuery: {
+        q: "type:observation",
+        track: "author",
+        order: "asc" as const,
+        after: "page-2",
+      },
+    };
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      route,
+    );
+    const actor = document.querySelector<HTMLAnchorElement>(
+      'li.event a[data-timeline-context-kind="actor"]',
+    );
+    expect(actor?.textContent).toBe("actor:author");
+    expect(actor?.tabIndex).toBe(-1);
+    expect(actor?.getAttribute("aria-label")).toBe(
+      "Filter Timeline to writer actor:author",
+    );
+    // The actor is a q clause; `track` stays the structured param it already
+    // was, and the continuation cursor is dropped.
+    expect(actor?.getAttribute("href")).toBe(
+      "#/timeline?q=type%3Aobservation+actor%3Aauthor&track=author&order=asc",
+    );
+  });
+
+  it("filters the Timeline to a row's track through the structured param", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const route = {
+      kind: "timeline" as const,
+      historyQuery: { q: "type:observation", at: "evt:sha256:one" },
+    };
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      route,
+    );
+    const track = document.querySelector<HTMLAnchorElement>(
+      'li.event a[data-timeline-context-kind="track"]',
+    );
+    expect(track?.textContent).toBe("track author");
+    expect(track?.getAttribute("aria-label")).toBe(
+      "Filter Timeline to track author",
+    );
+    // Never flattened into the query text.
+    expect(track?.getAttribute("href")).toBe(
+      "#/timeline?q=type%3Aobservation&track=author",
+    );
+  });
+
+  it("does not re-append an actor clause that already filters", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: { q: "actor:author" } },
+    );
+    expect(
+      document
+        .querySelector<HTMLAnchorElement>(
+          'li.event a[data-timeline-context-kind="actor"]',
+        )
+        ?.getAttribute("href"),
+    ).toBe("#/timeline?q=actor%3Aauthor");
+  });
+
+  it("keeps a filter link from also opening the event row", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    renderChangeInspectorTimeline(
+      master,
+      documentValue(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+    );
+    const actor = document.querySelector<HTMLElement>(
+      'li.event a[data-timeline-context-kind="actor"]',
+    );
+    expect(actor?.closest("li.event")).not.toBeNull();
+    expect(actor?.matches("a[href]")).toBe(true);
+    // An actor click writes q only — no `track` param appears.
+    expect(actor?.getAttribute("href")).toBe("#/timeline?q=actor%3Aauthor");
+    expect(document.querySelectorAll("li.event button")).toHaveLength(0);
   });
 
   it("bounds opaque presentation titles without losing their exact source", () => {
@@ -685,5 +879,240 @@ describe("Change-aware Timeline renderer", () => {
     ).find((row) => row.dataset.eventId === selectedEventId);
     expect(selected).toBeDefined();
     expect(list.getAttribute("aria-activedescendant")).toBe(selected?.id);
+  });
+
+  describe("grouped rows", () => {
+    it("paints a collapsed run as exactly one virtual row", () => {
+      renderGroupedTimeline();
+
+      expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+      expect(document.querySelectorAll("#timeline li.event")).toHaveLength(3);
+    });
+
+    it("marks the group row with its type, member count, and one visual class", () => {
+      renderGroupedTimeline();
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:b2"]',
+      );
+      expect(group?.dataset.timelineGroup).toBe("validation_check_recorded");
+      expect(group?.dataset.timelineGroupSize).toBe("3");
+      expect(group?.classList.contains("event")).toBe(true);
+      expect(group?.classList.contains("timeline-group")).toBe(true);
+      expect(group?.getAttribute("role")).toBe("option");
+      expect(group?.tabIndex).toBe(-1);
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.querySelector(".type-count")?.textContent).toBe("3");
+      expect(group?.querySelector(".type")?.textContent).toBe("validation");
+      expect(
+        group?.querySelector<HTMLElement>(".rail")?.style.background,
+      ).toContain("--evt-validation");
+      expect(
+        document.querySelector("#timeline [data-timeline-group] a"),
+      ).toBeNull();
+    });
+
+    it("registers the one new class it adds", () => {
+      expect(ALL_EMITTABLE_CLASSES).toContain("timeline-group");
+    });
+
+    it("discloses the page-scoped collapse in the lens metadata line", () => {
+      const master = renderGroupedTimeline();
+
+      expect(master.querySelector(".lens-meta")?.textContent).toBe(
+        "5 events · newest first · adjacent same-type events collapsed",
+      );
+    });
+
+    it("leaves the metadata line unchanged when nothing collapsed", () => {
+      const master = renderGroupedTimeline(
+        timelineDocument([
+          historyEntry("ev:a1", "change_declared"),
+          historyEntry("ev:b2", "validation_check_recorded"),
+        ]),
+      );
+
+      expect(master.querySelector(".lens-meta")?.textContent).toBe(
+        "2 events · newest first",
+      );
+    });
+
+    it("renders a page filtered to exactly one event type flat", () => {
+      // A single-type filter is the reader asking for that whole run, so
+      // collapsing it would hide the page behind one row.
+      renderGroupedTimeline(groupedDocument(), {
+        kind: "timeline",
+        historyQuery: { type: "validation_check_recorded" },
+      });
+
+      expect(renderedEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+    });
+
+    it("keeps the row-height estimator converging with group rows present", () => {
+      renderGroupedTimeline();
+      const list = document.querySelector<HTMLOListElement>("#timeline");
+      if (!list) throw new Error("missing Timeline list");
+      for (const row of list.querySelectorAll<HTMLElement>("li.event")) {
+        // A group row is close to, not exactly, one event row tall.
+        const height = row.dataset.timelineGroup ? 60 : 80;
+        Object.defineProperty(row, "getBoundingClientRect", {
+          configurable: true,
+          value: () => rect(0, height),
+        });
+      }
+
+      expect(remeasureChangeInspectorTimelineRows()).toBe(true);
+      // The estimator is a running mean over painted rows; it must move by a
+      // bounded amount rather than diverge.
+      const spacers = Array.from(
+        list.querySelectorAll<HTMLElement>("[data-timeline-spacer]"),
+      );
+      expect(spacers.map((spacer) => spacer.style.height)).toEqual([
+        "0px",
+        "0px",
+      ]);
+    });
+
+    it("exposes the visible sequence and group ownership through one seam", () => {
+      renderGroupedTimeline();
+
+      expect(changeInspectorTimelineNavigableEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineGroupAt("ev:b2")).toBe("ev:b2");
+      expect(changeInspectorTimelineGroupAt("ev:c3")).toBe("ev:b2");
+      expect(changeInspectorTimelineGroupAt("ev:a1")).toBeNull();
+      expect(changeInspectorTimelineGroupAt(null)).toBeNull();
+
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      expect(renderedEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineNavigableEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineGroupAt("ev:c3")).toBeNull();
+      expect(
+        changeInspectorTimelineGroupAt("ev:c3", { includeExpanded: true }),
+      ).toBe("ev:b2");
+
+      setChangeInspectorTimelineGroupExpanded("ev:b2", false);
+
+      expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+    });
+
+    it("reports raw entry order for a document the renderer has not painted", () => {
+      const other = groupedDocument();
+      other.timelineProjectionStamp = "sha256:elsewhere";
+
+      expect(changeInspectorTimelineNavigableEventIds(other)).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+    });
+  });
+
+  describe("group accessibility", () => {
+    it("names a collapsed group by its count, type label, and state", () => {
+      // aria-expanded is NOT supported on role=option (WAI-ARIA 1.2), so the
+      // state lives in the accessible NAME.
+      renderGroupedTimeline();
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:b2"]',
+      );
+      expect(group?.getAttribute("role")).toBe("option");
+      expect(group?.getAttribute("aria-label")).toBe(
+        "Validations, 3 events, collapsed",
+      );
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.querySelector(".title")?.textContent).toBe("Validations");
+    });
+
+    it("replaces the group row with a labelled role=group on expand", () => {
+      // Expanding REPLACES the group row with its member rows; the container
+      // carries the group's identity and there is no surviving controller row.
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      expect(
+        document.querySelector('[data-event-id="ev:b2"][role="option"]'),
+      ).not.toBeNull();
+      expect(
+        document.querySelector("#timeline [data-timeline-group]"),
+      ).toBeNull();
+      const group = document.querySelector("#timeline [role='group']");
+      expect(group?.getAttribute("aria-label")).toBe("Validations, 3 events");
+      expect(group?.querySelectorAll('[role="option"]').length).toBe(3);
+      expect(
+        Array.from(
+          group?.querySelectorAll<HTMLElement>("[data-event-id]") ?? [],
+        ).map((row) => row.dataset.eventId),
+      ).toEqual(["ev:b2", "ev:c3", "ev:d4"]);
+    });
+
+    it("keeps members individually labelled and free of aria-expanded", () => {
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      const member = document.querySelector('[data-event-id="ev:c3"]');
+      expect(member?.getAttribute("aria-label")).toMatch(/validation/);
+      expect(member?.getAttribute("aria-label")).toContain("ev:c3");
+      expect(member?.hasAttribute("aria-expanded")).toBe(false);
+    });
+
+    it("uses no unsupported or interactive constructs inside the listbox", () => {
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      // role=group IS permitted inside a listbox; details/summary and a
+      // tabbable button are not, and no option carries aria-expanded.
+      expect(document.querySelector("#timeline details")).toBeNull();
+      expect(document.querySelector("#timeline button")).toBeNull();
+      expect(document.querySelector("#timeline [aria-expanded]")).toBeNull();
+      expect(
+        document.querySelectorAll('#timeline [tabindex="0"]'),
+      ).toHaveLength(0);
+    });
+
+    it("keeps a multi-word type label verbatim rather than inventing a title", () => {
+      renderGroupedTimeline(
+        timelineDocument([
+          historyEntry("ev:a1", "change_declared"),
+          historyEntry("ev:b2", "change_declared"),
+          historyEntry("ev:c3", "change_declared"),
+        ]),
+      );
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:a1"]',
+      );
+      expect(group?.getAttribute("aria-label")).toBe(
+        "Change declared, 3 events, collapsed",
+      );
+      expect(group?.querySelector(".title")?.textContent).toBe(
+        "Change declared",
+      );
+    });
   });
 });

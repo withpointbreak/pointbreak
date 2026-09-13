@@ -112,6 +112,12 @@
       "reason": "Owns session-only follow, park, and new-event counts for an eligible Timeline head. It never reorders entries, decodes continuations, or replaces a parked window without explicit reader action."
     },
     {
+      "path": "change-inspector-timeline-grouping.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the pure page-local Timeline grouping projection: adjacent same-type runs of one `/api/v2/history` document become visual rows, and the navigable id sequence is derived from those same rows. It holds no state, never spans a continuation boundary, and never merges, renames, or synthesizes events."
+    },
+    {
       "path": "change-inspector-timeline-navigation.ts",
       "classification": "adapted",
       "activeImport": true,
@@ -248,6 +254,12 @@
       "classification": "model-neutral-retained",
       "activeImport": true,
       "reason": "Provides shared pure view constants and structural types consumed by retained exact-resource renderers. It owns no state, transport, route, or Change/Revision resolution."
+    },
+    {
+      "path": "workflow-handoff.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "The one producer of copyable CLI command text. It builds commands from ids passed in as arguments plus visible placeholder tokens, escapes them once, and copies to the clipboard. It owns no route, transport, aggregate store, or Change membership semantics and cannot execute what it displays."
     }
   ]
 }

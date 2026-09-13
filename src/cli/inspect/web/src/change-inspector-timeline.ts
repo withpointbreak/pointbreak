@@ -6,6 +6,7 @@
  */
 
 import {
+  eventGroupLabel,
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
@@ -16,11 +17,24 @@ import {
   formatChangeInspectorRoute,
   timelineEventRoute,
 } from "./change-inspector-router";
+import {
+  collapsedGroupAt,
+  GROUP_MIN_RUN,
+  groupKey,
+  groupTimelineEntries,
+  navigableEventIds,
+  owningGroupKey,
+  type TimelineGroup,
+  type TimelineRow,
+  visualRows,
+} from "./change-inspector-timeline-grouping";
 import type {
   EventHistoryDocument,
   EventHistoryEntry,
   EventHistoryRevisionRef,
 } from "./change-protocol";
+import { appendActorFilterClause } from "./chips";
+import { CLASS } from "./classNames";
 import { registerDensityListener } from "./prefs";
 import {
   compactIdentityText,
@@ -35,6 +49,12 @@ const REMEASURE_SETTLE_MS = 150;
 
 interface TimelineView {
   document: EventHistoryDocument;
+  /** Page-local grouping derived from exactly this document. */
+  grouped: readonly TimelineRow[];
+  /** Groups the reader opened; keyed by first member id, render-key lifetime. */
+  expanded: Set<string>;
+  /** The visual rows the virtual window paints: one `<li>` per row. */
+  rows: readonly TimelineRow[];
   list: HTMLOListElement;
   remeasureTimer: ReturnType<typeof setTimeout> | null;
   resizeObserver: ResizeObserver | null;
@@ -70,7 +90,7 @@ function timelineExcerpt(value: string): string {
 function appendTimelineLink(
   parent: HTMLElement,
   identity: string,
-  kind: "Change" | "Revision" | "event",
+  kind: "Change" | "Revision" | "event" | "actor" | "track",
   href: string,
 ): HTMLAnchorElement {
   const link = document.createElement("a");
@@ -121,6 +141,155 @@ function optionId(eventId: string): string {
   return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
 }
 
+/**
+ * A page filtered to exactly one event type is the reader asking for that
+ * whole run; collapsing it would hide the page behind a single row. Any other
+ * query groups at the design threshold.
+ */
+function groupingMinRun(
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): number {
+  const type = route.historyQuery.type;
+  return type !== undefined && !type.includes(",")
+    ? Number.POSITIVE_INFINITY
+    : GROUP_MIN_RUN;
+}
+
+function deriveTimelineRows(view: TimelineView): void {
+  view.rows = visualRows(view.grouped, view.expanded);
+}
+
+/**
+ * An exact event route names an event, never a group summary. Open the
+ * group that owns it, including when it is the group's first member, so the
+ * reveal that follows lands on the member's own option row.
+ */
+function expandOwningGroup(view: TimelineView, eventId: string): void {
+  const owner = owningGroupKey(view.grouped, eventId);
+  if (owner === null || view.expanded.has(owner)) return;
+  view.expanded.add(owner);
+  deriveTimelineRows(view);
+}
+
+/** The shared option scaffolding every Timeline row carries. */
+function optionRow(
+  eventId: string,
+  selectedEventId: string | null,
+): HTMLLIElement {
+  const row = document.createElement("li");
+  row.className = "event";
+  row.dataset.eventId = eventId;
+  row.id = optionId(eventId);
+  row.tabIndex = -1;
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", String(eventId === selectedEventId));
+  return row;
+}
+
+function appendOccurredAt(row: HTMLElement, occurredAt: string): void {
+  const occurred = new Date(occurredAt);
+  const time = document.createElement("time");
+  time.className = "time";
+  time.dateTime = occurredAt;
+  if (Number.isNaN(occurred.valueOf())) {
+    time.textContent = occurredAt;
+  } else {
+    const date = document.createElement("span");
+    date.className = "event-date";
+    date.textContent = occurred.toLocaleDateString();
+    const clock = document.createElement("span");
+    clock.textContent = occurred.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    time.append(date, clock);
+  }
+  row.append(time);
+}
+
+function appendRail(
+  row: HTMLElement,
+  eventType: EventHistoryEntry["eventType"],
+): void {
+  const rail = document.createElement("span");
+  rail.className = "rail";
+  rail.style.background = eventTypeColor(eventType);
+  rail.setAttribute("aria-hidden", "true");
+  row.append(rail);
+}
+
+/**
+ * One collapsed same-type run as a single option row. It is addressed by its
+ * first member's id, carries no links, and (per WAI-ARIA 1.2) no
+ * `aria-expanded`: that attribute is unsupported on `role="option"`.
+ */
+/** The accessible name shared by a group's collapsed row and expanded container. */
+function groupName(group: TimelineGroup): string {
+  const first = group.members[0];
+  if (first === undefined) throw new Error("Timeline group has no members");
+  return `${eventGroupLabel(first)}, ${group.members.length} events`;
+}
+
+/**
+ * An expanded group is a labelled `role="group"` container (permitted inside
+ * a listbox) whose children are the ordinary member option rows. It carries
+ * no `data-event-id` and no `event` class, so selection, measurement, and the
+ * keyboard cursor see only the member rows.
+ */
+function groupContainer(group: TimelineGroup): {
+  item: HTMLLIElement;
+  members: HTMLOListElement;
+} {
+  const item = document.createElement("li");
+  item.className = CLASS.timelineGroupMembers;
+  item.dataset.timelineGroupMembers = group.eventType;
+  item.setAttribute("role", "group");
+  item.setAttribute("aria-label", groupName(group));
+  const members = document.createElement("ol");
+  members.setAttribute("role", "none");
+  item.append(members);
+  return { item, members };
+}
+
+function groupRow(
+  group: TimelineGroup,
+  selectedEventId: string | null,
+): HTMLLIElement {
+  const first = group.members[0];
+  if (first === undefined) throw new Error("Timeline group has no members");
+  const presentation = presentEvent(first);
+  const row = optionRow(first.eventId, selectedEventId);
+  row.classList.add(CLASS.timelineGroup);
+  row.dataset.timelineGroup = group.eventType;
+  row.dataset.timelineGroupSize = String(group.members.length);
+  // The collapsed state lives in the accessible name: WAI-ARIA 1.2 does not
+  // support aria-expanded on role=option. Activating the row expands it.
+  row.setAttribute("aria-label", `${groupName(group)}, collapsed`);
+  appendOccurredAt(row, first.occurredAt);
+  appendRail(row, group.eventType);
+  const body = document.createElement("div");
+  body.className = "body";
+  const heading = document.createElement("h3");
+  heading.className = "title";
+  heading.textContent = eventGroupLabel(first);
+  const meta = document.createElement("div");
+  meta.className = "mono";
+  meta.classList.add("meta");
+  const eventType = document.createElement("span");
+  eventType.className = "type";
+  eventType.textContent = presentation.label;
+  eventType.title = group.eventType;
+  eventType.style.color = eventTypeColor(group.eventType);
+  const count = document.createElement("span");
+  count.className = CLASS.typeCount;
+  count.textContent = String(group.members.length);
+  meta.append(eventType, count);
+  body.append(heading, meta);
+  row.append(body);
+  return row;
+}
+
 function rowSpacer(height: number): HTMLLIElement {
   const spacer = document.createElement("li");
   spacer.dataset.timelineSpacer = "true";
@@ -129,11 +298,66 @@ function rowSpacer(height: number): HTMLLIElement {
   return spacer;
 }
 
-function appendChip(row: HTMLElement, text: string): void {
-  const chip = document.createElement("span");
-  chip.className = "badge";
-  chip.textContent = text;
-  row.append(chip);
+// The three row filter links below share a build-then-refine shape but stay
+// separate on purpose: each edits a different query key, and the writer is a
+// q clause while the track is a scope param. A shared abstraction would hide
+// exactly that distinction.
+
+// The writer is a query clause, not a scope param: appending composes with the
+// existing query text and leaves the `track` param free for an explicit track.
+function appendActorFilterLink(
+  parent: HTMLElement,
+  actorId: string,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): void {
+  const q = appendActorFilterClause(
+    route.historyQuery.q ?? "",
+    actorId,
+    "change-timeline",
+  );
+  const link = appendTimelineLink(
+    parent,
+    actorId,
+    "actor",
+    formatChangeInspectorRoute({
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        q: q || undefined,
+      },
+    }),
+  );
+  link.textContent = actorId;
+  link.title = `writer ${actorId}`;
+  link.setAttribute("aria-label", `Filter Timeline to writer ${actorId}`);
+}
+
+// A track is a scope, so it sets the structured param the Filters panel
+// already owns rather than a query clause.
+function appendTrackFilterLink(
+  parent: HTMLElement,
+  trackId: string,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): void {
+  const link = appendTimelineLink(
+    parent,
+    trackId,
+    "track",
+    formatChangeInspectorRoute({
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        track: trackId,
+      },
+    }),
+  );
+  link.textContent = `track ${trackId}`;
+  link.title = `track ${trackId}`;
+  link.setAttribute("aria-label", `Filter Timeline to track ${trackId}`);
 }
 
 function appendVerificationChip(
@@ -153,39 +377,13 @@ function entryRow(
   route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
 ): HTMLLIElement {
   const presentation = presentEvent(entry);
-  const row = document.createElement("li");
-  row.className = "event";
-  row.dataset.eventId = entry.eventId;
-  row.id = optionId(entry.eventId);
-  row.tabIndex = -1;
-  row.setAttribute("role", "option");
-  row.setAttribute("aria-selected", String(entry.eventId === selectedEventId));
+  const row = optionRow(entry.eventId, selectedEventId);
   row.setAttribute(
     "aria-label",
     `${presentation.title}; ${entry.eventType}; writer ${entry.writer.actorId}; ${entry.occurredAt}; event ${entry.eventId}; Changes ${entry.changeIds.join(", ") || "none"}; exact Revisions ${entry.revisionRefs.map((reference) => `${reference.revisionId} ${reference.objectArtifactContentHash}`).join(", ") || "none"}; unresolved Revisions ${entry.unresolvedRevisionIds.join(", ") || "none"}`,
   );
-  const occurred = new Date(entry.occurredAt);
-  const time = document.createElement("time");
-  time.className = "time";
-  time.dateTime = entry.occurredAt;
-  if (Number.isNaN(occurred.valueOf())) {
-    time.textContent = entry.occurredAt;
-  } else {
-    const date = document.createElement("span");
-    date.className = "event-date";
-    date.textContent = occurred.toLocaleDateString();
-    const clock = document.createElement("span");
-    clock.textContent = occurred.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    time.append(date, clock);
-  }
-  const rail = document.createElement("span");
-  rail.className = "rail";
-  rail.style.background = eventTypeColor(entry.eventType);
-  rail.setAttribute("aria-hidden", "true");
+  appendOccurredAt(row, entry.occurredAt);
+  appendRail(row, entry.eventType);
   const body = document.createElement("div");
   body.className = "body";
   const heading = document.createElement("h3");
@@ -214,11 +412,9 @@ function entryRow(
   eventType.style.color = eventTypeColor(entry.eventType);
   meta.append(eventType);
   appendVerificationChip(meta, entry.verificationStatus);
-  if (entry.trackId) appendChip(meta, `track ${entry.trackId}`);
-  const actor = document.createElement("span");
-  actor.textContent = entry.writer.actorId;
-  actor.title = `writer ${entry.writer.actorId}`;
-  meta.append(actor);
+  if (entry.trackId) appendTrackFilterLink(meta, entry.trackId, route);
+  if (entry.writer.actorId)
+    appendActorFilterLink(meta, entry.writer.actorId, route);
   appendTimelineLink(
     meta,
     entry.eventId,
@@ -266,13 +462,12 @@ function entryRow(
   }
   body.append(meta);
   if (contexts.childNodes.length) body.append(contexts);
-  row.append(time, rail, body);
+  row.append(body);
   return row;
 }
 
 function paintVisible(view: TimelineView): void {
-  const { list, document: timeline, rowHeight } = view;
-  const entries = timeline.entries;
+  const { list, rows, rowHeight } = view;
   const viewport = list.clientHeight;
   const localStart =
     viewport > 0
@@ -281,22 +476,41 @@ function paintVisible(view: TimelineView): void {
   const localEnd =
     viewport > 0
       ? Math.min(
-          entries.length,
+          rows.length,
           Math.ceil((list.scrollTop + viewport) / rowHeight) + OVERSCAN,
         )
-      : entries.length;
+      : rows.length;
   // The browser materializes one server-bounded page. Virtual geometry is
   // therefore page-local: global `offset`/`matchCount` are labels, not rows the
-  // browser may pretend are loaded or scrollable.
+  // browser may pretend are loaded or scrollable. The virtual index runs over
+  // VISUAL rows: a collapsed group is one `<li>`, so the uniform-height
+  // estimator stays valid.
   const top = rowSpacer(localStart * rowHeight);
-  const bottom = rowSpacer(Math.max(0, entries.length - localEnd) * rowHeight);
-  list.replaceChildren(
-    top,
-    ...entries
-      .slice(localStart, localEnd)
-      .map((entry) => entryRow(entry, view.selectedEventId, view.route)),
-    bottom,
-  );
+  const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
+  const painted: HTMLLIElement[] = [];
+  // A group's members are contiguous in the visual rows, so one container
+  // per expanded group inside the painted window is exactly the DOM needed.
+  const containers = new Map<TimelineGroup, HTMLOListElement>();
+  for (const row of rows.slice(localStart, localEnd)) {
+    if (row.kind === "group") {
+      painted.push(groupRow(row, view.selectedEventId));
+      continue;
+    }
+    const member = entryRow(row.entry, view.selectedEventId, view.route);
+    if (row.ofGroup === undefined) {
+      painted.push(member);
+      continue;
+    }
+    let members = containers.get(row.ofGroup);
+    if (members === undefined) {
+      const created = groupContainer(row.ofGroup);
+      members = created.members;
+      containers.set(row.ofGroup, members);
+      painted.push(created.item);
+    }
+    members.append(member);
+  }
+  list.replaceChildren(top, ...painted, bottom);
   const activeOption = view.selectedEventId
     ? Array.from(list.querySelectorAll<HTMLElement>("[data-event-id]")).find(
         (row) => row.dataset.eventId === view.selectedEventId,
@@ -391,12 +605,20 @@ export function renderChangeInspectorTimeline(
   const key = `${timeline.timelineProjectionStamp}\u0000${JSON.stringify(route.historyQuery)}`;
   if (master.dataset.timelineKey === key && active !== null) {
     const exactRouteChanged = selectedEventId !== active.routeSelectedEventId;
-    active.document = timeline;
+    if (active.document !== timeline) {
+      active.document = timeline;
+      active.grouped = groupTimelineEntries(
+        timeline.entries,
+        groupingMinRun(route),
+      );
+      deriveTimelineRows(active);
+    }
     active.route = route;
     active.list.dataset.timelineRoute = formatChangeInspectorRoute(route);
     active.routeSelectedEventId = selectedEventId;
     if (exactRouteChanged && selectedEventId !== null) {
       active.selectedEventId = selectedEventId;
+      expandOwningGroup(active, selectedEventId);
     }
     paintVisible(active);
     if (exactRouteChanged && selectedEventId !== null) {
@@ -404,11 +626,17 @@ export function renderChangeInspectorTimeline(
     }
     return;
   }
+  const grouped = groupTimelineEntries(timeline.entries, groupingMinRun(route));
   const section = document.createElement("section");
   section.className = "timeline-shell";
+  // Page-local grouping discloses its scope in the metadata line, the same
+  // honesty convention the Attention lens uses for its page-scoped groups.
+  const collapsedNotice = grouped.some((row) => row.kind === "group")
+    ? " · adjacent same-type events collapsed"
+    : "";
   const [heading, metadata] = createLensHeading(
     "Timeline",
-    `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first`,
+    `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first${collapsedNotice}`,
   );
   const notice = document.createElement("p");
   notice.className = "timeline-summary dim";
@@ -492,6 +720,9 @@ export function renderChangeInspectorTimeline(
   master.dataset.timelineKey = key;
   active = {
     document: timeline,
+    grouped,
+    expanded: new Set(),
+    rows: visualRows(grouped, new Set()),
     list,
     remeasureTimer: null,
     resizeObserver: null,
@@ -510,6 +741,7 @@ export function renderChangeInspectorTimeline(
     });
     view.resizeObserver.observe(list);
   }
+  if (selectedEventId !== null) expandOwningGroup(view, selectedEventId);
   paintVisible(view);
   if (selectedEventId !== null) {
     // An exact event route can anchor a bounded page whose selected event is
@@ -530,10 +762,17 @@ export function renderChangeInspectorTimeline(
  */
 export function revealChangeInspectorTimelineEvent(eventId: string): boolean {
   if (active === null) return false;
-  const localIndex = active.document.entries.findIndex(
-    (entry) => entry.eventId === eventId,
-  );
-  if (localIndex < 0) return false;
+  let localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+  if (localIndex < 0) {
+    // Reveal expands: a member of a collapsed group is in the document but
+    // not among the visual rows, so open its owner before searching again.
+    const owner = collapsedGroupAt(active.grouped, eventId, active.expanded);
+    if (owner === null) return false;
+    active.expanded.add(owner);
+    deriveTimelineRows(active);
+    localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+    if (localIndex < 0) return false;
+  }
   active.selectedEventId = eventId;
   remeasureChangeInspectorTimelineRows();
   const top = localIndex * active.rowHeight;
@@ -559,7 +798,7 @@ export function revealChangeInspectorTimelineEvent(eventId: string): boolean {
     // This keeps `g`/`G` and exact deep links honest without materializing the
     // whole server-bounded page.
     if (localIndex === 0) active.list.scrollTop = 0;
-    else if (localIndex === active.document.entries.length - 1) {
+    else if (localIndex === active.rows.length - 1) {
       active.list.scrollTop = active.list.scrollHeight;
     }
     paintVisible(active);
@@ -569,4 +808,54 @@ export function revealChangeInspectorTimelineEvent(eventId: string): boolean {
   }
   selected?.scrollIntoView({ block: "nearest", behavior: "auto" });
   return selected !== undefined;
+}
+
+/**
+ * The navigable id sequence for the mounted Timeline: exactly the visible
+ * sequence, so the keyboard cursor never walks an id with no rendered row.
+ * A document this module has not painted has no groups, so its raw entry
+ * order is returned unchanged.
+ */
+export function changeInspectorTimelineNavigableEventIds(
+  timeline?: EventHistoryDocument,
+): readonly string[] {
+  if (
+    active !== null &&
+    (timeline === undefined || active.document === timeline)
+  ) {
+    return navigableEventIds(active.rows);
+  }
+  return timeline === undefined
+    ? []
+    : timeline.entries.map((entry) => entry.eventId);
+}
+
+/**
+ * The group owning `eventId`, or null. By default only a COLLAPSED owner is
+ * reported; `includeExpanded` also reports an expanded one, which a collapse
+ * key needs to close the group the cursor is currently inside.
+ */
+export function changeInspectorTimelineGroupAt(
+  eventId: string | null,
+  options?: { includeExpanded?: boolean },
+): string | null {
+  if (active === null || eventId === null) return null;
+  return options?.includeExpanded
+    ? owningGroupKey(active.grouped, eventId)
+    : collapsedGroupAt(active.grouped, eventId, active.expanded);
+}
+
+/** Open or close one group and repaint the visual rows in place. */
+export function setChangeInspectorTimelineGroupExpanded(
+  groupKeyValue: string,
+  expanded: boolean,
+): void {
+  if (active === null) return;
+  if (owningGroupKey(active.grouped, groupKeyValue) !== groupKeyValue) return;
+  if (active.expanded.has(groupKeyValue) === expanded) return;
+  if (expanded) active.expanded.add(groupKeyValue);
+  else active.expanded.delete(groupKeyValue);
+  deriveTimelineRows(active);
+  paintVisible(active);
+  remeasureChangeInspectorTimelineRows();
 }

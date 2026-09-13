@@ -40,6 +40,8 @@ export const CLASS = {
   actions: "actions",
   timelineShell: "timeline-shell",
   timelineNewPill: "timeline-new-pill",
+  timelineGroup: "timeline-group",
+  timelineGroupMembers: "timeline-group-members",
   lensHeading: "lens-heading",
   lensMeta: "lens-meta",
   lensCount: "lens-count",
@@ -219,6 +221,7 @@ export const CLASS = {
 //   ENDORSE_CLASSES     ← projection `endorsementRow` (ENDORSEMENT_LABELS keys)
 //   VERDICT_ASSESSMENTS ← cards `verdictBadge`
 //   FACT_STATUSES       ← cards `factCard` + projection `assessmentCue`
+//   FACT_FAMILIES       ← change-inspector-render `renderFacts` group section
 //   REF_KINDS           ← derived from REF_ID_PREFIXES (the one prefix list;
 //                         refs `REF_RE` derives from it too) + hash/commit/track
 //
@@ -230,6 +233,15 @@ export const ANNO_KINDS = [
   "observation",
   "assessment",
   "input-request",
+  "validation",
+] as const;
+
+// The fact families the exact-Revision reading view groups by. Server-supplied
+// snake_case values; the class spelling hyphenates them.
+export const FACT_FAMILIES = [
+  "observation",
+  "input_request",
+  "assessment",
   "validation",
 ] as const;
 
@@ -289,6 +301,7 @@ export const FACT_STATUSES = [
   "accepted",
   "accepted_with_follow_up",
   "ambiguous",
+  "conflicted",
   "current",
   "errored",
   "failed",
@@ -303,6 +316,8 @@ export const FACT_STATUSES = [
   "stale",
   "superseded",
   "unassessed",
+  "unavailable",
+  "withdrawn",
 ] as const;
 
 // The id prefixes `refInfo`/`REF_RE` linkify, in REF_RE alternation order.
@@ -361,6 +376,10 @@ export const annoContainerClass = (kind: string): string => `anno anno-${kind}`;
 /** `anno-kind anno-kind-<kind>` — the fact-card kind chip class. */
 export const annoKindClass = (kind: string): string =>
   `anno-kind anno-kind-${kind}`;
+
+/** `fact-family fact-family-<family>` — the reading-view fact-family section class. */
+export const factFamilyClass = (family: string): string =>
+  `fact-family fact-family-${family.replaceAll("_", "-")}`;
 
 /** `drow drow-<kind>[ drow-noted]` — a diff row class (the noted gutter affordance). */
 export const drowClass = (kind: string, noted: boolean): string =>
@@ -439,6 +458,7 @@ export const ALL_EMITTABLE_CLASSES: readonly string[] = [
       ...Object.values(CLASS),
       ...ANNO_KINDS.map((k) => annoContainerClass(k)),
       ...ANNO_KINDS.map((k) => annoKindClass(k)),
+      ...FACT_FAMILIES.map((f) => factFamilyClass(f)),
       ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
       ...TOKEN_KINDS.map((k) => tokClass(k)),
       ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
