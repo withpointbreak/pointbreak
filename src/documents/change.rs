@@ -4,10 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::ChangeOrderingV1;
 use super::{
-    AssociationComparisonDocumentV1, ContentAvailabilityV1, RevisionResourceAvailabilityV1,
-    RevisionResourceDocumentV1,
+    AssociationComparisonDocumentV1, ChangeOrderingV1, ContentAvailabilityV1,
+    RevisionResourceAvailabilityV1, RevisionResourceDocumentV1,
 };
 use crate::error::{Result, ShoreError};
 use crate::model::{
