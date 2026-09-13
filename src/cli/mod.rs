@@ -33,6 +33,7 @@ mod input_request;
 mod inspect;
 mod json;
 mod key;
+pub(crate) mod legacy_admission;
 mod observation;
 mod output;
 mod revision;
