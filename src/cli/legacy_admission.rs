@@ -10,20 +10,12 @@
 //! of that policy; each surface only renders the verdict it receives.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "consumed by the CLI preflight and the Inspector legacy gate in the following changes"
-)]
 pub(crate) enum LegacyAdmissionSurfaceV1 {
     PublicCliCommand,
     InspectorLegacyRoute,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "consumed by the CLI preflight and the Inspector legacy gate in the following changes"
-)]
 pub(crate) enum LegacyAdmissionVerdictV1 {
     Serve,
     RefuseMigrationRequired,
@@ -31,10 +23,6 @@ pub(crate) enum LegacyAdmissionVerdictV1 {
     RefuseReaderUpgrade,
 }
 
-#[allow(
-    dead_code,
-    reason = "consumed by the CLI preflight and the Inspector legacy gate in the following changes"
-)]
 pub(crate) fn legacy_admission_v1(
     surface: LegacyAdmissionSurfaceV1,
     capability: Option<&pointbreak::session::StoreCapabilityInspection>,

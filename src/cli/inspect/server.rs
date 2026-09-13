@@ -1217,12 +1217,11 @@ fn route(
     }
     if is_legacy_semantic_path(path) {
         match pointbreak::session::activated_store_capability_for_repo(repo) {
-            Ok(Some(capability)) => {
-                if let Some(response) = legacy_semantic_gate(&capability) {
+            Ok(capability) => {
+                if let Some(response) = legacy_semantic_gate(capability.as_ref()) {
                     return response;
                 }
             }
-            Ok(None) => {}
             Err(error) => {
                 return Response::json_error("500 Internal Server Error", &error.to_string());
             }
@@ -1359,10 +1358,15 @@ fn is_legacy_semantic_path(path: &str) -> bool {
 }
 
 fn legacy_semantic_gate(
-    capability: &pointbreak::session::StoreCapabilityInspection,
+    capability: Option<&pointbreak::session::StoreCapabilityInspection>,
 ) -> Option<Response> {
-    match &capability.status {
-        pointbreak::session::StoreCapabilityStatus::Ready { .. } => {
+    use crate::cli::legacy_admission::{
+        LegacyAdmissionSurfaceV1, LegacyAdmissionVerdictV1, legacy_admission_v1,
+    };
+
+    match legacy_admission_v1(LegacyAdmissionSurfaceV1::InspectorLegacyRoute, capability) {
+        LegacyAdmissionVerdictV1::Serve => None,
+        LegacyAdmissionVerdictV1::RefuseReaderUpgrade => {
             let document = ReaderUpgradeRequiredDocumentV1::new(
                 "review_change_revision_v1",
                 Some("legacy_revision_v2".to_owned()),
@@ -1376,8 +1380,10 @@ fn legacy_semantic_gate(
                 Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
             })
         }
-        pointbreak::session::StoreCapabilityStatus::MigrationRequired
-        | pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+        LegacyAdmissionVerdictV1::RefuseMigrationRequired
+        | LegacyAdmissionVerdictV1::RefuseMigrationInProgress => {
+            let capability =
+                capability.expect("migration refusals carry the inspection that produced them");
             let document = ChangeQueryUnavailableDocumentV1::for_inspection(capability)
                 .expect("non-ready capability has a typed unavailable document");
             Some(match serde_json::to_string(&document) {
@@ -5242,7 +5248,7 @@ mod tests {
     #[test]
     fn legacy_semantic_routes_refuse_l0_before_partial_payload() {
         let capability = capability(pointbreak::session::StoreCapabilityStatus::MigrationRequired);
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "409 Conflict");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.store-migration-required");
@@ -5258,7 +5264,7 @@ mod tests {
             },
         );
         capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "409 Conflict");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.store-migration-in-progress");
@@ -5274,11 +5280,58 @@ mod tests {
         });
         capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
 
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "426 Upgrade Required");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.reader-upgrade-required");
         assert_eq!(value["code"], "reader_upgrade_required");
+    }
+
+    #[test]
+    fn legacy_gate_delegates_to_the_admission_table() {
+        // Whitespace- and qualification-tolerant: rustfmt may break the call across lines.
+        let gate = source_between(
+            SERVER_SOURCE,
+            "fn legacy_semantic_gate(",
+            "fn route_change_v2(",
+        );
+        assert!(gate.contains("legacy_admission_v1("));
+        assert!(gate.contains("LegacyAdmissionSurfaceV1::InspectorLegacyRoute"));
+        assert!(
+            !gate.contains("StoreCapabilityStatus::Ready"),
+            "the gate must not re-decide the table"
+        );
+        let dispatch = source_between(
+            SERVER_SOURCE,
+            "if is_legacy_semantic_path(path) {",
+            "match path {",
+        );
+        assert!(
+            !dispatch.contains("Ok(None) => {}"),
+            "the untouched-L0 cell comes from the table, not a bare arm"
+        );
+    }
+
+    #[test]
+    fn untouched_l0_legacy_routes_stay_ungated() {
+        // `route_for` builds a fresh `git init` repo: no activation root, so
+        // `activated_store_capability_for_repo` is None. The runtime is Active
+        // with no generation, so data routes answer 503 unavailable today;
+        // "ungated" means the response is neither of the gate's two refusals.
+        // Freshness keeps its authoritative detector and stays 200.
+        let threads = route_for("GET", "/api/threads");
+        assert!(
+            threads.status != "409 Conflict" && threads.status != "426 Upgrade Required",
+            "{}",
+            String::from_utf8_lossy(&threads.body)
+        );
+        let freshness = route_for("GET", "/api/freshness");
+        assert_eq!(
+            freshness.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&freshness.body)
+        );
     }
 
     #[test]
