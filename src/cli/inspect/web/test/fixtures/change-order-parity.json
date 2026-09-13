@@ -3,29 +3,105 @@
   "version": 1,
   "description": "Shared parity vectors for the event-instant comparator that orders Change lists. The Rust comparator (compare_event_instants) is the only sorting implementation; the TypeScript counterpart validates received page monotonicity and must agree on every vector here.",
   "instantComparisons": [
-    { "left": "unix-ms:0", "right": "1970-01-01T00:00:00.000Z", "expected": "eq", "note": "equal instants, different spellings" },
-    { "left": "2026-09-12T18:04:00Z", "right": "2026-09-12T18:04:00.000Z", "expected": "eq", "note": "fraction omitted vs zero fraction" },
-    { "left": "2026-09-12T18:04:00.0009Z", "right": "2026-09-12T18:04:00.000Z", "expected": "eq", "note": "sub-millisecond fraction truncates" },
-    { "left": "2026-09-12T19:20:00.000Z", "right": "2026-09-12T18:04:00.000Z", "expected": "gt" },
-    { "left": "unix-ms:1789000000000", "right": "2026-09-12T18:04:00.000Z", "expected": "lt", "note": "unix-ms (2026-09-10) is not compared lexically" },
-    { "left": "not-an-instant", "right": "1970-01-01T00:00:00.000Z", "expected": "lt", "note": "unparseable sorts before any parseable instant" },
-    { "left": "not-an-instant", "right": "unix-ms:not-a-number", "expected": "lt", "note": "two unparseable values compare lexically" },
-    { "left": "unix-ms:", "right": "unix-ms:0", "expected": "lt", "note": "empty millis is unparseable" },
-    { "left": "unix-ms:9223372036854775807", "right": "2026-09-12T18:04:00.000Z", "expected": "gt", "note": "i64 max parses" },
-    { "left": "unix-ms:9223372036854775808", "right": "1970-01-01T00:00:00.000Z", "expected": "lt", "note": "i64 overflow is unparseable" },
-    { "left": "unix-ms:-1", "right": "1970-01-01T00:00:00.000Z", "expected": "lt", "note": "negative millis parse and sort before the epoch" },
-    { "left": "2026-09-12T18:04:00+00:00", "right": "1970-01-01T00:00:00.000Z", "expected": "lt", "note": "non-Z offset is unparseable" },
-    { "left": "2026-02-30T00:00:00Z", "right": "1970-01-01T00:00:00.000Z", "expected": "lt", "note": "impossible date is unparseable" }
+    {
+      "left": "unix-ms:0",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "eq",
+      "note": "equal instants, different spellings"
+    },
+    {
+      "left": "2026-09-12T18:04:00Z",
+      "right": "2026-09-12T18:04:00.000Z",
+      "expected": "eq",
+      "note": "fraction omitted vs zero fraction"
+    },
+    {
+      "left": "2026-09-12T18:04:00.0009Z",
+      "right": "2026-09-12T18:04:00.000Z",
+      "expected": "eq",
+      "note": "sub-millisecond fraction truncates"
+    },
+    {
+      "left": "2026-09-12T19:20:00.000Z",
+      "right": "2026-09-12T18:04:00.000Z",
+      "expected": "gt"
+    },
+    {
+      "left": "unix-ms:1789000000000",
+      "right": "2026-09-12T18:04:00.000Z",
+      "expected": "lt",
+      "note": "unix-ms (2026-09-10) is not compared lexically"
+    },
+    {
+      "left": "not-an-instant",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "lt",
+      "note": "unparseable sorts before any parseable instant"
+    },
+    {
+      "left": "not-an-instant",
+      "right": "unix-ms:not-a-number",
+      "expected": "lt",
+      "note": "two unparseable values compare lexically"
+    },
+    {
+      "left": "unix-ms:",
+      "right": "unix-ms:0",
+      "expected": "lt",
+      "note": "empty millis is unparseable"
+    },
+    {
+      "left": "unix-ms:9223372036854775807",
+      "right": "2026-09-12T18:04:00.000Z",
+      "expected": "gt",
+      "note": "i64 max parses"
+    },
+    {
+      "left": "unix-ms:9223372036854775808",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "lt",
+      "note": "i64 overflow is unparseable"
+    },
+    {
+      "left": "unix-ms:-1",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "lt",
+      "note": "negative millis parse and sort before the epoch"
+    },
+    {
+      "left": "2026-09-12T18:04:00+00:00",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "lt",
+      "note": "non-Z offset is unparseable"
+    },
+    {
+      "left": "2026-02-30T00:00:00Z",
+      "right": "1970-01-01T00:00:00.000Z",
+      "expected": "lt",
+      "note": "impossible date is unparseable"
+    }
   ],
   "activityDescPages": [
     {
       "note": "descending activity, change_id ascending inside the tie, absent activity last",
       "order": "activity_desc",
       "changes": [
-        { "changeId": "change:sha256:3b77", "activityAt": "2026-09-12T19:20:00.000Z" },
-        { "changeId": "change:sha256:0a1f", "activityAt": "2026-09-12T18:04:00.000Z" },
-        { "changeId": "change:sha256:91cd", "activityAt": "unix-ms:1789000000000" },
-        { "changeId": "change:sha256:7e02", "activityAt": "unix-ms:not-a-number" },
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "2026-09-12T19:20:00.000Z"
+        },
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "2026-09-12T18:04:00.000Z"
+        },
+        {
+          "changeId": "change:sha256:91cd",
+          "activityAt": "unix-ms:1789000000000"
+        },
+        {
+          "changeId": "change:sha256:7e02",
+          "activityAt": "unix-ms:not-a-number"
+        },
         { "changeId": "change:sha256:ffff" }
       ],
       "monotonic": true
@@ -34,8 +110,14 @@
       "note": "a tie broken by descending change_id is mis-ordered",
       "order": "activity_desc",
       "changes": [
-        { "changeId": "change:sha256:91cd", "activityAt": "2026-09-12T18:04:00.000Z" },
-        { "changeId": "change:sha256:0a1f", "activityAt": "2026-09-12T18:04:00.000Z" }
+        {
+          "changeId": "change:sha256:91cd",
+          "activityAt": "2026-09-12T18:04:00.000Z"
+        },
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "2026-09-12T18:04:00.000Z"
+        }
       ],
       "monotonic": false
     },
@@ -43,8 +125,14 @@
       "note": "an older instant before a newer one is mis-ordered",
       "order": "activity_desc",
       "changes": [
-        { "changeId": "change:sha256:0a1f", "activityAt": "2026-09-12T18:04:00.000Z" },
-        { "changeId": "change:sha256:3b77", "activityAt": "2026-09-12T19:20:00.000Z" }
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "2026-09-12T18:04:00.000Z"
+        },
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "2026-09-12T19:20:00.000Z"
+        }
       ],
       "monotonic": false
     },
@@ -53,7 +141,10 @@
       "order": "activity_desc",
       "changes": [
         { "changeId": "change:sha256:0a1f" },
-        { "changeId": "change:sha256:3b77", "activityAt": "2026-09-12T19:20:00.000Z" }
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "2026-09-12T19:20:00.000Z"
+        }
       ],
       "monotonic": false
     },
@@ -61,8 +152,14 @@
       "note": "change_id ascending",
       "order": "change_id_asc",
       "changes": [
-        { "changeId": "change:sha256:0a1f", "activityAt": "2026-09-12T18:04:00.000Z" },
-        { "changeId": "change:sha256:3b77", "activityAt": "2026-09-12T19:20:00.000Z" }
+        {
+          "changeId": "change:sha256:0a1f",
+          "activityAt": "2026-09-12T18:04:00.000Z"
+        },
+        {
+          "changeId": "change:sha256:3b77",
+          "activityAt": "2026-09-12T19:20:00.000Z"
+        }
       ],
       "monotonic": true
     },
@@ -70,10 +167,34 @@
       "note": "attention_wait: primary tier before secondary, then oldest observed first, then change_id, absent last",
       "order": "attention_wait",
       "changes": [
-        { "changeId": "change:sha256:91cd", "attentionWaitAt": { "tierRank": 0, "oldestObservedAt": "2026-09-01T00:00:00.000Z" } },
-        { "changeId": "change:sha256:0a1f", "attentionWaitAt": { "tierRank": 0, "oldestObservedAt": "2026-09-02T00:00:00.000Z" } },
-        { "changeId": "change:sha256:3b77", "attentionWaitAt": { "tierRank": 0, "oldestObservedAt": "2026-09-02T00:00:00.000Z" } },
-        { "changeId": "change:sha256:7e02", "attentionWaitAt": { "tierRank": 1, "oldestObservedAt": "2026-08-01T00:00:00.000Z" } },
+        {
+          "changeId": "change:sha256:91cd",
+          "attentionWaitAt": {
+            "tierRank": 0,
+            "oldestObservedAt": "2026-09-01T00:00:00.000Z"
+          }
+        },
+        {
+          "changeId": "change:sha256:0a1f",
+          "attentionWaitAt": {
+            "tierRank": 0,
+            "oldestObservedAt": "2026-09-02T00:00:00.000Z"
+          }
+        },
+        {
+          "changeId": "change:sha256:3b77",
+          "attentionWaitAt": {
+            "tierRank": 0,
+            "oldestObservedAt": "2026-09-02T00:00:00.000Z"
+          }
+        },
+        {
+          "changeId": "change:sha256:7e02",
+          "attentionWaitAt": {
+            "tierRank": 1,
+            "oldestObservedAt": "2026-08-01T00:00:00.000Z"
+          }
+        },
         { "changeId": "change:sha256:ffff" }
       ],
       "monotonic": true

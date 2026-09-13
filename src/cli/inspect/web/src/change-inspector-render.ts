@@ -25,6 +25,7 @@ import {
   lensForRoute,
   parseChangeInspectorRoute,
   queryForExactNavigation,
+  queryForLens,
   showChangeInTimelineRoute,
   showRevisionInTimelineRoute,
 } from "./change-inspector-router";
@@ -44,6 +45,7 @@ import type {
   RevisionRef,
   RevisionResource,
 } from "./change-protocol";
+import { DEFAULT_CHANGE_PAGE_ORDER } from "./change-protocol";
 import { filterChipsFor, removeFilterChipToken } from "./chips";
 import {
   annoKindClass,
@@ -119,7 +121,7 @@ function routeForLens(
       current.kind === "timeline" ||
       current.kind === "event"
         ? {}
-        : { ...current.query, after: undefined },
+        : queryForLens(lens, { ...current.query, after: undefined }),
   };
 }
 
@@ -2403,9 +2405,13 @@ export function renderChangeInspector(
     route.query.after === undefined &&
     page.previous == null &&
     page.next == null;
+  const order =
+    page.order ??
+    DEFAULT_CHANGE_PAGE_ORDER[lens === "attention" ? "attention" : "changes"];
   const listKey = JSON.stringify({
     lens,
     query: route.query,
+    order,
     projectionStamp: page.projectionStamp,
     previous: page.previous ?? null,
     next: page.next,
@@ -2417,11 +2423,27 @@ export function renderChangeInspector(
     const list = document.createElement("section");
     list.className = "units";
     const count = page.changes.length;
+    // The order words follow the order the page declares, so the prose and
+    // the actual order cannot drift apart. "on this page" is the page-scope
+    // disclosure; Attention stays grouped by reason with the order inside
+    // each group.
+    const orderWords =
+      order === "activity_desc"
+        ? "latest activity first"
+        : order === "attention_wait"
+          ? "longest wait first"
+          : "Change ID order";
+    const groupedOrderWords =
+      order === "activity_desc"
+        ? "latest activity within groups"
+        : order === "attention_wait"
+          ? "longest wait first within groups"
+          : "Change ID order within groups";
     const [heading, metadata] = createLensHeading(
       lens === "changes" ? "Changes" : "Attention",
       lens === "changes"
-        ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order`
-        : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · Change ID order within groups`,
+        ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · ${orderWords}`
+        : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · ${groupedOrderWords}`,
     );
     list.append(heading, metadata);
     // Attention cards group under one visible heading per primary reason type,

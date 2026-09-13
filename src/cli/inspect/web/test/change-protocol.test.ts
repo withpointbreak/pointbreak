@@ -319,9 +319,9 @@ describe("bounded Change protocol", () => {
     );
   });
 
-  it("constructs canonical bounded URLs with the sole default order", () => {
+  it("constructs canonical bounded URLs with each lens's default order", () => {
     expect(buildChangePageUrl("changes")).toBe(
-      "/api/v2/changes?limit=50&order=change_id_asc",
+      "/api/v2/changes?limit=50&order=activity_desc",
     );
     expect(
       buildChangePageUrl("attention", {
@@ -330,7 +330,7 @@ describe("bounded Change protocol", () => {
         limit: 100,
       }),
     ).toBe(
-      "/api/v2/attention?limit=100&after=opaque-token&q=release+readiness&order=change_id_asc",
+      "/api/v2/attention?limit=100&after=opaque-token&q=release+readiness&order=attention_wait",
     );
   });
 

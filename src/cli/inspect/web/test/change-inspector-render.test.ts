@@ -724,7 +724,7 @@ describe("Change inspector render", () => {
         route: { kind: "lens" as const, lens: "changes" as const, query: {} },
         current: "changes",
         heading: "Changes",
-        meta: "1 Change on this page · Change ID order",
+        meta: "1 Change on this page · latest activity first",
       },
       {
         route: {
@@ -734,7 +734,7 @@ describe("Change inspector render", () => {
         },
         current: "attention",
         heading: "Attention",
-        meta: "1 Change on this page · grouped by attention reason · Change ID order within groups",
+        meta: "1 Change on this page · grouped by attention reason · longest wait first within groups",
       },
     ];
 
@@ -1497,7 +1497,7 @@ describe("Change inspector render", () => {
     expect(cards.at(-1)?.dataset.changeId).toBe("change:sha256:four");
   });
 
-  it("keeps the Changes lens flat and in Change ID order", () => {
+  it("keeps the Changes lens flat and in the server-declared order", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });
     const grouped = groupedAttentionFixture();
@@ -1517,7 +1517,7 @@ describe("Change inspector render", () => {
     const metadata = document.querySelector(
       "#master .lens-heading + p",
     )?.textContent;
-    expect(metadata).toContain("Change ID order");
+    expect(metadata).toContain("latest activity first");
     expect(metadata).not.toContain("grouped");
   });
 
@@ -3301,3 +3301,60 @@ describe("Change inspector render", () => {
 });
 
 resetDom();
+
+describe("Change page order prose", () => {
+  beforeEach(() => {
+    resetDom();
+    mountInspectorDom();
+  });
+
+  function metadataFor(
+    lens: "changes" | "attention",
+    order: "activity_desc" | "change_id_asc" | "attention_wait",
+  ): string {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "lens",
+      lens,
+      query: {},
+    });
+    state.publish(
+      stageGeneration(
+        profile,
+        lens === "changes" ? { ...changes, order } : changes,
+        lens === "attention" ? { ...attention, order } : attention,
+        profile,
+        eventHistory(),
+      ),
+    );
+    renderChangeInspector(state.snapshot(), { navigate });
+    return (
+      document.querySelector("#master .lens-heading + p")?.textContent ?? ""
+    );
+  }
+
+  it("describes the order in effect in the lens metadata line", () => {
+    // The words follow the order the page declares, never a hardcoded
+    // string, so the prose and the actual order cannot drift apart.
+    expect(metadataFor("changes", "activity_desc")).toContain(
+      "latest activity first",
+    );
+    expect(metadataFor("changes", "change_id_asc")).toContain(
+      "Change ID order",
+    );
+  });
+
+  it("keeps the Attention metadata line page-scoped and group-aware", () => {
+    const waiting = metadataFor("attention", "attention_wait");
+    expect(waiting).toContain("on this page");
+    expect(waiting).toContain("grouped by attention reason");
+    expect(waiting).toContain("longest wait first within groups");
+    expect(metadataFor("attention", "activity_desc")).toContain(
+      "latest activity within groups",
+    );
+    expect(metadataFor("attention", "change_id_asc")).toContain(
+      "Change ID order within groups",
+    );
+  });
+});

@@ -32,6 +32,53 @@ export interface AuthorityCursorV2 {
 export type ChangeLens = "changes" | "attention";
 
 /**
+ * Presentation order of a Change page. Server-owned and spelled identically on
+ * every surface (the Inspector query, the hash route, the CLI flag, and the
+ * `order` member every page declares). The client requests and validates an
+ * order; it never sorts.
+ */
+export type ChangePageOrder =
+  | "activity_desc"
+  | "change_id_asc"
+  | "attention_wait";
+
+/** `attention_wait` is Attention-lens only; the other two are valid on both. */
+const CHANGE_PAGE_ORDERS: Readonly<
+  Record<ChangeLens, ReadonlySet<ChangePageOrder>>
+> = {
+  changes: new Set<ChangePageOrder>(["activity_desc", "change_id_asc"]),
+  attention: new Set<ChangePageOrder>([
+    "attention_wait",
+    "activity_desc",
+    "change_id_asc",
+  ]),
+};
+
+/** Per-lens defaults, not one shared value: Changes asks what moved lately,
+ * Attention asks what has waited longest. */
+export const DEFAULT_CHANGE_PAGE_ORDER: Readonly<
+  Record<ChangeLens, ChangePageOrder>
+> = {
+  changes: "activity_desc",
+  attention: "attention_wait",
+};
+
+export function isChangePageOrder(value: unknown): value is ChangePageOrder {
+  return (
+    value === "activity_desc" ||
+    value === "change_id_asc" ||
+    value === "attention_wait"
+  );
+}
+
+export function isChangePageOrderAdmitted(
+  lens: ChangeLens,
+  order: ChangePageOrder,
+): boolean {
+  return CHANGE_PAGE_ORDERS[lens].has(order);
+}
+
+/**
  * Query for the Change-aware event Timeline. This is intentionally separate
  * from the Change-card page query: Timeline chronology permits `asc`/`desc`,
  * while card pages retain their one `change_id_asc` order.
@@ -581,9 +628,27 @@ export interface ChangeSummary {
   currentRevisionRefs: RevisionRef[];
   diagnostics?: string[];
   projectionStamp: string;
+  /** Newest contributing event instant, raw and unparsed; absent when none. */
+  activityAt?: string;
+  /** Attention wait key: tier rank then the OLDEST unresolved observed_at.
+   * Absent when the Change has no anchored attention item. */
+  attentionWaitAt?: AttentionWaitKey;
+}
+
+export interface AttentionWaitKey {
+  /** Primary before secondary, matching the server tier rank. */
+  tierRank: number;
+  /** Raw and unparsed, like `activityAt`. */
+  oldestObservedAt: string;
 }
 
 interface ChangePageBase {
+  /**
+   * The order the server emitted `changes` in. Every live page declares it;
+   * the decoder fills the lens default only for a page that omits it, which
+   * hand-built fixtures may do.
+   */
+  order?: ChangePageOrder;
   changes: ChangeSummary[];
   diagnostics?: string[];
   presentations?: Record<string, ChangePresentation>;
@@ -1250,7 +1315,7 @@ export interface ChangePageQuery {
   lifecycle?: string;
   attention?: string;
   availability?: string;
-  order?: "change_id_asc";
+  order?: ChangePageOrder;
 }
 
 const MAX_INSPECTOR_QUERY_BYTES = 256;
@@ -1302,10 +1367,15 @@ export function buildChangePageUrl(
   appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
   appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
   appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
-  if (query.order !== undefined && query.order !== "change_id_asc") {
-    throw new Error("Change page order must be change_id_asc");
+  const order = query.order ?? DEFAULT_CHANGE_PAGE_ORDER[lens];
+  if (!isChangePageOrder(order) || !isChangePageOrderAdmitted(lens, order)) {
+    throw new Error(
+      lens === "changes"
+        ? "Change page order must be activity_desc or change_id_asc"
+        : "Change page order must be attention_wait, activity_desc, or change_id_asc",
+    );
   }
-  params.set("order", "change_id_asc");
+  params.set("order", order);
   return `/api/v2/${lens}?${params}`;
 }
 
@@ -1886,14 +1956,19 @@ export function decodeChangePage(
   const changes = page.changes;
   const diagnostics = page.diagnostics;
   const presentations = page.presentations;
+  const order = page.order ?? DEFAULT_CHANGE_PAGE_ORDER[expected.lens];
   if (
     page.schema !== expectedSchema ||
     page.version !== expectedVersion ||
     !nonEmptyString(stamp) ||
+    !isChangePageOrder(order) ||
+    !isChangePageOrderAdmitted(expected.lens, order) ||
     !Array.isArray(changes) ||
     (expected.bounded && changes.length > 100) ||
     !changes.every((change) => isChangeSummary(change, stamp)) ||
-    !isStrictlyAscending(changes.map((change) => change.changeId)) ||
+    // Validation only, never a sort: the page must be strictly ordered under
+    // the order it declares, and identities must be unique.
+    !isStrictlyOrderedChangePage(order, changes) ||
     new Set(changes.map((change) => change.changeId)).size !== changes.length ||
     (diagnostics !== undefined && !isStringArray(diagnostics)) ||
     (presentations !== undefined &&
@@ -1919,6 +1994,7 @@ export function decodeChangePage(
   if (expected.bounded && next === undefined)
     throw new Error("bounded Change page is missing next continuation");
   const common = {
+    order,
     changes,
     diagnostics,
     presentations,
@@ -2020,7 +2096,20 @@ function isChangeSummary(
     value.currentRevisionRefs.every(isRevisionRef) &&
     uniqueRevisionKeys(value.currentRevisionRefs).size ===
       value.currentRevisionRefs.length &&
-    (value.diagnostics === undefined || isStringArray(value.diagnostics))
+    (value.diagnostics === undefined || isStringArray(value.diagnostics)) &&
+    (value.activityAt === undefined || nonEmptyString(value.activityAt)) &&
+    (value.attentionWaitAt === undefined ||
+      isAttentionWaitKey(value.attentionWaitAt))
+  );
+}
+
+function isAttentionWaitKey(value: unknown): value is AttentionWaitKey {
+  return (
+    isRecord(value) &&
+    typeof value.tierRank === "number" &&
+    Number.isSafeInteger(value.tierRank) &&
+    value.tierRank >= 0 &&
+    nonEmptyString(value.oldestObservedAt)
   );
 }
 
@@ -3114,10 +3203,144 @@ function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
   );
 }
 
-function isStrictlyAscending(values: string[]): boolean {
-  return values.every((value, index) => {
-    const previous = values[index - 1];
-    return index === 0 || (previous !== undefined && previous < value);
+// ---------------------------------------------------------------------------
+// Change page order validation.
+//
+// A scoped exception to "the client never orders": the validator must decide
+// whether a received page is monotonic under the order it declares, and the
+// keys are raw instants (`unix-ms:<millis>` and RFC 3339 UTC) that neither
+// lexical comparison nor Date.parse orders the way the server does. This is a
+// validation-only counterpart of the Rust comparator, proven against the
+// shared parity vectors in test/fixtures/change-order-parity.json; it never
+// re-sorts a page. A page that fails is rejected, not repaired.
+// ---------------------------------------------------------------------------
+
+const RFC3339_UTC =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+const UNIX_MS = /^unix-ms:([+-]?\d+)$/;
+const I64_MAX = 9223372036854775807n;
+const I64_MIN = -9223372036854775808n;
+
+function daysInMonth(year: bigint, month: number): number {
+  if (month === 2) {
+    const leap = year % 4n === 0n && (year % 100n !== 0n || year % 400n === 0n);
+    return leap ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+// Days from the epoch to a civil date (Hinnant), mirroring the server's own
+// hand-rolled parser so the two agree at every edge, including years the
+// Date object cannot represent.
+function daysFromCivil(year: bigint, month: number, day: number): bigint {
+  const y = month <= 2 ? year - 1n : year;
+  const era = (y >= 0n ? y : y - 399n) / 400n;
+  const yoe = y - era * 400n;
+  const mp = BigInt(month > 2 ? month - 3 : month + 9);
+  const doy = (153n * mp + 2n) / 5n + BigInt(day) - 1n;
+  const doe = yoe * 365n + yoe / 4n - yoe / 100n + doy;
+  return era * 146097n + doe - 719468n;
+}
+
+/** Epoch milliseconds for a legal instant, or null when unparseable. */
+export function parseEventInstant(value: string): bigint | null {
+  const unixMs = UNIX_MS.exec(value);
+  if (unixMs?.[1] !== undefined) {
+    const millis = BigInt(unixMs[1]);
+    return millis > I64_MAX || millis < I64_MIN ? null : millis;
+  }
+  if (value.startsWith("unix-ms:")) return null;
+  const parts = RFC3339_UTC.exec(value);
+  if (!parts) return null;
+  const year = BigInt(parts[1] ?? "");
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const hour = Number(parts[4]);
+  const minute = Number(parts[5]);
+  const second = Number(parts[6]);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month))
+    return null;
+  // A leap second (60) is admitted, as on the server.
+  if (hour > 23 || minute > 59 || second > 60) return null;
+  const fraction = parts[7] ?? "";
+  const millis = Number((fraction.slice(0, 3) + "000").slice(0, 3));
+  const days = daysFromCivil(year, month, day);
+  const seconds =
+    ((days * 24n + BigInt(hour)) * 60n + BigInt(minute)) * 60n + BigInt(second);
+  return seconds * 1000n + BigInt(millis);
+}
+
+/**
+ * Total order over raw instants, matching the server: legal instants compare
+ * by normalized milliseconds; malformed values compare lexically and sort
+ * before every legal instant.
+ */
+export function compareEventInstants(left: string, right: string): -1 | 0 | 1 {
+  const leftMillis = parseEventInstant(left);
+  const rightMillis = parseEventInstant(right);
+  if (leftMillis !== null && rightMillis !== null) {
+    return leftMillis < rightMillis ? -1 : leftMillis > rightMillis ? 1 : 0;
+  }
+  if (leftMillis === null && rightMillis === null) {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return leftMillis === null ? -1 : 1;
+}
+
+type ChangeOrderKeyRow = Pick<
+  ChangeSummary,
+  "changeId" | "activityAt" | "attentionWaitAt"
+>;
+
+function compareStrings(left: string, right: string): -1 | 0 | 1 {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Validation-only counterpart of the server comparator for one order. */
+function compareChangeOrder(
+  order: ChangePageOrder,
+  left: ChangeOrderKeyRow,
+  right: ChangeOrderKeyRow,
+): -1 | 0 | 1 {
+  let primary: -1 | 0 | 1 = 0;
+  if (order === "activity_desc") {
+    if (left.activityAt !== undefined && right.activityAt !== undefined) {
+      primary = compareEventInstants(right.activityAt, left.activityAt);
+    } else if (left.activityAt !== undefined) primary = -1;
+    else if (right.activityAt !== undefined) primary = 1;
+  } else if (order === "attention_wait") {
+    const leftKey = left.attentionWaitAt;
+    const rightKey = right.attentionWaitAt;
+    if (leftKey !== undefined && rightKey !== undefined) {
+      primary =
+        leftKey.tierRank < rightKey.tierRank
+          ? -1
+          : leftKey.tierRank > rightKey.tierRank
+            ? 1
+            : compareEventInstants(
+                leftKey.oldestObservedAt,
+                rightKey.oldestObservedAt,
+              );
+    } else if (leftKey !== undefined) primary = -1;
+    else if (rightKey !== undefined) primary = 1;
+  }
+  return primary !== 0
+    ? primary
+    : compareStrings(left.changeId, right.changeId);
+}
+
+/** Strict (never equal) under `order`, so duplicates and mis-slicing fail. */
+export function isStrictlyOrderedChangePage(
+  order: ChangePageOrder,
+  changes: readonly ChangeOrderKeyRow[],
+): boolean {
+  return changes.every((change, index) => {
+    const previous = changes[index - 1];
+    return (
+      index === 0 ||
+      (previous !== undefined &&
+        compareChangeOrder(order, previous, change) < 0)
+    );
   });
 }
 

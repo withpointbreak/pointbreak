@@ -18,6 +18,7 @@ import {
   formatChangeInspectorRoute,
   parseChangeInspectorRoute,
   queryForExactNavigation,
+  queryForLens,
   showChangeInTimelineRoute,
   showRevisionInTimelineRoute,
   timelineEventRoute,
@@ -1920,7 +1921,9 @@ export function installChangeInspectorInteraction(
         kind: "lens",
         lens: "changes",
         query:
-          route.kind === "timeline" ? {} : { ...route.query, after: undefined },
+          route.kind === "timeline"
+            ? {}
+            : queryForLens("changes", { ...route.query, after: undefined }),
       });
       return;
     }
@@ -1930,7 +1933,9 @@ export function installChangeInspectorInteraction(
         kind: "lens",
         lens: "attention",
         query:
-          route.kind === "timeline" ? {} : { ...route.query, after: undefined },
+          route.kind === "timeline"
+            ? {}
+            : queryForLens("attention", { ...route.query, after: undefined }),
       });
       return;
     }

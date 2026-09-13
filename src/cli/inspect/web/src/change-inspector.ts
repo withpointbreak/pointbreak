@@ -38,6 +38,7 @@ import {
   formatChangeInspectorRoute,
   lensForRoute,
   parseChangeInspectorRoute,
+  queryForLens,
 } from "./change-inspector-router";
 import {
   type ChangeInspectorSearchController,
@@ -610,22 +611,26 @@ export async function bootstrapChangeInspector(
   ): string =>
     route.kind === "timeline" || route.kind === "event"
       ? historyPageUrl(route)
-      : buildChangePageUrl("changes", route.query);
+      : buildChangePageUrl("changes", queryForLens("changes", route.query));
   const generationPageRequests = (
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
   ): { changes: string; attention: string } => {
     const query =
       route.kind === "timeline" || route.kind === "event" ? {} : route.query;
     const activeLens = lensForRoute(route);
-    // A continuation belongs only to its own lens. The companion is page one.
+    // A continuation belongs only to its own lens, and so does an explicit
+    // order: the companion is page one in its own lens default. Each lens
+    // defaults differently, so carrying the active lens's order across would
+    // make an explicit default reload the generation for no visible change.
+    const { order: _order, ...companion } = firstPageQuery(query);
     return {
       changes: buildChangePageUrl(
         "changes",
-        activeLens === "changes" ? query : firstPageQuery(query),
+        activeLens === "changes" ? query : companion,
       ),
       attention: buildChangePageUrl(
         "attention",
-        activeLens === "attention" ? query : firstPageQuery(query),
+        activeLens === "attention" ? query : companion,
       ),
     };
   };

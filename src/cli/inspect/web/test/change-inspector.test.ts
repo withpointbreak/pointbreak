@@ -524,7 +524,7 @@ describe("published generation reuse", () => {
   it("normalizes an explicit default page order without a generation reload", async () => {
     const requests = await start();
     const boundary = requests.length;
-    navigate(`${exact}&order=change_id_asc`);
+    navigate(`${exact}&order=activity_desc`);
     await accepted();
     expect(paired(requests.slice(boundary))).toEqual([]);
   });
@@ -535,8 +535,8 @@ describe("published generation reuse", () => {
     navigate(`${exact}&after=opaque-page`);
     await accepted();
     expect(paired(requests.slice(boundary))).toEqual([
-      "/api/v2/changes?limit=50&after=opaque-page&order=change_id_asc",
-      "/api/v2/attention?limit=50&order=change_id_asc",
+      "/api/v2/changes?limit=50&after=opaque-page&order=activity_desc",
+      "/api/v2/attention?limit=50&order=attention_wait",
     ]);
   });
 
@@ -2036,8 +2036,10 @@ describe("Change-first composition", () => {
     expect(requests).toContain(
       "/api/v2/changes?limit=20&after=changes-page&order=change_id_asc",
     );
+    // The companion lens reads page one in its own default order; an
+    // explicit order belongs to the lens it was requested on.
     expect(requests).toContain(
-      "/api/v2/attention?limit=20&order=change_id_asc",
+      "/api/v2/attention?limit=20&order=attention_wait",
     );
 
     document
@@ -2053,7 +2055,7 @@ describe("Change-first composition", () => {
       ).toHaveLength(2);
     });
     expect(requests.at(-3)).toBe(
-      "/api/v2/changes?limit=20&order=change_id_asc",
+      "/api/v2/changes?limit=20&order=activity_desc",
     );
     expect(requests.at(-2)).toBe(
       "/api/v2/attention?limit=20&order=change_id_asc",
@@ -2284,8 +2286,8 @@ describe("Change-first composition", () => {
     expect(requests).toEqual([
       "/api/v2/profile",
       "/api/identity",
-      "/api/v2/changes?limit=50&order=change_id_asc",
-      "/api/v2/attention?limit=50&order=change_id_asc",
+      "/api/v2/changes?limit=50&order=activity_desc",
+      "/api/v2/attention?limit=50&order=attention_wait",
       "/api/v2/profile",
     ]);
     document
@@ -3110,12 +3112,12 @@ describe("Change-first composition", () => {
     newerRouteProfileResolve(new Response(JSON.stringify(profile)));
     await vi.waitFor(() =>
       expect(requests).toContain(
-        "/api/v2/changes?limit=50&q=newer&order=change_id_asc",
+        "/api/v2/changes?limit=50&q=newer&order=activity_desc",
       ),
     );
 
     expect(requests).toContain(
-      "/api/v2/changes?limit=50&q=newer&order=change_id_asc",
+      "/api/v2/changes?limit=50&q=newer&order=activity_desc",
     );
     expect(document.querySelector("#master")?.textContent).toContain(
       "change:sha256:newer-route",
@@ -3258,7 +3260,7 @@ describe("Change-first composition", () => {
     replacementProfileResolve(new Response(JSON.stringify(profile)));
     await vi.waitFor(() => {
       expect(requests).toContain(
-        "/api/v2/changes?limit=50&q=replacement&order=change_id_asc",
+        "/api/v2/changes?limit=50&q=replacement&order=activity_desc",
       );
     });
   });

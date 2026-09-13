@@ -12,6 +12,10 @@ import type {
   EventHistoryQuery,
   RevisionRef,
 } from "./change-protocol";
+import {
+  isChangePageOrder,
+  isChangePageOrderAdmitted,
+} from "./change-protocol";
 
 export type ChangeInspectorRoute =
   | { kind: "timeline"; historyQuery: EventHistoryQuery }
@@ -226,7 +230,7 @@ function parseQuery(search: string): ParsedQuery | { message: string } {
         return { message: "Invalid limit route query." };
       query.limit = limit;
     } else if (key === "order") {
-      if (value !== "change_id_asc") {
+      if (!isChangePageOrder(value)) {
         return { message: "Invalid order route query." };
       }
       query.order = value;
@@ -379,6 +383,13 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
     segments.length === 1 &&
     (segments[0] === "changes" || segments[0] === "attention")
   ) {
+    // Admission is per lens: attention_wait means nothing on Changes.
+    if (
+      query.order !== undefined &&
+      !isChangePageOrderAdmitted(segments[0], query.order)
+    ) {
+      return { kind: "invalid", message: "Invalid order route query." };
+    }
     if (
       artifactHashes.length > 0 ||
       fromArtifactHashes.length > 0 ||
@@ -396,6 +407,14 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
   }
   if (segments[0] !== "changes")
     return { kind: "invalid", message: "Unknown Change Inspector route." };
+  // Exact routes keep Changes as their companion lens, so only Changes
+  // orders are admitted on them.
+  if (
+    query.order !== undefined &&
+    !isChangePageOrderAdmitted("changes", query.order)
+  ) {
+    return { kind: "invalid", message: "Invalid order route query." };
+  }
   const changeId = decodeSegment(segments[1] ?? "");
   if (changeId === null)
     return { kind: "invalid", message: "Change routes require a Change ID." };
@@ -611,6 +630,20 @@ export function firstPageQuery(query: ChangePageQuery): ChangePageQuery {
 }
 
 /**
+ * The same query carried to another lens: an explicit order survives only
+ * where the target lens admits it, otherwise that lens's default applies.
+ */
+export function queryForLens(
+  lens: ChangeLens,
+  query: ChangePageQuery,
+): ChangePageQuery {
+  if (query.order === undefined || isChangePageOrderAdmitted(lens, query.order))
+    return query;
+  const { order: _order, ...admitted } = query;
+  return admitted;
+}
+
+/**
  * Exact routes use the Changes page as their bounded companion generation.
  * Attention continuations are signed to the Attention lens, so leaving a
  * paginated Attention page must retain its filters while returning to page one
@@ -622,5 +655,5 @@ export function queryForExactNavigation(
 ): ChangePageQuery {
   if (route.kind === "timeline" || route.kind === "event") return {};
   if (route.kind !== "lens" || route.lens !== "attention") return route.query;
-  return firstPageQuery(route.query);
+  return queryForLens("changes", firstPageQuery(route.query));
 }

@@ -545,6 +545,1326 @@
   }
   __name(decodeInspectorIdentity, "decodeInspectorIdentity");
 
+  // ../../../documents/change_reader_profile_v1.json
+  var change_reader_profile_v1_default = {
+    minimumReaderProfile: "review_change_revision_v1",
+    documents: {
+      "pointbreak.attention-list": 2,
+      "pointbreak.inspect-attention": 2,
+      "pointbreak.inspect-changes-page": 1,
+      "pointbreak.inspect-reader-profile": 1,
+      "pointbreak.reader-upgrade-required": 1,
+      "pointbreak.review-association-comparison": 1,
+      "pointbreak.review-change": 1,
+      "pointbreak.review-change-list": 1,
+      "pointbreak.review-change-revision": 1,
+      "pointbreak.review-revision": 3,
+      "pointbreak.review-revision-interdiff": 1,
+      "pointbreak.review-revision-resource": 1,
+      "pointbreak.store-migration-in-progress": 1,
+      "pointbreak.store-migration-required": 1
+    }
+  };
+
+  // src/change-protocol.ts
+  var CHANGE_PAGE_ORDERS = {
+    changes: /* @__PURE__ */ new Set(["activity_desc", "change_id_asc"]),
+    attention: /* @__PURE__ */ new Set([
+      "attention_wait",
+      "activity_desc",
+      "change_id_asc"
+    ])
+  };
+  var DEFAULT_CHANGE_PAGE_ORDER = {
+    changes: "activity_desc",
+    attention: "attention_wait"
+  };
+  function isChangePageOrder(value) {
+    return value === "activity_desc" || value === "change_id_asc" || value === "attention_wait";
+  }
+  __name(isChangePageOrder, "isChangePageOrder");
+  function isChangePageOrderAdmitted(lens, order) {
+    return CHANGE_PAGE_ORDERS[lens].has(order);
+  }
+  __name(isChangePageOrderAdmitted, "isChangePageOrderAdmitted");
+  var EVENT_HISTORY_EVENT_TYPES = [
+    "review_initialized",
+    "work_object_proposed",
+    "review_observation_recorded",
+    "review_assessment_recorded",
+    "input_request_opened",
+    "input_request_responded",
+    "review_note_imported",
+    "revision_ref_associated",
+    "revision_ref_withdrawn",
+    "revision_commit_associated",
+    "revision_commit_withdrawn",
+    "validation_check_recorded",
+    "change_declared",
+    "change_membership_asserted",
+    "change_membership_withdrawn",
+    "change_link_asserted",
+    "change_revision_relation_asserted",
+    "change_revision_relation_withdrawn",
+    "revision_relation_attested",
+    "review_fact_ported"
+  ];
+  var CHANGE_PAGE_LIMIT = 50;
+  var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
+  var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
+  var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
+    "initial",
+    "replacement",
+    "replacement_divergent",
+    "consolidation",
+    "parallel_current",
+    "mixed",
+    "incomplete",
+    "cycle_conflicted"
+  ]);
+  var LIFECYCLE_VALUES = /* @__PURE__ */ new Set([
+    "incomplete",
+    "conflicted",
+    "in_progress",
+    "accepted"
+  ]);
+  var ATTENTION_VALUES = /* @__PURE__ */ new Set([
+    "clear",
+    "in_progress",
+    "incomplete",
+    "conflicted"
+  ]);
+  var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
+  var CONTENT_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "removed",
+    "missing",
+    "mismatch",
+    "non_textual"
+  ]);
+  var REVISION_CURRENCY_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale_by_supersession",
+    "membership_incomplete",
+    "membership_conflicted"
+  ]);
+  var FACT_FAMILY_STATE_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale",
+    "withdrawn",
+    "conflicted",
+    "unavailable"
+  ]);
+  var ASSOCIATION_STATE_VALUES = /* @__PURE__ */ new Set([
+    "unknown",
+    "exact",
+    "equivalent",
+    "extension",
+    "unavailable"
+  ]);
+  var ASSOCIATION_PROOF_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "missing",
+    "mismatch",
+    "not_requested"
+  ]);
+  var INTERDIFF_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "unavailable",
+    "endpoint_missing",
+    "endpoint_mismatch",
+    "non_textual"
+  ]);
+  function decodeChangeDetail(value) {
+    const detail = object(value, "Change detail");
+    const summary = detail.summary;
+    const stamp = detail.projectionStamp;
+    const memberRevisions = detail.memberRevisions;
+    const unavailableMemberRevisions = detail.unavailableMemberRevisions;
+    const membershipClaims = detail.membershipClaims;
+    const membershipWithdrawals = detail.membershipWithdrawals;
+    const relationClaims = detail.relationClaims;
+    const relationWithdrawals = detail.relationWithdrawals;
+    const links = detail.links;
+    const effectiveSupersedes = detail.effectiveSupersedes;
+    const pendingOrConflictingEdges = detail.pendingOrConflictingEdges;
+    const currentRevisionRefs = detail.currentRevisionRefs;
+    const perCurrentRevisionQualification = detail.perCurrentRevisionQualification;
+    const operativeObligations = detail.operativeObligations;
+    const diagnostics = detail.diagnostics;
+    const inspectorPresentation = detail.inspectorPresentation;
+    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString2(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
+      (claim) => isRelationClaim(claim, summary.changeId)
+    ) || !isClaimWithdrawals(relationWithdrawals) || !isChangeLinks(links) || !isEffectiveSupersedes(effectiveSupersedes) || !Array.isArray(pendingOrConflictingEdges) || !pendingOrConflictingEdges.every(
+      (claim) => isRelationClaim(claim, summary.changeId)
+    ) || !Array.isArray(currentRevisionRefs) || !currentRevisionRefs.every(isRevisionRef) || !sameRevisionSet(currentRevisionRefs, summary.currentRevisionRefs) || !isRevisionQualifications(
+      perCurrentRevisionQualification,
+      currentRevisionRefs
+    ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Change detail DTO");
+    }
+    if (!isChangeDetailInspectorPresentation(inspectorPresentation, {
+      memberRevisions,
+      currentRevisionRefs,
+      effectiveSupersedes,
+      pendingOrConflictingEdges,
+      diagnostics
+    })) {
+      throw new Error("invalid Change detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary,
+      memberRevisions,
+      unavailableMemberRevisions,
+      membershipClaims,
+      membershipWithdrawals,
+      relationClaims,
+      relationWithdrawals,
+      links,
+      effectiveSupersedes,
+      pendingOrConflictingEdges,
+      currentRevisionRefs,
+      perCurrentRevisionQualification,
+      operativeObligations,
+      diagnostics,
+      projectionStamp: stamp,
+      inspectorPresentation
+    };
+  }
+  __name(decodeChangeDetail, "decodeChangeDetail");
+  function decodeChangeRevisionDetail(value) {
+    const detail = object(value, "Change Revision detail");
+    const revision2 = detail.revision;
+    const factPresentations = detail.factPresentations;
+    const factContentPresentations = detail.factContentPresentations;
+    const exactRevisionDocument = detail.exactRevisionDocument;
+    const membershipSupport = detail.membershipSupport;
+    const factPorts = detail.factPorts;
+    const associations = detail.associations;
+    const diagnostics = detail.diagnostics;
+    const revisionCurrency = detail.revisionCurrency;
+    const relationClassification = detail.relationClassification;
+    const availability = detail.availability;
+    const inspectorPresentation = detail.inspectorPresentation;
+    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString2(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
+      factPorts,
+      detail.changeId,
+      factPresentations,
+      revision2
+    ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString2(detail.projectionStamp)) {
+      throw new Error("invalid Change Revision detail DTO");
+    }
+    if (!isChangeRevisionDetailInspectorPresentation(inspectorPresentation, {
+      revision: revision2,
+      factPresentations,
+      factPorts
+    })) {
+      throw new Error("invalid Change Revision detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: detail.changeId,
+      revision: revision2,
+      membershipSupport,
+      revisionCurrency,
+      relationClassification,
+      availability,
+      exactRevisionDocument,
+      factPresentations,
+      factContentPresentations,
+      factPorts,
+      associations,
+      diagnostics,
+      projectionStamp: detail.projectionStamp,
+      inspectorPresentation
+    };
+  }
+  __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
+  function decodeRevisionResource(value) {
+    const document2 = object(value, "Revision resource");
+    const resource = document2.resource;
+    const projection = document2.projection;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    const capturedDocumentHash = document2.capturedDocumentHash;
+    const projectionStamp = document2.projectionStamp;
+    const cacheKey = document2.cacheKey;
+    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString2(resource.objectId) || !isResourceProjection(projection) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString2(capturedDocumentHash) || availability === "available" && (capturedDocumentHash === void 0 || !isCapturedReviewSnapshot(
+      document2.capturedDocument,
+      resource.revision.objectArtifactContentHash,
+      resource.objectId
+    )) || availability !== "available" && (capturedDocumentHash !== void 0 || document2.capturedDocument !== void 0) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Revision resource DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-resource",
+      version: 1,
+      resource: { revision: resource.revision, objectId: resource.objectId },
+      projection,
+      availability,
+      capturedDocumentHash,
+      capturedDocument: document2.capturedDocument,
+      diagnostics,
+      projectionStamp,
+      cacheKey
+    };
+  }
+  __name(decodeRevisionResource, "decodeRevisionResource");
+  function decodeRevisionInterdiff(value) {
+    const document2 = object(value, "Revision interdiff");
+    const interdiff = document2.interdiff;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    const projectionStamp = document2.projectionStamp;
+    const cacheKey = document2.cacheKey;
+    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !nonEmptyString2(interdiff.algorithmVersion) || !isStringArray(interdiff.scope) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || availability === "available" !== (document2.comparison !== void 0)) {
+      throw new Error("invalid Revision interdiff DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-interdiff",
+      version: 1,
+      interdiff: {
+        from: interdiff.from,
+        to: interdiff.to,
+        algorithmVersion: interdiff.algorithmVersion,
+        scope: interdiff.scope
+      },
+      availability,
+      comparison: document2.comparison,
+      diagnostics,
+      projectionStamp,
+      cacheKey
+    };
+  }
+  __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
+  var MAX_INSPECTOR_QUERY_BYTES = 256;
+  function normalizeBoundedQueryText(value, label2) {
+    const normalized = trimUnicodeWhitespace(value).toLowerCase();
+    if (!normalized || new TextEncoder().encode(normalized).length > MAX_INSPECTOR_QUERY_BYTES) {
+      throw new Error(
+        `${label2} query must be non-empty and at most ${MAX_INSPECTOR_QUERY_BYTES} bytes`
+      );
+    }
+    return normalized;
+  }
+  __name(normalizeBoundedQueryText, "normalizeBoundedQueryText");
+  function normalizeChangePageQueryText(value) {
+    return normalizeBoundedQueryText(value, "Change page");
+  }
+  __name(normalizeChangePageQueryText, "normalizeChangePageQueryText");
+  function normalizeEventHistoryQueryText(value) {
+    return normalizeBoundedQueryText(value, "Timeline");
+  }
+  __name(normalizeEventHistoryQueryText, "normalizeEventHistoryQueryText");
+  function buildChangePageUrl(lens, query = {}) {
+    const limit = query.limit ?? CHANGE_PAGE_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Change page limit must be an integer from 1 through 100");
+    }
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (query.after !== void 0) {
+      if (!query.after || new TextEncoder().encode(query.after).length > 4096) {
+        throw new Error(
+          "Change page continuation must be a non-empty opaque token"
+        );
+      }
+      params.set("after", query.after);
+    }
+    if (query.q !== void 0) {
+      params.set("q", normalizeChangePageQueryText(query.q));
+    }
+    appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
+    appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
+    appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
+    appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
+    const order = query.order ?? DEFAULT_CHANGE_PAGE_ORDER[lens];
+    if (!isChangePageOrder(order) || !isChangePageOrderAdmitted(lens, order)) {
+      throw new Error(
+        lens === "changes" ? "Change page order must be activity_desc or change_id_asc" : "Change page order must be attention_wait, activity_desc, or change_id_asc"
+      );
+    }
+    params.set("order", order);
+    return `/api/v2/${lens}?${params}`;
+  }
+  __name(buildChangePageUrl, "buildChangePageUrl");
+  function buildEventHistoryUrl(query = {}) {
+    const limit = query.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Timeline limit must be an integer from 1 through 100");
+    }
+    if (query.after !== void 0 && query.at !== void 0) {
+      throw new Error("Timeline at and after are mutually exclusive");
+    }
+    if (query.revision === void 0 !== (query.artifactHash === void 0) || query.revision !== void 0 && (!query.revision || !query.artifactHash)) {
+      throw new Error("Timeline revision requires an exact artifact hash");
+    }
+    const eventTypes = query.type?.split(",");
+    if (eventTypes?.some((eventType) => !isEventHistoryEventType(eventType))) {
+      throw new Error("Timeline type contains an unknown event type");
+    }
+    if (eventTypes && new Set(eventTypes).size !== eventTypes.length) {
+      throw new Error("Timeline type contains a duplicate event type");
+    }
+    const canonicalTypes = eventTypes?.sort().join(",");
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (query.q !== void 0) {
+      params.set("q", normalizeEventHistoryQueryText(query.q));
+    }
+    const textFields = [
+      "after",
+      "at",
+      "track",
+      "change",
+      "revision",
+      "artifactHash"
+    ];
+    for (const field2 of textFields) {
+      const value = query[field2];
+      if (value === void 0) continue;
+      if (!value) throw new Error(`Timeline ${field2} must be non-empty`);
+      params.set(field2, value);
+    }
+    if (canonicalTypes) params.set("type", canonicalTypes);
+    if (query.order !== void 0 && query.order !== "asc" && query.order !== "desc") {
+      throw new Error("Timeline order must be asc or desc");
+    }
+    params.set("order", query.order ?? "desc");
+    return `/api/v2/history?${params}`;
+  }
+  __name(buildEventHistoryUrl, "buildEventHistoryUrl");
+  function isEventHistoryRevisionRef(value) {
+    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
+  }
+  __name(isEventHistoryRevisionRef, "isEventHistoryRevisionRef");
+  var EVENT_HISTORY_EVENT_TYPE_VALUES = new Set(
+    EVENT_HISTORY_EVENT_TYPES
+  );
+  function isEventHistoryEventType(value) {
+    return typeof value === "string" && EVENT_HISTORY_EVENT_TYPE_VALUES.has(value);
+  }
+  __name(isEventHistoryEventType, "isEventHistoryEventType");
+  function isEventHistoryWriter(value) {
+    return isRecord(value) && nonEmptyString2(value.actorId) && isRecord(value.producer) && nonEmptyString2(value.producer.name) && nonEmptyString2(value.producer.version);
+  }
+  __name(isEventHistoryWriter, "isEventHistoryWriter");
+  function isReviewEndpoint(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "git_commit":
+        return nonEmptyString2(value.commitOid) && nonEmptyString2(value.treeOid);
+      case "git_tree":
+      case "git_index":
+        return nonEmptyString2(value.treeOid);
+      case "git_working_tree":
+        return nonEmptyString2(value.worktreeRoot);
+      default:
+        return false;
+    }
+  }
+  __name(isReviewEndpoint, "isReviewEndpoint");
+  function isEventHistorySubject(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "journal":
+        return nonEmptyString2(value.journalId);
+      case "review":
+        return isFactTarget(value.target);
+      case "change":
+        return nonEmptyString2(value.changeId);
+      case "change_membership_claim":
+        return nonEmptyString2(value.membershipClaimId);
+      case "change_link_claim":
+        return nonEmptyString2(value.linkClaimId);
+      case "change_revision_relation_claim":
+        return nonEmptyString2(value.relationClaimId);
+      case "revision_relation_attestation":
+        return nonEmptyString2(value.relationAttestationId) && isEventHistoryRevisionRef(value.revision);
+      case "review_fact_port":
+        return nonEmptyString2(value.portId) && isEventHistoryRevisionRef(value.originRevision) && isFactRef(value.originFact);
+      default:
+        return false;
+    }
+  }
+  __name(isEventHistorySubject, "isEventHistorySubject");
+  function isOptionalStringArray(value) {
+    return value === void 0 || isStringArray(value);
+  }
+  __name(isOptionalStringArray, "isOptionalStringArray");
+  function isNullableString(value) {
+    return value === null || typeof value === "string";
+  }
+  __name(isNullableString, "isNullableString");
+  function isReviewTargetSummary(value) {
+    return isFactTarget(value);
+  }
+  __name(isReviewTargetSummary, "isReviewTargetSummary");
+  function isOptionalDeclaredContentType(value) {
+    return value === void 0 || value === "text/plain" || value === "text/markdown";
+  }
+  __name(isOptionalDeclaredContentType, "isOptionalDeclaredContentType");
+  function isEventHistorySummary(value, eventType) {
+    if (!isRecord(value) || value.kind !== eventType) return false;
+    if (eventType === "review_initialized" || eventType === "review_note_imported") {
+      return value.details === void 0;
+    }
+    const details = value.details;
+    if (!isRecord(details)) return false;
+    switch (eventType) {
+      case "work_object_proposed":
+        return nonEmptyString2(details.engagementId) && isRecord(details.revision) && nonEmptyString2(details.revision.id) && nonEmptyString2(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString2(details.objectArtifactContentHash) && isStringArray(details.supersedes);
+      case "review_observation_recorded":
+        return nonEmptyString2(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds) && isOptionalDeclaredContentType(details.bodyContentType);
+      case "review_assessment_recorded":
+        return nonEmptyString2(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds) && isOptionalDeclaredContentType(details.summaryContentType);
+      case "input_request_opened":
+        return nonEmptyString2(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalDeclaredContentType(details.bodyContentType);
+      case "input_request_responded":
+        return nonEmptyString2(details.inputRequestResponseId) && nonEmptyString2(details.inputRequestId) && nonEmptyString2(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason) && isOptionalDeclaredContentType(details.reasonContentType);
+      case "revision_ref_associated":
+        return nonEmptyString2(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refName) && nonEmptyString2(details.headOid);
+      case "revision_ref_withdrawn":
+        return nonEmptyString2(details.refWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refAssociationId);
+      case "revision_commit_associated":
+        return nonEmptyString2(details.commitAssociationId) && isReviewTargetSummary(details.target) && isReviewEndpoint(details.commit);
+      case "revision_commit_withdrawn":
+        return nonEmptyString2(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.commitAssociationId);
+      case "validation_check_recorded":
+        return nonEmptyString2(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString2(details.target.revisionId) && nonEmptyString2(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary) && isOptionalDeclaredContentType(details.summaryContentType);
+      case "change_declared":
+        return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString2(details.declarationClaimId) && nonEmptyString2(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString2(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString2(details.identityDescriptor.revision_id)) && nonEmptyString2(details.claimNonce);
+      case "change_membership_asserted":
+        return details.schema === "pointbreak.change-membership-asserted" && details.version === 1 && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.changeId) && nonEmptyString2(details.revisionId) && nonEmptyString2(details.claimNonce);
+      case "change_membership_withdrawn":
+        return details.schema === "pointbreak.change-membership-withdrawn" && details.version === 1 && nonEmptyString2(details.membershipWithdrawalId) && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.claimNonce);
+      case "change_link_asserted":
+        return details.schema === "pointbreak.change-link-asserted" && details.version === 1 && nonEmptyString2(details.linkClaimId) && nonEmptyString2(details.leftChangeId) && nonEmptyString2(details.rightChangeId) && (details.relation === "same_work" || details.relation === "related_work") && nonEmptyString2(details.claimNonce);
+      case "change_revision_relation_asserted":
+        return details.schema === "pointbreak.change-revision-relation-asserted" && details.version === 1 && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.changeId) && isEventHistoryRevisionRef(details.successor) && isEventHistoryRevisionRef(details.predecessor) && details.relation === "supersedes" && nonEmptyString2(details.claimNonce);
+      case "change_revision_relation_withdrawn":
+        return details.schema === "pointbreak.change-revision-relation-withdrawn" && details.version === 1 && nonEmptyString2(details.relationWithdrawalId) && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.claimNonce);
+      case "revision_relation_attested":
+        return details.schema === "pointbreak.revision-relation-attested" && details.version === 1 && nonEmptyString2(details.relationAttestationId) && isEventHistoryRevisionRef(details.revision) && nonEmptyString2(details.commitAssociationId) && (details.semanticRelation === "exact_materialization" || details.semanticRelation === "equivalent_rewrite" || details.semanticRelation === "content_preserving_extension" || details.semanticRelation === "landing_provenance" || details.semanticRelation === "related_provenance" || details.semanticRelation === "unknown") && (details.proofStatus === "verified" || details.proofStatus === "asserted" || details.proofStatus === "unverified" || details.proofStatus === "indeterminate" || details.proofStatus === "refuted") && nonEmptyString2(details.proofMethod) && nonEmptyString2(details.proofAlgorithmVersion) && isStringArray(details.captureScope) && isNullableString(details.comparisonBaseOrParent) && isStringArray(details.endpointOids) && isNullableString(details.evidenceContentHash) && nonEmptyString2(details.resultDigest);
+      case "review_fact_ported":
+        return details.schema === "pointbreak.review-fact-ported" && details.version === 1 && nonEmptyString2(details.portId) && isEventHistoryRevisionRef(details.originRevision) && isFactRef(details.originFact) && isEventHistoryRevisionRef(details.targetRevision) && (details.relation === "context_only" || details.relation === "reanchored_as" || details.relation === "carried_open_as" || details.relation === "resolved_by") && (details.targetFact === null || isFactRef(details.targetFact)) && isNullableString(details.rationaleContentHash) && isNullableString(details.contextChangeId);
+    }
+  }
+  __name(isEventHistorySummary, "isEventHistorySummary");
+  function isEventHistoryEntry(value) {
+    if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
+      return false;
+    }
+    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
+  }
+  __name(isEventHistoryEntry, "isEventHistoryEntry");
+  function decodeEventHistory(value) {
+    const document2 = object(value, "event history");
+    const completion = document2.completion;
+    const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
+    if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString2(document2.sourceChangeProjectionStamp) || !nonEmptyString2(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
+      ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
+    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
+      throw new Error("invalid event history DTO");
+    }
+    if (document2.offset + document2.entries.length > document2.matchCount) {
+      throw new Error("event history page exceeds its match count");
+    }
+    return {
+      ...document2,
+      authorityCursor
+    };
+  }
+  __name(decodeEventHistory, "decodeEventHistory");
+  var AUTHORITY_CURSOR_V2_KEYS = /* @__PURE__ */ new Set([
+    "schema",
+    "journalRecordCount",
+    "eventCount",
+    "journalRecordSetHash",
+    "eventSetHash",
+    "capabilitySetHash"
+  ]);
+  var PREFIXED_SHA256 = /^sha256:[0-9a-f]{64}$/;
+  function decodeAuthorityCursorV2(value) {
+    const cursor = object(value, "authority cursor");
+    if (!hasExactKeys(cursor, AUTHORITY_CURSOR_V2_KEYS) || cursor.schema !== "pointbreak.authority-cursor.v2" || !isNonnegativeSafeInteger(cursor.journalRecordCount) || !isNonnegativeSafeInteger(cursor.eventCount) || cursor.eventCount > cursor.journalRecordCount || typeof cursor.journalRecordSetHash !== "string" || !PREFIXED_SHA256.test(cursor.journalRecordSetHash) || typeof cursor.eventSetHash !== "string" || !PREFIXED_SHA256.test(cursor.eventSetHash) || typeof cursor.capabilitySetHash !== "string" || !PREFIXED_SHA256.test(cursor.capabilitySetHash)) {
+      throw new Error("invalid authority cursor DTO");
+    }
+    return cursor;
+  }
+  __name(decodeAuthorityCursorV2, "decodeAuthorityCursorV2");
+  function decodeReaderProfile(value) {
+    const profile = object(value, "Inspector reader profile");
+    const availability = profile.availability;
+    const authorityCursor = decodeAuthorityCursorV2(profile.authorityCursor);
+    const documents = profile.documents;
+    const minimumReaderProfile = profile.minimumReaderProfile;
+    const commitGraphStamp = profile.commitGraphStamp;
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
+      throw new Error("incompatible Inspector reader profile");
+    }
+    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
+      throw new Error(
+        "ready Inspector reader profile is missing capability or commit graph stamp"
+      );
+    }
+    return {
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+      availability,
+      minimumReaderProfile: typeof minimumReaderProfile === "string" ? minimumReaderProfile : void 0,
+      authorityCursor,
+      commitGraphStamp: typeof commitGraphStamp === "string" ? commitGraphStamp : void 0,
+      documents
+    };
+  }
+  __name(decodeReaderProfile, "decodeReaderProfile");
+  function decodeChangePage(value, expected) {
+    const page = object(value, `${expected.lens} Change page`);
+    const expectedSchema = expected.lens === "changes" ? "pointbreak.inspect-changes-page" : "pointbreak.inspect-attention";
+    const expectedVersion = expected.lens === "changes" ? 1 : 2;
+    const stamp = page.projectionStamp;
+    const changes = page.changes;
+    const diagnostics = page.diagnostics;
+    const presentations = page.presentations;
+    const order = page.order ?? DEFAULT_CHANGE_PAGE_ORDER[expected.lens];
+    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString2(stamp) || !isChangePageOrder(order) || !isChangePageOrderAdmitted(expected.lens, order) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || // Validation only, never a sort: the page must be strictly ordered under
+    // the order it declares, and identities must be unique.
+    !isStrictlyOrderedChangePage(order, changes) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
+      throw new Error(`invalid ${expected.lens} Change page DTO`);
+    }
+    const capability = /* @__PURE__ */ __name((name) => {
+      const candidate = page[name];
+      if (candidate !== void 0 && candidate !== null && (!nonEmptyString2(candidate) || new TextEncoder().encode(candidate).length > 4096)) {
+        throw new Error(`invalid Change page ${name} continuation`);
+      }
+      return candidate;
+    }, "capability");
+    const previous = capability("previous");
+    const next = capability("next");
+    const last = capability("last");
+    if (expected.bounded && next === void 0)
+      throw new Error("bounded Change page is missing next continuation");
+    const common = {
+      order,
+      changes,
+      diagnostics,
+      presentations,
+      projectionStamp: stamp,
+      ...previous === void 0 ? {} : { previous },
+      next: next ?? null,
+      ...last === void 0 ? {} : { last }
+    };
+    return expected.lens === "changes" ? {
+      schema: "pointbreak.inspect-changes-page",
+      version: 1,
+      ...common
+    } : {
+      schema: "pointbreak.inspect-attention",
+      version: 2,
+      ...common
+    };
+  }
+  __name(decodeChangePage, "decodeChangePage");
+  function requireCoherentGeneration(changes, attention) {
+    if (changes.projectionStamp !== attention.projectionStamp) {
+      throw new Error("Change documents do not form one coherent generation");
+    }
+  }
+  __name(requireCoherentGeneration, "requireCoherentGeneration");
+  function sameProfileGeneration(initial, postflight) {
+    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && sameAuthorityCursor(initial.authorityCursor, postflight.authorityCursor);
+  }
+  __name(sameProfileGeneration, "sameProfileGeneration");
+  function sameAuthorityCursor(left, right) {
+    return canonicalJson(left) === canonicalJson(right);
+  }
+  __name(sameAuthorityCursor, "sameAuthorityCursor");
+  function trimUnicodeWhitespace(value) {
+    return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+  }
+  __name(trimUnicodeWhitespace, "trimUnicodeWhitespace");
+  function appendEnum(params, name, value, values) {
+    if (value === void 0) return;
+    if (!values.has(value)) throw new Error(`invalid Change page ${name}`);
+    params.set(name, value);
+  }
+  __name(appendEnum, "appendEnum");
+  function isReaderProfileAvailability(value) {
+    return value === "migration_required" || value === "migration_in_progress" || value === "ready";
+  }
+  __name(isReaderProfileAvailability, "isReaderProfileAvailability");
+  function isChangeSummary(value, stamp) {
+    if (!isRecord(value)) return false;
+    return nonEmptyString2(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics)) && (value.activityAt === void 0 || nonEmptyString2(value.activityAt)) && (value.attentionWaitAt === void 0 || isAttentionWaitKey(value.attentionWaitAt));
+  }
+  __name(isChangeSummary, "isChangeSummary");
+  function isAttentionWaitKey(value) {
+    return isRecord(value) && typeof value.tierRank === "number" && Number.isSafeInteger(value.tierRank) && value.tierRank >= 0 && nonEmptyString2(value.oldestObservedAt);
+  }
+  __name(isAttentionWaitKey, "isAttentionWaitKey");
+  function isClaimSupport(value) {
+    return isRecord(value) && nonEmptyString2(value.eventId) && nonEmptyString2(value.actorId) && optionalString(value.trackId);
+  }
+  __name(isClaimSupport, "isClaimSupport");
+  function isChangeMemberRevisions(value) {
+    return Array.isArray(value) && value.every(
+      (member) => isRecord(member) && isRevisionRef(member.revision) && isStringArray(member.supportingClaimIds)
+    );
+  }
+  __name(isChangeMemberRevisions, "isChangeMemberRevisions");
+  function isUnavailableChangeMemberRevisions(value) {
+    return Array.isArray(value) && value.every(
+      (member) => isRecord(member) && nonEmptyString2(member.revisionId) && (member.reason === "invalid_revision_id" || member.reason === "invalid_object_artifact_content_hash") && isStringArray(member.supportingClaimIds)
+    );
+  }
+  __name(isUnavailableChangeMemberRevisions, "isUnavailableChangeMemberRevisions");
+  function isMembershipClaims(value, changeId) {
+    return Array.isArray(value) && value.every(
+      (claim) => isRecord(claim) && nonEmptyString2(claim.claimId) && claim.changeId === changeId && nonEmptyString2(claim.revisionId) && Array.isArray(claim.supports) && claim.supports.every(isClaimSupport) && Array.isArray(claim.withdrawals) && claim.withdrawals.every(isClaimSupport) && typeof claim.active === "boolean" && isStringArray(claim.diagnostics)
+    );
+  }
+  __name(isMembershipClaims, "isMembershipClaims");
+  function isClaimWithdrawals(value) {
+    return Array.isArray(value) && value.every(
+      (withdrawal) => isRecord(withdrawal) && nonEmptyString2(withdrawal.claimId) && Array.isArray(withdrawal.supports) && withdrawal.supports.every(isClaimSupport) && isStringArray(withdrawal.diagnostics)
+    );
+  }
+  __name(isClaimWithdrawals, "isClaimWithdrawals");
+  function isChangeLinks(value) {
+    return Array.isArray(value) && value.every(
+      (link) => isRecord(link) && nonEmptyString2(link.leftChangeId) && nonEmptyString2(link.rightChangeId) && nonEmptyString2(link.relation)
+    );
+  }
+  __name(isChangeLinks, "isChangeLinks");
+  function isEffectiveSupersedes(value) {
+    return Array.isArray(value) && value.every(
+      (edge) => Array.isArray(edge) && edge.length === 2 && isRevisionRef(edge[0]) && isRevisionRef(edge[1])
+    );
+  }
+  __name(isEffectiveSupersedes, "isEffectiveSupersedes");
+  function isRevisionQualifications(value, currentRevisionRefs) {
+    if (!Array.isArray(value)) return false;
+    const qualifications = [];
+    for (const candidate of value) {
+      if (!isRecord(candidate) || !isRevisionRef(candidate.revision)) {
+        return false;
+      }
+      const revision2 = candidate.revision;
+      if (typeof candidate.qualified !== "boolean" || !currentRevisionRefs.some((current) => sameRevision(current, revision2)))
+        return false;
+      qualifications.push({
+        revision: revision2,
+        qualified: candidate.qualified
+      });
+    }
+    return sameRevisionSet(
+      qualifications.map((qualification) => qualification.revision),
+      currentRevisionRefs
+    );
+  }
+  __name(isRevisionQualifications, "isRevisionQualifications");
+  function sameRevisionSet(left, right) {
+    const leftKeys = uniqueRevisionKeys(left);
+    const rightKeys = uniqueRevisionKeys(right);
+    return leftKeys.size === left.length && rightKeys.size === right.length && leftKeys.size === rightKeys.size && [...leftKeys].every((key) => rightKeys.has(key));
+  }
+  __name(sameRevisionSet, "sameRevisionSet");
+  function isPresentations(value, changes, lens) {
+    if (!isRecord(value)) return false;
+    const summaries = new Map(
+      changes.map((change) => [change.changeId, change])
+    );
+    if (Object.keys(value).length !== summaries.size) return false;
+    return Object.entries(value).every(([changeId, presentation]) => {
+      const change = summaries.get(changeId);
+      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision) || (lens === "attention" ? !isAttentionPresentation(presentation.attention) : presentation.attention !== void 0)) {
+        return false;
+      }
+      const expected = uniqueRevisionKeys(change.currentRevisionRefs);
+      const actual = uniqueRevisionKeys(
+        presentation.currentRevisions.map((candidate) => candidate.revision)
+      );
+      return expected.size === change.currentRevisionRefs.length && actual.size === presentation.currentRevisions.length && expected.size === actual.size && [...expected].every((key) => actual.has(key));
+    });
+  }
+  __name(isPresentations, "isPresentations");
+  function isAttentionPresentation(value) {
+    if (!isRecord(value)) return false;
+    const reasons = value.reasons;
+    const reasonPresentations = value.reasonPresentations;
+    if (!isAttentionReason(value.primaryReason) || !Array.isArray(reasons) || reasons.length === 0 || !reasons.every(isAttentionReason) || !sameAttentionReason(value.primaryReason, reasons[0]) || !Array.isArray(reasonPresentations) || reasonPresentations.length !== reasons.length || !reasonPresentations.every(
+      (presentation, index) => isAttentionReasonPresentation(presentation) && sameAttentionReason(presentation.cause, reasons[index])
+    ) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    return true;
+  }
+  __name(isAttentionPresentation, "isAttentionPresentation");
+  var ATTENTION_REASON_PRESENTATION_KEYS = /* @__PURE__ */ new Set([
+    "cause",
+    "ask",
+    "reason",
+    "evidence",
+    "nextAction"
+  ]);
+  function nonBlankAttentionCopy(value) {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+  __name(nonBlankAttentionCopy, "nonBlankAttentionCopy");
+  function isAttentionReasonPresentation(value) {
+    return isRecord(value) && hasExactKeys(value, ATTENTION_REASON_PRESENTATION_KEYS) && isAttentionReason(value.cause) && nonBlankAttentionCopy(value.ask) && nonBlankAttentionCopy(value.reason) && nonBlankAttentionCopy(value.evidence) && nonBlankAttentionCopy(value.nextAction);
+  }
+  __name(isAttentionReasonPresentation, "isAttentionReasonPresentation");
+  function isAttentionReason(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "conflicted":
+      case "incomplete":
+      case "no_current_revision":
+        return Object.keys(value).length === 1;
+      case "unresolved_operative_requests":
+        return Object.keys(value).length === 2 && Array.isArray(value.requestIds) && value.requestIds.length > 0 && value.requestIds.every(nonEmptyString2) && new Set(value.requestIds).size === value.requestIds.length;
+      case "current_revisions_need_assessment":
+        return Object.keys(value).length === 2 && Array.isArray(value.revisions) && value.revisions.length > 0 && value.revisions.every(isRevisionRef) && uniqueRevisionKeys(value.revisions).size === value.revisions.length;
+      default:
+        return false;
+    }
+  }
+  __name(isAttentionReason, "isAttentionReason");
+  function sameAttentionReason(left, right) {
+    if (left.kind !== right.kind) return false;
+    if (left.kind === "unresolved_operative_requests" && right.kind === "unresolved_operative_requests") {
+      return left.requestIds.length === right.requestIds.length && left.requestIds.every(
+        (requestId, index) => requestId === right.requestIds[index]
+      );
+    }
+    if (left.kind === "current_revisions_need_assessment" && right.kind === "current_revisions_need_assessment") {
+      return left.revisions.length === right.revisions.length && left.revisions.every(
+        (revision2, index) => sameRevision(revision2, right.revisions[index])
+      );
+    }
+    return true;
+  }
+  __name(sameAttentionReason, "sameAttentionReason");
+  function isPresentationRevision(value) {
+    return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
+    // non-empty string when present. summarySource validation is unchanged.
+    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+  }
+  __name(isPresentationRevision, "isPresentationRevision");
+  function isRevisionRef(value) {
+    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
+  }
+  __name(isRevisionRef, "isRevisionRef");
+  function isChangeDetailInspectorPresentation(value, detail) {
+    if (value === void 0) return true;
+    if (!isRecord(value) || !isChangeRevisionGraphPresentation(value.revisionGraph))
+      return false;
+    const graph = value.revisionGraph;
+    const expectedMembers = new Set(
+      detail.memberRevisions.map(
+        (member) => revisionGraphNodeId(member.revision)
+      )
+    );
+    const expectedCurrent = new Set(
+      detail.currentRevisionRefs.map(revisionGraphNodeId)
+    );
+    const expectedNodes = new Set(expectedMembers);
+    for (const claim of detail.pendingOrConflictingEdges) {
+      expectedNodes.add(revisionGraphNodeId(claim.successor));
+      expectedNodes.add(revisionGraphNodeId(claim.predecessor));
+    }
+    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every(
+      (node) => node.isMember === expectedMembers.has(node.id) && node.isCurrent === expectedCurrent.has(node.id)
+    ) || !sameStringArray(graph.diagnostics ?? [], detail.diagnostics)) {
+      return false;
+    }
+    const effective = new Set(
+      detail.effectiveSupersedes.map(
+        ([successor, predecessor]) => graphEdgeKey(
+          revisionGraphNodeId(successor),
+          revisionGraphNodeId(predecessor)
+        )
+      )
+    );
+    const graphEffective = new Set(
+      graph.effectiveSupersedes.map((edge) => graphEdgeKey(edge.from, edge.to))
+    );
+    if (!sameStringSet(effective, graphEffective)) return false;
+    const pending = new Map(
+      detail.pendingOrConflictingEdges.map((claim) => [claim.claimId, claim])
+    );
+    return pending.size === graph.pendingOrConflictingClaims.length && graph.pendingOrConflictingClaims.every((edge) => {
+      const claim = pending.get(edge.claimId);
+      return claim !== void 0 && sameRevision(edge.successor, claim.successor) && sameRevision(edge.predecessor, claim.predecessor) && sameStringArray(edge.diagnostics, claim.diagnostics);
+    });
+  }
+  __name(isChangeDetailInspectorPresentation, "isChangeDetailInspectorPresentation");
+  function isChangeRevisionDetailInspectorPresentation(value, detail) {
+    if (value === void 0) return true;
+    if (!isRecord(value) || !isFactRelationshipGraphPresentation(value.factGraph))
+      return false;
+    const graph = value.factGraph;
+    const expectedActivation = /* @__PURE__ */ new Map();
+    const expectedNodes = /* @__PURE__ */ new Set();
+    for (const fact2 of detail.factPresentations) {
+      const id = factGraphNodeId(fact2.originRevision, fact2.family, fact2.factId);
+      expectedNodes.add(id);
+      if (sameRevision(fact2.originRevision, detail.revision) || fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, detail.revision)) {
+        expectedActivation.set(id, detail.revision);
+      }
+    }
+    for (const port of detail.factPorts) {
+      expectedNodes.add(
+        factGraphNodeId(
+          port.originRevision,
+          port.originFact.kind,
+          factRefId(port.originFact)
+        )
+      );
+      const targetId = port.targetFact === void 0 ? revisionGraphNodeId(port.targetRevision) : factGraphNodeId(
+        port.targetRevision,
+        port.targetFact.kind,
+        factRefId(port.targetFact)
+      );
+      expectedNodes.add(targetId);
+      if (port.targetFact === void 0 && sameRevision(port.targetRevision, detail.revision)) {
+        expectedActivation.set(targetId, detail.revision);
+      }
+    }
+    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
+    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every((node) => {
+      const activation = expectedActivation.get(node.id);
+      return activation === void 0 ? node.contextAvailability === "relationship_context_only" && node.activationRevision === void 0 : node.contextAvailability === "available" && node.activationRevision !== void 0 && sameRevision(node.activationRevision, activation);
+    })) {
+      return false;
+    }
+    const ports = new Map(detail.factPorts.map((port) => [port.portId, port]));
+    return ports.size === graph.factPorts.length && graph.factPorts.every((edge) => {
+      const port = ports.get(edge.portId);
+      return port !== void 0 && sameRevision(edge.originRevision, port.originRevision) && sameFactRef(edge.originFact, port.originFact) && sameRevision(edge.targetRevision, port.targetRevision) && sameOptionalFactRef(edge.targetFact, port.targetFact) && edge.relation === port.relation && edge.applicability === port.applicability && sameStringArray(edge.diagnostics ?? [], port.diagnostics);
+    });
+  }
+  __name(isChangeRevisionDetailInspectorPresentation, "isChangeRevisionDetailInspectorPresentation");
+  function isChangeRevisionGraphPresentation(value) {
+    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isChangeRevisionGraphNode) || !Array.isArray(value.effectiveSupersedes) || !Array.isArray(value.pendingOrConflictingClaims) || !isGraphBounds(value.bounds) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+    return nodes.size === value.nodes.length && value.effectiveSupersedes.every(
+      (edge) => isChangeRevisionGraphEffectiveEdge(edge, nodes)
+    ) && uniqueGraphEdgeEndpoints(value.effectiveSupersedes) && value.pendingOrConflictingClaims.every(
+      (edge) => isChangeRevisionGraphClaimEdge(edge, nodes)
+    ) && new Set(value.pendingOrConflictingClaims.map((edge) => edge.claimId)).size === value.pendingOrConflictingClaims.length;
+  }
+  __name(isChangeRevisionGraphPresentation, "isChangeRevisionGraphPresentation");
+  function isChangeRevisionGraphNode(value) {
+    return isRecord(value) && nonEmptyString2(value.id) && isRevisionRef(value.revision) && isGraphDisplayLabel(value.displayLabel) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
+  }
+  __name(isChangeRevisionGraphNode, "isChangeRevisionGraphNode");
+  function isChangeRevisionGraphEffectiveEdge(value, nodes) {
+    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && value.from === revisionGraphNodeId(value.successor) && value.to === revisionGraphNodeId(value.predecessor) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+  }
+  __name(isChangeRevisionGraphEffectiveEdge, "isChangeRevisionGraphEffectiveEdge");
+  function isChangeRevisionGraphClaimEdge(value, nodes) {
+    if (!isRecord(value) || !isChangeRevisionGraphEffectiveEdge(value, nodes))
+      return false;
+    return nonEmptyString2(value.claimId) && isStringArray(value.diagnostics);
+  }
+  __name(isChangeRevisionGraphClaimEdge, "isChangeRevisionGraphClaimEdge");
+  function isFactRelationshipGraphPresentation(value) {
+    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isFactRelationshipGraphNode) || !Array.isArray(value.observationSupersedes) || !Array.isArray(value.assessmentReplaces) || !Array.isArray(value.factPorts) || !isGraphBounds(value.bounds)) {
+      return false;
+    }
+    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
+    return nodes.size === value.nodes.length && value.observationSupersedes.every(
+      (edge) => isFactRelationshipEdge(edge, "observation", nodes)
+    ) && uniqueGraphEdgeEndpoints(value.observationSupersedes) && value.assessmentReplaces.every(
+      (edge) => isFactRelationshipEdge(edge, "assessment", nodes)
+    ) && uniqueGraphEdgeEndpoints(value.assessmentReplaces) && value.factPorts.every((edge) => isFactPortRelationshipEdge(edge, nodes)) && new Set(value.factPorts.map((edge) => edge.portId)).size === value.factPorts.length;
+  }
+  __name(isFactRelationshipGraphPresentation, "isFactRelationshipGraphPresentation");
+  function isFactRelationshipGraphNode(value) {
+    if (!isRecord(value) || !nonEmptyString2(value.id) || !isRevisionRef(value.revision) || !isGraphDisplayLabel(value.displayLabel) || !isFiniteGeometry(value) || !isGraphContext(value)) {
+      return false;
+    }
+    if (value.kind === "fact") {
+      return nonEmptyString2(value.factId) && nonEmptyString2(value.family) && value.id === factGraphNodeId(value.revision, value.family, value.factId);
+    }
+    return value.kind === "revision" && value.factId === void 0 && value.family === void 0 && value.id === revisionGraphNodeId(value.revision);
+  }
+  __name(isFactRelationshipGraphNode, "isFactRelationshipGraphNode");
+  function isGraphContext(value) {
+    if (value.contextAvailability === "available") {
+      return isRevisionRef(value.activationRevision);
+    }
+    return value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0;
+  }
+  __name(isGraphContext, "isGraphContext");
+  function isGraphDisplayLabel(value) {
+    return typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= 256;
+  }
+  __name(isGraphDisplayLabel, "isGraphDisplayLabel");
+  function isFactRelationshipEdge(value, family, nodes) {
+    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.originRevision) && nonEmptyString2(value.fromFactId) && nonEmptyString2(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
+  }
+  __name(isFactRelationshipEdge, "isFactRelationshipEdge");
+  function isFactPortRelationshipEdge(value, nodes) {
+    if (!isRecord(value) || !nonEmptyString2(value.portId) || !nonEmptyString2(value.from) || !nonEmptyString2(value.to) || !isRevisionRef(value.originRevision) || !isFactRef(value.originFact) || !isRevisionRef(value.targetRevision) || value.targetFact !== void 0 && !isFactRef(value.targetFact) || value.relation !== "context_only" && value.relation !== "reanchored_as" && value.relation !== "carried_open_as" && value.relation !== "resolved_by" || value.applicability !== "applicable" && value.applicability !== "conflicted" && value.applicability !== "unavailable" || !isGraphPath(value.path) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
+      return false;
+    }
+    const from = factGraphNodeId(
+      value.originRevision,
+      value.originFact.kind,
+      factRefId(value.originFact)
+    );
+    const to = value.targetFact === void 0 ? revisionGraphNodeId(value.targetRevision) : factGraphNodeId(
+      value.targetRevision,
+      value.targetFact.kind,
+      factRefId(value.targetFact)
+    );
+    return value.from === from && value.to === to && nodes.has(from) && nodes.has(to);
+  }
+  __name(isFactPortRelationshipEdge, "isFactPortRelationshipEdge");
+  function isGraphBounds(value) {
+    return isRecord(value) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
+  }
+  __name(isGraphBounds, "isGraphBounds");
+  function isFiniteGeometry(value) {
+    return isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
+  }
+  __name(isFiniteGeometry, "isFiniteGeometry");
+  function isGraphPath(value) {
+    return Array.isArray(value) && value.length > 0 && value.every(
+      (point) => Array.isArray(point) && point.length === 2 && isFiniteNumber(point[0]) && isFiniteNumber(point[1])
+    );
+  }
+  __name(isGraphPath, "isGraphPath");
+  function isFiniteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+  __name(isFiniteNumber, "isFiniteNumber");
+  function uniqueGraphEdgeEndpoints(edges) {
+    return new Set(edges.map((edge) => `${edge.from}\0${edge.to}`)).size === edges.length;
+  }
+  __name(uniqueGraphEdgeEndpoints, "uniqueGraphEdgeEndpoints");
+  function revisionGraphNodeId(revision2) {
+    return `revision:${revision2.revisionId}@${revision2.objectArtifactContentHash}`;
+  }
+  __name(revisionGraphNodeId, "revisionGraphNodeId");
+  function factGraphNodeId(revision2, family, factId) {
+    return `${revisionGraphNodeId(revision2).replace("revision:", "fact:")}:${family}:${factId}`;
+  }
+  __name(factGraphNodeId, "factGraphNodeId");
+  function graphEdgeKey(from, to) {
+    return `${from}\0${to}`;
+  }
+  __name(graphEdgeKey, "graphEdgeKey");
+  function sameStringArray(left, right) {
+    return left.length === right.length && left.every((value, index) => value === right[index]);
+  }
+  __name(sameStringArray, "sameStringArray");
+  function sameStringSet(left, right) {
+    return left.size === right.size && [...left].every((value) => right.has(value));
+  }
+  __name(sameStringSet, "sameStringSet");
+  function sameFactRef(left, right) {
+    return left.kind === right.kind && factRefId(left) === factRefId(right);
+  }
+  __name(sameFactRef, "sameFactRef");
+  function sameOptionalFactRef(left, right) {
+    return left === void 0 && right === void 0 || left !== void 0 && right !== void 0 && sameFactRef(left, right);
+  }
+  __name(sameOptionalFactRef, "sameOptionalFactRef");
+  function uniqueRevisionKeys(revisions) {
+    return new Set(
+      revisions.map(
+        (revision2) => `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
+      )
+    );
+  }
+  __name(uniqueRevisionKeys, "uniqueRevisionKeys");
+  function isRelationClaim(value, changeId) {
+    return isRecord(value) && nonEmptyString2(value.claimId) && value.changeId === changeId && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport) && isStringArray(value.diagnostics);
+  }
+  __name(isRelationClaim, "isRelationClaim");
+  function isFactPresentation(value) {
+    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+  }
+  __name(isFactPresentation, "isFactPresentation");
+  function isFactTarget(value) {
+    if (!isRecord(value) || !nonEmptyString2(value.revisionId)) return false;
+    if (value.kind === "revision") return true;
+    if (value.kind === "file") return nonEmptyString2(value.filePath);
+    if (value.kind === "range") {
+      return nonEmptyString2(value.filePath) && (value.side === "old" || value.side === "new") && Number.isSafeInteger(value.startLine) && value.startLine > 0 && Number.isSafeInteger(value.endLine) && value.endLine >= value.startLine;
+    }
+    if (value.kind === "observation") return nonEmptyString2(value.observationId);
+    if (value.kind === "input_request")
+      return nonEmptyString2(value.inputRequestId);
+    if (value.kind === "assessment") return nonEmptyString2(value.assessmentId);
+    return value.kind === "event" && nonEmptyString2(value.eventId);
+  }
+  __name(isFactTarget, "isFactTarget");
+  function uniqueFactPresentationIds(facts) {
+    return new Set(facts.map((fact2) => fact2.factId)).size === facts.length;
+  }
+  __name(uniqueFactPresentationIds, "uniqueFactPresentationIds");
+  function isResourceProjection(value) {
+    return isRecord(value) && typeof value.includeBody === "boolean" && (value.trackId === void 0 || nonEmptyString2(value.trackId));
+  }
+  __name(isResourceProjection, "isResourceProjection");
+  function isCapturedReviewSnapshot(value, expectedContentHash, expectedObjectId) {
+    if (!isRecord(value) || value.schema !== "pointbreak.review-snapshot" || value.version !== 1 || value.contentHash !== expectedContentHash || !isRecord(value.snapshot)) {
+      return false;
+    }
+    return nonEmptyString2(value.snapshot.review_id) && value.snapshot.object_id === expectedObjectId && Array.isArray(value.snapshot.files);
+  }
+  __name(isCapturedReviewSnapshot, "isCapturedReviewSnapshot");
+  function isFactContentPresentations(value) {
+    return isRecord(value) && Object.values(value).every(
+      (presentation) => isRecord(presentation) && (presentation.contentType === "text/plain" || presentation.contentType === "text/markdown") && (presentation.bodyContentState === "present" || presentation.bodyContentState === "suppressed_present" || presentation.bodyContentState === "physically_removed") && isFactContent(presentation.content)
+    );
+  }
+  __name(isFactContentPresentations, "isFactContentPresentations");
+  function sameFactIds(facts, content) {
+    const expected = new Set(facts.map((fact2) => fact2.factId));
+    const actual = Object.keys(content);
+    return expected.size === facts.length && expected.size === actual.length && actual.every((factId) => expected.has(factId));
+  }
+  __name(sameFactIds, "sameFactIds");
+  function isRevisionResource(value) {
+    try {
+      decodeRevisionResource(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  __name(isRevisionResource, "isRevisionResource");
+  function isFactPortPresentations(value, changeId, facts, selectedRevision) {
+    if (!Array.isArray(value) || !value.every(isFactPortPresentation))
+      return false;
+    if (new Set(value.map((port) => port.portId)).size !== value.length)
+      return false;
+    return value.every(
+      (port) => (port.contextChangeId === void 0 || port.contextChangeId === changeId) && port.sourceEventIds.length > 0 && new Set(port.sourceEventIds).size === port.sourceEventIds.length && port.trackId !== void 0 && (port.applicability !== "applicable" || applicableFactPortHasExactEndpoints(port, facts, selectedRevision))
+    );
+  }
+  __name(isFactPortPresentations, "isFactPortPresentations");
+  function factRefId(fact2) {
+    return fact2.kind === "observation" ? fact2.observationId ?? "" : fact2.inputRequestId ?? "";
+  }
+  __name(factRefId, "factRefId");
+  function applicableFactPortHasExactEndpoints(port, facts, selectedRevision) {
+    if (!sameRevision(port.targetRevision, selectedRevision)) return false;
+    const matchingOrigin = facts.filter(
+      (fact2) => fact2.factId === factRefId(port.originFact) && fact2.family === port.originFact.kind && sameRevision(fact2.originRevision, port.originRevision) && fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, selectedRevision)
+    );
+    if (matchingOrigin.length !== 1) return false;
+    const targetFact = port.targetFact;
+    if (targetFact === void 0) return true;
+    return facts.filter(
+      (fact2) => fact2.factId === factRefId(targetFact) && fact2.family === targetFact.kind && sameRevision(fact2.originRevision, selectedRevision)
+    ).length === 1;
+  }
+  __name(applicableFactPortHasExactEndpoints, "applicableFactPortHasExactEndpoints");
+  function isFactPortPresentation(value) {
+    return isRecord(value) && nonEmptyString2(value.portId) && isRevisionRef(value.originRevision) && isFactRef(value.originFact) && isRevisionRef(value.targetRevision) && (value.relation === "context_only" || value.relation === "reanchored_as" || value.relation === "carried_open_as" || value.relation === "resolved_by") && (value.targetFact === void 0 || isFactRef(value.targetFact)) && optionalString(value.rationaleContentHash) && optionalString(value.contextChangeId) && nonEmptyString2(value.actorId) && nonEmptyString2(value.trackId) && isStringArray(value.sourceEventIds) && (value.applicability === "applicable" || value.applicability === "conflicted" || value.applicability === "unavailable") && isStringArray(value.diagnostics);
+  }
+  __name(isFactPortPresentation, "isFactPortPresentation");
+  function isFactRef(value) {
+    if (!isRecord(value)) return false;
+    if (value.kind === "observation") {
+      return nonEmptyString2(value.observationId) && value.inputRequestId === void 0;
+    }
+    if (value.kind === "input_request") {
+      return nonEmptyString2(value.inputRequestId) && value.observationId === void 0;
+    }
+    return false;
+  }
+  __name(isFactRef, "isFactRef");
+  function isFactContent(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "observation":
+        return nonEmptyString2(value.title) && optionalString(value.body);
+      case "input_request":
+        return nonEmptyString2(value.title) && optionalString(value.body) && nonEmptyString2(value.status) && (value.responses === void 0 || Array.isArray(value.responses) && value.responses.every(isFactResponse));
+      case "assessment":
+        return nonEmptyString2(value.assessment) && optionalString(value.summary);
+      case "validation":
+        return nonEmptyString2(value.checkName) && optionalString(value.command) && nonEmptyString2(value.status) && optionalString(value.summary);
+      default:
+        return false;
+    }
+  }
+  __name(isFactContent, "isFactContent");
+  function isFactResponse(value) {
+    return isRecord(value) && nonEmptyString2(value.responseId) && nonEmptyString2(value.outcome) && optionalString(value.reason) && (value.contentType === "text/plain" || value.contentType === "text/markdown") && (value.bodyContentState === "present" || value.bodyContentState === "suppressed_present" || value.bodyContentState === "physically_removed") && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+  }
+  __name(isFactResponse, "isFactResponse");
+  function isAssociation(value) {
+    return isRecord(value) && value.schema === "pointbreak.review-association-comparison" && value.version === 1 && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString2(value.comparison.associationId) && nonEmptyString2(value.comparison.commitOid) && nonEmptyString2(value.comparison.comparisonBase) && nonEmptyString2(value.comparison.viewKind) && optionalString(value.comparison.proofRef) && isStringArray(value.diagnostics) && nonEmptyString2(value.cacheKey);
+  }
+  __name(isAssociation, "isAssociation");
+  function sameRevision(left, right) {
+    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
+  }
+  __name(sameRevision, "sameRevision");
+  var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+  var UNIX_MS = /^unix-ms:([+-]?\d+)$/;
+  var I64_MAX = 9223372036854775807n;
+  var I64_MIN = -9223372036854775808n;
+  function daysInMonth(year, month) {
+    if (month === 2) {
+      const leap = year % 4n === 0n && (year % 100n !== 0n || year % 400n === 0n);
+      return leap ? 29 : 28;
+    }
+    return [4, 6, 9, 11].includes(month) ? 30 : 31;
+  }
+  __name(daysInMonth, "daysInMonth");
+  function daysFromCivil(year, month, day) {
+    const y = month <= 2 ? year - 1n : year;
+    const era = (y >= 0n ? y : y - 399n) / 400n;
+    const yoe = y - era * 400n;
+    const mp = BigInt(month > 2 ? month - 3 : month + 9);
+    const doy = (153n * mp + 2n) / 5n + BigInt(day) - 1n;
+    const doe = yoe * 365n + yoe / 4n - yoe / 100n + doy;
+    return era * 146097n + doe - 719468n;
+  }
+  __name(daysFromCivil, "daysFromCivil");
+  function parseEventInstant(value) {
+    const unixMs = UNIX_MS.exec(value);
+    if (unixMs?.[1] !== void 0) {
+      const millis2 = BigInt(unixMs[1]);
+      return millis2 > I64_MAX || millis2 < I64_MIN ? null : millis2;
+    }
+    if (value.startsWith("unix-ms:")) return null;
+    const parts = RFC3339_UTC.exec(value);
+    if (!parts) return null;
+    const year = BigInt(parts[1] ?? "");
+    const month = Number(parts[2]);
+    const day = Number(parts[3]);
+    const hour = Number(parts[4]);
+    const minute = Number(parts[5]);
+    const second = Number(parts[6]);
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month))
+      return null;
+    if (hour > 23 || minute > 59 || second > 60) return null;
+    const fraction = parts[7] ?? "";
+    const millis = Number((fraction.slice(0, 3) + "000").slice(0, 3));
+    const days = daysFromCivil(year, month, day);
+    const seconds = ((days * 24n + BigInt(hour)) * 60n + BigInt(minute)) * 60n + BigInt(second);
+    return seconds * 1000n + BigInt(millis);
+  }
+  __name(parseEventInstant, "parseEventInstant");
+  function compareEventInstants(left, right) {
+    const leftMillis = parseEventInstant(left);
+    const rightMillis = parseEventInstant(right);
+    if (leftMillis !== null && rightMillis !== null) {
+      return leftMillis < rightMillis ? -1 : leftMillis > rightMillis ? 1 : 0;
+    }
+    if (leftMillis === null && rightMillis === null) {
+      return left < right ? -1 : left > right ? 1 : 0;
+    }
+    return leftMillis === null ? -1 : 1;
+  }
+  __name(compareEventInstants, "compareEventInstants");
+  function compareStrings(left, right) {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  __name(compareStrings, "compareStrings");
+  function compareChangeOrder(order, left, right) {
+    let primary = 0;
+    if (order === "activity_desc") {
+      if (left.activityAt !== void 0 && right.activityAt !== void 0) {
+        primary = compareEventInstants(right.activityAt, left.activityAt);
+      } else if (left.activityAt !== void 0) primary = -1;
+      else if (right.activityAt !== void 0) primary = 1;
+    } else if (order === "attention_wait") {
+      const leftKey = left.attentionWaitAt;
+      const rightKey = right.attentionWaitAt;
+      if (leftKey !== void 0 && rightKey !== void 0) {
+        primary = leftKey.tierRank < rightKey.tierRank ? -1 : leftKey.tierRank > rightKey.tierRank ? 1 : compareEventInstants(
+          leftKey.oldestObservedAt,
+          rightKey.oldestObservedAt
+        );
+      } else if (leftKey !== void 0) primary = -1;
+      else if (rightKey !== void 0) primary = 1;
+    }
+    return primary !== 0 ? primary : compareStrings(left.changeId, right.changeId);
+  }
+  __name(compareChangeOrder, "compareChangeOrder");
+  function isStrictlyOrderedChangePage(order, changes) {
+    return changes.every((change, index) => {
+      const previous = changes[index - 1];
+      return index === 0 || previous !== void 0 && compareChangeOrder(order, previous, change) < 0;
+    });
+  }
+  __name(isStrictlyOrderedChangePage, "isStrictlyOrderedChangePage");
+  function isOneOf(value, values) {
+    return typeof value === "string" && values.has(value);
+  }
+  __name(isOneOf, "isOneOf");
+  function isDocumentMap(value) {
+    return isRecord(value) && Object.values(value).every((version) => Number.isInteger(version));
+  }
+  __name(isDocumentMap, "isDocumentMap");
+  function sameDocumentMap(left, right) {
+    const leftEntries = Object.entries(left).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    const rightEntries = Object.entries(right).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    return leftEntries.length === rightEntries.length && leftEntries.every(
+      ([schema, version], index) => schema === rightEntries[index]?.[0] && version === rightEntries[index]?.[1]
+    );
+  }
+  __name(sameDocumentMap, "sameDocumentMap");
+  function hasExactKeys(value, expected) {
+    const actual = Object.keys(value);
+    return actual.length === expected.size && actual.every((key) => expected.has(key));
+  }
+  __name(hasExactKeys, "hasExactKeys");
+  function isNonnegativeSafeInteger(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+  __name(isNonnegativeSafeInteger, "isNonnegativeSafeInteger");
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (isRecord(value)) {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+  __name(canonicalJson, "canonicalJson");
+  function object(value, name) {
+    if (!isRecord(value)) throw new Error(`invalid ${name} DTO`);
+    return value;
+  }
+  __name(object, "object");
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  __name(isRecord, "isRecord");
+  function nonEmptyString2(value) {
+    return typeof value === "string" && value.length > 0;
+  }
+  __name(nonEmptyString2, "nonEmptyString");
+  function optionalString(value) {
+    return value === void 0 || typeof value === "string";
+  }
+  __name(optionalString, "optionalString");
+  function isStringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  __name(isStringArray, "isStringArray");
+
   // src/change-inspector-router.ts
   var QUERY_KEYS = [
     "q",
@@ -655,7 +1975,7 @@
           return { message: "Invalid limit route query." };
         query.limit = limit;
       } else if (key === "order") {
-        if (value !== "change_id_asc") {
+        if (!isChangePageOrder(value)) {
           return { message: "Invalid order route query." };
         }
         query.order = value;
@@ -769,6 +2089,9 @@
       return Object.keys(selected).length ? selected : void 0;
     }, "focus");
     if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
+      if (query.order !== void 0 && !isChangePageOrderAdmitted(segments[0], query.order)) {
+        return { kind: "invalid", message: "Invalid order route query." };
+      }
       if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0 || fileQueries.length > 0) {
         return {
           kind: "invalid",
@@ -779,6 +2102,9 @@
     }
     if (segments[0] !== "changes")
       return { kind: "invalid", message: "Unknown Change Inspector route." };
+    if (query.order !== void 0 && !isChangePageOrderAdmitted("changes", query.order)) {
+      return { kind: "invalid", message: "Invalid order route query." };
+    }
     const changeId = decodeSegment(segments[1] ?? "");
     if (changeId === null)
       return { kind: "invalid", message: "Change routes require a Change ID." };
@@ -954,10 +2280,17 @@
     return firstPage;
   }
   __name(firstPageQuery, "firstPageQuery");
+  function queryForLens(lens, query) {
+    if (query.order === void 0 || isChangePageOrderAdmitted(lens, query.order))
+      return query;
+    const { order: _order, ...admitted } = query;
+    return admitted;
+  }
+  __name(queryForLens, "queryForLens");
   function queryForExactNavigation(route) {
     if (route.kind === "timeline" || route.kind === "event") return {};
     if (route.kind !== "lens" || route.lens !== "attention") return route.query;
-    return firstPageQuery(route.query);
+    return queryForLens("changes", firstPageQuery(route.query));
   }
   __name(queryForExactNavigation, "queryForExactNavigation");
 
@@ -1736,9 +3069,9 @@
   __name(collapsedGroupAt, "collapsedGroupAt");
 
   // src/format.ts
-  var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+  var RFC3339_UTC2 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
   function parseRfc3339UtcMillis(value) {
-    const match = value.match(RFC3339_UTC);
+    const match = value.match(RFC3339_UTC2);
     if (!match) return null;
     const [
       ,
@@ -1757,7 +3090,7 @@
     const minute = Number(minuteText);
     const second = Number(secondText);
     const leapYear = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
-    const daysInMonth = [
+    const daysInMonth2 = [
       31,
       leapYear ? 29 : 28,
       31,
@@ -1771,7 +3104,7 @@
       30,
       31
     ];
-    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 60) {
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth2[month - 1] || hour > 23 || minute > 59 || second > 60) {
       return null;
     }
     const millis = Number((fraction ?? "").padEnd(3, "0").slice(0, 3));
@@ -4333,7 +5666,7 @@
         actions2.navigate({
           kind: "lens",
           lens: "changes",
-          query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
+          query: route.kind === "timeline" ? {} : queryForLens("changes", { ...route.query, after: void 0 })
         });
         return;
       }
@@ -4342,7 +5675,7 @@
         actions2.navigate({
           kind: "lens",
           lens: "attention",
-          query: route.kind === "timeline" ? {} : { ...route.query, after: void 0 }
+          query: route.kind === "timeline" ? {} : queryForLens("attention", { ...route.query, after: void 0 })
         });
         return;
       }
@@ -4678,1211 +6011,6 @@
     };
   }
   __name(installChangeInspectorInteraction, "installChangeInspectorInteraction");
-
-  // ../../../documents/change_reader_profile_v1.json
-  var change_reader_profile_v1_default = {
-    minimumReaderProfile: "review_change_revision_v1",
-    documents: {
-      "pointbreak.attention-list": 2,
-      "pointbreak.inspect-attention": 2,
-      "pointbreak.inspect-changes-page": 1,
-      "pointbreak.inspect-reader-profile": 1,
-      "pointbreak.reader-upgrade-required": 1,
-      "pointbreak.review-association-comparison": 1,
-      "pointbreak.review-change": 1,
-      "pointbreak.review-change-list": 1,
-      "pointbreak.review-change-revision": 1,
-      "pointbreak.review-revision": 3,
-      "pointbreak.review-revision-interdiff": 1,
-      "pointbreak.review-revision-resource": 1,
-      "pointbreak.store-migration-in-progress": 1,
-      "pointbreak.store-migration-required": 1
-    }
-  };
-
-  // src/change-protocol.ts
-  var EVENT_HISTORY_EVENT_TYPES = [
-    "review_initialized",
-    "work_object_proposed",
-    "review_observation_recorded",
-    "review_assessment_recorded",
-    "input_request_opened",
-    "input_request_responded",
-    "review_note_imported",
-    "revision_ref_associated",
-    "revision_ref_withdrawn",
-    "revision_commit_associated",
-    "revision_commit_withdrawn",
-    "validation_check_recorded",
-    "change_declared",
-    "change_membership_asserted",
-    "change_membership_withdrawn",
-    "change_link_asserted",
-    "change_revision_relation_asserted",
-    "change_revision_relation_withdrawn",
-    "revision_relation_attested",
-    "review_fact_ported"
-  ];
-  var CHANGE_PAGE_LIMIT = 50;
-  var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
-  var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
-  var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
-    "initial",
-    "replacement",
-    "replacement_divergent",
-    "consolidation",
-    "parallel_current",
-    "mixed",
-    "incomplete",
-    "cycle_conflicted"
-  ]);
-  var LIFECYCLE_VALUES = /* @__PURE__ */ new Set([
-    "incomplete",
-    "conflicted",
-    "in_progress",
-    "accepted"
-  ]);
-  var ATTENTION_VALUES = /* @__PURE__ */ new Set([
-    "clear",
-    "in_progress",
-    "incomplete",
-    "conflicted"
-  ]);
-  var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
-  var CONTENT_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "removed",
-    "missing",
-    "mismatch",
-    "non_textual"
-  ]);
-  var REVISION_CURRENCY_VALUES = /* @__PURE__ */ new Set([
-    "current",
-    "stale_by_supersession",
-    "membership_incomplete",
-    "membership_conflicted"
-  ]);
-  var FACT_FAMILY_STATE_VALUES = /* @__PURE__ */ new Set([
-    "current",
-    "stale",
-    "withdrawn",
-    "conflicted",
-    "unavailable"
-  ]);
-  var ASSOCIATION_STATE_VALUES = /* @__PURE__ */ new Set([
-    "unknown",
-    "exact",
-    "equivalent",
-    "extension",
-    "unavailable"
-  ]);
-  var ASSOCIATION_PROOF_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "missing",
-    "mismatch",
-    "not_requested"
-  ]);
-  var INTERDIFF_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "unavailable",
-    "endpoint_missing",
-    "endpoint_mismatch",
-    "non_textual"
-  ]);
-  function decodeChangeDetail(value) {
-    const detail = object(value, "Change detail");
-    const summary = detail.summary;
-    const stamp = detail.projectionStamp;
-    const memberRevisions = detail.memberRevisions;
-    const unavailableMemberRevisions = detail.unavailableMemberRevisions;
-    const membershipClaims = detail.membershipClaims;
-    const membershipWithdrawals = detail.membershipWithdrawals;
-    const relationClaims = detail.relationClaims;
-    const relationWithdrawals = detail.relationWithdrawals;
-    const links = detail.links;
-    const effectiveSupersedes = detail.effectiveSupersedes;
-    const pendingOrConflictingEdges = detail.pendingOrConflictingEdges;
-    const currentRevisionRefs = detail.currentRevisionRefs;
-    const perCurrentRevisionQualification = detail.perCurrentRevisionQualification;
-    const operativeObligations = detail.operativeObligations;
-    const diagnostics = detail.diagnostics;
-    const inspectorPresentation = detail.inspectorPresentation;
-    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString2(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
-      (claim) => isRelationClaim(claim, summary.changeId)
-    ) || !isClaimWithdrawals(relationWithdrawals) || !isChangeLinks(links) || !isEffectiveSupersedes(effectiveSupersedes) || !Array.isArray(pendingOrConflictingEdges) || !pendingOrConflictingEdges.every(
-      (claim) => isRelationClaim(claim, summary.changeId)
-    ) || !Array.isArray(currentRevisionRefs) || !currentRevisionRefs.every(isRevisionRef) || !sameRevisionSet(currentRevisionRefs, summary.currentRevisionRefs) || !isRevisionQualifications(
-      perCurrentRevisionQualification,
-      currentRevisionRefs
-    ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics)) {
-      throw new Error("invalid Change detail DTO");
-    }
-    if (!isChangeDetailInspectorPresentation(inspectorPresentation, {
-      memberRevisions,
-      currentRevisionRefs,
-      effectiveSupersedes,
-      pendingOrConflictingEdges,
-      diagnostics
-    })) {
-      throw new Error("invalid Change detail DTO");
-    }
-    return {
-      schema: "pointbreak.review-change",
-      version: 1,
-      summary,
-      memberRevisions,
-      unavailableMemberRevisions,
-      membershipClaims,
-      membershipWithdrawals,
-      relationClaims,
-      relationWithdrawals,
-      links,
-      effectiveSupersedes,
-      pendingOrConflictingEdges,
-      currentRevisionRefs,
-      perCurrentRevisionQualification,
-      operativeObligations,
-      diagnostics,
-      projectionStamp: stamp,
-      inspectorPresentation
-    };
-  }
-  __name(decodeChangeDetail, "decodeChangeDetail");
-  function decodeChangeRevisionDetail(value) {
-    const detail = object(value, "Change Revision detail");
-    const revision2 = detail.revision;
-    const factPresentations = detail.factPresentations;
-    const factContentPresentations = detail.factContentPresentations;
-    const exactRevisionDocument = detail.exactRevisionDocument;
-    const membershipSupport = detail.membershipSupport;
-    const factPorts = detail.factPorts;
-    const associations = detail.associations;
-    const diagnostics = detail.diagnostics;
-    const revisionCurrency = detail.revisionCurrency;
-    const relationClassification = detail.relationClassification;
-    const availability = detail.availability;
-    const inspectorPresentation = detail.inspectorPresentation;
-    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString2(detail.changeId) || !isRevisionRef(revision2) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision2) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
-      factPorts,
-      detail.changeId,
-      factPresentations,
-      revision2
-    ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString2(detail.projectionStamp)) {
-      throw new Error("invalid Change Revision detail DTO");
-    }
-    if (!isChangeRevisionDetailInspectorPresentation(inspectorPresentation, {
-      revision: revision2,
-      factPresentations,
-      factPorts
-    })) {
-      throw new Error("invalid Change Revision detail DTO");
-    }
-    return {
-      schema: "pointbreak.review-change-revision",
-      version: 1,
-      changeId: detail.changeId,
-      revision: revision2,
-      membershipSupport,
-      revisionCurrency,
-      relationClassification,
-      availability,
-      exactRevisionDocument,
-      factPresentations,
-      factContentPresentations,
-      factPorts,
-      associations,
-      diagnostics,
-      projectionStamp: detail.projectionStamp,
-      inspectorPresentation
-    };
-  }
-  __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
-  function decodeRevisionResource(value) {
-    const document2 = object(value, "Revision resource");
-    const resource = document2.resource;
-    const projection = document2.projection;
-    const diagnostics = document2.diagnostics;
-    const availability = document2.availability;
-    const capturedDocumentHash = document2.capturedDocumentHash;
-    const projectionStamp = document2.projectionStamp;
-    const cacheKey = document2.cacheKey;
-    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString2(resource.objectId) || !isResourceProjection(projection) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString2(capturedDocumentHash) || availability === "available" && (capturedDocumentHash === void 0 || !isCapturedReviewSnapshot(
-      document2.capturedDocument,
-      resource.revision.objectArtifactContentHash,
-      resource.objectId
-    )) || availability !== "available" && (capturedDocumentHash !== void 0 || document2.capturedDocument !== void 0) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || !isStringArray(diagnostics)) {
-      throw new Error("invalid Revision resource DTO");
-    }
-    return {
-      schema: "pointbreak.review-revision-resource",
-      version: 1,
-      resource: { revision: resource.revision, objectId: resource.objectId },
-      projection,
-      availability,
-      capturedDocumentHash,
-      capturedDocument: document2.capturedDocument,
-      diagnostics,
-      projectionStamp,
-      cacheKey
-    };
-  }
-  __name(decodeRevisionResource, "decodeRevisionResource");
-  function decodeRevisionInterdiff(value) {
-    const document2 = object(value, "Revision interdiff");
-    const interdiff = document2.interdiff;
-    const diagnostics = document2.diagnostics;
-    const availability = document2.availability;
-    const projectionStamp = document2.projectionStamp;
-    const cacheKey = document2.cacheKey;
-    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !nonEmptyString2(interdiff.algorithmVersion) || !isStringArray(interdiff.scope) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || !nonEmptyString2(projectionStamp) || !nonEmptyString2(cacheKey) || availability === "available" !== (document2.comparison !== void 0)) {
-      throw new Error("invalid Revision interdiff DTO");
-    }
-    return {
-      schema: "pointbreak.review-revision-interdiff",
-      version: 1,
-      interdiff: {
-        from: interdiff.from,
-        to: interdiff.to,
-        algorithmVersion: interdiff.algorithmVersion,
-        scope: interdiff.scope
-      },
-      availability,
-      comparison: document2.comparison,
-      diagnostics,
-      projectionStamp,
-      cacheKey
-    };
-  }
-  __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
-  var MAX_INSPECTOR_QUERY_BYTES = 256;
-  function normalizeBoundedQueryText(value, label2) {
-    const normalized = trimUnicodeWhitespace(value).toLowerCase();
-    if (!normalized || new TextEncoder().encode(normalized).length > MAX_INSPECTOR_QUERY_BYTES) {
-      throw new Error(
-        `${label2} query must be non-empty and at most ${MAX_INSPECTOR_QUERY_BYTES} bytes`
-      );
-    }
-    return normalized;
-  }
-  __name(normalizeBoundedQueryText, "normalizeBoundedQueryText");
-  function normalizeChangePageQueryText(value) {
-    return normalizeBoundedQueryText(value, "Change page");
-  }
-  __name(normalizeChangePageQueryText, "normalizeChangePageQueryText");
-  function normalizeEventHistoryQueryText(value) {
-    return normalizeBoundedQueryText(value, "Timeline");
-  }
-  __name(normalizeEventHistoryQueryText, "normalizeEventHistoryQueryText");
-  function buildChangePageUrl(lens, query = {}) {
-    const limit = query.limit ?? CHANGE_PAGE_LIMIT;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      throw new Error("Change page limit must be an integer from 1 through 100");
-    }
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (query.after !== void 0) {
-      if (!query.after || new TextEncoder().encode(query.after).length > 4096) {
-        throw new Error(
-          "Change page continuation must be a non-empty opaque token"
-        );
-      }
-      params.set("after", query.after);
-    }
-    if (query.q !== void 0) {
-      params.set("q", normalizeChangePageQueryText(query.q));
-    }
-    appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
-    appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
-    appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
-    appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
-    if (query.order !== void 0 && query.order !== "change_id_asc") {
-      throw new Error("Change page order must be change_id_asc");
-    }
-    params.set("order", "change_id_asc");
-    return `/api/v2/${lens}?${params}`;
-  }
-  __name(buildChangePageUrl, "buildChangePageUrl");
-  function buildEventHistoryUrl(query = {}) {
-    const limit = query.limit ?? 100;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      throw new Error("Timeline limit must be an integer from 1 through 100");
-    }
-    if (query.after !== void 0 && query.at !== void 0) {
-      throw new Error("Timeline at and after are mutually exclusive");
-    }
-    if (query.revision === void 0 !== (query.artifactHash === void 0) || query.revision !== void 0 && (!query.revision || !query.artifactHash)) {
-      throw new Error("Timeline revision requires an exact artifact hash");
-    }
-    const eventTypes = query.type?.split(",");
-    if (eventTypes?.some((eventType) => !isEventHistoryEventType(eventType))) {
-      throw new Error("Timeline type contains an unknown event type");
-    }
-    if (eventTypes && new Set(eventTypes).size !== eventTypes.length) {
-      throw new Error("Timeline type contains a duplicate event type");
-    }
-    const canonicalTypes = eventTypes?.sort().join(",");
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (query.q !== void 0) {
-      params.set("q", normalizeEventHistoryQueryText(query.q));
-    }
-    const textFields = [
-      "after",
-      "at",
-      "track",
-      "change",
-      "revision",
-      "artifactHash"
-    ];
-    for (const field2 of textFields) {
-      const value = query[field2];
-      if (value === void 0) continue;
-      if (!value) throw new Error(`Timeline ${field2} must be non-empty`);
-      params.set(field2, value);
-    }
-    if (canonicalTypes) params.set("type", canonicalTypes);
-    if (query.order !== void 0 && query.order !== "asc" && query.order !== "desc") {
-      throw new Error("Timeline order must be asc or desc");
-    }
-    params.set("order", query.order ?? "desc");
-    return `/api/v2/history?${params}`;
-  }
-  __name(buildEventHistoryUrl, "buildEventHistoryUrl");
-  function isEventHistoryRevisionRef(value) {
-    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
-  }
-  __name(isEventHistoryRevisionRef, "isEventHistoryRevisionRef");
-  var EVENT_HISTORY_EVENT_TYPE_VALUES = new Set(
-    EVENT_HISTORY_EVENT_TYPES
-  );
-  function isEventHistoryEventType(value) {
-    return typeof value === "string" && EVENT_HISTORY_EVENT_TYPE_VALUES.has(value);
-  }
-  __name(isEventHistoryEventType, "isEventHistoryEventType");
-  function isEventHistoryWriter(value) {
-    return isRecord(value) && nonEmptyString2(value.actorId) && isRecord(value.producer) && nonEmptyString2(value.producer.name) && nonEmptyString2(value.producer.version);
-  }
-  __name(isEventHistoryWriter, "isEventHistoryWriter");
-  function isReviewEndpoint(value) {
-    if (!isRecord(value)) return false;
-    switch (value.kind) {
-      case "git_commit":
-        return nonEmptyString2(value.commitOid) && nonEmptyString2(value.treeOid);
-      case "git_tree":
-      case "git_index":
-        return nonEmptyString2(value.treeOid);
-      case "git_working_tree":
-        return nonEmptyString2(value.worktreeRoot);
-      default:
-        return false;
-    }
-  }
-  __name(isReviewEndpoint, "isReviewEndpoint");
-  function isEventHistorySubject(value) {
-    if (!isRecord(value)) return false;
-    switch (value.kind) {
-      case "journal":
-        return nonEmptyString2(value.journalId);
-      case "review":
-        return isFactTarget(value.target);
-      case "change":
-        return nonEmptyString2(value.changeId);
-      case "change_membership_claim":
-        return nonEmptyString2(value.membershipClaimId);
-      case "change_link_claim":
-        return nonEmptyString2(value.linkClaimId);
-      case "change_revision_relation_claim":
-        return nonEmptyString2(value.relationClaimId);
-      case "revision_relation_attestation":
-        return nonEmptyString2(value.relationAttestationId) && isEventHistoryRevisionRef(value.revision);
-      case "review_fact_port":
-        return nonEmptyString2(value.portId) && isEventHistoryRevisionRef(value.originRevision) && isFactRef(value.originFact);
-      default:
-        return false;
-    }
-  }
-  __name(isEventHistorySubject, "isEventHistorySubject");
-  function isOptionalStringArray(value) {
-    return value === void 0 || isStringArray(value);
-  }
-  __name(isOptionalStringArray, "isOptionalStringArray");
-  function isNullableString(value) {
-    return value === null || typeof value === "string";
-  }
-  __name(isNullableString, "isNullableString");
-  function isReviewTargetSummary(value) {
-    return isFactTarget(value);
-  }
-  __name(isReviewTargetSummary, "isReviewTargetSummary");
-  function isOptionalDeclaredContentType(value) {
-    return value === void 0 || value === "text/plain" || value === "text/markdown";
-  }
-  __name(isOptionalDeclaredContentType, "isOptionalDeclaredContentType");
-  function isEventHistorySummary(value, eventType) {
-    if (!isRecord(value) || value.kind !== eventType) return false;
-    if (eventType === "review_initialized" || eventType === "review_note_imported") {
-      return value.details === void 0;
-    }
-    const details = value.details;
-    if (!isRecord(details)) return false;
-    switch (eventType) {
-      case "work_object_proposed":
-        return nonEmptyString2(details.engagementId) && isRecord(details.revision) && nonEmptyString2(details.revision.id) && nonEmptyString2(details.revision.objectId) && isNullableString(details.summary) && nonEmptyString2(details.objectArtifactContentHash) && isStringArray(details.supersedes);
-      case "review_observation_recorded":
-        return nonEmptyString2(details.observationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalStringArray(details.tags) && optionalString(details.confidence) && isOptionalStringArray(details.supersedesObservationIds) && isOptionalStringArray(details.respondsToObservationIds) && isOptionalDeclaredContentType(details.bodyContentType);
-      case "review_assessment_recorded":
-        return nonEmptyString2(details.assessmentId) && isReviewTargetSummary(details.target) && (details.assessment === "accepted" || details.assessment === "accepted_with_follow_up" || details.assessment === "needs_changes" || details.assessment === "needs_clarification") && optionalString(details.summary) && isOptionalStringArray(details.replacesAssessmentIds) && isOptionalStringArray(details.relatedObservationIds) && isOptionalStringArray(details.relatedInputRequestIds) && isOptionalDeclaredContentType(details.summaryContentType);
-      case "input_request_opened":
-        return nonEmptyString2(details.inputRequestId) && isReviewTargetSummary(details.target) && (details.reasonCode === "ambiguous_state" || details.reasonCode === "unsafe_action" || details.reasonCode === "stale_revision" || details.reasonCode === "failed_gate" || details.reasonCode === "external_side_effect" || details.reasonCode === "conflicting_event" || details.reasonCode === "missing_permission" || details.reasonCode === "manual_decision_required" || details.reasonCode === "insufficient_evidence") && nonEmptyString2(details.title) && optionalString(details.body) && isOptionalDeclaredContentType(details.bodyContentType);
-      case "input_request_responded":
-        return nonEmptyString2(details.inputRequestResponseId) && nonEmptyString2(details.inputRequestId) && nonEmptyString2(details.revisionId) && (details.outcome === "approved" || details.outcome === "rejected" || details.outcome === "dismissed" || details.outcome === "superseded" || details.outcome === "abandoned") && optionalString(details.reason) && isOptionalDeclaredContentType(details.reasonContentType);
-      case "revision_ref_associated":
-        return nonEmptyString2(details.refAssociationId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refName) && nonEmptyString2(details.headOid);
-      case "revision_ref_withdrawn":
-        return nonEmptyString2(details.refWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.refAssociationId);
-      case "revision_commit_associated":
-        return nonEmptyString2(details.commitAssociationId) && isReviewTargetSummary(details.target) && isReviewEndpoint(details.commit);
-      case "revision_commit_withdrawn":
-        return nonEmptyString2(details.commitWithdrawalId) && isReviewTargetSummary(details.target) && nonEmptyString2(details.commitAssociationId);
-      case "validation_check_recorded":
-        return nonEmptyString2(details.validationCheckId) && isRecord(details.target) && details.target.kind === "revision" && nonEmptyString2(details.target.revisionId) && nonEmptyString2(details.checkName) && optionalString(details.command) && (details.status === "passed" || details.status === "failed" || details.status === "errored" || details.status === "skipped") && (details.exitCode === void 0 || typeof details.exitCode === "number" && Number.isSafeInteger(details.exitCode)) && (details.trigger === "manual" || details.trigger === "push" || details.trigger === "pull_request") && optionalString(details.summary) && isOptionalDeclaredContentType(details.summaryContentType);
-      case "change_declared":
-        return details.schema === "pointbreak.change-declared" && details.version === 1 && nonEmptyString2(details.declarationClaimId) && nonEmptyString2(details.changeId) && isRecord(details.identityDescriptor) && details.identityDescriptor.schema === "pointbreak.change-identity.v1" && (details.identityDescriptor.kind === "opaque_nonce" && nonEmptyString2(details.identityDescriptor.nonce) || details.identityDescriptor.kind === "root_revision" && nonEmptyString2(details.identityDescriptor.revision_id)) && nonEmptyString2(details.claimNonce);
-      case "change_membership_asserted":
-        return details.schema === "pointbreak.change-membership-asserted" && details.version === 1 && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.changeId) && nonEmptyString2(details.revisionId) && nonEmptyString2(details.claimNonce);
-      case "change_membership_withdrawn":
-        return details.schema === "pointbreak.change-membership-withdrawn" && details.version === 1 && nonEmptyString2(details.membershipWithdrawalId) && nonEmptyString2(details.membershipClaimId) && nonEmptyString2(details.claimNonce);
-      case "change_link_asserted":
-        return details.schema === "pointbreak.change-link-asserted" && details.version === 1 && nonEmptyString2(details.linkClaimId) && nonEmptyString2(details.leftChangeId) && nonEmptyString2(details.rightChangeId) && (details.relation === "same_work" || details.relation === "related_work") && nonEmptyString2(details.claimNonce);
-      case "change_revision_relation_asserted":
-        return details.schema === "pointbreak.change-revision-relation-asserted" && details.version === 1 && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.changeId) && isEventHistoryRevisionRef(details.successor) && isEventHistoryRevisionRef(details.predecessor) && details.relation === "supersedes" && nonEmptyString2(details.claimNonce);
-      case "change_revision_relation_withdrawn":
-        return details.schema === "pointbreak.change-revision-relation-withdrawn" && details.version === 1 && nonEmptyString2(details.relationWithdrawalId) && nonEmptyString2(details.relationClaimId) && nonEmptyString2(details.claimNonce);
-      case "revision_relation_attested":
-        return details.schema === "pointbreak.revision-relation-attested" && details.version === 1 && nonEmptyString2(details.relationAttestationId) && isEventHistoryRevisionRef(details.revision) && nonEmptyString2(details.commitAssociationId) && (details.semanticRelation === "exact_materialization" || details.semanticRelation === "equivalent_rewrite" || details.semanticRelation === "content_preserving_extension" || details.semanticRelation === "landing_provenance" || details.semanticRelation === "related_provenance" || details.semanticRelation === "unknown") && (details.proofStatus === "verified" || details.proofStatus === "asserted" || details.proofStatus === "unverified" || details.proofStatus === "indeterminate" || details.proofStatus === "refuted") && nonEmptyString2(details.proofMethod) && nonEmptyString2(details.proofAlgorithmVersion) && isStringArray(details.captureScope) && isNullableString(details.comparisonBaseOrParent) && isStringArray(details.endpointOids) && isNullableString(details.evidenceContentHash) && nonEmptyString2(details.resultDigest);
-      case "review_fact_ported":
-        return details.schema === "pointbreak.review-fact-ported" && details.version === 1 && nonEmptyString2(details.portId) && isEventHistoryRevisionRef(details.originRevision) && isFactRef(details.originFact) && isEventHistoryRevisionRef(details.targetRevision) && (details.relation === "context_only" || details.relation === "reanchored_as" || details.relation === "carried_open_as" || details.relation === "resolved_by") && (details.targetFact === null || isFactRef(details.targetFact)) && isNullableString(details.rationaleContentHash) && isNullableString(details.contextChangeId);
-    }
-  }
-  __name(isEventHistorySummary, "isEventHistorySummary");
-  function isEventHistoryEntry(value) {
-    if (!isRecord(value) || !isEventHistoryEventType(value.eventType)) {
-      return false;
-    }
-    return nonEmptyString2(value.eventId) && nonEmptyString2(value.occurredAt) && nonEmptyString2(value.payloadHash) && nonEmptyString2(value.journalId) && optionalString(value.trackId) && isEventHistoryWriter(value.writer) && (value.verificationStatus === "valid" || value.verificationStatus === "invalid" || value.verificationStatus === "untrusted_key" || value.verificationStatus === "unsigned") && (value.assertionMode === "advisory" || value.assertionMode === "operative") && optionalString(value.signer) && (value.sourceRef === void 0 || isRecord(value.sourceRef) && nonEmptyString2(value.sourceRef.sourceSystem) && nonEmptyString2(value.sourceRef.sourceId)) && (value.ingest === void 0 || isRecord(value.ingest) && (value.ingest.via === "ingest-events" || value.ingest.via === "bundle-apply") && nonEmptyString2(value.ingest.receivedAt)) && isEventHistorySubject(value.subject) && isStringArray(value.changeIds) && Array.isArray(value.revisionRefs) && value.revisionRefs.every(isEventHistoryRevisionRef) && isStringArray(value.unresolvedRevisionIds) && isEventHistorySummary(value.summary, value.eventType);
-  }
-  __name(isEventHistoryEntry, "isEventHistoryEntry");
-  function decodeEventHistory(value) {
-    const document2 = object(value, "event history");
-    const completion = document2.completion;
-    const authorityCursor = decodeAuthorityCursorV2(document2.authorityCursor);
-    if (document2.schema !== "pointbreak.inspect-event-history" || document2.version !== 1 || !nonEmptyString2(document2.sourceChangeProjectionStamp) || !nonEmptyString2(document2.timelineProjectionStamp) || document2.order !== "asc" && document2.order !== "desc" || !Number.isSafeInteger(document2.eventCount) || document2.eventCount < 0 || document2.eventCount !== authorityCursor.eventCount || !Number.isSafeInteger(document2.matchCount) || document2.matchCount < 0 || !Number.isSafeInteger(document2.offset) || document2.offset < 0 || document2.matchIndex !== void 0 && (!Number.isSafeInteger(document2.matchIndex) || document2.matchIndex < 0) || !isRecord(document2.facets) || !Object.entries(document2.facets).every(
-      ([eventType, count]) => isEventHistoryEventType(eventType) && typeof count === "number" && Number.isSafeInteger(count) && count >= 0
-    ) || !isRecord(completion) || !isStringArray(completion.eventTypes) || !completion.eventTypes.every(isEventHistoryEventType) || new Set(completion.eventTypes).size !== completion.eventTypes.length || !isStringArray(completion.trackIds) || !isStringArray(completion.changeIds) || !Array.isArray(completion.revisionRefs) || !completion.revisionRefs.every(isEventHistoryRevisionRef) || !isStringArray(completion.unresolvedRevisionIds) || !isStringArray(document2.diagnostics) || !isStringArray(document2.queryNotices) || !Array.isArray(document2.entries) || document2.entries.length > 100 || !document2.entries.every(isEventHistoryEntry) || document2.matchCount > document2.eventCount || document2.offset > document2.matchCount || document2.offset + document2.entries.length > document2.matchCount || document2.previous !== void 0 && !nonEmptyString2(document2.previous) || document2.next !== void 0 && !nonEmptyString2(document2.next)) {
-      throw new Error("invalid event history DTO");
-    }
-    if (document2.offset + document2.entries.length > document2.matchCount) {
-      throw new Error("event history page exceeds its match count");
-    }
-    return {
-      ...document2,
-      authorityCursor
-    };
-  }
-  __name(decodeEventHistory, "decodeEventHistory");
-  var AUTHORITY_CURSOR_V2_KEYS = /* @__PURE__ */ new Set([
-    "schema",
-    "journalRecordCount",
-    "eventCount",
-    "journalRecordSetHash",
-    "eventSetHash",
-    "capabilitySetHash"
-  ]);
-  var PREFIXED_SHA256 = /^sha256:[0-9a-f]{64}$/;
-  function decodeAuthorityCursorV2(value) {
-    const cursor = object(value, "authority cursor");
-    if (!hasExactKeys(cursor, AUTHORITY_CURSOR_V2_KEYS) || cursor.schema !== "pointbreak.authority-cursor.v2" || !isNonnegativeSafeInteger(cursor.journalRecordCount) || !isNonnegativeSafeInteger(cursor.eventCount) || cursor.eventCount > cursor.journalRecordCount || typeof cursor.journalRecordSetHash !== "string" || !PREFIXED_SHA256.test(cursor.journalRecordSetHash) || typeof cursor.eventSetHash !== "string" || !PREFIXED_SHA256.test(cursor.eventSetHash) || typeof cursor.capabilitySetHash !== "string" || !PREFIXED_SHA256.test(cursor.capabilitySetHash)) {
-      throw new Error("invalid authority cursor DTO");
-    }
-    return cursor;
-  }
-  __name(decodeAuthorityCursorV2, "decodeAuthorityCursorV2");
-  function decodeReaderProfile(value) {
-    const profile = object(value, "Inspector reader profile");
-    const availability = profile.availability;
-    const authorityCursor = decodeAuthorityCursorV2(profile.authorityCursor);
-    const documents = profile.documents;
-    const minimumReaderProfile = profile.minimumReaderProfile;
-    const commitGraphStamp = profile.commitGraphStamp;
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
-      throw new Error("incompatible Inspector reader profile");
-    }
-    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
-      throw new Error(
-        "ready Inspector reader profile is missing capability or commit graph stamp"
-      );
-    }
-    return {
-      schema: "pointbreak.inspect-reader-profile",
-      version: 1,
-      availability,
-      minimumReaderProfile: typeof minimumReaderProfile === "string" ? minimumReaderProfile : void 0,
-      authorityCursor,
-      commitGraphStamp: typeof commitGraphStamp === "string" ? commitGraphStamp : void 0,
-      documents
-    };
-  }
-  __name(decodeReaderProfile, "decodeReaderProfile");
-  function decodeChangePage(value, expected) {
-    const page = object(value, `${expected.lens} Change page`);
-    const expectedSchema = expected.lens === "changes" ? "pointbreak.inspect-changes-page" : "pointbreak.inspect-attention";
-    const expectedVersion = expected.lens === "changes" ? 1 : 2;
-    const stamp = page.projectionStamp;
-    const changes = page.changes;
-    const diagnostics = page.diagnostics;
-    const presentations = page.presentations;
-    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString2(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes, expected.lens)) {
-      throw new Error(`invalid ${expected.lens} Change page DTO`);
-    }
-    const capability = /* @__PURE__ */ __name((name) => {
-      const candidate = page[name];
-      if (candidate !== void 0 && candidate !== null && (!nonEmptyString2(candidate) || new TextEncoder().encode(candidate).length > 4096)) {
-        throw new Error(`invalid Change page ${name} continuation`);
-      }
-      return candidate;
-    }, "capability");
-    const previous = capability("previous");
-    const next = capability("next");
-    const last = capability("last");
-    if (expected.bounded && next === void 0)
-      throw new Error("bounded Change page is missing next continuation");
-    const common = {
-      changes,
-      diagnostics,
-      presentations,
-      projectionStamp: stamp,
-      ...previous === void 0 ? {} : { previous },
-      next: next ?? null,
-      ...last === void 0 ? {} : { last }
-    };
-    return expected.lens === "changes" ? {
-      schema: "pointbreak.inspect-changes-page",
-      version: 1,
-      ...common
-    } : {
-      schema: "pointbreak.inspect-attention",
-      version: 2,
-      ...common
-    };
-  }
-  __name(decodeChangePage, "decodeChangePage");
-  function requireCoherentGeneration(changes, attention) {
-    if (changes.projectionStamp !== attention.projectionStamp) {
-      throw new Error("Change documents do not form one coherent generation");
-    }
-  }
-  __name(requireCoherentGeneration, "requireCoherentGeneration");
-  function sameProfileGeneration(initial, postflight) {
-    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && sameAuthorityCursor(initial.authorityCursor, postflight.authorityCursor);
-  }
-  __name(sameProfileGeneration, "sameProfileGeneration");
-  function sameAuthorityCursor(left, right) {
-    return canonicalJson(left) === canonicalJson(right);
-  }
-  __name(sameAuthorityCursor, "sameAuthorityCursor");
-  function trimUnicodeWhitespace(value) {
-    return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
-  }
-  __name(trimUnicodeWhitespace, "trimUnicodeWhitespace");
-  function appendEnum(params, name, value, values) {
-    if (value === void 0) return;
-    if (!values.has(value)) throw new Error(`invalid Change page ${name}`);
-    params.set(name, value);
-  }
-  __name(appendEnum, "appendEnum");
-  function isReaderProfileAvailability(value) {
-    return value === "migration_required" || value === "migration_in_progress" || value === "ready";
-  }
-  __name(isReaderProfileAvailability, "isReaderProfileAvailability");
-  function isChangeSummary(value, stamp) {
-    if (!isRecord(value)) return false;
-    return nonEmptyString2(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
-  }
-  __name(isChangeSummary, "isChangeSummary");
-  function isClaimSupport(value) {
-    return isRecord(value) && nonEmptyString2(value.eventId) && nonEmptyString2(value.actorId) && optionalString(value.trackId);
-  }
-  __name(isClaimSupport, "isClaimSupport");
-  function isChangeMemberRevisions(value) {
-    return Array.isArray(value) && value.every(
-      (member) => isRecord(member) && isRevisionRef(member.revision) && isStringArray(member.supportingClaimIds)
-    );
-  }
-  __name(isChangeMemberRevisions, "isChangeMemberRevisions");
-  function isUnavailableChangeMemberRevisions(value) {
-    return Array.isArray(value) && value.every(
-      (member) => isRecord(member) && nonEmptyString2(member.revisionId) && (member.reason === "invalid_revision_id" || member.reason === "invalid_object_artifact_content_hash") && isStringArray(member.supportingClaimIds)
-    );
-  }
-  __name(isUnavailableChangeMemberRevisions, "isUnavailableChangeMemberRevisions");
-  function isMembershipClaims(value, changeId) {
-    return Array.isArray(value) && value.every(
-      (claim) => isRecord(claim) && nonEmptyString2(claim.claimId) && claim.changeId === changeId && nonEmptyString2(claim.revisionId) && Array.isArray(claim.supports) && claim.supports.every(isClaimSupport) && Array.isArray(claim.withdrawals) && claim.withdrawals.every(isClaimSupport) && typeof claim.active === "boolean" && isStringArray(claim.diagnostics)
-    );
-  }
-  __name(isMembershipClaims, "isMembershipClaims");
-  function isClaimWithdrawals(value) {
-    return Array.isArray(value) && value.every(
-      (withdrawal) => isRecord(withdrawal) && nonEmptyString2(withdrawal.claimId) && Array.isArray(withdrawal.supports) && withdrawal.supports.every(isClaimSupport) && isStringArray(withdrawal.diagnostics)
-    );
-  }
-  __name(isClaimWithdrawals, "isClaimWithdrawals");
-  function isChangeLinks(value) {
-    return Array.isArray(value) && value.every(
-      (link) => isRecord(link) && nonEmptyString2(link.leftChangeId) && nonEmptyString2(link.rightChangeId) && nonEmptyString2(link.relation)
-    );
-  }
-  __name(isChangeLinks, "isChangeLinks");
-  function isEffectiveSupersedes(value) {
-    return Array.isArray(value) && value.every(
-      (edge) => Array.isArray(edge) && edge.length === 2 && isRevisionRef(edge[0]) && isRevisionRef(edge[1])
-    );
-  }
-  __name(isEffectiveSupersedes, "isEffectiveSupersedes");
-  function isRevisionQualifications(value, currentRevisionRefs) {
-    if (!Array.isArray(value)) return false;
-    const qualifications = [];
-    for (const candidate of value) {
-      if (!isRecord(candidate) || !isRevisionRef(candidate.revision)) {
-        return false;
-      }
-      const revision2 = candidate.revision;
-      if (typeof candidate.qualified !== "boolean" || !currentRevisionRefs.some((current) => sameRevision(current, revision2)))
-        return false;
-      qualifications.push({
-        revision: revision2,
-        qualified: candidate.qualified
-      });
-    }
-    return sameRevisionSet(
-      qualifications.map((qualification) => qualification.revision),
-      currentRevisionRefs
-    );
-  }
-  __name(isRevisionQualifications, "isRevisionQualifications");
-  function sameRevisionSet(left, right) {
-    const leftKeys = uniqueRevisionKeys(left);
-    const rightKeys = uniqueRevisionKeys(right);
-    return leftKeys.size === left.length && rightKeys.size === right.length && leftKeys.size === rightKeys.size && [...leftKeys].every((key) => rightKeys.has(key));
-  }
-  __name(sameRevisionSet, "sameRevisionSet");
-  function isPresentations(value, changes, lens) {
-    if (!isRecord(value)) return false;
-    const summaries = new Map(
-      changes.map((change) => [change.changeId, change])
-    );
-    if (Object.keys(value).length !== summaries.size) return false;
-    return Object.entries(value).every(([changeId, presentation]) => {
-      const change = summaries.get(changeId);
-      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision) || (lens === "attention" ? !isAttentionPresentation(presentation.attention) : presentation.attention !== void 0)) {
-        return false;
-      }
-      const expected = uniqueRevisionKeys(change.currentRevisionRefs);
-      const actual = uniqueRevisionKeys(
-        presentation.currentRevisions.map((candidate) => candidate.revision)
-      );
-      return expected.size === change.currentRevisionRefs.length && actual.size === presentation.currentRevisions.length && expected.size === actual.size && [...expected].every((key) => actual.has(key));
-    });
-  }
-  __name(isPresentations, "isPresentations");
-  function isAttentionPresentation(value) {
-    if (!isRecord(value)) return false;
-    const reasons = value.reasons;
-    const reasonPresentations = value.reasonPresentations;
-    if (!isAttentionReason(value.primaryReason) || !Array.isArray(reasons) || reasons.length === 0 || !reasons.every(isAttentionReason) || !sameAttentionReason(value.primaryReason, reasons[0]) || !Array.isArray(reasonPresentations) || reasonPresentations.length !== reasons.length || !reasonPresentations.every(
-      (presentation, index) => isAttentionReasonPresentation(presentation) && sameAttentionReason(presentation.cause, reasons[index])
-    ) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
-      return false;
-    }
-    return true;
-  }
-  __name(isAttentionPresentation, "isAttentionPresentation");
-  var ATTENTION_REASON_PRESENTATION_KEYS = /* @__PURE__ */ new Set([
-    "cause",
-    "ask",
-    "reason",
-    "evidence",
-    "nextAction"
-  ]);
-  function nonBlankAttentionCopy(value) {
-    return typeof value === "string" && value.trim().length > 0;
-  }
-  __name(nonBlankAttentionCopy, "nonBlankAttentionCopy");
-  function isAttentionReasonPresentation(value) {
-    return isRecord(value) && hasExactKeys(value, ATTENTION_REASON_PRESENTATION_KEYS) && isAttentionReason(value.cause) && nonBlankAttentionCopy(value.ask) && nonBlankAttentionCopy(value.reason) && nonBlankAttentionCopy(value.evidence) && nonBlankAttentionCopy(value.nextAction);
-  }
-  __name(isAttentionReasonPresentation, "isAttentionReasonPresentation");
-  function isAttentionReason(value) {
-    if (!isRecord(value)) return false;
-    switch (value.kind) {
-      case "conflicted":
-      case "incomplete":
-      case "no_current_revision":
-        return Object.keys(value).length === 1;
-      case "unresolved_operative_requests":
-        return Object.keys(value).length === 2 && Array.isArray(value.requestIds) && value.requestIds.length > 0 && value.requestIds.every(nonEmptyString2) && new Set(value.requestIds).size === value.requestIds.length;
-      case "current_revisions_need_assessment":
-        return Object.keys(value).length === 2 && Array.isArray(value.revisions) && value.revisions.length > 0 && value.revisions.every(isRevisionRef) && uniqueRevisionKeys(value.revisions).size === value.revisions.length;
-      default:
-        return false;
-    }
-  }
-  __name(isAttentionReason, "isAttentionReason");
-  function sameAttentionReason(left, right) {
-    if (left.kind !== right.kind) return false;
-    if (left.kind === "unresolved_operative_requests" && right.kind === "unresolved_operative_requests") {
-      return left.requestIds.length === right.requestIds.length && left.requestIds.every(
-        (requestId, index) => requestId === right.requestIds[index]
-      );
-    }
-    if (left.kind === "current_revisions_need_assessment" && right.kind === "current_revisions_need_assessment") {
-      return left.revisions.length === right.revisions.length && left.revisions.every(
-        (revision2, index) => sameRevision(revision2, right.revisions[index])
-      );
-    }
-    return true;
-  }
-  __name(sameAttentionReason, "sameAttentionReason");
-  function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && // Server-owned display string (D7): optional for an older server, but a
-    // non-empty string when present. summarySource validation is unchanged.
-    (value.label === void 0 || nonEmptyString2(value.label)) && (value.summarySource === "revision_proposal_summary" && nonEmptyString2(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
-  }
-  __name(isPresentationRevision, "isPresentationRevision");
-  function isRevisionRef(value) {
-    return isRecord(value) && nonEmptyString2(value.revisionId) && nonEmptyString2(value.objectArtifactContentHash);
-  }
-  __name(isRevisionRef, "isRevisionRef");
-  function isChangeDetailInspectorPresentation(value, detail) {
-    if (value === void 0) return true;
-    if (!isRecord(value) || !isChangeRevisionGraphPresentation(value.revisionGraph))
-      return false;
-    const graph = value.revisionGraph;
-    const expectedMembers = new Set(
-      detail.memberRevisions.map(
-        (member) => revisionGraphNodeId(member.revision)
-      )
-    );
-    const expectedCurrent = new Set(
-      detail.currentRevisionRefs.map(revisionGraphNodeId)
-    );
-    const expectedNodes = new Set(expectedMembers);
-    for (const claim of detail.pendingOrConflictingEdges) {
-      expectedNodes.add(revisionGraphNodeId(claim.successor));
-      expectedNodes.add(revisionGraphNodeId(claim.predecessor));
-    }
-    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
-    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every(
-      (node) => node.isMember === expectedMembers.has(node.id) && node.isCurrent === expectedCurrent.has(node.id)
-    ) || !sameStringArray(graph.diagnostics ?? [], detail.diagnostics)) {
-      return false;
-    }
-    const effective = new Set(
-      detail.effectiveSupersedes.map(
-        ([successor, predecessor]) => graphEdgeKey(
-          revisionGraphNodeId(successor),
-          revisionGraphNodeId(predecessor)
-        )
-      )
-    );
-    const graphEffective = new Set(
-      graph.effectiveSupersedes.map((edge) => graphEdgeKey(edge.from, edge.to))
-    );
-    if (!sameStringSet(effective, graphEffective)) return false;
-    const pending = new Map(
-      detail.pendingOrConflictingEdges.map((claim) => [claim.claimId, claim])
-    );
-    return pending.size === graph.pendingOrConflictingClaims.length && graph.pendingOrConflictingClaims.every((edge) => {
-      const claim = pending.get(edge.claimId);
-      return claim !== void 0 && sameRevision(edge.successor, claim.successor) && sameRevision(edge.predecessor, claim.predecessor) && sameStringArray(edge.diagnostics, claim.diagnostics);
-    });
-  }
-  __name(isChangeDetailInspectorPresentation, "isChangeDetailInspectorPresentation");
-  function isChangeRevisionDetailInspectorPresentation(value, detail) {
-    if (value === void 0) return true;
-    if (!isRecord(value) || !isFactRelationshipGraphPresentation(value.factGraph))
-      return false;
-    const graph = value.factGraph;
-    const expectedActivation = /* @__PURE__ */ new Map();
-    const expectedNodes = /* @__PURE__ */ new Set();
-    for (const fact2 of detail.factPresentations) {
-      const id = factGraphNodeId(fact2.originRevision, fact2.family, fact2.factId);
-      expectedNodes.add(id);
-      if (sameRevision(fact2.originRevision, detail.revision) || fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, detail.revision)) {
-        expectedActivation.set(id, detail.revision);
-      }
-    }
-    for (const port of detail.factPorts) {
-      expectedNodes.add(
-        factGraphNodeId(
-          port.originRevision,
-          port.originFact.kind,
-          factRefId(port.originFact)
-        )
-      );
-      const targetId = port.targetFact === void 0 ? revisionGraphNodeId(port.targetRevision) : factGraphNodeId(
-        port.targetRevision,
-        port.targetFact.kind,
-        factRefId(port.targetFact)
-      );
-      expectedNodes.add(targetId);
-      if (port.targetFact === void 0 && sameRevision(port.targetRevision, detail.revision)) {
-        expectedActivation.set(targetId, detail.revision);
-      }
-    }
-    const actualNodes = new Map(graph.nodes.map((node) => [node.id, node]));
-    if (actualNodes.size !== expectedNodes.size || ![...expectedNodes].every((id) => actualNodes.has(id)) || !graph.nodes.every((node) => {
-      const activation = expectedActivation.get(node.id);
-      return activation === void 0 ? node.contextAvailability === "relationship_context_only" && node.activationRevision === void 0 : node.contextAvailability === "available" && node.activationRevision !== void 0 && sameRevision(node.activationRevision, activation);
-    })) {
-      return false;
-    }
-    const ports = new Map(detail.factPorts.map((port) => [port.portId, port]));
-    return ports.size === graph.factPorts.length && graph.factPorts.every((edge) => {
-      const port = ports.get(edge.portId);
-      return port !== void 0 && sameRevision(edge.originRevision, port.originRevision) && sameFactRef(edge.originFact, port.originFact) && sameRevision(edge.targetRevision, port.targetRevision) && sameOptionalFactRef(edge.targetFact, port.targetFact) && edge.relation === port.relation && edge.applicability === port.applicability && sameStringArray(edge.diagnostics ?? [], port.diagnostics);
-    });
-  }
-  __name(isChangeRevisionDetailInspectorPresentation, "isChangeRevisionDetailInspectorPresentation");
-  function isChangeRevisionGraphPresentation(value) {
-    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isChangeRevisionGraphNode) || !Array.isArray(value.effectiveSupersedes) || !Array.isArray(value.pendingOrConflictingClaims) || !isGraphBounds(value.bounds) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
-      return false;
-    }
-    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
-    return nodes.size === value.nodes.length && value.effectiveSupersedes.every(
-      (edge) => isChangeRevisionGraphEffectiveEdge(edge, nodes)
-    ) && uniqueGraphEdgeEndpoints(value.effectiveSupersedes) && value.pendingOrConflictingClaims.every(
-      (edge) => isChangeRevisionGraphClaimEdge(edge, nodes)
-    ) && new Set(value.pendingOrConflictingClaims.map((edge) => edge.claimId)).size === value.pendingOrConflictingClaims.length;
-  }
-  __name(isChangeRevisionGraphPresentation, "isChangeRevisionGraphPresentation");
-  function isChangeRevisionGraphNode(value) {
-    return isRecord(value) && nonEmptyString2(value.id) && isRevisionRef(value.revision) && isGraphDisplayLabel(value.displayLabel) && value.id === revisionGraphNodeId(value.revision) && isFiniteGeometry(value) && typeof value.isCurrent === "boolean" && typeof value.isMember === "boolean" && isGraphContext(value) && (value.isMember ? value.contextAvailability === "available" && isRevisionRef(value.activationRevision) && sameRevision(value.activationRevision, value.revision) : value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0);
-  }
-  __name(isChangeRevisionGraphNode, "isChangeRevisionGraphNode");
-  function isChangeRevisionGraphEffectiveEdge(value, nodes) {
-    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && value.from === revisionGraphNodeId(value.successor) && value.to === revisionGraphNodeId(value.predecessor) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
-  }
-  __name(isChangeRevisionGraphEffectiveEdge, "isChangeRevisionGraphEffectiveEdge");
-  function isChangeRevisionGraphClaimEdge(value, nodes) {
-    if (!isRecord(value) || !isChangeRevisionGraphEffectiveEdge(value, nodes))
-      return false;
-    return nonEmptyString2(value.claimId) && isStringArray(value.diagnostics);
-  }
-  __name(isChangeRevisionGraphClaimEdge, "isChangeRevisionGraphClaimEdge");
-  function isFactRelationshipGraphPresentation(value) {
-    if (!isRecord(value) || !Array.isArray(value.nodes) || value.nodes.length === 0 || !value.nodes.every(isFactRelationshipGraphNode) || !Array.isArray(value.observationSupersedes) || !Array.isArray(value.assessmentReplaces) || !Array.isArray(value.factPorts) || !isGraphBounds(value.bounds)) {
-      return false;
-    }
-    const nodes = new Map(value.nodes.map((node) => [node.id, node]));
-    return nodes.size === value.nodes.length && value.observationSupersedes.every(
-      (edge) => isFactRelationshipEdge(edge, "observation", nodes)
-    ) && uniqueGraphEdgeEndpoints(value.observationSupersedes) && value.assessmentReplaces.every(
-      (edge) => isFactRelationshipEdge(edge, "assessment", nodes)
-    ) && uniqueGraphEdgeEndpoints(value.assessmentReplaces) && value.factPorts.every((edge) => isFactPortRelationshipEdge(edge, nodes)) && new Set(value.factPorts.map((edge) => edge.portId)).size === value.factPorts.length;
-  }
-  __name(isFactRelationshipGraphPresentation, "isFactRelationshipGraphPresentation");
-  function isFactRelationshipGraphNode(value) {
-    if (!isRecord(value) || !nonEmptyString2(value.id) || !isRevisionRef(value.revision) || !isGraphDisplayLabel(value.displayLabel) || !isFiniteGeometry(value) || !isGraphContext(value)) {
-      return false;
-    }
-    if (value.kind === "fact") {
-      return nonEmptyString2(value.factId) && nonEmptyString2(value.family) && value.id === factGraphNodeId(value.revision, value.family, value.factId);
-    }
-    return value.kind === "revision" && value.factId === void 0 && value.family === void 0 && value.id === revisionGraphNodeId(value.revision);
-  }
-  __name(isFactRelationshipGraphNode, "isFactRelationshipGraphNode");
-  function isGraphContext(value) {
-    if (value.contextAvailability === "available") {
-      return isRevisionRef(value.activationRevision);
-    }
-    return value.contextAvailability === "relationship_context_only" && value.activationRevision === void 0;
-  }
-  __name(isGraphContext, "isGraphContext");
-  function isGraphDisplayLabel(value) {
-    return typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= 256;
-  }
-  __name(isGraphDisplayLabel, "isGraphDisplayLabel");
-  function isFactRelationshipEdge(value, family, nodes) {
-    return isRecord(value) && nonEmptyString2(value.from) && nonEmptyString2(value.to) && isRevisionRef(value.originRevision) && nonEmptyString2(value.fromFactId) && nonEmptyString2(value.toFactId) && value.from === factGraphNodeId(value.originRevision, family, value.fromFactId) && value.to === factGraphNodeId(value.originRevision, family, value.toFactId) && nodes.has(value.from) && nodes.has(value.to) && isGraphPath(value.path);
-  }
-  __name(isFactRelationshipEdge, "isFactRelationshipEdge");
-  function isFactPortRelationshipEdge(value, nodes) {
-    if (!isRecord(value) || !nonEmptyString2(value.portId) || !nonEmptyString2(value.from) || !nonEmptyString2(value.to) || !isRevisionRef(value.originRevision) || !isFactRef(value.originFact) || !isRevisionRef(value.targetRevision) || value.targetFact !== void 0 && !isFactRef(value.targetFact) || value.relation !== "context_only" && value.relation !== "reanchored_as" && value.relation !== "carried_open_as" && value.relation !== "resolved_by" || value.applicability !== "applicable" && value.applicability !== "conflicted" && value.applicability !== "unavailable" || !isGraphPath(value.path) || value.diagnostics !== void 0 && !isStringArray(value.diagnostics)) {
-      return false;
-    }
-    const from = factGraphNodeId(
-      value.originRevision,
-      value.originFact.kind,
-      factRefId(value.originFact)
-    );
-    const to = value.targetFact === void 0 ? revisionGraphNodeId(value.targetRevision) : factGraphNodeId(
-      value.targetRevision,
-      value.targetFact.kind,
-      factRefId(value.targetFact)
-    );
-    return value.from === from && value.to === to && nodes.has(from) && nodes.has(to);
-  }
-  __name(isFactPortRelationshipEdge, "isFactPortRelationshipEdge");
-  function isGraphBounds(value) {
-    return isRecord(value) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
-  }
-  __name(isGraphBounds, "isGraphBounds");
-  function isFiniteGeometry(value) {
-    return isFiniteNumber(value.x) && isFiniteNumber(value.y) && isFiniteNumber(value.w) && isFiniteNumber(value.h);
-  }
-  __name(isFiniteGeometry, "isFiniteGeometry");
-  function isGraphPath(value) {
-    return Array.isArray(value) && value.length > 0 && value.every(
-      (point) => Array.isArray(point) && point.length === 2 && isFiniteNumber(point[0]) && isFiniteNumber(point[1])
-    );
-  }
-  __name(isGraphPath, "isGraphPath");
-  function isFiniteNumber(value) {
-    return typeof value === "number" && Number.isFinite(value);
-  }
-  __name(isFiniteNumber, "isFiniteNumber");
-  function uniqueGraphEdgeEndpoints(edges) {
-    return new Set(edges.map((edge) => `${edge.from}\0${edge.to}`)).size === edges.length;
-  }
-  __name(uniqueGraphEdgeEndpoints, "uniqueGraphEdgeEndpoints");
-  function revisionGraphNodeId(revision2) {
-    return `revision:${revision2.revisionId}@${revision2.objectArtifactContentHash}`;
-  }
-  __name(revisionGraphNodeId, "revisionGraphNodeId");
-  function factGraphNodeId(revision2, family, factId) {
-    return `${revisionGraphNodeId(revision2).replace("revision:", "fact:")}:${family}:${factId}`;
-  }
-  __name(factGraphNodeId, "factGraphNodeId");
-  function graphEdgeKey(from, to) {
-    return `${from}\0${to}`;
-  }
-  __name(graphEdgeKey, "graphEdgeKey");
-  function sameStringArray(left, right) {
-    return left.length === right.length && left.every((value, index) => value === right[index]);
-  }
-  __name(sameStringArray, "sameStringArray");
-  function sameStringSet(left, right) {
-    return left.size === right.size && [...left].every((value) => right.has(value));
-  }
-  __name(sameStringSet, "sameStringSet");
-  function sameFactRef(left, right) {
-    return left.kind === right.kind && factRefId(left) === factRefId(right);
-  }
-  __name(sameFactRef, "sameFactRef");
-  function sameOptionalFactRef(left, right) {
-    return left === void 0 && right === void 0 || left !== void 0 && right !== void 0 && sameFactRef(left, right);
-  }
-  __name(sameOptionalFactRef, "sameOptionalFactRef");
-  function uniqueRevisionKeys(revisions) {
-    return new Set(
-      revisions.map(
-        (revision2) => `${revision2.revisionId}\0${revision2.objectArtifactContentHash}`
-      )
-    );
-  }
-  __name(uniqueRevisionKeys, "uniqueRevisionKeys");
-  function isRelationClaim(value, changeId) {
-    return isRecord(value) && nonEmptyString2(value.claimId) && value.changeId === changeId && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport) && isStringArray(value.diagnostics);
-  }
-  __name(isRelationClaim, "isRelationClaim");
-  function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString2(value.factId) && nonEmptyString2(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString2(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString2(value.actorId) && (value.trackId === void 0 || nonEmptyString2(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
-  }
-  __name(isFactPresentation, "isFactPresentation");
-  function isFactTarget(value) {
-    if (!isRecord(value) || !nonEmptyString2(value.revisionId)) return false;
-    if (value.kind === "revision") return true;
-    if (value.kind === "file") return nonEmptyString2(value.filePath);
-    if (value.kind === "range") {
-      return nonEmptyString2(value.filePath) && (value.side === "old" || value.side === "new") && Number.isSafeInteger(value.startLine) && value.startLine > 0 && Number.isSafeInteger(value.endLine) && value.endLine >= value.startLine;
-    }
-    if (value.kind === "observation") return nonEmptyString2(value.observationId);
-    if (value.kind === "input_request")
-      return nonEmptyString2(value.inputRequestId);
-    if (value.kind === "assessment") return nonEmptyString2(value.assessmentId);
-    return value.kind === "event" && nonEmptyString2(value.eventId);
-  }
-  __name(isFactTarget, "isFactTarget");
-  function uniqueFactPresentationIds(facts) {
-    return new Set(facts.map((fact2) => fact2.factId)).size === facts.length;
-  }
-  __name(uniqueFactPresentationIds, "uniqueFactPresentationIds");
-  function isResourceProjection(value) {
-    return isRecord(value) && typeof value.includeBody === "boolean" && (value.trackId === void 0 || nonEmptyString2(value.trackId));
-  }
-  __name(isResourceProjection, "isResourceProjection");
-  function isCapturedReviewSnapshot(value, expectedContentHash, expectedObjectId) {
-    if (!isRecord(value) || value.schema !== "pointbreak.review-snapshot" || value.version !== 1 || value.contentHash !== expectedContentHash || !isRecord(value.snapshot)) {
-      return false;
-    }
-    return nonEmptyString2(value.snapshot.review_id) && value.snapshot.object_id === expectedObjectId && Array.isArray(value.snapshot.files);
-  }
-  __name(isCapturedReviewSnapshot, "isCapturedReviewSnapshot");
-  function isFactContentPresentations(value) {
-    return isRecord(value) && Object.values(value).every(
-      (presentation) => isRecord(presentation) && (presentation.contentType === "text/plain" || presentation.contentType === "text/markdown") && (presentation.bodyContentState === "present" || presentation.bodyContentState === "suppressed_present" || presentation.bodyContentState === "physically_removed") && isFactContent(presentation.content)
-    );
-  }
-  __name(isFactContentPresentations, "isFactContentPresentations");
-  function sameFactIds(facts, content) {
-    const expected = new Set(facts.map((fact2) => fact2.factId));
-    const actual = Object.keys(content);
-    return expected.size === facts.length && expected.size === actual.length && actual.every((factId) => expected.has(factId));
-  }
-  __name(sameFactIds, "sameFactIds");
-  function isRevisionResource(value) {
-    try {
-      decodeRevisionResource(value);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  __name(isRevisionResource, "isRevisionResource");
-  function isFactPortPresentations(value, changeId, facts, selectedRevision) {
-    if (!Array.isArray(value) || !value.every(isFactPortPresentation))
-      return false;
-    if (new Set(value.map((port) => port.portId)).size !== value.length)
-      return false;
-    return value.every(
-      (port) => (port.contextChangeId === void 0 || port.contextChangeId === changeId) && port.sourceEventIds.length > 0 && new Set(port.sourceEventIds).size === port.sourceEventIds.length && port.trackId !== void 0 && (port.applicability !== "applicable" || applicableFactPortHasExactEndpoints(port, facts, selectedRevision))
-    );
-  }
-  __name(isFactPortPresentations, "isFactPortPresentations");
-  function factRefId(fact2) {
-    return fact2.kind === "observation" ? fact2.observationId ?? "" : fact2.inputRequestId ?? "";
-  }
-  __name(factRefId, "factRefId");
-  function applicableFactPortHasExactEndpoints(port, facts, selectedRevision) {
-    if (!sameRevision(port.targetRevision, selectedRevision)) return false;
-    const matchingOrigin = facts.filter(
-      (fact2) => fact2.factId === factRefId(port.originFact) && fact2.family === port.originFact.kind && sameRevision(fact2.originRevision, port.originRevision) && fact2.presentedInRevision !== void 0 && sameRevision(fact2.presentedInRevision, selectedRevision)
-    );
-    if (matchingOrigin.length !== 1) return false;
-    const targetFact = port.targetFact;
-    if (targetFact === void 0) return true;
-    return facts.filter(
-      (fact2) => fact2.factId === factRefId(targetFact) && fact2.family === targetFact.kind && sameRevision(fact2.originRevision, selectedRevision)
-    ).length === 1;
-  }
-  __name(applicableFactPortHasExactEndpoints, "applicableFactPortHasExactEndpoints");
-  function isFactPortPresentation(value) {
-    return isRecord(value) && nonEmptyString2(value.portId) && isRevisionRef(value.originRevision) && isFactRef(value.originFact) && isRevisionRef(value.targetRevision) && (value.relation === "context_only" || value.relation === "reanchored_as" || value.relation === "carried_open_as" || value.relation === "resolved_by") && (value.targetFact === void 0 || isFactRef(value.targetFact)) && optionalString(value.rationaleContentHash) && optionalString(value.contextChangeId) && nonEmptyString2(value.actorId) && nonEmptyString2(value.trackId) && isStringArray(value.sourceEventIds) && (value.applicability === "applicable" || value.applicability === "conflicted" || value.applicability === "unavailable") && isStringArray(value.diagnostics);
-  }
-  __name(isFactPortPresentation, "isFactPortPresentation");
-  function isFactRef(value) {
-    if (!isRecord(value)) return false;
-    if (value.kind === "observation") {
-      return nonEmptyString2(value.observationId) && value.inputRequestId === void 0;
-    }
-    if (value.kind === "input_request") {
-      return nonEmptyString2(value.inputRequestId) && value.observationId === void 0;
-    }
-    return false;
-  }
-  __name(isFactRef, "isFactRef");
-  function isFactContent(value) {
-    if (!isRecord(value)) return false;
-    switch (value.kind) {
-      case "observation":
-        return nonEmptyString2(value.title) && optionalString(value.body);
-      case "input_request":
-        return nonEmptyString2(value.title) && optionalString(value.body) && nonEmptyString2(value.status) && (value.responses === void 0 || Array.isArray(value.responses) && value.responses.every(isFactResponse));
-      case "assessment":
-        return nonEmptyString2(value.assessment) && optionalString(value.summary);
-      case "validation":
-        return nonEmptyString2(value.checkName) && optionalString(value.command) && nonEmptyString2(value.status) && optionalString(value.summary);
-      default:
-        return false;
-    }
-  }
-  __name(isFactContent, "isFactContent");
-  function isFactResponse(value) {
-    return isRecord(value) && nonEmptyString2(value.responseId) && nonEmptyString2(value.outcome) && optionalString(value.reason) && (value.contentType === "text/plain" || value.contentType === "text/markdown") && (value.bodyContentState === "present" || value.bodyContentState === "suppressed_present" || value.bodyContentState === "physically_removed") && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
-  }
-  __name(isFactResponse, "isFactResponse");
-  function isAssociation(value) {
-    return isRecord(value) && value.schema === "pointbreak.review-association-comparison" && value.version === 1 && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString2(value.comparison.associationId) && nonEmptyString2(value.comparison.commitOid) && nonEmptyString2(value.comparison.comparisonBase) && nonEmptyString2(value.comparison.viewKind) && optionalString(value.comparison.proofRef) && isStringArray(value.diagnostics) && nonEmptyString2(value.cacheKey);
-  }
-  __name(isAssociation, "isAssociation");
-  function sameRevision(left, right) {
-    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
-  }
-  __name(sameRevision, "sameRevision");
-  function isStrictlyAscending(values) {
-    return values.every((value, index) => {
-      const previous = values[index - 1];
-      return index === 0 || previous !== void 0 && previous < value;
-    });
-  }
-  __name(isStrictlyAscending, "isStrictlyAscending");
-  function isOneOf(value, values) {
-    return typeof value === "string" && values.has(value);
-  }
-  __name(isOneOf, "isOneOf");
-  function isDocumentMap(value) {
-    return isRecord(value) && Object.values(value).every((version) => Number.isInteger(version));
-  }
-  __name(isDocumentMap, "isDocumentMap");
-  function sameDocumentMap(left, right) {
-    const leftEntries = Object.entries(left).sort(
-      ([a], [b]) => a.localeCompare(b)
-    );
-    const rightEntries = Object.entries(right).sort(
-      ([a], [b]) => a.localeCompare(b)
-    );
-    return leftEntries.length === rightEntries.length && leftEntries.every(
-      ([schema, version], index) => schema === rightEntries[index]?.[0] && version === rightEntries[index]?.[1]
-    );
-  }
-  __name(sameDocumentMap, "sameDocumentMap");
-  function hasExactKeys(value, expected) {
-    const actual = Object.keys(value);
-    return actual.length === expected.size && actual.every((key) => expected.has(key));
-  }
-  __name(hasExactKeys, "hasExactKeys");
-  function isNonnegativeSafeInteger(value) {
-    return Number.isSafeInteger(value) && value >= 0;
-  }
-  __name(isNonnegativeSafeInteger, "isNonnegativeSafeInteger");
-  function canonicalJson(value) {
-    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-    if (isRecord(value)) {
-      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-    }
-    return JSON.stringify(value);
-  }
-  __name(canonicalJson, "canonicalJson");
-  function object(value, name) {
-    if (!isRecord(value)) throw new Error(`invalid ${name} DTO`);
-    return value;
-  }
-  __name(object, "object");
-  function isRecord(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  __name(isRecord, "isRecord");
-  function nonEmptyString2(value) {
-    return typeof value === "string" && value.length > 0;
-  }
-  __name(nonEmptyString2, "nonEmptyString");
-  function optionalString(value) {
-    return value === void 0 || typeof value === "string";
-  }
-  __name(optionalString, "optionalString");
-  function isStringArray(value) {
-    return Array.isArray(value) && value.every((item) => typeof item === "string");
-  }
-  __name(isStringArray, "isStringArray");
 
   // src/change-inspector-reading.ts
   function sameExactRevision(left, right) {
@@ -7920,7 +8048,7 @@
     return {
       kind: "lens",
       lens,
-      query: current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? {} : { ...current.query, after: void 0 }
+      query: current.kind === "invalid" || current.kind === "timeline" || current.kind === "event" ? {} : queryForLens(lens, { ...current.query, after: void 0 })
     };
   }
   __name(routeForLens, "routeForLens");
@@ -9792,9 +9920,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     const lens = lensForRoute(route);
     const page = lens === "changes" ? snapshot2.generation.changes : snapshot2.generation.attention;
     const firstCaptureEligible = route.kind === "lens" && lens === "changes" && page.changes.length === 0 && filterValues(route.query).length === 0 && route.query.after === void 0 && page.previous == null && page.next == null;
+    const order = page.order ?? DEFAULT_CHANGE_PAGE_ORDER[lens === "attention" ? "attention" : "changes"];
     const listKey = JSON.stringify({
       lens,
       query: route.query,
+      order,
       projectionStamp: page.projectionStamp,
       previous: page.previous ?? null,
       next: page.next,
@@ -9806,9 +9936,11 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const list = document.createElement("section");
       list.className = "units";
       const count = page.changes.length;
+      const orderWords = order === "activity_desc" ? "latest activity first" : order === "attention_wait" ? "longest wait first" : "Change ID order";
+      const groupedOrderWords = order === "activity_desc" ? "latest activity within groups" : order === "attention_wait" ? "longest wait first within groups" : "Change ID order within groups";
       const [heading, metadata] = createLensHeading(
         lens === "changes" ? "Changes" : "Attention",
-        lens === "changes" ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · Change ID order` : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · Change ID order within groups`
+        lens === "changes" ? `${count} ${count === 1 ? "Change" : "Changes"} on this page · ${orderWords}` : `${count} ${count === 1 ? "Change" : "Changes"} on this page · grouped by attention reason · ${groupedOrderWords}`
       );
       list.append(heading, metadata);
       const attentionGroups = lens === "attention" ? /* @__PURE__ */ new Map() : null;
@@ -11218,18 +11350,19 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         at: route.eventId
       });
     }, "historyPageUrl");
-    const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? historyPageUrl(route) : buildChangePageUrl("changes", route.query), "requestKey");
+    const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? historyPageUrl(route) : buildChangePageUrl("changes", queryForLens("changes", route.query)), "requestKey");
     const generationPageRequests = /* @__PURE__ */ __name((route) => {
       const query = route.kind === "timeline" || route.kind === "event" ? {} : route.query;
       const activeLens = lensForRoute(route);
+      const { order: _order, ...companion } = firstPageQuery(query);
       return {
         changes: buildChangePageUrl(
           "changes",
-          activeLens === "changes" ? query : firstPageQuery(query)
+          activeLens === "changes" ? query : companion
         ),
         attention: buildChangePageUrl(
           "attention",
-          activeLens === "attention" ? query : firstPageQuery(query)
+          activeLens === "attention" ? query : companion
         )
       };
     }, "generationPageRequests");
