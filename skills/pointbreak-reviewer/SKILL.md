@@ -1,6 +1,6 @@
 ---
 name: pointbreak-reviewer
-description: Review one exact Pointbreak Revision within a stable Change. Read and write through exact selectors, inspect the frozen content state independently, record reviewer facts and validation on a separate track, and assess only that Revision.
+description: Independently review and assess one exact Pointbreak Revision on a separate reviewer track.
 ---
 
 # Pointbreak Reviewer Handoff Review
