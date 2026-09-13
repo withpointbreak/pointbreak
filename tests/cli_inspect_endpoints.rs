@@ -4345,3 +4345,59 @@ fn inspector_serves_revision_and_history_over_a_swept_body() {
         "the always-hydrating history base cache must survive a swept body"
     );
 }
+
+#[test]
+fn the_cli_and_the_inspector_agree_on_order_for_one_store() {
+    // Two captures, so the store holds two Changes whose activity order is
+    // known (the second capture is the newer one) independent of their ids.
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let first_revision = capture(repo.path());
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_revision = capture(repo.path());
+    assert_ne!(first_revision, second_revision);
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let page = |query: &str| inspector.get_json(&format!("/api/v2/changes?limit=100{query}"));
+    let ids_of = |document: &Value| {
+        document["changes"]
+            .as_array()
+            .expect("changes array")
+            .iter()
+            .map(|change| change["changeId"].as_str().expect("change id").to_owned())
+            .collect::<Vec<_>>()
+    };
+    let cli = |extra: &[&str]| -> Value {
+        let mut args = vec!["change", "list", "--repo", repo.path().to_str().unwrap()];
+        args.extend_from_slice(extra);
+        let output = pointbreak_env(args, &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("list JSON")
+    };
+
+    let default_page = page("");
+    assert_eq!(default_page["order"], "activity_desc");
+    assert_eq!(ids_of(&default_page).len(), 2);
+    assert_eq!(
+        default_page["changes"][0]["currentRevisionRefs"][0]["revisionId"], second_revision,
+        "the newest capture leads under activity_desc"
+    );
+    let default_cli = cli(&[]);
+    assert_eq!(default_cli["order"], "activity_desc");
+    assert_eq!(ids_of(&default_cli), ids_of(&default_page));
+
+    let ascending_page = page("&order=change_id_asc");
+    let ascending_cli = cli(&["--order", "change_id_asc"]);
+    assert_eq!(ascending_page["order"], "change_id_asc");
+    assert_eq!(ascending_cli["order"], "change_id_asc");
+    assert_eq!(ids_of(&ascending_cli), ids_of(&ascending_page));
+    let mut sorted = ids_of(&ascending_page);
+    sorted.sort_unstable();
+    assert_eq!(ids_of(&ascending_page), sorted);
+}

@@ -19,17 +19,18 @@ use pointbreak::session::event::{ChangeLinkRelationV1, FactRefV1};
 use pointbreak::session::{
     BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions, BulkAdoptionMigrationOptions,
     BulkAdoptionOwnerDecisionManifestV1, CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions,
-    ChangeCreateOptions, ChangeDocumentProjectionV1, ChangeLinkOptions, ChangeMembershipOptions,
-    ChangeMembershipWithdrawalOptions, ChangeProjection, ChangeReaderReadyV1, ChangeReaderStateV1,
-    ChangeRelationOptions, ChangeRelationWithdrawalOptions, DerivedChangeAccess,
-    DerivedChangeOutcomeV1, DerivedExactRevisionReadV1, DerivedReadSourceV1,
-    ExactRevisionReadPlanV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1,
-    RevisionShowOptions, SnapshotContentState, WorktreeSpec, assert_change_revision_relation,
-    capture_change_revision, change_reader_state_for_repo, create_change, dry_run_bulk_adoption,
-    join_revision_to_change, link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup,
-    review_source_binding, review_source_binding_from_shown, select_review_cursor,
-    show_revision_for_change_reader_ready, validate_review_cursor_for_write,
-    withdraw_change_revision_relation, withdraw_revision_from_change,
+    ChangeCreateOptions, ChangeDocumentProjectionV1, ChangeLinkOptions, ChangeListOrderV1,
+    ChangeMembershipOptions, ChangeMembershipWithdrawalOptions, ChangeProjection,
+    ChangeReaderReadyV1, ChangeReaderStateV1, ChangeRelationOptions,
+    ChangeRelationWithdrawalOptions, DerivedChangeAccess, DerivedChangeOutcomeV1,
+    DerivedExactRevisionReadV1, DerivedReadSourceV1, ExactRevisionReadPlanV1, ReviewCursorV1,
+    ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState,
+    WorktreeSpec, assert_change_revision_relation, capture_change_revision,
+    change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
+    link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
+    review_source_binding_from_shown, select_review_cursor, show_revision_for_change_reader_ready,
+    validate_review_cursor_for_write, withdraw_change_revision_relation,
+    withdraw_revision_from_change,
 };
 
 use crate::cli::{common, output};
@@ -123,9 +124,9 @@ enum ChangeCommand {
     /// Report the store capability before any Change payload is read
     Profile(ReadArgs),
     /// List stable Changes
-    List(ReadArgs),
+    List(ListArgs),
     /// List Changes that still require judgment
-    Attention(ReadArgs),
+    Attention(ListArgs),
     /// Show one stable Change and every exact current candidate
     Show(ChangeReadArgs),
     /// Select one exact current Revision and emit a self-hashed review cursor
@@ -380,6 +381,47 @@ struct ReadArgs {
     /// Repository root or a path inside the repository.
     #[arg(long, default_value = ".")]
     repo: PathBuf,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+/// Presentation order for the Change list surfaces. A parse-only wrapper: the
+/// ordering rule lives in `ChangeListOrderV1`, shared with the Inspector.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+// Clap renames variants kebab-case by default, which would accept
+// `activity-desc` and reject the `activity_desc` every other surface uses.
+#[value(rename_all = "snake_case")]
+enum ChangeOrderArg {
+    /// Newest activity first, then Change id (the `change list` default).
+    #[default]
+    ActivityDesc,
+    /// Change id ascending.
+    ChangeIdAsc,
+    /// Longest-waiting attention first (the `change attention` default);
+    /// rejected on `change list`.
+    AttentionWait,
+}
+
+impl From<ChangeOrderArg> for ChangeListOrderV1 {
+    fn from(value: ChangeOrderArg) -> Self {
+        // Exhaustive: a missing arm is a compile error, which is the point.
+        match value {
+            ChangeOrderArg::ActivityDesc => Self::ActivityDesc,
+            ChangeOrderArg::ChangeIdAsc => Self::ChangeIdAsc,
+            ChangeOrderArg::AttentionWait => Self::AttentionWait,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct ListArgs {
+    /// Repository root or a path inside the repository.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Presentation order. Defaults per command: `change list` uses
+    /// activity_desc, `change attention` uses attention_wait.
+    #[arg(long, value_enum)]
+    order: Option<ChangeOrderArg>,
     #[command(flatten)]
     format_args: output::FormatArgs,
 }
@@ -790,8 +832,24 @@ fn run_profile(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
     }
 }
 
-fn run_list(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
-    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_list_document) {
+fn run_list(args: &ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    let order = args
+        .order
+        .map(ChangeListOrderV1::from)
+        .unwrap_or(ChangeListOrderV1::default_for_changes());
+    if !order.admitted_on_changes_lens() {
+        return Err(format!(
+            "--order {} is only admitted on `change attention`; `change list` accepts \
+             activity_desc or change_id_asc",
+            order.as_str()
+        )
+        .into());
+    }
+    // Both lanes honour the order: a fallback that ignored it would make the
+    // order depend on whether the derived cache happened to be warm.
+    match attempt_derived_change_read(&args.repo, |access| {
+        access.review_list_document_ordered(order)
+    }) {
         DerivedChangeAttempt::Answered { document, state } => {
             record_change_route_state(state);
             write(&args.format_args, stdout, &serde_json::to_value(document)?)
@@ -799,17 +857,23 @@ fn run_list(args: &ReadArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
         DerivedChangeAttempt::Fallback { state } => {
             record_change_route_state(state);
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
-                Ok(serde_json::to_value(facade.list_document())?)
+                Ok(serde_json::to_value(facade.list_document_ordered(order))?)
             })
         }
     }
 }
 
 fn run_attention(
-    args: &ReadArgs,
+    args: &ListArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match attempt_derived_change_read(&args.repo, DerivedChangeAccess::review_attention_document) {
+    let order = args
+        .order
+        .map(ChangeListOrderV1::from)
+        .unwrap_or(ChangeListOrderV1::default_for_attention());
+    match attempt_derived_change_read(&args.repo, |access| {
+        access.review_attention_document_ordered(order)
+    }) {
         DerivedChangeAttempt::Answered { document, state } => {
             record_change_route_state(state);
             write(&args.format_args, stdout, &serde_json::to_value(document)?)
@@ -818,7 +882,7 @@ fn run_attention(
             record_change_route_state(state);
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
                 Ok(serde_json::to_value(
-                    facade.attention_document_with_presentations(false)?,
+                    facade.attention_document_with_presentations_ordered(false, order)?,
                 )?)
             })
         }
@@ -2008,6 +2072,31 @@ fn write<T: serde::Serialize>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_order_flag_wrapper_only_parses_and_converts() {
+        use clap::ValueEnum as _;
+        use pointbreak::session::ChangeListOrderV1;
+
+        // The wrapper's default is the shared default, and its accepted
+        // strings are the exact snake_case spellings every surface uses.
+        assert_eq!(
+            ChangeListOrderV1::from(super::ChangeOrderArg::default()),
+            ChangeListOrderV1::default()
+        );
+        let names = super::ChangeOrderArg::value_variants()
+            .iter()
+            .map(|variant| variant.to_possible_value().unwrap().get_name().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["activity_desc", "change_id_asc", "attention_wait"]);
+        for variant in super::ChangeOrderArg::value_variants() {
+            let converted = ChangeListOrderV1::from(*variant);
+            assert_eq!(
+                ChangeListOrderV1::parse(variant.to_possible_value().unwrap().get_name()),
+                Some(converted)
+            );
+        }
+    }
+
     use super::*;
     use crate::cli::derived_exact_read_corruption;
 

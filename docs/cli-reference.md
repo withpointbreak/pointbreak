@@ -252,8 +252,9 @@ revision recorded; its subject is always the captured snapshot, never the live w
 
 ```bash
 pointbreak change profile [--repo <path>] [--format <fmt>]
-pointbreak change list [--repo <path>] [--format <fmt>]
-pointbreak change attention [--repo <path>] [--format <fmt>]
+pointbreak change list [--order activity_desc|change_id_asc] [--repo <path>] [--format <fmt>]
+pointbreak change attention [--order attention_wait|activity_desc|change_id_asc]
+  [--repo <path>] [--format <fmt>]
 pointbreak change show <change-id> [--repo <path>] [--format <fmt>]
 pointbreak change select <change-id> [--revision <revision-id>] [--allow-historical]
   [--cursor <token>] [--source captured|worktree|commit:<rev>]
@@ -292,6 +293,15 @@ pointbreak change migrate --dry-run <file> --ack-manifest <sha256>
 pointbreak change migrate-restore --backup <external-dir> --target-repo <path>
   [--format <fmt>]
 ```
+
+`change list` and `change attention` emit their Changes in one server-owned presentation order and
+name it in the document's `order` member. `change list` defaults to `activity_desc` (newest
+contributing event first, ties on Change id ascending); `change attention` defaults to
+`attention_wait` (primary attention tier first, then the longest-waiting unresolved item, ties on
+Change id). `change_id_asc` remains available on both, and `attention_wait` is accepted only on
+`change attention`. The Inspector Changes and Attention pages use the same values and defaults, so
+the two front ends never present a different order for the same store. Each summary carries its
+`activityAt` instant and, when the Change has an anchored attention item, its `attentionWaitAt` key.
 
 The Change reader begins with a complete capability profile. An untouched legacy root reports
 `migration_required`; a root with an admitted but incomplete transition reports `migration_in_progress`.

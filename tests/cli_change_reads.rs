@@ -647,6 +647,8 @@ fn change_list_reports_every_change_with_projection_identity_in_each_format_lane
                 "list",
                 "--repo",
                 fixture.repo_arg(),
+                "--order",
+                "change_id_asc",
                 "--format",
                 lane,
             ],
@@ -1598,10 +1600,30 @@ fn change_list_and_attention_active_current_preserve_ordering_and_exclusion() {
     let fixture = change_reads_fixture();
     fixture.build_derived();
 
-    let list_output = pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], ACTIVE);
+    let list_output = pointbreak_env(
+        [
+            "change",
+            "list",
+            "--repo",
+            fixture.repo_arg(),
+            "--order",
+            "change_id_asc",
+        ],
+        ACTIVE,
+    );
     assert_success(&list_output);
     let list = parse_json(&list_output.stdout);
-    let off_output = pointbreak_env(["change", "list", "--repo", fixture.repo_arg()], OFF);
+    let off_output = pointbreak_env(
+        [
+            "change",
+            "list",
+            "--repo",
+            fixture.repo_arg(),
+            "--order",
+            "change_id_asc",
+        ],
+        OFF,
+    );
     assert_success(&off_output);
     assert_ne!(
         list["projectionStamp"],
@@ -4427,5 +4449,183 @@ fn fact_port_public_acknowledgement_reports_call_bound_derived_states() {
             );
             assert!(String::from_utf8_lossy(&output.stderr).contains("public fixture deferred"));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `--order` parity with the Inspector
+// ---------------------------------------------------------------------------
+
+fn change_ids_of(document: &Value) -> Vec<String> {
+    document["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .map(|change| change["changeId"].as_str().expect("change id").to_owned())
+        .collect()
+}
+
+fn run_change_read(fixture: &ChangeReadsFixture, lens: &str, extra: &[&str]) -> Value {
+    let mut args = vec!["change", lens, "--repo", fixture.repo_arg()];
+    args.extend_from_slice(extra);
+    let output = pointbreak_env(args, OFF);
+    assert_success(&output);
+    parse_json(&output.stdout)
+}
+
+fn run_change_read_expecting_failure(
+    fixture: &ChangeReadsFixture,
+    lens: &str,
+    extra: &[&str],
+) -> String {
+    let mut args = vec!["change", lens, "--repo", fixture.repo_arg()];
+    args.extend_from_slice(extra);
+    let output = pointbreak_env(args, OFF);
+    assert!(
+        !output.status.success(),
+        "expected a usage error for {extra:?}: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn change_list_defaults_to_activity_descending() {
+    let fixture = change_reads_fixture();
+
+    let list = run_change_read(&fixture, "list", &[]);
+
+    assert_eq!(list["order"], "activity_desc");
+    let activity = list["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .map(|change| {
+            change["activityAt"]
+                .as_str()
+                .expect("activityAt")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        activity.windows(2).all(|pair| pair[0] >= pair[1]),
+        "activity must be newest-first: {activity:?}"
+    );
+    assert_eq!(
+        change_ids_of(&list),
+        change_ids_of(&run_change_read(
+            &fixture,
+            "list",
+            &["--order", "activity_desc"]
+        ))
+    );
+}
+
+#[test]
+fn change_list_accepts_the_legacy_order_explicitly() {
+    let fixture = change_reads_fixture();
+
+    let list = run_change_read(&fixture, "list", &["--order", "change_id_asc"]);
+
+    assert_eq!(list["order"], "change_id_asc");
+    let ids = change_ids_of(&list);
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(ids, sorted);
+    assert_eq!(ids.len(), 2);
+}
+
+#[test]
+fn the_accepted_flag_strings_are_snake_case() {
+    let fixture = change_reads_fixture();
+
+    assert_eq!(
+        run_change_read(&fixture, "list", &["--order", "activity_desc"])["order"],
+        "activity_desc"
+    );
+    let error = run_change_read_expecting_failure(&fixture, "list", &["--order", "activity-desc"]);
+    assert!(error.contains("activity_desc"), "{error}");
+}
+
+#[test]
+fn attention_wait_is_rejected_on_change_list_and_accepted_on_attention() {
+    let fixture = change_reads_fixture();
+
+    let error = run_change_read_expecting_failure(&fixture, "list", &["--order", "attention_wait"]);
+    assert!(error.contains("attention_wait"), "{error}");
+    assert_eq!(
+        run_change_read(&fixture, "attention", &["--order", "attention_wait"])["order"],
+        "attention_wait"
+    );
+}
+
+#[test]
+fn an_unknown_order_is_a_usage_error() {
+    let fixture = change_reads_fixture();
+
+    let error = run_change_read_expecting_failure(&fixture, "list", &["--order", "activity_asc"]);
+
+    assert!(error.contains("activity_desc"), "{error}");
+    assert!(error.contains("change_id_asc"), "{error}");
+}
+
+#[test]
+fn each_lens_uses_its_own_default_order() {
+    let fixture = change_reads_fixture();
+
+    assert_eq!(
+        run_change_read(&fixture, "list", &[])["order"],
+        "activity_desc"
+    );
+    assert_eq!(
+        run_change_read(&fixture, "attention", &[])["order"],
+        "attention_wait"
+    );
+}
+
+#[test]
+fn both_lanes_honour_the_order_flag() {
+    let fixture = change_reads_fixture();
+    fixture.build_derived();
+
+    for (lens, order) in [
+        ("list", "change_id_asc"),
+        ("list", "activity_desc"),
+        ("attention", "attention_wait"),
+        ("attention", "activity_desc"),
+    ] {
+        let derived = pointbreak_env(
+            [
+                "change",
+                lens,
+                "--repo",
+                fixture.repo_arg(),
+                "--order",
+                order,
+            ],
+            ACTIVE,
+        );
+        assert_success(&derived);
+        let authoritative = pointbreak_env(
+            [
+                "change",
+                lens,
+                "--repo",
+                fixture.repo_arg(),
+                "--order",
+                order,
+            ],
+            OFF,
+        );
+        assert_success(&authoritative);
+        let derived = parse_json(&derived.stdout);
+        let authoritative = parse_json(&authoritative.stdout);
+        assert_eq!(derived["order"], order, "{lens} {order}");
+        assert_eq!(authoritative["order"], order, "{lens} {order}");
+        assert_eq!(
+            change_ids_of(&derived),
+            change_ids_of(&authoritative),
+            "{lens} {order}: the lanes must not order differently"
+        );
     }
 }
