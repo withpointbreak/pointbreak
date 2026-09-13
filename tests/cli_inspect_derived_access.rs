@@ -467,3 +467,52 @@ fn v2_changes_and_attention_pages_continue_across_the_elected_and_default_lanes(
         );
     }
 }
+
+#[test]
+fn v2_elected_first_page_survives_a_later_derived_read_on_a_fresh_inspector() {
+    for lens in ["changes", "attention"] {
+        let repo = three_change_ready_repo();
+        // No harness profile pre-read: the process has not selected a generation yet.
+        let inspector = Inspector::spawn_current_unready(repo.path());
+        let path = format!("/api/v2/{lens}");
+        let elected = page(&inspector, &format!("{path}?limit=1&access=authoritative"));
+        let token = elected["next"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{lens}: elected next: {elected}"))
+            .to_owned();
+        let same_lane_cold = page(
+            &inspector,
+            &format!(
+                "{path}?limit=1&after={}&access=authoritative",
+                urlencode(&token)
+            ),
+        );
+        let derived = page(&inspector, &format!("{path}?limit=1"));
+        assert_eq!(
+            derived["projectionStamp"], elected["projectionStamp"],
+            "{lens}: the elected page already carried the generation stamp before any derived read"
+        );
+        let elected_after = page(
+            &inspector,
+            &format!(
+                "{path}?limit=1&after={}&access=authoritative",
+                urlencode(&token)
+            ),
+        );
+        let default_after = page(
+            &inspector,
+            &format!("{path}?limit=1&after={}", urlencode(&token)),
+        );
+        let expected = first_change_id(&same_lane_cold);
+        assert_eq!(
+            first_change_id(&elected_after),
+            expected,
+            "{lens}: elected continuation survives the warm-up"
+        );
+        assert_eq!(
+            first_change_id(&default_after),
+            expected,
+            "{lens}: default continuation accepts the elected token"
+        );
+    }
+}

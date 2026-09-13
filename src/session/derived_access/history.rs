@@ -547,6 +547,17 @@ impl DerivedHistoryAccess {
     /// Whether an active data route would serve a validated current generation
     /// now, observed without discovery side effects (INV-2).
     #[doc(hidden)]
+    /// Run one request discovery so this process selects its current
+    /// generation when a validated one exists, exactly as a derived data
+    /// request does (observation-class: it may request the existing
+    /// maintenance-only worker, never builds, waits or moves state aside).
+    /// Returns whether a current generation is selected afterwards. Elected
+    /// authoritative reads call this before binding their page stamp so the
+    /// stamp matches the derived lane regardless of request order.
+    pub fn select_current_generation(&self) -> bool {
+        matches!(self.current(), Ok(CurrentRead::Ready(_)))
+    }
+
     pub fn observe_serving_current(&self) -> bool {
         self.is_active() && matches!(self.runtime.observe_current_readable(), Ok(true))
     }

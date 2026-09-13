@@ -1738,6 +1738,11 @@ fn elected_change_v2_response(
             "an authoritative fallback is already in progress",
         );
     };
+    // Select the current generation the way a derived data request would, so
+    // the page stamp the binder applies does not depend on whether some other
+    // request warmed this process first. Unavailable states leave the
+    // authoritative stamp in place and the read still serves.
+    state.derived_history.select_current_generation();
     change_v2_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
 }
 

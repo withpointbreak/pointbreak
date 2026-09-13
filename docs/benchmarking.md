@@ -487,10 +487,12 @@ The same election applies to the Change-first entry routes `/api/v2/profile`, `/
 their existing authoritative producers through the strict Change reader snapshot that the explicit-off profile
 already uses, carries the same `X-Pointbreak-Access-Source: authoritative-fallback` header, shares the same
 single permit (a concurrent election receives `429`), and an unrecognized or repeated `access` member answers
-`400`. The election member is consumed before the page grammar parses the query, and an elected Changes or
-Attention page binds the same generation stamp as the derived lane whenever a current generation exists, so
-continuation tokens are interchangeable between elected and default requests; while no current generation
-exists the elected page carries the authoritative stamp instead. The key is matched literally, as on the legacy
+`400`. The election member is consumed before the page grammar parses the query. An elected read first selects
+the current generation the way a derived read does, then binds its page to that generation's stamp, so whenever a
+validated current generation exists the elected page carries the same stamp as the derived lane regardless of
+which request came first, and continuation tokens are interchangeable between elected and default requests. While
+no current generation exists the elected page carries the authoritative stamp instead, and a later publication
+changes stamps for both lanes alike. The key is matched literally, as on the legacy
 routes: a percent-encoded key is a page-grammar error, not an election. `access=derived` and an empty value are
 the default route. The member
 routes under `/api/v2/changes/` and every default request are unchanged, and the `actions` list in the status
