@@ -142,6 +142,27 @@ describe("Change cards", () => {
     );
   });
 
+  it("sources the supplied-case accessible name from the server label, not the raw summary", () => {
+    // Future-proofing: if server policy ever lets the finished label diverge
+    // from the stored proposal summary, visible and accessible copy must agree.
+    const card = changeCardPresentation(
+      summary([first]),
+      presentation([
+        {
+          revision: first,
+          revisionProposalSummary: "raw stored summary",
+          summarySource: "revision_proposal_summary",
+          label: "finished server label",
+        },
+      ]),
+    );
+
+    expect(card.peers[0]?.label).toBe("finished server label");
+    expect(card.peers[0]?.accessibleName).toBe(
+      `Current Revision — finished server label; ${exactRevisionAccessibleIdentity(first)}`,
+    );
+  });
+
   it("keeps the shipped generic label when an older server sends none", () => {
     const card = changeCardPresentation(
       summary([first]),

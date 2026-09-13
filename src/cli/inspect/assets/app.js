@@ -5442,14 +5442,15 @@
       );
       const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
       const identity = exactRevisionAccessibleIdentity(revision2);
+      const visibleLabel = entry?.label ?? (summaryLabel || "Current Revision");
       return {
         revision: revision2,
-        // Server-owned when supplied (a proposal summary or the absent-summary
-        // label). The generic string remains only for an older server that sends
-        // no `label`, which is shipped behavior, not client-minted meaning.
-        label: entry?.label ?? (summaryLabel || "Current Revision"),
+        label: visibleLabel,
         visibleIdentity: shortExactRevision(revision2),
-        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${identity}` : `Current Revision — ${identity}`,
+        // The accessible name leads with the same visible label the card shows
+        // (never a raw summary that could drift from it), and stays identity-led
+        // for an absent summary so it never claims a summary that was not given.
+        accessibleName: entry?.summarySource === "revision_proposal_summary" ? `Current Revision — ${visibleLabel}; ${identity}` : `Current Revision — ${identity}`,
         title: identity,
         copyText: exactRevisionCopyText([revision2])
       };
