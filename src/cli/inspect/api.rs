@@ -544,9 +544,15 @@ pub(super) fn authoritative_change_v2_profile_json(
     serde_json::to_string(&profile).map_err(|error| error.to_string())
 }
 
+/// `stamp_binder` is `None` for the explicit-off profile (the page carries the
+/// authoritative stamp) and the process binder for an elected read while the
+/// derived profile is active, so an elected page carries the same generation
+/// stamp as the derived lane whenever a current generation exists and its
+/// continuation tokens stay interchangeable with default requests.
 pub(super) fn authoritative_changes_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: Option<&StrictChangeStampBinder>,
     query: Option<&str>,
     signer: &super::change_page::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
@@ -555,7 +561,7 @@ pub(super) fn authoritative_changes_v2_json(
             Ok(request) => request,
             Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
         };
-    with_change_v2_outcome(repo, cache, None, |facade, _| {
+    with_change_v2_outcome(repo, cache, stamp_binder, |facade, _| {
         let document = facade
             .list_document_for_inspector_with_presentations()
             .map_err(|error| error.to_string())?;
@@ -563,9 +569,11 @@ pub(super) fn authoritative_changes_v2_json(
     })
 }
 
+/// See `authoritative_changes_v2_json` for the `stamp_binder` contract.
 pub(super) fn authoritative_change_attention_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    stamp_binder: Option<&StrictChangeStampBinder>,
     query: Option<&str>,
     signer: &super::change_page::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
@@ -577,7 +585,7 @@ pub(super) fn authoritative_change_attention_v2_json(
         Ok(request) => request,
         Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
     };
-    with_change_v2_outcome(repo, cache, None, |facade, _| {
+    with_change_v2_outcome(repo, cache, stamp_binder, |facade, _| {
         let document = facade
             .attention_document_with_presentations(true)
             .map_err(|error| error.to_string())?;

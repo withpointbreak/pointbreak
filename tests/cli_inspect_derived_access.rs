@@ -374,3 +374,96 @@ fn v2_entry_routes_serve_the_elected_authoritative_fallback_with_the_header() {
         "the elected page lists the captured Change: {changes}"
     );
 }
+
+/// Three independent Changes on a ready store with a current derived generation.
+fn three_change_ready_repo() -> GitRepo {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 0 }\n");
+    repo.commit_all("base");
+    for value in 1..=3 {
+        repo.write(
+            "src/lib.rs",
+            format!("pub fn value() -> u32 {{ {value} }}\n"),
+        );
+        capture(repo.path());
+    }
+    let build = support::pointbreak([
+        "store",
+        "derived",
+        "build",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        build.status.success(),
+        "derived build stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    repo
+}
+
+fn page(inspector: &Inspector, path: &str) -> serde_json::Value {
+    let (head, body) = inspector.raw_get(path);
+    assert!(head.starts_with("HTTP/1.1 200"), "{path}: {head}\n{body}");
+    serde_json::from_str(&body).unwrap_or_else(|error| panic!("{path}: {error}: {body}"))
+}
+
+fn first_change_id(page: &serde_json::Value) -> String {
+    page["changes"][0]["changeId"]
+        .as_str()
+        .or_else(|| page["changes"][0]["id"].as_str())
+        .unwrap_or_else(|| panic!("page lists at least one Change: {page}"))
+        .to_owned()
+}
+
+#[test]
+fn v2_changes_and_attention_pages_continue_across_the_elected_and_default_lanes() {
+    let repo = three_change_ready_repo();
+    let inspector = Inspector::spawn_current(repo.path());
+    for lens in ["changes", "attention"] {
+        let path = format!("/api/v2/{lens}");
+        let default = page(&inspector, &format!("{path}?limit=1"));
+        let elected = page(&inspector, &format!("{path}?limit=1&access=authoritative"));
+        assert_eq!(
+            default["projectionStamp"], elected["projectionStamp"],
+            "{lens}: an elected page binds the same generation stamp as the derived lane"
+        );
+        let default_next = default["next"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{lens}: default next: {default}"));
+        let elected_next = elected["next"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{lens}: elected next: {elected}"));
+        let same_lane = page(
+            &inspector,
+            &format!("{path}?limit=1&after={}", urlencode(default_next)),
+        );
+        let default_to_elected = page(
+            &inspector,
+            &format!(
+                "{path}?limit=1&after={}&access=authoritative",
+                urlencode(default_next)
+            ),
+        );
+        let elected_to_default = page(
+            &inspector,
+            &format!("{path}?limit=1&after={}", urlencode(elected_next)),
+        );
+        let expected = first_change_id(&same_lane);
+        assert_eq!(
+            first_change_id(&default_to_elected),
+            expected,
+            "{lens}: default → elected continues at the same row"
+        );
+        assert_eq!(
+            first_change_id(&elected_to_default),
+            expected,
+            "{lens}: elected → default continues at the same row"
+        );
+        assert_ne!(
+            first_change_id(&default),
+            expected,
+            "{lens}: the continuation moved past the first row"
+        );
+    }
+}

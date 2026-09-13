@@ -1173,7 +1173,7 @@ fn route(
         if !state.derived_changes.is_active() {
             return authoritative_change_v2_profile_response(state);
         }
-        return match requested_authoritative_access(query) {
+        return match v2_access_election(query) {
             Ok(true) => elected_authoritative_change_v2_profile(state),
             Ok(false) => {
                 change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes))
@@ -1193,7 +1193,7 @@ fn route(
         }
         // The election member is consumed here; the strict page grammar never sees it.
         let page_query = strip_access_member(query);
-        return match requested_authoritative_access(query) {
+        return match v2_access_election(query) {
             Ok(true) => elected_authoritative_event_history_v2(state, page_query.as_deref()),
             Ok(false) => change_v2_response(api::event_history_v2_json(
                 repo,
@@ -1209,7 +1209,7 @@ fn route(
             return authoritative_changes_v2_response(state, query);
         }
         let page_query = strip_access_member(query);
-        return match requested_authoritative_access(query) {
+        return match v2_access_election(query) {
             Ok(true) => elected_authoritative_changes_v2(state, page_query.as_deref()),
             Ok(false) => change_v2_response(api::changes_v2_json(
                 &state.derived_changes,
@@ -1224,7 +1224,7 @@ fn route(
             return authoritative_change_attention_v2_response(state, query);
         }
         let page_query = strip_access_member(query);
-        return match requested_authoritative_access(query) {
+        return match v2_access_election(query) {
             Ok(true) => elected_authoritative_change_attention_v2(state, page_query.as_deref()),
             Ok(false) => change_v2_response(api::change_attention_v2_json(
                 &state.derived_changes,
@@ -1642,6 +1642,7 @@ fn authoritative_changes_v2_response(state: &InspectState, query: Option<&str>) 
     change_v2_response(api::authoritative_changes_v2_json(
         state.repo.as_path(),
         &state.change_reader_cache,
+        None,
         query,
         &state.page_token_signer,
     ))
@@ -1654,6 +1655,7 @@ fn authoritative_change_attention_v2_response(
     change_v2_response(api::authoritative_change_attention_v2_json(
         state.repo.as_path(),
         &state.change_reader_cache,
+        None,
         query,
         &state.page_token_signer,
     ))
@@ -1689,6 +1691,25 @@ fn explicit_authoritative_routed_response(
         );
     };
     routed_api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+/// The Change-first election: the legacy first-match parser, plus the strict
+/// page grammars' duplicate rule so a repeated `access` member is a request
+/// error rather than a silently chosen lane. The key is matched literally, as
+/// on the legacy routes; a percent-encoded key is not an election.
+fn v2_access_election(query: Option<&str>) -> Result<bool, String> {
+    let members = query
+        .map(|query| {
+            query
+                .split('&')
+                .filter(|pair| pair.split('=').next() == Some("access"))
+                .count()
+        })
+        .unwrap_or(0);
+    if members > 1 {
+        return Err("duplicate access member".to_owned());
+    }
+    requested_authoritative_access(query)
 }
 
 /// Remove every `access` member so the strict Change-first page grammars never
@@ -1731,6 +1752,7 @@ fn elected_authoritative_changes_v2(state: &InspectState, query: Option<&str>) -
         api::authoritative_changes_v2_json(
             state.repo.as_path(),
             &state.change_reader_cache,
+            Some(&state.strict_change_stamp),
             query,
             &state.page_token_signer,
         )
@@ -1745,6 +1767,7 @@ fn elected_authoritative_change_attention_v2(
         api::authoritative_change_attention_v2_json(
             state.repo.as_path(),
             &state.change_reader_cache,
+            Some(&state.strict_change_stamp),
             query,
             &state.page_token_signer,
         )
@@ -2299,7 +2322,7 @@ mod tests {
                 "{name} must not enter the strict Change reader cache"
             );
             assert!(
-                derived_route.contains("requested_authoritative_access(query)"),
+                derived_route.contains("v2_access_election(query)"),
                 "{name} must consult the explicit election"
             );
             assert_source_order(
@@ -2356,7 +2379,7 @@ mod tests {
             "!state.derived_changes.is_active()",
             "api::authoritative_event_history_v2_json",
         );
-        assert!(timeline.contains("requested_authoritative_access(query)"));
+        assert!(timeline.contains("v2_access_election(query)"));
         assert_source_order(
             timeline,
             "api::authoritative_event_history_v2_json",
@@ -2376,7 +2399,8 @@ mod tests {
         assert!(exact.contains("let cache = &state.change_reader_cache"));
         assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
         assert!(
-            !exact.contains("requested_authoritative_access"),
+            !exact.contains("requested_authoritative_access")
+                && !exact.contains("v2_access_election"),
             "member routes are not elected"
         );
         let detail = source_between(
@@ -3250,6 +3274,22 @@ mod tests {
             );
             let invalid = route(&state, true, "GET", path, Some("access=bogus"));
             assert_eq!(invalid.status, "400 Bad Request", "{path}?access=bogus");
+            // A repeated member is a request error, never a silently chosen lane.
+            for duplicate in [
+                "access=authoritative&access=bogus",
+                "access=derived&access=authoritative",
+                "access=authoritative&access=authoritative",
+            ] {
+                let response = route(&state, true, "GET", path, Some(duplicate));
+                assert_eq!(response.status, "400 Bad Request", "{path}?{duplicate}");
+                assert!(
+                    !response
+                        .headers
+                        .iter()
+                        .any(|(name, _)| *name == "X-Pointbreak-Access-Source"),
+                    "{path}?{duplicate} must not elect"
+                );
+            }
             // The deliberate widening: these two values are the default route, not a grammar error.
             for default_value in ["access=derived", "access="] {
                 let same_as_default = route(&state, true, "GET", path, Some(default_value));

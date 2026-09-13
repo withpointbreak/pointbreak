@@ -486,9 +486,13 @@ The same election applies to the Change-first entry routes `/api/v2/profile`, `/
 `/api/v2/history` and `/api/v2/attention` while the derived profile is active: `access=authoritative` runs
 their existing authoritative producers through the strict Change reader snapshot that the explicit-off profile
 already uses, carries the same `X-Pointbreak-Access-Source: authoritative-fallback` header, shares the same
-single permit (a concurrent election receives `429`), and an unrecognized value answers `400`. The election
-member is consumed before the page grammar parses the query, so continuation tokens are interchangeable
-between elected and default requests. `access=derived` and an empty value are the default route. The member
+single permit (a concurrent election receives `429`), and an unrecognized or repeated `access` member answers
+`400`. The election member is consumed before the page grammar parses the query, and an elected Changes or
+Attention page binds the same generation stamp as the derived lane whenever a current generation exists, so
+continuation tokens are interchangeable between elected and default requests; while no current generation
+exists the elected page carries the authoritative stamp instead. The key is matched literally, as on the legacy
+routes: a percent-encoded key is a page-grammar error, not an election. `access=derived` and an empty value are
+the default route. The member
 routes under `/api/v2/changes/` and every default request are unchanged, and the `actions` list in the status
 document describes an election the served client can make. A conflicting derived namespace is an unavailable
 state rather than an off profile: the legacy aggregate routes answer the typed unavailable document, the
