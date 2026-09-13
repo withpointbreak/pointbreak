@@ -3002,7 +3002,7 @@ mod tests {
     #[test]
     fn bounded_change_routes_share_typed_query_errors() {
         for path in ["/api/v2/changes", "/api/v2/attention"] {
-            let response = route_for_query(path, "order=activity_desc");
+            let response = route_for_query(path, "order=activity_asc");
             assert_eq!(response.status, "400 Bad Request");
             let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(body["schema"], "pointbreak.inspect-change-page-error");
