@@ -1329,6 +1329,12 @@
     }
   }
   __name(presentEvent, "presentEvent");
+  function eventGroupLabel(entry) {
+    const label2 = presentEvent(entry).label;
+    const plural = label2.includes(" ") || label2.endsWith("s") ? label2 : `${label2}s`;
+    return plural.charAt(0).toUpperCase() + plural.slice(1);
+  }
+  __name(eventGroupLabel, "eventGroupLabel");
 
   // src/classNames.ts
   var CLASS = {
@@ -2049,7 +2055,7 @@
   function groupName(group) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
-    return `${presentEvent(first).label}, ${group.members.length} events`;
+    return `${eventGroupLabel(first)}, ${group.members.length} events`;
   }
   __name(groupName, "groupName");
   function groupContainer(group) {
@@ -2072,13 +2078,14 @@
     row.classList.add(CLASS.timelineGroup);
     row.dataset.timelineGroup = group.eventType;
     row.dataset.timelineGroupSize = String(group.members.length);
+    row.setAttribute("aria-label", `${groupName(group)}, collapsed`);
     appendOccurredAt(row, first.occurredAt);
     appendRail(row, group.eventType);
     const body = document.createElement("div");
     body.className = "body";
     const heading = document.createElement("h3");
     heading.className = "title";
-    heading.textContent = presentation.label;
+    heading.textContent = eventGroupLabel(first);
     const meta = document.createElement("div");
     meta.className = "mono";
     meta.classList.add("meta");

@@ -424,3 +424,16 @@ export function presentEvent(entry: EventHistoryEntry): EventPresentation {
     }
   }
 }
+
+/**
+ * The heading for a same-type group of events, derived from the one per-type
+ * label above rather than a second label table. A single-word label is
+ * pluralized; a multi-word label such as "Change declared" reads as a
+ * description already and is kept verbatim. Sentence case, no invented title.
+ */
+export function eventGroupLabel(entry: EventHistoryEntry): string {
+  const label = presentEvent(entry).label;
+  const plural =
+    label.includes(" ") || label.endsWith("s") ? label : `${label}s`;
+  return plural.charAt(0).toUpperCase() + plural.slice(1);
+}

@@ -923,4 +923,88 @@ describe("Change-aware Timeline renderer", () => {
       ]);
     });
   });
+
+  describe("group accessibility", () => {
+    it("names a collapsed group by its count, type label, and state", () => {
+      // aria-expanded is NOT supported on role=option (WAI-ARIA 1.2), so the
+      // state lives in the accessible NAME.
+      renderGroupedTimeline();
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:b2"]',
+      );
+      expect(group?.getAttribute("role")).toBe("option");
+      expect(group?.getAttribute("aria-label")).toBe(
+        "Validations, 3 events, collapsed",
+      );
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.querySelector(".title")?.textContent).toBe("Validations");
+    });
+
+    it("replaces the group row with a labelled role=group on expand", () => {
+      // Expanding REPLACES the group row with its member rows; the container
+      // carries the group's identity and there is no surviving controller row.
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      expect(
+        document.querySelector('[data-event-id="ev:b2"][role="option"]'),
+      ).not.toBeNull();
+      expect(
+        document.querySelector("#timeline [data-timeline-group]"),
+      ).toBeNull();
+      const group = document.querySelector("#timeline [role='group']");
+      expect(group?.getAttribute("aria-label")).toBe("Validations, 3 events");
+      expect(group?.querySelectorAll('[role="option"]').length).toBe(3);
+      expect(
+        Array.from(
+          group?.querySelectorAll<HTMLElement>("[data-event-id]") ?? [],
+        ).map((row) => row.dataset.eventId),
+      ).toEqual(["ev:b2", "ev:c3", "ev:d4"]);
+    });
+
+    it("keeps members individually labelled and free of aria-expanded", () => {
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      const member = document.querySelector('[data-event-id="ev:c3"]');
+      expect(member?.getAttribute("aria-label")).toMatch(/validation/);
+      expect(member?.getAttribute("aria-label")).toContain("ev:c3");
+      expect(member?.hasAttribute("aria-expanded")).toBe(false);
+    });
+
+    it("uses no unsupported or interactive constructs inside the listbox", () => {
+      renderGroupedTimeline();
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      // role=group IS permitted inside a listbox; details/summary and a
+      // tabbable button are not, and no option carries aria-expanded.
+      expect(document.querySelector("#timeline details")).toBeNull();
+      expect(document.querySelector("#timeline button")).toBeNull();
+      expect(document.querySelector("#timeline [aria-expanded]")).toBeNull();
+      expect(
+        document.querySelectorAll('#timeline [tabindex="0"]'),
+      ).toHaveLength(0);
+    });
+
+    it("keeps a multi-word type label verbatim rather than inventing a title", () => {
+      renderGroupedTimeline(
+        timelineDocument([
+          historyEntry("ev:a1", "change_declared"),
+          historyEntry("ev:b2", "change_declared"),
+          historyEntry("ev:c3", "change_declared"),
+        ]),
+      );
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:a1"]',
+      );
+      expect(group?.getAttribute("aria-label")).toBe(
+        "Change declared, 3 events, collapsed",
+      );
+      expect(group?.querySelector(".title")?.textContent).toBe(
+        "Change declared",
+      );
+    });
+  });
 });
