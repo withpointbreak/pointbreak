@@ -1564,6 +1564,7 @@
     "accepted",
     "accepted_with_follow_up",
     "ambiguous",
+    "conflicted",
     "current",
     "errored",
     "failed",
@@ -1577,7 +1578,9 @@
     "skipped",
     "stale",
     "superseded",
-    "unassessed"
+    "unassessed",
+    "unavailable",
+    "withdrawn"
   ];
   var REF_ID_PREFIXES = [
     "input-request-response",
@@ -8485,6 +8488,7 @@
     button2.className = "ghost mono";
     button2.textContent = label2;
     button2.title = factId;
+    button2.setAttribute("aria-label", `Focus fact ${factId}`);
     button2.dataset.relationFactId = factId;
     button2.addEventListener("click", () => activate(factId));
     return button2;
@@ -8534,8 +8538,11 @@
     return lines;
   }
   __name(factRelationLines, "factRelationLines");
-  function factStatusText(content) {
-    return content.kind === "input_request" || content.kind === "validation" ? content.status : content.kind === "assessment" ? content.assessment : void 0;
+  function factStatusText(family, familyState, content) {
+    if (content?.kind === "input_request" || content?.kind === "validation") {
+      return content.status;
+    }
+    return family === "assessment" || family === "observation" ? familyState : void 0;
   }
   __name(factStatusText, "factStatusText");
   function renderFacts(reading, route, actions2) {
@@ -8573,7 +8580,7 @@
         kind.className = annoKindClass(family.replaceAll("_", "-"));
         kind.textContent = familyLabel;
         head.append(kind);
-        const status = content ? factStatusText(content.content) : void 0;
+        const status = factStatusText(family, fact2.familyState, content?.content);
         if (status !== void 0) {
           const chip = document.createElement("span");
           chip.className = factStatusClass(status);

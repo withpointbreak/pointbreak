@@ -299,6 +299,7 @@ export const FACT_STATUSES = [
   "accepted",
   "accepted_with_follow_up",
   "ambiguous",
+  "conflicted",
   "current",
   "errored",
   "failed",
@@ -313,6 +314,8 @@ export const FACT_STATUSES = [
   "stale",
   "superseded",
   "unassessed",
+  "unavailable",
+  "withdrawn",
 ] as const;
 
 // The id prefixes `refInfo`/`REF_RE` linkify, in REF_RE alternation order.

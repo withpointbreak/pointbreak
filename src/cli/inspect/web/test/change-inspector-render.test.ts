@@ -1975,11 +1975,51 @@ describe("Change inspector render", () => {
     expect(chipOf("validation:sha256:gate")?.classList.contains("passed")).toBe(
       true,
     );
-    expect(
-      chipOf("assess:sha256:verdict")?.classList.contains("accepted"),
-    ).toBe(true);
-    // An observation declares no status, so it gets no chip rather than a blank one.
-    expect(chipOf("obs:sha256:focused")).toBeNull();
+    // An assessment's chip is its carried record currency, never its decision:
+    // the decision already heads the card, and a replaced "accepted" must not
+    // read as a live acceptance.
+    const verdict = chipOf("assess:sha256:verdict");
+    expect(verdict?.textContent).toBe("current");
+    expect(verdict?.classList.contains("current")).toBe(true);
+    expect(verdict?.classList.contains("accepted")).toBe(false);
+    // An observation's chip is its record currency too.
+    expect(chipOf("obs:sha256:focused")?.textContent).toBe("current");
+  });
+
+  it("names a stale assessment by its carried currency rather than its decision", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    const facts = localFacts();
+    if (!facts.factPresentations) throw new Error("fixture missing");
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: readingWith({
+          ...facts,
+          factPresentations: facts.factPresentations.map((fact) =>
+            fact.factId === "assess:sha256:verdict"
+              ? { ...fact, familyState: "stale" }
+              : fact,
+          ),
+        }),
+        refusal: null,
+      },
+    );
+    const card = document.querySelector<HTMLElement>(
+      '#detail-body .detail-facts [data-fact-id="assess:sha256:verdict"]',
+    );
+    const chip = card?.querySelector<HTMLElement>(".fact-status");
+    expect(chip?.textContent).toBe("stale");
+    expect(chip?.classList.contains("stale")).toBe(true);
+    expect(card?.querySelector("h5")?.textContent).toBe("Assessment: accepted");
   });
 
   it("renders each exact fact's carried review target and activates only same-document targets", () => {
@@ -2021,6 +2061,10 @@ describe("Change inspector render", () => {
     const control = peer?.querySelector<HTMLButtonElement>("button");
     expect(control?.type).toBe("button");
     expect(control?.dataset.relationFactId).toBe("obs:sha256:focused");
+    // The visible text is compact; assistive technology gets the full identity.
+    expect(control?.getAttribute("aria-label")).toBe(
+      "Focus fact obs:sha256:focused",
+    );
     // A relation control must never shadow a fact card in focus resolution.
     expect(control?.dataset.factId).toBeUndefined();
     control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));

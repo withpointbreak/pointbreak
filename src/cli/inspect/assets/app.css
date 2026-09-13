@@ -2966,6 +2966,14 @@ html.compact .unit-card {
 .fact-status.stale {
   color: var(--danger);
 }
+/* Record-currency states the exact Change document carries beyond current/stale. */
+.fact-status.withdrawn,
+.fact-status.unavailable {
+  color: var(--fg-dim);
+}
+.fact-status.conflicted {
+  color: var(--warning);
+}
 .fact-status.passed {
   color: var(--success);
 }

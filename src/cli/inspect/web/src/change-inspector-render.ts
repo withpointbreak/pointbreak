@@ -1211,6 +1211,7 @@ function factReferenceControl(
   button.className = "ghost mono";
   button.textContent = label;
   button.title = factId;
+  button.setAttribute("aria-label", `Focus fact ${factId}`);
   button.dataset.relationFactId = factId;
   button.addEventListener("click", () => activate(factId));
   return button;
@@ -1281,13 +1282,23 @@ function factRelationLines(
   return lines;
 }
 
-/** The status a fact content declares, when it declares one. */
-function factStatusText(content: FactContent): string | undefined {
-  return content.kind === "input_request" || content.kind === "validation"
-    ? content.status
-    : content.kind === "assessment"
-      ? content.assessment
-      : undefined;
+/**
+ * The status chip for one fact. Input requests and validation checks carry
+ * their own status; an assessment's decision already heads the card, so its
+ * chip (like an observation's) is the carried record currency, never the
+ * decision, so a replaced "accepted" cannot read as a live acceptance.
+ */
+function factStatusText(
+  family: string,
+  familyState: string,
+  content: FactContent | undefined,
+): string | undefined {
+  if (content?.kind === "input_request" || content?.kind === "validation") {
+    return content.status;
+  }
+  return family === "assessment" || family === "observation"
+    ? familyState
+    : undefined;
 }
 
 function renderFacts(
@@ -1332,7 +1343,7 @@ function renderFacts(
       kind.className = annoKindClass(family.replaceAll("_", "-"));
       kind.textContent = familyLabel;
       head.append(kind);
-      const status = content ? factStatusText(content.content) : undefined;
+      const status = factStatusText(family, fact.familyState, content?.content);
       if (status !== undefined) {
         const chip = document.createElement("span");
         chip.className = factStatusClass(status);
