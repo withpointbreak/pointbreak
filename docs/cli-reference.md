@@ -401,6 +401,23 @@ fall back to them and paints only `migration_required`. Store activation is a se
 transition. Once a transition enters the in-progress state, legacy
 aggregate routes return a typed `409 Conflict` migration document.
 
+Both surfaces decide legacy admission from one table. The difference between them is intentional: the
+ordinary command fence keeps every non-Change command away from a pre-migration store, while the Inspector
+keeps migration-era readers working on untouched legacy roots.
+
+| Store state | Ordinary CLI commands (`history`, `revision list`, `attention list`, review writers) | Inspector legacy aggregate routes (`/api/history`, `/api/revisions`, `/api/threads`, `/api/attention`, `/api/freshness`, member reads) |
+| --- | --- | --- |
+| Untouched legacy root (no activation record) | refused with `migration_required` | served, for the signed v0.9 reader |
+| Activation root present, migration still required | refused with `migration_required` | `409 Conflict`, `pointbreak.store-migration-required` |
+| Migration in progress | refused with `migration_in_progress` | `409 Conflict`, `pointbreak.store-migration-in-progress` |
+| Ready Change-aware root | served | `426 Upgrade Required`, `reader_upgrade_required` |
+
+The `change` family, the `store` placement commands, `key`, `identity`, `inspect` and `version` answer their
+own typed capability documents instead of taking this table. While the derived view cannot serve, the
+Change-first entry routes (`/api/v2/profile`, `/api/v2/changes`, `/api/v2/history`, `/api/v2/attention`)
+accept the same explicit `access=authoritative` election the legacy routes accept; the derived-access
+section below describes it.
+
 Three v1 bundled-pair documents are compatibility-advertised by `pointbreak version`:
 `/api/snapshots/{id}` returns `pointbreak.review-snapshot`, `/api/freshness` returns
 `pointbreak.inspect-freshness`, and JSON startup emits `pointbreak.inspect-startup`. `/api/version` mirrors
@@ -646,6 +663,17 @@ Who may do what to the disposable derived generation is fixed by the actor's rol
 
 On an activated store, invalid disposable state stays in place until an explicit recover or replace action;
 ordinary reads keep reporting it and fall back to authoritative data.
+
+When both the stable `derived/` root and its legacy predecessor exist at once, derived access is unavailable,
+not off. Ordinary bounded CLI reads fall back to authoritative data with the one-per-process hint. Where
+admission permits them (the legacy aggregate routes on an untouched legacy root), Inspector data routes answer
+the typed unavailable document and serve only under the explicit `access=authoritative` election; the
+exact-read, search, freshness and bare poll-probe routes keep their existing behaviour. Change-first routes
+answer typed migration documents on pre-migration stores and the typed `projection_invalid` document on ready
+stores. Status names the conflict and text output prints both paths; `build`, `rebuild` and the Inspector
+`Retry` refuse or do nothing until an operator moves one root aside or selects explicit off. A conflict that
+appears while an Inspector is already running is reported through the lifecycle error until that process
+restarts.
 
 Build and rebuild may scan the complete event history and can therefore be expensive on a large store.
 Progress is written to stderr; stdout contains exactly one completion document, so scripts can consume it
