@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::ChangeOrderingV1;
 use super::{
     AssociationComparisonDocumentV1, ContentAvailabilityV1, RevisionResourceAvailabilityV1,
     RevisionResourceDocumentV1,
@@ -18,9 +19,9 @@ use crate::session::event::{
     WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::{
-    BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1,
-    ChangeLinkView, ChangeMembershipClaimViewV1, ChangeProjection, ChangeRelationClaimViewV1,
-    ChangeTopologyV1, RevisionRefUnavailableReasonV1,
+    AttentionWaitKeyV1, BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1,
+    ChangeLifecycleV1, ChangeLinkView, ChangeMembershipClaimViewV1, ChangeOrderKey,
+    ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1, RevisionRefUnavailableReasonV1,
 };
 
 pub const REVIEW_CHANGE_LIST_SCHEMA: &str = "pointbreak.review-change-list";
@@ -268,6 +269,29 @@ pub struct ChangeSummaryV1 {
     pub availability_summary: String,
     pub diagnostics: Vec<String>,
     pub projection_stamp: String,
+    /// Newest contributing event instant, for presentation ordering only.
+    /// Absent when no contributing event exists. Never an input to Change
+    /// semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_at: Option<String>,
+    /// Wait-time ordering key for the Attention lens: tier rank plus the
+    /// oldest unresolved `observed_at`. Absent when the Change has no anchored
+    /// attention item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_wait_at: Option<AttentionWaitKeyV1>,
+}
+
+/// Borrow one summary as the shared Change-order comparator's input.
+pub fn change_summary_order_key(summary: &ChangeSummaryV1) -> ChangeOrderKey<'_> {
+    ChangeOrderKey {
+        change_id: summary.change_id.as_str(),
+        activity_at: summary.activity_at.as_deref(),
+        tier_rank: summary.attention_wait_at.as_ref().map(|key| key.tier_rank),
+        oldest_observed_at: summary
+            .attention_wait_at
+            .as_ref()
+            .map(|key| key.oldest_observed_at.as_str()),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -565,6 +589,7 @@ pub struct ChangeDocumentFacadeV1 {
     presentations: Option<BTreeMap<ChangeId, ChangePresentationV1>>,
     fact_port_carriers: Vec<FactPortCarrierV1>,
     projection_stamp: String,
+    ordering: Option<ChangeOrderingV1>,
 }
 
 impl ChangeDocumentFacadeV1 {
@@ -613,6 +638,7 @@ impl ChangeDocumentFacadeV1 {
         Ok(Self {
             semantic,
             projection_stamp: provenance.projection_stamp.clone(),
+            ordering: None,
             provenance,
             presentations: None,
             fact_port_carriers: Vec::new(),
@@ -737,6 +763,24 @@ impl ChangeDocumentFacadeV1 {
             }
         }
         Ok(ports)
+    }
+
+    /// Bind the presentation-only ordering keys computed for this exact
+    /// semantic generation. Summaries then carry `activityAt` and
+    /// `attentionWaitAt`; nothing semantic reads them.
+    pub fn with_ordering(mut self, ordering: ChangeOrderingV1) -> Result<Self> {
+        if ordering.source_projection_stamp != self.provenance.projection_stamp {
+            return Err(ShoreError::Message(
+                "Change ordering belongs to a different semantic generation".to_owned(),
+            ));
+        }
+        self.ordering = Some(ordering);
+        Ok(self)
+    }
+
+    /// The ordering keys bound to this facade, when a composer supplied them.
+    pub fn ordering(&self) -> Option<&ChangeOrderingV1> {
+        self.ordering.as_ref()
     }
 
     /// Bind optional presentation data produced from the exact same validated
@@ -1614,6 +1658,14 @@ impl ChangeDocumentFacadeV1 {
             .to_owned(),
             diagnostics: view.diagnostics.clone(),
             projection_stamp: self.projection_stamp.clone(),
+            activity_at: self
+                .ordering
+                .as_ref()
+                .and_then(|ordering| ordering.activity.get(&view.change_id).cloned()),
+            attention_wait_at: self
+                .ordering
+                .as_ref()
+                .and_then(|ordering| ordering.attention_wait.get(&view.change_id).cloned()),
         }
     }
 
@@ -2320,6 +2372,125 @@ mod tests {
             crate::session::change_document_projection_stamp(&semantic, &provenance).unwrap();
         let facade = ChangeDocumentFacadeV1::new(semantic, provenance).unwrap();
         (change_id, revision, facade)
+    }
+
+    fn ordering_for(
+        facade: &ChangeDocumentFacadeV1,
+        change_id: &ChangeId,
+        activity_at: Option<&str>,
+        wait: Option<AttentionWaitKeyV1>,
+    ) -> ChangeOrderingV1 {
+        ChangeOrderingV1 {
+            activity: activity_at
+                .map(|at| [(change_id.clone(), at.to_owned())].into())
+                .unwrap_or_default(),
+            attention_wait: wait
+                .map(|key| [(change_id.clone(), key)].into())
+                .unwrap_or_default(),
+            source_projection_stamp: facade.provenance.projection_stamp.clone(),
+        }
+    }
+
+    #[test]
+    fn summary_carries_the_change_activity_and_wait_keys() {
+        let (change_id, _, facade) = facade();
+        let ordering = ordering_for(
+            &facade,
+            &change_id,
+            Some("2026-09-12T19:20:00.000Z"),
+            Some(AttentionWaitKeyV1 {
+                tier_rank: 0,
+                oldest_observed_at: "2026-09-01T00:00:00.000Z".to_owned(),
+            }),
+        );
+        let facade = facade.with_ordering(ordering).unwrap();
+
+        let summary = &facade.list_document().changes[0];
+        assert_eq!(
+            summary.activity_at.as_deref(),
+            Some("2026-09-12T19:20:00.000Z")
+        );
+        assert_eq!(
+            summary.attention_wait_at,
+            Some(AttentionWaitKeyV1 {
+                tier_rank: 0,
+                oldest_observed_at: "2026-09-01T00:00:00.000Z".to_owned(),
+            })
+        );
+        let json = serde_json::to_value(facade.list_document()).unwrap();
+        assert_eq!(json["changes"][0]["activityAt"], "2026-09-12T19:20:00.000Z");
+        assert_eq!(json["changes"][0]["attentionWaitAt"]["tierRank"], 0);
+    }
+
+    #[test]
+    fn a_change_without_ordering_keys_omits_both_fields() {
+        let (change_id, _, facade) = facade();
+        let bare = serde_json::to_value(facade.list_document()).unwrap();
+        assert!(bare["changes"][0].get("activityAt").is_none());
+        assert!(bare["changes"][0].get("attentionWaitAt").is_none());
+
+        let ordering = ordering_for(&facade, &change_id, None, None);
+        let facade = facade.with_ordering(ordering).unwrap();
+        let json = serde_json::to_value(facade.list_document()).unwrap();
+        assert!(json["changes"][0].get("activityAt").is_none());
+        assert!(json["changes"][0].get("attentionWaitAt").is_none());
+    }
+
+    #[test]
+    fn the_attention_document_carries_the_same_keys_as_the_list_document() {
+        let (change_id, _, facade) = facade();
+        let ordering = ordering_for(
+            &facade,
+            &change_id,
+            Some("2026-09-12T19:20:00.000Z"),
+            Some(AttentionWaitKeyV1 {
+                tier_rank: 1,
+                oldest_observed_at: "2026-09-01T00:00:00.000Z".to_owned(),
+            }),
+        );
+        let facade = facade.with_ordering(ordering).unwrap();
+
+        let listed = facade.list_document();
+        let attention = facade.attention_document(false);
+        assert!(!attention.changes.is_empty());
+        for change in &attention.changes {
+            let matching = listed
+                .changes
+                .iter()
+                .find(|candidate| candidate.change_id == change.change_id)
+                .expect("attention Changes are a subset of listed Changes");
+            assert_eq!(change.activity_at, matching.activity_at);
+            assert_eq!(change.attention_wait_at, matching.attention_wait_at);
+        }
+    }
+
+    #[test]
+    fn ordering_from_another_semantic_generation_is_rejected() {
+        let (change_id, _, facade) = facade();
+        let mut ordering = ordering_for(&facade, &change_id, None, None);
+        ordering.source_projection_stamp = "sha256:elsewhere".to_owned();
+        assert!(facade.with_ordering(ordering).is_err());
+    }
+
+    #[test]
+    fn the_order_key_adapter_reads_the_summary_fields() {
+        let (change_id, _, facade) = facade();
+        let ordering = ordering_for(
+            &facade,
+            &change_id,
+            Some("2026-09-12T19:20:00.000Z"),
+            Some(AttentionWaitKeyV1 {
+                tier_rank: 1,
+                oldest_observed_at: "2026-09-01T00:00:00.000Z".to_owned(),
+            }),
+        );
+        let facade = facade.with_ordering(ordering).unwrap();
+        let document = facade.list_document();
+        let key = change_summary_order_key(&document.changes[0]);
+        assert_eq!(key.change_id, change_id.as_str());
+        assert_eq!(key.activity_at, Some("2026-09-12T19:20:00.000Z"));
+        assert_eq!(key.tier_rank, Some(1));
+        assert_eq!(key.oldest_observed_at, Some("2026-09-01T00:00:00.000Z"));
     }
 
     fn attention_detail(

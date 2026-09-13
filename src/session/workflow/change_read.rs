@@ -70,11 +70,17 @@ impl ChangeReaderReadyV1 {
             &self.events,
             &self.event_set_hash,
         )?;
+        let ordering = crate::documents::change_ordering_projection(
+            &self.projection,
+            &self.document_projection,
+            &self.events,
+        )?;
         crate::documents::ChangeDocumentFacadeV1::new(
             self.projection.clone(),
             self.document_projection.clone(),
         )?
-        .with_presentations(presentations)
+        .with_presentations(presentations)?
+        .with_ordering(ordering)
     }
 
     /// Build the typed, review-domain event timeline from the same complete
@@ -575,6 +581,46 @@ mod tests {
         assert_eq!(counters.object_artifact_reads, 0);
         assert!(counters.change_semantic_constructions > 0);
         assert!(counters.change_projection_constructions > 0);
+    }
+
+    #[test]
+    fn ready_document_facade_orders_changes_by_their_timeline_activity() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let state = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let ready = state.ready().expect("L2 reader is ready");
+        let facade = ready.document_facade().unwrap();
+        let history = ready
+            .event_history_facade(&crate::session::TrustSet::default())
+            .unwrap()
+            .document();
+        let listed = facade.list_document();
+        assert!(!listed.changes.is_empty());
+        // The newest Timeline row naming a Change is the row that sets its
+        // activity: one attribution, two surfaces.
+        for summary in &listed.changes {
+            let expected = history
+                .entries
+                .iter()
+                .filter(|entry| entry.change_ids.contains(&summary.change_id))
+                .max_by(|left, right| {
+                    crate::session::compare_event_instants(&left.occurred_at, &right.occurred_at)
+                        .then_with(|| left.event_id.cmp(&right.event_id))
+                })
+                .map(|entry| entry.occurred_at.clone());
+            assert!(
+                expected.is_some(),
+                "{} has Timeline rows",
+                summary.change_id.as_str()
+            );
+            assert_eq!(
+                summary.activity_at,
+                expected,
+                "{}",
+                summary.change_id.as_str()
+            );
+        }
     }
 
     fn external_observation_event(revision_id: RevisionId) -> ShoreEvent {

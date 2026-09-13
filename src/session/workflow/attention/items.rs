@@ -277,6 +277,12 @@ fn tier_rank(tier: AttentionTier) -> u8 {
     }
 }
 
+/// The tier rank `sort_items` orders by, exposed so Change list ordering
+/// reuses it rather than re-deriving it.
+pub(crate) fn attention_tier_rank(tier: AttentionTier) -> u8 {
+    tier_rank(tier)
+}
+
 /// One `follow_up_outstanding` item per current `accepted_with_follow_up`
 /// assessment whose `related_input_request_ids` include at least one still-open
 /// request. The broad form (untracked follow-ups with no linked request) is

@@ -27,8 +27,8 @@ mod workflow;
 
 #[doc(hidden)]
 pub use change_order::{
-    AttentionWaitKeyV1, ChangeListOrderV1, ChangeOrderKey, ChangePageKeyV1,
-    compare_change_order, is_strictly_ordered,
+    AttentionWaitKeyV1, ChangeListOrderV1, ChangeOrderKey, ChangePageKeyV1, compare_change_order,
+    is_strictly_ordered,
 };
 pub use derived_access::attention::{DerivedAttention, DerivedAttentionRoute};
 #[doc(hidden)]
@@ -67,6 +67,8 @@ pub use derived_access::timeline::{
     DerivedTimelinePageRequestError, DerivedTimelinePageRequestV1, DerivedTimelinePageV1,
     DerivedTimelineTraversalV1,
 };
+pub(crate) use projection::event_history::project_selected_event_history_without_trust;
+pub(crate) use workflow::attention::{attention_from_events, attention_tier_rank};
 
 /// Drain process-local, user-actionable diagnostics produced while coordinating
 /// disposable derived state around authoritative writes.

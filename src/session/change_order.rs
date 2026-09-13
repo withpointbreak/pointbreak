@@ -106,29 +106,25 @@ pub fn compare_change_order(
     let by_id = || left.change_id.cmp(right.change_id);
     match order {
         ChangeListOrderV1::ChangeIdAsc => by_id(),
-        ChangeListOrderV1::ActivityDesc => {
-            match (left.activity_at, right.activity_at) {
-                (Some(left_at), Some(right_at)) => compare_event_instants(right_at, left_at),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-            .then_with(by_id)
+        ChangeListOrderV1::ActivityDesc => match (left.activity_at, right.activity_at) {
+            (Some(left_at), Some(right_at)) => compare_event_instants(right_at, left_at),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
         }
-        ChangeListOrderV1::AttentionWait => {
-            match (
-                left.tier_rank.zip(left.oldest_observed_at),
-                right.tier_rank.zip(right.oldest_observed_at),
-            ) {
-                (Some((left_tier, left_at)), Some((right_tier, right_at))) => left_tier
-                    .cmp(&right_tier)
-                    .then_with(|| compare_event_instants(left_at, right_at)),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-            .then_with(by_id)
+        .then_with(by_id),
+        ChangeListOrderV1::AttentionWait => match (
+            left.tier_rank.zip(left.oldest_observed_at),
+            right.tier_rank.zip(right.oldest_observed_at),
+        ) {
+            (Some((left_tier, left_at)), Some((right_tier, right_at))) => left_tier
+                .cmp(&right_tier)
+                .then_with(|| compare_event_instants(left_at, right_at)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
         }
+        .then_with(by_id),
     }
 }
 
@@ -137,7 +133,11 @@ pub fn compare_change_order(
 /// order-specific; a continuation presented under a different order is
 /// rejected by the order check, never re-interpreted.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "order", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "order",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ChangePageKeyV1 {
     ChangeIdAsc {
         change_id: String,
@@ -243,8 +243,7 @@ pub fn is_strictly_ordered<'a>(
 mod tests {
     use super::*;
 
-    const PARITY: &str =
-        include_str!("../cli/inspect/web/test/fixtures/change-order-parity.json");
+    const PARITY: &str = include_str!("../cli/inspect/web/test/fixtures/change-order-parity.json");
 
     fn key<'a>(change_id: &'a str, activity_at: Option<&'a str>) -> ChangeOrderKey<'a> {
         ChangeOrderKey {
@@ -283,7 +282,10 @@ mod tests {
         }
         assert_eq!(ChangeListOrderV1::parse("activity-desc"), None);
         assert_eq!(ChangeListOrderV1::parse("activity_asc"), None);
-        assert_eq!(ChangeListOrderV1::default(), ChangeListOrderV1::ActivityDesc);
+        assert_eq!(
+            ChangeListOrderV1::default(),
+            ChangeListOrderV1::ActivityDesc
+        );
         assert!(!ChangeListOrderV1::AttentionWait.admitted_on_changes_lens());
         assert!(ChangeListOrderV1::AttentionWait.admitted_on_attention_lens());
     }
@@ -334,21 +336,53 @@ mod tests {
 
     #[test]
     fn attention_wait_orders_tier_then_oldest_then_change_id_with_absent_last() {
-        let primary_old = wait("change:sha256:91cd", Some(0), Some("2026-09-01T00:00:00.000Z"));
-        let primary_new = wait("change:sha256:0a1f", Some(0), Some("2026-09-02T00:00:00.000Z"));
-        let primary_new_tie = wait("change:sha256:3b77", Some(0), Some("2026-09-02T00:00:00.000Z"));
-        let secondary_older = wait("change:sha256:7e02", Some(1), Some("2026-08-01T00:00:00.000Z"));
+        let primary_old = wait(
+            "change:sha256:91cd",
+            Some(0),
+            Some("2026-09-01T00:00:00.000Z"),
+        );
+        let primary_new = wait(
+            "change:sha256:0a1f",
+            Some(0),
+            Some("2026-09-02T00:00:00.000Z"),
+        );
+        let primary_new_tie = wait(
+            "change:sha256:3b77",
+            Some(0),
+            Some("2026-09-02T00:00:00.000Z"),
+        );
+        let secondary_older = wait(
+            "change:sha256:7e02",
+            Some(1),
+            Some("2026-08-01T00:00:00.000Z"),
+        );
         let absent = wait("change:sha256:0000", None, None);
         let order = ChangeListOrderV1::AttentionWait;
-        assert_eq!(compare_change_order(order, primary_old, primary_new), Ordering::Less);
-        assert_eq!(compare_change_order(order, primary_new, primary_new_tie), Ordering::Less);
-        assert_eq!(compare_change_order(order, primary_new_tie, secondary_older), Ordering::Less);
-        assert_eq!(compare_change_order(order, secondary_older, absent), Ordering::Less);
+        assert_eq!(
+            compare_change_order(order, primary_old, primary_new),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_change_order(order, primary_new, primary_new_tie),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_change_order(order, primary_new_tie, secondary_older),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_change_order(order, secondary_older, absent),
+            Ordering::Less
+        );
     }
 
     #[test]
     fn page_keys_round_trip_their_order_and_components() {
-        let source = wait("change:sha256:91cd", Some(0), Some("2026-09-01T00:00:00.000Z"));
+        let source = wait(
+            "change:sha256:91cd",
+            Some(0),
+            Some("2026-09-01T00:00:00.000Z"),
+        );
         let boundary = ChangePageKeyV1::from_order_key(ChangeListOrderV1::AttentionWait, source);
         assert_eq!(boundary.order(), ChangeListOrderV1::AttentionWait);
         assert_eq!(boundary.order_key(), source);
@@ -370,8 +404,14 @@ mod tests {
         let a = key("change:sha256:a", Some("2026-09-12T19:20:00.000Z"));
         let b = key("change:sha256:b", Some("2026-09-12T18:04:00.000Z"));
         assert!(is_strictly_ordered(ChangeListOrderV1::ActivityDesc, [a, b]));
-        assert!(!is_strictly_ordered(ChangeListOrderV1::ActivityDesc, [b, a]));
-        assert!(!is_strictly_ordered(ChangeListOrderV1::ActivityDesc, [a, a]));
+        assert!(!is_strictly_ordered(
+            ChangeListOrderV1::ActivityDesc,
+            [b, a]
+        ));
+        assert!(!is_strictly_ordered(
+            ChangeListOrderV1::ActivityDesc,
+            [a, a]
+        ));
         assert!(is_strictly_ordered(ChangeListOrderV1::ActivityDesc, []));
     }
 

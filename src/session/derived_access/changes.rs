@@ -2999,6 +2999,8 @@ mod tests {
             availability_summary: availability_filter_name(availability).to_owned(),
             diagnostics: Vec::new(),
             projection_stamp: PAGE_TEST_STAMP.to_owned(),
+            activity_at: None,
+            attention_wait_at: None,
         }
     }
 

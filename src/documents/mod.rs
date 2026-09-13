@@ -24,6 +24,7 @@ mod association_comparison;
 mod attention;
 mod capture;
 mod change;
+mod change_ordering;
 mod event_history;
 mod history;
 mod identity;
@@ -55,8 +56,6 @@ pub use attention::{
     derived_attention_list_document,
 };
 pub use capture::{CaptureBody, capture_document};
-#[doc(hidden)]
-pub use change::normalize_fact_presentations;
 pub use change::{
     ATTENTION_LIST_SCHEMA_V2, ChangeAttentionDocumentV2, ChangeAttentionPresentationDocumentV2,
     ChangeClaimWithdrawalV1, ChangeDeclarationStateV1, ChangeDetailDocumentV1, ChangeDetailV1,
@@ -75,6 +74,12 @@ pub use change::{
     attention_presentation_for_change,
 };
 pub(crate) use change::{FactPortCarrierSourceV1, change_presentation_projection};
+#[doc(hidden)]
+pub use change::{change_summary_order_key, normalize_fact_presentations};
+pub(crate) use change_ordering::change_ordering_projection;
+pub use change_ordering::{
+    ChangeActivityContributionV1, ChangeOrderingV1, attention_wait_keys, fold_change_activity,
+};
 pub use event_history::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
     EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,

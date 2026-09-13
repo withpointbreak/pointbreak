@@ -14,7 +14,7 @@ pub use items::{
     AttentionAssessmentRecord, AttentionDetail, AttentionFreshness, AttentionFreshnessState,
     AttentionItem, AttentionProjection, AttentionTier,
 };
-pub(crate) use items::{attention_from_events, scope_attention_items};
+pub(crate) use items::{attention_from_events, attention_tier_rank, scope_attention_items};
 
 use crate::error::{Result, ShoreError};
 use crate::model::RevisionId;
