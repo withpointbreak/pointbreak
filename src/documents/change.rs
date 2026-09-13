@@ -183,6 +183,10 @@ pub enum RevisionSummarySourceV1 {
     Absent,
 }
 
+/// Server-owned copy for a current Revision whose proposal carried no summary.
+/// Fixed by owner decision D1; the Inspector never re-derives it client-side.
+pub const ABSENT_SUMMARY_LABEL: &str = "No summary at capture";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentRevisionPresentationV1 {
@@ -190,6 +194,10 @@ pub struct CurrentRevisionPresentationV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision_proposal_summary: Option<String>,
     pub summary_source: RevisionSummarySourceV1,
+    /// Finished display string. The proposal summary when one was supplied,
+    /// otherwise `ABSENT_SUMMARY_LABEL`. Server owns this so the client mints
+    /// no copy of its own.
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1788,6 +1796,9 @@ fn presentation_for_current_revisions(
             let revision_proposal_summary = (summaries.len() == 1)
                 .then(|| summaries.iter().next().cloned().flatten())
                 .flatten();
+            let label = revision_proposal_summary
+                .clone()
+                .unwrap_or_else(|| ABSENT_SUMMARY_LABEL.to_owned());
             Ok(CurrentRevisionPresentationV1 {
                 summary_source: if revision_proposal_summary.is_some() {
                     RevisionSummarySourceV1::RevisionProposalSummary
@@ -1796,6 +1807,7 @@ fn presentation_for_current_revisions(
                 },
                 revision,
                 revision_proposal_summary,
+                label,
             })
         })
         .collect()
@@ -3838,11 +3850,13 @@ mod tests {
                                 revision: revision.clone(),
                                 revision_proposal_summary: Some("first proposal".to_owned()),
                                 summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
+                                label: "first proposal".to_owned(),
                             },
                             CurrentRevisionPresentationV1 {
                                 revision: other.clone(),
                                 revision_proposal_summary: None,
                                 summary_source: RevisionSummarySourceV1::Absent,
+                                label: ABSENT_SUMMARY_LABEL.to_owned(),
                             },
                         ],
                     },
@@ -4129,6 +4143,36 @@ mod tests {
     }
 
     #[test]
+    fn absent_proposal_summary_presents_a_server_owned_label() {
+        let revision = reference("one", 'a');
+        let summaries = BTreeMap::from([(revision.clone(), BTreeSet::from([None]))]);
+        let presented =
+            presentation_for_current_revisions(vec![revision.clone()], &summaries).unwrap();
+        assert_eq!(presented[0].summary_source, RevisionSummarySourceV1::Absent);
+        assert_eq!(presented[0].revision_proposal_summary, None);
+        assert_eq!(presented[0].label, ABSENT_SUMMARY_LABEL);
+        // Pin the owner-approved copy (D1) end to end; the client fixtures use
+        // the same literal, so drift on either side fails a test.
+        assert_eq!(presented[0].label, "No summary at capture");
+    }
+
+    #[test]
+    fn supplied_proposal_summary_is_the_label_verbatim() {
+        let revision = reference("one", 'a');
+        let summaries = BTreeMap::from([(
+            revision.clone(),
+            BTreeSet::from([Some("Preserve atomic captures".to_owned())]),
+        )]);
+        let presented =
+            presentation_for_current_revisions(vec![revision.clone()], &summaries).unwrap();
+        assert_eq!(
+            presented[0].summary_source,
+            RevisionSummarySourceV1::RevisionProposalSummary
+        );
+        assert_eq!(presented[0].label, "Preserve atomic captures");
+    }
+
+    #[test]
     fn presentation_stamp_includes_event_generation_identity() {
         let (change_id, revision, facade) = facade();
         let presentation = ChangePresentationV1 {
@@ -4136,6 +4180,7 @@ mod tests {
                 revision,
                 revision_proposal_summary: Some("stable".to_owned()),
                 summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
+                label: "stable".to_owned(),
             }],
         };
         let bind = |event_set_hash: &str| {

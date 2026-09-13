@@ -105,6 +105,11 @@ describe("active Change inspector architecture", () => {
           activeImport: true,
         }),
         expect.objectContaining({
+          path: "workflow-handoff.ts",
+          classification: "model-neutral-retained",
+          activeImport: true,
+        }),
+        expect.objectContaining({
           path: "change-inspector-search.ts",
           classification: "adapted",
           activeImport: true,

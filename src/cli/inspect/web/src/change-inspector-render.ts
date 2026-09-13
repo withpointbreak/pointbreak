@@ -7,6 +7,7 @@ import {
 } from "./change-inspector-diff";
 import {
   eventSubjectLabel,
+  eventTargetLabel,
   eventTypeColor,
   presentEvent,
 } from "./change-inspector-event-presentation";
@@ -37,11 +38,19 @@ import type {
   EventHistoryEntry,
   EventHistoryQuery,
   FactContent,
+  FactRelationshipEdge,
+  FactRelationshipGraphPresentation,
+  FactTarget,
   RevisionRef,
   RevisionResource,
 } from "./change-protocol";
 import { filterChipsFor, removeFilterChipToken } from "./chips";
-import { CLASS } from "./classNames";
+import {
+  annoKindClass,
+  CLASS,
+  factFamilyClass,
+  factStatusClass,
+} from "./classNames";
 import {
   type DiffArtifact,
   renderDiff,
@@ -54,6 +63,11 @@ import {
   shortExactRevision,
   shortRef,
 } from "./refs";
+import {
+  copyWorkflowCommand,
+  firstReviewHandoff,
+  renderWorkflowHandoff,
+} from "./workflow-handoff";
 
 export interface ChangeInspectorNavigationActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
@@ -178,6 +192,27 @@ function message(text: string): HTMLParagraphElement {
   element.className = "empty";
   setCompactIdentityText(element, text);
   return element;
+}
+
+/**
+ * Hydrate one handoff block from the ONE command producer and wire its copy
+ * control. The markup, the command text, the escaping, and the clipboard write
+ * all belong to `workflow-handoff.ts`; this seam only adopts the node into the
+ * Change-first tree and binds the click the shell owns. Copying is advisory and
+ * clipboard-only: it never fetches, navigates, or mutates store state.
+ */
+function firstCaptureHandoffBlock(): HTMLElement | null {
+  const host = document.createElement("div");
+  host.innerHTML = renderWorkflowHandoff(firstReviewHandoff());
+  const block = host.firstElementChild;
+  if (!(block instanceof HTMLElement)) return null;
+  const copy = block.querySelector<HTMLElement>("[data-copy-workflow-command]");
+  if (copy) {
+    copy.addEventListener("click", () => {
+      void copyWorkflowCommand(copy);
+    });
+  }
+  return block;
 }
 
 function selectOption(
@@ -840,7 +875,17 @@ function renderEventDetail(
   identity.dataset.eventId = event.eventId;
   const summary = document.createElement("section");
   summary.className = "event-detail-summary";
-  if (presentation.body) summary.append(detailLine(presentation.body));
+  if (presentation.body) {
+    const body = document.createElement("div");
+    body.className = "anno-body";
+    // Only a content type the writer declared reaches the Markdown renderer;
+    // absent means plain text and stays escaped.
+    body.innerHTML = renderBodyContent(
+      presentation.body,
+      presentation.bodyContentType ?? "text/plain",
+    );
+    summary.append(body);
+  }
   const summaryFacts = document.createElement("dl");
   summaryFacts.className = "kv";
   for (const item of presentation.fields) {
@@ -1131,6 +1176,159 @@ function renderedFactBody(
   return body;
 }
 
+/**
+ * Responses the server already nested inside their input request. Each response
+ * declares its own content type; the request's type never stands in for it, and
+ * a body that is not present is stated, never rendered.
+ */
+function renderedInputRequestResponses(
+  content: FactContent,
+): HTMLElement | null {
+  if (content.kind !== "input_request") return null;
+  const responses = content.responses ?? [];
+  if (responses.length === 0) return null;
+  const nest = document.createElement("div");
+  nest.className = "fact-responses";
+  for (const response of responses) {
+    const entry = document.createElement("div");
+    entry.className = "fact-response";
+    const head = document.createElement("div");
+    head.className = "anno-head";
+    const outcome = document.createElement("span");
+    outcome.className = "outcome";
+    outcome.textContent = response.outcome;
+    head.append(outcome);
+    entry.append(
+      head,
+      detailLine(
+        `response: ${shortRef(response.responseId)} · ${response.bodyContentState.replaceAll("_", " ")} · ${response.availability.replaceAll("_", " ")}`,
+      ),
+    );
+    if (response.bodyContentState === "present" && response.reason) {
+      const reason = document.createElement("div");
+      reason.className = "anno-body";
+      reason.innerHTML = renderBodyContent(
+        response.reason,
+        response.contentType,
+      );
+      entry.append(reason);
+    }
+    nest.append(entry);
+  }
+  return nest;
+}
+
+/** The fact identities this exact response itself carries. */
+function documentFactIds(
+  facts: Array<{ factId: string }>,
+): ReadonlySet<string> {
+  return new Set(facts.map((fact) => fact.factId));
+}
+
+/**
+ * An activation for one identity the same exact response already carries. It
+ * deliberately avoids `data-fact-id`, which the exact focus resolver matches.
+ */
+function factReferenceControl(
+  label: string,
+  factId: string,
+  activate: (factId: string) => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost mono";
+  button.textContent = label;
+  button.title = factId;
+  button.setAttribute("aria-label", `Focus fact ${factId}`);
+  button.dataset.relationFactId = factId;
+  button.addEventListener("click", () => activate(factId));
+  return button;
+}
+
+/** The fact id a review target names, when the target names a fact at all. */
+function targetFactId(target: FactTarget): string | undefined {
+  return target.kind === "observation"
+    ? target.observationId
+    : target.kind === "input_request"
+      ? target.inputRequestId
+      : target.kind === "assessment"
+        ? target.assessmentId
+        : undefined;
+}
+
+function factTargetLine(
+  target: FactTarget,
+  present: ReadonlySet<string>,
+  activate: (factId: string) => void,
+): HTMLParagraphElement {
+  const line = detailLine("target: ", "fact-rel");
+  const factId = targetFactId(target);
+  if (factId !== undefined && present.has(factId)) {
+    line.append(factReferenceControl(shortRef(factId), factId, activate));
+    return line;
+  }
+  line.append(document.createTextNode(eventTargetLabel(target)));
+  return line;
+}
+
+/**
+ * Inline relation lines for one fact, read only from the fact graph this exact
+ * response carries. An identity absent from this response is named but never
+ * activated.
+ */
+function factRelationLines(
+  factId: string,
+  graph: FactRelationshipGraphPresentation | undefined,
+  present: ReadonlySet<string>,
+  activate: (factId: string) => void,
+): HTMLParagraphElement[] {
+  if (!graph) return [];
+  const lines: HTMLParagraphElement[] = [];
+  const relate = (label: string, edges: FactRelationshipEdge[]): void => {
+    for (const edge of edges) {
+      if (edge.fromFactId !== factId) continue;
+      const line = detailLine(`${label} `, "fact-rel");
+      if (present.has(edge.toFactId)) {
+        line.append(
+          factReferenceControl(
+            shortRef(edge.toFactId),
+            edge.toFactId,
+            activate,
+          ),
+        );
+      } else {
+        const named = document.createElement("code");
+        named.textContent = shortRef(edge.toFactId);
+        named.title = edge.toFactId;
+        line.append(named);
+      }
+      lines.push(line);
+    }
+  };
+  relate("supersedes", graph.observationSupersedes);
+  relate("replaces", graph.assessmentReplaces);
+  return lines;
+}
+
+/**
+ * The status chip for one fact. Input requests and validation checks carry
+ * their own status; an assessment's decision already heads the card, so its
+ * chip (like an observation's) is the carried record currency, never the
+ * decision, so a replaced "accepted" cannot read as a live acceptance.
+ */
+function factStatusText(
+  family: string,
+  familyState: string,
+  content: FactContent | undefined,
+): string | undefined {
+  if (content?.kind === "input_request" || content?.kind === "validation") {
+    return content.status;
+  }
+  return family === "assessment" || family === "observation"
+    ? familyState
+    : undefined;
+}
+
 function renderFacts(
   reading:
     | Extract<ChangeInspectorReading, { kind: "revision" }>
@@ -1147,15 +1345,40 @@ function renderFacts(
     family.push(fact);
     groups.set(fact.family, family);
   }
+  const presentFactIds = documentFactIds(reading.document.factPresentations);
+  const focusFact = (factId: string): void =>
+    actions.navigate({
+      kind: route.kind,
+      changeId: route.changeId,
+      revision: route.revision,
+      query: queryForExactNavigation(route),
+      focus: { factId },
+    });
   for (const [family, items] of groups) {
+    const familyLabel = family.replaceAll("_", " ");
     const group = document.createElement("section");
-    group.append(detailHeading(family.replaceAll("_", " "), 4));
+    group.className = factFamilyClass(family);
+    group.append(detailHeading(`${familyLabel} (${items.length})`, 4));
     for (const fact of items) {
       const card = document.createElement("article");
       card.className = "unit-card";
       card.dataset.factId = fact.factId;
       card.tabIndex = -1;
       const content = reading.document.factContentPresentations?.[fact.factId];
+      const head = document.createElement("div");
+      head.className = "anno-head";
+      const kind = document.createElement("span");
+      kind.className = annoKindClass(family.replaceAll("_", "-"));
+      kind.textContent = familyLabel;
+      head.append(kind);
+      const status = factStatusText(family, fact.familyState, content?.content);
+      if (status !== undefined) {
+        const chip = document.createElement("span");
+        chip.className = factStatusClass(status);
+        chip.textContent = status;
+        head.append(chip);
+      }
+      card.append(head);
       if (content) {
         const heading =
           content.content.kind === "assessment"
@@ -1181,6 +1404,17 @@ function renderFacts(
           `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`,
         ),
       );
+      if (fact.target) {
+        card.append(factTargetLine(fact.target, presentFactIds, focusFact));
+      }
+      card.append(
+        ...factRelationLines(
+          fact.factId,
+          reading.document.inspectorPresentation?.factGraph,
+          presentFactIds,
+          focusFact,
+        ),
+      );
       const presentedInRevision = fact.presentedInRevision;
       if (presentedInRevision) {
         const applicablePort = reading.document.factPorts.find(
@@ -1201,26 +1435,20 @@ function renderFacts(
         );
       }
       if (content) {
+        const responses = renderedInputRequestResponses(content.content);
         card.append(
           detailLine(
             `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`,
           ),
           renderedFactBody(content.content, content.contentType),
+          ...(responses ? [responses] : []),
         );
       }
       const focus = document.createElement("button");
       focus.type = "button";
       focus.className = "ghost";
       focus.textContent = "Focus fact";
-      focus.addEventListener("click", () =>
-        actions.navigate({
-          kind: route.kind,
-          changeId: route.changeId,
-          revision: route.revision,
-          query: queryForExactNavigation(route),
-          focus: { factId: fact.factId },
-        }),
-      );
+      focus.addEventListener("click", () => focusFact(fact.factId));
       card.append(focus);
       group.append(card);
     }
@@ -2065,6 +2293,9 @@ export function renderChangeInspector(
     actions,
   );
   if (snapshot.route.kind !== "timeline") {
+    // Blanket hide on every render; the Timeline/event branch below re-shows
+    // the control whenever a retained monitor snapshot exists, so this must
+    // stay ahead of that branch.
     document.querySelector("#follow-toggle")?.classList.add("hidden");
   }
   clearError();
@@ -2085,18 +2316,30 @@ export function renderChangeInspector(
       renderDetail(snapshot, actions, presentation);
       return;
     }
+    // Which history the master pane paints stays a Timeline-only decision: an
+    // event route deliberately reads the loaded page, not a parked window.
     const monitor =
       route.kind === "timeline" ? (presentation.timeline ?? null) : null;
     const history = monitor?.display ?? snapshot.generation.history;
+    // Whether the reader can still see that the Timeline is following is a
+    // separate, presentation-only question. Opening an event detail never
+    // changes follow state, so the control stays readable while it is open,
+    // reflecting the retained monitor snapshot; it is operable only on the
+    // Timeline itself because toggling is timeline-only.
+    const followState = presentation.timeline ?? null;
     const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
     if (follow) {
-      follow.classList.toggle("hidden", monitor === null);
-      if (monitor !== null) {
-        const parked = monitor.mode === "parked";
+      follow.classList.toggle("hidden", followState === null);
+      // `aria-disabled` rather than `disabled`: the state text stays in the
+      // tab order and the accessibility tree, while the toggle handler itself
+      // refuses to act off the Timeline.
+      follow.setAttribute("aria-disabled", String(route.kind !== "timeline"));
+      if (followState !== null) {
+        const parked = followState.mode === "parked";
         follow.setAttribute("aria-pressed", String(!parked));
         follow.textContent = parked
-          ? monitor.newCount > 0
-            ? `Show ${monitor.newCount} new ${monitor.newCount === 1 ? "event" : "events"}`
+          ? followState.newCount > 0
+            ? `Show ${followState.newCount} new ${followState.newCount === 1 ? "event" : "events"}`
             : "Parked"
           : "Following";
         follow.setAttribute(
@@ -2144,6 +2387,22 @@ export function renderChangeInspector(
   // Polling often republishes the same stamped generation. Compute the cache
   // key before allocating card nodes so an unchanged tick does not build and
   // discard the complete bounded tree every three seconds.
+  // The capture suggestion is first-open-only: the Changes lens route itself
+  // (not an exact route that merely maps to this lens), a loaded page with
+  // zero Changes, no filter of any kind, and no continuation in either
+  // direction. A filtered or paged empty view keeps its message and never
+  // suggests a capture, because recapturing is not the answer to a filter
+  // miss or to reading past the end. The eligibility reads the route kind,
+  // which nothing else in the cached tree does, so it joins the cache key:
+  // a same-generation lens/exact transition must repaint rather than reuse.
+  const firstCaptureEligible =
+    route.kind === "lens" &&
+    lens === "changes" &&
+    page.changes.length === 0 &&
+    filterValues(route.query).length === 0 &&
+    route.query.after === undefined &&
+    page.previous == null &&
+    page.next == null;
   const listKey = JSON.stringify({
     lens,
     query: route.query,
@@ -2152,6 +2411,7 @@ export function renderChangeInspector(
     next: page.next,
     last: page.last ?? null,
     changes: page.changes.map((change) => change.changeId),
+    firstCaptureEligible,
   });
   if (master.dataset.changeListKey !== listKey) {
     const list = document.createElement("section");
@@ -2342,7 +2602,7 @@ export function renderChangeInspector(
           const choose = document.createElement("button");
           choose.type = "button";
           choose.className = "ghost change-card-peer-open";
-          choose.textContent = `Open current Revision · ${peer.label} · ${peer.visibleIdentity}`;
+          choose.textContent = `Open · ${peer.label} · ${peer.visibleIdentity}`;
           choose.title = peer.title;
           choose.setAttribute(
             "aria-label",
@@ -2372,12 +2632,17 @@ export function renderChangeInspector(
     // honest h1 → h3 outline (no group h2 above these cards) beats a
     // client-invented heading.
     for (const ungrouped of ungroupedCards) list.append(ungrouped);
-    if (page.changes.length === 0)
+    if (page.changes.length === 0) {
       list.append(
         message(
           lens === "changes" ? "No Changes." : "No Changes need attention.",
         ),
       );
+      if (firstCaptureEligible) {
+        const handoff = firstCaptureHandoffBlock();
+        if (handoff) list.append(handoff);
+      }
+    }
     const appendPager = (
       direction: "previous" | "next" | "last",
       continuation: string | null | undefined,

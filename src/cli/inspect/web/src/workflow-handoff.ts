@@ -14,7 +14,23 @@
 
 import { CLASS } from "./classNames";
 import { escapeHtml } from "./escape";
-import type { AttentionItem } from "./store";
+
+/**
+ * The attention fields a handoff command reads, declared locally so the ONE
+ * command producer carries no dependency on the legacy aggregate store. The
+ * legacy `AttentionItem` is structurally assignable to this shape, so existing
+ * callers need no change.
+ */
+export interface WorkflowAttentionItem {
+  kind: string;
+  revisionId?: string;
+  inputRequestId?: string;
+  trackId?: string;
+  checkName?: string;
+  assessments?: { assessmentId?: string }[];
+  headRevisionIds?: string[];
+  openInputRequestIds?: string[];
+}
 
 /** One copyable command: a label, the exact command text, and the visible
  * placeholder tokens it contains (in order of appearance). */
@@ -110,7 +126,7 @@ function respondHandoff(
 /** The kind-specific commands for one attention item, or `[]` when the kind is
  * unsupported or any authoritative field a command needs is absent. */
 export function attentionHandoffs(
-  item: AttentionItem,
+  item: WorkflowAttentionItem,
 ): WorkflowCommandHandoff[] {
   switch (item.kind) {
     case "open_input_request": {
