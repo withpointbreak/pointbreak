@@ -18,13 +18,20 @@ import type {
   EventHistoryEventType,
 } from "./change-protocol";
 
+export type TimelineGroup = {
+  kind: "group";
+  eventType: EventHistoryEventType;
+  members: EventHistoryEntry[];
+};
+
 export type TimelineRow =
-  | { kind: "event"; entry: EventHistoryEntry }
   | {
-      kind: "group";
-      eventType: EventHistoryEventType;
-      members: EventHistoryEntry[];
-    };
+      kind: "event";
+      entry: EventHistoryEntry;
+      /** Set on a member row spliced in from an expanded group. */
+      ofGroup?: TimelineGroup;
+    }
+  | TimelineGroup;
 
 /** Adjacent same-type runs shorter than this stay flat. */
 export const GROUP_MIN_RUN = 3;
@@ -74,7 +81,9 @@ export function visualRows(
   const rows: TimelineRow[] = [];
   for (const row of groups) {
     if (row.kind === "group" && expanded.has(groupKey(row))) {
-      for (const entry of row.members) rows.push({ kind: "event", entry });
+      for (const entry of row.members) {
+        rows.push({ kind: "event", entry, ofGroup: row });
+      }
     } else {
       rows.push(row);
     }

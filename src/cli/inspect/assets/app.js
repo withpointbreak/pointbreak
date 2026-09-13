@@ -1354,6 +1354,7 @@
     timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
     timelineGroup: "timeline-group",
+    timelineGroupMembers: "timeline-group-members",
     lensHeading: "lens-heading",
     lensMeta: "lens-meta",
     lensCount: "lens-count",
@@ -1682,7 +1683,9 @@
     const rows = [];
     for (const row of groups) {
       if (row.kind === "group" && expanded.has(groupKey(row))) {
-        for (const entry of row.members) rows.push({ kind: "event", entry });
+        for (const entry of row.members) {
+          rows.push({ kind: "event", entry, ofGroup: row });
+        }
       } else {
         rows.push(row);
       }
@@ -1690,6 +1693,25 @@
     return rows;
   }
   __name(visualRows, "visualRows");
+  function navigableEventIds(rows) {
+    return rows.map(groupKey);
+  }
+  __name(navigableEventIds, "navigableEventIds");
+  function owningGroupKey(groups, eventId) {
+    for (const row of groups) {
+      if (row.kind === "group" && row.members.some((member) => member.eventId === eventId)) {
+        return groupKey(row);
+      }
+    }
+    return null;
+  }
+  __name(owningGroupKey, "owningGroupKey");
+  function collapsedGroupAt(groups, eventId, expanded) {
+    if (eventId === null) return null;
+    const owner = owningGroupKey(groups, eventId);
+    return owner !== null && !expanded.has(owner) ? owner : null;
+  }
+  __name(collapsedGroupAt, "collapsedGroupAt");
 
   // src/dom.ts
   function $(sel) {
@@ -2024,6 +2046,24 @@
     row.append(rail);
   }
   __name(appendRail, "appendRail");
+  function groupName(group) {
+    const first = group.members[0];
+    if (first === void 0) throw new Error("Timeline group has no members");
+    return `${presentEvent(first).label}, ${group.members.length} events`;
+  }
+  __name(groupName, "groupName");
+  function groupContainer(group) {
+    const item = document.createElement("li");
+    item.className = CLASS.timelineGroupMembers;
+    item.dataset.timelineGroupMembers = group.eventType;
+    item.setAttribute("role", "group");
+    item.setAttribute("aria-label", groupName(group));
+    const members = document.createElement("ol");
+    members.setAttribute("role", "none");
+    item.append(members);
+    return { item, members };
+  }
+  __name(groupContainer, "groupContainer");
   function groupRow(group, selectedEventId) {
     const first = group.members[0];
     if (first === void 0) throw new Error("Timeline group has no members");
@@ -2177,13 +2217,28 @@
     ) : rows.length;
     const top = rowSpacer(localStart * rowHeight);
     const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
-    list.replaceChildren(
-      top,
-      ...rows.slice(localStart, localEnd).map(
-        (row) => row.kind === "group" ? groupRow(row, view.selectedEventId) : entryRow(row.entry, view.selectedEventId, view.route)
-      ),
-      bottom
-    );
+    const painted = [];
+    const containers = /* @__PURE__ */ new Map();
+    for (const row of rows.slice(localStart, localEnd)) {
+      if (row.kind === "group") {
+        painted.push(groupRow(row, view.selectedEventId));
+        continue;
+      }
+      const member = entryRow(row.entry, view.selectedEventId, view.route);
+      if (row.ofGroup === void 0) {
+        painted.push(member);
+        continue;
+      }
+      let members = containers.get(row.ofGroup);
+      if (members === void 0) {
+        const created = groupContainer(row.ofGroup);
+        members = created.members;
+        containers.set(row.ofGroup, members);
+        painted.push(created.item);
+      }
+      members.append(member);
+    }
+    list.replaceChildren(top, ...painted, bottom);
     const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
       (row) => row.dataset.eventId === view.selectedEventId
     ) : null;
@@ -2393,8 +2448,15 @@
   __name(renderChangeInspectorTimeline, "renderChangeInspectorTimeline");
   function revealChangeInspectorTimelineEvent(eventId) {
     if (active === null) return false;
-    const localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
-    if (localIndex < 0) return false;
+    let localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+    if (localIndex < 0) {
+      const owner = collapsedGroupAt(active.grouped, eventId, active.expanded);
+      if (owner === null) return false;
+      active.expanded.add(owner);
+      deriveTimelineRows(active);
+      localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+      if (localIndex < 0) return false;
+    }
     active.selectedEventId = eventId;
     remeasureChangeInspectorTimelineRows();
     const top = localIndex * active.rowHeight;
@@ -2423,6 +2485,29 @@
     return selected !== void 0;
   }
   __name(revealChangeInspectorTimelineEvent, "revealChangeInspectorTimelineEvent");
+  function changeInspectorTimelineNavigableEventIds(timeline) {
+    if (active !== null && (timeline === void 0 || active.document === timeline)) {
+      return navigableEventIds(active.rows);
+    }
+    return timeline === void 0 ? [] : timeline.entries.map((entry) => entry.eventId);
+  }
+  __name(changeInspectorTimelineNavigableEventIds, "changeInspectorTimelineNavigableEventIds");
+  function changeInspectorTimelineGroupAt(eventId, options) {
+    if (active === null || eventId === null) return null;
+    return options?.includeExpanded ? owningGroupKey(active.grouped, eventId) : collapsedGroupAt(active.grouped, eventId, active.expanded);
+  }
+  __name(changeInspectorTimelineGroupAt, "changeInspectorTimelineGroupAt");
+  function setChangeInspectorTimelineGroupExpanded(groupKeyValue, expanded) {
+    if (active === null) return;
+    if (owningGroupKey(active.grouped, groupKeyValue) !== groupKeyValue) return;
+    if (active.expanded.has(groupKeyValue) === expanded) return;
+    if (expanded) active.expanded.add(groupKeyValue);
+    else active.expanded.delete(groupKeyValue);
+    deriveTimelineRows(active);
+    paintVisible(active);
+    remeasureChangeInspectorTimelineRows();
+  }
+  __name(setChangeInspectorTimelineGroupExpanded, "setChangeInspectorTimelineGroupExpanded");
 
   // src/change-inspector-timeline-navigation.ts
   function selectedIndex(window2) {
@@ -2700,7 +2785,16 @@
     let selectedTimelineEventId = null;
     let followedEventId = null;
     let currentTimelineEventIds = [];
+    let currentTimelinePage = null;
     let currentTimelineEntries = /* @__PURE__ */ new Map();
+    const refreshTimelineNavigation = /* @__PURE__ */ __name(() => {
+      currentTimelineEventIds = currentTimelinePage === null ? [] : [...changeInspectorTimelineNavigableEventIds(currentTimelinePage)];
+    }, "refreshTimelineNavigation");
+    const revealTimelineEvent = /* @__PURE__ */ __name((eventId) => {
+      const revealed = actions2.revealTimelineEvent?.(eventId) ?? false;
+      refreshTimelineNavigation();
+      return revealed;
+    }, "revealTimelineEvent");
     let pendingTimelineSelection = null;
     let pendingGlobalTimelineSelection = null;
     let pendingChangePageSelection = null;
@@ -2767,7 +2861,7 @@
     }, "navigateToTimelineEvent");
     const selectTimelineEvent = /* @__PURE__ */ __name((eventId, follow = false) => {
       selectedTimelineEventId = eventId;
-      actions2.revealTimelineEvent?.(eventId);
+      revealTimelineEvent(eventId);
       setTimelineSelected(eventId);
       if (follow) scrollTimelineSelectionIntoView(eventId);
       else focusTimelineSelection(eventId);
@@ -2817,7 +2911,7 @@
         restoreTimelineFocus = pendingGlobalTimelineSelection.restoreFocus;
         pendingGlobalTimelineSelection = null;
         if (selectedTimelineEventId !== null) {
-          actions2.revealTimelineEvent?.(selectedTimelineEventId);
+          revealTimelineEvent(selectedTimelineEventId);
         }
       }
       if (pendingTimelineSelection !== null && route?.kind === "timeline" && mountedTimelineRoute === pendingTimelineSelection.route && window2.eventIds.length > 0) {
@@ -2828,10 +2922,10 @@
         restoreTimelineFocus = pendingTimelineSelection.restoreFocus;
         pendingTimelineSelection = null;
         if (selectedTimelineEventId !== null) {
-          actions2.revealTimelineEvent?.(selectedTimelineEventId);
+          revealTimelineEvent(selectedTimelineEventId);
         }
       }
-      if (selectedTimelineEventId !== null && !window2.eventIds.includes(selectedTimelineEventId)) {
+      if (selectedTimelineEventId !== null && !currentTimelineEventIds.includes(selectedTimelineEventId)) {
         setTimelineSelected(null);
         return;
       }
@@ -3713,6 +3807,31 @@
           }
           return;
         }
+        if (event.key === "Enter" && !isNativeActionControl(event.target) || event.key === "ArrowRight" && isTimelineListTarget(event.target)) {
+          const group = changeInspectorTimelineGroupAt(selectedTimelineEventId);
+          if (group !== null) {
+            event.preventDefault();
+            parkTimelineForReaderActivity();
+            actions2.expandTimelineGroup?.(group);
+            refreshTimelineNavigation();
+            selectTimelineEvent(group);
+            return;
+          }
+          if (event.key === "ArrowRight") return;
+        }
+        if (event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
+          const owner = changeInspectorTimelineGroupAt(selectedTimelineEventId, {
+            includeExpanded: true
+          });
+          if (owner !== null) {
+            event.preventDefault();
+            parkTimelineForReaderActivity();
+            actions2.collapseTimelineGroup?.(owner);
+            refreshTimelineNavigation();
+            selectTimelineEvent(owner);
+          }
+          return;
+        }
         if (event.key === "Enter" && selectedTimelineEventId !== null && !isNativeActionControl(event.target)) {
           event.preventDefault();
           if (route.kind === "event" && route.eventId === selectedTimelineEventId) {
@@ -3949,6 +4068,7 @@
       selectedTimelineEventId = null;
       followedEventId = null;
       currentTimelineEventIds = [];
+      currentTimelinePage = null;
       currentTimelineEntries = /* @__PURE__ */ new Map();
       pendingTimelineSelection = null;
       pendingGlobalTimelineSelection = null;
@@ -3984,8 +4104,9 @@
       sync(snapshot2, timelinePage = snapshot2.generation?.history ?? null) {
         const nextRoute = snapshot2.route.kind === "invalid" ? null : snapshot2.route;
         const previousTimelineEntries = currentTimelineEntries;
-        const timelineEntries = companionTimelineRoute(nextRoute) !== null && timelinePage !== null ? timelinePage.entries : [];
-        currentTimelineEventIds = timelineEntries.map((entry) => entry.eventId);
+        currentTimelinePage = companionTimelineRoute(nextRoute) !== null ? timelinePage : null;
+        const timelineEntries = currentTimelinePage?.entries ?? [];
+        refreshTimelineNavigation();
         currentTimelineEntries = new Map(
           timelineEntries.map((entry) => [entry.eventId, entry])
         );
@@ -11399,7 +11520,9 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       navigateTimelineBoundary,
       revealTimelineEvent: revealChangeInspectorTimelineEvent,
       toggleTimelineMonitoring,
-      parkTimelineMonitoring
+      parkTimelineMonitoring,
+      expandTimelineGroup: /* @__PURE__ */ __name((groupKey2) => setChangeInspectorTimelineGroupExpanded(groupKey2, true), "expandTimelineGroup"),
+      collapseTimelineGroup: /* @__PURE__ */ __name((groupKey2) => setChangeInspectorTimelineGroupExpanded(groupKey2, false), "collapseTimelineGroup")
     });
     interactionStop = interaction.stop;
     filterInput = document.querySelector("#filter-text");

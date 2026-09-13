@@ -23,6 +23,7 @@ import {
   groupTimelineEntries,
   navigableEventIds,
   owningGroupKey,
+  type TimelineGroup,
   type TimelineRow,
   visualRows,
 } from "./change-inspector-timeline-grouping";
@@ -209,8 +210,36 @@ function appendRail(
  * first member's id, carries no links, and (per WAI-ARIA 1.2) no
  * `aria-expanded`: that attribute is unsupported on `role="option"`.
  */
+/** The accessible name shared by a group's collapsed row and expanded container. */
+function groupName(group: TimelineGroup): string {
+  const first = group.members[0];
+  if (first === undefined) throw new Error("Timeline group has no members");
+  return `${presentEvent(first).label}, ${group.members.length} events`;
+}
+
+/**
+ * An expanded group is a labelled `role="group"` container (permitted inside
+ * a listbox) whose children are the ordinary member option rows. It carries
+ * no `data-event-id` and no `event` class, so selection, measurement, and the
+ * keyboard cursor see only the member rows.
+ */
+function groupContainer(group: TimelineGroup): {
+  item: HTMLLIElement;
+  members: HTMLOListElement;
+} {
+  const item = document.createElement("li");
+  item.className = CLASS.timelineGroupMembers;
+  item.dataset.timelineGroupMembers = group.eventType;
+  item.setAttribute("role", "group");
+  item.setAttribute("aria-label", groupName(group));
+  const members = document.createElement("ol");
+  members.setAttribute("role", "none");
+  item.append(members);
+  return { item, members };
+}
+
 function groupRow(
-  group: Extract<TimelineRow, { kind: "group" }>,
+  group: TimelineGroup,
   selectedEventId: string | null,
 ): HTMLLIElement {
   const first = group.members[0];
@@ -388,17 +417,30 @@ function paintVisible(view: TimelineView): void {
   // estimator stays valid.
   const top = rowSpacer(localStart * rowHeight);
   const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
-  list.replaceChildren(
-    top,
-    ...rows
-      .slice(localStart, localEnd)
-      .map((row) =>
-        row.kind === "group"
-          ? groupRow(row, view.selectedEventId)
-          : entryRow(row.entry, view.selectedEventId, view.route),
-      ),
-    bottom,
-  );
+  const painted: HTMLLIElement[] = [];
+  // A group's members are contiguous in the visual rows, so one container
+  // per expanded group inside the painted window is exactly the DOM needed.
+  const containers = new Map<TimelineGroup, HTMLOListElement>();
+  for (const row of rows.slice(localStart, localEnd)) {
+    if (row.kind === "group") {
+      painted.push(groupRow(row, view.selectedEventId));
+      continue;
+    }
+    const member = entryRow(row.entry, view.selectedEventId, view.route);
+    if (row.ofGroup === undefined) {
+      painted.push(member);
+      continue;
+    }
+    let members = containers.get(row.ofGroup);
+    if (members === undefined) {
+      const created = groupContainer(row.ofGroup);
+      members = created.members;
+      containers.set(row.ofGroup, members);
+      painted.push(created.item);
+    }
+    members.append(member);
+  }
+  list.replaceChildren(top, ...painted, bottom);
   const activeOption = view.selectedEventId
     ? Array.from(list.querySelectorAll<HTMLElement>("[data-event-id]")).find(
         (row) => row.dataset.eventId === view.selectedEventId,
@@ -648,8 +690,17 @@ export function renderChangeInspectorTimeline(
  */
 export function revealChangeInspectorTimelineEvent(eventId: string): boolean {
   if (active === null) return false;
-  const localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
-  if (localIndex < 0) return false;
+  let localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+  if (localIndex < 0) {
+    // Reveal expands: a member of a collapsed group is in the document but
+    // not among the visual rows, so open its owner before searching again.
+    const owner = collapsedGroupAt(active.grouped, eventId, active.expanded);
+    if (owner === null) return false;
+    active.expanded.add(owner);
+    deriveTimelineRows(active);
+    localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
+    if (localIndex < 0) return false;
+  }
   active.selectedEventId = eventId;
   remeasureChangeInspectorTimelineRows();
   const top = localIndex * active.rowHeight;

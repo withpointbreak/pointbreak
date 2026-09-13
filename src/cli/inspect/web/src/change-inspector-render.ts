@@ -64,6 +64,8 @@ export interface ChangeInspectorNavigationActions {
   revealTimelineEvent?(eventId: string): boolean;
   toggleTimelineMonitoring?(): void;
   parkTimelineMonitoring?(): void;
+  expandTimelineGroup?(groupKey: string): void;
+  collapseTimelineGroup?(groupKey: string): void;
 }
 
 export interface ChangeInspectorRenderActions

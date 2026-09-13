@@ -48,7 +48,10 @@ import {
   createChangeInspectorState,
   stageGeneration,
 } from "./change-inspector-state";
-import { revealChangeInspectorTimelineEvent } from "./change-inspector-timeline";
+import {
+  revealChangeInspectorTimelineEvent,
+  setChangeInspectorTimelineGroupExpanded,
+} from "./change-inspector-timeline";
 import {
   firstTimelineRoute,
   traverseTimelineTail,
@@ -1394,6 +1397,10 @@ export async function bootstrapChangeInspector(
     revealTimelineEvent: revealChangeInspectorTimelineEvent,
     toggleTimelineMonitoring,
     parkTimelineMonitoring,
+    expandTimelineGroup: (groupKey) =>
+      setChangeInspectorTimelineGroupExpanded(groupKey, true),
+    collapseTimelineGroup: (groupKey) =>
+      setChangeInspectorTimelineGroupExpanded(groupKey, false),
   });
   interactionStop = interaction.stop;
   filterInput = document.querySelector<HTMLInputElement>("#filter-text");

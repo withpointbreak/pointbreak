@@ -23,7 +23,11 @@ import {
   timelineEventRoute,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
-import { scheduleChangeInspectorTimelineRemeasure } from "./change-inspector-timeline";
+import {
+  changeInspectorTimelineGroupAt,
+  changeInspectorTimelineNavigableEventIds,
+  scheduleChangeInspectorTimelineRemeasure,
+} from "./change-inspector-timeline";
 import {
   boundaryTimelineSelection,
   moveTimelineSelection,
@@ -390,7 +394,23 @@ export function installChangeInspectorInteraction(
   // the activation repair permanently suppressed.
   let followedEventId: string | null = null;
   let currentTimelineEventIds: string[] = [];
+  let currentTimelinePage: EventHistoryDocument | null = null;
   let currentTimelineEntries = new Map<string, EventHistoryEntry>();
+  // The navigable sequence IS the visible sequence. One source, so render
+  // order and cursor order cannot drift; copied because the seam is readonly.
+  const refreshTimelineNavigation = () => {
+    currentTimelineEventIds =
+      currentTimelinePage === null
+        ? []
+        : [...changeInspectorTimelineNavigableEventIds(currentTimelinePage)];
+  };
+  // A reveal can expand a collapsed group, so the visible sequence must be
+  // re-read in the same turn, before the next key is handled.
+  const revealTimelineEvent = (eventId: string): boolean => {
+    const revealed = actions.revealTimelineEvent?.(eventId) ?? false;
+    refreshTimelineNavigation();
+    return revealed;
+  };
   let pendingTimelineSelection: PendingTimelineSelection | null = null;
   let pendingGlobalTimelineSelection: {
     boundary: "first" | "last";
@@ -474,7 +494,7 @@ export function installChangeInspectorInteraction(
 
   const selectTimelineEvent = (eventId: string, follow = false) => {
     selectedTimelineEventId = eventId;
-    actions.revealTimelineEvent?.(eventId);
+    revealTimelineEvent(eventId);
     setTimelineSelected(eventId);
     // A follow leaves focus exactly where the reader put it — in the detail,
     // on its chrome, or on a master the reading layout has hidden.
@@ -558,7 +578,7 @@ export function installChangeInspectorInteraction(
       restoreTimelineFocus = pendingGlobalTimelineSelection.restoreFocus;
       pendingGlobalTimelineSelection = null;
       if (selectedTimelineEventId !== null) {
-        actions.revealTimelineEvent?.(selectedTimelineEventId);
+        revealTimelineEvent(selectedTimelineEventId);
       }
     }
     if (
@@ -574,12 +594,12 @@ export function installChangeInspectorInteraction(
       restoreTimelineFocus = pendingTimelineSelection.restoreFocus;
       pendingTimelineSelection = null;
       if (selectedTimelineEventId !== null) {
-        actions.revealTimelineEvent?.(selectedTimelineEventId);
+        revealTimelineEvent(selectedTimelineEventId);
       }
     }
     if (
       selectedTimelineEventId !== null &&
-      !window.eventIds.includes(selectedTimelineEventId)
+      !currentTimelineEventIds.includes(selectedTimelineEventId)
     ) {
       // Virtual scrolling can temporarily unmount the active option. Keep the
       // cursor identity so it is restored if that row re-enters the window,
@@ -1729,6 +1749,39 @@ export function installChangeInspectorInteraction(
         }
         return;
       }
+      // Collapsed same-type groups use the treeview idiom: Enter or ArrowRight
+      // opens the group under the cursor and keeps selection on its first
+      // member; ArrowLeft closes the group the cursor is inside and returns
+      // selection to the group row. Enter on a plain event row keeps its
+      // descend-to-detail meaning below.
+      if (
+        (event.key === "Enter" && !isNativeActionControl(event.target)) ||
+        (event.key === "ArrowRight" && isTimelineListTarget(event.target))
+      ) {
+        const group = changeInspectorTimelineGroupAt(selectedTimelineEventId);
+        if (group !== null) {
+          event.preventDefault();
+          parkTimelineForReaderActivity();
+          actions.expandTimelineGroup?.(group);
+          refreshTimelineNavigation();
+          selectTimelineEvent(group);
+          return;
+        }
+        if (event.key === "ArrowRight") return;
+      }
+      if (event.key === "ArrowLeft" && isTimelineListTarget(event.target)) {
+        const owner = changeInspectorTimelineGroupAt(selectedTimelineEventId, {
+          includeExpanded: true,
+        });
+        if (owner !== null) {
+          event.preventDefault();
+          parkTimelineForReaderActivity();
+          actions.collapseTimelineGroup?.(owner);
+          refreshTimelineNavigation();
+          selectTimelineEvent(owner);
+        }
+        return;
+      }
       if (
         event.key === "Enter" &&
         selectedTimelineEventId !== null &&
@@ -2017,6 +2070,7 @@ export function installChangeInspectorInteraction(
     selectedTimelineEventId = null;
     followedEventId = null;
     currentTimelineEventIds = [];
+    currentTimelinePage = null;
     currentTimelineEntries = new Map();
     pendingTimelineSelection = null;
     pendingGlobalTimelineSelection = null;
@@ -2055,11 +2109,10 @@ export function installChangeInspectorInteraction(
       const nextRoute =
         snapshot.route.kind === "invalid" ? null : snapshot.route;
       const previousTimelineEntries = currentTimelineEntries;
-      const timelineEntries =
-        companionTimelineRoute(nextRoute) !== null && timelinePage !== null
-          ? timelinePage.entries
-          : [];
-      currentTimelineEventIds = timelineEntries.map((entry) => entry.eventId);
+      currentTimelinePage =
+        companionTimelineRoute(nextRoute) !== null ? timelinePage : null;
+      const timelineEntries = currentTimelinePage?.entries ?? [];
+      refreshTimelineNavigation();
       currentTimelineEntries = new Map(
         timelineEntries.map((entry) => [entry.eventId, entry]),
       );

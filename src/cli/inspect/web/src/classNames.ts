@@ -41,6 +41,7 @@ export const CLASS = {
   timelineShell: "timeline-shell",
   timelineNewPill: "timeline-new-pill",
   timelineGroup: "timeline-group",
+  timelineGroupMembers: "timeline-group-members",
   lensHeading: "lens-heading",
   lensMeta: "lens-meta",
   lensCount: "lens-count",
