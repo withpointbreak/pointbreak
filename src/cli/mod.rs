@@ -370,6 +370,10 @@ fn preflight_public_store_capability(
     cli: &Cli,
     args: &[OsString],
 ) -> Result<Option<pointbreak::session::PublicReadCommandContextV1>, Box<dyn std::error::Error>> {
+    use legacy_admission::{
+        LegacyAdmissionSurfaceV1, LegacyAdmissionVerdictV1, legacy_admission_v1,
+    };
+
     let catalog = classify_invocation_read_v1(cli);
     if matches!(catalog, InvocationReadCatalogV1::Exempt(_)) {
         return Ok(None);
@@ -404,21 +408,23 @@ fn preflight_public_store_capability(
             })
         })
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let Some(capability) = pointbreak::session::activated_store_capability_for_repo(repo)? else {
-        return Err(
-            "migration_required; this command requires an explicit completed store migration"
-                .into(),
-        );
-    };
-    match capability.status {
-        pointbreak::session::StoreCapabilityStatus::Ready { .. } => Ok(None),
-        pointbreak::session::StoreCapabilityStatus::MigrationRequired => Err(
+    let capability = pointbreak::session::activated_store_capability_for_repo(repo)?;
+    match legacy_admission_v1(
+        LegacyAdmissionSurfaceV1::PublicCliCommand,
+        capability.as_ref(),
+    ) {
+        LegacyAdmissionVerdictV1::Serve => Ok(None),
+        LegacyAdmissionVerdictV1::RefuseMigrationRequired => Err(
             "migration_required; this command requires an explicit completed store migration"
                 .into(),
         ),
-        pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+        LegacyAdmissionVerdictV1::RefuseMigrationInProgress => {
             Err("migration_in_progress; this command refuses partial Change authority".into())
         }
+        LegacyAdmissionVerdictV1::RefuseReaderUpgrade => Err(
+            "reader_upgrade_required; this command cannot consume the activated Change cohort"
+                .into(),
+        ),
     }
 }
 
@@ -1674,6 +1680,56 @@ mod change_reader_cli_tests {
         );
         assert_eq!(snapshot.counters.directory_entries_walked, 0);
         assert_eq!(snapshot.counters.event_decodes, 0);
+    }
+
+    #[test]
+    fn legacy_preflight_arm_delegates_to_the_admission_table() {
+        // Whitespace- and qualification-tolerant: rustfmt may break the call across lines.
+        const CLI_SOURCE: &str = include_str!("mod.rs");
+        let start = CLI_SOURCE
+            .find("fn preflight_public_store_capability(")
+            .expect("preflight start");
+        let end = CLI_SOURCE[start..]
+            .find("#[cfg(test)]\nmod invocation_read_catalog_tests")
+            .expect("preflight end");
+        let preflight = &CLI_SOURCE[start..start + end];
+        assert!(preflight.contains("legacy_admission_v1("));
+        assert!(preflight.contains("LegacyAdmissionSurfaceV1::PublicCliCommand"));
+        assert!(
+            !preflight.contains("StoreCapabilityStatus::Ready"),
+            "the arm must not re-decide the table"
+        );
+        assert!(!preflight.contains("StoreCapabilityStatus::MigrationInProgress"));
+    }
+
+    #[test]
+    fn untouched_l0_history_refuses_with_the_migration_required_string() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let raw_args = vec![
+            OsString::from("pointbreak"),
+            OsString::from("history"),
+            OsString::from("--repo"),
+            repo.path().as_os_str().to_owned(),
+            OsString::from("--format"),
+            OsString::from("json"),
+        ];
+        let cli = Cli::try_parse_from(raw_args.clone()).unwrap();
+        let error = preflight_public_store_capability(&cli, &raw_args)
+            .err()
+            .expect("L0 refusal")
+            .to_string();
+        assert_eq!(
+            error,
+            "migration_required; this command requires an explicit completed store migration"
+        );
     }
 }
 
