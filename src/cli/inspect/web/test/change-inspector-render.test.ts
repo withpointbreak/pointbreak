@@ -2459,6 +2459,47 @@ describe("Change inspector render", () => {
       expect(handoffBlock()).toBeNull();
     });
 
+    // The handoff's eligibility depends on the route kind, so a same-generation
+    // transition between an exact route and the Changes lens must repaint the
+    // master list rather than reuse the cached tree.
+    it("inserts the handoff when returning to the lens from an exact route", () => {
+      const state = createChangeInspectorState({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+
+      state.setRoute({ kind: "lens", lens: "changes", query: {} });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+    });
+
+    it("removes the handoff when an exact route opens from the empty lens", () => {
+      const state = createChangeInspectorState({
+        kind: "lens",
+        lens: "changes",
+        query: {},
+      });
+      state.publish(
+        stageGeneration(profile, emptyChanges, emptyAttention, profile),
+      );
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).not.toBeNull();
+
+      state.setRoute({
+        kind: "change",
+        changeId: "change:sha256:missing",
+        query: {},
+      });
+      renderChangeInspector(state.snapshot(), { navigate: vi.fn() });
+      expect(handoffBlock()).toBeNull();
+    });
+
     it("leaves the empty Attention lens exactly as it is", () => {
       renderEmptyLens({ lens: "attention" });
       expect(document.querySelector("#master .empty")?.textContent).toBe(

@@ -2168,6 +2168,22 @@ export function renderChangeInspector(
   // Polling often republishes the same stamped generation. Compute the cache
   // key before allocating card nodes so an unchanged tick does not build and
   // discard the complete bounded tree every three seconds.
+  // The capture suggestion is first-open-only: the Changes lens route itself
+  // (not an exact route that merely maps to this lens), a loaded page with
+  // zero Changes, no filter of any kind, and no continuation in either
+  // direction. A filtered or paged empty view keeps its message and never
+  // suggests a capture, because recapturing is not the answer to a filter
+  // miss or to reading past the end. The eligibility reads the route kind,
+  // which nothing else in the cached tree does, so it joins the cache key:
+  // a same-generation lens/exact transition must repaint rather than reuse.
+  const firstCaptureEligible =
+    route.kind === "lens" &&
+    lens === "changes" &&
+    page.changes.length === 0 &&
+    filterValues(route.query).length === 0 &&
+    route.query.after === undefined &&
+    page.previous == null &&
+    page.next == null;
   const listKey = JSON.stringify({
     lens,
     query: route.query,
@@ -2176,6 +2192,7 @@ export function renderChangeInspector(
     next: page.next,
     last: page.last ?? null,
     changes: page.changes.map((change) => change.changeId),
+    firstCaptureEligible,
   });
   if (master.dataset.changeListKey !== listKey) {
     const list = document.createElement("section");
@@ -2402,20 +2419,7 @@ export function renderChangeInspector(
           lens === "changes" ? "No Changes." : "No Changes need attention.",
         ),
       );
-      // The capture suggestion is first-open-only: the Changes lens route
-      // itself (not an exact route that merely maps to this lens), a loaded
-      // page with zero Changes, no filter of any kind, and no continuation in
-      // either direction. A filtered or paged empty view keeps its message and
-      // never suggests a capture, because recapturing is not the answer to a
-      // filter miss or to reading past the end.
-      const genuinelyEmptyStore =
-        route.kind === "lens" &&
-        lens === "changes" &&
-        filterValues(route.query).length === 0 &&
-        route.query.after === undefined &&
-        page.previous == null &&
-        page.next == null;
-      if (genuinelyEmptyStore) {
+      if (firstCaptureEligible) {
         const handoff = firstCaptureHandoffBlock();
         if (handoff) list.append(handoff);
       }
