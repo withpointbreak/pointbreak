@@ -281,7 +281,7 @@ fn author_response_skill_reuses_author_identity_and_advances_after_content_chang
             "## Classify the verdict",
             "## Respond to advisory requests",
             "## Record author response observations",
-            "## Record the landing commit",
+            "## Landing and rewrite evidence",
         ],
     );
     assert_contains(
@@ -328,18 +328,34 @@ fn enrollment_is_optional_staged_and_follows_the_untrusted_explanation() {
 
 #[test]
 fn landing_guidance_is_proof_first_and_content_changes_create_a_revision() {
-    for path in [
-        "skills/pointbreak-author/SKILL.md",
-        "skills/pointbreak-author-response/SKILL.md",
-    ] {
-        assert_contains(path, "pointbreak association land");
-        assert_contains(path, "--source \"commit:$landed_commit\"");
-        assert_contains(path, "landing_cursor");
-        assert_contains(path, "--review-cursor");
-        assert_contains(path, "provenance-only");
+    // Ordinary handoffs never load the landing mechanics. Each author skill keeps a routing
+    // pointer in SKILL.md and owns a self-contained reference that carries the proof-first
+    // command sequence, so a copied or symlinked install still resolves it.
+    for skill in ["pointbreak-author", "pointbreak-author-response"] {
+        let skill_md = format!("skills/{skill}/SKILL.md");
+        let landing = format!("skills/{skill}/references/landing.md");
+
+        assert_contains(&skill_md, "## Landing and rewrite evidence");
+        assert_contains(&skill_md, "does not create a new Revision");
+        assert_contains(&skill_md, "](references/landing.md)");
+        assert_contains(
+            &skill_md,
+            "Structural provenance alone does not prove content",
+        );
+
+        assert_contains(&landing, "pointbreak association land");
+        assert_contains(&landing, "--source \"commit:$landed_commit\"");
+        assert_contains(&landing, "landing_cursor");
+        assert_contains(&landing, "--review-cursor");
+        assert_contains(&landing, "provenance-only");
+        assert_contains(&landing, "--candidate-parent --dry-run");
+        assert_contains(&landing, "](single-commit-rewrites.md)");
+        assert_exists(&format!(
+            "skills/{skill}/references/single-commit-rewrites.md"
+        ));
     }
     assert_contains(
-        "skills/pointbreak-author/SKILL.md",
+        "skills/pointbreak-author/references/landing.md",
         "pointbreak association record",
     );
     assert_contains(
@@ -377,6 +393,11 @@ fn assert_order(relative_path: &str, needles: &[&str]) {
             ),
         }
     }
+}
+
+fn assert_exists(relative_path: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    assert!(path.is_file(), "{relative_path} should exist");
 }
 
 fn assert_not_contains(relative_path: &str, needle: &str) {
