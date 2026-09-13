@@ -59,7 +59,9 @@ mod tests {
         StoreCapabilityInspection {
             status,
             cursor: AuthorityCursorV2 {
-                schema: "pointbreak.authority-cursor.v2".to_owned(),
+                // The table never reads the cursor; keep this fixture free of
+                // schema literals, which the version registry guard scans.
+                schema: String::new(),
                 journal_record_count: 1,
                 event_count: 1,
                 journal_record_set_hash: format!("sha256:{}", "2".repeat(64)),
