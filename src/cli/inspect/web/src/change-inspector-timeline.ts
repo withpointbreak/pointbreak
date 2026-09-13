@@ -158,6 +158,18 @@ function deriveTimelineRows(view: TimelineView): void {
   view.rows = visualRows(view.grouped, view.expanded);
 }
 
+/**
+ * An exact event route names an event, never a group summary. Open the
+ * group that owns it, including when it is the group's first member, so the
+ * reveal that follows lands on the member's own option row.
+ */
+function expandOwningGroup(view: TimelineView, eventId: string): void {
+  const owner = owningGroupKey(view.grouped, eventId);
+  if (owner === null || view.expanded.has(owner)) return;
+  view.expanded.add(owner);
+  deriveTimelineRows(view);
+}
+
 /** The shared option scaffolding every Timeline row carries. */
 function optionRow(
   eventId: string,
@@ -552,6 +564,7 @@ export function renderChangeInspectorTimeline(
     active.routeSelectedEventId = selectedEventId;
     if (exactRouteChanged && selectedEventId !== null) {
       active.selectedEventId = selectedEventId;
+      expandOwningGroup(active, selectedEventId);
     }
     paintVisible(active);
     if (exactRouteChanged && selectedEventId !== null) {
@@ -674,6 +687,7 @@ export function renderChangeInspectorTimeline(
     });
     view.resizeObserver.observe(list);
   }
+  if (selectedEventId !== null) expandOwningGroup(view, selectedEventId);
   paintVisible(view);
   if (selectedEventId !== null) {
     // An exact event route can anchor a bounded page whose selected event is

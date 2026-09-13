@@ -133,6 +133,21 @@ function clickRow(eventId: string): void {
     ?.click();
 }
 
+/** Put the cursor on the collapsed group row by keyboard alone. */
+function selectGroupByKeyboard(): void {
+  clickRow("ev:a1");
+  pressKey("j");
+  expect(selectedTimelineEventId()).toBe("ev:b2");
+}
+
+function selectedRowLabel(): string | null {
+  return (
+    document
+      .querySelector<HTMLElement>('#timeline [aria-selected="true"]')
+      ?.getAttribute("aria-label") ?? null
+  );
+}
+
 beforeEach(() => {
   mountInspectorDom();
   vi.spyOn(window, "matchMedia").mockImplementation(
@@ -178,12 +193,12 @@ describe("grouped Timeline navigation", () => {
     const timeline = renderGroupedTimeline();
     controller.sync(snapshot(), timeline);
 
-    clickRow("ev:b2");
-    const navigatedByClick = navigate.mock.calls.length;
+    selectGroupByKeyboard();
+    const navigatedBefore = navigate.mock.calls.length;
     pressKey("Enter");
 
     // Enter on a collapsed group expands; it does not descend to detail.
-    expect(navigate).toHaveBeenCalledTimes(navigatedByClick);
+    expect(navigate).toHaveBeenCalledTimes(navigatedBefore);
     expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
     expect(selectedTimelineEventId()).toBe("ev:b2");
     pressKey("j");
@@ -218,7 +233,7 @@ describe("grouped Timeline navigation", () => {
     const timeline = renderGroupedTimeline();
     controller.sync(snapshot(), timeline);
 
-    clickRow("ev:b2");
+    selectGroupByKeyboard();
     pressKey("ArrowRight");
     expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
     clickRow("ev:d4");
@@ -299,7 +314,7 @@ describe("grouped Timeline navigation", () => {
     const { controller } = install();
     controller.sync(snapshot(), renderGroupedTimeline());
 
-    clickRow("ev:b2");
+    selectGroupByKeyboard();
     pressKey("ArrowRight");
     expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
 
@@ -318,10 +333,95 @@ describe("grouped Timeline navigation", () => {
     controller.sync(snapshot(), renderGroupedTimeline());
     const hash = location.hash;
 
-    clickRow("ev:b2");
+    selectGroupByKeyboard();
     pressKey("ArrowRight");
 
     expect(location.hash).toBe(hash);
     expect(localStorage.length).toBe(0);
+  });
+
+  it("expands a collapsed group on pointer activation without opening a detail", () => {
+    const { controller, navigate } = install();
+    controller.sync(snapshot(), renderGroupedTimeline());
+
+    clickRow("ev:b2");
+
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(selectedTimelineEventId()).toBe("ev:b2");
+    expect(selectedRowLabel()).not.toContain("collapsed");
+    pressKey("j");
+    expect(selectedTimelineEventId()).toBe("ev:c3");
+  });
+
+  it("still opens the detail when an expanded member or a plain row is clicked", () => {
+    const { controller, navigate } = install();
+    controller.sync(snapshot(), renderGroupedTimeline());
+
+    clickRow("ev:b2");
+    clickRow("ev:c3");
+
+    expect(navigate).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenLastCalledWith({
+      kind: "event",
+      eventId: "ev:c3",
+      historyQuery: {},
+      query: {},
+    });
+  });
+
+  it("keeps the summary collapsed when the keyboard cursor lands on it", () => {
+    const { controller } = install();
+    controller.sync(snapshot(), renderGroupedTimeline());
+
+    selectGroupByKeyboard();
+
+    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+    expect(selectedRowLabel()).toContain("collapsed");
+  });
+
+  it("lands a deep link on the FIRST member as an event row, not the summary", () => {
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+
+    renderChangeInspectorTimeline(
+      master,
+      groupedDocument(),
+      { navigate: vi.fn() },
+      route,
+      "ev:b2",
+    );
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    expect(list?.querySelector("[role='group']")).not.toBeNull();
+    const selected = list?.querySelector<HTMLElement>('[aria-selected="true"]');
+    expect(selected?.dataset.eventId).toBe("ev:b2");
+    expect(selected?.getAttribute("aria-label")).not.toContain("collapsed");
+    expect(selected?.getAttribute("aria-label")).toContain("ev:b2");
+    expect(list?.getAttribute("aria-activedescendant")).toBe(selected?.id);
+  });
+
+  it("expands for an exact event route that arrives on a same-key repaint", () => {
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const timeline = groupedDocument();
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: vi.fn() },
+      route,
+    );
+    expect(document.querySelector("#timeline [role='group']")).toBeNull();
+
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: vi.fn() },
+      route,
+      "ev:b2",
+    );
+
+    expect(document.querySelector("#timeline [role='group']")).not.toBeNull();
+    expect(selectedRowLabel()).not.toContain("collapsed");
   });
 });

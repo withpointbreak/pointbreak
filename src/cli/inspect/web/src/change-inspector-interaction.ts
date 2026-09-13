@@ -1440,6 +1440,14 @@ export function installChangeInspectorInteraction(
     ) {
       parkTimelineForReaderActivity();
       const eventId = timelineEvent.dataset.eventId;
+      if (timelineEvent.dataset.timelineGroup !== undefined) {
+        // Pointer activation of a collapsed group expands it, matching Enter.
+        // It never opens one arbitrary member's detail.
+        actions.expandTimelineGroup?.(eventId);
+        refreshTimelineNavigation();
+        selectTimelineEvent(eventId);
+        return;
+      }
       selectTimelineEvent(eventId);
       const historyQuery =
         currentRoute?.kind === "timeline" || currentRoute?.kind === "event"

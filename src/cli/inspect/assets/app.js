@@ -2011,6 +2011,13 @@
     view.rows = visualRows(view.grouped, view.expanded);
   }
   __name(deriveTimelineRows, "deriveTimelineRows");
+  function expandOwningGroup(view, eventId) {
+    const owner = owningGroupKey(view.grouped, eventId);
+    if (owner === null || view.expanded.has(owner)) return;
+    view.expanded.add(owner);
+    deriveTimelineRows(view);
+  }
+  __name(expandOwningGroup, "expandOwningGroup");
   function optionRow(eventId, selectedEventId) {
     const row = document.createElement("li");
     row.className = "event";
@@ -2328,6 +2335,7 @@
       active.routeSelectedEventId = selectedEventId;
       if (exactRouteChanged && selectedEventId !== null) {
         active.selectedEventId = selectedEventId;
+        expandOwningGroup(active, selectedEventId);
       }
       paintVisible(active);
       if (exactRouteChanged && selectedEventId !== null) {
@@ -2445,6 +2453,7 @@
       });
       view.resizeObserver.observe(list);
     }
+    if (selectedEventId !== null) expandOwningGroup(view, selectedEventId);
     paintVisible(view);
     if (selectedEventId !== null) {
       revealChangeInspectorTimelineEvent(selectedEventId);
@@ -3569,6 +3578,12 @@
       if (timelineEvent?.dataset.eventId && !target?.closest("button, a[href], input, select, textarea")) {
         parkTimelineForReaderActivity();
         const eventId = timelineEvent.dataset.eventId;
+        if (timelineEvent.dataset.timelineGroup !== void 0) {
+          actions2.expandTimelineGroup?.(eventId);
+          refreshTimelineNavigation();
+          selectTimelineEvent(eventId);
+          return;
+        }
         selectTimelineEvent(eventId);
         const historyQuery = currentRoute2?.kind === "timeline" || currentRoute2?.kind === "event" ? currentRoute2.historyQuery : {};
         navigateToTimelineEvent(eventId, historyQuery);
