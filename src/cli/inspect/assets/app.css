@@ -934,6 +934,20 @@ main {
   font-family: var(--mono);
   font-size: var(--fs-xs);
 }
+/* A collapsed same-type group is one option row built on the .event grid, so it
+   inherits the narrow layout and stays close to one event row tall for the
+   uniform-height virtual window. Expansion is a DOM splice with no transition,
+   so no prefers-reduced-motion rule is needed here. */
+.timeline-group {
+  background: var(--bg-elev);
+}
+.timeline-group .title {
+  font-weight: 600;
+}
+.timeline-group .type-count {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
 .event-summary,
 .event-context {
   margin: 2px 0 0;

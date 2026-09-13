@@ -162,9 +162,11 @@ function boundaryHistoryPage(options: {
     matchCount: authoritySequence,
     offset: options.offset,
     next: options.next,
-    entries: options.eventIds.map((eventId) => ({
+    // Alternate two event types so no adjacent same-type run reaches the
+    // Timeline grouping threshold: these compositions read one row per event.
+    entries: options.eventIds.map((eventId, index) => ({
       eventId,
-      eventType: "review_note_imported",
+      eventType: index % 2 ? "review_initialized" : "review_note_imported",
       occurredAt: "2026-08-08T00:00:00Z",
       payloadHash: `sha256:${eventId}`,
       journalId: "journal:sha256:test",
@@ -178,7 +180,10 @@ function boundaryHistoryPage(options: {
       changeIds: [],
       revisionRefs: [],
       unresolvedRevisionIds: [],
-      summary: { kind: "review_note_imported" },
+      summary:
+        index % 2
+          ? { kind: "review_initialized" }
+          : { kind: "review_note_imported" },
     })),
   };
 }

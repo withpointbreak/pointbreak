@@ -1353,6 +1353,7 @@
     actions: "actions",
     timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
+    timelineGroup: "timeline-group",
     lensHeading: "lens-heading",
     lensMeta: "lens-meta",
     lensCount: "lens-count",
@@ -1649,6 +1650,47 @@
   }
   __name(createLensHeading, "createLensHeading");
 
+  // src/change-inspector-timeline-grouping.ts
+  var GROUP_MIN_RUN = 3;
+  function groupTimelineEntries(entries, minRun) {
+    const rows = [];
+    let index = 0;
+    while (index < entries.length) {
+      const first = entries[index];
+      if (first === void 0) break;
+      const eventType = first.eventType;
+      let end = index + 1;
+      while (end < entries.length && entries[end]?.eventType === eventType) {
+        end += 1;
+      }
+      const run = entries.slice(index, end);
+      if (run.length >= minRun) {
+        rows.push({ kind: "group", eventType, members: run });
+      } else {
+        for (const entry of run) rows.push({ kind: "event", entry });
+      }
+      index = end;
+    }
+    return rows;
+  }
+  __name(groupTimelineEntries, "groupTimelineEntries");
+  function groupKey(row) {
+    return row.kind === "group" ? row.members[0]?.eventId ?? "" : row.entry.eventId;
+  }
+  __name(groupKey, "groupKey");
+  function visualRows(groups, expanded) {
+    const rows = [];
+    for (const row of groups) {
+      if (row.kind === "group" && expanded.has(groupKey(row))) {
+        for (const entry of row.members) rows.push({ kind: "event", entry });
+      } else {
+        rows.push(row);
+      }
+    }
+    return rows;
+  }
+  __name(visualRows, "visualRows");
+
   // src/dom.ts
   function $(sel) {
     return document.querySelector(sel);
@@ -1932,6 +1974,88 @@
     return `timeline-event-${encodeURIComponent(eventId).replaceAll("%", "_")}`;
   }
   __name(optionId, "optionId");
+  function groupingMinRun(route) {
+    const type = route.historyQuery.type;
+    return type !== void 0 && !type.includes(",") ? Number.POSITIVE_INFINITY : GROUP_MIN_RUN;
+  }
+  __name(groupingMinRun, "groupingMinRun");
+  function deriveTimelineRows(view) {
+    view.rows = visualRows(view.grouped, view.expanded);
+  }
+  __name(deriveTimelineRows, "deriveTimelineRows");
+  function optionRow(eventId, selectedEventId) {
+    const row = document.createElement("li");
+    row.className = "event";
+    row.dataset.eventId = eventId;
+    row.id = optionId(eventId);
+    row.tabIndex = -1;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(eventId === selectedEventId));
+    return row;
+  }
+  __name(optionRow, "optionRow");
+  function appendOccurredAt(row, occurredAt) {
+    const occurred = new Date(occurredAt);
+    const time = document.createElement("time");
+    time.className = "time";
+    time.dateTime = occurredAt;
+    if (Number.isNaN(occurred.valueOf())) {
+      time.textContent = occurredAt;
+    } else {
+      const date = document.createElement("span");
+      date.className = "event-date";
+      date.textContent = occurred.toLocaleDateString();
+      const clock = document.createElement("span");
+      clock.textContent = occurred.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+      time.append(date, clock);
+    }
+    row.append(time);
+  }
+  __name(appendOccurredAt, "appendOccurredAt");
+  function appendRail(row, eventType) {
+    const rail = document.createElement("span");
+    rail.className = "rail";
+    rail.style.background = eventTypeColor(eventType);
+    rail.setAttribute("aria-hidden", "true");
+    row.append(rail);
+  }
+  __name(appendRail, "appendRail");
+  function groupRow(group, selectedEventId) {
+    const first = group.members[0];
+    if (first === void 0) throw new Error("Timeline group has no members");
+    const presentation = presentEvent(first);
+    const row = optionRow(first.eventId, selectedEventId);
+    row.classList.add(CLASS.timelineGroup);
+    row.dataset.timelineGroup = group.eventType;
+    row.dataset.timelineGroupSize = String(group.members.length);
+    appendOccurredAt(row, first.occurredAt);
+    appendRail(row, group.eventType);
+    const body = document.createElement("div");
+    body.className = "body";
+    const heading = document.createElement("h3");
+    heading.className = "title";
+    heading.textContent = presentation.label;
+    const meta = document.createElement("div");
+    meta.className = "mono";
+    meta.classList.add("meta");
+    const eventType = document.createElement("span");
+    eventType.className = "type";
+    eventType.textContent = presentation.label;
+    eventType.title = group.eventType;
+    eventType.style.color = eventTypeColor(group.eventType);
+    const count = document.createElement("span");
+    count.className = CLASS.typeCount;
+    count.textContent = String(group.members.length);
+    meta.append(eventType, count);
+    body.append(heading, meta);
+    row.append(body);
+    return row;
+  }
+  __name(groupRow, "groupRow");
   function rowSpacer(height) {
     const spacer = document.createElement("li");
     spacer.dataset.timelineSpacer = "true";
@@ -1957,39 +2081,13 @@
   __name(appendVerificationChip, "appendVerificationChip");
   function entryRow(entry, selectedEventId, route) {
     const presentation = presentEvent(entry);
-    const row = document.createElement("li");
-    row.className = "event";
-    row.dataset.eventId = entry.eventId;
-    row.id = optionId(entry.eventId);
-    row.tabIndex = -1;
-    row.setAttribute("role", "option");
-    row.setAttribute("aria-selected", String(entry.eventId === selectedEventId));
+    const row = optionRow(entry.eventId, selectedEventId);
     row.setAttribute(
       "aria-label",
       `${presentation.title}; ${entry.eventType}; writer ${entry.writer.actorId}; ${entry.occurredAt}; event ${entry.eventId}; Changes ${entry.changeIds.join(", ") || "none"}; exact Revisions ${entry.revisionRefs.map((reference) => `${reference.revisionId} ${reference.objectArtifactContentHash}`).join(", ") || "none"}; unresolved Revisions ${entry.unresolvedRevisionIds.join(", ") || "none"}`
     );
-    const occurred = new Date(entry.occurredAt);
-    const time = document.createElement("time");
-    time.className = "time";
-    time.dateTime = entry.occurredAt;
-    if (Number.isNaN(occurred.valueOf())) {
-      time.textContent = entry.occurredAt;
-    } else {
-      const date = document.createElement("span");
-      date.className = "event-date";
-      date.textContent = occurred.toLocaleDateString();
-      const clock = document.createElement("span");
-      clock.textContent = occurred.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
-      });
-      time.append(date, clock);
-    }
-    const rail = document.createElement("span");
-    rail.className = "rail";
-    rail.style.background = eventTypeColor(entry.eventType);
-    rail.setAttribute("aria-hidden", "true");
+    appendOccurredAt(row, entry.occurredAt);
+    appendRail(row, entry.eventType);
     const body = document.createElement("div");
     body.className = "body";
     const heading = document.createElement("h3");
@@ -2065,24 +2163,25 @@
     }
     body.append(meta);
     if (contexts.childNodes.length) body.append(contexts);
-    row.append(time, rail, body);
+    row.append(body);
     return row;
   }
   __name(entryRow, "entryRow");
   function paintVisible(view) {
-    const { list, document: timeline, rowHeight } = view;
-    const entries = timeline.entries;
+    const { list, rows, rowHeight } = view;
     const viewport = list.clientHeight;
     const localStart = viewport > 0 ? Math.max(0, Math.floor(list.scrollTop / rowHeight) - OVERSCAN) : 0;
     const localEnd = viewport > 0 ? Math.min(
-      entries.length,
+      rows.length,
       Math.ceil((list.scrollTop + viewport) / rowHeight) + OVERSCAN
-    ) : entries.length;
+    ) : rows.length;
     const top = rowSpacer(localStart * rowHeight);
-    const bottom = rowSpacer(Math.max(0, entries.length - localEnd) * rowHeight);
+    const bottom = rowSpacer(Math.max(0, rows.length - localEnd) * rowHeight);
     list.replaceChildren(
       top,
-      ...entries.slice(localStart, localEnd).map((entry) => entryRow(entry, view.selectedEventId, view.route)),
+      ...rows.slice(localStart, localEnd).map(
+        (row) => row.kind === "group" ? groupRow(row, view.selectedEventId) : entryRow(row.entry, view.selectedEventId, view.route)
+      ),
       bottom
     );
     const activeOption = view.selectedEventId ? Array.from(list.querySelectorAll("[data-event-id]")).find(
@@ -2154,7 +2253,14 @@
     const key = `${timeline.timelineProjectionStamp}\0${JSON.stringify(route.historyQuery)}`;
     if (master.dataset.timelineKey === key && active !== null) {
       const exactRouteChanged = selectedEventId !== active.routeSelectedEventId;
-      active.document = timeline;
+      if (active.document !== timeline) {
+        active.document = timeline;
+        active.grouped = groupTimelineEntries(
+          timeline.entries,
+          groupingMinRun(route)
+        );
+        deriveTimelineRows(active);
+      }
       active.route = route;
       active.list.dataset.timelineRoute = formatChangeInspectorRoute(route);
       active.routeSelectedEventId = selectedEventId;
@@ -2167,11 +2273,13 @@
       }
       return;
     }
+    const grouped = groupTimelineEntries(timeline.entries, groupingMinRun(route));
     const section = document.createElement("section");
     section.className = "timeline-shell";
+    const collapsedNotice = grouped.some((row) => row.kind === "group") ? " · adjacent same-type events collapsed" : "";
     const [heading, metadata] = createLensHeading(
       "Timeline",
-      `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first`
+      `${timeline.matchCount} ${timeline.matchCount === 1 ? "event" : "events"} · ${timeline.order === "desc" ? "newest" : "oldest"} first${collapsedNotice}`
     );
     const notice = document.createElement("p");
     notice.className = "timeline-summary dim";
@@ -2254,6 +2362,9 @@
     master.dataset.timelineKey = key;
     active = {
       document: timeline,
+      grouped,
+      expanded: /* @__PURE__ */ new Set(),
+      rows: visualRows(grouped, /* @__PURE__ */ new Set()),
       list,
       remeasureTimer: null,
       resizeObserver: null,
@@ -2282,9 +2393,7 @@
   __name(renderChangeInspectorTimeline, "renderChangeInspectorTimeline");
   function revealChangeInspectorTimelineEvent(eventId) {
     if (active === null) return false;
-    const localIndex = active.document.entries.findIndex(
-      (entry) => entry.eventId === eventId
-    );
+    const localIndex = active.rows.findIndex((row) => groupKey(row) === eventId);
     if (localIndex < 0) return false;
     active.selectedEventId = eventId;
     remeasureChangeInspectorTimelineRows();
@@ -2302,7 +2411,7 @@
     ).find((row) => row.dataset.eventId === eventId);
     if (selected === void 0) {
       if (localIndex === 0) active.list.scrollTop = 0;
-      else if (localIndex === active.document.entries.length - 1) {
+      else if (localIndex === active.rows.length - 1) {
         active.list.scrollTop = active.list.scrollHeight;
       }
       paintVisible(active);

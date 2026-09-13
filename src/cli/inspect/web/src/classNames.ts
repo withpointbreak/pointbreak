@@ -40,6 +40,7 @@ export const CLASS = {
   actions: "actions",
   timelineShell: "timeline-shell",
   timelineNewPill: "timeline-new-pill",
+  timelineGroup: "timeline-group",
   lensHeading: "lens-heading",
   lensMeta: "lens-meta",
   lensCount: "lens-count",

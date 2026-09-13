@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  changeInspectorTimelineGroupAt,
+  changeInspectorTimelineNavigableEventIds,
   remeasureChangeInspectorTimelineRows,
   renderChangeInspectorTimeline,
   revealChangeInspectorTimelineEvent,
+  setChangeInspectorTimelineGroupExpanded,
 } from "../src/change-inspector-timeline";
 import type {
   EventHistoryDocument,
   EventHistoryEntry,
+  EventHistoryEventType,
 } from "../src/change-protocol";
+import { ALL_EMITTABLE_CLASSES } from "../src/classNames";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
@@ -125,18 +130,99 @@ function documentValue(): EventHistoryDocument {
 
 function longDocument(count = 100): EventHistoryDocument {
   const timeline = documentValue();
-  const template = timeline.entries[0];
-  if (!template) throw new Error("missing Timeline entry fixture");
+  // Alternate the two fixture templates so no adjacent same-type run reaches
+  // the grouping threshold: these suites exercise virtual geometry over one
+  // visual row per event.
+  const templates = timeline.entries.slice(0, 2);
+  if (templates.length !== 2) throw new Error("missing Timeline entry fixture");
   timeline.eventCount = count;
   timeline.matchCount = count;
   timeline.offset = 0;
   timeline.previous = undefined;
   timeline.next = undefined;
   timeline.entries = Array.from({ length: count }, (_, index) => ({
-    ...template,
+    ...(templates[index % 2] as EventHistoryEntry),
     eventId: `evt:sha256:${index.toString().padStart(3, "0")}`,
   })) satisfies EventHistoryEntry[];
   return timeline;
+}
+
+/** One entry of a supported type, built from the fixture templates. */
+function historyEntry(
+  eventId: string,
+  eventType: Extract<
+    EventHistoryEventType,
+    | "validation_check_recorded"
+    | "change_declared"
+    | "review_observation_recorded"
+  >,
+): EventHistoryEntry {
+  const [validation, declared] = documentValue().entries;
+  if (!validation || !declared) throw new Error("missing fixture entries");
+  if (eventType === "validation_check_recorded") {
+    return { ...validation, eventId };
+  }
+  if (eventType === "change_declared") return { ...declared, eventId };
+  return {
+    ...validation,
+    eventId,
+    eventType,
+    summary: {
+      kind: "review_observation_recorded",
+      details: {
+        observationId: `obs:sha256:${eventId}`,
+        target: { kind: "revision", revisionId: "rev:sha256:one" },
+        title: `Observation ${eventId}`,
+      },
+    },
+  };
+}
+
+function timelineDocument(entries: EventHistoryEntry[]): EventHistoryDocument {
+  const timeline = documentValue();
+  timeline.entries = entries;
+  timeline.eventCount = entries.length;
+  timeline.matchCount = entries.length;
+  timeline.offset = 0;
+  timeline.previous = undefined;
+  timeline.next = undefined;
+  return timeline;
+}
+
+/** ev:a1, then a run of three validations (ev:b2, ev:c3, ev:d4), then ev:e5. */
+function groupedDocument(): EventHistoryDocument {
+  return timelineDocument([
+    historyEntry("ev:a1", "change_declared"),
+    historyEntry("ev:b2", "validation_check_recorded"),
+    historyEntry("ev:c3", "validation_check_recorded"),
+    historyEntry("ev:d4", "validation_check_recorded"),
+    historyEntry("ev:e5", "review_observation_recorded"),
+  ]);
+}
+
+function renderGroupedTimeline(
+  timeline: EventHistoryDocument = groupedDocument(),
+  route: { kind: "timeline"; historyQuery: Record<string, string> } = {
+    kind: "timeline",
+    historyQuery: {},
+  },
+): HTMLElement {
+  mountInspectorDom();
+  const master = document.querySelector<HTMLElement>("#master");
+  if (!master) throw new Error("missing master");
+  renderChangeInspectorTimeline(
+    master,
+    timeline,
+    { navigate: () => undefined },
+    route,
+  );
+  return master;
+}
+
+function renderedEventIds(): string[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("#timeline [data-event-id]"),
+  ).map((row) => row.dataset.eventId ?? "");
 }
 
 function setViewportHeight(list: HTMLOListElement, height: number): void {
@@ -685,5 +771,156 @@ describe("Change-aware Timeline renderer", () => {
     ).find((row) => row.dataset.eventId === selectedEventId);
     expect(selected).toBeDefined();
     expect(list.getAttribute("aria-activedescendant")).toBe(selected?.id);
+  });
+
+  describe("grouped rows", () => {
+    it("paints a collapsed run as exactly one virtual row", () => {
+      renderGroupedTimeline();
+
+      expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+      expect(document.querySelectorAll("#timeline li.event")).toHaveLength(3);
+    });
+
+    it("marks the group row with its type, member count, and one visual class", () => {
+      renderGroupedTimeline();
+
+      const group = document.querySelector<HTMLElement>(
+        '#timeline [data-event-id="ev:b2"]',
+      );
+      expect(group?.dataset.timelineGroup).toBe("validation_check_recorded");
+      expect(group?.dataset.timelineGroupSize).toBe("3");
+      expect(group?.classList.contains("event")).toBe(true);
+      expect(group?.classList.contains("timeline-group")).toBe(true);
+      expect(group?.getAttribute("role")).toBe("option");
+      expect(group?.tabIndex).toBe(-1);
+      expect(group?.hasAttribute("aria-expanded")).toBe(false);
+      expect(group?.querySelector(".type-count")?.textContent).toBe("3");
+      expect(group?.querySelector(".type")?.textContent).toBe("validation");
+      expect(
+        group?.querySelector<HTMLElement>(".rail")?.style.background,
+      ).toContain("--evt-validation");
+      expect(
+        document.querySelector("#timeline [data-timeline-group] a"),
+      ).toBeNull();
+    });
+
+    it("registers the one new class it adds", () => {
+      expect(ALL_EMITTABLE_CLASSES).toContain("timeline-group");
+    });
+
+    it("discloses the page-scoped collapse in the lens metadata line", () => {
+      const master = renderGroupedTimeline();
+
+      expect(master.querySelector(".lens-meta")?.textContent).toBe(
+        "5 events · newest first · adjacent same-type events collapsed",
+      );
+    });
+
+    it("leaves the metadata line unchanged when nothing collapsed", () => {
+      const master = renderGroupedTimeline(
+        timelineDocument([
+          historyEntry("ev:a1", "change_declared"),
+          historyEntry("ev:b2", "validation_check_recorded"),
+        ]),
+      );
+
+      expect(master.querySelector(".lens-meta")?.textContent).toBe(
+        "2 events · newest first",
+      );
+    });
+
+    it("renders a page filtered to exactly one event type flat", () => {
+      // A single-type filter is the reader asking for that whole run, so
+      // collapsing it would hide the page behind one row.
+      renderGroupedTimeline(groupedDocument(), {
+        kind: "timeline",
+        historyQuery: { type: "validation_check_recorded" },
+      });
+
+      expect(renderedEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+    });
+
+    it("keeps the row-height estimator converging with group rows present", () => {
+      renderGroupedTimeline();
+      const list = document.querySelector<HTMLOListElement>("#timeline");
+      if (!list) throw new Error("missing Timeline list");
+      for (const row of list.querySelectorAll<HTMLElement>("li.event")) {
+        // A group row is close to, not exactly, one event row tall.
+        const height = row.dataset.timelineGroup ? 60 : 80;
+        Object.defineProperty(row, "getBoundingClientRect", {
+          configurable: true,
+          value: () => rect(0, height),
+        });
+      }
+
+      expect(remeasureChangeInspectorTimelineRows()).toBe(true);
+      // The estimator is a running mean over painted rows; it must move by a
+      // bounded amount rather than diverge.
+      const spacers = Array.from(
+        list.querySelectorAll<HTMLElement>("[data-timeline-spacer]"),
+      );
+      expect(spacers.map((spacer) => spacer.style.height)).toEqual([
+        "0px",
+        "0px",
+      ]);
+    });
+
+    it("exposes the visible sequence and group ownership through one seam", () => {
+      renderGroupedTimeline();
+
+      expect(changeInspectorTimelineNavigableEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineGroupAt("ev:b2")).toBe("ev:b2");
+      expect(changeInspectorTimelineGroupAt("ev:c3")).toBe("ev:b2");
+      expect(changeInspectorTimelineGroupAt("ev:a1")).toBeNull();
+      expect(changeInspectorTimelineGroupAt(null)).toBeNull();
+
+      setChangeInspectorTimelineGroupExpanded("ev:b2", true);
+
+      expect(renderedEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineNavigableEventIds()).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+      expect(changeInspectorTimelineGroupAt("ev:c3")).toBeNull();
+      expect(
+        changeInspectorTimelineGroupAt("ev:c3", { includeExpanded: true }),
+      ).toBe("ev:b2");
+
+      setChangeInspectorTimelineGroupExpanded("ev:b2", false);
+
+      expect(renderedEventIds()).toEqual(["ev:a1", "ev:b2", "ev:e5"]);
+    });
+
+    it("reports raw entry order for a document the renderer has not painted", () => {
+      const other = groupedDocument();
+      other.timelineProjectionStamp = "sha256:elsewhere";
+
+      expect(changeInspectorTimelineNavigableEventIds(other)).toEqual([
+        "ev:a1",
+        "ev:b2",
+        "ev:c3",
+        "ev:d4",
+        "ev:e5",
+      ]);
+    });
   });
 });

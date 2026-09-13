@@ -112,6 +112,12 @@
       "reason": "Owns session-only follow, park, and new-event counts for an eligible Timeline head. It never reorders entries, decodes continuations, or replaces a parked window without explicit reader action."
     },
     {
+      "path": "change-inspector-timeline-grouping.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Owns the pure page-local Timeline grouping projection: adjacent same-type runs of one `/api/v2/history` document become visual rows, and the navigable id sequence is derived from those same rows. It holds no state, never spans a continuation boundary, and never merges, renames, or synthesizes events."
+    },
+    {
       "path": "change-inspector-timeline-navigation.ts",
       "classification": "adapted",
       "activeImport": true,
