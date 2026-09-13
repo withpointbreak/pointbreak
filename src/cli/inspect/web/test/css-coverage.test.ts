@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import { ALL_EMITTABLE_CLASSES } from "../src/classNames";
+import {
+  ALL_EMITTABLE_CLASSES,
+  FACT_FAMILIES,
+  factFamilyClass,
+} from "../src/classNames";
 
 // The served stylesheet, resolved from the web package root (vitest's working
 // directory is `src/cli/inspect/web`, where this suite always runs). This reads
@@ -57,6 +61,34 @@ function cssClassSelectors(css: string): Set<string> {
     [...css.matchAll(/\.([a-z][a-z0-9_-]*)/g)].map((match) => match[1]),
   );
 }
+
+// The declaration block of the first rule whose selector list is exactly
+// `selector`, or null when no such rule exists. Used to assert that a new rule
+// expresses colour only through theme tokens.
+function cssRuleBody(css: string, selector: string): string | null {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\-]/g, (ch) => `\\${ch}`);
+  const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
+  return match ? match[1] : null;
+}
+
+test("expresses every fact-family accent through theme tokens", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  for (const family of FACT_FAMILIES) {
+    const selector = `.${factFamilyClass(family).split(" ")[1]}`;
+    const rule = cssRuleBody(css, selector);
+    expect(rule, selector).not.toBeNull();
+    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(rule).toMatch(/var\(--/);
+  }
+});
+
+test("styles the follow control's not-operable state through theme tokens", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  const rule = cssRuleBody(css, '.follow-toggle[aria-disabled="true"]');
+  expect(rule).not.toBeNull();
+  expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+  expect(rule).toMatch(/var\(--/);
+});
 
 test("every emittable class has an app.css selector (or is an allowlisted CSS-less class)", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
