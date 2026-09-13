@@ -5334,6 +5334,306 @@ mod tests {
         );
     }
 
+    const CONFLICT_DETAIL: &str = "both stable and legacy derived-access roots exist; move one disposable root aside or select explicit off";
+
+    fn conflict_roots(store_root: &std::path::Path) {
+        for root in ["derived", ".pointbreak-derived"] {
+            std::fs::create_dir_all(store_root.join(root))
+                .expect("create conflicting derived root");
+        }
+    }
+
+    struct ConflictFixture {
+        _repo: tempfile::TempDir,
+        state: Arc<InspectState>,
+        store_root: std::path::PathBuf,
+        revision_id: Option<String>,
+    }
+
+    /// A populated, untouched legacy root (one captured Revision, no activation
+    /// record) whose derived roots conflict before the Inspector state exists.
+    fn untouched_l0_conflict_fixture() -> ConflictFixture {
+        let repo = tempfile::tempdir().expect("legacy conflict repository");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Pointbreak Test"],
+            vec!["config", "user.email", "pointbreak@example.test"],
+            vec!["config", "commit.gpgsign", "false"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "before\n").unwrap();
+        for args in [
+            vec!["add", "sample.txt"],
+            vec!["commit", "--quiet", "-m", "base"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "after\n").unwrap();
+        let capture = pointbreak::session::capture_review(
+            pointbreak::session::CaptureOptions::new(repo.path()).with_summary("legacy"),
+        )
+        .expect("capture one legacy revision");
+        assert!(
+            pointbreak::session::activated_store_capability_for_repo(repo.path())
+                .unwrap()
+                .is_none(),
+            "an event-only capture never activates the Change cohort"
+        );
+        let store_root = pointbreak::session::store_paths_for_repo(repo.path())
+            .expect("resolve the fixture store")
+            .common_store()
+            .to_path_buf();
+        conflict_roots(&store_root);
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
+        );
+        ConflictFixture {
+            _repo: repo,
+            state,
+            store_root,
+            revision_id: Some(capture.revision_id.as_str().to_owned()),
+        }
+    }
+
+    /// The ready fixture with both derived roots created before a fresh state.
+    fn l2_conflict_fixture() -> ConflictFixture {
+        let fixture = exact_change_fixture(false);
+        let store_root = pointbreak::session::store_paths_for_repo(fixture._repo.path())
+            .expect("resolve the fixture store")
+            .common_store()
+            .to_path_buf();
+        conflict_roots(&store_root);
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(fixture._repo.path().to_path_buf(), false)
+                .unwrap(),
+        );
+        ConflictFixture {
+            _repo: fixture._repo,
+            state,
+            store_root,
+            revision_id: None,
+        }
+    }
+
+    fn json_body(response: &Response) -> serde_json::Value {
+        serde_json::from_slice(&response.body)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&response.body)))
+    }
+
+    fn assert_conflict_status(state: &Arc<InspectState>) {
+        let status = json_body(&route(
+            state,
+            true,
+            "GET",
+            "/api/derived-access/status",
+            None,
+        ));
+        assert_eq!(status["namespace"], "conflict", "{status}");
+        assert_eq!(status["availability"], "unavailable", "{status}");
+        assert_eq!(status["detail"], CONFLICT_DETAIL, "{status}");
+        assert_eq!(status["rebuildInFlight"], false, "{status}");
+    }
+
+    #[test]
+    fn untouched_l0_conflict_v2_profile_answers_migration_required() {
+        let fixture = untouched_l0_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        let profile = route(&fixture.state, true, "GET", "/api/v2/profile", None);
+        assert_eq!(
+            profile.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&profile.body)
+        );
+        assert_eq!(json_body(&profile)["availability"], "migration_required");
+    }
+
+    #[test]
+    fn untouched_l0_conflict_legacy_aggregates_are_typed_unavailable() {
+        let fixture = untouched_l0_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        for path in [
+            "/api/history",
+            "/api/threads",
+            "/api/attention",
+            "/api/revisions",
+        ] {
+            let response = route(&fixture.state, true, "GET", path, None);
+            assert_eq!(
+                response.status,
+                "503 Service Unavailable",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let body = json_body(&response);
+            assert_eq!(body["availability"], "unavailable", "{path}: {body}");
+            assert_eq!(body["detail"], CONFLICT_DETAIL, "{path}: {body}");
+        }
+        let cursor = route(
+            &fixture.state,
+            true,
+            "GET",
+            "/api/history/new-count",
+            Some("sinceOccurredAt=2026-01-01T00%3A00%3A00Z&sinceEventId=evt"),
+        );
+        assert_eq!(
+            cursor.status,
+            "503 Service Unavailable",
+            "{}",
+            String::from_utf8_lossy(&cursor.body)
+        );
+    }
+
+    #[test]
+    fn untouched_l0_conflict_election_serves_with_the_fallback_header() {
+        let fixture = untouched_l0_conflict_fixture();
+        for path in [
+            "/api/history",
+            "/api/threads",
+            "/api/attention",
+            "/api/revisions",
+        ] {
+            let response = route(
+                &fixture.state,
+                true,
+                "GET",
+                path,
+                Some("access=authoritative"),
+            );
+            assert_eq!(
+                response.status,
+                "200 OK",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| *name == "X-Pointbreak-Access-Source"
+                        && *value == "authoritative-fallback"),
+                "{path} must label the elected fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn untouched_l0_conflict_exceptions_keep_their_behaviour() {
+        let fixture = untouched_l0_conflict_fixture();
+        let bare_probe = route(&fixture.state, true, "GET", "/api/history/new-count", None);
+        assert_eq!(
+            bare_probe.status, "200 OK",
+            "the bare poll probe collapses every unavailable state"
+        );
+        let freshness = route(&fixture.state, true, "GET", "/api/freshness", None);
+        assert_eq!(freshness.status, "200 OK");
+        assert!(
+            json_body(&freshness)
+                .get("projectionStamp")
+                .is_none_or(|v| v.is_null())
+        );
+        let revision = fixture
+            .revision_id
+            .as_deref()
+            .expect("legacy fixture captured a revision");
+        let detail = route(
+            &fixture.state,
+            true,
+            "GET",
+            &format!("/api/revisions/{revision}"),
+            None,
+        );
+        assert_eq!(
+            detail.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&detail.body)
+        );
+        let search = route(
+            &fixture.state,
+            true,
+            "GET",
+            "/api/history",
+            Some("q=sample"),
+        );
+        assert_eq!(
+            search.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&search.body)
+        );
+    }
+
+    #[test]
+    fn untouched_l0_conflict_retry_is_a_typed_no_op() {
+        let fixture = untouched_l0_conflict_fixture();
+        let retry = route(
+            &fixture.state,
+            true,
+            "POST",
+            "/api/derived-access/retry",
+            None,
+        );
+        assert_eq!(
+            retry.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&retry.body)
+        );
+        let body = json_body(&retry);
+        assert_eq!(body["namespace"], "conflict");
+        assert_eq!(body["rebuildInFlight"], false);
+        assert!(fixture.store_root.join("derived").exists());
+        assert!(fixture.store_root.join(".pointbreak-derived").exists());
+        assert_eq!(quarantine_siblings(&fixture.store_root), 0);
+    }
+
+    #[test]
+    fn l2_conflict_v2_routes_are_projection_invalid_with_the_conflict_detail() {
+        let fixture = l2_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        for path in ["/api/v2/profile", "/api/v2/changes", "/api/v2/attention"] {
+            let response = route(&fixture.state, true, "GET", path, None);
+            assert_eq!(
+                response.status,
+                "503 Service Unavailable",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let body = json_body(&response);
+            assert_eq!(body["code"], "projection_invalid", "{path}: {body}");
+            assert_eq!(body["retryable"], false, "{path}: {body}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains(CONFLICT_DETAIL)),
+                "{path}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_conflict_legacy_routes_stay_gated_before_reader_selection() {
+        let fixture = l2_conflict_fixture();
+        let response = route(&fixture.state, true, "GET", "/api/history", None);
+        assert_eq!(response.status, "426 Upgrade Required");
+    }
+
     #[test]
     fn non_get_methods_are_rejected() {
         assert_eq!(
