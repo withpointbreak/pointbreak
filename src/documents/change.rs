@@ -20,8 +20,9 @@ use crate::session::event::{
 };
 use crate::session::{
     AttentionWaitKeyV1, BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1,
-    ChangeLifecycleV1, ChangeLinkView, ChangeMembershipClaimViewV1, ChangeOrderKey,
-    ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1, RevisionRefUnavailableReasonV1,
+    ChangeLifecycleV1, ChangeLinkView, ChangeListOrderV1, ChangeMembershipClaimViewV1,
+    ChangeOrderKey, ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1, ChangeView,
+    RevisionRefUnavailableReasonV1, compare_change_order, is_strictly_ordered,
 };
 
 pub const REVIEW_CHANGE_LIST_SCHEMA: &str = "pointbreak.review-change-list";
@@ -521,6 +522,9 @@ pub struct ChangeRevisionDetailV1 {
 pub struct ChangeListDocumentV1 {
     pub schema: String,
     pub version: u32,
+    /// The presentation order `changes` is emitted in. Server-owned: every
+    /// client renders received order and never sorts locally.
+    pub order: ChangeListOrderV1,
     pub changes: Vec<ChangeSummaryV1>,
     pub diagnostics: Vec<String>,
     pub projection_stamp: String,
@@ -531,6 +535,8 @@ pub struct ChangeListDocumentV1 {
 pub struct ChangeAttentionDocumentV2 {
     pub schema: String,
     pub version: u32,
+    /// The presentation order `changes` is emitted in.
+    pub order: ChangeListOrderV1,
     pub changes: Vec<ChangeSummaryV1>,
     pub projection_stamp: String,
 }
@@ -844,8 +850,14 @@ impl ChangeDocumentFacadeV1 {
         Ok(self)
     }
 
+    /// The review-schema Change list in the Changes lens default order.
     pub fn list_document(&self) -> ChangeListDocumentV1 {
-        self.list_document_with_schema(REVIEW_CHANGE_LIST_SCHEMA)
+        self.list_document_ordered(ChangeListOrderV1::default_for_changes())
+    }
+
+    /// The review-schema Change list under an explicit presentation order.
+    pub fn list_document_ordered(&self, order: ChangeListOrderV1) -> ChangeListDocumentV1 {
+        self.list_document_with_schema(REVIEW_CHANGE_LIST_SCHEMA, order)
     }
 
     /// Build the Inspector page from the same ordered Change summaries as the
@@ -853,7 +865,10 @@ impl ChangeDocumentFacadeV1 {
     /// cohort; the distinct schema keeps a later bounded page additive without
     /// weakening the CLI document.
     pub fn list_document_for_inspector(&self) -> ChangeListDocumentV1 {
-        self.list_document_with_schema(INSPECT_CHANGES_PAGE_SCHEMA)
+        self.list_document_with_schema(
+            INSPECT_CHANGES_PAGE_SCHEMA,
+            ChangeListOrderV1::default_for_changes(),
+        )
     }
 
     pub fn list_document_for_inspector_with_presentations(
@@ -876,16 +891,19 @@ impl ChangeDocumentFacadeV1 {
         selected_change_ids: &[ChangeId],
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
+        order: ChangeListOrderV1,
     ) -> Result<ChangeListPresentationDocumentV1> {
         let (changes, presentations) = self.selected_page_content_with_presentations(
             selected_change_ids,
             hydrated_proposal_events,
             generation_stamp,
+            order,
         )?;
         Ok(ChangeListPresentationDocumentV1 {
             document: ChangeListDocumentV1 {
                 schema: INSPECT_CHANGES_PAGE_SCHEMA.to_owned(),
                 version: 1,
+                order,
                 changes,
                 diagnostics: self.provenance.diagnostics.clone(),
                 projection_stamp: generation_stamp.to_owned(),
@@ -894,24 +912,58 @@ impl ChangeDocumentFacadeV1 {
         })
     }
 
-    fn list_document_with_schema(&self, schema: &str) -> ChangeListDocumentV1 {
+    fn list_document_with_schema(
+        &self,
+        schema: &str,
+        order: ChangeListOrderV1,
+    ) -> ChangeListDocumentV1 {
         ChangeListDocumentV1 {
             schema: schema.to_owned(),
             version: 1,
-            changes: self
-                .semantic
-                .changes
-                .values()
-                .map(|view| self.summary(view))
-                .collect(),
+            order,
+            changes: self.ordered_summaries(order, |_| true),
             diagnostics: self.provenance.diagnostics.clone(),
             projection_stamp: self.projection_stamp.clone(),
         }
     }
 
-    /// Build attention from the same Change summary model. Accepted Changes are
-    /// omitted; no separate client-side lifecycle policy exists.
+    /// Every Change summary passing `keep`, sorted by the one shared Change
+    /// comparator so the facade never presents BTreeMap iteration as an order.
+    fn ordered_summaries(
+        &self,
+        order: ChangeListOrderV1,
+        keep: impl Fn(&ChangeView) -> bool,
+    ) -> Vec<ChangeSummaryV1> {
+        let mut changes = self
+            .semantic
+            .changes
+            .values()
+            .filter(|view| keep(view))
+            .map(|view| self.summary(view))
+            .collect::<Vec<_>>();
+        changes.sort_by(|left, right| {
+            compare_change_order(
+                order,
+                change_summary_order_key(left),
+                change_summary_order_key(right),
+            )
+        });
+        changes
+    }
+
+    /// Build attention from the same Change summary model in the Attention
+    /// lens default order. Accepted Changes are omitted; no separate
+    /// client-side lifecycle policy exists.
     pub fn attention_document(&self, inspect: bool) -> ChangeAttentionDocumentV2 {
+        self.attention_document_ordered(inspect, ChangeListOrderV1::default_for_attention())
+    }
+
+    /// The Attention document under an explicit presentation order.
+    pub fn attention_document_ordered(
+        &self,
+        inspect: bool,
+        order: ChangeListOrderV1,
+    ) -> ChangeAttentionDocumentV2 {
         ChangeAttentionDocumentV2 {
             schema: if inspect {
                 INSPECT_ATTENTION_SCHEMA_V2
@@ -920,13 +972,9 @@ impl ChangeDocumentFacadeV1 {
             }
             .to_owned(),
             version: 2,
+            order,
             changes: self
-                .semantic
-                .changes
-                .values()
-                .filter(|view| view.lifecycle != ChangeLifecycleV1::Accepted)
-                .map(|view| self.summary(view))
-                .collect(),
+                .ordered_summaries(order, |view| view.lifecycle != ChangeLifecycleV1::Accepted),
             projection_stamp: self.projection_stamp.clone(),
         }
     }
@@ -934,6 +982,17 @@ impl ChangeDocumentFacadeV1 {
     pub fn attention_document_with_presentations(
         &self,
         inspect: bool,
+    ) -> Result<ChangeAttentionPresentationDocumentV2> {
+        self.attention_document_with_presentations_ordered(
+            inspect,
+            ChangeListOrderV1::default_for_attention(),
+        )
+    }
+
+    pub fn attention_document_with_presentations_ordered(
+        &self,
+        inspect: bool,
+        order: ChangeListOrderV1,
     ) -> Result<ChangeAttentionPresentationDocumentV2> {
         let visible_change_ids = self
             .semantic
@@ -953,7 +1012,7 @@ impl ChangeDocumentFacadeV1 {
             .map(|(change_id, presentation)| (change_id.clone(), presentation.clone()))
             .collect();
         Ok(ChangeAttentionPresentationDocumentV2 {
-            document: self.attention_document(inspect),
+            document: self.attention_document_ordered(inspect, order),
             presentations,
         })
     }
@@ -966,17 +1025,20 @@ impl ChangeDocumentFacadeV1 {
         selected_change_ids: &[ChangeId],
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
+        order: ChangeListOrderV1,
     ) -> Result<ChangeAttentionPresentationDocumentV2> {
         self.refuse_accepted_attention_selection(selected_change_ids)?;
         let (changes, presentations) = self.selected_page_content_with_presentations(
             selected_change_ids,
             hydrated_proposal_events,
             generation_stamp,
+            order,
         )?;
         Ok(ChangeAttentionPresentationDocumentV2 {
             document: ChangeAttentionDocumentV2 {
                 schema: INSPECT_ATTENTION_SCHEMA_V2.to_owned(),
                 version: 2,
+                order,
                 changes,
                 projection_stamp: generation_stamp.to_owned(),
             },
@@ -992,15 +1054,18 @@ impl ChangeDocumentFacadeV1 {
         selected_change_ids: &[ChangeId],
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
+        order: ChangeListOrderV1,
     ) -> Result<ChangeListDocumentV1> {
         let (changes, _presentations) = self.selected_page_content_with_presentations(
             selected_change_ids,
             hydrated_proposal_events,
             generation_stamp,
+            order,
         )?;
         Ok(ChangeListDocumentV1 {
             schema: REVIEW_CHANGE_LIST_SCHEMA.to_owned(),
             version: 1,
+            order,
             changes,
             diagnostics: self.provenance.diagnostics.clone(),
             projection_stamp: generation_stamp.to_owned(),
@@ -1015,17 +1080,20 @@ impl ChangeDocumentFacadeV1 {
         selected_change_ids: &[ChangeId],
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
+        order: ChangeListOrderV1,
     ) -> Result<ChangeAttentionPresentationDocumentV2> {
         self.refuse_accepted_attention_selection(selected_change_ids)?;
         let (changes, presentations) = self.selected_page_content_with_presentations(
             selected_change_ids,
             hydrated_proposal_events,
             generation_stamp,
+            order,
         )?;
         Ok(ChangeAttentionPresentationDocumentV2 {
             document: ChangeAttentionDocumentV2 {
                 schema: ATTENTION_LIST_SCHEMA_V2.to_owned(),
                 version: 2,
+                order,
                 changes,
                 projection_stamp: generation_stamp.to_owned(),
             },
@@ -1098,7 +1166,8 @@ impl ChangeDocumentFacadeV1 {
                 matches.push(change_id.clone());
             }
         }
-        matches.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        // Candidates arrive in the page order; matching keeps it. Sorting
+        // here by identity would silently re-impose change_id_asc.
         Ok(matches)
     }
 
@@ -1107,6 +1176,7 @@ impl ChangeDocumentFacadeV1 {
         selected_change_ids: &[ChangeId],
         hydrated_proposal_events: &[ShoreEvent],
         generation_stamp: &str,
+        order: ChangeListOrderV1,
     ) -> Result<(
         Vec<ChangeSummaryV1>,
         BTreeMap<ChangeId, ChangePresentationV1>,
@@ -1116,13 +1186,19 @@ impl ChangeDocumentFacadeV1 {
                 "selected Change page has no checkpoint-derived generation stamp".to_owned(),
             ));
         }
-        if selected_change_ids
-            .windows(2)
-            .any(|pair| pair[0].as_str() >= pair[1].as_str())
-        {
-            return Err(ShoreError::Message(
-                "selected Change page identities are not strict change_id_asc".to_owned(),
-            ));
+        // Strict under the order in effect, never merely ascending by
+        // identity: the guard keeps catching duplicates and mis-slicing under
+        // every admitted order.
+        if !is_strictly_ordered(
+            order,
+            selected_change_ids
+                .iter()
+                .map(|change_id| self.order_key_for(change_id)),
+        ) {
+            return Err(ShoreError::Message(format!(
+                "selected Change page identities are not strictly ordered under {}",
+                order.as_str()
+            )));
         }
 
         let selected = selected_change_ids
@@ -1626,6 +1702,21 @@ impl ChangeDocumentFacadeV1 {
             )?,
             fact_content_presentations,
         })
+    }
+
+    /// The shared comparator's input for one Change, read from the bound
+    /// ordering keys (absent keys when no ordering was attached).
+    fn order_key_for<'a>(&'a self, change_id: &'a ChangeId) -> ChangeOrderKey<'a> {
+        let ordering = self.ordering.as_ref();
+        let wait = ordering.and_then(|ordering| ordering.attention_wait.get(change_id));
+        ChangeOrderKey {
+            change_id: change_id.as_str(),
+            activity_at: ordering
+                .and_then(|ordering| ordering.activity.get(change_id))
+                .map(String::as_str),
+            tier_rank: wait.map(|key| key.tier_rank),
+            oldest_observed_at: wait.map(|key| key.oldest_observed_at.as_str()),
+        }
     }
 
     fn summary(&self, view: &crate::session::ChangeView) -> ChangeSummaryV1 {
@@ -3302,6 +3393,7 @@ mod tests {
             serde_json::json!({
                 "schema": "pointbreak.review-change-list",
                 "version": 1,
+                "order": "activity_desc",
                 "changes": [{
                     "changeId": "change:sha256:one",
                     "declarationState": "authoritative",
@@ -3651,6 +3743,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         assert_eq!(list.document.changes.len(), 1);
@@ -3671,6 +3764,7 @@ mod tests {
                 std::slice::from_ref(&list.document.changes[0].change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         assert_eq!(attention.document.changes, list.document.changes);
@@ -3689,6 +3783,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &[],
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .expect_err("selected current exact Revision must have a proposal carrier");
         assert!(
@@ -3705,6 +3800,7 @@ mod tests {
                     proposal_event(&revision, None, "proposal:absent"),
                 ],
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .expect_err("Some(summary) and None duplicates must conflict");
         assert!(
@@ -3740,6 +3836,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &events,
                 &expected_list.document.projection_stamp,
+                ChangeListOrderV1::default_for_changes(),
             )
             .unwrap();
         let actual_attention = facade
@@ -3747,6 +3844,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &events,
                 &expected_attention.document.projection_stamp,
+                ChangeListOrderV1::default_for_attention(),
             )
             .unwrap();
 
@@ -3767,6 +3865,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         let review_list = facade
@@ -3774,6 +3873,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         assert_eq!(review_list.schema, REVIEW_CHANGE_LIST_SCHEMA);
@@ -3790,6 +3890,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         let review_attention = facade
@@ -3797,6 +3898,7 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
         assert_eq!(review_attention.document.schema, ATTENTION_LIST_SCHEMA_V2);
@@ -3824,6 +3926,7 @@ mod tests {
                     std::slice::from_ref(&change_id),
                     &hydrated,
                     "",
+                    ChangeListOrderV1::ChangeIdAsc,
                 )
                 .map(|_| ()),
             facade
@@ -3831,6 +3934,7 @@ mod tests {
                     std::slice::from_ref(&change_id),
                     &hydrated,
                     "",
+                    ChangeListOrderV1::ChangeIdAsc,
                 )
                 .map(|_| ()),
         ] {
@@ -3857,13 +3961,14 @@ mod tests {
                 std::slice::from_ref(&change_id),
                 &hydrated,
                 "sha256:checkpoint-page",
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .expect_err("the review attention selection refuses an accepted Change");
         assert!(refused.to_string().contains("accepted Change"));
     }
 
     #[test]
-    fn proposal_search_validates_all_candidates_before_matching_and_sorts_results() {
+    fn proposal_search_validates_all_candidates_before_matching_and_keeps_candidate_order() {
         let (first_change, first_revision, facade) = facade();
         let second_change = ChangeId::new("change:sha256:two");
         let second_revision = reference("second", 'b');
@@ -3902,7 +4007,9 @@ mod tests {
                     "change:sha256",
                 )
                 .unwrap(),
-            vec![first_change.clone(), second_change.clone()]
+            // Matches keep the candidate (page) order; the search never
+            // re-sorts by identity.
+            vec![second_change.clone(), first_change.clone()]
         );
 
         let mut diagnostic_only = facade.clone();
@@ -4118,6 +4225,7 @@ mod tests {
             BTreeSet::from([
                 "changes",
                 "diagnostics",
+                "order",
                 "presentations",
                 "projectionStamp",
                 "schema",
@@ -4141,6 +4249,7 @@ mod tests {
                 keys(&attention),
                 BTreeSet::from([
                     "changes",
+                    "order",
                     "presentations",
                     "projectionStamp",
                     "schema",

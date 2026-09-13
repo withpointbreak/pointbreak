@@ -28,7 +28,7 @@ use crate::documents::{
     ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1, ChangeDocumentFacadeV1,
     ChangeListDocumentV1, ChangeListPresentationDocumentV1, ChangeQueryUnavailableDocumentV1,
     ChangeSummaryV1, ReaderProfileDocumentV1, ReaderUpgradeRequiredDocumentV1,
-    attention_presentation_for_change,
+    attention_presentation_for_change, change_summary_order_key,
 };
 use crate::error::{Result, ShoreError};
 use crate::model::{ChangeId, RevisionRefV1};
@@ -39,8 +39,9 @@ use crate::session::store::capabilities::{
 };
 use crate::session::store::resolution::resolve_change_read_backend;
 use crate::session::{
-    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeProjection,
-    ChangeTopologyV1, ChangeView, RevisionShowResult,
+    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeListOrderV1,
+    ChangeOrderKey, ChangePageKeyV1, ChangeProjection, ChangeTopologyV1, ChangeView,
+    RevisionShowResult, compare_change_order, is_strictly_ordered,
 };
 
 const AUTHORITY_ERROR_SCHEMA: &str = "pointbreak.inspect-change-authority-error";
@@ -525,11 +526,21 @@ impl DerivedChangeAccess {
     /// selection, mirroring [`Self::profile`]'s finished-document return
     /// shape for the CLI.
     pub fn review_list_document(&self) -> Result<DerivedChangeOutcomeV1<ChangeListDocumentV1>> {
+        self.review_list_document_ordered(ChangeListOrderV1::default_for_changes())
+    }
+
+    /// The review-schema Change list under an explicit order. Rejects an
+    /// order the Changes lens does not admit before any reader work.
+    pub fn review_list_document_ordered(
+        &self,
+        order: ChangeListOrderV1,
+    ) -> Result<DerivedChangeOutcomeV1<ChangeListDocumentV1>> {
         Ok(self
             .read_page_with_hook(
                 ChangePageLens::Changes,
                 ChangeCompositionTarget::Review,
                 &DerivedChangePageRequestV1::Bare,
+                order,
                 |_| {},
             )?
             .map_ready(|page| match page {
@@ -547,11 +558,20 @@ impl DerivedChangeAccess {
     pub fn review_attention_document(
         &self,
     ) -> Result<DerivedChangeOutcomeV1<ChangeAttentionPresentationDocumentV2>> {
+        self.review_attention_document_ordered(ChangeListOrderV1::default_for_attention())
+    }
+
+    /// The review-schema Attention document under an explicit order.
+    pub fn review_attention_document_ordered(
+        &self,
+        order: ChangeListOrderV1,
+    ) -> Result<DerivedChangeOutcomeV1<ChangeAttentionPresentationDocumentV2>> {
         Ok(self
             .read_page_with_hook(
                 ChangePageLens::Attention,
                 ChangeCompositionTarget::Review,
                 &DerivedChangePageRequestV1::Bare,
+                order,
                 |_| {},
             )?
             .map_ready(|page| match page {
@@ -741,7 +761,13 @@ impl DerivedChangeAccess {
         request: &DerivedChangePageRequestV1,
         hook: impl FnMut(ChangeReadBoundary),
     ) -> Result<DerivedChangeOutcomeV1<PreparedChangePage>> {
-        self.read_page_with_hook(lens, ChangeCompositionTarget::Inspector, request, hook)
+        self.read_page_with_hook(
+            lens,
+            ChangeCompositionTarget::Inspector,
+            request,
+            request.order_for(lens),
+            hook,
+        )
     }
 
     fn read_page_with_hook(
@@ -749,8 +775,10 @@ impl DerivedChangeAccess {
         lens: ChangePageLens,
         target: ChangeCompositionTarget,
         request: &DerivedChangePageRequestV1,
+        order: ChangeListOrderV1,
         mut hook: impl FnMut(ChangeReadBoundary),
     ) -> Result<DerivedChangeOutcomeV1<PreparedChangePage>> {
+        require_admitted_order(lens, order)?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let snapshot_phase = enter_derived_access_phase_v1(Phase::ChangePageSnapshotAcquisition);
         let current = match self.runtime.current() {
@@ -840,16 +868,21 @@ impl DerivedChangeAccess {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let selection_phase = enter_derived_access_phase_v1(Phase::ChangePageBodylessSelection);
         let summaries = facade.list_document_for_inspector().changes;
-        let candidate_ids =
-            match select_bodyless_change_candidates(lens, &summaries, &generation_stamp, request) {
-                Ok(candidates) => candidates,
-                Err(error) => {
-                    return Ok(DerivedChangeOutcomeV1::projection_unavailable(
-                        DerivedProjectionFailureCodeV1::ProjectionInvalid,
-                        error.to_string(),
-                    ));
-                }
-            };
+        let candidate_ids = match select_bodyless_change_candidates(
+            lens,
+            &summaries,
+            &generation_stamp,
+            request,
+            order,
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error.to_string(),
+                ));
+            }
+        };
         let candidate_id_set = candidate_ids.iter().cloned().collect::<BTreeSet<_>>();
         let candidate_revisions = summaries
             .iter()
@@ -869,8 +902,10 @@ impl DerivedChangeAccess {
             None => {
                 let selection = match paginate_bodyless_change_candidates(
                     &candidate_ids,
+                    &summaries,
                     &generation_stamp,
                     request,
+                    order,
                 ) {
                     Ok(selection) => selection,
                     Err(error) => {
@@ -1056,8 +1091,10 @@ impl DerivedChangeAccess {
                 record_change_matches(matching_ids.len());
                 let selection = match paginate_bodyless_change_candidates(
                     &matching_ids,
+                    &summaries,
                     &generation_stamp,
                     request,
+                    order,
                 ) {
                     Ok(selection) => selection,
                     Err(error) => {
@@ -1165,6 +1202,7 @@ impl DerivedChangeAccess {
                     &selection.change_ids,
                     &proposal_events,
                     &generation_stamp,
+                    order,
                 )
                 .map(PreparedChangePage::ReviewList),
             (ChangePageLens::Attention, ChangeCompositionTarget::Review) => facade
@@ -1172,6 +1210,7 @@ impl DerivedChangeAccess {
                     &selection.change_ids,
                     &proposal_events,
                     &generation_stamp,
+                    order,
                 )
                 .map(PreparedChangePage::ReviewAttention),
             (ChangePageLens::Changes, ChangeCompositionTarget::Inspector) => facade
@@ -1179,6 +1218,7 @@ impl DerivedChangeAccess {
                     &selection.change_ids,
                     &proposal_events,
                     &generation_stamp,
+                    order,
                 )
                 .map(|document| {
                     PreparedChangePage::Changes(DerivedChangePageV1 {
@@ -1192,6 +1232,7 @@ impl DerivedChangeAccess {
                         &selection.change_ids,
                         &proposal_events,
                         &generation_stamp,
+                        order,
                     )?;
                 let attention_presentations = selection
                     .change_ids
@@ -1744,6 +1785,18 @@ pub enum DerivedChangePageRequestV1 {
     Bounded(DerivedChangePageSelectionV1),
 }
 
+impl DerivedChangePageRequestV1 {
+    /// The order this request reads under: the bound selection's explicit
+    /// order, else the lens default. Lens admission is the caller's check.
+    fn order_for(&self, lens: ChangePageLens) -> ChangeListOrderV1 {
+        let explicit = match self {
+            Self::Bare => None,
+            Self::Bounded(selection) => selection.order(),
+        };
+        explicit.unwrap_or(lens.default_order())
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedChangePageSelectionV1 {
@@ -1754,6 +1807,8 @@ pub struct DerivedChangePageSelectionV1 {
     lifecycle: Option<ChangeLifecycleV1>,
     attention: Option<DerivedChangeAttentionFilterV1>,
     availability: Option<DerivedChangeAvailabilityFilterV1>,
+    /// The presentation order requested, or `None` for the lens default.
+    order: Option<ChangeListOrderV1>,
 }
 
 impl DerivedChangePageSelectionV1 {
@@ -1796,6 +1851,7 @@ impl DerivedChangePageSelectionV1 {
             lifecycle,
             attention,
             availability,
+            order: None,
         })
     }
 
@@ -1808,7 +1864,19 @@ impl DerivedChangePageSelectionV1 {
             lifecycle: None,
             attention: None,
             availability: None,
+            order: None,
         }
+    }
+
+    /// Bind an explicit presentation order. Without one the lens default
+    /// applies; lens admission is checked where the lens is known.
+    pub fn with_order(mut self, order: ChangeListOrderV1) -> Self {
+        self.order = Some(order);
+        self
+    }
+
+    pub fn order(&self) -> Option<ChangeListOrderV1> {
+        self.order
     }
 
     pub fn limit(&self) -> usize {
@@ -1876,24 +1944,25 @@ impl DerivedChangePageContinuationV1 {
 #[doc(hidden)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedChangePageBoundaryV1 {
-    last_change_id: Option<ChangeId>,
+    /// The order-tagged key of the row immediately before the target page, or
+    /// `None` for page one. The same key the Inspector token carries, so the
+    /// two lanes cannot slice differently.
+    last_key: Option<ChangePageKeyV1>,
 }
 
 impl DerivedChangePageBoundaryV1 {
     pub fn page_one() -> Self {
+        Self { last_key: None }
+    }
+
+    pub fn after(last_key: ChangePageKeyV1) -> Self {
         Self {
-            last_change_id: None,
+            last_key: Some(last_key),
         }
     }
 
-    pub fn after(last_change_id: ChangeId) -> Self {
-        Self {
-            last_change_id: Some(last_change_id),
-        }
-    }
-
-    pub fn last_change_id(&self) -> Option<&ChangeId> {
-        self.last_change_id.as_ref()
+    pub fn last_key(&self) -> Option<&ChangePageKeyV1> {
+        self.last_key.as_ref()
     }
 }
 
@@ -2091,6 +2160,37 @@ pub(crate) enum ChangePageLens {
     Attention,
 }
 
+impl ChangePageLens {
+    /// The per-lens default order, identical to the Inspector and CLI defaults.
+    pub(crate) fn default_order(self) -> ChangeListOrderV1 {
+        match self {
+            Self::Changes => ChangeListOrderV1::default_for_changes(),
+            Self::Attention => ChangeListOrderV1::default_for_attention(),
+        }
+    }
+
+    /// Whether this lens admits `order`; `attention_wait` only means
+    /// something where attention items exist.
+    pub(crate) fn admits(self, order: ChangeListOrderV1) -> bool {
+        match self {
+            Self::Changes => order.admitted_on_changes_lens(),
+            Self::Attention => order.admitted_on_attention_lens(),
+        }
+    }
+}
+
+/// Refuse an order the lens does not admit before any reader work happens.
+fn require_admitted_order(lens: ChangePageLens, order: ChangeListOrderV1) -> Result<()> {
+    if lens.admits(order) {
+        Ok(())
+    } else {
+        Err(ShoreError::Message(format!(
+            "Change page order {} is not admitted on this lens",
+            order.as_str()
+        )))
+    }
+}
+
 /// Bodyless selection result. Proposal carriers are opened only for these
 /// Change identities after this pure step completes.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2106,15 +2206,17 @@ pub(crate) fn select_bodyless_change_page(
     summaries: &[ChangeSummaryV1],
     projection_stamp: &str,
     request: &DerivedChangePageRequestV1,
+    order: ChangeListOrderV1,
 ) -> Result<BodylessChangePageSelection> {
-    let candidates = select_bodyless_change_candidates(lens, summaries, projection_stamp, request)?;
+    let candidates =
+        select_bodyless_change_candidates(lens, summaries, projection_stamp, request, order)?;
     if matches!(request, DerivedChangePageRequestV1::Bounded(selection) if selection.summary_query().is_some())
     {
         return Err(ShoreError::Message(
             "derived Change summary query requires exhaustive proposal selection".to_owned(),
         ));
     }
-    paginate_bodyless_change_candidates(&candidates, projection_stamp, request)
+    paginate_bodyless_change_candidates(&candidates, summaries, projection_stamp, request, order)
 }
 
 /// Apply the lens and every prose-independent filter without windowing. The
@@ -2125,17 +2227,40 @@ pub(crate) fn select_bodyless_change_candidates(
     summaries: &[ChangeSummaryV1],
     projection_stamp: &str,
     request: &DerivedChangePageRequestV1,
+    order: ChangeListOrderV1,
 ) -> Result<Vec<ChangeId>> {
-    let mut candidates = summaries.iter().collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.change_id.as_str().cmp(right.change_id.as_str()));
-    if candidates
-        .windows(2)
-        .any(|pair| pair[0].change_id == pair[1].change_id)
+    require_admitted_order(lens, order)?;
+    if let DerivedChangePageRequestV1::Bounded(selection) = request
+        && selection
+            .order()
+            .is_some_and(|requested| requested != order)
+    {
+        return Err(ShoreError::Message(
+            "derived Change selection order disagrees with the page order".to_owned(),
+        ));
+    }
+    // Identity uniqueness is order-independent: under an activity order two
+    // rows sharing a Change identity need not be adjacent, so a set over the
+    // identity is the only check that is sound under every order.
+    let mut identities = BTreeSet::new();
+    if summaries
+        .iter()
+        .any(|summary| !identities.insert(&summary.change_id))
     {
         return Err(ShoreError::Message(
             "bodyless Change selection contains a duplicate Change identity".to_owned(),
         ));
     }
+    let mut candidates = summaries.iter().collect::<Vec<_>>();
+    // The same comparator the Inspector page and the authoritative facade
+    // use, so the derived lane cannot order Changes differently.
+    candidates.sort_by(|left, right| {
+        compare_change_order(
+            order,
+            change_summary_order_key(left),
+            change_summary_order_key(right),
+        )
+    });
 
     if lens == ChangePageLens::Attention {
         candidates.retain(|summary| summary.lifecycle != ChangeLifecycleV1::Accepted);
@@ -2171,15 +2296,33 @@ pub(crate) fn select_bodyless_change_candidates(
         .collect())
 }
 
+/// Window an already-ordered candidate sequence. `summaries` supplies the
+/// order keys the identities alone cannot carry: the strictness guard, the
+/// boundary partition, and the issued boundaries all read the full key under
+/// `order`, so a page slices exactly where the sort placed its neighbours.
 fn paginate_bodyless_change_candidates(
     candidates: &[ChangeId],
+    summaries: &[ChangeSummaryV1],
     projection_stamp: &str,
     request: &DerivedChangePageRequestV1,
+    order: ChangeListOrderV1,
 ) -> Result<BodylessChangePageSelection> {
-    if candidates
-        .windows(2)
-        .any(|pair| pair[0].as_str() >= pair[1].as_str())
-    {
+    let keys_by_id = summaries
+        .iter()
+        .map(|summary| (&summary.change_id, change_summary_order_key(summary)))
+        .collect::<BTreeMap<_, _>>();
+    let key_of = |change_id: &ChangeId| -> Result<ChangeOrderKey<'_>> {
+        keys_by_id.get(change_id).copied().ok_or_else(|| {
+            ShoreError::Message(format!(
+                "bodyless Change candidate {} has no summary",
+                change_id.as_str()
+            ))
+        })
+    };
+    let keys = candidates.iter().map(key_of).collect::<Result<Vec<_>>>()?;
+    // Strict under the order in effect (never equal), so duplicates and
+    // mis-slicing are still caught once the sort key is no longer the id.
+    if !is_strictly_ordered(order, keys.iter().copied()) {
         return Err(ShoreError::Message(
             "bodyless Change candidates are not strictly ordered".to_owned(),
         ));
@@ -2192,38 +2335,43 @@ fn paginate_bodyless_change_candidates(
         });
     };
 
-    let start = selection
+    let start = match selection
         .after()
-        .and_then(|continuation| continuation.boundary().last_change_id())
-        .map_or(0, |boundary| {
-            candidates.partition_point(|change_id| change_id.as_str() <= boundary.as_str())
-        });
+        .and_then(|continuation| continuation.boundary().last_key())
+    {
+        None => 0,
+        Some(boundary) => {
+            if boundary.order() != order {
+                return Err(ShoreError::Message(
+                    "derived Change continuation was issued under a different order".to_owned(),
+                ));
+            }
+            let boundary_key = boundary.order_key();
+            keys.partition_point(|key| compare_change_order(order, *key, boundary_key).is_le())
+        }
+    };
     let end = start
         .saturating_add(selection.limit())
         .min(candidates.len());
     let change_ids = candidates[start..end].to_vec();
 
-    let previous = (start > 0).then(|| {
-        let previous_start = start.saturating_sub(selection.limit());
-        if previous_start == 0 {
+    let boundary_before = |page_start: usize| {
+        if page_start == 0 {
             DerivedChangePageBoundaryV1::page_one()
         } else {
-            DerivedChangePageBoundaryV1::after(candidates[previous_start - 1].clone())
+            DerivedChangePageBoundaryV1::after(ChangePageKeyV1::from_order_key(
+                order,
+                keys[page_start - 1],
+            ))
         }
-    });
-    let next = (end < candidates.len())
-        .then(|| DerivedChangePageBoundaryV1::after(candidates[end - 1].clone()));
+    };
+    let previous = (start > 0).then(|| boundary_before(start.saturating_sub(selection.limit())));
+    let next = (end < candidates.len()).then(|| boundary_before(end));
     let last_page_start = candidates
         .len()
         .checked_sub(1)
         .map_or(0, |last| (last / selection.limit()) * selection.limit());
-    let last = (last_page_start != start).then(|| {
-        if last_page_start == 0 {
-            DerivedChangePageBoundaryV1::page_one()
-        } else {
-            DerivedChangePageBoundaryV1::after(candidates[last_page_start - 1].clone())
-        }
-    });
+    let last = (last_page_start != start).then(|| boundary_before(last_page_start));
 
     Ok(BodylessChangePageSelection {
         change_ids,
@@ -3062,6 +3210,454 @@ mod tests {
         }
     }
 
+    // ---- Derived-lane order parity (activity_desc default, order keys) ----
+
+    fn activity_summary(change_id: &str, activity_at: Option<&str>) -> ChangeSummaryV1 {
+        let mut summary = bodyless_summary(
+            change_id,
+            ChangeTopologyV1::Initial,
+            ChangeLifecycleV1::InProgress,
+            DerivedChangeAttentionFilterV1::InProgress,
+            DerivedChangeAvailabilityFilterV1::Available,
+        );
+        summary.activity_at = activity_at.map(str::to_owned);
+        summary
+    }
+
+    fn summaries_with_activity() -> Vec<ChangeSummaryV1> {
+        vec![
+            activity_summary("change:sha256:0a1f", Some("2026-09-12T18:04:00.000Z")),
+            activity_summary("change:sha256:3b77", Some("2026-09-12T19:20:00.000Z")),
+            activity_summary("change:sha256:91cd", Some("unix-ms:1789000000000")),
+            activity_summary("change:sha256:ffff", None),
+        ]
+    }
+
+    fn id_strs(ids: &[ChangeId]) -> Vec<&str> {
+        ids.iter().map(ChangeId::as_str).collect()
+    }
+
+    #[test]
+    fn a_request_reads_under_its_explicit_order_or_the_lens_default() {
+        let bare = DerivedChangePageRequestV1::Bare;
+        assert_eq!(
+            bare.order_for(ChangePageLens::Changes),
+            ChangeListOrderV1::ActivityDesc
+        );
+        assert_eq!(
+            bare.order_for(ChangePageLens::Attention),
+            ChangeListOrderV1::AttentionWait
+        );
+        let explicit = ordered(
+            bounded_request(2, None, None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
+        );
+        assert_eq!(
+            explicit.order_for(ChangePageLens::Attention),
+            ChangeListOrderV1::ChangeIdAsc
+        );
+        assert!(!ChangePageLens::Changes.admits(ChangeListOrderV1::AttentionWait));
+        assert!(ChangePageLens::Attention.admits(ChangeListOrderV1::AttentionWait));
+    }
+
+    #[test]
+    fn the_derived_lane_defaults_to_activity_descending() {
+        let ids = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries_with_activity(),
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            DerivedChangePageRequestV1::Bare.order_for(ChangePageLens::Changes),
+        )
+        .expect("candidates");
+
+        assert_eq!(
+            id_strs(&ids),
+            [
+                "change:sha256:3b77",
+                "change:sha256:0a1f",
+                "change:sha256:91cd",
+                "change:sha256:ffff"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_derived_lane_still_serves_change_id_ascending_on_request() {
+        let ids = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries_with_activity(),
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ChangeIdAsc,
+        )
+        .expect("candidates");
+
+        assert_eq!(
+            id_strs(&ids),
+            [
+                "change:sha256:0a1f",
+                "change:sha256:3b77",
+                "change:sha256:91cd",
+                "change:sha256:ffff"
+            ]
+        );
+    }
+
+    #[test]
+    fn attention_wait_is_refused_on_the_changes_lens_and_a_disagreeing_selection_is_refused() {
+        let error = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries_with_activity(),
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::AttentionWait,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not admitted"), "{error}");
+
+        let error = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries_with_activity(),
+            PAGE_TEST_STAMP,
+            &ordered(
+                bounded_request(2, None, None, None, None, None),
+                ChangeListOrderV1::ChangeIdAsc,
+            ),
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("disagrees"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_identities_are_caught_even_when_not_adjacent() {
+        // Under activity_desc the duplicate pair is separated by an
+        // intervening candidate and their full keys differ, so neither
+        // adjacency nor strict full-key ordering would catch it.
+        let summaries = vec![
+            activity_summary("change:sha256:0a1f", Some("2026-09-12T19:20:00.000Z")),
+            activity_summary("change:sha256:3b77", Some("2026-09-12T18:30:00.000Z")),
+            activity_summary("change:sha256:0a1f", Some("2026-09-12T18:04:00.000Z")),
+        ];
+        let error = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries,
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate"), "{error}");
+    }
+
+    #[test]
+    fn the_duplicate_identity_guard_still_fires_under_the_new_order() {
+        let summaries = vec![
+            activity_summary("change:sha256:0a1f", Some("2026-09-12T19:20:00.000Z")),
+            activity_summary("change:sha256:0a1f", Some("2026-09-12T19:20:00.000Z")),
+        ];
+        let error = select_bodyless_change_candidates(
+            ChangePageLens::Changes,
+            &summaries,
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("duplicate"), "{error}");
+    }
+
+    #[test]
+    fn a_non_ascending_page_is_not_rejected_by_the_pagination_guard() {
+        let summaries = summaries_with_activity();
+        let ordered_ids = [
+            "change:sha256:3b77",
+            "change:sha256:0a1f",
+            "change:sha256:91cd",
+            "change:sha256:ffff",
+        ]
+        .map(ChangeId::new);
+
+        let page = paginate_bodyless_change_candidates(
+            &ordered_ids,
+            &summaries,
+            PAGE_TEST_STAMP,
+            &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ActivityDesc,
+        );
+
+        assert!(
+            page.is_ok(),
+            "pagination guard rejected a valid activity_desc page: {page:?}"
+        );
+    }
+
+    #[test]
+    fn the_pagination_guard_still_rejects_a_mis_sliced_page() {
+        let summaries = summaries_with_activity();
+        for ids in [
+            // a duplicate
+            vec!["change:sha256:3b77", "change:sha256:3b77"],
+            // reversed for the declared order
+            vec!["change:sha256:0a1f", "change:sha256:3b77"],
+            // absent activity before present activity
+            vec!["change:sha256:ffff", "change:sha256:91cd"],
+        ] {
+            let ids = ids.into_iter().map(ChangeId::new).collect::<Vec<_>>();
+            let error = paginate_bodyless_change_candidates(
+                &ids,
+                &summaries,
+                PAGE_TEST_STAMP,
+                &DerivedChangePageRequestV1::Bare,
+                ChangeListOrderV1::ActivityDesc,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("not strictly ordered"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn bodyless_pages_slice_the_activity_order_on_order_tagged_keys() {
+        let rows = summaries_with_activity();
+        let first = select_bodyless_change_page(
+            ChangePageLens::Changes,
+            &rows,
+            PAGE_TEST_STAMP,
+            &ordered(
+                bounded_request(2, None, None, None, None, None),
+                ChangeListOrderV1::ActivityDesc,
+            ),
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap();
+        assert_eq!(
+            selected_ids(&first),
+            ["change:sha256:3b77", "change:sha256:0a1f"]
+        );
+        let window = first.window.clone().expect("window");
+        let next = window.next.expect("next boundary");
+        assert_eq!(
+            next.last_key(),
+            Some(&ChangePageKeyV1::ActivityDesc {
+                activity_at: Some("2026-09-12T18:04:00.000Z".to_owned()),
+                change_id: "change:sha256:0a1f".to_owned(),
+            })
+        );
+
+        let second = select_bodyless_change_page(
+            ChangePageLens::Changes,
+            &rows,
+            PAGE_TEST_STAMP,
+            &ordered(
+                bounded_request(2, Some(next), None, None, None, None),
+                ChangeListOrderV1::ActivityDesc,
+            ),
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap();
+        assert_eq!(
+            selected_ids(&second),
+            ["change:sha256:91cd", "change:sha256:ffff"]
+        );
+        assert!(second.window.as_ref().unwrap().next.is_none());
+
+        // A boundary issued under another order never re-interprets.
+        let foreign = DerivedChangePageBoundaryV1::after(ChangePageKeyV1::ChangeIdAsc {
+            change_id: "change:sha256:0a1f".to_owned(),
+        });
+        let error = select_bodyless_change_page(
+            ChangePageLens::Changes,
+            &rows,
+            PAGE_TEST_STAMP,
+            &ordered(
+                bounded_request(2, Some(foreign), None, None, None, None),
+                ChangeListOrderV1::ActivityDesc,
+            ),
+            ChangeListOrderV1::ActivityDesc,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("different order"), "{error}");
+    }
+
+    fn strict_facade(fixture: &ActiveChangeFixture) -> ChangeDocumentFacadeV1 {
+        let events = fixture.store.list_change_events().unwrap();
+        let semantic = crate::session::project_changes(&events).unwrap();
+        let provenance = crate::session::project_change_documents(&events).unwrap();
+        let ordering =
+            crate::documents::change_ordering_projection(&semantic, &provenance, &events).unwrap();
+        ChangeDocumentFacadeV1::new(semantic, provenance)
+            .unwrap()
+            .with_ordering(ordering)
+            .unwrap()
+    }
+
+    fn page_through_derived(
+        fixture: &ActiveChangeFixture,
+        order: ChangeListOrderV1,
+        limit: usize,
+    ) -> Vec<ChangeId> {
+        let mut ids = Vec::new();
+        let mut continuation = None;
+        loop {
+            let selection = DerivedChangePageSelectionV1::new(
+                limit,
+                continuation,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .with_order(order);
+            let DerivedChangeOutcomeV1::Ready(page) = fixture
+                .access
+                .changes(&DerivedChangePageRequestV1::Bounded(selection))
+                .unwrap()
+            else {
+                panic!("derived page must be ready");
+            };
+            ids.extend(
+                page.document
+                    .document
+                    .changes
+                    .iter()
+                    .map(|summary| summary.change_id.clone()),
+            );
+            let window = page.window.expect("bounded window");
+            match window.next {
+                Some(next) => {
+                    continuation = Some(
+                        DerivedChangePageContinuationV1::new(
+                            page.document.document.projection_stamp.clone(),
+                            next,
+                        )
+                        .unwrap(),
+                    );
+                }
+                None => return ids,
+            }
+        }
+    }
+
+    #[test]
+    fn both_lanes_emit_identical_change_order_for_the_same_store() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("a")], &[Some("b")], &[Some("c")]]);
+        // Newest activity on the greatest identity, so activity_desc is the
+        // exact reverse of change_id_asc and the assertion is not vacuous.
+        let mut by_id = fixture.changes.clone();
+        by_id.sort_by(|left, right| left.change_id.cmp(&right.change_id));
+        for (index, change) in by_id.iter().enumerate() {
+            record_fixture_event(
+                &fixture.store,
+                ordering_observation(
+                    &change.revision.revision_id,
+                    &format!("parity-{index}"),
+                    &format!("2026-09-1{index}T00:00:00Z"),
+                ),
+            );
+        }
+        // One anchored attention item so attention_wait has a key to order by.
+        record_fixture_event(
+            &fixture.store,
+            ordering_request_opened(
+                &by_id[1].revision.revision_id,
+                "parity",
+                "2026-09-01T00:00:00Z",
+            ),
+        );
+        let strict = strict_facade(&fixture);
+        let strict_ids = |order: ChangeListOrderV1| {
+            strict
+                .list_document_ordered(order)
+                .changes
+                .into_iter()
+                .map(|summary| summary.change_id)
+                .collect::<Vec<_>>()
+        };
+
+        for order in [
+            ChangeListOrderV1::ActivityDesc,
+            ChangeListOrderV1::ChangeIdAsc,
+        ] {
+            let DerivedChangeOutcomeV1::Ready(derived) =
+                fixture.access.review_list_document_ordered(order).unwrap()
+            else {
+                panic!("derived list must be ready for {order:?}");
+            };
+            assert_eq!(derived.order, order);
+            let derived_ids = derived
+                .changes
+                .iter()
+                .map(|summary| summary.change_id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                derived_ids,
+                strict_ids(order),
+                "lane divergence for {order:?}"
+            );
+            assert_eq!(
+                page_through_derived(&fixture, order, 2),
+                strict_ids(order),
+                "paged lane divergence for {order:?}"
+            );
+        }
+        let activity = strict_ids(ChangeListOrderV1::ActivityDesc);
+        let mut reversed = strict_ids(ChangeListOrderV1::ChangeIdAsc);
+        reversed.reverse();
+        assert_eq!(activity, reversed);
+
+        for order in [
+            ChangeListOrderV1::AttentionWait,
+            ChangeListOrderV1::ActivityDesc,
+        ] {
+            let DerivedChangeOutcomeV1::Ready(derived) = fixture
+                .access
+                .review_attention_document_ordered(order)
+                .unwrap()
+            else {
+                panic!("derived attention must be ready for {order:?}");
+            };
+            let derived_ids = derived
+                .document
+                .changes
+                .iter()
+                .map(|summary| summary.change_id.clone())
+                .collect::<Vec<_>>();
+            let strict_ids = strict
+                .attention_document_ordered(false, order)
+                .changes
+                .into_iter()
+                .map(|summary| summary.change_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                derived_ids, strict_ids,
+                "attention lane divergence for {order:?}"
+            );
+        }
+        let DerivedChangeOutcomeV1::Ready(waiting) = fixture
+            .access
+            .review_attention_document_ordered(ChangeListOrderV1::AttentionWait)
+            .unwrap()
+        else {
+            panic!("attention must be ready");
+        };
+        assert_eq!(waiting.document.changes[0].change_id, by_id[1].change_id);
+        assert!(
+            fixture
+                .access
+                .review_list_document_ordered(ChangeListOrderV1::AttentionWait)
+                .is_err(),
+            "attention_wait is refused on the Changes lens"
+        );
+    }
+
     fn record_fixture_event(store: &EventStore, event: ShoreEvent) {
         assert_eq!(
             store
@@ -3403,6 +3999,19 @@ mod tests {
         summary
     }
 
+    /// Bind an explicit order to a bounded test request.
+    fn ordered(
+        request: DerivedChangePageRequestV1,
+        order: ChangeListOrderV1,
+    ) -> DerivedChangePageRequestV1 {
+        match request {
+            DerivedChangePageRequestV1::Bounded(selection) => {
+                DerivedChangePageRequestV1::Bounded(selection.with_order(order))
+            }
+            bare @ DerivedChangePageRequestV1::Bare => bare,
+        }
+    }
+
     fn selected_ids(selection: &BodylessChangePageSelection) -> Vec<String> {
         selection
             .change_ids
@@ -3412,11 +4021,9 @@ mod tests {
     }
 
     fn boundary_shape(boundary: &Option<DerivedChangePageBoundaryV1>) -> Option<Option<String>> {
-        boundary.as_ref().map(|boundary| {
-            boundary
-                .last_change_id()
-                .map(|change_id| change_id.as_str().to_owned())
-        })
+        boundary
+            .as_ref()
+            .map(|boundary| boundary.last_key().map(|key| key.change_id().to_owned()))
     }
 
     fn window_shapes(selection: &BodylessChangePageSelection) -> WindowShape {
@@ -3745,7 +4352,7 @@ mod tests {
                 .after()
                 .expect("continuation")
                 .boundary()
-                .last_change_id(),
+                .last_key(),
             None
         );
         assert!(DerivedChangePageSelectionV1::new(0, None, None, None, None, None, None).is_err());
@@ -3788,6 +4395,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(
@@ -3806,6 +4414,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &bounded_request(2, None, None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&first), ["change:001", "change:002"]);
@@ -3824,14 +4433,17 @@ mod tests {
             PAGE_TEST_STAMP,
             &bounded_request(
                 2,
-                Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                    "change:002",
-                ))),
+                Some(DerivedChangePageBoundaryV1::after(
+                    ChangePageKeyV1::ChangeIdAsc {
+                        change_id: "change:002".to_owned(),
+                    },
+                )),
                 None,
                 None,
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&middle), ["change:003", "change:004"]);
@@ -3856,6 +4468,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &bounded_request(2, Some(previous_boundary), None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&previous), ["change:001", "change:002"]);
@@ -3872,6 +4485,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &bounded_request(2, Some(next_boundary), None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&next), ["change:003", "change:004"]);
@@ -3888,6 +4502,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &bounded_request(2, Some(last_boundary), None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&last), ["change:007"]);
@@ -3902,14 +4517,17 @@ mod tests {
             PAGE_TEST_STAMP,
             &bounded_request(
                 2,
-                Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                    "change:003x",
-                ))),
+                Some(DerivedChangePageBoundaryV1::after(
+                    ChangePageKeyV1::ChangeIdAsc {
+                        change_id: "change:003x".to_owned(),
+                    },
+                )),
                 None,
                 None,
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&absent_boundary), ["change:004", "change:005"]);
@@ -3928,14 +4546,17 @@ mod tests {
             PAGE_TEST_STAMP,
             &bounded_request(
                 2,
-                Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                    "change:999",
-                ))),
+                Some(DerivedChangePageBoundaryV1::after(
+                    ChangePageKeyV1::ChangeIdAsc {
+                        change_id: "change:999".to_owned(),
+                    },
+                )),
                 None,
                 None,
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert!(selected_ids(&beyond_tail).is_empty());
@@ -3953,6 +4574,7 @@ mod tests {
             &[],
             PAGE_TEST_STAMP,
             &bounded_request(2, None, None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert!(selected_ids(&empty).is_empty());
@@ -3984,6 +4606,7 @@ mod tests {
                 &rows,
                 PAGE_TEST_STAMP,
                 &bounded_request(limit, None, None, None, None, None),
+                ChangeListOrderV1::ChangeIdAsc,
             )
             .unwrap();
             assert_eq!(selected_ids(&page).len(), expected_len);
@@ -4003,14 +4626,17 @@ mod tests {
             PAGE_TEST_STAMP,
             &bounded_request(
                 3,
-                Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                    "change:006",
-                ))),
+                Some(DerivedChangePageBoundaryV1::after(
+                    ChangePageKeyV1::ChangeIdAsc {
+                        change_id: "change:006".to_owned(),
+                    },
+                )),
                 None,
                 None,
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&tail), ["change:007"]);
@@ -4035,9 +4661,14 @@ mod tests {
             )
             .unwrap(),
         );
-        let search_error =
-            select_bodyless_change_page(ChangePageLens::Changes, &rows, PAGE_TEST_STAMP, &searched)
-                .expect_err("summary search must use the exhaustive proposal path");
+        let search_error = select_bodyless_change_page(
+            ChangePageLens::Changes,
+            &rows,
+            PAGE_TEST_STAMP,
+            &searched,
+            ChangeListOrderV1::ChangeIdAsc,
+        )
+        .expect_err("summary search must use the exhaustive proposal path");
         assert!(
             search_error
                 .to_string()
@@ -4062,9 +4693,14 @@ mod tests {
             )
             .unwrap(),
         );
-        let stale_error =
-            select_bodyless_change_page(ChangePageLens::Changes, &rows, PAGE_TEST_STAMP, &stale)
-                .expect_err("stale continuation cannot select against another projection");
+        let stale_error = select_bodyless_change_page(
+            ChangePageLens::Changes,
+            &rows,
+            PAGE_TEST_STAMP,
+            &stale,
+            ChangeListOrderV1::ChangeIdAsc,
+        )
+        .expect_err("stale continuation cannot select against another projection");
         assert!(
             stale_error
                 .to_string()
@@ -4143,6 +4779,7 @@ mod tests {
                                 *attention,
                                 *availability,
                             ),
+                            ChangeListOrderV1::ChangeIdAsc,
                         )
                         .unwrap();
                         let expected = rows
@@ -4217,6 +4854,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &DerivedChangePageRequestV1::Bare,
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(
@@ -4230,6 +4868,7 @@ mod tests {
             &rows,
             PAGE_TEST_STAMP,
             &bounded_request(2, None, None, None, None, None),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&first), ["change:002", "change:004"]);
@@ -4248,14 +4887,17 @@ mod tests {
             PAGE_TEST_STAMP,
             &bounded_request(
                 2,
-                Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                    "change:004",
-                ))),
+                Some(DerivedChangePageBoundaryV1::after(
+                    ChangePageKeyV1::ChangeIdAsc {
+                        change_id: "change:004".to_owned(),
+                    },
+                )),
                 None,
                 None,
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert_eq!(selected_ids(&next), ["change:005"]);
@@ -4272,6 +4914,7 @@ mod tests {
                 None,
                 None,
             ),
+            ChangeListOrderV1::ChangeIdAsc,
         )
         .unwrap();
         assert!(
@@ -4359,9 +5002,14 @@ mod tests {
             bare.document.document.projection_stamp
         );
 
+        // One explicit order on both lenses so the two page-one rows are the
+        // same Change; the lens defaults differ by design.
         let DerivedChangeOutcomeV1::Ready(page) = fixture
             .access
-            .changes(&bounded_request(1, None, None, None, None, None))
+            .changes(&ordered(
+                bounded_request(1, None, None, None, None, None),
+                ChangeListOrderV1::ActivityDesc,
+            ))
             .expect("read bounded Changes")
         else {
             panic!("bounded Changes must be ready");
@@ -4387,7 +5035,10 @@ mod tests {
 
         let DerivedChangeOutcomeV1::Ready(attention) = fixture
             .access
-            .attention(&bounded_request(1, None, None, None, None, None))
+            .attention(&ordered(
+                bounded_request(1, None, None, None, None, None),
+                ChangeListOrderV1::ActivityDesc,
+            ))
             .expect("read bounded Attention")
         else {
             panic!("bounded Attention must be ready");
@@ -4403,7 +5054,7 @@ mod tests {
             page.document.presentations
         );
         let mut expected_attention = strict
-            .attention_document_with_presentations(true)
+            .attention_document_with_presentations_ordered(true, ChangeListOrderV1::ActivityDesc)
             .expect("strict Attention");
         expected_attention
             .document
@@ -5174,9 +5825,14 @@ mod tests {
             .expect("warm the current generation before counting");
         let bounded_scope = LongitudinalCountingScopeV1::new("1".repeat(64)).unwrap();
         let bounded_guard = bounded_scope.enter();
+        // The selected Change is the smallest identity, so page one is read
+        // under change_id_asc explicitly.
         let bounded = fixture
             .access
-            .changes(&bounded_request(1, None, None, None, None, None))
+            .changes(&ordered(
+                bounded_request(1, None, None, None, None, None),
+                ChangeListOrderV1::ChangeIdAsc,
+            ))
             .expect("read selected page with support");
         drop(bounded_guard);
         let DerivedChangeOutcomeV1::Ready(bounded) = bounded else {
@@ -5258,7 +5914,10 @@ mod tests {
         let cold_guard = cold_scope.enter();
         let cold = fixture
             .fresh_access()
-            .changes(&bounded_request(1, None, None, None, None, None))
+            .changes(&ordered(
+                bounded_request(1, None, None, None, None, None),
+                ChangeListOrderV1::ChangeIdAsc,
+            ))
             .expect("read selected page from a cold runtime");
         drop(cold_guard);
         assert!(matches!(cold, DerivedChangeOutcomeV1::Ready(_)));

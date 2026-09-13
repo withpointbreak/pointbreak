@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pointbreak::model::ChangeId;
 use pointbreak::session::{
-    ChangeLifecycleV1, ChangeTopologyV1, DerivedChangeAttentionFilterV1,
-    DerivedChangeAvailabilityFilterV1, DerivedChangePageBoundaryV1,
+    ChangeLifecycleV1, ChangeListOrderV1, ChangeOrderKey, ChangePageKeyV1, ChangeTopologyV1,
+    DerivedChangeAttentionFilterV1, DerivedChangeAvailabilityFilterV1, DerivedChangePageBoundaryV1,
     DerivedChangePageContinuationV1, DerivedChangePageRequestV1, DerivedChangePageSelectionV1,
-    DerivedChangePageWindowV1,
+    DerivedChangePageWindowV1, compare_change_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,7 +12,6 @@ use serde_json::Value;
 pub(super) use super::page_token::PageTokenSigner;
 
 const TOKEN_SCHEMA: &str = "pointbreak.inspect-change-page-token.v1";
-const ORDER: &str = "change_id_asc";
 const MAX_TOKEN_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,6 +19,37 @@ const MAX_TOKEN_BYTES: usize = 4096;
 pub(super) enum Lens {
     Changes,
     Attention,
+}
+
+impl Lens {
+    fn default_order(self) -> ChangeListOrderV1 {
+        match self {
+            Self::Changes => ChangeListOrderV1::default_for_changes(),
+            Self::Attention => ChangeListOrderV1::default_for_attention(),
+        }
+    }
+
+    fn admits(self, order: ChangeListOrderV1) -> bool {
+        match self {
+            Self::Changes => order.admitted_on_changes_lens(),
+            Self::Attention => order.admitted_on_attention_lens(),
+        }
+    }
+}
+
+/// The comparator input for one projected Change row. Both the strict sort
+/// and the page slice read the same fields, so a cursor lands between exactly
+/// the neighbours the sort produced.
+fn page_order_key(change: &Value) -> ChangeOrderKey<'_> {
+    let wait = &change["attentionWaitAt"];
+    ChangeOrderKey {
+        change_id: change["changeId"].as_str().unwrap_or_default(),
+        activity_at: change["activityAt"].as_str(),
+        tier_rank: wait["tierRank"]
+            .as_u64()
+            .and_then(|rank| u8::try_from(rank).ok()),
+        oldest_observed_at: wait["oldestObservedAt"].as_str(),
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -72,8 +101,17 @@ impl Request {
                 if stamp != window.projection_stamp {
                     return Err(invalid("Change page window has the wrong projection stamp"));
                 }
+                if document["order"] != query.order.as_str() {
+                    return Err(invalid("Change page document has the wrong order"));
+                }
                 let identity = query.identity();
                 let issue = |boundary: &DerivedChangePageBoundaryV1| {
+                    if boundary
+                        .last_key()
+                        .is_some_and(|key| key.order() != query.order)
+                    {
+                        return Err(invalid("Change page window has the wrong order"));
+                    }
                     encode_token(
                         &Token {
                             schema: TOKEN_SCHEMA.to_owned(),
@@ -81,10 +119,8 @@ impl Request {
                             projection_stamp: window.projection_stamp.clone(),
                             query: identity.clone(),
                             limit: query.limit,
-                            order: ORDER.to_owned(),
-                            last_change_id: boundary
-                                .last_change_id()
-                                .map(|change_id| change_id.as_str().to_owned()),
+                            order: query.order,
+                            last_key: boundary.last_key().cloned(),
                         },
                         signer,
                     )
@@ -120,6 +156,7 @@ impl Request {
 pub(super) struct Query {
     lens: Lens,
     limit: usize,
+    order: ChangeListOrderV1,
     after: Option<Token>,
     raw_q: Option<String>,
     q: Option<String>,
@@ -137,10 +174,11 @@ struct Token {
     projection_stamp: String,
     query: String,
     limit: usize,
-    order: String,
-    /// The Change immediately before the target page, or `None` for page one.
-    /// This boundary is always server-issued and covered by the token signature.
-    last_change_id: Option<String>,
+    order: ChangeListOrderV1,
+    /// The order-tagged key of the Change immediately before the target page,
+    /// or `None` for page one. This boundary is always server-issued and
+    /// covered by the token signature.
+    last_key: Option<ChangePageKeyV1>,
 }
 
 pub(super) fn parse_signed(
@@ -193,11 +231,12 @@ pub(super) fn parse_signed(
         Some(_) => return Err(invalid("invalid limit")),
         None => 50,
     };
-    if let Some(order) = nonempty("order")?
-        && order != ORDER
-    {
-        return Err(invalid("invalid order"));
-    }
+    let order = match nonempty("order")? {
+        Some(raw) => ChangeListOrderV1::parse(&raw)
+            .filter(|order| lens.admits(*order))
+            .ok_or_else(|| invalid("invalid order"))?,
+        None => lens.default_order(),
+    };
     let q = nonempty("q")?
         .map(|v| v.trim().to_owned())
         .filter(|v| !v.is_empty());
@@ -237,6 +276,7 @@ pub(super) fn parse_signed(
     Ok(Request::Bounded(Box::new(Query {
         lens,
         limit,
+        order,
         after,
         raw_q,
         q,
@@ -257,18 +297,19 @@ pub(super) fn apply_signed(
         .ok_or_else(|| invalid("missing projection stamp"))?
         .to_owned();
     let identity = query.identity();
+    let order = query.order;
     let after = if let Some(token) = &query.after {
         if token.lens != query.lens
             || token.query != identity
             || token.limit != query.limit
-            || token.order != ORDER
+            || token.order != order
         {
             return Err(invalid("continuation does not match request"));
         }
         if token.projection_stamp != stamp {
             return Err(PageError::Stale);
         }
-        token.last_change_id.as_deref()
+        token.last_key.as_ref()
     } else {
         None
     };
@@ -280,11 +321,13 @@ pub(super) fn apply_signed(
         changes.retain(|c| c["lifecycle"] != "accepted");
     }
     changes.retain(|c| query.matches(c, &document["presentations"]));
-    changes.sort_by(|a, b| a["changeId"].as_str().cmp(&b["changeId"].as_str()));
+    changes.sort_by(|a, b| compare_change_order(order, page_order_key(a), page_order_key(b)));
     let page_start = after
         .map(|last| {
-            changes
-                .partition_point(|change| change["changeId"].as_str().is_some_and(|id| id <= last))
+            let last = last.order_key();
+            changes.partition_point(|change| {
+                compare_change_order(order, page_order_key(change), last).is_le()
+            })
         })
         .unwrap_or(0);
     let page_end = changes.len().min(page_start.saturating_add(query.limit));
@@ -293,14 +336,11 @@ pub(super) fn apply_signed(
         .checked_sub(1)
         .map(|last_index| (last_index / query.limit) * query.limit);
     let boundary_before = |start: usize| {
-        start.checked_sub(1).map(|index| {
-            changes[index]["changeId"]
-                .as_str()
-                .expect("validated Change page entries have Change IDs")
-                .to_owned()
-        })
+        start
+            .checked_sub(1)
+            .map(|index| ChangePageKeyV1::from_order_key(order, page_order_key(&changes[index])))
     };
-    let issue = |last_change_id: Option<String>| {
+    let issue = |last_key: Option<ChangePageKeyV1>| {
         encode_token(
             &Token {
                 schema: TOKEN_SCHEMA.into(),
@@ -308,8 +348,8 @@ pub(super) fn apply_signed(
                 projection_stamp: stamp.clone(),
                 query: identity.clone(),
                 limit: query.limit,
-                order: ORDER.into(),
-                last_change_id,
+                order,
+                last_key,
             },
             signer,
         )
@@ -352,6 +392,7 @@ pub(super) fn apply_signed(
     // The client treats every page capability as opaque. Signing makes that
     // boundary enforceable: callers cannot alter a target boundary to skip or
     // revisit rows, and capabilities die with the Inspector process that issued them.
+    document["order"] = Value::String(order.as_str().to_owned());
     document["changes"] = Value::Array(changes);
     document["previous"] = previous.map(Value::String).unwrap_or(Value::Null);
     document["next"] = next.map(Value::String).unwrap_or(Value::Null);
@@ -368,16 +409,14 @@ impl Query {
                 if token.lens != self.lens
                     || token.query != self.identity()
                     || token.limit != self.limit
-                    || token.order != ORDER
+                    || token.order != self.order
                 {
                     return Err(invalid("continuation does not match request"));
                 }
-                let boundary = token
-                    .last_change_id
-                    .as_ref()
-                    .map_or_else(DerivedChangePageBoundaryV1::page_one, |change_id| {
-                        DerivedChangePageBoundaryV1::after(ChangeId::new(change_id))
-                    });
+                let boundary = token.last_key.clone().map_or_else(
+                    DerivedChangePageBoundaryV1::page_one,
+                    DerivedChangePageBoundaryV1::after,
+                );
                 DerivedChangePageContinuationV1::new(token.projection_stamp.clone(), boundary)
                     .map_err(|error| PageError::Invalid(error.to_string()))
             })
@@ -424,19 +463,21 @@ impl Query {
             attention,
             availability,
         )
+        .map(|selection| selection.with_order(self.order))
         .map(DerivedChangePageRequestV1::Bounded)
         .map_err(|error| PageError::Invalid(error.to_string()))
     }
 
     fn identity(&self) -> String {
         format!(
-            "limit={}&q={:?}&topology={:?}&lifecycle={:?}&attention={:?}&availability={:?}&order={ORDER}&lens={}",
+            "limit={}&q={:?}&topology={:?}&lifecycle={:?}&attention={:?}&availability={:?}&order={}&lens={}",
             self.limit,
             self.q,
             self.topology,
             self.lifecycle,
             self.attention,
             self.availability,
+            self.order.as_str(),
             match self.lens {
                 Lens::Changes => "changes",
                 Lens::Attention => "attention",
@@ -504,9 +545,10 @@ fn decode_token(raw: &str, signer: &PageTokenSigner) -> Result<Token, PageError>
         .decode(raw)
         .map_err(|()| invalid("malformed continuation"))?;
     if t.schema != TOKEN_SCHEMA
-        || t.order != ORDER
         || t.projection_stamp.is_empty()
-        || t.last_change_id.as_ref().is_some_and(String::is_empty)
+        || t.last_key
+            .as_ref()
+            .is_some_and(|key| key.order() != t.order || key.change_id().is_empty())
     {
         Err(invalid("malformed continuation"))
     } else {
@@ -562,7 +604,7 @@ fn invalid(message: &str) -> PageError {
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use pointbreak::model::{ChangeId, RevisionId};
+    use pointbreak::model::RevisionId;
     use pointbreak::session::{
         ChangeLifecycleV1, ChangeTopologyV1, DerivedChangeAttentionFilterV1,
         DerivedChangeAvailabilityFilterV1, DerivedChangePageBoundaryV1, DerivedChangePageRequestV1,
@@ -625,8 +667,10 @@ mod tests {
                 projection_stamp: "stamp-1".to_owned(),
                 query: "different-query".to_owned(),
                 limit: 7,
-                order: ORDER.to_owned(),
-                last_change_id: Some("change:01".to_owned()),
+                order: ChangeListOrderV1::ChangeIdAsc,
+                last_key: Some(ChangePageKeyV1::ChangeIdAsc {
+                    change_id: "change:01".to_owned(),
+                }),
             },
             &signer(),
         )
@@ -648,6 +692,7 @@ mod tests {
         let document = serde_json::json!({
             "schema": "pointbreak.inspect-changes-page",
             "version": 1,
+            "order": "change_id_asc",
             "projectionStamp": "stamp-2",
             "changes": [{"changeId": "change:02", "currentRevisionRefs": [{
                 "revisionId": RevisionId::new("revision:02"),
@@ -658,12 +703,16 @@ mod tests {
         let window = DerivedChangePageWindowV1 {
             projection_stamp: "stamp-2".to_owned(),
             previous: Some(DerivedChangePageBoundaryV1::page_one()),
-            next: Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                "change:02",
-            ))),
-            last: Some(DerivedChangePageBoundaryV1::after(ChangeId::new(
-                "change:09",
-            ))),
+            next: Some(DerivedChangePageBoundaryV1::after(
+                ChangePageKeyV1::ChangeIdAsc {
+                    change_id: "change:02".to_owned(),
+                },
+            )),
+            last: Some(DerivedChangePageBoundaryV1::after(
+                ChangePageKeyV1::ChangeIdAsc {
+                    change_id: "change:09".to_owned(),
+                },
+            )),
         };
         let rendered = parsed
             .apply_derived_window(document.clone(), Some(&window), &signer())
@@ -685,7 +734,14 @@ mod tests {
     }
     #[test]
     fn strict_grammar_rejects_unknown_duplicate_empty_and_order() {
-        for q in ["wat=x", "order=activity_desc", "q=%FF", "q=%2G", "q=%"] {
+        for q in [
+            "wat=x",
+            "order=activity_asc",
+            "order=activity-desc",
+            "q=%FF",
+            "q=%2G",
+            "q=%",
+        ] {
             assert!(
                 matches!(parse(Lens::Changes, Some(q)), Err(PageError::Invalid(_))),
                 "{q}"
@@ -711,7 +767,7 @@ mod tests {
             let value = if field == "limit" {
                 "1"
             } else if field == "order" {
-                ORDER
+                "activity_desc"
             } else {
                 "x"
             };
@@ -744,7 +800,7 @@ mod tests {
         ));
     }
     #[test]
-    fn grammar_accepts_every_frozen_enum_and_only_change_id_order() {
+    fn grammar_accepts_every_frozen_enum_and_the_admitted_orders() {
         for (field, values) in [
             (
                 "topology",
@@ -768,7 +824,7 @@ mod tests {
                 &["clear", "in_progress", "incomplete", "conflicted"][..],
             ),
             ("availability", &["available", "incomplete"][..]),
-            ("order", &["change_id_asc"][..]),
+            ("order", &["change_id_asc", "activity_desc"][..]),
         ] {
             for value in values {
                 assert!(
@@ -823,7 +879,7 @@ mod tests {
             panic!()
         };
         let Request::Bounded(b) =
-            parse(Lens::Changes, Some("order=change_id_asc&limit=50")).unwrap()
+            parse(Lens::Changes, Some("order=activity_desc&limit=50")).unwrap()
         else {
             panic!()
         };
@@ -1077,7 +1133,8 @@ mod tests {
         for bad in [
             "not-base64".to_owned(),
             tamper_payload_keep_signature(token),
-            mutate_token(token, |v| v["order"] = "other".into()),
+            // A key issued under one order presented as another order.
+            mutate_token(token, |v| v["order"] = "change_id_asc".into()),
         ] {
             assert!(matches!(
                 parse(Lens::Changes, Some(&format!("limit=1&after={bad}"))),
@@ -1172,5 +1229,277 @@ mod tests {
                 "{name} must retain typed stale-projection refusal"
             );
         }
+    }
+
+    // ---- Change list order (activity_desc default, order-tagged keys) ----
+
+    fn ordered_doc(changes: Value) -> Value {
+        let ids: Vec<String> = changes
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["changeId"].as_str().unwrap().to_owned())
+            .collect();
+        let mut presentations = serde_json::Map::new();
+        for id in ids {
+            presentations.insert(id, serde_json::json!({"currentRevisions": []}));
+        }
+        serde_json::json!({
+            "schema": "pointbreak.inspect-changes-page",
+            "version": 1,
+            "projectionStamp": "stamp-1",
+            "changes": changes,
+            "presentations": presentations
+        })
+    }
+
+    fn ordered_change(id: &str, activity_at: Option<&str>) -> Value {
+        let mut change = serde_json::json!({
+            "changeId": id,
+            "topology": "initial",
+            "lifecycle": "in_progress",
+            "attentionSummary": "in_progress",
+            "availabilitySummary": "available",
+            "currentRevisionRefs": []
+        });
+        if let Some(at) = activity_at {
+            change["activityAt"] = at.into();
+        }
+        change
+    }
+
+    fn document_with_activity() -> Value {
+        ordered_doc(serde_json::json!([
+            ordered_change("change:sha256:0a1f", Some("2026-09-12T18:04:00.000Z")),
+            ordered_change("change:sha256:3b77", Some("2026-09-12T19:20:00.000Z")),
+            ordered_change("change:sha256:91cd", Some("unix-ms:1789000000000")),
+        ]))
+    }
+
+    fn tied_activity_document() -> Value {
+        ordered_doc(serde_json::json!([
+            ordered_change("change:sha256:91cd", Some("2026-09-12T18:04:00.000Z")),
+            ordered_change("change:sha256:0a1f", Some("2026-09-12T18:04:00.000Z")),
+        ]))
+    }
+
+    fn mixed_activity_document() -> Value {
+        ordered_doc(serde_json::json!([
+            ordered_change("change:sha256:7e02", Some("unix-ms:not-a-number")),
+            ordered_change("change:sha256:3b77", Some("2026-09-12T19:20:00.000Z")),
+            ordered_change("change:sha256:0a1f", Some("2026-09-12T18:04:00.000Z")),
+        ]))
+    }
+
+    fn page(document: Value, lens: Lens, raw: &str) -> Result<Value, PageError> {
+        match parse(lens, Some(raw))? {
+            Request::Bounded(query) => apply(document, *query),
+            Request::Bare => panic!("ordered page tests always bound the request"),
+        }
+    }
+
+    fn change_ids(page: &Value) -> Vec<String> {
+        page["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["changeId"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn next_token(page: &Value) -> String {
+        page["next"]
+            .as_str()
+            .expect("a next page exists")
+            .to_owned()
+    }
+
+    #[test]
+    fn the_default_order_is_activity_descending() {
+        let page = page(document_with_activity(), Lens::Changes, "limit=50").unwrap();
+
+        assert_eq!(page["order"], "activity_desc");
+        assert_eq!(
+            change_ids(&page),
+            [
+                "change:sha256:3b77",
+                "change:sha256:0a1f",
+                "change:sha256:91cd"
+            ]
+        );
+    }
+
+    #[test]
+    fn change_id_asc_remains_available_as_an_explicit_value() {
+        let page = page(
+            document_with_activity(),
+            Lens::Changes,
+            "limit=50&order=change_id_asc",
+        )
+        .unwrap();
+
+        assert_eq!(page["order"], "change_id_asc");
+        assert_eq!(
+            change_ids(&page),
+            [
+                "change:sha256:0a1f",
+                "change:sha256:3b77",
+                "change:sha256:91cd"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tie_on_activity_breaks_on_change_id_ascending() {
+        let page = page(tied_activity_document(), Lens::Changes, "limit=50").unwrap();
+
+        assert_eq!(
+            change_ids(&page),
+            ["change:sha256:0a1f", "change:sha256:91cd"]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_activity_instant_sorts_last_under_activity_desc() {
+        let page = page(mixed_activity_document(), Lens::Changes, "limit=50").unwrap();
+
+        assert_eq!(
+            change_ids(&page),
+            [
+                "change:sha256:3b77",
+                "change:sha256:0a1f",
+                "change:sha256:7e02"
+            ]
+        );
+    }
+
+    #[test]
+    fn continuations_are_adjacent_without_overlap_under_activity_desc() {
+        let first = page(document_with_activity(), Lens::Changes, "limit=2").unwrap();
+        let token = next_token(&first);
+        let second = page(
+            document_with_activity(),
+            Lens::Changes,
+            &format!("limit=2&after={token}"),
+        )
+        .unwrap();
+
+        let mut seen = change_ids(&first);
+        seen.extend(change_ids(&second));
+        assert_eq!(
+            seen,
+            [
+                "change:sha256:3b77",
+                "change:sha256:0a1f",
+                "change:sha256:91cd"
+            ]
+        );
+        assert_eq!(seen.len(), seen.iter().collect::<BTreeSet<_>>().len());
+        assert!(second["next"].is_null());
+        let previous = second["previous"].as_str().unwrap();
+        let returned = page(
+            document_with_activity(),
+            Lens::Changes,
+            &format!("limit=2&after={previous}"),
+        )
+        .unwrap();
+        assert_eq!(change_ids(&returned), change_ids(&first));
+    }
+
+    #[test]
+    fn a_continuation_issued_under_a_different_order_is_rejected() {
+        let token = next_token(
+            &page(
+                document_with_activity(),
+                Lens::Changes,
+                "limit=2&order=change_id_asc",
+            )
+            .unwrap(),
+        );
+
+        let error = page(
+            document_with_activity(),
+            Lens::Changes,
+            &format!("limit=2&order=activity_desc&after={token}"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PageError::Invalid(_)));
+    }
+
+    #[test]
+    fn a_continuation_is_stale_when_the_projection_stamp_moves() {
+        let token = next_token(&page(document_with_activity(), Lens::Changes, "limit=2").unwrap());
+        let mut moved = document_with_activity();
+        moved["projectionStamp"] = "stamp-2".into();
+
+        let error = page(moved, Lens::Changes, &format!("limit=2&after={token}")).unwrap_err();
+
+        assert_eq!(error, PageError::Stale);
+    }
+
+    #[test]
+    fn attention_wait_is_admitted_only_on_the_attention_lens() {
+        assert!(matches!(
+            parse(Lens::Changes, Some("limit=50&order=attention_wait")),
+            Err(PageError::Invalid(_))
+        ));
+        let mut waiting = document_with_activity();
+        waiting["changes"][0]["attentionWaitAt"] =
+            serde_json::json!({"tierRank": 1, "oldestObservedAt": "2026-08-01T00:00:00.000Z"});
+        waiting["changes"][2]["attentionWaitAt"] =
+            serde_json::json!({"tierRank": 0, "oldestObservedAt": "2026-09-01T00:00:00.000Z"});
+        let page = page(waiting, Lens::Attention, "limit=50").unwrap();
+
+        assert_eq!(page["order"], "attention_wait");
+        // Primary tier first, then the secondary, then the Change with no
+        // anchored attention item last.
+        assert_eq!(
+            change_ids(&page),
+            [
+                "change:sha256:91cd",
+                "change:sha256:0a1f",
+                "change:sha256:3b77"
+            ]
+        );
+    }
+
+    #[test]
+    fn order_specific_keys_are_carried_by_every_issued_capability() {
+        let first = page(document_with_activity(), Lens::Changes, "limit=1").unwrap();
+        let next = decode_token(first["next"].as_str().unwrap(), &signer()).unwrap();
+        assert_eq!(next.order, ChangeListOrderV1::ActivityDesc);
+        assert_eq!(
+            next.last_key,
+            Some(ChangePageKeyV1::ActivityDesc {
+                activity_at: Some("2026-09-12T19:20:00.000Z".to_owned()),
+                change_id: "change:sha256:3b77".to_owned(),
+            })
+        );
+        let last = decode_token(first["last"].as_str().unwrap(), &signer()).unwrap();
+        assert_eq!(
+            last.last_key.as_ref().map(ChangePageKeyV1::change_id),
+            Some("change:sha256:0a1f")
+        );
+        let derived = match parse(
+            Lens::Changes,
+            Some(&format!(
+                "limit=1&after={}",
+                first["next"].as_str().unwrap()
+            )),
+        )
+        .unwrap()
+        {
+            Request::Bounded(query) => query.derived_request().unwrap(),
+            Request::Bare => unreachable!(),
+        };
+        let DerivedChangePageRequestV1::Bounded(selection) = derived else {
+            panic!("bounded")
+        };
+        assert_eq!(selection.order(), Some(ChangeListOrderV1::ActivityDesc));
+        assert_eq!(
+            selection.after().unwrap().boundary().last_key(),
+            next.last_key.as_ref()
+        );
     }
 }
