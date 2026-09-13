@@ -103,10 +103,20 @@ pub(crate) fn validate_narrowed_seek_scope(
 
 /// Seek, fold, validate scope, mint the seek stamp, and compose the narrowed
 /// facade with its fact-port carriers at one pinned checkpoint.
+/// Whether a narrowed read composes summary ordering keys. Only a document
+/// that presents a summary (the seek Detail) consumes them; the selector and
+/// the exact-Revision session discard the facade's keys, so they skip the fold.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NarrowedOrderingV1 {
+    SummaryKeys,
+    Skipped,
+}
+
 pub(crate) fn prepare_narrowed_facade(
     current: &CurrentGeneration,
     checkpoint: &ReaderProjectionCheckpointV1,
     change_id: &ChangeId,
+    ordering: NarrowedOrderingV1,
 ) -> Result<DerivedChangeOutcomeV1<PreparedNarrowedFacadeV1>> {
     let as_of = checkpoint.truth_cursor;
     #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -216,28 +226,34 @@ pub(crate) fn prepare_narrowed_facade(
         Ok(stamp) => stamp,
         Err(error) => return Ok(lifecycle_failure_outcome(error)),
     };
-    let ordering = match current.service().semantic_change_ordering_at(
-        checkpoint.truth_cursor,
-        &narrowed_semantic,
-        &narrowed_document.projection_stamp,
-        Some(change_id),
-    ) {
-        Ok(LocatorRead::Ready(ordering)) => ordering,
-        Ok(LocatorRead::CatchUpRequired { .. }) => {
-            return Ok(DerivedChangeOutcomeV1::retryable(
-                DerivedProjectionFailureCodeV1::ProjectionStale,
-                "derived Change seek ordering moved while its checkpoint was pinned",
-            ));
-        }
-        Err(error) => {
-            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
-                DerivedProjectionFailureCodeV1::ProjectionInvalid,
-                error.to_string(),
-            ));
-        }
+    let ordering = match ordering {
+        NarrowedOrderingV1::Skipped => None,
+        NarrowedOrderingV1::SummaryKeys => match current.service().semantic_change_ordering_at(
+            checkpoint.truth_cursor,
+            &narrowed_semantic,
+            &narrowed_document.projection_stamp,
+            Some(change_id),
+        ) {
+            Ok(LocatorRead::Ready(ordering)) => Some(ordering),
+            Ok(LocatorRead::CatchUpRequired { .. }) => {
+                return Ok(DerivedChangeOutcomeV1::retryable(
+                    DerivedProjectionFailureCodeV1::ProjectionStale,
+                    "derived Change seek ordering moved while its checkpoint was pinned",
+                ));
+            }
+            Err(error) => {
+                return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                    error.to_string(),
+                ));
+            }
+        },
     };
     let facade = match ChangeDocumentFacadeV1::new(narrowed_semantic, narrowed_document.clone())
-        .and_then(|facade| facade.with_ordering(ordering))
+        .and_then(|facade| match ordering {
+            Some(ordering) => facade.with_ordering(ordering),
+            None => Ok(facade),
+        })
         .and_then(|facade| facade.with_generation_stamp(stamp.clone()))
         .and_then(|facade| facade.with_fact_port_sources(sources))
     {
@@ -300,7 +316,11 @@ pub(crate) fn change_seek_read_v1_inner_with_hook(
     #[cfg(any(test, feature = "longitudinal-counting"))]
     drop(snapshot_phase);
 
-    let narrowed = match prepare_narrowed_facade(&current, &checkpoint, change_id)? {
+    let ordering = match target {
+        ChangeSeekCompositionTarget::Detail => NarrowedOrderingV1::SummaryKeys,
+        ChangeSeekCompositionTarget::Selector => NarrowedOrderingV1::Skipped,
+    };
+    let narrowed = match prepare_narrowed_facade(&current, &checkpoint, change_id, ordering)? {
         DerivedChangeOutcomeV1::Ready(prepared) => prepared,
         DerivedChangeOutcomeV1::AuthorityUnavailable(document) => {
             return Ok(DerivedChangeOutcomeV1::AuthorityUnavailable(document));

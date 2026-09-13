@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use super::change_seek_reads::{PreparedNarrowedFacadeV1, prepare_narrowed_facade};
+use super::change_seek_reads::{
+    NarrowedOrderingV1, PreparedNarrowedFacadeV1, prepare_narrowed_facade,
+};
 use super::changes::{
     DerivedChangeAccess, DerivedChangeOutcomeV1, DerivedExactRevisionReadV1,
     DerivedExactRevisionSessionV1, DerivedProjectionFailureCodeV1, ExactRevisionReadPlanV1,
@@ -161,7 +163,14 @@ pub(crate) fn exact_revision_session_v1_inner<'a>(
     #[cfg(any(test, feature = "longitudinal-counting"))]
     drop(snapshot_phase);
 
-    let prepared = match prepare_narrowed_facade(&current, &checkpoint, change_id)? {
+    // The exact-Revision session never presents a summary, so it skips the
+    // ordering fold entirely.
+    let prepared = match prepare_narrowed_facade(
+        &current,
+        &checkpoint,
+        change_id,
+        NarrowedOrderingV1::Skipped,
+    )? {
         DerivedChangeOutcomeV1::Ready(prepared) => prepared,
         other => return Ok(other.map_ready(|_| unreachable!("matched non-Ready outcome"))),
     };

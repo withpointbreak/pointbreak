@@ -2954,6 +2954,51 @@ mod tests {
                 "{context}: attention wait key"
             );
         }
+        // The seek-backed detail folds its keys through the Change-scoped
+        // path (correlation index + engagement closure); it must agree with
+        // the whole-generation fold exactly.
+        for listed in &list.changes {
+            let DerivedChangeOutcomeV1::Ready(detail) = fixture
+                .access
+                .review_detail_document(&listed.change_id)
+                .unwrap()
+            else {
+                panic!("{context}: derived detail must be ready");
+            };
+            assert_eq!(
+                detail.detail.summary.activity_at,
+                listed.activity_at,
+                "{context}: seek detail activity of {}",
+                listed.change_id.as_str()
+            );
+            assert_eq!(
+                detail.detail.summary.attention_wait_at,
+                listed.attention_wait_at,
+                "{context}: seek detail wait key of {}",
+                listed.change_id.as_str()
+            );
+        }
+        // Reads that present no summary skip the ordering fold: the selector
+        // and the exact-Revision session carry no keys.
+        let RuntimeCurrentRead::Ready(current) = fixture.runtime.current().unwrap() else {
+            panic!("{context}: generation must be current");
+        };
+        let checkpoint = current.pin_change_reader_checkpoint().unwrap();
+        let DerivedChangeOutcomeV1::Ready(skipped) =
+            super::super::change_seek_reads::prepare_narrowed_facade(
+                &current,
+                &checkpoint,
+                &list.changes[0].change_id,
+                super::super::change_seek_reads::NarrowedOrderingV1::Skipped,
+            )
+            .unwrap()
+        else {
+            panic!("{context}: narrowed facade must be ready");
+        };
+        assert!(
+            skipped.facade.ordering().is_none(),
+            "{context}: skipped fold"
+        );
         for summary in &list.changes {
             let DerivedChangeOutcomeV1::Ready(detail) = fixture
                 .access
@@ -8472,6 +8517,7 @@ mod tests {
                 &current,
                 &checkpoint,
                 &change_id,
+                super::super::change_seek_reads::NarrowedOrderingV1::SummaryKeys,
             )
             .unwrap()
         else {
@@ -8549,6 +8595,7 @@ mod tests {
                     &current,
                     &checkpoint,
                     &change_id,
+                    super::super::change_seek_reads::NarrowedOrderingV1::SummaryKeys,
                 )
                 .unwrap(),
                 expected,
