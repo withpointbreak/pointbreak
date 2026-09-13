@@ -9323,6 +9323,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     }
     const lens = lensForRoute(route);
     const page = lens === "changes" ? snapshot2.generation.changes : snapshot2.generation.attention;
+    const firstCaptureEligible = route.kind === "lens" && lens === "changes" && page.changes.length === 0 && filterValues(route.query).length === 0 && route.query.after === void 0 && page.previous == null && page.next == null;
     const listKey = JSON.stringify({
       lens,
       query: route.query,
@@ -9330,7 +9331,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       previous: page.previous ?? null,
       next: page.next,
       last: page.last ?? null,
-      changes: page.changes.map((change) => change.changeId)
+      changes: page.changes.map((change) => change.changeId),
+      firstCaptureEligible
     });
     if (master.dataset.changeListKey !== listKey) {
       const list = document.createElement("section");
@@ -9531,8 +9533,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             lens === "changes" ? "No Changes." : "No Changes need attention."
           )
         );
-        const genuinelyEmptyStore = route.kind === "lens" && lens === "changes" && filterValues(route.query).length === 0 && route.query.after === void 0 && page.previous == null && page.next == null;
-        if (genuinelyEmptyStore) {
+        if (firstCaptureEligible) {
           const handoff = firstCaptureHandoffBlock();
           if (handoff) list.append(handoff);
         }
