@@ -21,6 +21,7 @@ import type {
   EventHistoryEntry,
   EventHistoryRevisionRef,
 } from "./change-protocol";
+import { appendActorFilterClause } from "./chips";
 import { registerDensityListener } from "./prefs";
 import {
   compactIdentityText,
@@ -70,7 +71,7 @@ function timelineExcerpt(value: string): string {
 function appendTimelineLink(
   parent: HTMLElement,
   identity: string,
-  kind: "Change" | "Revision" | "event",
+  kind: "Change" | "Revision" | "event" | "actor" | "track",
   href: string,
 ): HTMLAnchorElement {
   const link = document.createElement("a");
@@ -129,11 +130,66 @@ function rowSpacer(height: number): HTMLLIElement {
   return spacer;
 }
 
-function appendChip(row: HTMLElement, text: string): void {
-  const chip = document.createElement("span");
-  chip.className = "badge";
-  chip.textContent = text;
-  row.append(chip);
+// The three row filter links below share a build-then-refine shape but stay
+// separate on purpose: each edits a different query key, and the writer is a
+// q clause while the track is a scope param. A shared abstraction would hide
+// exactly that distinction.
+
+// The writer is a query clause, not a scope param: appending composes with the
+// existing query text and leaves the `track` param free for an explicit track.
+function appendActorFilterLink(
+  parent: HTMLElement,
+  actorId: string,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): void {
+  const q = appendActorFilterClause(
+    route.historyQuery.q ?? "",
+    actorId,
+    "change-timeline",
+  );
+  const link = appendTimelineLink(
+    parent,
+    actorId,
+    "actor",
+    formatChangeInspectorRoute({
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        q: q || undefined,
+      },
+    }),
+  );
+  link.textContent = actorId;
+  link.title = `writer ${actorId}`;
+  link.setAttribute("aria-label", `Filter Timeline to writer ${actorId}`);
+}
+
+// A track is a scope, so it sets the structured param the Filters panel
+// already owns rather than a query clause.
+function appendTrackFilterLink(
+  parent: HTMLElement,
+  trackId: string,
+  route: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): void {
+  const link = appendTimelineLink(
+    parent,
+    trackId,
+    "track",
+    formatChangeInspectorRoute({
+      kind: "timeline",
+      historyQuery: {
+        ...route.historyQuery,
+        after: undefined,
+        at: undefined,
+        track: trackId,
+      },
+    }),
+  );
+  link.textContent = `track ${trackId}`;
+  link.title = `track ${trackId}`;
+  link.setAttribute("aria-label", `Filter Timeline to track ${trackId}`);
 }
 
 function appendVerificationChip(
@@ -214,11 +270,9 @@ function entryRow(
   eventType.style.color = eventTypeColor(entry.eventType);
   meta.append(eventType);
   appendVerificationChip(meta, entry.verificationStatus);
-  if (entry.trackId) appendChip(meta, `track ${entry.trackId}`);
-  const actor = document.createElement("span");
-  actor.textContent = entry.writer.actorId;
-  actor.title = `writer ${entry.writer.actorId}`;
-  meta.append(actor);
+  if (entry.trackId) appendTrackFilterLink(meta, entry.trackId, route);
+  if (entry.writer.actorId)
+    appendActorFilterLink(meta, entry.writer.actorId, route);
   appendTimelineLink(
     meta,
     entry.eventId,
