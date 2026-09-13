@@ -4398,6 +4398,30 @@ fn query_materialized_compact_facts(
     engagement_id: Option<&str>,
     families: MaterializedFactFamilies,
 ) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
+    query_materialized_compact_facts_with_attention_closure(
+        connection,
+        epoch,
+        sequence,
+        engagement_id,
+        families,
+        false,
+    )
+}
+
+/// The engagement-scoped selection, optionally widened with the attention
+/// closure: every selected-family fact that names no Revision, and every
+/// response to a request opened on a Revision of the engagement, wherever
+/// that response was recorded. A response on a foreign Revision, or on none,
+/// resolves an operative request in the engagement; a scoped attention fold
+/// that dropped it would report the request as still open.
+fn query_materialized_compact_facts_with_attention_closure(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    engagement_id: Option<&str>,
+    families: MaterializedFactFamilies,
+    widen_attention_closure: bool,
+) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
     let sql = format!(
         "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
                 locator.replay_key, locator.event_id, locator.event_type,
@@ -4449,6 +4473,36 @@ fn query_materialized_compact_facts(
            AND locator.epoch = ?1 AND event.sequence <= ?2
            AND (
                ?3 IS NULL
+               OR (?4 = 1 AND event.revision_id IS NULL)
+               OR (
+                   ?4 = 1
+                   AND representative.family_id = 5
+                   AND response.request_id IN (
+                       SELECT request_representative.semantic_key
+                       FROM semantic_representative_text AS request_representative
+                       JOIN semantic_event_fact_text AS request_event
+                         ON request_event.sequence = request_representative.sequence
+                       JOIN locator_event AS request_locator
+                         ON request_locator.sequence = request_event.sequence
+                       WHERE request_representative.family_id = 4
+                         AND request_locator.epoch = ?1
+                         AND request_event.sequence <= ?2
+                         AND request_event.revision_id IN (
+                             SELECT selected_event.revision_id
+                             FROM semantic_revision_fact AS selected_revision
+                             JOIN semantic_event_fact_text AS selected_event
+                               ON selected_event.sequence = selected_revision.sequence
+                             JOIN locator_event AS selected_locator
+                               ON selected_locator.sequence = selected_event.sequence
+                             JOIN semantic_representative AS selected_representative
+                               ON selected_representative.family_id = 1
+                              AND selected_representative.sequence = selected_event.sequence
+                             WHERE selected_revision.engagement_id = ?3
+                               AND selected_locator.epoch = ?1
+                               AND selected_event.sequence <= ?2
+                         )
+                   )
+               )
                OR event.revision_id IN (
                    SELECT selected_event.revision_id
                    FROM semantic_revision_fact AS selected_revision
@@ -4493,6 +4547,7 @@ fn query_materialized_compact_facts(
             to_i64(epoch, "materialized semantic epoch")?,
             to_i64(sequence, "materialized semantic cursor")?,
             engagement_id,
+            i64::from(widen_attention_closure),
         ])
         .map_err(|error| sqlite_error("query materialized semantic facts", error))?;
     let mut facts = Vec::new();
@@ -4918,12 +4973,13 @@ fn query_change_scoped_attention_facts(
     let mut seen = BTreeSet::new();
     let mut facts = Vec::new();
     for engagement in engagements {
-        for fact in query_materialized_compact_facts(
+        for fact in query_materialized_compact_facts_with_attention_closure(
             connection,
             epoch,
             sequence,
             Some(&engagement),
             MaterializedFactFamilies::Attention,
+            true,
         )? {
             if seen.insert(fact.cursor.sequence) {
                 facts.push(fact);
