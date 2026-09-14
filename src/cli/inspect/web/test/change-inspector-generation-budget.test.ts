@@ -219,13 +219,22 @@ function navigate(hash: string) {
   history.replaceState(null, "", `/${hash}`);
   window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
-beforeEach(() => {
+// happy-dom queues a `hashchange` on its own (real) timer whenever
+// `replaceState` changes the hash. Drain it before the inspector under test
+// registers its route listener, or the stale event lands as a second route
+// load mid-test and the generation settles early.
+const realSetTimeout = globalThis.setTimeout;
+async function settleHashChange(): Promise<void> {
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+}
+beforeEach(async () => {
   vi.resetModules();
-  vi.useFakeTimers({ now: 0 });
   localStorage.clear();
   sessionStorage.clear();
   mountInspectorDom();
   history.replaceState(null, "", `/${detailRoute}`);
+  await settleHashChange();
+  vi.useFakeTimers({ now: 0 });
 });
 afterEach(async () => {
   (await import("../src/change-inspector")).stopChangeInspector();
@@ -242,7 +251,10 @@ describe("route and recovery generation budget", () => {
     "history",
     "postflight",
   ] as const)("%s stall settles at 30 seconds and exposes a working Retry", async (leaf) => {
-    if (leaf === "history") history.replaceState(null, "", "/#/timeline");
+    if (leaf === "history") {
+      history.replaceState(null, "", "/#/timeline");
+      await settleHashChange();
+    }
     const c = serve();
     c.stall = leaf;
     const { bootstrapChangeInspector, stopChangeInspector } = await import(
