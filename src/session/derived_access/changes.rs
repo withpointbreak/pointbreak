@@ -3123,6 +3123,11 @@ mod tests {
     #[test]
     fn derived_ordering_keys_match_the_authoritative_lane_across_timeline_families() {
         let fixture = ActiveChangeFixture::new(&[&[Some("first")], &[Some("second")]]);
+        // Keep checkpoint movement under the test's control: each raw append
+        // below is followed by an immediate derived read, and on Windows the
+        // background maintenance worker can otherwise advance the checkpoint
+        // mid-read and turn a Ready outcome into a retryable one.
+        fixture.runtime.pause_background_worker_for_test();
         let first = fixture.changes[0].clone();
         let second = fixture.changes[1].clone();
         assert_derived_ordering_matches_strict(&fixture, "declarations and memberships");
@@ -3594,6 +3599,7 @@ mod tests {
     #[test]
     fn both_lanes_emit_identical_change_order_for_the_same_store() {
         let fixture = ActiveChangeFixture::new(&[&[Some("a")], &[Some("b")], &[Some("c")]]);
+        fixture.runtime.pause_background_worker_for_test();
         // Newest activity on the greatest identity, so activity_desc is the
         // exact reverse of change_id_asc and the assertion is not vacuous.
         let mut by_id = fixture.changes.clone();
