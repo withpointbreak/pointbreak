@@ -25,3 +25,6 @@ __pycache__
 # direnv / nix-direnv local cache
 /.direnv/
 /.envrc.local
+
+# Vitest writes its results cache beneath the directory it is launched from.
+/node_modules/
