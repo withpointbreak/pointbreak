@@ -68,7 +68,8 @@ use super::{
     qualification_derived_change_control_attestation_test_v1,
     qualification_derived_change_control_command_sha256_v1,
     qualification_derived_change_expected_outcome_v1,
-    qualification_derived_change_storage_probe_hashes_v1, required_timeline_cases_v1,
+    qualification_derived_change_storage_probe_hashes_v1,
+    qualification_derived_timeline_expected_oracle_v1, required_timeline_cases_v1,
     scan_qualification_derived_storage_v1, timeline_invalid_signature_run_identity_v1,
     timeline_request_schedule_sha256_v1, timeline_request_schedule_v1,
 };
@@ -3874,10 +3875,22 @@ mod instrumented {
             let derived_endpoint = fresh_derived
                 .as_ref()
                 .map_or(derived, |child| &child.endpoint);
-            let authoritative_endpoint = fresh_strict
-                .as_ref()
-                .map(|child| &child.endpoint)
-                .or(authoritative);
+            // A typed Timeline failure is held to its expected typed
+            // document, not to the explicit-off child (which never sees a
+            // derived carrier fault) — the same rule Change rows apply.
+            let typed_fault_outcome = operation == "timeline_fault_outcome"
+                && qualification_derived_timeline_expected_oracle_v1(
+                    request.execution.platform,
+                    request.fixture,
+                ) == QualificationDerivedTimelineReadOracleV1::TypedFailure;
+            let authoritative_endpoint = if typed_fault_outcome {
+                None
+            } else {
+                fresh_strict
+                    .as_ref()
+                    .map(|child| &child.endpoint)
+                    .or(authoritative)
+            };
             let derived_target = timeline_operation_target(
                 operation,
                 derived_endpoint,
@@ -4150,13 +4163,10 @@ mod instrumented {
                 schedule_sha256,
                 success: !timeline_operation_is_expected_failure(operation)
                     || (operation == "timeline_fault_outcome"
-                        && qualification_derived_change_expected_outcome_v1(
+                        && qualification_derived_timeline_expected_oracle_v1(
                             request.execution.platform,
                             request.fixture,
-                            QualificationDerivedChangeReadCaseV1::ChangesBare,
-                        )
-                        .0
-                            != QualificationDerivedChangeReadOracleV1::TypedFailure),
+                        ) != QualificationDerivedTimelineReadOracleV1::TypedFailure),
                 semantic_result_sha256: semantic_result_sha256.clone(),
                 include_capacity_ownership: false,
             }
@@ -5521,17 +5531,10 @@ mod instrumented {
             }
             wire_contract_matches &= trust_transition_matches;
         }
-        let oracle = if qualification_derived_change_expected_outcome_v1(
+        let oracle = qualification_derived_timeline_expected_oracle_v1(
             request.execution.platform,
             request.fixture,
-            QualificationDerivedChangeReadCaseV1::ChangesBare,
-        )
-        .0 == QualificationDerivedChangeReadOracleV1::TypedFailure
-        {
-            QualificationDerivedTimelineReadOracleV1::TypedFailure
-        } else {
-            QualificationDerivedTimelineReadOracleV1::StrictParity
-        };
+        );
         Ok(QualificationDerivedTimelineReadEvidenceV1 {
             platform: request.execution.platform,
             fixture: request.fixture,

@@ -42,6 +42,12 @@ pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-evaluator-v4-procedure.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1: &str =
     "02b5e44244fefc3fbe99212fa7e6ec3be191fe01fc3fde464e947e085921b9a3";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5: &str =
+    "pointbreak.qualification-derived-access-evaluator.v5";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-evaluator-v5-procedure.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1: &str =
+    "da4dc89936309fe4784c8df836fe248679f158a0b0f43a7eab77e19d66e68a00";
 
 const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V3_STEPS_V1: [&str; 6] = [
     "change-read-parity-and-bounds-v1",
@@ -61,6 +67,27 @@ const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1: [&str; 8] = [
     "completion-last-independent-package-verification-v1",
     "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
     "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v2",
+];
+
+/// Evaluator v5 keeps the frozen v4 step prefix and adds one step: a typed
+/// Timeline failure is held to its expected typed document without a
+/// strict-parity comparison (the explicit-off child never sees a derived
+/// fault, exactly as Change rows already treat typed failures); byte-identical
+/// product and control-binary identities collapse before the
+/// one-product-per-platform package count; and a row may bind to any packaged
+/// execution identity on its platform, since every fixture's change-read
+/// receipt carries its own request-bound identity. Together these let every
+/// fixture kind's receipt from one exact binary enter one package.
+const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1: [&str; 9] = [
+    "change-read-parity-and-bounds-v1",
+    "exact-product-and-harness-identity-v1",
+    "complete-typed-error-documents-v1",
+    "reader-v3-authority-lifecycle-concurrency-v1",
+    "immutable-schema-and-byte-inventory-v1",
+    "completion-last-independent-package-verification-v1",
+    "timeline-route-parity-independent-errors-request-bounds-concurrent-trust-validated-stamps-canonical-byte-clone-seeded-disjoint-reference-fault-roots-post-pin-exact-carrier-barrier-and-asymmetric-one-bit-signature-recovery-v1",
+    "receipt-proven-topology-candidate-bounds-and-cursor-ledger-attempt-token-exemption-v2",
+    "typed-timeline-failures-without-strict-parity-identical-product-identity-dedupe-and-per-platform-execution-identity-membership-v1",
 ];
 
 pub const QUALIFICATION_TIMELINE_INVALID_SIGNATURE_MUTATION_RECIPE_SHA256_V1: &str =
@@ -92,6 +119,21 @@ pub fn qualification_derived_access_evaluator_v4_procedure_sha256() -> String {
     assert_eq!(
         digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1,
         "compiled derived-access evaluator-v4 procedure drifted"
+    );
+    digest
+}
+
+pub fn qualification_derived_access_evaluator_v5_procedure_sha256() -> String {
+    let procedure = serde_json::json!({
+        "schema": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SCHEMA_V1,
+        "steps": QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1,
+    });
+    let bytes = canonical_json_bytes(&procedure)
+        .expect("the derived-access evaluator-v5 procedure is canonical");
+    let digest = sha256_bytes_hex(&bytes);
+    assert_eq!(
+        digest, QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1,
+        "compiled derived-access evaluator-v5 procedure drifted"
     );
     digest
 }
@@ -2084,14 +2126,16 @@ pub(crate) fn expected_timeline_typed_documents_v1(
                     Some(false),
                 ),
                 "timeline_fault_outcome" => {
-                    let (oracle, status, code) = qualification_derived_change_expected_outcome_v1(
+                    if qualification_derived_timeline_expected_oracle_v1(platform, fixture)
+                        != QualificationDerivedTimelineReadOracleV1::TypedFailure
+                    {
+                        return None;
+                    }
+                    let (_, status, code) = qualification_derived_change_expected_outcome_v1(
                         platform,
                         fixture,
                         QualificationDerivedChangeReadCaseV1::ChangesBare,
                     );
-                    if oracle != QualificationDerivedChangeReadOracleV1::TypedFailure {
-                        return None;
-                    }
                     (
                         status,
                         "pointbreak.inspect-change-projection-error",
@@ -2207,6 +2251,7 @@ pub fn evaluate_qualification_derived_access_v1(
             QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
                 | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+                | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
         )
         || package.proposed_profile_id.trim().is_empty()
     {
@@ -2241,6 +2286,12 @@ pub fn evaluate_qualification_derived_access_v1(
     {
         return Err("evaluator v4 procedure binding drifted".to_owned());
     }
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+        && package.evaluator_procedure_sha256
+            != qualification_derived_access_evaluator_v5_procedure_sha256()
+    {
+        return Err("evaluator v5 procedure binding drifted".to_owned());
+    }
     let missing_platforms = validate_execution_identities(package)?;
     reject_duplicate_rows(package)?;
 
@@ -2261,12 +2312,17 @@ pub fn evaluate_qualification_derived_access_v1(
         package.evaluator_revision.as_str(),
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
     ) {
         evaluate_change_reads(package, &mut failed, &mut missing);
         evaluate_change_controls(package, &mut failed, &mut missing);
         evaluate_change_storage(package, &mut failed, &mut missing);
     }
-    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4 {
+    if matches!(
+        package.evaluator_revision.as_str(),
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+    ) {
         evaluate_timeline_reads_v1(package, &mut failed, &mut missing);
         evaluate_timeline_storage_v1(package, &mut failed, &mut missing);
     }
@@ -2485,8 +2541,13 @@ fn validate_execution_identities(
     if !platforms.is_subset(&required) || duplicated {
         return Err("derived-access execution identities are duplicated or unsupported".to_owned());
     }
-    let product_platforms = package
-        .product_identities
+    // Under v5 every fixture's change-read receipt shares one exact product
+    // binary per platform, so byte-identical identities collapse before the
+    // one-product-per-platform count; mixed identities still refuse.
+    let dedupe_identical =
+        package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5;
+    let distinct_products = distinct_identities(&package.product_identities, dedupe_identical);
+    let product_platforms = distinct_products
         .iter()
         .map(|identity| identity.platform)
         .collect::<BTreeSet<_>>();
@@ -2494,13 +2555,15 @@ fn validate_execution_identities(
         package.evaluator_revision.as_str(),
         QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V3
             | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
-    ) && (product_platforms.len() != package.product_identities.len()
+            | QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+    ) && (product_platforms.len() != distinct_products.len()
         || !product_platforms.is_subset(&required))
     {
         return Err("derived-access product identities are duplicated or unsupported".to_owned());
     }
-    let control_binaries = package
-        .change_control_binary_identities
+    let distinct_controls =
+        distinct_identities(&package.change_control_binary_identities, dedupe_identical);
+    let control_binaries = distinct_controls
         .iter()
         .map(|identity| (identity.platform, identity.kind))
         .collect::<BTreeSet<_>>();
@@ -2515,7 +2578,7 @@ fn validate_execution_identities(
             .map(move |kind| (platform, kind))
     })
     .collect::<BTreeSet<_>>();
-    if control_binaries.len() != package.change_control_binary_identities.len()
+    if control_binaries.len() != distinct_controls.len()
         || !control_binaries.is_subset(&expected_control_binaries)
     {
         return Err(
@@ -3335,19 +3398,10 @@ fn evaluate_change_reads(
                 missing.push(criterion);
                 continue;
             };
-            let product_identity_sha256 = package
-                .product_identities
-                .iter()
-                .find(|identity| identity.platform == platform)
-                .and_then(|identity| identity.canonical_sha256().ok());
-            let execution_identity_sha256 = package
-                .execution_identities
-                .iter()
-                .find(|identity| identity.platform == platform)
-                .and_then(|identity| identity.canonical_sha256().ok());
-            if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
-                || execution_identity_sha256.as_deref()
-                    != Some(row.counter_execution_identity_sha256.as_str())
+            let product_identity_sha256s = packaged_product_sha256s_v1(package, platform);
+            let execution_identity_sha256s = packaged_execution_sha256s_v1(package, platform);
+            if !product_identity_sha256s.contains(&row.product_identity_sha256)
+                || !execution_identity_sha256s.contains(&row.counter_execution_identity_sha256)
             {
                 failed.push(format!(
                     "{platform:?}/{fixture:?}/{case:?} source authority"
@@ -3405,16 +3459,8 @@ fn evaluate_change_controls(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ] {
-        let product = package
-            .product_identities
-            .iter()
-            .find(|identity| identity.platform == platform);
-        let product_identity_sha256 = product.and_then(|identity| identity.canonical_sha256().ok());
-        let execution_identity_sha256 = package
-            .execution_identities
-            .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
+        let product_identity_sha256s = packaged_product_sha256s_v1(package, platform);
+        let execution_identity_sha256s = packaged_execution_sha256s_v1(package, platform);
         for kind in QualificationDerivedChangeControlBinaryKindV1::ALL {
             if !package
                 .change_control_binary_identities
@@ -3470,10 +3516,8 @@ fn evaluate_change_controls(
                         || binary_identity.is_some_and(|identity| {
                             identity.binary_sha256 != row.test_binary_sha256
                         })
-                        || product_identity_sha256.as_deref()
-                            != Some(row.product_identity_sha256.as_str())
-                        || execution_identity_sha256.as_deref()
-                            != Some(row.execution_identity_sha256.as_str()) =>
+                        || !product_identity_sha256s.contains(&row.product_identity_sha256)
+                        || !execution_identity_sha256s.contains(&row.execution_identity_sha256) =>
                 {
                     failed.push(criterion);
                 }
@@ -3492,16 +3536,8 @@ fn evaluate_change_storage(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ] {
-        let product_identity_sha256 = package
-            .product_identities
-            .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
-        let execution_identity_sha256 = package
-            .execution_identities
-            .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
+        let product_identity_sha256s = packaged_product_sha256s_v1(package, platform);
+        let execution_identity_sha256s = packaged_execution_sha256s_v1(package, platform);
         for fixture in QualificationDerivedChangeFixtureV1::ALL {
             let phases: &[QualificationDerivedChangeStoragePhaseV1] =
                 if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
@@ -3572,10 +3608,8 @@ fn evaluate_change_storage(
                 if row.witness.validate().is_err()
                     || observed_fixture_probes != required_fixture_probes
                     || forbidden_search_schema
-                    || product_identity_sha256.as_deref()
-                        != Some(row.product_identity_sha256.as_str())
-                    || execution_identity_sha256.as_deref()
-                        != Some(row.execution_identity_sha256.as_str())
+                    || !product_identity_sha256s.contains(&row.product_identity_sha256)
+                    || !execution_identity_sha256s.contains(&row.execution_identity_sha256)
                 {
                     failed.push(criterion);
                 }
@@ -3689,17 +3723,10 @@ fn evaluate_timeline_reads_v1(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ] {
-        let product = package
-            .product_identities
-            .iter()
-            .find(|identity| identity.platform == platform);
-        let product_identity_sha256 = product.and_then(|identity| identity.canonical_sha256().ok());
-        let execution = package
-            .execution_identities
-            .iter()
-            .find(|identity| identity.platform == platform);
-        let execution_identity_sha256 =
-            execution.and_then(|identity| identity.canonical_sha256().ok());
+        let products = packaged_product_identities_v1(package, platform);
+        let product_identity_sha256s = packaged_product_sha256s_v1(package, platform);
+        let executions = packaged_execution_identities_v1(package, platform);
+        let execution_identity_sha256s = packaged_execution_sha256s_v1(package, platform);
 
         for fixture in QualificationDerivedChangeFixtureV1::ALL {
             for &case in required_timeline_cases_v1(fixture) {
@@ -3711,6 +3738,13 @@ fn evaluate_timeline_reads_v1(
                     continue;
                 };
 
+                // The row's own reference execution identity (the trust suite's
+                // fault identity is derived from it); under v4 this is the
+                // platform's first packaged identity as before.
+                let row_execution = executions.iter().copied().find(|identity| {
+                    identity.canonical_sha256().ok().as_deref()
+                        == Some(row.counter_execution_identity_sha256.as_str())
+                });
                 let source_authority_matches = package.change_read_rows.iter().any(|change| {
                     change.platform == platform
                         && change.fixture == fixture
@@ -3718,10 +3752,10 @@ fn evaluate_timeline_reads_v1(
                         && change.fixture_inventory_sha256 == row.fixture_inventory_sha256
                         && change.fixture_witness_sha256 == row.fixture_witness_sha256
                 });
-                if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
-                    || execution_identity_sha256.as_deref()
-                        != Some(row.counter_execution_identity_sha256.as_str())
-                    || product.is_none_or(|identity| {
+                if !product_identity_sha256s.contains(&row.product_identity_sha256)
+                    || !execution_identity_sha256s.contains(&row.counter_execution_identity_sha256)
+                    || products.is_empty()
+                    || products.iter().any(|identity| {
                         !identity
                             .enabled_features
                             .iter()
@@ -3762,13 +3796,13 @@ fn evaluate_timeline_reads_v1(
                                 && receipt.operation == *operation
                                 && receipt.phase == case.as_str()
                                 && receipt.success == expected_success
-                                && execution.is_some_and(|identity| {
+                                && executions.iter().any(|identity| {
                                     receipt.root_identity == identity.root_provenance_sha256
                                 })
-                                && execution_identity_sha256.as_deref()
-                                    == Some(receipt.base_execution_identity_sha256.as_str())
-                                && product_identity_sha256.as_deref()
-                                    == Some(receipt.derivative_execution_identity_sha256.as_str())
+                                && execution_identity_sha256s
+                                    .contains(&receipt.base_execution_identity_sha256)
+                                && product_identity_sha256s
+                                    .contains(&receipt.derivative_execution_identity_sha256)
                                 && receipt.manifest_sha256 == row.fixture_inventory_sha256
                                 && receipt.schedule_sha256 == schedule_sha256
                                 && timeline_counter_bounds_hold_v1(
@@ -3823,7 +3857,7 @@ fn evaluate_timeline_reads_v1(
                     || !timeline_authority_valid_v1(row)
                     || !timeline_trust_transition_valid_v1(row)
                     || !timeline_concurrent_trust_valid_v1(row)
-                    || !timeline_invalid_signature_failure_valid_v1(row, execution)
+                    || !timeline_invalid_signature_failure_valid_v1(row, row_execution)
                 {
                     failed.push(criterion);
                 }
@@ -3832,20 +3866,96 @@ fn evaluate_timeline_reads_v1(
     }
 }
 
-fn qualification_derived_timeline_expected_oracle_v1(
+/// The Timeline fault-outcome oracle mirrors the Changes oracle for the
+/// fixture: every fault that makes the Changes routes fail typed (a mutated,
+/// wrong-family, or missing selected carrier, or a conflicting duplicate
+/// proposal) is expected to fail typed on `/api/v2/history` too, with the
+/// same platform-specific document. The run and the evaluator share this one
+/// derivation; a typed expectation is never compared against the explicit-off
+/// child.
+pub(crate) fn qualification_derived_timeline_expected_oracle_v1(
     platform: QualificationDerivedAccessPlatformV1,
     fixture: QualificationDerivedChangeFixtureV1,
 ) -> QualificationDerivedTimelineReadOracleV1 {
-    let (oracle, _, _) = qualification_derived_change_expected_outcome_v1(
+    let (changes_oracle, _, _) = qualification_derived_change_expected_outcome_v1(
         platform,
         fixture,
         QualificationDerivedChangeReadCaseV1::ChangesBare,
     );
-    if oracle == QualificationDerivedChangeReadOracleV1::TypedFailure {
+    if changes_oracle == QualificationDerivedChangeReadOracleV1::TypedFailure {
         QualificationDerivedTimelineReadOracleV1::TypedFailure
     } else {
         QualificationDerivedTimelineReadOracleV1::StrictParity
     }
+}
+
+/// Collapse byte-identical identities when the evaluator revision admits it;
+/// earlier revisions keep every entry so their historical refusals hold.
+fn distinct_identities<T: Clone + PartialEq>(identities: &[T], dedupe_identical: bool) -> Vec<T> {
+    if !dedupe_identical {
+        return identities.to_vec();
+    }
+    let mut distinct: Vec<T> = Vec::new();
+    for identity in identities {
+        if !distinct.contains(identity) {
+            distinct.push(identity.clone());
+        }
+    }
+    distinct
+}
+
+/// Under v5 a row may be bound to any packaged execution identity on its
+/// platform: every fixture's change-read receipt carries its own request-bound
+/// execution identity, so one package legitimately holds several per platform.
+/// Earlier revisions keep their historical first-identity binding.
+fn packaged_execution_identities_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    platform: QualificationDerivedAccessPlatformV1,
+) -> Vec<&QualificationDerivedAccessExecutionIdentityV1> {
+    let on_platform = package
+        .execution_identities
+        .iter()
+        .filter(|identity| identity.platform == platform);
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+        on_platform.collect()
+    } else {
+        on_platform.take(1).collect()
+    }
+}
+
+fn packaged_product_identities_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    platform: QualificationDerivedAccessPlatformV1,
+) -> Vec<&QualificationDerivedAccessProductIdentityV1> {
+    let on_platform = package
+        .product_identities
+        .iter()
+        .filter(|identity| identity.platform == platform);
+    if package.evaluator_revision == QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 {
+        on_platform.collect()
+    } else {
+        on_platform.take(1).collect()
+    }
+}
+
+fn packaged_execution_sha256s_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    platform: QualificationDerivedAccessPlatformV1,
+) -> Vec<String> {
+    packaged_execution_identities_v1(package, platform)
+        .into_iter()
+        .filter_map(|identity| identity.canonical_sha256().ok())
+        .collect()
+}
+
+fn packaged_product_sha256s_v1(
+    package: &QualificationDerivedAccessPackageV1,
+    platform: QualificationDerivedAccessPlatformV1,
+) -> Vec<String> {
+    packaged_product_identities_v1(package, platform)
+        .into_iter()
+        .filter_map(|identity| identity.canonical_sha256().ok())
+        .collect()
 }
 
 fn timeline_operation_is_typed_failure_v1(operation: &str) -> bool {
@@ -4875,16 +4985,8 @@ fn evaluate_timeline_storage_v1(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ] {
-        let product_identity_sha256 = package
-            .product_identities
-            .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
-        let execution_identity_sha256 = package
-            .execution_identities
-            .iter()
-            .find(|identity| identity.platform == platform)
-            .and_then(|identity| identity.canonical_sha256().ok());
+        let product_identity_sha256s = packaged_product_sha256s_v1(package, platform);
+        let execution_identity_sha256s = packaged_execution_sha256s_v1(package, platform);
         for fixture in QualificationDerivedChangeFixtureV1::ALL {
             let phases: &[QualificationDerivedChangeStoragePhaseV1] =
                 if fixture == QualificationDerivedChangeFixtureV1::TopologyV1 {
@@ -4967,9 +5069,8 @@ fn evaluate_timeline_storage_v1(
                     }) && change.fixture_inventory_sha256 == row.fixture_inventory_sha256
                         && change.fixture_witness_sha256 == row.fixture_witness_sha256
                 });
-                if product_identity_sha256.as_deref() != Some(row.product_identity_sha256.as_str())
-                    || execution_identity_sha256.as_deref()
-                        != Some(row.execution_identity_sha256.as_str())
+                if !product_identity_sha256s.contains(&row.product_identity_sha256)
+                    || !execution_identity_sha256s.contains(&row.execution_identity_sha256)
                     || !probes_valid
                     || !schema_valid
                 {
@@ -6437,6 +6538,98 @@ mod tests {
     }
 
     #[test]
+    fn evaluator_v5_procedure_extends_the_frozen_v4_prefix() {
+        assert_eq!(
+            qualification_derived_access_evaluator_v5_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1
+        );
+        assert_eq!(
+            &QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_STEPS_V1[..8],
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_STEPS_V1
+        );
+        assert_eq!(
+            qualification_derived_access_evaluator_v4_procedure_sha256(),
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1,
+            "the frozen v4 digest must not move with v5"
+        );
+        assert_ne!(
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V4_PROCEDURE_SHA256_V1,
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1
+        );
+    }
+
+    #[test]
+    fn timeline_fault_outcome_oracle_mirrors_the_changes_oracle_per_platform() {
+        use QualificationDerivedAccessPlatformV1::{MacosApfs, WindowsNtfs};
+        use QualificationDerivedChangeFixtureV1 as Fixture;
+        use QualificationDerivedTimelineReadCaseV1::StructuredQuerySuite;
+        use QualificationDerivedTimelineReadOracleV1::{StrictParity, TypedFailure};
+
+        // Every fault that fails the Changes routes typed is expected to fail
+        // `/api/v2/history` typed with the same platform-specific document.
+        let typed = |platform, fixture| {
+            let documents =
+                expected_timeline_typed_documents_v1(platform, fixture, StructuredQuerySuite);
+            assert_eq!(
+                qualification_derived_timeline_expected_oracle_v1(platform, fixture),
+                TypedFailure
+            );
+            assert_eq!(documents.len(), 1, "{fixture:?}");
+            let document = &documents[0];
+            assert_eq!(document.operation, "timeline_fault_outcome");
+            assert_eq!(document.http_status, 503);
+            assert_eq!(
+                document.schema,
+                "pointbreak.inspect-change-projection-error"
+            );
+            document.code.clone()
+        };
+        assert_eq!(
+            typed(MacosApfs, Fixture::MutatedCarrierV1),
+            "projection_invalid"
+        );
+        assert_eq!(
+            typed(MacosApfs, Fixture::WrongFamilyCarrierV1),
+            "projection_invalid"
+        );
+        assert_eq!(
+            typed(WindowsNtfs, Fixture::MutatedCarrierV1),
+            "projection_rebuild_required"
+        );
+        assert_eq!(
+            typed(WindowsNtfs, Fixture::WrongFamilyCarrierV1),
+            "projection_rebuild_required"
+        );
+        assert_eq!(
+            typed(MacosApfs, Fixture::MissingCarrierV1),
+            "projection_rebuild_required"
+        );
+        assert_eq!(
+            typed(MacosApfs, Fixture::DuplicateConflictV1),
+            "projection_invalid"
+        );
+        assert_eq!(
+            typed(WindowsNtfs, Fixture::DuplicateConflictV1),
+            "projection_invalid"
+        );
+
+        // Ready fixtures stay strict parity with no typed expectation.
+        for fixture in [
+            Fixture::TopologyV1,
+            Fixture::DuplicateEqualV1,
+            Fixture::RemovalV1,
+            Fixture::IncompleteV1,
+            Fixture::CycleConflictedV1,
+        ] {
+            assert_eq!(
+                qualification_derived_timeline_expected_oracle_v1(MacosApfs, fixture),
+                StrictParity,
+                "{fixture:?}"
+            );
+        }
+    }
+
+    #[test]
     fn timeline_source_and_admitted_family_inventories_track_live_vocabulary() {
         use crate::session::event::EventType;
 
@@ -6919,6 +7112,117 @@ mod tests {
         v3_with_timeline.evaluator_procedure_sha256 =
             qualification_derived_access_evaluator_v3_procedure_sha256();
         assert!(evaluate_qualification_derived_access_v1(&v3_with_timeline).is_err());
+
+        // v5 evaluates the same complete evidence under its own procedure
+        // binding, and collapses byte-identical product identities (one per
+        // fixture change-read receipt) before the one-product-per-platform
+        // count; v4 keeps its historical refusal of the same package.
+        let mut v5_timeline = complete_timeline.clone();
+        v5_timeline.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5.to_owned();
+        v5_timeline.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v5_procedure_sha256();
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&v5_timeline)
+                .expect("complete v5 evaluation")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+        let mut v5_wrong_binding = v5_timeline.clone();
+        v5_wrong_binding.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v4_procedure_sha256();
+        assert!(evaluate_qualification_derived_access_v1(&v5_wrong_binding).is_err());
+        let mut v5_identical_products = v5_timeline.clone();
+        let repeated_products = v5_identical_products.product_identities.clone();
+        v5_identical_products
+            .product_identities
+            .extend(repeated_products.iter().cloned());
+        v5_identical_products
+            .product_identities
+            .extend(repeated_products);
+        let repeated_controls = v5_identical_products
+            .change_control_binary_identities
+            .clone();
+        v5_identical_products
+            .change_control_binary_identities
+            .extend(repeated_controls);
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&v5_identical_products)
+                .expect("identical identities collapse under v5")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+        // v5 binds each row to any packaged execution identity on its
+        // platform (one per fixture receipt); v4 keeps the first-identity
+        // binding and fails those rows' source authority.
+        let mut v5_second_execution = v5_timeline.clone();
+        let mut second_execution = v5_second_execution.execution_identities[0].clone();
+        second_execution.command_sha256 = digest("a second request path");
+        let second_platform = second_execution.platform;
+        let second_sha256 = second_execution
+            .canonical_sha256()
+            .expect("second execution identity");
+        v5_second_execution
+            .execution_identities
+            .push(second_execution.clone());
+        for row in v5_second_execution
+            .change_read_rows
+            .iter_mut()
+            .filter(|row| {
+                row.platform == second_platform
+                    && row.fixture == QualificationDerivedChangeFixtureV1::DuplicateEqualV1
+            })
+        {
+            row.counter_execution_identity_sha256 = second_sha256.clone();
+        }
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&v5_second_execution)
+                .expect("rows bound to a second packaged identity evaluate under v5")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+        let mut v4_second_execution = v5_second_execution.clone();
+        v4_second_execution.evaluator_revision =
+            QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
+        v4_second_execution.evaluator_procedure_sha256 =
+            qualification_derived_access_evaluator_v4_procedure_sha256();
+        let v4_second = evaluate_qualification_derived_access_v1(&v4_second_execution)
+            .expect("v4 evaluates the same package");
+        assert_eq!(
+            v4_second.outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
+        );
+        assert!(
+            v4_second
+                .failed_criteria
+                .iter()
+                .any(|criterion| criterion.contains("DuplicateEqualV1")
+                    && criterion.ends_with("source authority")),
+            "{:?}",
+            v4_second.failed_criteria
+        );
+
+        let mut v5_mixed_products = v5_timeline.clone();
+        let mut foreign_product = v5_mixed_products.product_identities[0].clone();
+        foreign_product.binary_sha256 = digest("a second product binary");
+        v5_mixed_products.product_identities.push(foreign_product);
+        let mixed = evaluate_qualification_derived_access_v1(&v5_mixed_products)
+            .expect_err("mixed product identities still refuse under v5");
+        assert!(
+            mixed.contains("product identities are duplicated"),
+            "{mixed}"
+        );
+        let mut v4_identical_products = complete_timeline.clone();
+        let repeated_products = v4_identical_products.product_identities.clone();
+        v4_identical_products
+            .product_identities
+            .extend(repeated_products);
+        let refused = evaluate_qualification_derived_access_v1(&v4_identical_products)
+            .expect_err("v4 keeps refusing repeated product identities");
+        assert!(
+            refused.contains("product identities are duplicated"),
+            "{refused}"
+        );
 
         let mut duplicate_timeline = complete_timeline.clone();
         duplicate_timeline

@@ -4174,10 +4174,13 @@ pub(super) fn validate_summaries_against_raw(
             return Err("V1 Change receipt requires evaluator v3".to_owned());
         }
         Some("v2")
-            if package.evaluator_revision
-                != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4 =>
+            if !matches!(
+                package.evaluator_revision.as_str(),
+                super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4
+                    | super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+            ) =>
         {
-            return Err("V2 Change receipt requires evaluator v4".to_owned());
+            return Err("V2 Change receipt requires evaluator v4 or v5".to_owned());
         }
         _ => {}
     }
@@ -4311,6 +4314,10 @@ pub fn build_qualification_derived_access_fragment_v1(
             super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4,
             super::qualification_derived_access_evaluator_v4_procedure_sha256(),
         ),
+        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5 => (
+            super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5,
+            super::qualification_derived_access_evaluator_v5_procedure_sha256(),
+        ),
         _ => {
             return Err(
                 "derived-access fragment request names an unsupported evaluator revision"
@@ -4386,10 +4393,16 @@ pub fn build_qualification_derived_access_fragment_v1(
                 if receipt.base.execution != request.execution {
                     return Err("Change read successor receipt authority drifted".to_owned());
                 }
-                package.evaluator_revision =
-                    super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
-                package.evaluator_procedure_sha256 =
-                    super::qualification_derived_access_evaluator_v4_procedure_sha256();
+                // A successor receipt lifts a v3 request to v4; a v5 request
+                // keeps its own procedure binding.
+                if package.evaluator_revision
+                    != super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+                {
+                    package.evaluator_revision =
+                        super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4.to_owned();
+                    package.evaluator_procedure_sha256 =
+                        super::qualification_derived_access_evaluator_v4_procedure_sha256();
+                }
                 if !package.product_identities.contains(&receipt.base.product) {
                     package
                         .product_identities

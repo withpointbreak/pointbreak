@@ -934,6 +934,17 @@ failure and two-sided recovery, and Timeline storage witnesses from both macOS/A
 Missing rows remain `insufficient_evidence`; semantic, wire, counter-classification, lifecycle, storage, or
 authority drift rejects the package.
 
+`pointbreak.qualification-derived-access-evaluator.v5` keeps every v4 requirement and its frozen step prefix,
+and adds one ninth step (`pointbreak.qualification-derived-access-evaluator-v5-procedure.v1`, digest in
+`QUALIFICATION_DERIVED_ACCESS_EVALUATOR_V5_PROCEDURE_SHA256_V1`): a typed Timeline fault outcome (every
+fixture whose Changes routes fail typed) is held to its platform-specific typed document without a
+strict-parity comparison against the explicit-off child, the rule Change rows already apply to typed
+failures; byte-identical product and control-binary identities collapse before the one-product-per-platform
+package count; and a row may bind to any packaged execution identity on its platform, since every fixture
+kind's change-read receipt carries its own request-bound identity. Together these let every fixture kind's
+receipt from one exact binary enter a single package. Mixed identities still refuse, historical v4 packages
+keep their recorded refusals, and a V2 successor receipt fragments under v4 or v5 as requested.
+
 ## Prospective feasibility contract
 
 The approved prospective contract is compiled into the benchmark target as

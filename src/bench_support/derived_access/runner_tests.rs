@@ -2090,6 +2090,82 @@ fn fragment_request_revision_authors_v4_and_assembly_still_refuses_mixed_authori
 
 #[cfg(feature = "longitudinal-counting")]
 #[test]
+fn fragment_request_revision_authors_v5_and_refuses_mixing_with_v4() {
+    let root = tempfile::tempdir().expect("fragment workspace");
+    let smoke =
+        run_qualification_derived_access_non_timing_smoke_at_v1(&root.path().join("d0-workspace"))
+            .expect("D0 smoke");
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let receipt = QualificationDerivedAccessNativeSmokeRunReceiptV1 {
+        schema: QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1.to_owned(),
+        execution: execution.clone(),
+        payload: QualificationDerivedAccessNativeSmokePayloadV1::D0_128(Box::new(smoke)),
+    };
+    let receipt_path = root.path().join("native-smoke.json");
+    std::fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&receipt).expect("serialize smoke receipt"),
+    )
+    .expect("write smoke receipt");
+    let fragment_for = |name: &str, revision: &str| {
+        let request_path = root.path().join(format!("{name}-request.json"));
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec_pretty(&QualificationDerivedAccessFragmentRequestV1 {
+                schema: QUALIFICATION_DERIVED_ACCESS_FRAGMENT_REQUEST_SCHEMA_V1.to_owned(),
+                execution: execution.clone(),
+                receipt_paths: vec![receipt_path.clone()],
+                evaluator_revision: revision.to_owned(),
+            })
+            .expect("serialize fragment request"),
+        )
+        .expect("write fragment request");
+        let fragment =
+            build_qualification_derived_access_fragment_v1(&request_path).expect("build fragment");
+        let fragment_path = root.path().join(format!("{name}-fragment.json"));
+        std::fs::write(
+            &fragment_path,
+            serde_json::to_vec_pretty(&fragment).expect("serialize fragment"),
+        )
+        .expect("write fragment");
+        (fragment, fragment_path)
+    };
+
+    let (v5_fragment, v5_path) =
+        fragment_for("v5", QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5);
+    assert_eq!(
+        v5_fragment.package.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+    );
+    assert_eq!(
+        v5_fragment.package.evaluator_procedure_sha256,
+        qualification_derived_access_evaluator_v5_procedure_sha256()
+    );
+    let (_, v4_path) = fragment_for("v4", QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V4);
+
+    let mixed = assemble_qualification_derived_access_package_v1(
+        &[v5_path.clone(), v4_path],
+        &root.path().join("mixed-package"),
+    )
+    .expect_err("v4 and v5 fragments must refuse assembly");
+    assert!(mixed.contains("mix package authority"), "{mixed}");
+
+    let package_root = root.path().join("v5-package");
+    let evaluation = assemble_qualification_derived_access_package_v1(&[v5_path], &package_root)
+        .expect("assemble v5 package");
+    assert_eq!(
+        evaluation.evaluator_revision,
+        QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V5
+    );
+    assert_eq!(
+        evaluation.outcome,
+        QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+    );
+    verify_qualification_derived_access_package_v1(&package_root).expect("verify v5 package");
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[test]
 fn shared_campaign_provenance_lets_both_host_lanes_co_assemble() {
     // The static co-assembly falsifier: stub identities for every planned
     // host lane run through the real package guard before an evidence
