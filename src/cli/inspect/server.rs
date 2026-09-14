@@ -207,6 +207,7 @@ enum ChangeReaderLoad<'a> {
 #[derive(Debug)]
 pub(super) enum ChangeReaderLoadError {
     MovingJournal,
+    ProjectionInvalid(pointbreak::session::DerivedProjectionUnavailableDocumentV1),
     Other(String),
 }
 
@@ -215,6 +216,7 @@ impl fmt::Display for ChangeReaderLoadError {
         match self {
             Self::MovingJournal => formatter
                 .write_str("Journal changed while the Change reader generation was loading; retry"),
+            Self::ProjectionInvalid(document) => formatter.write_str(document.message()),
             Self::Other(message) => formatter.write_str(message),
         }
     }
@@ -288,7 +290,13 @@ impl ChangeReaderCache<ChangeReaderPresentationV1, EventHistoryDocumentV1> {
                     .ready()
                     .map(|ready| ready.presentation().map(Arc::new))
                     .transpose()
-                    .map_err(|error| ChangeReaderLoadError::Other(error.to_string()))
+                    .map_err(|error| {
+                        ChangeReaderLoadError::ProjectionInvalid(
+                            pointbreak::session::DerivedProjectionUnavailableDocumentV1::projection_invalid(
+                                error.to_string(),
+                            ),
+                        )
+                    })
             },
             |state, presentation, trust_set| {
                 state

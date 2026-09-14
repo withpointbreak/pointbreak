@@ -9,10 +9,68 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rusqlite::Connection;
 use serde_json::Value;
 use support::git_repo::GitRepo;
+#[cfg(feature = "longitudinal-counting")]
+use support::inspect::Inspector;
 use support::{common_dir_store, pointbreak_env, superseded_dump_repo};
 
 const ACTIVE: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")];
 const OFF: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "off")];
+
+#[cfg(feature = "longitudinal-counting")]
+#[test]
+fn conflicting_duplicate_proposal_timeline_is_typed_invalid_on_both_access_lanes() {
+    use pointbreak::bench_support::derived_access::{
+        QualificationDerivedChangeFixtureKindV1, QualificationDerivedChangeFixtureRequestV1,
+        materialize_qualification_derived_change_fixture_v1,
+    };
+
+    let parent = tempfile::tempdir().expect("Timeline proposal-conflict fixture parent");
+    let repo = parent.path().join("duplicate-conflict-v1");
+    let witness = materialize_qualification_derived_change_fixture_v1(
+        QualificationDerivedChangeFixtureRequestV1::new(
+            &repo,
+            QualificationDerivedChangeFixtureKindV1::DuplicateConflicting,
+        ),
+    )
+    .expect("materialize the public conflicting-proposal fixture");
+    assert_eq!(witness.fixture_id, "duplicate-conflict-v1");
+
+    let results = [("explicit-off", OFF), ("derived", ACTIVE)].map(|(lane, env)| {
+        let inspector = Inspector::spawn_current_authenticated_with_env(&repo, env);
+        let (invalid_status, invalid_document) =
+            inspector.get_error("/api/v2/history?limit=not-a-number");
+        let (status, document) = inspector.get_error("/api/v2/history?limit=100&order=asc");
+        (lane, invalid_status, invalid_document, status, document)
+    });
+    let observed = results
+        .iter()
+        .map(
+            |(lane, invalid_status, invalid_document, status, document)| {
+                format!(
+                    "{lane}: invalid={invalid_status}: {invalid_document}; conflict={status}: {document}"
+                )
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        results
+            .iter()
+            .all(|(_, invalid_status, invalid_document, status, document)| {
+                invalid_status.starts_with("HTTP/1.1 400")
+                    && invalid_document["schema"] == "pointbreak.inspect-event-history-error"
+                    && invalid_document["code"] == "invalid_query"
+                    && status.starts_with("HTTP/1.1 503")
+                    && document["schema"] == "pointbreak.inspect-change-projection-error"
+                    && document["code"] == "projection_invalid"
+                    && document["retryable"] == false
+                    && document["message"].as_str().is_some_and(|message| {
+                        message.contains("conflicting proposal summaries for exact Revision")
+                    })
+            }),
+        "{observed}"
+    );
+}
 
 #[test]
 fn active_bounded_history_attention_and_revision_pages_use_projection_identity() {

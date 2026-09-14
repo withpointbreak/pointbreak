@@ -1917,6 +1917,25 @@ fn fold_hydrated_proposal_summaries(
     Ok(proposal_summaries)
 }
 
+/// Intersect a sparse exact-Revision set with the current semantic/provenance
+/// pair in one pass over current members.
+pub(crate) fn current_revision_refs_matching_projection(
+    semantic: &ChangeProjection,
+    provenance: &ChangeDocumentProjectionV1,
+    selected: &BTreeSet<RevisionRefV1>,
+) -> BTreeSet<RevisionRefV1> {
+    if selected.is_empty() {
+        return BTreeSet::new();
+    }
+    semantic
+        .changes
+        .values()
+        .flat_map(|view| view.current_revisions.iter())
+        .filter_map(|revision_id| exact_ref_from_projection(provenance, revision_id))
+        .filter(|revision| selected.contains(revision))
+        .collect()
+}
+
 fn presentation_for_current_revisions(
     current_revisions: Vec<RevisionRefV1>,
     proposal_summaries: &BTreeMap<RevisionRefV1, BTreeSet<Option<String>>>,

@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::documents::{
-    ChangeActivityContributionV1, ChangeOrderingV1, attention_wait_keys, fold_change_activity,
+    ChangeActivityContributionV1, ChangeOrderingV1, attention_wait_keys,
+    current_revision_refs_matching_projection, fold_change_activity,
 };
 use crate::model::{
     ActorId, ChangeId, EventId, ReviewTargetRef, RevisionId, RevisionRefV1, TrackId,
@@ -48,7 +49,7 @@ use crate::session::workflow::{referenced_content_hashes_for_event, tag_completi
 use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 8;
+const SEMANTIC_SCHEMA_VERSION: i64 = 9;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 5;
 
@@ -105,6 +106,8 @@ pub(crate) struct MaterializedChangeProjection {
     pub(crate) as_of: TruthCursor,
     pub(crate) projection: crate::session::ChangeProjection,
     pub(crate) document_projection: crate::session::ChangeDocumentProjectionV1,
+    pub(crate) proposal_summary_conflicts: BTreeSet<RevisionRefV1>,
+    pub(crate) proposal_summary_conflict_sequences: BTreeMap<RevisionRefV1, u64>,
 }
 
 /// The Change-page snapshot: the whole-generation projections plus the
@@ -795,7 +798,23 @@ pub(crate) struct ProductHistoryFact {
     pub(crate) membership_withdrawal_claim_id: Option<String>,
     pub(crate) relation_claim: Option<ProductRelationClaimFact>,
     pub(crate) relation_withdrawal_claim_id: Option<String>,
+    /// Proposal summary material exists only while a validated authoritative
+    /// delta is being materialized. It is never written to SQLite.
+    pub(crate) proposal_summary: Option<ProposalSummaryMaterializationFact>,
     pub(crate) content_references: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProposalSummaryMaterializationFact {
+    pub(crate) sequence: u64,
+    pub(crate) revision: RevisionRefV1,
+    pub(crate) summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProposalSummaryConflictUpdate {
+    revision: RevisionRefV1,
+    first_conflict_sequence: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -916,15 +935,16 @@ impl ProductHistoryFact {
         let mut membership_withdrawal_claim_id = None;
         let mut relation_claim = None;
         let mut relation_withdrawal_claim_id = None;
+        let mut proposal_summary = None;
         match event.event_type {
             EventType::WorkObjectProposed => {
                 let payload: WorkObjectProposedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 if let WorkObjectProposal::Revision {
                     revision: proposed,
+                    summary,
                     object_artifact_content_hash,
                     supersedes,
-                    ..
                 } = payload.work_object
                 {
                     let captured_at_millis =
@@ -939,6 +959,16 @@ impl ProductHistoryFact {
                             .iter()
                             .map(|revision| revision.as_str().to_owned())
                             .collect(),
+                    });
+                    proposal_summary = RevisionRefV1::new(
+                        proposed.id.clone(),
+                        object_artifact_content_hash.clone(),
+                    )
+                    .ok()
+                    .map(|revision| ProposalSummaryMaterializationFact {
+                        sequence,
+                        revision,
+                        summary,
                     });
                     let mut event = ProductTimelineFact::new();
                     event
@@ -1181,6 +1211,7 @@ impl ProductHistoryFact {
             membership_withdrawal_claim_id,
             relation_claim,
             relation_withdrawal_claim_id,
+            proposal_summary,
             content_references: referenced_content_hashes_for_event(event)?,
         })
     }
@@ -1461,7 +1492,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 8),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 9),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -1571,6 +1602,13 @@ impl SqliteSemantic {
                      ON semantic_revision_proposal_carrier(
                          revision_id, object_artifact_content_hash, sequence
                      );
+                 CREATE TABLE IF NOT EXISTS semantic_revision_proposal_summary_conflict (
+                     revision_id TEXT NOT NULL,
+                     object_artifact_content_hash TEXT NOT NULL,
+                     first_conflict_sequence INTEGER NOT NULL
+                         REFERENCES semantic_revision_fact(sequence),
+                     PRIMARY KEY (revision_id, object_artifact_content_hash)
+                 ) STRICT, WITHOUT ROWID;
                  CREATE TABLE IF NOT EXISTS semantic_representative (
                      family_id INTEGER NOT NULL CHECK (family_id BETWEEN 1 AND 12),
                      semantic_key_prefix_id INTEGER
@@ -2016,11 +2054,14 @@ impl SqliteSemantic {
             .receipts
             .last()
             .map_or(delta.after, |receipt| receipt.cursor);
+        let proposal_summary_conflicts =
+            self.proposal_summary_conflict_updates(delta.after, product_history_facts)?;
         let result = self
             .locator
             .apply_delta_with(delta, locator_rows, |transaction| {
                 insert_facts(transaction, semantic_facts)?;
                 insert_product_history_facts(transaction, product_history_facts)?;
+                insert_proposal_summary_conflicts(transaction, &proposal_summary_conflicts)?;
                 if let Some(checkpoint) = read_reader_projection_checkpoint(transaction)
                     .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?
                 {
@@ -2113,6 +2154,137 @@ impl SqliteSemantic {
             });
         result.map_err(SqliteSemanticError::from)?;
         Ok(applied)
+    }
+
+    /// Compare only proposal groups touched by this delta. The sparse table
+    /// stores conflict state, never summary material; while a group remains
+    /// valid, its earliest authoritative carrier is the canonical baseline.
+    fn proposal_summary_conflict_updates(
+        &self,
+        observed: TruthCursor,
+        product_history_facts: &[ProductHistoryFact],
+    ) -> Result<Vec<ProposalSummaryConflictUpdate>, SqliteSemanticError> {
+        let mut grouped =
+            BTreeMap::<RevisionRefV1, Vec<&ProposalSummaryMaterializationFact>>::new();
+        for proposal in product_history_facts
+            .iter()
+            .filter_map(|fact| fact.proposal_summary.as_ref())
+        {
+            grouped
+                .entry(proposal.revision.clone())
+                .or_default()
+                .push(proposal);
+        }
+        if grouped.is_empty() {
+            return Ok(Vec::new());
+        }
+        for proposals in grouped.values_mut() {
+            proposals.sort_by_key(|proposal| proposal.sequence);
+        }
+
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied != observed {
+            return Err(SqliteSemanticError::Delta(format!(
+                "proposal summary baseline expected {observed:?}, observed {:?}",
+                checkpoint.applied
+            )));
+        }
+
+        let mut pending = Vec::new();
+        let mut baseline_event_ids = Vec::new();
+        for (revision, proposals) in grouped {
+            let already_conflicted = connection
+                .query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM semantic_revision_proposal_summary_conflict
+                         WHERE revision_id = ?1
+                           AND object_artifact_content_hash = ?2
+                     )",
+                    params![
+                        revision.revision_id.as_str(),
+                        revision.object_artifact_content_hash
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|error| sqlite_error("read proposal summary conflict", error))?;
+            if already_conflicted {
+                continue;
+            }
+            let baseline = connection
+                .query_row(
+                    "SELECT proposal.sequence, locator.event_id
+                     FROM semantic_revision_proposal_carrier AS proposal
+                     JOIN locator_event_text AS locator ON locator.sequence = proposal.sequence
+                     WHERE proposal.revision_id = ?1
+                       AND proposal.object_artifact_content_hash = ?2
+                       AND proposal.sequence <= ?3
+                     ORDER BY proposal.sequence
+                     LIMIT 1",
+                    params![
+                        revision.revision_id.as_str(),
+                        revision.object_artifact_content_hash,
+                        to_i64(observed.sequence, "proposal summary baseline sequence")?,
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(|error| sqlite_error("read proposal summary baseline", error))?
+                .map(|(sequence, event_id)| {
+                    u64::try_from(sequence)
+                        .map(|sequence| (sequence, event_id))
+                        .map_err(|_| {
+                            SqliteSemanticError::Metadata(
+                                "negative proposal summary baseline sequence".to_owned(),
+                            )
+                        })
+                })
+                .transpose()?;
+            if let Some((_, event_id)) = &baseline {
+                baseline_event_ids.push(event_id.clone());
+            }
+            pending.push((revision, proposals, baseline));
+        }
+        drop(connection);
+
+        let hydrated = match self
+            .locator
+            .lookup_event_ids_hydrated(&baseline_event_ids, observed)?
+        {
+            LocatorRead::Ready(rows) => rows,
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                return Err(SqliteSemanticError::Delta(format!(
+                    "proposal summary baseline moved from {observed:?} to {applied:?}"
+                )));
+            }
+        };
+        let mut hydrated = hydrated.into_iter();
+        let mut updates = Vec::new();
+        for (revision, proposals, baseline) in pending {
+            let (baseline_summary, start) = if baseline.is_some() {
+                let row = hydrated.next().flatten().ok_or_else(|| {
+                    SqliteSemanticError::Metadata(format!(
+                        "proposal summary baseline for exact Revision {} is absent",
+                        revision.revision_id.as_str()
+                    ))
+                })?;
+                (proposal_summary_from_event(&row.event, &revision)?, 0_usize)
+            } else {
+                (proposals[0].summary.clone(), 1_usize)
+            };
+            if let Some(conflict) = proposals[start..]
+                .iter()
+                .find(|proposal| proposal.summary != baseline_summary)
+            {
+                updates.push(ProposalSummaryConflictUpdate {
+                    revision,
+                    first_conflict_sequence: conflict.sequence,
+                });
+            }
+        }
+        debug_assert!(hydrated.next().is_none());
+        Ok(updates)
     }
 
     pub(crate) fn audit_snapshot(
@@ -2298,10 +2470,23 @@ impl SqliteSemantic {
         }
         let (projection, document_projection) =
             query_materialized_change_projections(&connection, observed.epoch, observed.sequence)?;
+        let proposal_summary_conflict_sequences =
+            query_proposal_summary_conflicts(&connection, observed)?;
+        let conflict_revisions = proposal_summary_conflict_sequences
+            .keys()
+            .cloned()
+            .collect();
+        let proposal_summary_conflicts = current_revision_refs_matching_projection(
+            &projection,
+            &document_projection,
+            &conflict_revisions,
+        );
         Ok(LocatorRead::Ready(MaterializedChangeProjection {
             as_of: observed,
             projection,
             document_projection,
+            proposal_summary_conflicts,
+            proposal_summary_conflict_sequences,
         }))
     }
 
@@ -2814,6 +2999,17 @@ impl SqliteSemantic {
         let state = query_materialized_state(&connection)?;
         let (projection, document_projection) =
             query_materialized_change_projections(&connection, observed.epoch, observed.sequence)?;
+        let proposal_summary_conflict_sequences =
+            query_proposal_summary_conflicts(&connection, observed)?;
+        let conflict_revisions = proposal_summary_conflict_sequences
+            .keys()
+            .cloned()
+            .collect();
+        let proposal_summary_conflicts = current_revision_refs_matching_projection(
+            &projection,
+            &document_projection,
+            &conflict_revisions,
+        );
         Ok(LocatorRead::Ready(ProductHistoryReadSnapshot {
             connection,
             state,
@@ -2821,6 +3017,8 @@ impl SqliteSemantic {
                 as_of: observed,
                 projection,
                 document_projection,
+                proposal_summary_conflicts,
+                proposal_summary_conflict_sequences,
             },
         }))
     }
@@ -3057,6 +3255,66 @@ fn insert_facts(
         update_materialized_projection(transaction, fact)?;
     }
     Ok(())
+}
+
+fn insert_proposal_summary_conflicts(
+    transaction: &Transaction<'_>,
+    conflicts: &[ProposalSummaryConflictUpdate],
+) -> Result<(), SqliteLocatorError> {
+    for conflict in conflicts {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO semantic_revision_proposal_summary_conflict
+                 (revision_id, object_artifact_content_hash, first_conflict_sequence)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    conflict.revision.revision_id.as_str(),
+                    conflict.revision.object_artifact_content_hash,
+                    to_i64_locator(
+                        conflict.first_conflict_sequence,
+                        "proposal summary conflict sequence"
+                    )?,
+                ],
+            )
+            .map_err(|error| locator_sqlite_error("insert proposal summary conflict", error))?;
+    }
+    Ok(())
+}
+
+fn proposal_summary_from_event(
+    event: &ShoreEvent,
+    expected: &RevisionRefV1,
+) -> Result<Option<String>, SqliteSemanticError> {
+    if event.event_type != EventType::WorkObjectProposed {
+        return Err(SqliteSemanticError::Metadata(format!(
+            "proposal summary baseline {} has family {}",
+            event.event_id.as_str(),
+            event.event_type.as_str()
+        )));
+    }
+    let payload: WorkObjectProposedPayload =
+        serde_json::from_value(event.payload.clone()).map_err(SemanticModelError::Json)?;
+    let WorkObjectProposal::Revision {
+        revision,
+        summary,
+        object_artifact_content_hash,
+        ..
+    } = payload.work_object
+    else {
+        return Err(SqliteSemanticError::Metadata(format!(
+            "proposal summary baseline {} is not a Revision proposal",
+            event.event_id.as_str()
+        )));
+    };
+    let actual = RevisionRefV1::new(revision.id, object_artifact_content_hash)
+        .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+    if actual != *expected {
+        return Err(SqliteSemanticError::Metadata(format!(
+            "proposal summary baseline {} has the wrong exact Revision binding",
+            event.event_id.as_str()
+        )));
+    }
+    Ok(summary)
 }
 
 fn insert_product_history_facts(
@@ -4869,6 +5127,48 @@ fn query_materialized_change_projections(
     let document_projection = project_change_documents_from_facts(&facts)
         .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))?;
     Ok((projection, document_projection))
+}
+
+fn query_proposal_summary_conflicts(
+    connection: &rusqlite::Connection,
+    observed: TruthCursor,
+) -> Result<BTreeMap<RevisionRefV1, u64>, SqliteSemanticError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT revision_id, object_artifact_content_hash, first_conflict_sequence
+             FROM semantic_revision_proposal_summary_conflict
+             WHERE first_conflict_sequence <= ?1
+             ORDER BY revision_id, object_artifact_content_hash",
+        )
+        .map_err(|error| sqlite_error("prepare proposal conflicts", error))?;
+    statement
+        .query_map(
+            [to_i64(
+                observed.sequence,
+                "proposal summary conflict sequence",
+            )?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| sqlite_error("query proposal conflicts", error))?
+        .map(|row| {
+            let (revision_id, artifact_hash, sequence) =
+                row.map_err(|error| sqlite_error("read proposal conflict", error))?;
+            let revision = RevisionRefV1::new(RevisionId::new(revision_id), artifact_hash)
+                .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+            let sequence = u64::try_from(sequence).map_err(|_| {
+                SqliteSemanticError::Metadata(
+                    "negative proposal summary conflict sequence".to_owned(),
+                )
+            })?;
+            Ok((revision, sequence))
+        })
+        .collect()
 }
 
 /// Both ordering keys over one already-validated connection at one

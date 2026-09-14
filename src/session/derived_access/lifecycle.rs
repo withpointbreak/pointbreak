@@ -27,7 +27,9 @@ use super::sqlite::{
     BootstrapControl, BootstrapProgress, CursorLedgerError, CursorLedgerIdentity,
     SqliteCursorLedger, SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
 };
-use super::verification::strict_bodyless_materialized_snapshot_at;
+use super::verification::{
+    strict_bodyless_materialized_snapshot_at, strict_proposal_summary_conflicts,
+};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     InteractionActorV1, LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseV1 as Phase,
@@ -793,6 +795,16 @@ impl DerivedAccessLifecycle {
             {
                 return Err(LifecycleError::Validation(
                     "materialized Change projection differs from the candidate snapshot".to_owned(),
+                ));
+            }
+            let strict_proposal_summary_conflicts =
+                strict_proposal_summary_conflicts(&strict_events)
+                    .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+            if compact_change_projection.proposal_summary_conflict_sequences
+                != strict_proposal_summary_conflicts
+            {
+                return Err(LifecycleError::Validation(
+                    "materialized proposal-summary conflicts differ from strict replay".to_owned(),
                 ));
             }
             let strict_complete = lifecycle_progress(

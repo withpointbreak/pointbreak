@@ -95,6 +95,18 @@ impl Inspector {
         inspector
     }
 
+    /// Start the authenticated API against the supplied current authority
+    /// without constructing the legacy compatibility fixture.
+    pub fn spawn_current_authenticated_with_env(repo: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env_mode(
+            repo,
+            InspectSurface::ApiOnly,
+            InspectOutput::Json,
+            env,
+            false,
+        )
+    }
+
     /// Start against the supplied authority without waiting for a ready reader.
     /// Capability-fence tests use this to inspect a real L0 or M1 response;
     /// ordinary v2 tests should use [`Self::spawn_current`] instead.
