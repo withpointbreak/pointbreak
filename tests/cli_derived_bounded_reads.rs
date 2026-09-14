@@ -637,6 +637,94 @@ fn eligible_active_cli_routes_never_walk_event_directory_entries() {
     }
 }
 
+fn conflict_roots(repo: &GitRepo) {
+    let store = common_dir_store(repo.path());
+    for root in ["derived", ".pointbreak-derived"] {
+        std::fs::create_dir_all(store.join(root)).expect("create conflicting derived root");
+    }
+}
+
+#[test]
+fn conflicting_namespace_reads_fall_back_once_with_the_hint_and_match_explicit_off() {
+    let (repo, _, _) = superseded_dump_repo();
+    conflict_roots(&repo);
+    let repo_arg = repo.path().to_str().unwrap();
+
+    let status = pointbreak_env(
+        [
+            "store", "derived", "status", "--repo", repo_arg, "--format", "json",
+        ],
+        ACTIVE,
+    );
+    assert_success(&status);
+    let status = parse_json(&status.stdout);
+    assert_eq!(status["namespace"], "conflict", "{status:#}");
+    assert_eq!(status["availability"], "unavailable", "{status:#}");
+
+    for args in [
+        vec!["history", "--repo", repo_arg, "--limit", "1"],
+        vec!["attention", "list", "--repo", repo_arg],
+        vec!["revision", "list", "--repo", repo_arg, "--limit", "1"],
+    ] {
+        let active = pointbreak_env(args.clone(), ACTIVE);
+        assert_success(&active);
+        let json = parse_json(&active.stdout);
+        assert!(json["eventSetHash"].is_string(), "{json:#}");
+        assert!(
+            json.get("projectionStamp").is_none_or(|v| v.is_null()),
+            "{json:#}"
+        );
+        let stderr = String::from_utf8_lossy(&active.stderr);
+        assert_eq!(
+            stderr.matches("pointbreak store derived build").count(),
+            1,
+            "{stderr}"
+        );
+        let off = pointbreak_env(args, OFF);
+        assert_success(&off);
+        assert_eq!(
+            off.stdout, active.stdout,
+            "explicit off and the labeled fallback agree"
+        );
+        assert!(
+            off.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&off.stderr)
+        );
+    }
+}
+
+#[test]
+fn conflicting_namespace_write_acknowledgement_is_characterized() {
+    let (repo, _, _) = superseded_dump_repo();
+    conflict_roots(&repo);
+    let repo_arg = repo.path().to_str().unwrap();
+    let output = pointbreak_env(
+        [
+            "capture",
+            "--repo",
+            repo_arg,
+            "--allow-empty",
+            "--format",
+            "json",
+        ],
+        ACTIVE,
+    );
+    assert_success(&output);
+    // `pointbreak_env` already asserts the write-acknowledgement contract on every output.
+    let document = parse_json(&output.stdout);
+    // Characterization pin: the values observed before the conflict became a
+    // typed runtime mode; the write path never reads that mode.
+    assert_eq!(
+        document["acknowledgement"]["derived"]["availability"], "unavailable",
+        "{document:#}"
+    );
+    assert_eq!(
+        document["acknowledgement"]["legacyProjectionState"], "refreshed",
+        "{document:#}"
+    );
+}
+
 fn build(repo: &GitRepo) {
     let output = pointbreak_env(
         [

@@ -2031,6 +2031,63 @@ fn change_aware_timeline_preserves_m1_as_a_typed_migration_response() {
 }
 
 #[test]
+fn m1_root_with_conflicting_derived_roots_answers_typed_migration_documents() {
+    let repo = GitRepo::new();
+    std::fs::create_dir_all(repo.path().join(".pointbreak/data/events"))
+        .expect("create disposable M1 event directory");
+    std::fs::write(
+        repo.path().join(".pointbreak/store.local.json"),
+        b"{\"schema\":\"shore.store-config\",\"version\":1,\"mode\":\"ephemeral\"}\n",
+    )
+    .expect("write disposable M1 store configuration");
+    std::fs::write(
+        repo.path()
+            .join(".pointbreak/data/events/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"),
+        include_bytes!("support/assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"),
+    )
+    .expect("install M1 capability activation only");
+    for root in ["derived", ".pointbreak-derived"] {
+        std::fs::create_dir_all(repo.path().join(".pointbreak/data").join(root))
+            .expect("create conflicting derived root before the Inspector starts");
+    }
+
+    let inspector = Inspector::spawn_current_unready(repo.path());
+
+    let status = inspector.get_json("/api/derived-access/status");
+    assert_eq!(status["namespace"], "conflict", "{status}");
+    assert_eq!(status["rebuildInFlight"], false, "{status}");
+
+    let (profile_status, profile) = inspector.raw_get("/api/v2/profile");
+    assert!(
+        profile_status.contains("200 OK"),
+        "status: {profile_status}; body: {profile}"
+    );
+    let profile: serde_json::Value = serde_json::from_str(&profile).expect("profile json");
+    assert_eq!(
+        profile["availability"], "migration_in_progress",
+        "{profile}"
+    );
+
+    let (timeline_status, timeline) = inspector.get_error("/api/v2/history");
+    assert!(
+        timeline_status.contains("409 Conflict"),
+        "status: {timeline_status}"
+    );
+    assert_eq!(timeline["state"], "migration_in_progress", "{timeline}");
+
+    let (legacy_status, legacy) = inspector.get_error("/api/history");
+    assert!(
+        legacy_status.contains("409 Conflict"),
+        "status: {legacy_status}"
+    );
+    assert_eq!(legacy["state"], "migration_in_progress", "{legacy}");
+
+    for root in ["derived", ".pointbreak-derived"] {
+        assert!(repo.path().join(".pointbreak/data").join(root).exists());
+    }
+}
+
+#[test]
 fn change_aware_timeline_filters_historical_change_membership_after_withdrawal() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

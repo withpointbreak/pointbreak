@@ -257,7 +257,8 @@ Revision/artifact read and never follows a floating head. Use `change interdiff`
 The legacy aggregate `revision list` and `revision show` documents are not Change-capable readers; an L2
 store may still serve those CLI views, but they report neither Change membership nor contextual current-set
 topology. The Inspector's legacy aggregate HTTP routes return typed `426 Upgrade Required` rather than
-partial Change semantics.
+partial Change semantics. The per-state admission table for both surfaces lives in the Inspector section of
+the [CLI reference](cli-reference.md).
 
 ### `pointbreak history`
 

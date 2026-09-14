@@ -14,7 +14,7 @@ use super::cursor::TruthCursor;
 use super::interaction::{AUTHORITATIVE_FALLBACK_HINT, claim_unavailable_hint};
 use super::layout::{
     DerivedStorageDiscovery, DerivedStorageLayout, DerivedStorageNamespace,
-    DerivedStorageTransition,
+    DerivedStorageTransition, NAMESPACE_CONFLICT_DETAIL,
 };
 use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleProgress,
@@ -547,6 +547,17 @@ impl DerivedHistoryAccess {
     /// Whether an active data route would serve a validated current generation
     /// now, observed without discovery side effects (INV-2).
     #[doc(hidden)]
+    /// Run one request discovery so this process selects its current
+    /// generation when a validated one exists, exactly as a derived data
+    /// request does (observation-class: it may request the existing
+    /// maintenance-only worker, never builds, waits or moves state aside).
+    /// Returns whether a current generation is selected afterwards. Elected
+    /// authoritative reads call this before binding their page stamp so the
+    /// stamp matches the derived lane regardless of request order.
+    pub fn select_current_generation(&self) -> bool {
+        matches!(self.current(), Ok(CurrentRead::Ready(_)))
+    }
+
     pub fn observe_serving_current(&self) -> bool {
         self.is_active() && matches!(self.runtime.observe_current_readable(), Ok(true))
     }
@@ -792,10 +803,7 @@ impl DerivedHistoryMaintenance {
                 completed_bytes: None,
                 elapsed_milliseconds: None,
                 eta_milliseconds: None,
-                detail: Some(
-                    "both stable and legacy derived-access roots exist; move one disposable root aside or select explicit off"
-                        .to_owned(),
-                ),
+                detail: Some(NAMESPACE_CONFLICT_DETAIL.to_owned()),
                 rebuild_in_flight,
                 rebuild_paused,
                 conflict_paths: Some(DerivedHistoryConflictPaths {
@@ -3548,5 +3556,89 @@ mod tests {
             panic!("active new-count should be current");
         };
         assert_eq!(new_count.new_count, 2);
+    }
+
+    /// A store whose stable and legacy derived roots both exist when the access
+    /// object is constructed. The roots are created before `resolve` because the
+    /// runtime decides its mode once, at construction.
+    fn conflicting_namespace_access() -> (TempDir, DerivedHistoryAccess) {
+        let repo = TempDir::new().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let store_root = crate::session::store::resolution::resolve_read_store(repo.path())
+            .unwrap()
+            .store_dir()
+            .to_path_buf();
+        for namespace in [
+            DerivedStorageNamespace::Stable,
+            DerivedStorageNamespace::Legacy,
+        ] {
+            std::fs::create_dir_all(
+                DerivedStorageLayout::for_namespace(&store_root, namespace).root(),
+            )
+            .unwrap();
+        }
+        let access = DerivedHistoryAccess::resolve(repo.path()).unwrap();
+        assert_eq!(
+            access.lifecycle_status().namespace,
+            DerivedHistoryNamespace::Conflict,
+            "fixture must be observed as a conflict"
+        );
+        (repo, access)
+    }
+
+    #[test]
+    fn conflicting_namespace_is_observed_without_any_worker() {
+        let (repo, access) = conflicting_namespace_access();
+        let status = access.lifecycle_status();
+        assert!(status.active);
+        assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
+        assert_eq!(status.detail.as_deref(), Some(NAMESPACE_CONFLICT_DETAIL));
+        access.start_background_rebuild().unwrap();
+        access.restart_background_rebuild().unwrap();
+        assert!(
+            !access.rebuild_in_flight(),
+            "a conflict has no lifecycle to run"
+        );
+        let store_root = crate::session::store::resolution::resolve_read_store(repo.path())
+            .unwrap()
+            .store_dir()
+            .to_path_buf();
+        for namespace in [
+            DerivedStorageNamespace::Stable,
+            DerivedStorageNamespace::Legacy,
+        ] {
+            assert!(
+                DerivedStorageLayout::for_namespace(&store_root, namespace)
+                    .root()
+                    .exists(),
+                "observation never moves a root aside"
+            );
+        }
+    }
+
+    #[test]
+    fn conflicting_namespace_legacy_reads_are_typed_unavailable() {
+        let (_repo, access) = conflicting_namespace_access();
+        let config = BaseProjectionConfig::default();
+        match access
+            .history(&HistoryQuery::default(), &HistoryPage::default(), &config)
+            .unwrap()
+        {
+            DerivedHistoryRoute::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
+                assert_eq!(status.detail.as_deref(), Some(NAMESPACE_CONFLICT_DETAIL));
+            }
+            DerivedHistoryRoute::Off => panic!("a conflict is unavailable, not an off profile"),
+            DerivedHistoryRoute::Ready(_) | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+                panic!("a conflict has no generation to serve")
+            }
+        }
     }
 }

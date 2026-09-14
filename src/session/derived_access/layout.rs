@@ -18,6 +18,11 @@ const LEGACY_GENERATION_LEASE_PREFIX: &str = ".pointbreak-derived.generation-lea
 const LEGACY_QUARANTINE_PREFIX: &str = ".pointbreak-derived.quarantine-";
 const LEGACY_RETIRED_PREFIX: &str = ".pointbreak-derived.retired-";
 
+/// The one operator-facing explanation of a conflicting namespace. Status
+/// producers and request discovery share it so every surface names the same
+/// condition without embedding local paths in a wire document.
+pub(crate) const NAMESPACE_CONFLICT_DETAIL: &str = "both stable and legacy derived-access roots exist; move one disposable root aside or select explicit off";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DerivedStorageNamespace {
     Stable,

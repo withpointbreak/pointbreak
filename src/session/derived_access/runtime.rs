@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use super::generation::GenerationPublication;
-use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout};
+use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout, NAMESPACE_CONFLICT_DETAIL};
 use super::lifecycle::{
     CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
 };
@@ -147,6 +147,14 @@ pub(super) enum DerivedAccessMode {
         store_identity: String,
         backend: StoreBackend,
     },
+    /// Both the stable and the legacy derived roots exist. The profile is
+    /// active and the authoritative backend stays reachable for capability
+    /// control answers, but there is no lifecycle to run: every request
+    /// discovery reports a typed unavailable state and never requests work.
+    NamespaceConflict {
+        store_identity: String,
+        backend: StoreBackend,
+    },
 }
 
 pub(crate) struct DerivedAccessRuntime {
@@ -247,7 +255,10 @@ impl DerivedAccessRuntime {
             store_identity: store_identity.clone(),
         };
         let mode = match DerivedStorageLayout::discover(read_store.store_dir()) {
-            DerivedStorageDiscovery::Conflict { .. } => DerivedAccessMode::Off,
+            DerivedStorageDiscovery::Conflict { .. } => DerivedAccessMode::NamespaceConflict {
+                store_identity: store_identity.clone(),
+                backend: read_store.backend().clone(),
+            },
             DerivedStorageDiscovery::Selected(_) => {
                 let lifecycle = maintenance.lifecycle()?;
                 DerivedAccessMode::Active {
@@ -262,19 +273,25 @@ impl DerivedAccessRuntime {
     }
 
     pub(super) fn is_active(&self) -> bool {
-        matches!(self.mode, DerivedAccessMode::Active { .. }) || self.maintenance.is_some()
+        matches!(
+            self.mode,
+            DerivedAccessMode::Active { .. } | DerivedAccessMode::NamespaceConflict { .. }
+        ) || self.maintenance.is_some()
     }
 
     pub(super) fn active_context(&self) -> Option<(&str, &StoreBackend)> {
-        let DerivedAccessMode::Active {
-            store_identity,
-            backend,
-            ..
-        } = &self.mode
-        else {
-            return None;
-        };
-        Some((store_identity, backend))
+        match &self.mode {
+            DerivedAccessMode::Active {
+                store_identity,
+                backend,
+                ..
+            }
+            | DerivedAccessMode::NamespaceConflict {
+                store_identity,
+                backend,
+            } => Some((store_identity, backend)),
+            DerivedAccessMode::Off => None,
+        }
     }
 
     pub(super) fn maintenance(&self) -> Option<&DerivedAccessMaintenance> {
@@ -440,6 +457,14 @@ impl DerivedAccessRuntime {
         &self,
         retry_current_transition: bool,
     ) -> Result<RuntimeCurrentRead, String> {
+        // A conflicting namespace is an unavailable state, not an off profile:
+        // report it typed and never request a worker (there is no lifecycle).
+        if matches!(self.mode, DerivedAccessMode::NamespaceConflict { .. }) {
+            return Ok(RuntimeCurrentRead::Unavailable(runtime_status(
+                DerivedAccessAvailability::Unavailable,
+                NAMESPACE_CONFLICT_DETAIL,
+            )));
+        }
         let DerivedAccessMode::Active {
             lifecycle: configured_lifecycle,
             current,
@@ -1059,6 +1084,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::layout::DerivedStorageNamespace;
     use super::*;
 
     fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -1156,5 +1182,126 @@ mod tests {
             started,
             started + Duration::from_secs(30),
         );
+    }
+
+    /// A git repository whose resolved store has both derived roots present
+    /// before any runtime is constructed. The mode is decided once, in
+    /// `from_read_store`, so the roots must exist first.
+    fn conflicting_read_store(
+        capability: Option<crate::session::store::capabilities::CapabilityFixtureState>,
+    ) -> (
+        tempfile::TempDir,
+        crate::session::store::resolution::ReadStore,
+    ) {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        if let Some(state) = capability {
+            let resolution = crate::session::store::resolution::resolve_store(repo.path()).unwrap();
+            crate::session::store::capabilities::write_capability_fixture_for_test(
+                resolution.backend().journal().as_ref(),
+                state,
+            )
+            .unwrap();
+        }
+        let read_store =
+            crate::session::store::resolution::resolve_read_store(repo.path()).unwrap();
+        let store_root = read_store.store_dir().to_path_buf();
+        for namespace in [
+            DerivedStorageNamespace::Stable,
+            DerivedStorageNamespace::Legacy,
+        ] {
+            std::fs::create_dir_all(
+                DerivedStorageLayout::for_namespace(&store_root, namespace).root(),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            DerivedStorageLayout::discover(&store_root),
+            DerivedStorageDiscovery::Conflict { .. }
+        ));
+        (repo, read_store)
+    }
+
+    #[test]
+    fn namespace_conflict_is_a_typed_unavailable_mode_with_a_backend_and_no_worker() {
+        let (_repo, read_store) = conflicting_read_store(None);
+        let runtime = DerivedAccessRuntime::from_read_store(read_store).unwrap();
+        assert!(runtime.is_active());
+        assert!(
+            runtime.active_context().is_some(),
+            "the capability control path needs the backend"
+        );
+        match runtime.current().unwrap() {
+            RuntimeCurrentRead::Unavailable(status) => {
+                assert_eq!(status.availability, DerivedAccessAvailability::Unavailable);
+                assert_eq!(status.detail.as_deref(), Some(NAMESPACE_CONFLICT_DETAIL));
+            }
+            RuntimeCurrentRead::Ready(_) => {
+                panic!("a conflicting namespace has no generation to serve")
+            }
+        }
+        assert!(
+            !runtime.maintenance_in_flight(),
+            "conflict never requests a worker"
+        );
+        assert!(runtime.worker_lifecycle().unwrap().is_none());
+        assert!(matches!(
+            runtime.mode,
+            DerivedAccessMode::NamespaceConflict { .. }
+        ));
+    }
+
+    #[test]
+    fn namespace_conflict_on_an_untouched_root_still_answers_the_migration_profile() {
+        use crate::documents::ReaderProfileAvailabilityV1;
+        use crate::session::derived_access::changes::{
+            DerivedChangeAccess, DerivedChangeOutcomeV1,
+        };
+
+        let (_repo, read_store) = conflicting_read_store(None);
+        let runtime = DerivedAccessRuntime::from_read_store(read_store).unwrap();
+        let access = DerivedChangeAccess::from_runtime(Arc::clone(&runtime));
+        match access.profile().unwrap() {
+            DerivedChangeOutcomeV1::Ready(profile) => {
+                assert_eq!(
+                    profile.availability,
+                    ReaderProfileAvailabilityV1::MigrationRequired
+                );
+            }
+            other => panic!("expected the capability control path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn namespace_conflict_on_a_ready_root_is_projection_invalid_with_the_conflict_detail() {
+        use crate::session::derived_access::changes::{
+            DerivedChangeAccess, DerivedChangeOutcomeV1, DerivedProjectionFailureCodeV1,
+        };
+        use crate::session::store::capabilities::CapabilityFixtureState;
+
+        let (_repo, read_store) = conflicting_read_store(Some(CapabilityFixtureState::L2));
+        let runtime = DerivedAccessRuntime::from_read_store(read_store).unwrap();
+        let access = DerivedChangeAccess::from_runtime(Arc::clone(&runtime));
+        match access.profile().unwrap() {
+            DerivedChangeOutcomeV1::ProjectionUnavailable(document) => {
+                assert_eq!(
+                    document.code(),
+                    DerivedProjectionFailureCodeV1::ProjectionInvalid
+                );
+                assert!(
+                    document.message().contains(NAMESPACE_CONFLICT_DETAIL),
+                    "{}",
+                    document.message()
+                );
+            }
+            other => panic!("expected a typed projection failure, got {other:?}"),
+        }
     }
 }

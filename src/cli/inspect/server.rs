@@ -1173,7 +1173,13 @@ fn route(
         if !state.derived_changes.is_active() {
             return authoritative_change_v2_profile_response(state);
         }
-        return change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes));
+        return match v2_access_election(query) {
+            Ok(true) => elected_authoritative_change_v2_profile(state),
+            Ok(false) => {
+                change_v2_response(api::change_v2_profile_json(repo, &state.derived_changes))
+            }
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/history" {
         if !state.derived_changes.is_active() {
@@ -1185,44 +1191,59 @@ fn route(
                 &state.page_token_signer,
             ));
         }
-        return change_v2_response(api::event_history_v2_json(
-            repo,
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        // The election member is consumed here; the strict page grammar never sees it.
+        let page_query = strip_access_member(query);
+        return match v2_access_election(query) {
+            Ok(true) => elected_authoritative_event_history_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::event_history_v2_json(
+                repo,
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/changes" {
         if !state.derived_changes.is_active() {
             return authoritative_changes_v2_response(state, query);
         }
-        return change_v2_response(api::changes_v2_json(
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        let page_query = strip_access_member(query);
+        return match v2_access_election(query) {
+            Ok(true) => elected_authoritative_changes_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::changes_v2_json(
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path == "/api/v2/attention" {
         if !state.derived_changes.is_active() {
             return authoritative_change_attention_v2_response(state, query);
         }
-        return change_v2_response(api::change_attention_v2_json(
-            &state.derived_changes,
-            query,
-            &state.page_token_signer,
-        ));
+        let page_query = strip_access_member(query);
+        return match v2_access_election(query) {
+            Ok(true) => elected_authoritative_change_attention_v2(state, page_query.as_deref()),
+            Ok(false) => change_v2_response(api::change_attention_v2_json(
+                &state.derived_changes,
+                page_query.as_deref(),
+                &state.page_token_signer,
+            )),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        };
     }
     if path.starts_with("/api/v2/changes/") {
         return route_change_v2(state, path, query);
     }
     if is_legacy_semantic_path(path) {
         match pointbreak::session::activated_store_capability_for_repo(repo) {
-            Ok(Some(capability)) => {
-                if let Some(response) = legacy_semantic_gate(&capability) {
+            Ok(capability) => {
+                if let Some(response) = legacy_semantic_gate(capability.as_ref()) {
                     return response;
                 }
             }
-            Ok(None) => {}
             Err(error) => {
                 return Response::json_error("500 Internal Server Error", &error.to_string());
             }
@@ -1359,10 +1380,15 @@ fn is_legacy_semantic_path(path: &str) -> bool {
 }
 
 fn legacy_semantic_gate(
-    capability: &pointbreak::session::StoreCapabilityInspection,
+    capability: Option<&pointbreak::session::StoreCapabilityInspection>,
 ) -> Option<Response> {
-    match &capability.status {
-        pointbreak::session::StoreCapabilityStatus::Ready { .. } => {
+    use crate::cli::legacy_admission::{
+        LegacyAdmissionSurfaceV1, LegacyAdmissionVerdictV1, legacy_admission_v1,
+    };
+
+    match legacy_admission_v1(LegacyAdmissionSurfaceV1::InspectorLegacyRoute, capability) {
+        LegacyAdmissionVerdictV1::Serve => None,
+        LegacyAdmissionVerdictV1::RefuseReaderUpgrade => {
             let document = ReaderUpgradeRequiredDocumentV1::new(
                 "review_change_revision_v1",
                 Some("legacy_revision_v2".to_owned()),
@@ -1376,8 +1402,10 @@ fn legacy_semantic_gate(
                 Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
             })
         }
-        pointbreak::session::StoreCapabilityStatus::MigrationRequired
-        | pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+        LegacyAdmissionVerdictV1::RefuseMigrationRequired
+        | LegacyAdmissionVerdictV1::RefuseMigrationInProgress => {
+            let capability =
+                capability.expect("migration refusals carry the inspection that produced them");
             let document = ChangeQueryUnavailableDocumentV1::for_inspection(capability)
                 .expect("non-ready capability has a typed unavailable document");
             Some(match serde_json::to_string(&document) {
@@ -1614,6 +1642,7 @@ fn authoritative_changes_v2_response(state: &InspectState, query: Option<&str>) 
     change_v2_response(api::authoritative_changes_v2_json(
         state.repo.as_path(),
         &state.change_reader_cache,
+        None,
         query,
         &state.page_token_signer,
     ))
@@ -1626,6 +1655,7 @@ fn authoritative_change_attention_v2_response(
     change_v2_response(api::authoritative_change_attention_v2_json(
         state.repo.as_path(),
         &state.change_reader_cache,
+        None,
         query,
         &state.page_token_signer,
     ))
@@ -1661,6 +1691,104 @@ fn explicit_authoritative_routed_response(
         );
     };
     routed_api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+/// The Change-first election: the legacy first-match parser, plus the strict
+/// page grammars' duplicate rule so a repeated `access` member is a request
+/// error rather than a silently chosen lane. The key is matched literally, as
+/// on the legacy routes; a percent-encoded key is not an election.
+fn v2_access_election(query: Option<&str>) -> Result<bool, String> {
+    let members = query
+        .map(|query| {
+            query
+                .split('&')
+                .filter(|pair| pair.split('=').next() == Some("access"))
+                .count()
+        })
+        .unwrap_or(0);
+    if members > 1 {
+        return Err("duplicate access member".to_owned());
+    }
+    requested_authoritative_access(query)
+}
+
+/// Remove every `access` member so the strict Change-first page grammars never
+/// see the election they do not define. A query with nothing else left is
+/// treated as absent, exactly like a bare request.
+fn strip_access_member(query: Option<&str>) -> Option<String> {
+    let query = query?;
+    let kept = query
+        .split('&')
+        .filter(|pair| pair.split('=').next() != Some("access"))
+        .collect::<Vec<_>>()
+        .join("&");
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// The Change-first sibling of `explicit_authoritative_routed_response`: the
+/// caller has already taken the explicit-off early return, so the derived
+/// profile is active and the elected read must hold the single permit.
+fn elected_change_v2_response(
+    state: &InspectState,
+    build: impl FnOnce() -> Result<api::ChangeV2Json, String>,
+) -> Response {
+    let Some(_permit) = state.authoritative_fallback.try_acquire() else {
+        return Response::json_error(
+            "429 Too Many Requests",
+            "an authoritative fallback is already in progress",
+        );
+    };
+    // Select the current generation the way a derived data request would, so
+    // the page stamp the binder applies does not depend on whether some other
+    // request warmed this process first. Unavailable states leave the
+    // authoritative stamp in place and the read still serves.
+    state.derived_history.select_current_generation();
+    change_v2_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+fn elected_authoritative_change_v2_profile(state: &InspectState) -> Response {
+    explicit_authoritative_response(state, || {
+        api::authoritative_change_v2_profile_json(state.repo.as_path(), &state.change_reader_cache)
+    })
+}
+
+fn elected_authoritative_changes_v2(state: &InspectState, query: Option<&str>) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_changes_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            Some(&state.strict_change_stamp),
+            query,
+            &state.page_token_signer,
+        )
+    })
+}
+
+fn elected_authoritative_change_attention_v2(
+    state: &InspectState,
+    query: Option<&str>,
+) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_change_attention_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            Some(&state.strict_change_stamp),
+            query,
+            &state.page_token_signer,
+        )
+    })
+}
+
+fn elected_authoritative_event_history_v2(state: &InspectState, query: Option<&str>) -> Response {
+    elected_change_v2_response(state, || {
+        api::authoritative_event_history_v2_json(
+            state.repo.as_path(),
+            &state.change_reader_cache,
+            &state.strict_change_stamp,
+            query,
+            &state.page_token_signer,
+        )
+    })
 }
 
 fn derived_access_control_response(state: &InspectState, retry: bool) -> Response {
@@ -2167,23 +2295,26 @@ mod tests {
             "if path == \"/api/v2/attention\"",
             "if path.starts_with(\"/api/v2/changes/\")",
         );
-        for (name, derived_route, authoritative_helper, derived_helper) in [
+        for (name, derived_route, authoritative_helper, elected_helper, derived_helper) in [
             (
                 "Profile",
                 profile,
                 "authoritative_change_v2_profile_response",
+                "elected_authoritative_change_v2_profile",
                 "api::change_v2_profile_json",
             ),
             (
                 "Changes",
                 changes,
                 "authoritative_changes_v2_response",
+                "elected_authoritative_changes_v2",
                 "api::changes_v2_json",
             ),
             (
                 "Attention",
                 attention,
                 "authoritative_change_attention_v2_response",
+                "elected_authoritative_change_attention_v2",
                 "api::change_attention_v2_json",
             ),
         ] {
@@ -2195,13 +2326,34 @@ mod tests {
                 !derived_route.contains("state.change_reader_cache"),
                 "{name} must not enter the strict Change reader cache"
             );
+            assert!(
+                derived_route.contains("v2_access_election(query)"),
+                "{name} must consult the explicit election"
+            );
             assert_source_order(
                 derived_route,
                 "!state.derived_changes.is_active()",
                 authoritative_helper,
             );
-            assert_source_order(derived_route, authoritative_helper, derived_helper);
+            assert_source_order(derived_route, authoritative_helper, elected_helper);
+            assert_source_order(derived_route, elected_helper, derived_helper);
         }
+        let elected_helpers = source_between(
+            SERVER_SOURCE,
+            "fn elected_change_v2_response(",
+            "fn derived_access_control_response(",
+        );
+        assert_eq!(
+            elected_helpers
+                .matches("&state.change_reader_cache")
+                .count(),
+            4,
+            "every elected Change-first entry route must use the strict reader cache"
+        );
+        assert!(
+            !elected_helpers.contains("state.derived_changes"),
+            "elected routing must not enter the derived facade"
+        );
         let explicit_off_helpers = source_between(
             SERVER_SOURCE,
             "fn authoritative_change_v2_profile_response(",
@@ -2232,9 +2384,15 @@ mod tests {
             "!state.derived_changes.is_active()",
             "api::authoritative_event_history_v2_json",
         );
+        assert!(timeline.contains("v2_access_election(query)"));
         assert_source_order(
             timeline,
             "api::authoritative_event_history_v2_json",
+            "elected_authoritative_event_history_v2",
+        );
+        assert_source_order(
+            timeline,
+            "elected_authoritative_event_history_v2",
             "api::event_history_v2_json",
         );
 
@@ -2245,6 +2403,11 @@ mod tests {
         );
         assert!(exact.contains("let cache = &state.change_reader_cache"));
         assert!(exact.contains("let stamp_binder = &state.strict_change_stamp"));
+        assert!(
+            !exact.contains("requested_authoritative_access")
+                && !exact.contains("v2_access_election"),
+            "member routes are not elected"
+        );
         let detail = source_between(
             exact,
             "[change_id] => {",
@@ -3080,6 +3243,119 @@ mod tests {
             );
             assert_eq!(body["code"], "invalid_exact_selection");
         }
+    }
+
+    #[test]
+    fn v2_entry_routes_honour_the_explicit_authoritative_election() {
+        let fixture = exact_change_fixture(false);
+        let state = Arc::new(fixture.state);
+        for path in [
+            "/api/v2/profile",
+            "/api/v2/changes",
+            "/api/v2/history",
+            "/api/v2/attention",
+        ] {
+            let default = route(&state, true, "GET", path, None);
+            assert_eq!(
+                default.status,
+                "503 Service Unavailable",
+                "{path} default stays derived-unavailable: {}",
+                String::from_utf8_lossy(&default.body)
+            );
+            let elected = route(&state, true, "GET", path, Some("access=authoritative"));
+            assert_eq!(
+                elected.status,
+                "200 OK",
+                "{path}: {}",
+                String::from_utf8_lossy(&elected.body)
+            );
+            assert!(
+                elected
+                    .headers
+                    .iter()
+                    .any(|(name, value)| *name == "X-Pointbreak-Access-Source"
+                        && *value == "authoritative-fallback"),
+                "{path} must label the elected fallback"
+            );
+            let invalid = route(&state, true, "GET", path, Some("access=bogus"));
+            assert_eq!(invalid.status, "400 Bad Request", "{path}?access=bogus");
+            // A repeated member is a request error, never a silently chosen lane.
+            for duplicate in [
+                "access=authoritative&access=bogus",
+                "access=derived&access=authoritative",
+                "access=authoritative&access=authoritative",
+            ] {
+                let response = route(&state, true, "GET", path, Some(duplicate));
+                assert_eq!(response.status, "400 Bad Request", "{path}?{duplicate}");
+                assert!(
+                    !response
+                        .headers
+                        .iter()
+                        .any(|(name, _)| *name == "X-Pointbreak-Access-Source"),
+                    "{path}?{duplicate} must not elect"
+                );
+            }
+            // The deliberate widening: these two values are the default route, not a grammar error.
+            for default_value in ["access=derived", "access="] {
+                let same_as_default = route(&state, true, "GET", path, Some(default_value));
+                assert_eq!(
+                    same_as_default.status,
+                    default.status,
+                    "{path}?{default_value}: {}",
+                    String::from_utf8_lossy(&same_as_default.body)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_election_is_single_flight_and_strips_the_member_before_page_parsing() {
+        let fixture = exact_change_fixture(false);
+        let state = Arc::new(fixture.state);
+        let permit = state
+            .authoritative_fallback
+            .try_acquire()
+            .expect("hold the permit");
+        let busy = route(
+            &state,
+            true,
+            "GET",
+            "/api/v2/changes",
+            Some("limit=5&access=authoritative"),
+        );
+        assert_eq!(busy.status, "429 Too Many Requests");
+        drop(permit);
+        let paged = route(
+            &state,
+            true,
+            "GET",
+            "/api/v2/changes",
+            Some("limit=5&access=authoritative"),
+        );
+        assert_eq!(
+            paged.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&paged.body)
+        );
+        let paged: serde_json::Value = serde_json::from_slice(&paged.body).unwrap();
+        assert_eq!(paged["schema"], "pointbreak.inspect-changes-page");
+        if let Some(next) = paged["next"].as_str() {
+            // A token minted by the elected page is signature-compatible with the default route.
+            let continued = route(
+                &state,
+                true,
+                "GET",
+                "/api/v2/changes",
+                Some(&format!("after={next}")),
+            );
+            assert_ne!(continued.status, "400 Bad Request");
+        }
+        let derived_paged = route(&state, true, "GET", "/api/v2/changes", Some("limit=5"));
+        assert_eq!(
+            derived_paged.status, "503 Service Unavailable",
+            "default paging is unchanged"
+        );
     }
 
     #[test]
@@ -5242,7 +5518,7 @@ mod tests {
     #[test]
     fn legacy_semantic_routes_refuse_l0_before_partial_payload() {
         let capability = capability(pointbreak::session::StoreCapabilityStatus::MigrationRequired);
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "409 Conflict");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.store-migration-required");
@@ -5258,7 +5534,7 @@ mod tests {
             },
         );
         capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "409 Conflict");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.store-migration-in-progress");
@@ -5274,11 +5550,358 @@ mod tests {
         });
         capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
 
-        let response = legacy_semantic_gate(&capability).unwrap();
+        let response = legacy_semantic_gate(Some(&capability)).unwrap();
         assert_eq!(response.status, "426 Upgrade Required");
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.reader-upgrade-required");
         assert_eq!(value["code"], "reader_upgrade_required");
+    }
+
+    #[test]
+    fn legacy_gate_delegates_to_the_admission_table() {
+        // Whitespace- and qualification-tolerant: rustfmt may break the call across lines.
+        let gate = source_between(
+            SERVER_SOURCE,
+            "fn legacy_semantic_gate(",
+            "fn route_change_v2(",
+        );
+        assert!(gate.contains("legacy_admission_v1("));
+        assert!(gate.contains("LegacyAdmissionSurfaceV1::InspectorLegacyRoute"));
+        assert!(
+            !gate.contains("StoreCapabilityStatus::Ready"),
+            "the gate must not re-decide the table"
+        );
+        let dispatch = source_between(
+            SERVER_SOURCE,
+            "if is_legacy_semantic_path(path) {",
+            "match path {",
+        );
+        assert!(
+            !dispatch.contains("Ok(None) => {}"),
+            "the untouched-L0 cell comes from the table, not a bare arm"
+        );
+    }
+
+    #[test]
+    fn untouched_l0_legacy_routes_stay_ungated() {
+        // `route_for` builds a fresh `git init` repo: no activation root, so
+        // `activated_store_capability_for_repo` is None. The runtime is Active
+        // with no generation, so data routes answer 503 unavailable today;
+        // "ungated" means the response is neither of the gate's two refusals.
+        // Freshness keeps its authoritative detector and stays 200.
+        let threads = route_for("GET", "/api/threads");
+        assert!(
+            threads.status != "409 Conflict" && threads.status != "426 Upgrade Required",
+            "{}",
+            String::from_utf8_lossy(&threads.body)
+        );
+        let freshness = route_for("GET", "/api/freshness");
+        assert_eq!(
+            freshness.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&freshness.body)
+        );
+    }
+
+    const CONFLICT_DETAIL: &str = "both stable and legacy derived-access roots exist; move one disposable root aside or select explicit off";
+
+    fn conflict_roots(store_root: &std::path::Path) {
+        for root in ["derived", ".pointbreak-derived"] {
+            std::fs::create_dir_all(store_root.join(root))
+                .expect("create conflicting derived root");
+        }
+    }
+
+    struct ConflictFixture {
+        _repo: tempfile::TempDir,
+        state: Arc<InspectState>,
+        store_root: std::path::PathBuf,
+        revision_id: Option<String>,
+    }
+
+    /// A populated, untouched legacy root (one captured Revision, no activation
+    /// record) whose derived roots conflict before the Inspector state exists.
+    fn untouched_l0_conflict_fixture() -> ConflictFixture {
+        let repo = tempfile::tempdir().expect("legacy conflict repository");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Pointbreak Test"],
+            vec!["config", "user.email", "pointbreak@example.test"],
+            vec!["config", "commit.gpgsign", "false"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "before\n").unwrap();
+        for args in [
+            vec!["add", "sample.txt"],
+            vec!["commit", "--quiet", "-m", "base"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "after\n").unwrap();
+        let capture = pointbreak::session::capture_review(
+            pointbreak::session::CaptureOptions::new(repo.path()).with_summary("legacy"),
+        )
+        .expect("capture one legacy revision");
+        assert!(
+            pointbreak::session::activated_store_capability_for_repo(repo.path())
+                .unwrap()
+                .is_none(),
+            "an event-only capture never activates the Change cohort"
+        );
+        let store_root = pointbreak::session::store_paths_for_repo(repo.path())
+            .expect("resolve the fixture store")
+            .common_store()
+            .to_path_buf();
+        conflict_roots(&store_root);
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
+        );
+        ConflictFixture {
+            _repo: repo,
+            state,
+            store_root,
+            revision_id: Some(capture.revision_id.as_str().to_owned()),
+        }
+    }
+
+    /// The ready fixture with both derived roots created before a fresh state.
+    fn l2_conflict_fixture() -> ConflictFixture {
+        let fixture = exact_change_fixture(false);
+        let store_root = pointbreak::session::store_paths_for_repo(fixture._repo.path())
+            .expect("resolve the fixture store")
+            .common_store()
+            .to_path_buf();
+        conflict_roots(&store_root);
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(fixture._repo.path().to_path_buf(), false)
+                .unwrap(),
+        );
+        ConflictFixture {
+            _repo: fixture._repo,
+            state,
+            store_root,
+            revision_id: None,
+        }
+    }
+
+    fn json_body(response: &Response) -> serde_json::Value {
+        serde_json::from_slice(&response.body)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&response.body)))
+    }
+
+    fn assert_conflict_status(state: &Arc<InspectState>) {
+        let status = json_body(&route(
+            state,
+            true,
+            "GET",
+            "/api/derived-access/status",
+            None,
+        ));
+        assert_eq!(status["namespace"], "conflict", "{status}");
+        assert_eq!(status["availability"], "unavailable", "{status}");
+        assert_eq!(status["detail"], CONFLICT_DETAIL, "{status}");
+        assert_eq!(status["rebuildInFlight"], false, "{status}");
+    }
+
+    #[test]
+    fn untouched_l0_conflict_v2_profile_answers_migration_required() {
+        let fixture = untouched_l0_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        let profile = route(&fixture.state, true, "GET", "/api/v2/profile", None);
+        assert_eq!(
+            profile.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&profile.body)
+        );
+        assert_eq!(json_body(&profile)["availability"], "migration_required");
+    }
+
+    #[test]
+    fn untouched_l0_conflict_legacy_aggregates_are_typed_unavailable() {
+        let fixture = untouched_l0_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        for path in [
+            "/api/history",
+            "/api/threads",
+            "/api/attention",
+            "/api/revisions",
+        ] {
+            let response = route(&fixture.state, true, "GET", path, None);
+            assert_eq!(
+                response.status,
+                "503 Service Unavailable",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let body = json_body(&response);
+            assert_eq!(body["availability"], "unavailable", "{path}: {body}");
+            assert_eq!(body["detail"], CONFLICT_DETAIL, "{path}: {body}");
+        }
+        let cursor = route(
+            &fixture.state,
+            true,
+            "GET",
+            "/api/history/new-count",
+            Some("sinceOccurredAt=2026-01-01T00%3A00%3A00Z&sinceEventId=evt"),
+        );
+        assert_eq!(
+            cursor.status,
+            "503 Service Unavailable",
+            "{}",
+            String::from_utf8_lossy(&cursor.body)
+        );
+    }
+
+    #[test]
+    fn untouched_l0_conflict_election_serves_with_the_fallback_header() {
+        let fixture = untouched_l0_conflict_fixture();
+        for path in [
+            "/api/history",
+            "/api/threads",
+            "/api/attention",
+            "/api/revisions",
+        ] {
+            let response = route(
+                &fixture.state,
+                true,
+                "GET",
+                path,
+                Some("access=authoritative"),
+            );
+            assert_eq!(
+                response.status,
+                "200 OK",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| *name == "X-Pointbreak-Access-Source"
+                        && *value == "authoritative-fallback"),
+                "{path} must label the elected fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn untouched_l0_conflict_exceptions_keep_their_behaviour() {
+        let fixture = untouched_l0_conflict_fixture();
+        let bare_probe = route(&fixture.state, true, "GET", "/api/history/new-count", None);
+        assert_eq!(
+            bare_probe.status, "200 OK",
+            "the bare poll probe collapses every unavailable state"
+        );
+        let freshness = route(&fixture.state, true, "GET", "/api/freshness", None);
+        assert_eq!(freshness.status, "200 OK");
+        assert!(
+            json_body(&freshness)
+                .get("projectionStamp")
+                .is_none_or(|v| v.is_null())
+        );
+        let revision = fixture
+            .revision_id
+            .as_deref()
+            .expect("legacy fixture captured a revision");
+        let detail = route(
+            &fixture.state,
+            true,
+            "GET",
+            &format!("/api/revisions/{revision}"),
+            None,
+        );
+        assert_eq!(
+            detail.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&detail.body)
+        );
+        let search = route(
+            &fixture.state,
+            true,
+            "GET",
+            "/api/history",
+            Some("q=sample"),
+        );
+        assert_eq!(
+            search.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&search.body)
+        );
+    }
+
+    #[test]
+    fn untouched_l0_conflict_retry_is_a_typed_no_op() {
+        let fixture = untouched_l0_conflict_fixture();
+        let retry = route(
+            &fixture.state,
+            true,
+            "POST",
+            "/api/derived-access/retry",
+            None,
+        );
+        assert_eq!(
+            retry.status,
+            "200 OK",
+            "{}",
+            String::from_utf8_lossy(&retry.body)
+        );
+        let body = json_body(&retry);
+        assert_eq!(body["namespace"], "conflict");
+        assert_eq!(body["rebuildInFlight"], false);
+        assert!(fixture.store_root.join("derived").exists());
+        assert!(fixture.store_root.join(".pointbreak-derived").exists());
+        assert_eq!(quarantine_siblings(&fixture.store_root), 0);
+    }
+
+    #[test]
+    fn l2_conflict_v2_routes_are_projection_invalid_with_the_conflict_detail() {
+        let fixture = l2_conflict_fixture();
+        assert_conflict_status(&fixture.state);
+        for path in ["/api/v2/profile", "/api/v2/changes", "/api/v2/attention"] {
+            let response = route(&fixture.state, true, "GET", path, None);
+            assert_eq!(
+                response.status,
+                "503 Service Unavailable",
+                "{path}: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            let body = json_body(&response);
+            assert_eq!(body["code"], "projection_invalid", "{path}: {body}");
+            assert_eq!(body["retryable"], false, "{path}: {body}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains(CONFLICT_DETAIL)),
+                "{path}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn l2_conflict_legacy_routes_stay_gated_before_reader_selection() {
+        let fixture = l2_conflict_fixture();
+        let response = route(&fixture.state, true, "GET", "/api/history", None);
+        assert_eq!(response.status, "426 Upgrade Required");
     }
 
     #[test]
