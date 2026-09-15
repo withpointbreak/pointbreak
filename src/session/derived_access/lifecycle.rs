@@ -1169,10 +1169,9 @@ impl DerivedAccessLifecycle {
     }
 
     /// Open the generation selected while the caller holds the canonical writer
-    /// lock. The coordinator has already performed the exact truth-count audit at
-    /// construction; this path validates the publication and its internal cursor
-    /// coverage without repeating a history-proportional directory walk for every
-    /// append.
+    /// lock. Publication admission validates the descriptor, WAL shape, reader
+    /// publication and bounded authority continuation here, without a
+    /// history-proportional directory walk for every append.
     pub(crate) fn open_current_for_write_locked(
         &self,
         _writer_lock: &StoreWriterLock,
@@ -1278,19 +1277,6 @@ impl DerivedAccessLifecycle {
                 .map(|_| ())
                 .map_err(LifecycleError::Service)
         })
-    }
-
-    /// Admit a product writer against a stable current generation. The bounded
-    /// authority continuation runs while the canonical writer lock excludes
-    /// governed truth publication; no loose-directory census is repeated. Busy
-    /// admission is reported immediately so the product writer can preserve
-    /// authoritative availability through its degraded-loose mode.
-    pub(crate) fn admit_writer(&self) -> Result<bool, LifecycleError> {
-        let writer_lock = StoreWriterLock::try_acquire(&self.store_root)?;
-        let Some(_current) = self.open_current_for_write_locked(&writer_lock)? else {
-            return Ok(false);
-        };
-        Ok(true)
     }
 
     pub(crate) fn quarantine_current_locked(

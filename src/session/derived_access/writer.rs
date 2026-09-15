@@ -1,14 +1,15 @@
 //! Product write coordination around disposable derived access.
 //!
-//! The coordinator is a two-state machine. `Governed` owns the existing
-//! current-generation admission, truth publication, receipt finalization, and
-//! catch-up protocol. `DegradedLoose` deliberately bypasses all derived work and
-//! invokes the authoritative publisher exactly once. Missing, stale, corrupt,
-//! busy, or ambiguous derived state selects the latter state; it can reduce
-//! acceleration but cannot make an otherwise valid loose write unavailable.
+//! The coordinator is a two-state machine. `AdmissionEligible` attempts the
+//! existing current-generation admission at publication, followed by truth
+//! publication, receipt finalization, and catch-up. Construction does not sample
+//! generation availability. `DegradedLoose` deliberately bypasses all derived
+//! work and invokes the authoritative publisher exactly once. Missing, stale,
+//! corrupt, busy, or ambiguous derived state at publication selects the latter
+//! state; it cannot make an otherwise valid loose write unavailable.
 //!
-//! A governed coordinator may transition to degraded before truth publication
-//! if its admitted generation disappears, or after publication if receipt
+//! An eligible coordinator may transition to degraded before truth publication
+//! if admission fails, or after publication if receipt
 //! finalization fails. It never transitions in the other direction: rebuilding
 //! and admitting a new immutable generation requires a fresh coordinator.
 
@@ -66,14 +67,14 @@ impl From<DerivedWriteDiagnostic> for ProjectionDiagnostic {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum DerivedWriteMode {
-    Governed = 0,
+    AdmissionEligible = 0,
     DegradedLoose = 1,
 }
 
 impl DerivedWriteMode {
     fn load(value: &AtomicU8) -> Self {
         match value.load(Ordering::Acquire) {
-            0 => Self::Governed,
+            0 => Self::AdmissionEligible,
             1 => Self::DegradedLoose,
             _ => unreachable!("derived write mode has a closed representation"),
         }
@@ -90,40 +91,23 @@ pub(crate) struct DerivedWriteCoordinator {
 }
 
 impl DerivedWriteCoordinator {
-    /// Admit the active generation with one exact authoritative-head audit.
+    /// Prepare a writer; admit the then-current generation at publication.
     pub(crate) fn new(lifecycle: DerivedAccessLifecycle) -> Result<Self> {
         let store_root = lifecycle.store_root().to_path_buf();
-        let admission = lifecycle.admit_writer();
-        let (mode, unavailable_detail) = match admission {
-            Ok(true) => (DerivedWriteMode::Governed, None),
-            Ok(false) => (
-                DerivedWriteMode::DegradedLoose,
-                Some("no usable derived generation is current".to_owned()),
-            ),
-            Err(error) => (DerivedWriteMode::DegradedLoose, Some(error.to_string())),
-        };
-        let process_hint = unavailable_diagnostic(
-            unavailable_detail
-                .as_deref()
-                .unwrap_or("no usable derived generation is current"),
-        );
-        let coordinator = Self {
+        Ok(Self {
             store_root,
             lifecycle: Some(lifecycle),
-            mode: AtomicU8::new(mode as u8),
-            process_hint: Mutex::new(process_hint.clone()),
+            mode: AtomicU8::new(DerivedWriteMode::AdmissionEligible as u8),
+            process_hint: Mutex::new(unavailable_diagnostic(
+                "no usable derived generation is current",
+            )),
             diagnostics: Mutex::new(VecDeque::new()),
-        };
-        if unavailable_detail.is_some() {
-            coordinator.push_diagnostic(process_hint);
-        }
-        Ok(coordinator)
+        })
     }
 
     /// Require a current generation for a qualification append. Product writes
-    /// deliberately degrade immediately when disposable derived state is busy;
-    /// the evidence route admits that generation under the writer lock at the
-    /// publication boundary instead.
+    /// deliberately degrade when publication admission finds disposable state
+    /// busy; the evidence route uses its bounded retry at that boundary.
     #[cfg(any(test, feature = "longitudinal-counting"))]
     pub(crate) fn new_for_qualification(lifecycle: DerivedAccessLifecycle) -> Result<Self> {
         let status = lifecycle
@@ -143,7 +127,7 @@ impl DerivedWriteCoordinator {
         Ok(Self {
             store_root,
             lifecycle: Some(lifecycle),
-            mode: AtomicU8::new(DerivedWriteMode::Governed as u8),
+            mode: AtomicU8::new(DerivedWriteMode::AdmissionEligible as u8),
             process_hint: Mutex::new(unavailable_diagnostic(
                 "no usable derived generation is current",
             )),
@@ -191,7 +175,10 @@ impl DerivedWriteCoordinator {
         }
         self.record_event_once_acknowledged_with_hook(
             event,
-            |_| {},
+            |_point| {
+                #[cfg(test)]
+                tests::run_product_append_hook(_point);
+            },
             publish,
             catch_up_after_publication,
         )
@@ -770,6 +757,296 @@ mod tests {
     use crate::session::{
         AuthorityCursorV2, EventStore, EventVerificationPolicy, EventWriteOutcome, TrustSet,
     };
+
+    type ProductAppendHook = Box<dyn FnMut(AppendCrashPoint)>;
+
+    thread_local! {
+        static PRODUCT_APPEND_HOOK: std::cell::RefCell<Option<ProductAppendHook>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    struct ProductAppendHookGuard;
+
+    impl ProductAppendHookGuard {
+        fn install(hook: impl FnMut(AppendCrashPoint) + 'static) -> Self {
+            PRODUCT_APPEND_HOOK.with(|slot| {
+                assert!(slot.borrow().is_none(), "one scoped hook per writer thread");
+                *slot.borrow_mut() = Some(Box::new(hook));
+            });
+            Self
+        }
+    }
+
+    impl Drop for ProductAppendHookGuard {
+        fn drop(&mut self) {
+            PRODUCT_APPEND_HOOK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+
+    pub(super) fn run_product_append_hook(point: AppendCrashPoint) {
+        PRODUCT_APPEND_HOOK.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(point);
+            }
+        });
+    }
+
+    fn product_store(root: &std::path::Path) -> EventStore {
+        event_store_for_explicit_target(root, DerivedAccessProfile::SqliteWalBodylessV1).unwrap()
+    }
+
+    fn current_cursor(lifecycle: &DerivedAccessLifecycle) -> super::super::cursor::TruthCursor {
+        lifecycle
+            .open_current()
+            .unwrap()
+            .unwrap()
+            .service()
+            .truth_head()
+            .unwrap()
+            .cursor
+    }
+
+    #[test]
+    fn constructor_overlap_re_admits_at_product_publication() {
+        use crate::session::DerivedWriteAvailabilityV1::Current;
+        for change_aware in [false, true] {
+            let (root, _backend, lifecycle) = ready_change_lifecycle();
+            let before = current_cursor(&lifecycle);
+            let held = StoreWriterLock::acquire(root.path()).unwrap();
+            let store = product_store(root.path());
+            let construction_diagnostics = store.take_write_diagnostics();
+            drop(held);
+            let appended = event(10);
+            for expected in [EventWriteOutcome::Created, EventWriteOutcome::Existing] {
+                let ack = if change_aware {
+                    store.record_change_event_once_acknowledged(&appended)
+                } else {
+                    store.record_event_once_acknowledged(&appended)
+                }
+                .unwrap();
+                assert_eq!(ack.outcome, expected);
+                assert_eq!(ack.derived.availability, Current);
+                let token = ack.derived.token.unwrap();
+                assert_eq!(token.epoch, before.epoch);
+                assert_eq!(token.head_sequence, before.sequence + 1);
+            }
+            assert!(construction_diagnostics.is_empty());
+            assert_eq!(current_cursor(&lifecycle).sequence, before.sequence + 1);
+            assert_eq!(
+                EventStore::open(root.path())
+                    .read_stored_event(&appended.idempotency_key)
+                    .unwrap(),
+                appended
+            );
+        }
+    }
+
+    #[test]
+    fn two_product_writers_constructor_overlap_keeps_current() {
+        use crate::session::DerivedWriteAvailabilityV1::Current;
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let before = current_cursor(&lifecycle);
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first_root = root.path().to_path_buf();
+        let first = thread::spawn(move || {
+            let _hook = ProductAppendHookGuard::install(move |point| {
+                if point == AppendCrashPoint::AfterIntentCommit {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+            });
+            product_store(&first_root)
+                .record_change_event_once_acknowledged(&event(11))
+                .unwrap()
+        });
+        held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (constructed_tx, constructed_rx) = mpsc::channel();
+        let (publish_tx, publish_rx) = mpsc::channel();
+        let second_root = root.path().to_path_buf();
+        let second = thread::spawn(move || {
+            let store = product_store(&second_root);
+            constructed_tx.send(()).unwrap();
+            publish_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            store
+                .record_change_event_once_acknowledged(&event(12))
+                .unwrap()
+        });
+        constructed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        let first_ack = first.join().unwrap();
+        publish_tx.send(()).unwrap();
+        let second_ack = second.join().unwrap();
+        for (offset, ack) in [(1, first_ack), (2, second_ack)] {
+            assert_eq!(ack.outcome, EventWriteOutcome::Created);
+            assert_eq!(ack.derived.availability, Current);
+            assert_eq!(
+                ack.derived.token.unwrap().head_sequence,
+                before.sequence + offset
+            );
+        }
+        assert_eq!(current_cursor(&lifecycle).sequence, before.sequence + 2);
+        for index in [11, 12] {
+            let appended = event(index);
+            assert_eq!(
+                EventStore::open(root.path())
+                    .read_stored_event(&appended.idempotency_key)
+                    .unwrap(),
+                appended
+            );
+        }
+    }
+
+    #[test]
+    fn product_constructor_defers_missing_generation_until_publication() {
+        use crate::session::DerivedWriteAvailabilityV1::Current;
+        let root = TempDir::new().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let store = product_store(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let ack = store
+            .record_change_event_once_acknowledged(&event(13))
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(ack.derived.availability, Current);
+        assert!(store.take_write_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn product_publication_refuses_unreceipted_authority_after_construction() {
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let store = product_store(root.path());
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(16)).unwrap();
+
+        let ack = store
+            .record_change_event_once_acknowledged(&event(17))
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(
+            ack.derived.availability,
+            crate::session::DerivedWriteAvailabilityV1::Unavailable
+        );
+        assert!(ack.derived.token.is_none());
+        for index in [16, 17] {
+            assert_eq!(
+                truth
+                    .read_stored_event(&event(index).idempotency_key)
+                    .unwrap(),
+                event(index)
+            );
+        }
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+    }
+
+    #[test]
+    fn product_restart_preserves_compatible_intent_and_reply_loss_outcomes() {
+        use crate::session::DerivedWriteAvailabilityV1::Current;
+        for point in [
+            AppendCrashPoint::AfterIntentCommit,
+            AppendCrashPoint::AfterHeadBeforeIntentRetirement,
+        ] {
+            let (root, _backend, lifecycle) = ready_change_lifecycle();
+            let before = current_cursor(&lifecycle);
+            let writer_root = root.path().to_path_buf();
+            assert!(
+                thread::spawn(move || {
+                    let _hook = ProductAppendHookGuard::install(move |observed| {
+                        assert_ne!(observed, point, "interrupt actual product append");
+                    });
+                    product_store(&writer_root)
+                        .record_change_event_once_acknowledged(&event(14))
+                        .unwrap();
+                })
+                .join()
+                .is_err()
+            );
+            let expected = if point == AppendCrashPoint::AfterIntentCommit {
+                EventWriteOutcome::Created
+            } else {
+                EventWriteOutcome::Existing
+            };
+            let ack = product_store(root.path())
+                .record_change_event_once_acknowledged(&event(14))
+                .unwrap();
+            assert_eq!(ack.outcome, expected);
+            assert_eq!(ack.derived.availability, Current);
+            assert_eq!(
+                ack.derived.token.unwrap().head_sequence,
+                before.sequence + 1
+            );
+            // Discard the successful reply, then retry through a new product handle.
+            let retry = product_store(root.path())
+                .record_change_event_once_acknowledged(&event(14))
+                .unwrap();
+            assert_eq!(retry.outcome, EventWriteOutcome::Existing);
+            assert_eq!(retry.derived.availability, Current);
+            assert_eq!(current_cursor(&lifecycle).sequence, before.sequence + 1);
+        }
+    }
+
+    #[test]
+    fn product_restart_before_receipt_preserves_unavailable_existing_outcome() {
+        use crate::session::DerivedWriteAvailabilityV1::Unavailable;
+        let (root, _backend, lifecycle) = ready_change_lifecycle();
+        let before = current_cursor(&lifecycle);
+        let writer_root = root.path().to_path_buf();
+        assert!(
+            thread::spawn(move || {
+                let _hook = ProductAppendHookGuard::install(|point| {
+                    assert_ne!(
+                        point,
+                        AppendCrashPoint::AfterEventPublication,
+                        "interrupt before receipt"
+                    );
+                });
+                product_store(&writer_root)
+                    .record_change_event_once_acknowledged(&event(15))
+                    .unwrap();
+            })
+            .join()
+            .is_err()
+        );
+        let ack = product_store(root.path())
+            .record_change_event_once_acknowledged(&event(15))
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Existing);
+        assert_eq!(ack.derived.availability, Unavailable);
+        assert!(ack.derived.token.is_none());
+        assert_eq!(
+            EventStore::open(root.path())
+                .read_stored_event(&event(15).idempotency_key)
+                .unwrap(),
+            event(15)
+        );
+        let connection = current_projection_connection(&lifecycle);
+        let head: i64 = connection
+            .query_row(
+                "SELECT head_sequence FROM cursor_meta WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            u64::try_from(head).unwrap(),
+            before.sequence,
+            "retry must not invent a receipt/head"
+        );
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+    }
 
     #[test]
     fn acknowledged_write_off_and_current_keep_exact_call_coordinates() {
@@ -1470,24 +1747,30 @@ mod tests {
 
     #[test]
     fn interrupted_change_catch_up_rolls_back_identity_and_checkpoint_then_resumes() {
-        let (_root, backend, lifecycle) = ready_change_lifecycle();
+        let (root, backend, lifecycle) = ready_change_lifecycle();
+        let before_cursor = current_cursor(&lifecycle);
         let before_checkpoint = read_live_checkpoint_bytes(&lifecycle);
         let before_identity_count = authority_identity_count(&lifecycle);
         let truth = EventStore::from_backend(&backend);
         let interrupted_event = event(51);
         let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
 
+        let ack = coordinator
+            .record_event_once_acknowledged_with_hook(
+                &interrupted_event,
+                |_| {},
+                || truth.record_event_once(&interrupted_event),
+                |_| Err("forced catch-up deferral before semantic application".to_owned()),
+            )
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
         assert_eq!(
-            coordinator
-                .record_event_once_with_hook(
-                    &interrupted_event,
-                    |_| {},
-                    || truth.record_event_once(&interrupted_event),
-                    |_| Err("forced catch-up deferral before semantic application".to_owned()),
-                )
-                .unwrap(),
-            EventWriteOutcome::Created
+            ack.derived.availability,
+            crate::session::DerivedWriteAvailabilityV1::CatchingUp
         );
+        let token = ack.derived.token.unwrap();
+        assert_eq!(token.epoch, before_cursor.epoch);
+        assert_eq!(token.head_sequence, before_cursor.sequence + 1);
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::CatchingUp
@@ -1501,6 +1784,8 @@ mod tests {
         assert_eq!(read_live_checkpoint_bytes(&lifecycle), before_checkpoint);
         assert_eq!(authority_identity_count(&lifecycle), before_identity_count);
 
+        drop(coordinator);
+        let lifecycle = active_product_lifecycle(&root);
         assert!(lifecycle.maintain_current_generation().unwrap());
         let recovered = lifecycle
             .open_current()
@@ -1511,6 +1796,13 @@ mod tests {
             .unwrap();
         let checkpoint = read_live_checkpoint(&lifecycle);
         assert_eq!(checkpoint.truth_cursor, recovered);
+        assert_eq!(checkpoint.truth_cursor.sequence, token.head_sequence);
+        assert_eq!(
+            truth
+                .read_stored_event(&interrupted_event.idempotency_key)
+                .unwrap(),
+            interrupted_event
+        );
         assert_eq!(
             authority_identity_count(&lifecycle),
             before_identity_count + 1

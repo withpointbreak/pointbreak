@@ -1466,7 +1466,12 @@ mod tests {
 
         let second_handle =
             event_store_for_explicit_target(root.path(), DerivedAccessProfile::SqliteWalBodylessV1)
-                .expect("another handle still degrades to loose authority");
+                .expect("another handle can attempt publication admission");
+        assert!(second_handle.take_write_diagnostics().is_empty());
+        assert_eq!(
+            second_handle.record_event_once(&event).unwrap(),
+            crate::session::EventWriteOutcome::Existing
+        );
         assert_eq!(second_handle.take_write_diagnostics().len(), 1);
         assert!(
             crate::session::take_derived_write_diagnostics().is_empty(),
