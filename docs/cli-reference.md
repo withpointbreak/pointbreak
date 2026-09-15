@@ -75,6 +75,11 @@ Call-specific diagnostics appear once in the existing top-level `diagnostics` ar
 retains diagnostics from both legacy refresh attempts, even if the second refresh succeeds. Store
 link/migrate append their existing warnings after workflow diagnostics.
 
+A writer reports derived-generation admission failure on its first attempted publication,
+not when its handle is constructed. For example, writing without a usable derived generation
+can succeed durably with `derived.availability: unavailable` and the top-level diagnostic
+`derived_access_generation_unavailable`.
+
 These are additive v1 JSON fields: consumers must tolerate unknown fields. Strict decoders may need
 updating, and Rust callers constructing public result structs must supply the new fields. Existing
 text without diagnostics is unchanged. Text renderers that already consume result diagnostics may
