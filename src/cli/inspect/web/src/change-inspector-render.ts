@@ -327,7 +327,6 @@ export function prepareChangeInspectorShell(
     .querySelector("#jump-latest")
     ?.closest(".control-section")
     ?.classList.add("hidden");
-  document.querySelector("#derived-access-status")?.classList.add("hidden");
   const follow = document.querySelector<HTMLButtonElement>("#follow-toggle");
   if (follow) {
     follow.classList.add("hidden");

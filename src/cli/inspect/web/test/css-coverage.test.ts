@@ -248,6 +248,8 @@ function commentStrippedCssClassSelectors(css: string): Set<string> {
 // one-line reason. Same contract as CSS_LESS_ALLOWLIST above: an entry that
 // gains a rule or stops being emitted fails the honesty test below.
 const LITERAL_CSS_LESS_ALLOWLIST: Record<string, string> = {
+  authoritative:
+    "Derived-access protocol value read by change-recovery-render.ts; the literal scanner sees it beside classList operations but it is never emitted as a class",
   "change-filter":
     "Change-lens facet visibility hook (change-inspector-render.ts:346,359); queried at :718/:776 only to toggle `.hidden` — a behavior marker, never styled",
   "timeline-filter":

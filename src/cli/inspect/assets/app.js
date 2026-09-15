@@ -258,6 +258,135 @@
   }
   __name(promptForCredential, "promptForCredential");
 
+  // src/change-recovery-protocol.ts
+  var AVAILABILITIES = [
+    "absent",
+    "bootstrapping",
+    "current",
+    "catching_up",
+    "rebuild_required",
+    "quarantined",
+    "unavailable"
+  ];
+  var NAMESPACES = ["absent", "stable", "legacy", "conflict"];
+  var PHASES = [
+    "cursor_population",
+    "projection_population",
+    "strict_verification",
+    "finalizing"
+  ];
+  var ACTION_VALUES = [
+    "wait",
+    "authoritative_fallback",
+    "cancel",
+    "retry"
+  ];
+  var STATUS_VALUES = {
+    availability: new Set(AVAILABILITIES),
+    namespace: new Set(NAMESPACES),
+    phase: new Set(PHASES)
+  };
+  var ACTIONS = new Set(ACTION_VALUES);
+  var OPTIONAL_COUNTS = [
+    "completedEvents",
+    "totalEvents",
+    "completedBytes",
+    "elapsedMilliseconds",
+    "etaMilliseconds"
+  ];
+  function record(value) {
+    return typeof value === "object" && value !== null ? value : null;
+  }
+  __name(record, "record");
+  function decodeChangeRecoveryStatus(value) {
+    const doc = record(value);
+    if (doc === null || doc.schema !== "pointbreak.inspect-derived-access-status" || doc.version !== 1 || typeof doc.active !== "boolean" || typeof doc.availability !== "string" || !STATUS_VALUES.availability.has(doc.availability) || typeof doc.namespace !== "string" || !STATUS_VALUES.namespace.has(doc.namespace) || doc.phase !== void 0 && (typeof doc.phase !== "string" || !STATUS_VALUES.phase.has(doc.phase)) || doc.generationId !== void 0 && typeof doc.generationId !== "string" || doc.detail !== void 0 && typeof doc.detail !== "string" || [
+      "rebuildInFlight",
+      "rebuildPaused",
+      "servingCurrent",
+      "fallbackInFlight"
+    ].some((key) => typeof doc[key] !== "boolean") || OPTIONAL_COUNTS.some(
+      (key) => doc[key] !== void 0 && (typeof doc[key] !== "number" || !Number.isFinite(doc[key]) || doc[key] < 0)
+    ) || !Array.isArray(doc.actions))
+      return null;
+    const decoded2 = {
+      ...doc,
+      actions: doc.actions.filter(
+        (action) => typeof action === "string" && ACTIONS.has(action)
+      )
+    };
+    for (const key of ["phase", "generationId", "detail", ...OPTIONAL_COUNTS])
+      if (decoded2[key] === void 0)
+        delete decoded2[key];
+    return decoded2;
+  }
+  __name(decodeChangeRecoveryStatus, "decodeChangeRecoveryStatus");
+  var PROJECTION_CODES = /* @__PURE__ */ new Set([
+    "projection_absent",
+    "projection_rebuild_required",
+    "projection_stale",
+    "projection_invalid",
+    "projection_unstable"
+  ]);
+  var PAGE_CODES = /* @__PURE__ */ new Set(["invalid_query", "stale_projection"]);
+  var HISTORY_CODES = /* @__PURE__ */ new Set([...PAGE_CODES, "moving_journal"]);
+  function failureRule(schema) {
+    if (schema === "pointbreak.inspect-change-projection-error")
+      return ["projection", 503, true, PROJECTION_CODES];
+    if (schema === "pointbreak.inspect-change-page-error")
+      return ["page", 0, true, PAGE_CODES];
+    if (schema === "pointbreak.inspect-event-history-error")
+      return ["page", 0, true, HISTORY_CODES];
+    if (schema === "pointbreak.inspect-change-selection-error")
+      return ["selection", 400, false, /* @__PURE__ */ new Set(["invalid_exact_selection"])];
+    if (schema === "pointbreak.inspect-change-authority-error")
+      return [
+        "authority",
+        409,
+        false,
+        /* @__PURE__ */ new Set(["authority_conflicted", "authority_invalid"])
+      ];
+    if (schema === "pointbreak.reader-upgrade-required")
+      return ["capability", 426, false, /* @__PURE__ */ new Set(["reader_upgrade_required"])];
+    return null;
+  }
+  __name(failureRule, "failureRule");
+  var PAGE_STATUSES = /* @__PURE__ */ new Map([
+    ["invalid_query", 400],
+    ["stale_projection", 409],
+    ["moving_journal", 503]
+  ]);
+  function decodeChangeRecoveryFailure(value, status) {
+    const doc = record(value);
+    if (doc === null || doc.version !== 1 || typeof doc.schema !== "string")
+      return null;
+    const migrationState = doc.schema === "pointbreak.store-migration-required" ? "migration_required" : doc.schema === "pointbreak.store-migration-in-progress" ? "migration_in_progress" : null;
+    if (status === 409 && migrationState !== null && doc.state === migrationState)
+      return {
+        kind: "capability",
+        schema: doc.schema,
+        code: migrationState,
+        message: `Store migration ${doc.state === "migration_in_progress" ? "is in progress" : "is required"}`,
+        retryable: false,
+        status
+      };
+    const rule = failureRule(doc.schema);
+    if (rule === null || typeof doc.code !== "string") return null;
+    const [kind, requiredStatus, needsRetryable, codes] = rule;
+    if (requiredStatus !== 0 && requiredStatus !== status || !codes.has(doc.code) || typeof doc.message !== "string" || needsRetryable && typeof doc.retryable !== "boolean")
+      return null;
+    if (kind === "page" && PAGE_STATUSES.get(doc.code) !== status) return null;
+    return {
+      kind,
+      schema: doc.schema,
+      code: doc.code,
+      message: doc.message,
+      retryable: doc.retryable === true,
+      status
+    };
+  }
+  __name(decodeChangeRecoveryFailure, "decodeChangeRecoveryFailure");
+
   // src/connection.ts
   var snapshot = {
     connection: "connecting",
@@ -379,7 +508,7 @@
   var ChangeInspectorRequestFailure = class extends Error {
     constructor(kind, status) {
       super(
-        kind === "aborted" ? "request cancelled" : kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
+        kind === "aborted" ? "request cancelled" : kind === "busy" ? "authoritative reader is busy" : kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
       );
       this.kind = kind;
       this.status = status;
@@ -390,112 +519,172 @@
       __name(this, "ChangeInspectorRequestFailure");
     }
   };
-  function isRequestAbort(error, signal) {
-    return signal?.aborted === true || error instanceof DOMException && error.name === "AbortError";
-  }
-  __name(isRequestAbort, "isRequestAbort");
+  var ChangeInspectorRecoveryFailure = class extends ChangeInspectorRequestFailure {
+    constructor(document2) {
+      super(document2.kind, document2.status);
+      this.document = document2;
+      this.message = document2.message;
+    }
+    document;
+    static {
+      __name(this, "ChangeInspectorRecoveryFailure");
+    }
+  };
   var ChangeInspectorPageFailure = class extends ChangeInspectorRequestFailure {
     constructor(code, status) {
       super("protocol", status);
       this.code = code;
-      if (code === "moving_journal") {
+      if (code === "moving_journal")
         this.message = "Timeline journal changed while loading; retry";
-      }
     }
     code;
     static {
       __name(this, "ChangeInspectorPageFailure");
     }
   };
+  var ELECTABLE_PATHS = /* @__PURE__ */ new Set([
+    "/api/v2/profile",
+    "/api/v2/changes",
+    "/api/v2/attention",
+    "/api/v2/history"
+  ]);
+  var CONTROL_PATHS = /* @__PURE__ */ new Set([
+    "/api/derived-access/retry",
+    "/api/derived-access/cancel"
+  ]);
+  var authoritativeQueue = Promise.resolve();
+  function isRequestAbort(error, signal) {
+    return signal?.aborted === true || error instanceof DOMException && error.name === "AbortError";
+  }
+  __name(isRequestAbort, "isRequestAbort");
+  function requestPath(path) {
+    return path.split("?", 1)[0] ?? path;
+  }
+  __name(requestPath, "requestPath");
+  function withAccess(path, access) {
+    if (access !== "authoritative" || !ELECTABLE_PATHS.has(requestPath(path)))
+      return path;
+    const query = path.includes("?") ? path.slice(path.indexOf("?") + 1) : "";
+    if (new URLSearchParams(query).has("access"))
+      throw new ChangeInspectorRequestFailure("protocol");
+    return `${path}${path.includes("?") ? "&" : "?"}access=${access}`;
+  }
+  __name(withAccess, "withAccess");
   function failure(kind, status, reportConnection = true) {
     if (reportConnection) markRequestFailure(kind, { degradeRefresh: false });
     return new ChangeInspectorRequestFailure(kind, status);
   }
   __name(failure, "failure");
-  function typedPageFailure(value, status) {
-    if (typeof value !== "object" || value === null) return null;
-    const document2 = value;
-    if (document2.schema !== "pointbreak.inspect-change-page-error" && document2.schema !== "pointbreak.inspect-event-history-error" || document2.version !== 1)
-      return null;
-    if (document2.code === "invalid_query" && status === 400)
-      return new ChangeInspectorPageFailure("invalid_query", status);
-    if (document2.code === "stale_projection" && status === 409)
-      return new ChangeInspectorPageFailure("stale_projection", status);
-    if (document2.schema === "pointbreak.inspect-event-history-error" && document2.code === "moving_journal" && status === 503) {
-      return new ChangeInspectorPageFailure("moving_journal", status);
-    }
-    return null;
+  function typedFailure(value, status) {
+    const decoded2 = decodeChangeRecoveryFailure(value, status);
+    if (decoded2 === null) return null;
+    if (decoded2.kind === "page" && (decoded2.code === "invalid_query" || decoded2.code === "stale_projection" || decoded2.code === "moving_journal"))
+      return new ChangeInspectorPageFailure(decoded2.code, status);
+    return new ChangeInspectorRecoveryFailure(decoded2);
   }
-  __name(typedPageFailure, "typedPageFailure");
-  async function fetchOnce(path, reportConnection, signal) {
+  __name(typedFailure, "typedFailure");
+  async function fetchOnce(path, options) {
+    const reportConnection = options.reportConnection !== false;
+    const method = options.method ?? "GET";
+    if (method === "POST" && !CONTROL_PATHS.has(requestPath(path)))
+      throw new ChangeInspectorRequestFailure("protocol");
     const headers = {};
     const token = getSessionToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     let response;
     try {
       response = await fetch(path, {
-        method: "GET",
+        method,
         cache: "no-store",
         credentials: "omit",
         referrerPolicy: "no-referrer",
         headers,
-        signal
+        signal: options.signal
       });
     } catch (error) {
-      if (isRequestAbort(error, signal)) {
+      if (isRequestAbort(error, options.signal))
         throw new ChangeInspectorRequestFailure("aborted");
-      }
       throw failure("unreachable", void 0, reportConnection);
     }
-    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
+    if (options.signal?.aborted)
+      throw new ChangeInspectorRequestFailure("aborted");
     if (response.status === 401)
       throw new ChangeInspectorRequestFailure("unauthorized", 401);
     let data;
     try {
       data = JSON.parse(await response.text());
     } catch (error) {
-      if (isRequestAbort(error, signal)) {
+      if (isRequestAbort(error, options.signal))
         throw new ChangeInspectorRequestFailure("aborted");
-      }
       throw failure("protocol", response.status, reportConnection);
     }
-    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
-    if (!response.ok)
-      throw typedPageFailure(data, response.status) ?? failure("protocol", response.status, reportConnection);
-    if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error)) {
+    if (options.signal?.aborted)
+      throw new ChangeInspectorRequestFailure("aborted");
+    if (!response.ok) {
+      const decoded2 = typedFailure(data, response.status);
+      if (decoded2 !== null) throw decoded2;
+      if (response.status === 429 && options.access === "authoritative")
+        throw new ChangeInspectorRequestFailure("busy", 429);
       throw failure("protocol", response.status, reportConnection);
     }
-    if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
+    if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error))
+      throw failure("protocol", response.status, reportConnection);
+    if (options.signal?.aborted)
+      throw new ChangeInspectorRequestFailure("aborted");
     if (reportConnection) markRequestSuccess();
-    return data;
+    const source = response.headers?.get?.("X-Pointbreak-Access-Source");
+    return {
+      value: data,
+      accessSource: source === "authoritative-fallback" ? source : null
+    };
   }
   __name(fetchOnce, "fetchOnce");
-  async function fetchChangeInspectorJSON(path, options = {}) {
-    const reportConnection = options.reportConnection !== false;
+  async function fetchAuthenticated(path, options) {
     const credentialVersion2 = sessionCredentialVersion();
     try {
-      return await fetchOnce(path, reportConnection, options.signal);
+      return await fetchOnce(path, options);
     } catch (error) {
       if (!(error instanceof ChangeInspectorRequestFailure) || error.kind !== "unauthorized")
         throw error;
     }
     if (options.signal?.aborted)
       throw new ChangeInspectorRequestFailure("aborted");
-    if (sessionCredentialVersion() !== credentialVersion2)
-      return fetchOnce(path, reportConnection, options.signal);
-    const recovered = await recoverUnauthorized();
+    const changed = sessionCredentialVersion() !== credentialVersion2;
+    const recovered = changed ? true : await recoverUnauthorized();
     if (options.signal?.aborted)
       throw new ChangeInspectorRequestFailure("aborted");
-    if (recovered) return fetchOnce(path, reportConnection, options.signal);
-    throw failure("unauthorized", 401, reportConnection);
+    if (recovered && (options.method ?? "GET") === "GET")
+      return fetchOnce(path, options);
+    throw failure("unauthorized", 401, options.reportConnection !== false);
+  }
+  __name(fetchAuthenticated, "fetchAuthenticated");
+  function fetchChangeInspectorResponse(path, options = {}) {
+    const selectedPath = withAccess(path, options.access);
+    const operation = /* @__PURE__ */ __name(() => {
+      if (options.signal?.aborted)
+        return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+      return fetchAuthenticated(selectedPath, options);
+    }, "operation");
+    if (options.access !== "authoritative" || !ELECTABLE_PATHS.has(requestPath(path)))
+      return operation();
+    const queued = authoritativeQueue.then(operation, operation);
+    authoritativeQueue = queued.then(
+      () => void 0,
+      () => void 0
+    );
+    return queued;
+  }
+  __name(fetchChangeInspectorResponse, "fetchChangeInspectorResponse");
+  async function fetchChangeInspectorJSON(path, options = {}) {
+    return (await fetchChangeInspectorResponse(path, options)).value;
   }
   __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
 
   // src/change-inspector-identity.ts
-  function record(value) {
+  function record2(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
   }
-  __name(record, "record");
+  __name(record2, "record");
   function hasOnlyKeys(value, allowed) {
     const keys = new Set(allowed);
     return Object.keys(value).every((key) => keys.has(key));
@@ -514,9 +703,9 @@
   }
   __name(familySlug, "familySlug");
   function decodeInspectorIdentity(value) {
-    const document2 = record(value);
-    const placement = record(document2?.placement);
-    const family = document2?.family === void 0 ? void 0 : record(document2.family);
+    const document2 = record2(value);
+    const placement = record2(document2?.placement);
+    const family = document2?.family === void 0 ? void 0 : record2(document2.family);
     const tier = placement?.tier;
     const expectedLabel = tier === "clone" ? "clone store" : tier === "family" ? "family store" : tier === "ephemeral" ? "ephemeral store" : null;
     if (document2 === null || !hasOnlyKeys(document2, [
@@ -4713,14 +4902,14 @@
         return null;
       const origin = state[HISTORY_ORIGIN_KEY];
       if (origin === null || typeof origin !== "object") return null;
-      const record2 = origin;
-      if (record2.route !== formatChangeInspectorRoute(route)) return null;
-      return record2;
+      const record3 = origin;
+      if (record3.route !== formatChangeInspectorRoute(route)) return null;
+      return record3;
     }, "historyOriginRecord");
     const historyOrigin = /* @__PURE__ */ __name((route) => {
-      const record2 = historyOriginRecord(route);
-      if (record2 === null) return null;
-      return record2.lens === "timeline" || record2.lens === "changes" || record2.lens === "attention" ? record2.lens : null;
+      const record3 = historyOriginRecord(route);
+      if (record3 === null) return null;
+      return record3.lens === "timeline" || record3.lens === "changes" || record3.lens === "attention" ? record3.lens : null;
     }, "historyOrigin");
     const persistHistoryOrigin = /* @__PURE__ */ __name((route, lens, returnRoute = null) => {
       if (route.kind === "lens" || route.kind === "timeline") return;
@@ -8215,7 +8404,6 @@
     document.querySelector("#view-order-section")?.classList.add("hidden");
     document.querySelector("#view-sort-section")?.classList.add("hidden");
     document.querySelector("#jump-latest")?.closest(".control-section")?.classList.add("hidden");
-    document.querySelector("#derived-access-status")?.classList.add("hidden");
     const follow = document.querySelector("#follow-toggle");
     if (follow) {
       follow.classList.add("hidden");
@@ -8728,9 +8916,9 @@
       );
     }
     attribution.append(attributionFacts);
-    const record2 = document.createElement("section");
-    record2.className = "event-detail-record";
-    record2.append(detailHeading("Event record", 3));
+    const record3 = document.createElement("section");
+    record3.className = "event-detail-record";
+    record3.append(detailHeading("Event record", 3));
     const facts = document.createElement("dl");
     facts.className = "kv";
     const add = /* @__PURE__ */ __name((name, value, accessibleName = value) => appendDefinition(facts, name, value, accessibleName), "add");
@@ -8756,7 +8944,7 @@
     );
     if (event.unresolvedRevisionIds.length)
       add("unresolved Revisions", event.unresolvedRevisionIds.join("; "));
-    record2.append(facts);
+    record3.append(facts);
     const context = document.createElement("section");
     context.className = "actions event-detail-actions";
     const onlyChange = event.changeIds.length === 1 ? event.changeIds[0] : null;
@@ -8851,7 +9039,7 @@
       2
     );
     structured.append(structuredLabel, raw);
-    return [heading, identity, summary, attribution, record2, context, structured];
+    return [heading, identity, summary, attribution, record3, context, structured];
   }
   __name(renderEventDetail, "renderEventDetail");
   function detailHeading(text, level = 2) {
@@ -9573,19 +9761,19 @@
       ],
       ["Diagnostics", detail.diagnostics]
     ];
-    const record2 = document.createElement("details");
-    record2.className = "detail-record";
+    const record3 = document.createElement("details");
+    record3.className = "detail-record";
     const recordLabel = document.createElement("summary");
     recordLabel.textContent = "Recorded claims and diagnostics";
-    record2.append(recordLabel);
+    record3.append(recordLabel);
     for (const [title, entries] of sections) {
       const section = document.createElement("section");
       section.append(detailHeading(title, 3));
       if (entries.length === 0) section.append(message("None."));
       for (const entry of entries) section.append(detailLine(entry));
-      record2.append(section);
+      record3.append(section);
     }
-    nodes.push(record2);
+    nodes.push(record3);
     return nodes;
   }
   __name(renderChangeDetail, "renderChangeDetail");
@@ -10890,10 +11078,67 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       park,
       /** Explicit catch-up resumes the newest successfully loaded head page. */
       follow,
+      reset() {
+        key = null;
+        latest = null;
+        parked = null;
+        following = true;
+      },
       snapshot: snapshot2
     };
   }
   __name(createTimelineMonitor, "createTimelineMonitor");
+
+  // src/change-recovery-render.ts
+  function renderChangeRecovery(view, callbacks) {
+    const root = document.querySelector("#derived-access-status");
+    if (root === null) return;
+    const find = /* @__PURE__ */ __name((selector) => root.querySelector(selector), "find");
+    const status = view.status;
+    const visible = view.error !== null || view.access === "authoritative" || status?.active === true && (!status.servingCurrent || status.rebuildInFlight || status.rebuildPaused);
+    root.classList.toggle("hidden", !visible);
+    if (!visible) return;
+    const summary = find("#derived-access-summary");
+    const detail = find("#derived-access-detail");
+    const count = status?.completedEvents !== void 0 && status.totalEvents !== void 0 ? ` ${status.completedEvents}/${status.totalEvents} events.` : "";
+    if (summary !== null) {
+      summary.textContent = view.error ? "Recovery status unavailable" : view.pending === "fallback" ? "Reading authoritative journal" : view.access === "authoritative" ? view.fallbackValidated ? "Authoritative fallback" : "Reading authoritative journal" : status?.rebuildPaused ? "Derived view rebuild paused" : `Derived view: ${(status?.phase ?? status?.availability ?? "unavailable").replaceAll("_", " ")}.${count}`;
+    }
+    if (detail !== null) detail.textContent = view.error ?? status?.detail ?? "";
+    const progress = find("#derived-access-progress");
+    if (progress !== null) {
+      const determinate = status?.completedEvents !== void 0 && (status.totalEvents ?? 0) > 0;
+      progress.classList.toggle("hidden", !determinate);
+      if (determinate) {
+        progress.max = status.totalEvents ?? 1;
+        progress.value = Math.min(
+          status.completedEvents ?? 0,
+          status.totalEvents ?? 1
+        );
+      }
+    }
+    const supported = new Set(status?.actions ?? []);
+    const buttons = [
+      ["wait", "wait", callbacks.wait],
+      ["fallback", "authoritative_fallback", callbacks.fallback],
+      ["cancel", "cancel", callbacks.cancel],
+      ["retry", "retry", callbacks.retry]
+    ];
+    for (const [name, action, callback] of buttons) {
+      const button2 = find(`#derived-access-${name}`);
+      if (button2 === null) continue;
+      button2.classList.toggle("hidden", !supported.has(action));
+      button2.disabled = view.pending !== null || status?.fallbackInFlight === true;
+      button2.onclick = callback;
+    }
+    const derived = find("#derived-access-use-derived");
+    if (derived !== null) {
+      derived.classList.toggle("hidden", view.access !== "authoritative");
+      derived.disabled = view.pending !== null;
+      derived.onclick = callbacks.derived;
+    }
+  }
+  __name(renderChangeRecovery, "renderChangeRecovery");
 
   // src/disclosure.ts
   var active2 = null;
@@ -11126,6 +11371,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   var interactionStop = null;
   var timelineSearchFocusIntentStop = null;
   var pollCoordinatorStop = null;
+  var recoveryStop = null;
   var refreshSettleTimer = null;
   var requestEpoch = 0;
   var compositionEpoch = 0;
@@ -11207,6 +11453,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     pollTimer = null;
     pollCoordinatorStop?.();
     pollCoordinatorStop = null;
+    recoveryStop?.();
+    recoveryStop = null;
     clearRefreshSettleTimer();
     if (routeListener !== null)
       window.removeEventListener("hashchange", routeListener);
@@ -11236,6 +11484,110 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
     installDefaultAuthCoordinator();
     const refreshEnabled = options.poll !== false;
     const state = createChangeInspectorState(currentRoute());
+    let access = "derived";
+    let fallbackValidated = false;
+    let recoveryStatus = null;
+    let recoveryError = null;
+    let recoveryPending = null;
+    let recoveryObservationEpoch = 0;
+    let recoveryController = null;
+    let recoveryTimer = null;
+    let reloadSelectedAccess = /* @__PURE__ */ __name(() => {
+    }, "reloadSelectedAccess");
+    let selectRecoveryAccess = /* @__PURE__ */ __name(() => {
+    }, "selectRecoveryAccess");
+    const fetchEntryJSON = /* @__PURE__ */ __name(async (path, signal) => {
+      const response = await fetchChangeInspectorResponse(path, {
+        access,
+        signal
+      });
+      if (access === "authoritative" && response.accessSource !== "authoritative-fallback")
+        throw new ChangeInspectorRequestFailure("protocol");
+      return response.value;
+    }, "fetchEntryJSON");
+    const renderRecovery = /* @__PURE__ */ __name(() => renderChangeRecovery(
+      {
+        status: recoveryStatus,
+        error: recoveryError,
+        access,
+        fallbackValidated,
+        pending: recoveryPending
+      },
+      {
+        wait: /* @__PURE__ */ __name(() => void refreshRecoveryStatus(), "wait"),
+        fallback: /* @__PURE__ */ __name(() => selectRecoveryAccess("authoritative"), "fallback"),
+        derived: /* @__PURE__ */ __name(() => selectRecoveryAccess("derived"), "derived"),
+        retry: /* @__PURE__ */ __name(() => void controlRecovery("retry"), "retry"),
+        cancel: /* @__PURE__ */ __name(() => void controlRecovery("cancel"), "cancel")
+      }
+    ), "renderRecovery");
+    const refreshRecoveryStatus = /* @__PURE__ */ __name(async () => {
+      const observation = ++recoveryObservationEpoch;
+      const credentialVersion2 = sessionCredentialVersion();
+      const wasBuilding = recoveryStatus?.rebuildInFlight === true;
+      recoveryController?.abort("superseded");
+      const controller = new AbortController();
+      recoveryController = controller;
+      try {
+        const decoded2 = decodeChangeRecoveryStatus(
+          await fetchChangeInspectorJSON("/api/derived-access/status", {
+            reportConnection: false,
+            signal: controller.signal
+          })
+        );
+        if (decoded2 === null) throw new Error("unsupported recovery status");
+        if (observation !== recoveryObservationEpoch || credentialSessionChanged(credentialVersion2) || !isCurrentComposition())
+          return;
+        recoveryStatus = decoded2;
+        recoveryError = null;
+        renderRecovery();
+        if (wasBuilding && decoded2.servingCurrent) reloadSelectedAccess();
+      } catch (error) {
+        if (controller.signal.aborted || observation !== recoveryObservationEpoch)
+          return;
+        recoveryStatus = null;
+        recoveryError = error instanceof Error ? error.message : String(error);
+        renderRecovery();
+      } finally {
+        if (recoveryController === controller) recoveryController = null;
+        if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+        recoveryTimer = isCurrentComposition() && recoveryPending === null && recoveryStatus?.rebuildInFlight ? setTimeout(() => void refreshRecoveryStatus(), 750) : null;
+      }
+    }, "refreshRecoveryStatus");
+    const controlRecovery = /* @__PURE__ */ __name(async (action) => {
+      if (recoveryPending !== null) return;
+      recoveryPending = action;
+      recoveryController?.abort("control");
+      recoveryObservationEpoch += 1;
+      renderRecovery();
+      try {
+        const path = action === "retry" ? "/api/derived-access/retry" : "/api/derived-access/cancel";
+        const decoded2 = decodeChangeRecoveryStatus(
+          await fetchChangeInspectorJSON(path, {
+            method: "POST",
+            reportConnection: false
+          })
+        );
+        if (decoded2 === null) throw new Error("unsupported recovery status");
+        recoveryStatus = decoded2;
+        recoveryError = null;
+      } catch (error) {
+        recoveryStatus = null;
+        recoveryError = error instanceof Error ? error.message : String(error);
+      } finally {
+        recoveryPending = null;
+        recoveryObservationEpoch += 1;
+        renderRecovery();
+        void refreshRecoveryStatus();
+      }
+    }, "controlRecovery");
+    recoveryStop = /* @__PURE__ */ __name(() => {
+      recoveryObservationEpoch += 1;
+      recoveryController?.abort("stopped");
+      recoveryController = null;
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer = null;
+    }, "recoveryStop");
     const credentialSessionChanged = /* @__PURE__ */ __name((startedAt) => sessionCredentialVersion() !== startedAt, "credentialSessionChanged");
     const showAcceptedPublication = /* @__PURE__ */ __name((transition, origin) => {
       if (!refreshEnabled) return;
@@ -11316,6 +11668,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           timeline: monitor
         }
       );
+      renderRecovery();
       if (draft !== null && filterInput !== null) {
         filterInput.value = draft.value;
         if (draft.restoreFocus) filterInput.focus({ preventScroll: true });
@@ -11375,10 +11728,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       };
     }, "generationPageRequests");
     let visibleRequest = "";
+    let visibleAccess = null;
     let visiblePageRequests = null;
     let visibleHistoryFilters = "";
     const clearVisibleRequest = /* @__PURE__ */ __name(() => {
       visibleRequest = "";
+      visibleAccess = null;
       visiblePageRequests = null;
       visibleHistoryFilters = "";
     }, "clearVisibleRequest");
@@ -11400,6 +11755,19 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       exactReadingPresentation = null;
       visibleReading = "";
     }, "clearReading");
+    const retireSemanticState = /* @__PURE__ */ __name(() => {
+      clearVisibleRequest();
+      pendingTimelineSearchFocus = false;
+      clearReading();
+      timelineMonitor.reset();
+      state.clearGeneration();
+    }, "retireSemanticState");
+    const observeRecoveryFailure = /* @__PURE__ */ __name((error) => {
+      fallbackValidated = false;
+      recoveryError = error instanceof Error ? error.message : String(error);
+      renderRecovery();
+      void refreshRecoveryStatus();
+    }, "observeRecoveryFailure");
     const showRetryableReadingFailure = /* @__PURE__ */ __name((message2, pollDraft) => {
       reading = null;
       readingRefusal = null;
@@ -11460,9 +11828,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         const postflight = decodeReaderProfile(
           await attempt.run(
-            () => fetchChangeInspectorJSON("/api/v2/profile", {
-              signal: attempt.signal
-            })
+            () => fetchEntryJSON("/api/v2/profile", attempt.signal)
           )
         );
         attempt.clearTimer(postflightBudget);
@@ -11500,6 +11866,28 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           return;
         }
         if (error instanceof ChangeInspectorRequestFailure && !(error instanceof ChangeInspectorPageFailure)) {
+          if (error instanceof ChangeInspectorRecoveryFailure && error.document.kind === "projection" && access === "authoritative") {
+            const accepted = state.snapshot().generation;
+            try {
+              const postflight = decodeReaderProfile(
+                await fetchEntryJSON("/api/v2/profile", attempt.signal)
+              );
+              if (accepted !== null && sameProfileGeneration(accepted.profile, postflight)) {
+                reading = null;
+                exactReadingPresentation = null;
+                readingRefusal = `Exact surface unavailable: ${error.message}`;
+                observeRecoveryFailure(error);
+                paint(pollDraft);
+                return;
+              }
+            } catch {
+            }
+            retireSemanticState();
+            showPollFailure();
+            renderChangeInspectorRefusal(error);
+            observeRecoveryFailure(error);
+            return;
+          }
           showRetryableReadingFailure(
             `Reader refused this exact surface: ${error.message}`,
             pollDraft
@@ -11526,7 +11914,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         if (epoch !== requestEpoch || signal?.aborted) {
           return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
         }
-        const fetchDocument = /* @__PURE__ */ __name(() => fetchChangeInspectorJSON(request, { signal }), "fetchDocument");
+        const fetchDocument = /* @__PURE__ */ __name(() => fetchEntryJSON(request, signal), "fetchDocument");
         return generationAttempt === null ? fetchDocument() : generationAttempt.run(fetchDocument);
       }, "generationJSON");
       let refreshAttempt = null;
@@ -11538,19 +11926,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         if (epoch !== requestEpoch || signal?.aborted) return "superseded";
         if (profile.availability !== "ready") {
-          if (origin !== "route" && state.snapshot().generation !== null) {
-            showPollFailure();
-            return "failed";
-          }
-          pendingTimelineSearchFocus = false;
-          clearVisibleRequest();
-          clearReading();
-          state.clearGeneration();
+          retireSemanticState();
           renderChangeInspectorUnavailable(profile.availability);
+          void refreshRecoveryStatus();
           return "failed";
         }
         const browserRoute = currentRoute();
-        if (origin === "poll" && allowUnchangedPoll && !pollRequiresFullValidation && browserRoute.kind !== "invalid" && formatChangeInspectorRoute(browserRoute) === formatChangeInspectorRoute(route) && !credentialSessionChanged(credentialVersion2) && state.matchesPublishedProfile(profile, credentialVersion2)) {
+        if (origin === "poll" && allowUnchangedPoll && !pollRequiresFullValidation && browserRoute.kind !== "invalid" && formatChangeInspectorRoute(browserRoute) === formatChangeInspectorRoute(route) && !credentialSessionChanged(credentialVersion2) && visibleAccess === access && state.matchesPublishedProfile(profile, credentialVersion2)) {
           return "quiet";
         }
         const pageRequests = generationPageRequests(route);
@@ -11615,9 +11997,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             );
             const readingPostflight = decodeReaderProfile(
               await attempt.run(
-                () => fetchChangeInspectorJSON("/api/v2/profile", {
-                  signal: attempt.signal
-                })
+                () => fetchEntryJSON("/api/v2/profile", attempt.signal)
               )
             );
             attempt.clearTimer(refreshBudget);
@@ -11649,14 +12029,19 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           visibleReading = acceptedReadingKey;
         }
         const publication = state.publish(staged, credentialVersion2);
+        fallbackValidated = access === "authoritative";
+        recoveryError = null;
         showAcceptedPublication(publication.transition, origin);
         if (route.kind === "timeline" && history2 !== null) {
           timelineMonitor.observe(route, history2);
         }
         visibleRequest = request;
+        visibleAccess = access;
         visiblePageRequests = pageRequests;
         visibleHistoryFilters = (route.kind === "timeline" || route.kind === "event") && history2 !== null ? eventHistoryFilters(route.historyQuery) : "";
         paint(pollDraft);
+        if (access === "authoritative" || recoveryStatus !== null)
+          void refreshRecoveryStatus();
         if (!refreshesExactReading && !holdsManualReadingRetry) {
           await loadReading(
             route,
@@ -11677,26 +12062,23 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         generationAttempt?.dispose();
         if (timedOut) {
           generationNeedsRetry = true;
-          if (origin === "recovery" && state.snapshot().generation !== null) {
-            showPollFailure();
-          } else {
-            clearVisibleRequest();
-            pendingTimelineSearchFocus = false;
-            clearReading();
-            state.clearGeneration();
-            if (getConnectionSnapshot().connection === "connecting") {
-              markRequestFailure("unreachable");
-            }
-            setRefreshState("degraded");
-            renderChangeInspectorRefusal(
-              new ChangeInspectorTimeout("generation loading timed out")
-            );
+          retireSemanticState();
+          if (getConnectionSnapshot().connection === "connecting") {
+            markRequestFailure("unreachable");
           }
+          setRefreshState("degraded");
+          const timeout = new ChangeInspectorTimeout(
+            "generation loading timed out"
+          );
+          renderChangeInspectorRefusal(timeout);
+          observeRecoveryFailure(timeout);
           return "failed";
         }
         const sessionChanged = error instanceof ChangeInspectorSessionChanged && origin === "route";
         if ((error instanceof ChangeInspectorPageFailure && (error.code === "stale_projection" || error.code === "moving_journal") || error instanceof ChangeInspectorGenerationChanged || sessionChanged) && consumeProjectionRetry(retryBudget)) {
           if (sessionChanged) revalidateIdentityForCurrentSession();
+          retireSemanticState();
+          paint(pollDraft);
           return loadGeneration(
             route,
             retryBudget,
@@ -11706,15 +12088,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             false
           );
         }
-        if (origin !== "route" && state.snapshot().generation !== null) {
-          showPollFailure();
-          return "failed";
-        }
-        clearVisibleRequest();
-        pendingTimelineSearchFocus = false;
-        clearReading();
-        state.clearGeneration();
+        retireSemanticState();
+        showPollFailure();
         renderChangeInspectorRefusal(error);
+        observeRecoveryFailure(error);
         return "failed";
       } finally {
         generationAttempt?.dispose();
@@ -11727,6 +12104,29 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         }
       }
     }, "loadGeneration");
+    reloadSelectedAccess = /* @__PURE__ */ __name(() => {
+      const route = currentRoute();
+      if (route.kind === "invalid") return;
+      void loadGeneration(
+        route,
+        newProjectionRetryBudget(),
+        null,
+        "recovery"
+      ).finally(() => {
+        recoveryPending = null;
+        renderRecovery();
+      });
+    }, "reloadSelectedAccess");
+    selectRecoveryAccess = /* @__PURE__ */ __name((next) => {
+      if (access === next || recoveryPending !== null) return;
+      recoveryPending = next === "authoritative" ? "fallback" : "derived";
+      access = next;
+      fallbackValidated = false;
+      advanceRequestEpoch();
+      retireSemanticState();
+      paint();
+      reloadSelectedAccess();
+    }, "selectRecoveryAccess");
     const onRoute = /* @__PURE__ */ __name(async () => {
       generationNeedsRetry = false;
       filterDisclosure?.close();
@@ -11738,9 +12138,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       advanceRequestEpoch();
       state.setRoute(route);
       if (route.kind === "invalid") {
-        clearVisibleRequest();
-        clearReading();
-        state.clearGeneration();
+        retireSemanticState();
         paint();
         return;
       }
@@ -11756,7 +12154,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
       const generation = state.snapshot().generation;
       const matchesRequest = route.kind === "timeline" || route.kind === "event" ? request === visibleRequest : pageRequests.changes === visiblePageRequests?.changes && pageRequests.attention === visiblePageRequests?.attention;
-      if (generation !== null && matchesRequest && state.matchesPublishedProfile(
+      if (generation !== null && visibleAccess === access && matchesRequest && state.matchesPublishedProfile(
         generation.profile,
         sessionCredentialVersion()
       )) {
@@ -11772,9 +12170,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         paint();
       } else {
-        clearVisibleRequest();
-        clearReading();
-        state.clearGeneration();
+        retireSemanticState();
         paint();
         await loadGeneration(route, newProjectionRetryBudget());
       }
@@ -11848,11 +12244,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const prior = state.snapshot();
       const continuesSession = prior.identity !== null && prior.identity !== void 0 && prior.identity.storeIdentity === identity.storeIdentity && prior.identity.contextIdentity === identity.contextIdentity;
       const mustRetireGeneration = prior.generation !== null && !continuesSession;
+      if (!continuesSession) {
+        access = "derived";
+        fallbackValidated = false;
+      }
       if (mustRetireGeneration) {
-        clearVisibleRequest();
-        pendingTimelineSearchFocus = false;
-        clearReading();
-        state.clearGeneration();
+        retireSemanticState();
       }
       const next = state.publishIdentity(identity, verified.credentialVersion);
       if (mustRetireGeneration) paint();
@@ -11893,7 +12290,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           pendingAuthorityTraversal = { token: traversalToken, epoch };
           try {
             const preflight = decodeReaderProfile(
-              await fetchChangeInspectorJSON("/api/v2/profile")
+              await fetchEntryJSON("/api/v2/profile")
             );
             if (epoch !== requestEpoch || currentRoute().kind === "invalid" || formatChangeInspectorRoute(
               currentRoute()
@@ -11908,7 +12305,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               anchor,
               async (query) => {
                 const page = decodeEventHistory(
-                  await fetchChangeInspectorJSON(buildEventHistoryUrl(query))
+                  await fetchEntryJSON(buildEventHistoryUrl(query))
                 );
                 if (epoch !== requestEpoch) {
                   throw new ChangeInspectorGenerationChanged();
@@ -11917,7 +12314,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               }
             );
             const postflight = decodeReaderProfile(
-              await fetchChangeInspectorJSON("/api/v2/profile")
+              await fetchEntryJSON("/api/v2/profile")
             );
             if (epoch !== requestEpoch || !sameProfileGeneration(generation.profile, postflight)) {
               throw new ChangeInspectorGenerationChanged();
@@ -11935,9 +12332,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
               }
               continue;
             }
-            clearVisibleRequest();
-            clearReading();
-            state.clearGeneration();
+            retireSemanticState();
             renderChangeInspectorRefusal(error);
             return null;
           }
@@ -12095,6 +12490,13 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         activePollCycleController = controller;
         const pollEpoch = requestEpoch;
         let outcome = "superseded";
+        const failPoll = /* @__PURE__ */ __name((error) => {
+          retireSemanticState();
+          showPollFailure();
+          renderChangeInspectorRefusal(error);
+          observeRecoveryFailure(error);
+          outcome = "failed";
+        }, "failPoll");
         void withinTimeout(
           operation,
           POLL_CYCLE_TIMEOUT_MS,
@@ -12106,14 +12508,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
             if (isCurrentComposition() && requestEpoch === pollEpoch) {
               controller.abort("superseded");
               advanceRequestEpoch();
-              showPollFailure();
-              outcome = "failed";
+              failPoll(error);
             }
             return;
           }
           if (isCurrentComposition() && requestEpoch === pollEpoch) {
-            showPollFailure();
-            outcome = "failed";
+            failPoll(error);
           }
         }).finally(() => {
           if (activePollCycleController === controller) {

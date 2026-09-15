@@ -3979,6 +3979,175 @@
 		teardown: teardownSection,
 	});
 
+	await diagnostics.section("Derived recovery and fallback", {
+		setup: () => page.setViewportSize(layouts[0]),
+		run: async () => {
+
+			// This browser-only transport injection exercises the recovery shell and
+			// access switch without claiming a producer failure as real API evidence.
+			// The successful fallback reads still come from the disposable public L2
+			// fixture and must carry the server's authoritative source header.
+			const recoveryStatus = {
+				schema: "pointbreak.inspect-derived-access-status",
+				version: 1,
+				active: true,
+				availability: "rebuild_required",
+				namespace: "stable",
+				phase: "projection_population",
+				completedEvents: 2,
+				totalEvents: 9,
+				detail: "Rebuilding the derived Change view.",
+				rebuildInFlight: true,
+				rebuildPaused: false,
+				servingCurrent: false,
+				fallbackInFlight: false,
+				actions: ["wait", "authoritative_fallback", "cancel"],
+			};
+			const injectedRefusal = {
+				schema: "pointbreak.inspect-change-projection-error",
+				version: 1,
+				code: "projection_rebuild_required",
+				message: "injected derived projection refusal",
+				retryable: false,
+			};
+			const profileInterceptor = async (route) => {
+				if (route.request().url().includes("access=authoritative")) {
+					await route.continue();
+					return;
+				}
+				await route.fulfill({ json: injectedRefusal });
+			};
+			const statusInterceptor = (route) =>
+				route.fulfill({ json: recoveryStatus });
+			const exactInterceptor = (route) =>
+				route.fulfill({ json: injectedRefusal });
+			const recoveryRequests = [];
+			const recordRecoveryRequest = (request) => {
+				if (request.url().startsWith(`${config.server.baseUrl}/api/v2/`))
+					recoveryRequests.push(request.url());
+			};
+			await page.route("**/api/v2/profile**", profileInterceptor);
+			await page.route("**/api/derived-access/status", statusInterceptor);
+			await page.route("**/api/v2/changes/**", exactInterceptor);
+			page.on("request", recordRecoveryRequest);
+			try {
+				await page.goto(url("changes"), { waitUntil: "domcontentloaded" });
+				await page.waitForFunction(() => {
+					const panel = document.querySelector("#derived-access-status");
+					const fallback = document.querySelector("#derived-access-fallback");
+					return (
+						panel &&
+						!panel.classList.contains("hidden") &&
+						fallback &&
+						!fallback.classList.contains("hidden")
+					);
+				});
+				const firstOpen = await page.evaluate(() => ({
+					summary: document.querySelector("#derived-access-summary")?.textContent,
+					detail: document.querySelector("#derived-access-detail")?.textContent,
+					progress: document.querySelector("#derived-access-progress")?.getAttribute("value"),
+					ariaLive: document
+						.querySelector("#derived-access-status")
+						?.getAttribute("aria-live"),
+					hasSemanticCards:
+						document.querySelectorAll(".unit-card[data-change-id]").length > 0,
+				}));
+				compare(
+					firstOpen.summary?.includes("projection population") &&
+						firstOpen.detail === recoveryStatus.detail &&
+						firstOpen.progress === "2" &&
+						firstOpen.ariaLive === "polite" &&
+						!firstOpen.hasSemanticCards,
+					"injected recovery first open",
+					"the recovery shell, progress, or stale-data retirement was incomplete",
+					{
+						summary: "projection population",
+						detail: recoveryStatus.detail,
+						progress: "2",
+						ariaLive: "polite",
+						hasSemanticCards: false,
+					},
+					firstOpen,
+				);
+				await screenshot("reader-injected-recovery-first-open");
+
+				const fallbackRequestStart = recoveryRequests.length;
+				await page.locator("#derived-access-fallback").click();
+				await page.waitForFunction(
+					() =>
+						document.querySelectorAll(".unit-card[data-change-id]").length > 0 &&
+						document.querySelector("#derived-access-summary")?.textContent ===
+							"Authoritative fallback",
+				);
+				const fallbackRequests = recoveryRequests.slice(fallbackRequestStart);
+				const electedEntries = fallbackRequests.filter((requestUrl) =>
+					[/\/api\/v2\/profile/u, /\/api\/v2\/changes/u, /\/api\/v2\/attention/u].some(
+						(pattern) => pattern.test(requestUrl),
+					),
+				);
+					expect(
+						electedEntries.length >= 3 &&
+							electedEntries.every(
+							(requestUrl) => requestUrl.includes("access=authoritative"),
+						),
+					"injected recovery access election",
+					"fallback entry reads were not explicitly elected",
+					{ electedEntries },
+				);
+
+				const parallel = config.fixture.matrix.topology.parallel_current;
+				const [from, to] = parallel.current;
+				requireCondition(
+					from && to,
+					"injected recovery exact fixtures",
+					"the public parallel fixture did not expose two exact Revisions",
+					"two exact Revisions",
+					parallel.current,
+				);
+				const change = encodeURIComponent(parallel.change);
+				const fromRevision = encodeURIComponent(from.revision);
+				const toRevision = encodeURIComponent(to.revision);
+				const fromArtifact = encodeURIComponent(from.artifact);
+				const toArtifact = encodeURIComponent(to.artifact);
+				const exactRoutes = [
+					`#/changes/${change}`,
+					`#/changes/${change}/revisions/${fromRevision}?artifactHash=${fromArtifact}`,
+					`#/changes/${change}/revisions/${fromRevision}/resource?artifactHash=${fromArtifact}`,
+					`#/changes/${change}/interdiff/${fromRevision}/${toRevision}?fromArtifactHash=${fromArtifact}&toArtifactHash=${toArtifact}`,
+				];
+				for (const exactRoute of exactRoutes) {
+					await page.evaluate((next) => {
+						location.hash = next;
+					}, exactRoute);
+					await page.waitForFunction(
+						(expectedHash) =>
+							location.hash === expectedHash &&
+							document
+								.querySelector("#detail-body")
+								?.textContent?.includes("Reader refused this exact surface:"),
+						exactRoute,
+					);
+					const acceptedListRetained =
+						(await page.locator(".unit-card[data-change-id]").count()) > 0;
+					compare(
+						acceptedListRetained,
+						"injected fallback exact refusal",
+						`fallback exact refusal retired the accepted list at ${exactRoute}`,
+						true,
+						acceptedListRetained,
+					);
+				}
+				await screenshot("reader-injected-fallback-exact-refusal");
+			} finally {
+				page.off("request", recordRecoveryRequest);
+				await page.unroute("**/api/v2/changes/**", exactInterceptor);
+				await page.unroute("**/api/derived-access/status", statusInterceptor);
+				await page.unroute("**/api/v2/profile**", profileInterceptor);
+			}
+		},
+		teardown: teardownSection,
+	});
+
 	await diagnostics.section("Timeline overview and chronology", {
 		setup: () => open("", layouts[0], "default Timeline startup"),
 		run: async (defaultTimeline) => {

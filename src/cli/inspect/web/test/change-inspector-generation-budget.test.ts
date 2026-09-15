@@ -160,6 +160,21 @@ function serve() {
           placement: { tier: "clone", label: "clone store" },
         }),
       );
+    if (path === "/api/derived-access/status")
+      return new Response(
+        JSON.stringify({
+          schema: "pointbreak.inspect-derived-access-status",
+          version: 1,
+          active: true,
+          availability: "rebuild_required",
+          namespace: "stable",
+          rebuildInFlight: false,
+          rebuildPaused: false,
+          servingCurrent: false,
+          fallbackInFlight: false,
+          actions: ["authoritative_fallback", "retry"],
+        }),
+      );
     const leaf: Leaf =
       path === "/api/v2/profile"
         ? ++profiles % 2 === 1
@@ -189,6 +204,8 @@ function serve() {
           schema: "pointbreak.inspect-change-page-error",
           version: 1,
           code: "stale_projection",
+          message: "projection moved",
+          retryable: true,
         }),
         { status: 409 },
       );
@@ -302,7 +319,7 @@ describe("route and recovery generation budget", () => {
   it.each([
     false,
     true,
-  ])("recovery timeout preserves only same-identity accepted data (retire=%s)", async (retire) => {
+  ])("recovery timeout retires semantic data (identity changes=%s)", async (retire) => {
     const c = serve();
     const { bootstrapChangeInspector } = await import(
       "../src/change-inspector"
@@ -317,9 +334,7 @@ describe("route and recovery generation budget", () => {
     await flush();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(c.signals.at(-1)?.aborted).toBe(true);
-    expect(retire ? readingKey() !== oldKey : readingKey() === oldKey).toBe(
-      true,
-    );
+    expect(readingKey()).not.toBe(oldKey);
     expect(retry()?.textContent).toBe("Retry");
     expect(retry()?.classList.contains("hidden")).toBe(false);
     c.stall = "";

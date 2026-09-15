@@ -133,6 +133,12 @@ export function createTimelineMonitor() {
     park,
     /** Explicit catch-up resumes the newest successfully loaded head page. */
     follow,
+    reset(): void {
+      key = null;
+      latest = null;
+      parked = null;
+      following = true;
+    },
     snapshot,
   };
 }

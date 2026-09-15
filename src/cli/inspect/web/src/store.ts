@@ -9,6 +9,7 @@
 // (the `if (!state.selected)` / `if (!state.diff)` reconciliation), with no DOM
 // access and no behaviour beyond the container contract.
 
+import type { ChangeRecoveryStatus } from "./change-recovery-protocol";
 import type { Revision } from "./projection";
 import type { HistoryEntry, QueryDiagnostic } from "./types";
 import { TYPES } from "./types";
@@ -173,37 +174,8 @@ export interface AttentionDoc {
   eventSetHash?: string;
 }
 
-/** The always-available derived-access recovery-plane document. */
-export interface DerivedAccessStatusDoc {
-  schema: "pointbreak.inspect-derived-access-status";
-  version: 1;
-  active: boolean;
-  availability:
-    | "absent"
-    | "bootstrapping"
-    | "current"
-    | "catching_up"
-    | "rebuild_required"
-    | "quarantined"
-    | "unavailable";
-  generationId?: string;
-  phase?:
-    | "cursor_population"
-    | "projection_population"
-    | "strict_verification"
-    | "finalizing";
-  completedEvents?: number;
-  totalEvents?: number;
-  completedBytes?: number;
-  elapsedMilliseconds?: number;
-  etaMilliseconds?: number;
-  detail?: string;
-  rebuildInFlight: boolean;
-  rebuildPaused: boolean;
-  servingCurrent: boolean;
-  fallbackInFlight: boolean;
-  actions: Array<"wait" | "authoritative_fallback" | "cancel" | "retry">;
-}
+/** Legacy alias; the active decoder owns the recovery-plane document. */
+export type DerivedAccessStatusDoc = ChangeRecoveryStatus;
 
 /**
  * The single selection through-line. The detail pane is a pure projection of

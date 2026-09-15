@@ -52,6 +52,18 @@
       "reason": "Owns authenticated transport for the bounded Change reader and path-private identity document, plus typed request failures. It cannot construct or call legacy aggregate-reader routes."
     },
     {
+      "path": "change-recovery-protocol.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Strictly decodes the client-owned derived recovery status and failure vocabulary and owns the explicit generation access type without importing legacy aggregate state."
+    },
+    {
+      "path": "change-recovery-render.ts",
+      "classification": "adapted",
+      "activeImport": true,
+      "reason": "Projects root-owned recovery state and callbacks into the existing accessible status panel without fetching, polling, or owning semantic publication."
+    },
+    {
       "path": "change-inspector-identity.ts",
       "classification": "adapted",
       "activeImport": true,

@@ -124,6 +124,8 @@ function staleProjectionResponse(): Response {
       schema: "pointbreak.inspect-change-page-error",
       version: 1,
       code: "stale_projection",
+      message: "projection moved",
+      retryable: true,
     }),
     { status: 409 },
   );
@@ -135,6 +137,7 @@ function movingJournalResponse(): Response {
       schema: "pointbreak.inspect-event-history-error",
       version: 1,
       code: "moving_journal",
+      message: "journal moved",
       retryable: true,
     }),
     { status: 503 },
@@ -312,6 +315,7 @@ describe("exact-reading preservation floor", () => {
             schema: "pointbreak.inspect-change-projection-error",
             version: 1,
             code: "projection_unstable",
+            message: "projection moved",
             retryable: true,
           }),
           { status: 503 },
@@ -327,7 +331,7 @@ describe("exact-reading preservation floor", () => {
 
     expect(exactRequests).toBe(1);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "Reader refused this exact surface: server response error",
+      "Reader refused this exact surface: projection moved",
     );
   });
 

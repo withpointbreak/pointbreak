@@ -238,7 +238,9 @@ describe("active Change inspector architecture", () => {
         activeComposition ||
         file.endsWith("/src/change-inspector-reading.ts")
       )
-        expect(source).not.toMatch(/\/api\/(?!v2\/|identity\b)/);
+        expect(source).not.toMatch(
+          /\/api\/(?!v2\/|identity\b|derived-access\/(?:status|retry|cancel)\b)/,
+        );
     }
 
     // Identity is chrome metadata, but it still belongs to the active

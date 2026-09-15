@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchChangeInspectorJSON } from "../src/change-inspector-http";
+import {
+  fetchChangeInspectorJSON,
+  fetchChangeInspectorResponse,
+} from "../src/change-inspector-http";
 import { markRequestFailure, markRequestSuccess } from "../src/connection";
 
 vi.mock("../src/auth", () => ({
@@ -190,5 +193,129 @@ describe("Change Inspector HTTP cancellation", () => {
     });
 
     expect(observedSignals).toEqual([controller.signal, controller.signal]);
+  });
+});
+
+describe("Change Inspector recovery transport", () => {
+  it("adds one explicit selector only to electable entry routes", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = vi.fn(async (input) => {
+      paths.push(String(input));
+      return new Response(JSON.stringify({ ready: true }), {
+        headers: { "X-Pointbreak-Access-Source": "authoritative-fallback" },
+      });
+    }) as typeof fetch;
+
+    await fetchChangeInspectorResponse("/api/v2/changes?order=desc", {
+      access: "authoritative",
+    });
+    await fetchChangeInspectorResponse("/api/v2/changes/change%3Aone", {
+      access: "authoritative",
+    });
+
+    expect(paths).toEqual([
+      "/api/v2/changes?order=desc&access=authoritative",
+      "/api/v2/changes/change%3Aone",
+    ]);
+  });
+
+  it("preserves the validated response source", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ready: true }), {
+          headers: { "X-Pointbreak-Access-Source": "authoritative-fallback" },
+        }),
+    ) as typeof fetch;
+    await expect(
+      fetchChangeInspectorResponse("/api/v2/profile", {
+        access: "authoritative",
+      }),
+    ).resolves.toEqual({
+      value: { ready: true },
+      accessSource: "authoritative-fallback",
+    });
+  });
+
+  it("serializes authoritative entry reads while derived reads stay parallel", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const releases: Array<() => void> = [];
+    globalThis.fetch = vi.fn(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return new Response(JSON.stringify({ ready: true }), {
+        headers: { "X-Pointbreak-Access-Source": "authoritative-fallback" },
+      });
+    }) as typeof fetch;
+
+    const first = fetchChangeInspectorResponse("/api/v2/profile", {
+      access: "authoritative",
+    });
+    const second = fetchChangeInspectorResponse("/api/v2/changes", {
+      access: "authoritative",
+    });
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    releases.shift()?.();
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    releases.shift()?.();
+    await Promise.all([first, second]);
+    expect(maxActive).toBe(1);
+
+    const derived = [
+      fetchChangeInspectorResponse("/api/v2/profile", { access: "derived" }),
+      fetchChangeInspectorResponse("/api/v2/changes", { access: "derived" }),
+    ];
+    await vi.waitFor(() => expect(releases).toHaveLength(2));
+    for (const release of releases.splice(0)) release();
+    await Promise.all(derived);
+    expect(maxActive).toBe(2);
+  });
+
+  it("never replays an ambiguously admitted control POST", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: "unauthorized" }), {
+          status: 401,
+        }),
+    ) as typeof fetch;
+    const { recoverUnauthorized } = await import("../src/auth");
+    vi.mocked(recoverUnauthorized).mockResolvedValueOnce(true);
+
+    await expect(
+      fetchChangeInspectorResponse("/api/derived-access/retry", {
+        method: "POST",
+      }),
+    ).rejects.toMatchObject({ kind: "unauthorized" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces typed projection failure without treating a label as success", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-change-projection-error",
+            version: 1,
+            code: "projection_invalid",
+            message: "projection invalid",
+            retryable: false,
+          }),
+          {
+            status: 503,
+            headers: { "X-Pointbreak-Access-Source": "authoritative-fallback" },
+          },
+        ),
+    ) as typeof fetch;
+    await expect(
+      fetchChangeInspectorResponse("/api/v2/profile", {
+        access: "authoritative",
+      }),
+    ).rejects.toMatchObject({
+      kind: "projection",
+      status: 503,
+      message: "projection invalid",
+    });
   });
 });

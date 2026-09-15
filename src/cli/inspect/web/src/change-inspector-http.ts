@@ -6,33 +6,46 @@ import {
   sessionCredentialVersion,
 } from "./auth";
 import {
+  type ChangeInspectorAccess,
+  type ChangeRecoveryFailure,
+  decodeChangeRecoveryFailure,
+} from "./change-recovery-protocol";
+import {
   markRequestFailure,
   markRequestSuccess,
   type RequestFailureKind,
 } from "./connection";
 
+type ChangeRequestFailureKind =
+  | RequestFailureKind
+  | "aborted"
+  | "busy"
+  | ChangeRecoveryFailure["kind"];
+
 export class ChangeInspectorRequestFailure extends Error {
   constructor(
-    readonly kind: RequestFailureKind | "aborted",
+    readonly kind: ChangeRequestFailureKind,
     readonly status?: number,
   ) {
     super(
       kind === "aborted"
         ? "request cancelled"
-        : kind === "unauthorized"
-          ? "authentication required"
-          : kind === "unreachable"
-            ? "server unavailable"
-            : "server response error",
+        : kind === "busy"
+          ? "authoritative reader is busy"
+          : kind === "unauthorized"
+            ? "authentication required"
+            : kind === "unreachable"
+              ? "server unavailable"
+              : "server response error",
     );
   }
 }
 
-function isRequestAbort(error: unknown, signal?: AbortSignal): boolean {
-  return (
-    signal?.aborted === true ||
-    (error instanceof DOMException && error.name === "AbortError")
-  );
+export class ChangeInspectorRecoveryFailure extends ChangeInspectorRequestFailure {
+  constructor(readonly document: ChangeRecoveryFailure) {
+    super(document.kind, document.status);
+    this.message = document.message;
+  }
 }
 
 export class ChangeInspectorPageFailure extends ChangeInspectorRequestFailure {
@@ -41,10 +54,53 @@ export class ChangeInspectorPageFailure extends ChangeInspectorRequestFailure {
     status: number,
   ) {
     super("protocol", status);
-    if (code === "moving_journal") {
+    if (code === "moving_journal")
       this.message = "Timeline journal changed while loading; retry";
-    }
   }
+}
+
+export interface ChangeInspectorResponse {
+  value: unknown;
+  accessSource: "authoritative-fallback" | null;
+}
+
+export interface ChangeInspectorFetchOptions {
+  reportConnection?: boolean;
+  signal?: AbortSignal;
+  access?: ChangeInspectorAccess;
+  method?: "GET" | "POST";
+}
+
+const ELECTABLE_PATHS = new Set([
+  "/api/v2/profile",
+  "/api/v2/changes",
+  "/api/v2/attention",
+  "/api/v2/history",
+]);
+const CONTROL_PATHS = new Set([
+  "/api/derived-access/retry",
+  "/api/derived-access/cancel",
+]);
+let authoritativeQueue: Promise<void> = Promise.resolve();
+
+function isRequestAbort(error: unknown, signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true ||
+    (error instanceof DOMException && error.name === "AbortError")
+  );
+}
+
+function requestPath(path: string): string {
+  return path.split("?", 1)[0] ?? path;
+}
+
+function withAccess(path: string, access?: ChangeInspectorAccess): string {
+  if (access !== "authoritative" || !ELECTABLE_PATHS.has(requestPath(path)))
+    return path;
+  const query = path.includes("?") ? path.slice(path.indexOf("?") + 1) : "";
+  if (new URLSearchParams(query).has("access"))
+    throw new ChangeInspectorRequestFailure("protocol");
+  return `${path}${path.includes("?") ? "&" : "?"}access=${access}`;
 }
 
 function failure(
@@ -56,95 +112,89 @@ function failure(
   return new ChangeInspectorRequestFailure(kind, status);
 }
 
-function typedPageFailure(
-  value: unknown,
-  status: number,
-): ChangeInspectorPageFailure | null {
-  if (typeof value !== "object" || value === null) return null;
-  const document = value as Record<string, unknown>;
+function typedFailure(value: unknown, status: number): Error | null {
+  const decoded = decodeChangeRecoveryFailure(value, status);
+  if (decoded === null) return null;
   if (
-    (document.schema !== "pointbreak.inspect-change-page-error" &&
-      document.schema !== "pointbreak.inspect-event-history-error") ||
-    document.version !== 1
+    decoded.kind === "page" &&
+    (decoded.code === "invalid_query" ||
+      decoded.code === "stale_projection" ||
+      decoded.code === "moving_journal")
   )
-    return null;
-  if (document.code === "invalid_query" && status === 400)
-    return new ChangeInspectorPageFailure("invalid_query", status);
-  if (document.code === "stale_projection" && status === 409)
-    return new ChangeInspectorPageFailure("stale_projection", status);
-  if (
-    document.schema === "pointbreak.inspect-event-history-error" &&
-    document.code === "moving_journal" &&
-    status === 503
-  ) {
-    return new ChangeInspectorPageFailure("moving_journal", status);
-  }
-  return null;
+    return new ChangeInspectorPageFailure(decoded.code, status);
+  return new ChangeInspectorRecoveryFailure(decoded);
 }
 
 async function fetchOnce(
   path: string,
-  reportConnection: boolean,
-  signal?: AbortSignal,
-): Promise<unknown> {
+  options: ChangeInspectorFetchOptions,
+): Promise<ChangeInspectorResponse> {
+  const reportConnection = options.reportConnection !== false;
+  const method = options.method ?? "GET";
+  if (method === "POST" && !CONTROL_PATHS.has(requestPath(path)))
+    throw new ChangeInspectorRequestFailure("protocol");
   const headers: Record<string, string> = {};
   const token = getSessionToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   let response: Response;
   try {
     response = await fetch(path, {
-      method: "GET",
+      method,
       cache: "no-store",
       credentials: "omit",
       referrerPolicy: "no-referrer",
       headers,
-      signal,
+      signal: options.signal,
     });
   } catch (error) {
-    if (isRequestAbort(error, signal)) {
+    if (isRequestAbort(error, options.signal))
       throw new ChangeInspectorRequestFailure("aborted");
-    }
     throw failure("unreachable", undefined, reportConnection);
   }
-  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
+  if (options.signal?.aborted)
+    throw new ChangeInspectorRequestFailure("aborted");
   if (response.status === 401)
     throw new ChangeInspectorRequestFailure("unauthorized", 401);
   let data: unknown;
   try {
     data = JSON.parse(await response.text());
   } catch (error) {
-    if (isRequestAbort(error, signal)) {
+    if (isRequestAbort(error, options.signal))
       throw new ChangeInspectorRequestFailure("aborted");
-    }
     throw failure("protocol", response.status, reportConnection);
   }
-  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
-  if (!response.ok)
-    throw (
-      typedPageFailure(data, response.status) ??
-      failure("protocol", response.status, reportConnection)
-    );
+  if (options.signal?.aborted)
+    throw new ChangeInspectorRequestFailure("aborted");
+  if (!response.ok) {
+    const decoded = typedFailure(data, response.status);
+    if (decoded !== null) throw decoded;
+    if (response.status === 429 && options.access === "authoritative")
+      throw new ChangeInspectorRequestFailure("busy", 429);
+    throw failure("protocol", response.status, reportConnection);
+  }
   if (
     typeof data !== "object" ||
     data === null ||
     ("error" in data && Boolean((data as Record<string, unknown>).error))
-  ) {
+  )
     throw failure("protocol", response.status, reportConnection);
-  }
-  if (signal?.aborted) throw new ChangeInspectorRequestFailure("aborted");
+  if (options.signal?.aborted)
+    throw new ChangeInspectorRequestFailure("aborted");
   if (reportConnection) markRequestSuccess();
-  return data;
+  const source = response.headers?.get?.("X-Pointbreak-Access-Source");
+  return {
+    value: data,
+    accessSource: source === "authoritative-fallback" ? source : null,
+  };
 }
 
-/** Fetch one Change reader document, retrying exactly once after capability recovery. */
-export async function fetchChangeInspectorJSON(
+async function fetchAuthenticated(
   path: string,
-  options: { reportConnection?: boolean; signal?: AbortSignal } = {},
-): Promise<unknown> {
-  const reportConnection = options.reportConnection !== false;
+  options: ChangeInspectorFetchOptions,
+): Promise<ChangeInspectorResponse> {
   const credentialVersion = sessionCredentialVersion();
   try {
-    return await fetchOnce(path, reportConnection, options.signal);
+    return await fetchOnce(path, options);
   } catch (error) {
     if (
       !(error instanceof ChangeInspectorRequestFailure) ||
@@ -154,11 +204,43 @@ export async function fetchChangeInspectorJSON(
   }
   if (options.signal?.aborted)
     throw new ChangeInspectorRequestFailure("aborted");
-  if (sessionCredentialVersion() !== credentialVersion)
-    return fetchOnce(path, reportConnection, options.signal);
-  const recovered = await recoverUnauthorized();
+  const changed = sessionCredentialVersion() !== credentialVersion;
+  const recovered = changed ? true : await recoverUnauthorized();
   if (options.signal?.aborted)
     throw new ChangeInspectorRequestFailure("aborted");
-  if (recovered) return fetchOnce(path, reportConnection, options.signal);
-  throw failure("unauthorized", 401, reportConnection);
+  if (recovered && (options.method ?? "GET") === "GET")
+    return fetchOnce(path, options);
+  throw failure("unauthorized", 401, options.reportConnection !== false);
+}
+
+/** Fetch one Change reader document with explicit generation access and response metadata. */
+export function fetchChangeInspectorResponse(
+  path: string,
+  options: ChangeInspectorFetchOptions = {},
+): Promise<ChangeInspectorResponse> {
+  const selectedPath = withAccess(path, options.access);
+  const operation = () => {
+    if (options.signal?.aborted)
+      return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+    return fetchAuthenticated(selectedPath, options);
+  };
+  if (
+    options.access !== "authoritative" ||
+    !ELECTABLE_PATHS.has(requestPath(path))
+  )
+    return operation();
+  const queued = authoritativeQueue.then(operation, operation);
+  authoritativeQueue = queued.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queued;
+}
+
+/** Fetch one Change reader document, retrying a GET exactly once after capability recovery. */
+export async function fetchChangeInspectorJSON(
+  path: string,
+  options: ChangeInspectorFetchOptions = {},
+): Promise<unknown> {
+  return (await fetchChangeInspectorResponse(path, options)).value;
 }

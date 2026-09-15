@@ -257,6 +257,8 @@ function staleProjectionResponse(): Response {
       schema: "pointbreak.inspect-change-page-error",
       version: 1,
       code: "stale_projection",
+      message: "projection moved",
+      retryable: true,
     }),
     { status: 409 },
   );
@@ -2482,7 +2484,7 @@ describe("Change-first composition", () => {
     expect(document.title).toBe("newer-identity · Pointbreak Review");
   });
 
-  it("retains the last verified identity and generation across a failed poll and retry", async () => {
+  it("retains identity but clears semantic data across a failed poll and retry", async () => {
     vi.useFakeTimers();
     const identity = {
       schema: "pointbreak.inspect-identity",
@@ -2523,7 +2525,6 @@ describe("Change-first composition", () => {
     );
 
     await bootstrapChangeInspector();
-    const publishedHash = document.querySelector("#stat-hash")?.textContent;
     failPoll = true;
     await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() =>
@@ -2531,10 +2532,7 @@ describe("Change-first composition", () => {
         "response error",
       ),
     );
-    expect(document.querySelector(".unit-card[data-change-id]")).not.toBeNull();
-    expect(document.querySelector("#stat-hash")?.textContent).toBe(
-      publishedHash,
-    );
+    expect(document.querySelector(".unit-card[data-change-id]")).toBeNull();
     expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
       identity.repository,
     );
@@ -2544,9 +2542,7 @@ describe("Change-first composition", () => {
     document.querySelector<HTMLButtonElement>("#connection-action")?.click();
     await vi.waitFor(() => expect(identityRequests).toBe(2));
     expect(changesRequests).toBe(1);
-    expect(document.querySelector("#stat-hash")?.textContent).toBe(
-      publishedHash,
-    );
+    expect(document.querySelector(".unit-card[data-change-id]")).toBeNull();
     expect(document.querySelector("#store-chip-repo")?.textContent).toBe(
       identity.repository,
     );
@@ -3124,7 +3120,7 @@ describe("Change-first composition", () => {
     );
   });
 
-  it("preserves an accepted exact surface when poll hydration fails", async () => {
+  it("clears an accepted exact surface when poll hydration fails", async () => {
     vi.useFakeTimers();
     history.replaceState(
       null,
@@ -3180,11 +3176,8 @@ describe("Change-first composition", () => {
     await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => expect(exactRequests).toBe(2));
 
-    expect(detail?.dataset.changeReadingKey).toBe(acceptedReadingKey);
-    expect(detail?.textContent).toContain("Exact Revision");
-    expect(detail?.textContent).not.toContain(
-      "Reader refused this exact surface",
-    );
+    expect(detail?.dataset.changeReadingKey).toBeUndefined();
+    expect(detail?.textContent).not.toContain("Exact Revision");
     expect(document.querySelector("#refresh-status")?.textContent).toBe(
       "response error",
     );
@@ -3379,6 +3372,7 @@ describe("Change-first composition", () => {
         toggle: () => parkedSnapshot,
         park: () => parkedSnapshot,
         follow: () => parkedSnapshot,
+        reset: () => undefined,
         snapshot: () => parkedSnapshot,
       }),
     }));
@@ -5894,7 +5888,7 @@ describe("Change-first composition", () => {
     ).toHaveLength(3);
   });
 
-  it("retains an accepted generation while a non-ready poll backs off and latches full validation", async () => {
+  it("clears an accepted generation while a non-ready poll backs off", async () => {
     vi.useFakeTimers();
     const control = servePollComposition();
     const { bootstrapChangeInspector } = await import(
@@ -5910,7 +5904,7 @@ describe("Change-first composition", () => {
     expect(
       control.requests.filter((path) => path.startsWith("/api/v2/changes?")),
     ).toHaveLength(1);
-    expect(document.querySelector(".unit-card[data-change-id]")).not.toBeNull();
+    expect(document.querySelector(".unit-card[data-change-id]")).toBeNull();
 
     control.availability = "ready";
     await vi.advanceTimersByTimeAsync(5_999);
@@ -6073,9 +6067,6 @@ describe("Change-first composition", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector();
-    const readingKey =
-      document.querySelector<HTMLElement>("#detail-body")?.dataset
-        .changeReadingKey;
     generation = 2;
 
     await vi.advanceTimersByTimeAsync(3_000);
@@ -6086,9 +6077,9 @@ describe("Change-first composition", () => {
     expect(
       document.querySelector<HTMLElement>("#detail-body")?.dataset
         .changeReadingKey,
-    ).toBe(readingKey);
+    ).toBeUndefined();
     expect(document.querySelector("#detail-body")?.textContent).not.toContain(
-      "Still loading",
+      "Exact Revision",
     );
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
       "degraded",
@@ -6156,9 +6147,6 @@ describe("Change-first composition", () => {
       "../src/change-inspector"
     );
     await bootstrapChangeInspector();
-    const readingKey =
-      document.querySelector<HTMLElement>("#detail-body")?.dataset
-        .changeReadingKey;
     generation = 2;
 
     document.querySelector<HTMLButtonElement>("#connection-action")?.click();
@@ -6172,7 +6160,7 @@ describe("Change-first composition", () => {
     expect(
       document.querySelector<HTMLElement>("#detail-body")?.dataset
         .changeReadingKey,
-    ).toBe(readingKey);
+    ).toBeUndefined();
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
       "degraded",
     );

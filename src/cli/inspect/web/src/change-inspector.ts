@@ -13,8 +13,10 @@ import {
 } from "./auth";
 import {
   ChangeInspectorPageFailure,
+  ChangeInspectorRecoveryFailure,
   ChangeInspectorRequestFailure,
   fetchChangeInspectorJSON,
+  fetchChangeInspectorResponse,
 } from "./change-inspector-http";
 import {
   decodeInspectorIdentity,
@@ -67,6 +69,12 @@ import {
   type EventHistoryQuery,
   sameProfileGeneration,
 } from "./change-protocol";
+import {
+  type ChangeInspectorAccess,
+  type ChangeRecoveryStatus,
+  decodeChangeRecoveryStatus,
+} from "./change-recovery-protocol";
+import { renderChangeRecovery } from "./change-recovery-render";
 import {
   configureConnectionActions,
   getConnectionSnapshot,
@@ -299,6 +307,7 @@ let viewDisclosure: DisclosureController | null = null;
 let interactionStop: (() => void) | null = null;
 let timelineSearchFocusIntentStop: (() => void) | null = null;
 let pollCoordinatorStop: (() => void) | null = null;
+let recoveryStop: (() => void) | null = null;
 let refreshSettleTimer: ReturnType<typeof setTimeout> | null = null;
 let requestEpoch = 0;
 let compositionEpoch = 0;
@@ -396,6 +405,8 @@ export function stopChangeInspector(): void {
   pollTimer = null;
   pollCoordinatorStop?.();
   pollCoordinatorStop = null;
+  recoveryStop?.();
+  recoveryStop = null;
   clearRefreshSettleTimer();
   if (routeListener !== null)
     window.removeEventListener("hashchange", routeListener);
@@ -428,6 +439,128 @@ export async function bootstrapChangeInspector(
   installDefaultAuthCoordinator();
   const refreshEnabled = options.poll !== false;
   const state = createChangeInspectorState(currentRoute());
+  let access: ChangeInspectorAccess = "derived";
+  let fallbackValidated = false;
+  let recoveryStatus: ChangeRecoveryStatus | null = null;
+  let recoveryError: string | null = null;
+  let recoveryPending: "fallback" | "derived" | "retry" | "cancel" | null =
+    null;
+  let recoveryObservationEpoch = 0;
+  let recoveryController: AbortController | null = null;
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let reloadSelectedAccess: () => void = () => {};
+  let selectRecoveryAccess: (next: ChangeInspectorAccess) => void = () => {};
+  const fetchEntryJSON = async (
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> => {
+    const response = await fetchChangeInspectorResponse(path, {
+      access,
+      signal,
+    });
+    if (
+      access === "authoritative" &&
+      response.accessSource !== "authoritative-fallback"
+    )
+      throw new ChangeInspectorRequestFailure("protocol");
+    return response.value;
+  };
+  const renderRecovery = () =>
+    renderChangeRecovery(
+      {
+        status: recoveryStatus,
+        error: recoveryError,
+        access,
+        fallbackValidated,
+        pending: recoveryPending,
+      },
+      {
+        wait: () => void refreshRecoveryStatus(),
+        fallback: () => selectRecoveryAccess("authoritative"),
+        derived: () => selectRecoveryAccess("derived"),
+        retry: () => void controlRecovery("retry"),
+        cancel: () => void controlRecovery("cancel"),
+      },
+    );
+  const refreshRecoveryStatus = async (): Promise<void> => {
+    const observation = ++recoveryObservationEpoch;
+    const credentialVersion = sessionCredentialVersion();
+    const wasBuilding = recoveryStatus?.rebuildInFlight === true;
+    recoveryController?.abort("superseded");
+    const controller = new AbortController();
+    recoveryController = controller;
+    try {
+      const decoded = decodeChangeRecoveryStatus(
+        await fetchChangeInspectorJSON("/api/derived-access/status", {
+          reportConnection: false,
+          signal: controller.signal,
+        }),
+      );
+      if (decoded === null) throw new Error("unsupported recovery status");
+      if (
+        observation !== recoveryObservationEpoch ||
+        credentialSessionChanged(credentialVersion) ||
+        !isCurrentComposition()
+      )
+        return;
+      recoveryStatus = decoded;
+      recoveryError = null;
+      renderRecovery();
+      if (wasBuilding && decoded.servingCurrent) reloadSelectedAccess();
+    } catch (error) {
+      if (controller.signal.aborted || observation !== recoveryObservationEpoch)
+        return;
+      recoveryStatus = null;
+      recoveryError = error instanceof Error ? error.message : String(error);
+      renderRecovery();
+    } finally {
+      if (recoveryController === controller) recoveryController = null;
+      if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+      recoveryTimer =
+        isCurrentComposition() &&
+        recoveryPending === null &&
+        recoveryStatus?.rebuildInFlight
+          ? setTimeout(() => void refreshRecoveryStatus(), 750)
+          : null;
+    }
+  };
+  const controlRecovery = async (action: "retry" | "cancel"): Promise<void> => {
+    if (recoveryPending !== null) return;
+    recoveryPending = action;
+    recoveryController?.abort("control");
+    recoveryObservationEpoch += 1;
+    renderRecovery();
+    try {
+      const path =
+        action === "retry"
+          ? "/api/derived-access/retry"
+          : "/api/derived-access/cancel";
+      const decoded = decodeChangeRecoveryStatus(
+        await fetchChangeInspectorJSON(path, {
+          method: "POST",
+          reportConnection: false,
+        }),
+      );
+      if (decoded === null) throw new Error("unsupported recovery status");
+      recoveryStatus = decoded;
+      recoveryError = null;
+    } catch (error) {
+      recoveryStatus = null;
+      recoveryError = error instanceof Error ? error.message : String(error);
+    } finally {
+      recoveryPending = null;
+      recoveryObservationEpoch += 1;
+      renderRecovery();
+      void refreshRecoveryStatus();
+    }
+  };
+  recoveryStop = () => {
+    recoveryObservationEpoch += 1;
+    recoveryController?.abort("stopped");
+    recoveryController = null;
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+  };
   const credentialSessionChanged = (startedAt: number): boolean =>
     sessionCredentialVersion() !== startedAt;
   const showAcceptedPublication = (
@@ -532,6 +665,7 @@ export async function bootstrapChangeInspector(
         timeline: monitor,
       },
     );
+    renderRecovery();
     if (draft !== null && filterInput !== null) {
       filterInput.value = draft.value;
       if (draft.restoreFocus) filterInput.focus({ preventScroll: true });
@@ -635,6 +769,7 @@ export async function bootstrapChangeInspector(
     };
   };
   let visibleRequest = "";
+  let visibleAccess: ChangeInspectorAccess | null = null;
   // Request identities belong to the one published generation, not a cache.
   let visiblePageRequests: ReturnType<typeof generationPageRequests> | null =
     null;
@@ -642,6 +777,7 @@ export async function bootstrapChangeInspector(
   let visibleHistoryFilters = "";
   const clearVisibleRequest = (): void => {
     visibleRequest = "";
+    visibleAccess = null;
     visiblePageRequests = null;
     visibleHistoryFilters = "";
   };
@@ -669,6 +805,19 @@ export async function bootstrapChangeInspector(
     readingRefusal = null;
     exactReadingPresentation = null;
     visibleReading = "";
+  };
+  const retireSemanticState = (): void => {
+    clearVisibleRequest();
+    pendingTimelineSearchFocus = false;
+    clearReading();
+    timelineMonitor.reset();
+    state.clearGeneration();
+  };
+  const observeRecoveryFailure = (error: unknown): void => {
+    fallbackValidated = false;
+    recoveryError = error instanceof Error ? error.message : String(error);
+    renderRecovery();
+    void refreshRecoveryStatus();
   };
 
   const showRetryableReadingFailure = (
@@ -750,9 +899,7 @@ export async function bootstrapChangeInspector(
       );
       const postflight = decodeReaderProfile(
         await attempt.run(() =>
-          fetchChangeInspectorJSON("/api/v2/profile", {
-            signal: attempt.signal,
-          }),
+          fetchEntryJSON("/api/v2/profile", attempt.signal),
         ),
       );
       attempt.clearTimer(postflightBudget);
@@ -815,6 +962,36 @@ export async function bootstrapChangeInspector(
         error instanceof ChangeInspectorRequestFailure &&
         !(error instanceof ChangeInspectorPageFailure)
       ) {
+        if (
+          error instanceof ChangeInspectorRecoveryFailure &&
+          error.document.kind === "projection" &&
+          access === "authoritative"
+        ) {
+          const accepted = state.snapshot().generation;
+          try {
+            const postflight = decodeReaderProfile(
+              await fetchEntryJSON("/api/v2/profile", attempt.signal),
+            );
+            if (
+              accepted !== null &&
+              sameProfileGeneration(accepted.profile, postflight)
+            ) {
+              reading = null;
+              exactReadingPresentation = null;
+              readingRefusal = `Exact surface unavailable: ${error.message}`;
+              observeRecoveryFailure(error);
+              paint(pollDraft);
+              return;
+            }
+          } catch {
+            // A failed postflight cannot preserve the surrounding generation.
+          }
+          retireSemanticState();
+          showPollFailure();
+          renderChangeInspectorRefusal(error);
+          observeRecoveryFailure(error);
+          return;
+        }
         showRetryableReadingFailure(
           `Reader refused this exact surface: ${error.message}`,
           pollDraft,
@@ -850,7 +1027,7 @@ export async function bootstrapChangeInspector(
       if (epoch !== requestEpoch || signal?.aborted) {
         return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
       }
-      const fetchDocument = () => fetchChangeInspectorJSON(request, { signal });
+      const fetchDocument = () => fetchEntryJSON(request, signal);
       return generationAttempt === null
         ? fetchDocument()
         : generationAttempt.run(fetchDocument);
@@ -867,15 +1044,9 @@ export async function bootstrapChangeInspector(
       );
       if (epoch !== requestEpoch || signal?.aborted) return "superseded";
       if (profile.availability !== "ready") {
-        if (origin !== "route" && state.snapshot().generation !== null) {
-          showPollFailure();
-          return "failed";
-        }
-        pendingTimelineSearchFocus = false;
-        clearVisibleRequest();
-        clearReading();
-        state.clearGeneration();
+        retireSemanticState();
         renderChangeInspectorUnavailable(profile.availability);
+        void refreshRecoveryStatus();
         return "failed";
       }
       const browserRoute = currentRoute();
@@ -887,6 +1058,7 @@ export async function bootstrapChangeInspector(
         formatChangeInspectorRoute(browserRoute) ===
           formatChangeInspectorRoute(route) &&
         !credentialSessionChanged(credentialVersion) &&
+        visibleAccess === access &&
         state.matchesPublishedProfile(profile, credentialVersion)
       ) {
         return "quiet";
@@ -966,9 +1138,7 @@ export async function bootstrapChangeInspector(
           );
           const readingPostflight = decodeReaderProfile(
             await attempt.run(() =>
-              fetchChangeInspectorJSON("/api/v2/profile", {
-                signal: attempt.signal,
-              }),
+              fetchEntryJSON("/api/v2/profile", attempt.signal),
             ),
           );
           attempt.clearTimer(refreshBudget);
@@ -1008,11 +1178,14 @@ export async function bootstrapChangeInspector(
         visibleReading = acceptedReadingKey;
       }
       const publication = state.publish(staged, credentialVersion);
+      fallbackValidated = access === "authoritative";
+      recoveryError = null;
       showAcceptedPublication(publication.transition, origin);
       if (route.kind === "timeline" && history !== null) {
         timelineMonitor.observe(route, history);
       }
       visibleRequest = request;
+      visibleAccess = access;
       visiblePageRequests = pageRequests;
       visibleHistoryFilters =
         (route.kind === "timeline" || route.kind === "event") &&
@@ -1020,6 +1193,8 @@ export async function bootstrapChangeInspector(
           ? eventHistoryFilters(route.historyQuery)
           : "";
       paint(pollDraft);
+      if (access === "authoritative" || recoveryStatus !== null)
+        void refreshRecoveryStatus();
       if (!refreshesExactReading && !holdsManualReadingRetry) {
         await loadReading(
           route,
@@ -1041,21 +1216,16 @@ export async function bootstrapChangeInspector(
       generationAttempt?.dispose();
       if (timedOut) {
         generationNeedsRetry = true;
-        if (origin === "recovery" && state.snapshot().generation !== null) {
-          showPollFailure();
-        } else {
-          clearVisibleRequest();
-          pendingTimelineSearchFocus = false;
-          clearReading();
-          state.clearGeneration();
-          if (getConnectionSnapshot().connection === "connecting") {
-            markRequestFailure("unreachable");
-          }
-          setRefreshState("degraded");
-          renderChangeInspectorRefusal(
-            new ChangeInspectorTimeout("generation loading timed out"),
-          );
+        retireSemanticState();
+        if (getConnectionSnapshot().connection === "connecting") {
+          markRequestFailure("unreachable");
         }
+        setRefreshState("degraded");
+        const timeout = new ChangeInspectorTimeout(
+          "generation loading timed out",
+        );
+        renderChangeInspectorRefusal(timeout);
+        observeRecoveryFailure(timeout);
         return "failed";
       }
       const sessionChanged =
@@ -1069,6 +1239,8 @@ export async function bootstrapChangeInspector(
         consumeProjectionRetry(retryBudget)
       ) {
         if (sessionChanged) revalidateIdentityForCurrentSession();
+        retireSemanticState();
+        paint(pollDraft);
         return loadGeneration(
           route,
           retryBudget,
@@ -1078,15 +1250,10 @@ export async function bootstrapChangeInspector(
           false,
         );
       }
-      if (origin !== "route" && state.snapshot().generation !== null) {
-        showPollFailure();
-        return "failed";
-      }
-      clearVisibleRequest();
-      pendingTimelineSearchFocus = false;
-      clearReading();
-      state.clearGeneration();
+      retireSemanticState();
+      showPollFailure();
       renderChangeInspectorRefusal(error);
+      observeRecoveryFailure(error);
       return "failed";
     } finally {
       generationAttempt?.dispose();
@@ -1098,6 +1265,30 @@ export async function bootstrapChangeInspector(
         releaseQueuedPoll();
       }
     }
+  };
+
+  reloadSelectedAccess = () => {
+    const route = currentRoute();
+    if (route.kind === "invalid") return;
+    void loadGeneration(
+      route,
+      newProjectionRetryBudget(),
+      null,
+      "recovery",
+    ).finally(() => {
+      recoveryPending = null;
+      renderRecovery();
+    });
+  };
+  selectRecoveryAccess = (next) => {
+    if (access === next || recoveryPending !== null) return;
+    recoveryPending = next === "authoritative" ? "fallback" : "derived";
+    access = next;
+    fallbackValidated = false;
+    advanceRequestEpoch();
+    retireSemanticState();
+    paint();
+    reloadSelectedAccess();
   };
 
   const onRoute = async (): Promise<void> => {
@@ -1122,9 +1313,7 @@ export async function bootstrapChangeInspector(
     advanceRequestEpoch();
     state.setRoute(route);
     if (route.kind === "invalid") {
-      clearVisibleRequest();
-      clearReading();
-      state.clearGeneration();
+      retireSemanticState();
       paint();
       return;
     }
@@ -1150,6 +1339,7 @@ export async function bootstrapChangeInspector(
           pageRequests.attention === visiblePageRequests?.attention;
     if (
       generation !== null &&
+      visibleAccess === access &&
       matchesRequest &&
       state.matchesPublishedProfile(
         generation.profile,
@@ -1168,9 +1358,7 @@ export async function bootstrapChangeInspector(
       );
       paint();
     } else {
-      clearVisibleRequest();
-      clearReading();
-      state.clearGeneration();
+      retireSemanticState();
       paint();
       await loadGeneration(route, newProjectionRetryBudget());
     }
@@ -1253,11 +1441,12 @@ export async function bootstrapChangeInspector(
       prior.identity.storeIdentity === identity.storeIdentity &&
       prior.identity.contextIdentity === identity.contextIdentity;
     const mustRetireGeneration = prior.generation !== null && !continuesSession;
+    if (!continuesSession) {
+      access = "derived";
+      fallbackValidated = false;
+    }
     if (mustRetireGeneration) {
-      clearVisibleRequest();
-      pendingTimelineSearchFocus = false;
-      clearReading();
-      state.clearGeneration();
+      retireSemanticState();
     }
     const next = state.publishIdentity(identity, verified.credentialVersion);
     if (mustRetireGeneration) paint();
@@ -1306,7 +1495,7 @@ export async function bootstrapChangeInspector(
         pendingAuthorityTraversal = { token: traversalToken, epoch };
         try {
           const preflight = decodeReaderProfile(
-            await fetchChangeInspectorJSON("/api/v2/profile"),
+            await fetchEntryJSON("/api/v2/profile"),
           );
           if (
             epoch !== requestEpoch ||
@@ -1328,7 +1517,7 @@ export async function bootstrapChangeInspector(
             anchor,
             async (query) => {
               const page = decodeEventHistory(
-                await fetchChangeInspectorJSON(buildEventHistoryUrl(query)),
+                await fetchEntryJSON(buildEventHistoryUrl(query)),
               );
               if (epoch !== requestEpoch) {
                 throw new ChangeInspectorGenerationChanged();
@@ -1337,7 +1526,7 @@ export async function bootstrapChangeInspector(
             },
           );
           const postflight = decodeReaderProfile(
-            await fetchChangeInspectorJSON("/api/v2/profile"),
+            await fetchEntryJSON("/api/v2/profile"),
           );
           if (
             epoch !== requestEpoch ||
@@ -1370,9 +1559,7 @@ export async function bootstrapChangeInspector(
             }
             continue;
           }
-          clearVisibleRequest();
-          clearReading();
-          state.clearGeneration();
+          retireSemanticState();
           renderChangeInspectorRefusal(error);
           return null;
         }
@@ -1553,6 +1740,13 @@ export async function bootstrapChangeInspector(
       activePollCycleController = controller;
       const pollEpoch = requestEpoch;
       let outcome: GenerationLoadOutcome = "superseded";
+      const failPoll = (error: unknown): void => {
+        retireSemanticState();
+        showPollFailure();
+        renderChangeInspectorRefusal(error);
+        observeRecoveryFailure(error);
+        outcome = "failed";
+      };
       void withinTimeout(
         operation,
         POLL_CYCLE_TIMEOUT_MS,
@@ -1566,14 +1760,12 @@ export async function bootstrapChangeInspector(
             if (isCurrentComposition() && requestEpoch === pollEpoch) {
               controller.abort("superseded");
               advanceRequestEpoch();
-              showPollFailure();
-              outcome = "failed";
+              failPoll(error);
             }
             return;
           }
           if (isCurrentComposition() && requestEpoch === pollEpoch) {
-            showPollFailure();
-            outcome = "failed";
+            failPoll(error);
           }
         })
         .finally(() => {

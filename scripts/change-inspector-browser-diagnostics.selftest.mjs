@@ -574,7 +574,7 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 		assert.match(reading, /revisions\/\$\{encoded\(revision\.revisionId\)\}\?artifactHash=/);
 		assert.match(reading, /revisions\/\$\{encoded\(revision\.revisionId\)\}\/resource\?artifactHash=/);
 		assert.match(reading, /\/interdiff\/\$\{encoded\(route\.from\.revisionId\)\}\/\$\{encoded\(route\.to\.revisionId\)\}/);
-		assert.match(composition, /fetchChangeInspectorJSON\(request, \{ signal \}\)/);
+		assert.match(composition, /fetchEntryJSON\(request, signal\)/);
 		assert.deepEqual(families.map(([name]) => name).sort(), ["attention", "change", "changes", "history", "interdiff", "resource", "revision"]);
 		const browser = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
 		assert.ok(browser.indexOf("await page.addInitScript(") < browser.indexOf("await page.goto(bootstrapUrl(config.server)"), "bridge precedes bootstrap");
@@ -3666,6 +3666,7 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 	);
 	const fullSectionNames = [
 		"Reader readiness",
+		"Derived recovery and fallback",
 		"Timeline overview and chronology",
 		"Timeline search and correlation",
 		"Timeline preferences",
@@ -3688,6 +3689,7 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 	];
 	const frozenSectionNames = fullSectionNames.filter(
 		(name) =>
+			name !== "Derived recovery and fallback" &&
 			name !== "Changes keyboard and filters" &&
 			name !== "Polling retention and reduced motion" &&
 			name !== "Browser runtime",
