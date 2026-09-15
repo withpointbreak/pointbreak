@@ -2196,20 +2196,31 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
         format!("sha256:{}", "c".repeat(64)),
     )
     .expect("exact Revision");
-    append(
-        &adapter,
-        &proposal_carrier_event(
-            &exact,
-            Some(SUMMARY_SENTINEL),
-            "work_object_proposed:proposal-carrier:inventory",
-            "2026-08-04T00:03:01Z",
-        ),
-        0,
+    let primary = proposal_carrier_event(
+        &exact,
+        Some(SUMMARY_SENTINEL),
+        "work_object_proposed:proposal-carrier:inventory",
+        "2026-08-04T00:03:01Z",
     );
+    let equal = proposal_carrier_event(
+        &exact,
+        Some(SUMMARY_SENTINEL),
+        "work_object_proposed:proposal-carrier:inventory-equal",
+        "2026-08-04T00:03:02Z",
+    );
+    let conflicting = proposal_carrier_event(
+        &exact,
+        None,
+        "work_object_proposed:proposal-carrier:inventory-conflict",
+        "2026-08-04T00:03:03Z",
+    );
+    append(&adapter, &primary, 0);
+    append(&adapter, &equal, 1);
+    append(&adapter, &conflicting, 2);
 
     let inventory = adapter.semantic_inventory().expect("semantic inventory");
-    assert_eq!(inventory.schema_version, 8);
-    assert_eq!(inventory.proposal_carrier_count, 1);
+    assert_eq!(inventory.schema_version, 9);
+    assert_eq!(inventory.proposal_carrier_count, 3);
     assert!(
         inventory
             .tables
@@ -2225,6 +2236,17 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
         vec!["semantic_revision_proposal_exact"]
     );
     assert_eq!(inventory.retained_body_object_bytes, 0);
+    for name in inventory
+        .tables
+        .iter()
+        .chain(&inventory.columns)
+        .chain(&inventory.indexes)
+    {
+        assert!(
+            !super::contract::forbidden_bodyless_storage_name_v1(name),
+            "semantic catalog name violates bodyless storage policy: {name}"
+        );
+    }
     for name in inventory
         .proposal_carrier_columns
         .iter()
@@ -2253,6 +2275,45 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .expect("open proposal index evidence");
+    let conflict = query_connection
+        .query_row(
+            "SELECT revision_id, object_artifact_content_hash, first_conflict_sequence
+             FROM semantic_revision_proposal_conflict",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .expect("read sparse proposal conflict marker");
+    assert_eq!(conflict.0, exact.revision_id.as_str());
+    assert_eq!(conflict.1, exact.object_artifact_content_hash);
+    let expected_conflict_sequence =
+        crate::session::derived_access::verification::strict_proposal_summary_conflicts(&[
+            primary.clone(),
+            equal.clone(),
+            conflicting.clone(),
+        ])
+        .expect("strictly replay proposal conflicts")[&exact];
+    assert_eq!(conflict.2, expected_conflict_sequence as i64);
+    let conflict_columns = query_connection
+        .prepare("PRAGMA table_info(semantic_revision_proposal_conflict)")
+        .expect("prepare proposal conflict schema")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query proposal conflict schema")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read proposal conflict schema");
+    assert_eq!(
+        conflict_columns,
+        vec![
+            "revision_id",
+            "object_artifact_content_hash",
+            "first_conflict_sequence",
+        ]
+    );
     let mut plan = query_connection
         .prepare(
             "EXPLAIN QUERY PLAN
@@ -3097,7 +3158,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 8);
+    assert_eq!(inventory.schema_version, 9);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(
@@ -3119,6 +3180,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
             "semantic_response_fact",
             "semantic_revision_fact",
             "semantic_revision_proposal_carrier",
+            "semantic_revision_proposal_conflict",
             "semantic_state_projection",
             "semantic_validation_fact",
         ]

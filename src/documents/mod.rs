@@ -73,7 +73,10 @@ pub use change::{
     ChangeAttentionPresentationV1, ChangeAttentionReasonPresentationV1, ChangeAttentionReasonV1,
     attention_presentation_for_change,
 };
-pub(crate) use change::{FactPortCarrierSourceV1, change_presentation_projection};
+pub(crate) use change::{
+    FactPortCarrierSourceV1, change_presentation_projection,
+    current_revision_refs_matching_projection,
+};
 #[doc(hidden)]
 pub use change::{change_summary_order_key, normalize_fact_presentations};
 pub(crate) use change_ordering::change_ordering_projection;

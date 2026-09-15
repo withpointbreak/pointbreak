@@ -371,6 +371,11 @@ pub(super) fn authoritative_event_history_v2_from_loaded(
                 true,
             )));
         }
+        Err(super::server::ChangeReaderLoadError::ProjectionInvalid(document)) => {
+            return serde_json::to_string(&document)
+                .map(ChangeV2Json::Retryable)
+                .map_err(|error| error.to_string());
+        }
         Err(super::server::ChangeReaderLoadError::Other(message)) => return Err(message),
     };
     if let Some(unavailable) =
@@ -1053,6 +1058,11 @@ pub(super) fn with_change_v2_outcome_from_loaded(
                 "Journal changed while the Timeline generation was loading; retry",
                 true,
             )));
+        }
+        Err(super::server::ChangeReaderLoadError::ProjectionInvalid(document)) => {
+            return serde_json::to_string(&document)
+                .map(ChangeV2Json::Retryable)
+                .map_err(|error| error.to_string());
         }
         Err(super::server::ChangeReaderLoadError::Other(message)) => return Err(message),
     };

@@ -684,18 +684,31 @@ impl DerivedChangeAccess {
             ));
         }
         hook(super::timeline::TimelineReadBoundary::SnapshotPinned);
-        let prepared = super::timeline::prepare_timeline_page(
-            current.service(),
-            &snapshot.connection,
-            &snapshot.changes.document_projection,
-            as_of,
-            checkpoint.authority_cursor.clone(),
-            source_change_projection_stamp,
-            timeline_projection_stamp,
-            request,
-            trust_set,
-            &mut hook,
-        );
+        let proposal_summary_conflict = snapshot
+            .changes
+            .proposal_summary_conflicts
+            .iter()
+            .next()
+            .map(|conflict| {
+                format!(
+                    "conflicting proposal summaries for exact Revision {}",
+                    conflict.revision_id.as_str()
+                )
+            });
+        let prepared = proposal_summary_conflict.is_none().then(|| {
+            super::timeline::prepare_timeline_page(
+                current.service(),
+                &snapshot.connection,
+                &snapshot.changes.document_projection,
+                as_of,
+                checkpoint.authority_cursor.clone(),
+                source_change_projection_stamp,
+                timeline_projection_stamp,
+                request,
+                trust_set,
+                &mut hook,
+            )
+        });
         if let Err(error) = snapshot.finish() {
             return Ok(DerivedChangeOutcomeV1::projection_unavailable(
                 DerivedProjectionFailureCodeV1::ProjectionInvalid,
@@ -703,22 +716,23 @@ impl DerivedChangeAccess {
             ));
         }
         let prepared = match prepared {
-            Ok(page) => page,
-            Err(super::timeline::TimelinePageError::RequestInvalid(message)) => {
+            Some(Ok(page)) => Some(page),
+            Some(Err(super::timeline::TimelinePageError::RequestInvalid(message))) => {
                 return Err(ShoreError::WorkflowInputInvalid { reason: message });
             }
-            Err(super::timeline::TimelinePageError::Stale(message)) => {
+            Some(Err(super::timeline::TimelinePageError::Stale(message))) => {
                 return Ok(DerivedChangeOutcomeV1::retryable(
                     DerivedProjectionFailureCodeV1::ProjectionStale,
                     message,
                 ));
             }
-            Err(super::timeline::TimelinePageError::Invalid(message)) => {
+            Some(Err(super::timeline::TimelinePageError::Invalid(message))) => {
                 return Ok(DerivedChangeOutcomeV1::projection_unavailable(
                     DerivedProjectionFailureCodeV1::ProjectionInvalid,
                     message,
                 ));
             }
+            None => None,
         };
 
         let final_current = match self.runtime.current() {
@@ -752,7 +766,15 @@ impl DerivedChangeAccess {
                 "derived Timeline checkpoint changed before response completion",
             ));
         }
-        Ok(DerivedChangeOutcomeV1::Ready(prepared))
+        if let Some(message) = proposal_summary_conflict {
+            return Ok(DerivedChangeOutcomeV1::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                message,
+            ));
+        }
+        Ok(DerivedChangeOutcomeV1::Ready(
+            prepared.expect("a conflict-free Timeline read prepares a page"),
+        ))
     }
 
     fn read_page(
@@ -1749,6 +1771,15 @@ pub struct DerivedProjectionUnavailableDocumentV1 {
 }
 
 impl DerivedProjectionUnavailableDocumentV1 {
+    #[doc(hidden)]
+    pub fn projection_invalid(message: impl Into<String>) -> Self {
+        Self::new(
+            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+            message,
+            false,
+        )
+    }
+
     pub fn code(&self) -> DerivedProjectionFailureCodeV1 {
         self.code
     }
@@ -2760,6 +2791,42 @@ mod tests {
                 "2026-08-10T02:03:00Z",
             )
             .expect("build conflicting proposal event");
+            record_fixture_event(&self.store, event.clone());
+            event
+        }
+
+        fn append_duplicate_proposal(
+            &self,
+            revision: &RevisionRefV1,
+            summary: Option<&str>,
+            suffix: &str,
+        ) -> ShoreEvent {
+            let event = ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                format!("fixture:duplicate-proposal:{suffix}"),
+                EventTarget::for_revision(
+                    JournalId::new("journal:change-endpoint"),
+                    revision.revision_id.clone(),
+                    None,
+                )
+                .expect("build duplicate proposal target"),
+                Writer::shore_local("change-endpoint-test"),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new(format!("engagement:duplicate:{suffix}")),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: Revision {
+                            id: revision.revision_id.clone(),
+                            object_id: ObjectId::new(format!("obj:duplicate:{suffix}")),
+                            git_provenance: None,
+                        },
+                        summary: summary.map(str::to_owned),
+                        object_artifact_content_hash: revision.object_artifact_content_hash.clone(),
+                        supersedes: Vec::new(),
+                    },
+                },
+                "2026-08-10T02:03:01Z",
+            )
+            .expect("build duplicate proposal event");
             record_fixture_event(&self.store, event.clone());
             event
         }
@@ -5994,12 +6061,113 @@ mod tests {
 
     #[test]
     fn derived_change_selected_proposal_failures_are_typed_and_fail_closed() {
+        let equal = ActiveChangeFixture::new(&[&[Some("equal"), Some("equal")]]);
+        equal.mutate_database(|connection| {
+            let count = connection
+                .query_row(
+                    "SELECT count(*) FROM semantic_revision_proposal_conflict",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count equal proposal conflict markers");
+            assert_eq!(count, 0);
+        });
+        assert!(matches!(
+            equal
+                .access
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read Timeline with equal duplicate proposals"),
+            DerivedChangeOutcomeV1::Ready(_)
+        ));
+
         let conflicting = ActiveChangeFixture::new(&[&[Some("present"), None]]);
+        let conflict = conflicting.changes[0].clone();
+        let expected_conflict_sequence =
+            conflicting.proposal_sequence(&conflict.proposal_events[1]);
+        conflicting.mutate_database(|connection| {
+            let first_conflict_sequence = connection
+                .query_row(
+                    "SELECT first_conflict_sequence
+                     FROM semantic_revision_proposal_conflict
+                     WHERE revision_id = ?1 AND object_artifact_content_hash = ?2",
+                    params![
+                        conflict.revision.revision_id.as_str(),
+                        conflict.revision.object_artifact_content_hash
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read conflicting proposal marker");
+            assert_eq!(first_conflict_sequence, expected_conflict_sequence);
+        });
+        // Keep the moving-checkpoint probe separate: its append changes the
+        // projection's currentness state, which the stable assertions do not test.
+        let moving_conflicting = ActiveChangeFixture::new(&[&[Some("present"), None]]);
+        let mut moved = false;
+        let moving = moving_conflicting
+            .access
+            .timeline_with_hook(
+                &crate::session::DerivedTimelinePageRequestV1::initial(),
+                &crate::session::TrustSet::default(),
+                |boundary| {
+                    if boundary
+                        == crate::session::derived_access::timeline::TimelineReadBoundary::SnapshotPinned
+                        && !moved
+                    {
+                        moving_conflicting.append_unrelated("proposal-conflict-moving");
+                        moved = true;
+                    }
+                },
+            )
+            .expect("classify a moving conflicting-proposal Timeline");
+        assert!(moved);
+        assert!(matches!(
+            moving,
+            DerivedChangeOutcomeV1::Retryable(ref document)
+                if document.code() == DerivedProjectionFailureCodeV1::ProjectionUnstable
+        ));
         assert_projection_invalid(
             conflicting
                 .access
                 .changes(&DerivedChangePageRequestV1::Bare)
                 .expect("read conflicting duplicate proposals"),
+            "conflicting proposal summaries for exact Revision",
+        );
+        assert_projection_invalid(
+            conflicting
+                .fresh_access()
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read restarted Timeline with conflicting duplicate proposals"),
+            "conflicting proposal summaries for exact Revision",
+        );
+        conflicting.append_duplicate_proposal(
+            &conflict.revision,
+            Some("present"),
+            "after-conflict",
+        );
+        assert_projection_invalid(
+            conflicting
+                .fresh_access()
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read Timeline after a later equal proposal"),
+            "conflicting proposal summaries for exact Revision",
+        );
+        assert_projection_invalid(
+            conflicting
+                .access
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read Timeline with conflicting duplicate proposals"),
             "conflicting proposal summaries for exact Revision",
         );
 

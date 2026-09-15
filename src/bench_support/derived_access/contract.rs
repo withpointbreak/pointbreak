@@ -5109,7 +5109,7 @@ fn forbidden_timeline_storage_name_v1(name: &str) -> bool {
                 .any(|material| tokens.contains(material))
 }
 
-fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
+pub(super) fn forbidden_bodyless_storage_name_v1(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if [
         "fts",
