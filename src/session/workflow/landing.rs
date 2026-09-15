@@ -745,7 +745,11 @@ mod tests {
             first.acknowledgement.authority_outcome,
             crate::session::AuthorityWriteOutcomeV1::Created
         );
-        assert!(first.diagnostics.is_empty());
+        assert_eq!(first.diagnostics.len(), 1);
+        assert_eq!(
+            first.diagnostics[0].code,
+            "derived_access_generation_unavailable"
+        );
         assert!(first.proof_created);
         assert!(first.structural_association_created);
         assert!(first.relation_attestation_created);

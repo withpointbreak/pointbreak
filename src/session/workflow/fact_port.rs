@@ -384,7 +384,11 @@ mod tests {
             first_port.acknowledgement.legacy_projection_state,
             crate::session::LegacyProjectionStateV1::Refreshed
         );
-        assert!(first_port.diagnostics.is_empty());
+        assert_eq!(first_port.diagnostics.len(), 1);
+        assert_eq!(
+            first_port.diagnostics[0].code,
+            "derived_access_generation_unavailable"
+        );
         assert_eq!(first_port.origin_revision, origin);
         assert_eq!(first_port.target_revision.revision_id, second.revision_id);
 
