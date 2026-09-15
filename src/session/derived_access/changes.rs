@@ -6102,8 +6102,11 @@ mod tests {
                 .expect("read conflicting proposal marker");
             assert_eq!(first_conflict_sequence, expected_conflict_sequence);
         });
+        // Keep the moving-checkpoint probe separate: its append changes the
+        // projection's currentness state, which the stable assertions do not test.
+        let moving_conflicting = ActiveChangeFixture::new(&[&[Some("present"), None]]);
         let mut moved = false;
-        let moving = conflicting
+        let moving = moving_conflicting
             .access
             .timeline_with_hook(
                 &crate::session::DerivedTimelinePageRequestV1::initial(),
@@ -6113,7 +6116,7 @@ mod tests {
                         == crate::session::derived_access::timeline::TimelineReadBoundary::SnapshotPinned
                         && !moved
                     {
-                        conflicting.append_unrelated("proposal-conflict-moving");
+                        moving_conflicting.append_unrelated("proposal-conflict-moving");
                         moved = true;
                     }
                 },
