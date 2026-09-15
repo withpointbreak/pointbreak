@@ -1602,7 +1602,7 @@ impl SqliteSemantic {
                      ON semantic_revision_proposal_carrier(
                          revision_id, object_artifact_content_hash, sequence
                      );
-                 CREATE TABLE IF NOT EXISTS semantic_revision_proposal_summary_conflict (
+                 CREATE TABLE IF NOT EXISTS semantic_revision_proposal_conflict (
                      revision_id TEXT NOT NULL,
                      object_artifact_content_hash TEXT NOT NULL,
                      first_conflict_sequence INTEGER NOT NULL
@@ -2198,7 +2198,7 @@ impl SqliteSemantic {
             let already_conflicted = connection
                 .query_row(
                     "SELECT EXISTS(
-                         SELECT 1 FROM semantic_revision_proposal_summary_conflict
+                         SELECT 1 FROM semantic_revision_proposal_conflict
                          WHERE revision_id = ?1
                            AND object_artifact_content_hash = ?2
                      )",
@@ -3264,7 +3264,7 @@ fn insert_proposal_summary_conflicts(
     for conflict in conflicts {
         transaction
             .execute(
-                "INSERT OR IGNORE INTO semantic_revision_proposal_summary_conflict
+                "INSERT OR IGNORE INTO semantic_revision_proposal_conflict
                  (revision_id, object_artifact_content_hash, first_conflict_sequence)
                  VALUES (?1, ?2, ?3)",
                 params![
@@ -5136,7 +5136,7 @@ fn query_proposal_summary_conflicts(
     let mut statement = connection
         .prepare(
             "SELECT revision_id, object_artifact_content_hash, first_conflict_sequence
-             FROM semantic_revision_proposal_summary_conflict
+             FROM semantic_revision_proposal_conflict
              WHERE first_conflict_sequence <= ?1
              ORDER BY revision_id, object_artifact_content_hash",
         )

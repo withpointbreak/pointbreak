@@ -2237,6 +2237,17 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
     );
     assert_eq!(inventory.retained_body_object_bytes, 0);
     for name in inventory
+        .tables
+        .iter()
+        .chain(&inventory.columns)
+        .chain(&inventory.indexes)
+    {
+        assert!(
+            !super::contract::forbidden_bodyless_storage_name_v1(name),
+            "semantic catalog name violates bodyless storage policy: {name}"
+        );
+    }
+    for name in inventory
         .proposal_carrier_columns
         .iter()
         .chain(&inventory.proposal_carrier_indexes)
@@ -2267,7 +2278,7 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
     let conflict = query_connection
         .query_row(
             "SELECT revision_id, object_artifact_content_hash, first_conflict_sequence
-             FROM semantic_revision_proposal_summary_conflict",
+             FROM semantic_revision_proposal_conflict",
             [],
             |row| {
                 Ok((
@@ -2289,7 +2300,7 @@ fn proposal_carrier_inventory_is_indexed_and_retains_no_summary_material() {
         .expect("strictly replay proposal conflicts")[&exact];
     assert_eq!(conflict.2, expected_conflict_sequence as i64);
     let conflict_columns = query_connection
-        .prepare("PRAGMA table_info(semantic_revision_proposal_summary_conflict)")
+        .prepare("PRAGMA table_info(semantic_revision_proposal_conflict)")
         .expect("prepare proposal conflict schema")
         .query_map([], |row| row.get::<_, String>(1))
         .expect("query proposal conflict schema")
@@ -3169,7 +3180,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
             "semantic_response_fact",
             "semantic_revision_fact",
             "semantic_revision_proposal_carrier",
-            "semantic_revision_proposal_summary_conflict",
+            "semantic_revision_proposal_conflict",
             "semantic_state_projection",
             "semantic_validation_fact",
         ]

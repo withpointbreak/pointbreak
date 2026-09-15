@@ -6065,7 +6065,7 @@ mod tests {
         equal.mutate_database(|connection| {
             let count = connection
                 .query_row(
-                    "SELECT count(*) FROM semantic_revision_proposal_summary_conflict",
+                    "SELECT count(*) FROM semantic_revision_proposal_conflict",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -6091,7 +6091,7 @@ mod tests {
             let first_conflict_sequence = connection
                 .query_row(
                     "SELECT first_conflict_sequence
-                     FROM semantic_revision_proposal_summary_conflict
+                     FROM semantic_revision_proposal_conflict
                      WHERE revision_id = ?1 AND object_artifact_content_hash = ?2",
                     params![
                         conflict.revision.revision_id.as_str(),
