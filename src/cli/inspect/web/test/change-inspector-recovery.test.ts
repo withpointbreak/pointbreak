@@ -37,6 +37,56 @@ function page(lens: "changes" | "attention") {
     ],
   };
 }
+function historyPage(eventId: string) {
+  return {
+    schema: "pointbreak.inspect-event-history",
+    version: 1,
+    authorityCursor: authorityCursor(1),
+    sourceChangeProjectionStamp: "sha256:generation",
+    timelineProjectionStamp: "sha256:timeline",
+    order: "desc",
+    eventCount: 1,
+    matchCount: 1,
+    offset: 0,
+    facets: {},
+    completion: {
+      eventTypes: [],
+      trackIds: [],
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+    },
+    diagnostics: [],
+    queryNotices: [],
+    entries: [
+      {
+        eventId,
+        eventType: "review_note_imported",
+        occurredAt: "2026-08-08T00:00:00Z",
+        payloadHash: "sha256:payload",
+        journalId: "journal:sha256:one",
+        writer: {
+          actorId: "actor:one",
+          producer: { name: "pointbreak", version: "0.10.0" },
+        },
+        verificationStatus: "valid",
+        assertionMode: "advisory",
+        subject: { kind: "journal", journalId: "journal:sha256:one" },
+        changeIds: [],
+        revisionRefs: [],
+        unresolvedRevisionIds: [],
+        summary: { kind: "review_note_imported" },
+      },
+    ],
+  };
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((success) => {
+    resolve = success;
+  });
+  return { promise, resolve };
+}
 const unavailable = {
   schema: "pointbreak.inspect-change-projection-error",
   version: 1,
@@ -135,6 +185,90 @@ describe("Change-first recovery integration", () => {
             request.method === "GET",
         ),
     ).toBe(true);
+  });
+
+  it("supersedes an authoritative Timeline consumer without releasing its transport slot", async () => {
+    const oldBody = deferred<string>();
+    const v2Requests: string[] = [];
+    let historyRequests = 0;
+    globalThis.fetch = vi.fn(async (input) => {
+      const path = String(input);
+      if (path === "/api/identity")
+        return new Response(JSON.stringify(identity));
+      if (path === "/api/derived-access/status")
+        return new Response(JSON.stringify(status()));
+      if (!path.includes("access=authoritative"))
+        return new Response(JSON.stringify(unavailable), { status: 503 });
+      v2Requests.push(path);
+      const headers = {
+        "X-Pointbreak-Access-Source": "authoritative-fallback",
+      };
+      if (path.startsWith("/api/v2/profile"))
+        return new Response(JSON.stringify(profile), { headers });
+      if (path.startsWith("/api/v2/changes"))
+        return new Response(JSON.stringify(page("changes")), { headers });
+      if (path.startsWith("/api/v2/attention"))
+        return new Response(JSON.stringify(page("attention")), { headers });
+      if (path.startsWith("/api/v2/history")) {
+        historyRequests += 1;
+        if (historyRequests === 1)
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers(headers),
+            text: () => oldBody.promise,
+          } as Response;
+        return new Response(JSON.stringify(historyPage("evt:sha256:new")), {
+          headers,
+        });
+      }
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector("#derived-access-fallback")?.classList,
+      ).not.toContain("hidden"),
+    );
+    document
+      .querySelector<HTMLButtonElement>("#derived-access-fallback")
+      ?.click();
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(".unit-card[data-change-id]"),
+      ).not.toBeNull(),
+    );
+
+    history.replaceState(null, "", "/#/timeline?limit=100&order=desc");
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await vi.waitFor(() => expect(historyRequests).toBe(1));
+    history.replaceState(null, "", "/#/timeline?limit=100&q=new&order=desc");
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await Promise.resolve();
+    const blockedCount = v2Requests.length;
+    await Promise.resolve();
+    expect(v2Requests).toHaveLength(blockedCount);
+    expect(
+      document.querySelector('[data-event-id="evt:sha256:old"]'),
+    ).toBeNull();
+
+    oldBody.resolve(JSON.stringify(historyPage("evt:sha256:old")));
+    await vi.waitFor(() => expect(historyRequests).toBe(2));
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-event-id="evt:sha256:new"]'),
+      ).not.toBeNull(),
+    );
+    expect(
+      document.querySelector('[data-event-id="evt:sha256:old"]'),
+    ).toBeNull();
+    expect(document.querySelector("#master")?.textContent).not.toContain(
+      "Reader refused:",
+    );
   });
 
   it("orders status and control observations without replaying a POST", async () => {

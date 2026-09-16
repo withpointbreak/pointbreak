@@ -128,6 +128,7 @@ function typedFailure(value: unknown, status: number): Error | null {
 async function fetchOnce(
   path: string,
   options: ChangeInspectorFetchOptions,
+  transportSignal: AbortSignal | null | undefined = options.signal,
 ): Promise<ChangeInspectorResponse> {
   const reportConnection = options.reportConnection !== false;
   const method = options.method ?? "GET";
@@ -144,20 +145,16 @@ async function fetchOnce(
       credentials: "omit",
       referrerPolicy: "no-referrer",
       headers,
-      signal: options.signal,
+      signal: transportSignal,
     });
   } catch (error) {
     if (isRequestAbort(error, options.signal))
       throw new ChangeInspectorRequestFailure("aborted");
     throw failure("unreachable", undefined, reportConnection);
   }
-  if (options.signal?.aborted)
-    throw new ChangeInspectorRequestFailure("aborted");
-  if (response.status === 401)
-    throw new ChangeInspectorRequestFailure("unauthorized", 401);
-  let data: unknown;
+  let body: string;
   try {
-    data = JSON.parse(await response.text());
+    body = await response.text();
   } catch (error) {
     if (isRequestAbort(error, options.signal))
       throw new ChangeInspectorRequestFailure("aborted");
@@ -165,6 +162,14 @@ async function fetchOnce(
   }
   if (options.signal?.aborted)
     throw new ChangeInspectorRequestFailure("aborted");
+  if (response.status === 401)
+    throw new ChangeInspectorRequestFailure("unauthorized", 401);
+  let data: unknown;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw failure("protocol", response.status, reportConnection);
+  }
   if (!response.ok) {
     const decoded = typedFailure(data, response.status);
     if (decoded !== null) throw decoded;
@@ -191,10 +196,11 @@ async function fetchOnce(
 async function fetchAuthenticated(
   path: string,
   options: ChangeInspectorFetchOptions,
+  transportSignal: AbortSignal | null | undefined = options.signal,
 ): Promise<ChangeInspectorResponse> {
   const credentialVersion = sessionCredentialVersion();
   try {
-    return await fetchOnce(path, options);
+    return await fetchOnce(path, options, transportSignal);
   } catch (error) {
     if (
       !(error instanceof ChangeInspectorRequestFailure) ||
@@ -209,8 +215,32 @@ async function fetchAuthenticated(
   if (options.signal?.aborted)
     throw new ChangeInspectorRequestFailure("aborted");
   if (recovered && (options.method ?? "GET") === "GET")
-    return fetchOnce(path, options);
+    return fetchOnce(path, options, transportSignal);
   throw failure("unauthorized", 401, options.reportConnection !== false);
+}
+
+function settleForConsumer<T>(
+  transport: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal === undefined) return transport;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      complete();
+    };
+    const onAbort = () =>
+      finish(() => reject(new ChangeInspectorRequestFailure("aborted")));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    transport.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 /** Fetch one Change reader document with explicit generation access and response metadata. */
@@ -229,12 +259,22 @@ export function fetchChangeInspectorResponse(
     !ELECTABLE_PATHS.has(requestPath(path))
   )
     return operation();
-  const queued = authoritativeQueue.then(operation, operation);
-  authoritativeQueue = queued.then(
+  const transportOperation = () => {
+    if (options.signal?.aborted)
+      return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+    // The consumer may become obsolete after dispatch, but the issued read
+    // retains this queue slot until its body settles.
+    return fetchAuthenticated(selectedPath, options, null);
+  };
+  const transport = authoritativeQueue.then(
+    transportOperation,
+    transportOperation,
+  );
+  authoritativeQueue = transport.then(
     () => undefined,
     () => undefined,
   );
-  return queued;
+  return settleForConsumer(transport, options.signal);
 }
 
 /** Fetch one Change reader document, retrying a GET exactly once after capability recovery. */

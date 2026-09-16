@@ -583,7 +583,7 @@
     return new ChangeInspectorRecoveryFailure(decoded2);
   }
   __name(typedFailure, "typedFailure");
-  async function fetchOnce(path, options) {
+  async function fetchOnce(path, options, transportSignal = options.signal) {
     const reportConnection = options.reportConnection !== false;
     const method = options.method ?? "GET";
     if (method === "POST" && !CONTROL_PATHS.has(requestPath(path)))
@@ -599,20 +599,16 @@
         credentials: "omit",
         referrerPolicy: "no-referrer",
         headers,
-        signal: options.signal
+        signal: transportSignal
       });
     } catch (error) {
       if (isRequestAbort(error, options.signal))
         throw new ChangeInspectorRequestFailure("aborted");
       throw failure("unreachable", void 0, reportConnection);
     }
-    if (options.signal?.aborted)
-      throw new ChangeInspectorRequestFailure("aborted");
-    if (response.status === 401)
-      throw new ChangeInspectorRequestFailure("unauthorized", 401);
-    let data;
+    let body;
     try {
-      data = JSON.parse(await response.text());
+      body = await response.text();
     } catch (error) {
       if (isRequestAbort(error, options.signal))
         throw new ChangeInspectorRequestFailure("aborted");
@@ -620,6 +616,14 @@
     }
     if (options.signal?.aborted)
       throw new ChangeInspectorRequestFailure("aborted");
+    if (response.status === 401)
+      throw new ChangeInspectorRequestFailure("unauthorized", 401);
+    let data;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      throw failure("protocol", response.status, reportConnection);
+    }
     if (!response.ok) {
       const decoded2 = typedFailure(data, response.status);
       if (decoded2 !== null) throw decoded2;
@@ -639,10 +643,10 @@
     };
   }
   __name(fetchOnce, "fetchOnce");
-  async function fetchAuthenticated(path, options) {
+  async function fetchAuthenticated(path, options, transportSignal = options.signal) {
     const credentialVersion2 = sessionCredentialVersion();
     try {
-      return await fetchOnce(path, options);
+      return await fetchOnce(path, options, transportSignal);
     } catch (error) {
       if (!(error instanceof ChangeInspectorRequestFailure) || error.kind !== "unauthorized")
         throw error;
@@ -654,10 +658,30 @@
     if (options.signal?.aborted)
       throw new ChangeInspectorRequestFailure("aborted");
     if (recovered && (options.method ?? "GET") === "GET")
-      return fetchOnce(path, options);
+      return fetchOnce(path, options, transportSignal);
     throw failure("unauthorized", 401, options.reportConnection !== false);
   }
   __name(fetchAuthenticated, "fetchAuthenticated");
+  function settleForConsumer(transport, signal) {
+    if (signal === void 0) return transport;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = /* @__PURE__ */ __name((complete) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        complete();
+      }, "finish");
+      const onAbort = /* @__PURE__ */ __name(() => finish(() => reject(new ChangeInspectorRequestFailure("aborted"))), "onAbort");
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      transport.then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error))
+      );
+    });
+  }
+  __name(settleForConsumer, "settleForConsumer");
   function fetchChangeInspectorResponse(path, options = {}) {
     const selectedPath = withAccess(path, options.access);
     const operation = /* @__PURE__ */ __name(() => {
@@ -667,12 +691,20 @@
     }, "operation");
     if (options.access !== "authoritative" || !ELECTABLE_PATHS.has(requestPath(path)))
       return operation();
-    const queued = authoritativeQueue.then(operation, operation);
-    authoritativeQueue = queued.then(
+    const transportOperation = /* @__PURE__ */ __name(() => {
+      if (options.signal?.aborted)
+        return Promise.reject(new ChangeInspectorRequestFailure("aborted"));
+      return fetchAuthenticated(selectedPath, options, null);
+    }, "transportOperation");
+    const transport = authoritativeQueue.then(
+      transportOperation,
+      transportOperation
+    );
+    authoritativeQueue = transport.then(
       () => void 0,
       () => void 0
     );
-    return queued;
+    return settleForConsumer(transport, options.signal);
   }
   __name(fetchChangeInspectorResponse, "fetchChangeInspectorResponse");
   async function fetchChangeInspectorJSON(path, options = {}) {

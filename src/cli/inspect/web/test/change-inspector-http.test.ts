@@ -18,6 +18,16 @@ vi.mock("../src/connection", () => ({
 
 const requestPath = "/api/v2/profile";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((success, failure) => {
+    resolve = success;
+    reject = failure;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.mocked(markRequestFailure).mockClear();
   vi.mocked(markRequestSuccess).mockClear();
@@ -194,6 +204,17 @@ describe("Change Inspector HTTP cancellation", () => {
 
     expect(observedSignals).toEqual([controller.signal, controller.signal]);
   });
+
+  it("preserves unauthorized semantics after draining a non-JSON 401 body", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response("unauthorized", { status: 401 }),
+    ) as typeof fetch;
+
+    await expect(fetchChangeInspectorJSON(requestPath)).rejects.toMatchObject({
+      kind: "unauthorized",
+      status: 401,
+    });
+  });
 });
 
 describe("Change Inspector recovery transport", () => {
@@ -271,6 +292,155 @@ describe("Change Inspector recovery transport", () => {
     for (const release of releases.splice(0)) release();
     await Promise.all(derived);
     expect(maxActive).toBe(2);
+  });
+
+  it("skips an authoritative consumer aborted while it is queued", async () => {
+    const firstBody = deferred<string>();
+    globalThis.fetch = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "X-Pointbreak-Access-Source": "authoritative-fallback",
+        }),
+        text: () => firstBody.promise,
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    const first = fetchChangeInspectorResponse("/api/v2/history", {
+      access: "authoritative",
+    });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    const controller = new AbortController();
+    const obsolete = fetchChangeInspectorResponse("/api/v2/profile", {
+      access: "authoritative",
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(obsolete).rejects.toMatchObject({ kind: "aborted" });
+    expect(fetch).toHaveBeenCalledOnce();
+    firstBody.resolve(JSON.stringify({ ready: true }));
+    await first;
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  });
+
+  it("retains the authoritative slot after an issued consumer aborts before headers", async () => {
+    const firstHeaders = deferred<Response>();
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementationOnce((_input, init) => {
+        expect(init?.signal).toBeNull();
+        return firstHeaders.promise;
+      })
+      .mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({ ready: true }), {
+            headers: {
+              "X-Pointbreak-Access-Source": "authoritative-fallback",
+            },
+          }),
+      ) as typeof fetch;
+    const controller = new AbortController();
+    const obsolete = fetchChangeInspectorResponse("/api/v2/history", {
+      access: "authoritative",
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(obsolete).rejects.toMatchObject({ kind: "aborted" });
+
+    const replacement = fetchChangeInspectorResponse("/api/v2/profile", {
+      access: "authoritative",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    firstHeaders.resolve(new Response(JSON.stringify({ ready: true })));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await replacement;
+    expect(markRequestSuccess).toHaveBeenCalledOnce();
+    expect(markRequestFailure).not.toHaveBeenCalled();
+  });
+
+  it("retains the authoritative slot through an obsolete response body", async () => {
+    const firstBody = deferred<string>();
+    const text = vi.fn(() => firstBody.promise);
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          text,
+        } as unknown as Response;
+      })
+      .mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({ ready: true }), {
+            headers: {
+              "X-Pointbreak-Access-Source": "authoritative-fallback",
+            },
+          }),
+      ) as typeof fetch;
+    const controller = new AbortController();
+    const obsolete = fetchChangeInspectorResponse("/api/v2/history", {
+      access: "authoritative",
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(text).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(obsolete).rejects.toMatchObject({ kind: "aborted" });
+
+    const replacement = fetchChangeInspectorResponse("/api/v2/profile", {
+      access: "authoritative",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    firstBody.resolve(JSON.stringify({ ready: true }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    await replacement;
+    expect(markRequestSuccess).toHaveBeenCalledOnce();
+    expect(markRequestFailure).not.toHaveBeenCalled();
+  });
+
+  it("does not recover credentials or health from an obsolete authoritative response", async () => {
+    const unauthorizedBody = deferred<string>();
+    globalThis.fetch = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        return {
+          ok: false,
+          status: 401,
+          headers: new Headers(),
+          text: () => unauthorizedBody.promise,
+        } as unknown as Response;
+      })
+      .mockImplementationOnce(
+        async () =>
+          new Response(JSON.stringify({ ready: true }), {
+            headers: {
+              "X-Pointbreak-Access-Source": "authoritative-fallback",
+            },
+          }),
+      ) as typeof fetch;
+    const { recoverUnauthorized } = await import("../src/auth");
+    vi.mocked(recoverUnauthorized).mockClear();
+    const controller = new AbortController();
+    const obsolete = fetchChangeInspectorResponse("/api/v2/history", {
+      access: "authoritative",
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(obsolete).rejects.toMatchObject({ kind: "aborted" });
+    const replacement = fetchChangeInspectorResponse("/api/v2/profile", {
+      access: "authoritative",
+    });
+    unauthorizedBody.resolve(JSON.stringify({ error: "unauthorized" }));
+
+    await replacement;
+    expect(recoverUnauthorized).not.toHaveBeenCalled();
+    expect(markRequestSuccess).toHaveBeenCalledOnce();
+    expect(markRequestFailure).not.toHaveBeenCalled();
   });
 
   it("never replays an ambiguously admitted control POST", async () => {

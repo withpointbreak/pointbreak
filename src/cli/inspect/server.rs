@@ -5936,6 +5936,38 @@ mod tests {
     }
 
     #[test]
+    fn authoritative_fallback_permit_spans_the_builder_lifetime() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let gate = Arc::new(AuthoritativeFallbackGate::new());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let builder_gate = Arc::clone(&gate);
+            let builder = scope.spawn(move || {
+                let _permit = builder_gate.try_acquire().expect("builder takes permit");
+                started_tx.send(()).expect("announce blocked builder");
+                release_rx.recv().expect("release blocked builder");
+                "built"
+            });
+            started_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("builder acquired the permit");
+            assert!(
+                gate.try_acquire().is_none(),
+                "a second elected builder is busy while the first closure runs"
+            );
+            release_tx.send(()).expect("release first builder");
+            assert_eq!(builder.join().expect("builder thread"), "built");
+        });
+        assert!(
+            gate.try_acquire().is_some(),
+            "the permit is reusable after the builder returns"
+        );
+    }
+
+    #[test]
     fn lifecycle_post_surface_is_exact() {
         assert_eq!(
             route_for("POST", "/api/history").status,
