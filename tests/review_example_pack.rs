@@ -150,6 +150,12 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let browser_diagnostics =
         fs::read_to_string(root.join("scripts/change-inspector-browser-diagnostics.mjs"))
             .expect("read Change Inspector browser diagnostics");
+    let browser_contracts =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-contracts.mjs"))
+            .expect("read Change Inspector browser contracts");
+    let browser_result_parser =
+        fs::read_to_string(root.join("scripts/change-inspector-browser-result.mjs"))
+            .expect("read Change Inspector browser result parser");
     let manifest_publisher =
         fs::read_to_string(root.join("scripts/change-inspector-browser-manifest.mjs"))
             .expect("read Change Inspector browser manifest publisher");
@@ -251,7 +257,10 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
                 "const completion = diagnostics.result({ screenshotCount: screenshots });"
             )
             && browser_program.contains("return completion;")
-            && script.contains("line == \"### Result\"")
+            && browser_result_parser.contains("parseBrowserResultLog")
+            && browser_contracts.contains("line === \"### Result\"")
+            && browser_contracts.contains("if (exitCode !== 0)")
+            && script.contains("\"$browser_result_parser\"")
             && script.contains("browser_gate_status=$?"),
         "browser assertion failures must return a structured Playwright result while a nonzero runner remains infrastructure-fatal"
     );
