@@ -1805,16 +1805,17 @@ if [ "$mode" != "full" ]; then
   if [ "$mode" = "shakedown-return-destinations" ]; then
     jq -e '
       .status == "passed" and .globalInvalid == false and
-      .sectionCount == 4 and .screenshotCount == 4 and
+      .sectionCount == 5 and .screenshotCount == 5 and
       (.failures | length == 0) and
       (.sections == [
         {name: "Shakedown retained Timeline return", status: "passed", failureCount: 0},
         {name: "Shakedown Changes terminal return", status: "passed", failureCount: 0},
         {name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0},
-        {name: "Shakedown poll supersession request accounting", status: "passed", failureCount: 0}
+        {name: "Shakedown poll supersession request accounting", status: "passed", failureCount: 0},
+        {name: "Shakedown replace-state poll supersession", status: "passed", failureCount: 0}
       ])
     ' "$browser_result" >/dev/null \
-      || die "$mode did not complete its four ordered browser sections"
+      || die "$mode did not complete its five ordered browser sections"
   else
     jq -e --arg expectedSection "$expected_shakedown_section" '
       .status == "passed" and .globalInvalid == false and
@@ -1826,16 +1827,17 @@ if [ "$mode" != "full" ]; then
   fi
   screenshot_count="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
   if [ "$mode" = "shakedown-return-destinations" ]; then
-    [ "$screenshot_count" -eq 4 ] \
-      || die "shakedown expected four temporary screenshots, found $screenshot_count"
+    [ "$screenshot_count" -eq 5 ] \
+      || die "shakedown expected five temporary screenshots, found $screenshot_count"
     screenshot_names="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.png' -exec basename {} \; | LC_ALL=C sort)"
     expected_screenshot_names="$(printf '%s\n' \
       'shakedown-changes-terminal-return.png' \
       'shakedown-parallel-current-exact-history.png' \
       'shakedown-poll-supersession-request-accounting.png' \
+      'shakedown-replace-state-poll-supersession.png' \
       'shakedown-retained-timeline-return.png')"
     [ "$screenshot_names" = "$expected_screenshot_names" ] \
-      || die "shakedown screenshots did not match the four exact journey names"
+      || die "shakedown screenshots did not match the five exact journey names"
   else
     [ "$screenshot_count" -eq 1 ] \
       || die "shakedown expected one temporary screenshot, found $screenshot_count"

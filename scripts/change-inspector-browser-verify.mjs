@@ -157,11 +157,13 @@
 		const originalFetch = scope.fetch;
 		const origin = new scope.URL(config.primaryBaseUrl).origin;
 		const limit = config.recordLimit ?? 512;
+		const abortCallers = new WeakMap();
 		let invalid = false;
 		let ordinal = 0;
 		let generation = 0;
 		let routeEventOrdinal = 0;
 		let dispatch = null;
+		let lastRouteEvent = null;
 		const redactedHashFrom = (value) => {
 			const hash = new scope.URL(value, scope.location.href).hash;
 			const separator = hash.indexOf("?");
@@ -174,19 +176,61 @@
 			return hash.slice(0, separator) + (query ? `?${query}` : "");
 		};
 		const redactedHash = () => redactedHashFrom(scope.location.href);
-		scope.addEventListener("hashchange", (event) => {
+		const beginRouteEvent = ({ kind, oldHash, newHash, event = null }) => {
 			generation += 1;
 			routeEventOrdinal += 1;
 			const current = {
+				kind,
 				event,
 				ordinal: routeEventOrdinal,
-				oldHash: redactedHashFrom(event.oldURL),
-				newHash: redactedHashFrom(event.newURL),
+				oldHash,
+				newHash,
 				targetHash: redactedHash(),
 			};
 			dispatch = current;
+			lastRouteEvent = current;
 			scope.setTimeout(() => { if (dispatch === current) dispatch = null; }, 0);
+		};
+		scope.addEventListener("hashchange", (event) => {
+			beginRouteEvent({
+				kind: "hashchange",
+				oldHash: redactedHashFrom(event.oldURL),
+				newHash: redactedHashFrom(event.newURL),
+				event,
+			});
 		}, { passive: true });
+		const originalReplaceState = scope.history?.replaceState;
+		if (typeof originalReplaceState === "function") {
+			scope.history.replaceState = function (...args) {
+				const oldHash = redactedHash();
+				const result = originalReplaceState.apply(this, args);
+				const newHash = redactedHash();
+				if (newHash !== oldHash) {
+					beginRouteEvent({ kind: "replace-state", oldHash, newHash });
+				}
+				return result;
+			};
+		}
+		const originalAbort = scope.AbortController?.prototype.abort;
+		if (typeof originalAbort === "function") {
+			scope.AbortController.prototype.abort = function (...args) {
+				let signal = null;
+				try { signal = this.signal; }
+				catch { /* Preserve the native abort call's receiver error below. */ }
+				if (signal instanceof scope.AbortSignal) {
+					const abortStack = String(new (scope.Error ?? Error)().stack ?? "");
+					abortCallers.set(
+						signal,
+						/\bat advanceRequestEpoch\b/.test(abortStack) &&
+							/\bat loadGeneration\b/.test(abortStack) &&
+							/\bat onRoute\b/.test(abortStack)
+							? "route-generation"
+							: "unattributed",
+					);
+				}
+				return originalAbort.apply(this, args);
+			};
+		}
 		scope.__pointbreakClientAbortProvenance = {
 			take(token) {
 				const record = records.get(token);
@@ -214,11 +258,14 @@
 			ordinal += 1;
 			const token = `${nonce}:${ordinal}`;
 			headers.set(header, token);
+			const sourceRouteEvent = dispatch ?? lastRouteEvent;
 			const record = {
 				sourceHash: redactedHash(),
 				sourceGeneration: generation,
-				sourceRouteEventOrdinal: dispatch?.ordinal ?? null,
-				sourceRouteEventNewHash: dispatch?.newHash ?? null,
+				sourceRouteEventOrdinal: sourceRouteEvent?.ordinal ?? null,
+				sourceRouteEventKind: sourceRouteEvent?.kind ?? null,
+				sourceRouteEventNewHash: sourceRouteEvent?.newHash ?? null,
+				sourceRouteEventLive: sourceRouteEvent !== null && sourceRouteEvent === dispatch,
 				signalBearing: true,
 				fetchTerminal: "pending",
 				bodyTerminal: "pending",
@@ -227,17 +274,21 @@
 			if (!invalid) records.set(token, record);
 			const aborted = () => {
 				record.reason = typeof signal.reason === "string" ? signal.reason : null;
+				record.abortCaller = abortCallers.get(signal) ?? "unattributed";
 				record.abortHash = redactedHash();
 				record.abortGeneration = generation;
 				record.abortRouteEventOrdinal = dispatch?.ordinal ?? null;
+				record.abortRouteEventKind = dispatch?.kind ?? null;
 				record.abortRouteEventOldHash = dispatch?.oldHash ?? null;
 				record.abortRouteEventNewHash = dispatch?.newHash ?? null;
 				record.fetchTerminalAtAbort = record.fetchTerminal;
 				record.bodyTerminalAtAbort = record.bodyTerminal;
-				// The event's live dispatch state excludes a previously queued timeout even
-				// if it runs before our zero-delay cleanup task. No elapsed-time allowance.
-				record.dispatchOpen = dispatch !== null && dispatch.event.currentTarget === scope &&
-					dispatch.event.eventPhase !== 0 && dispatch.targetHash === record.abortHash;
+				// Replace-state remains observable through the current task so synchronous
+				// onRoute work can bind it; abortCaller separately rejects queued borrowers.
+				record.dispatchOpen = dispatch !== null && dispatch.targetHash === record.abortHash &&
+					(dispatch.kind === "replace-state" ||
+						(dispatch.kind === "hashchange" && dispatch.event?.currentTarget === scope &&
+							dispatch.event.eventPhase !== 0));
 			};
 			signal.addEventListener("abort", aborted, { once: true });
 			if (signal.aborted) aborted();
@@ -351,13 +402,26 @@
 			proof.documentGeneration === proof.terminalDocumentGeneration;
 		if (!common) return false;
 		if (endpoint === "profile") {
-			return Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 1 &&
+			const consecutiveRouteEvents =
 				Number.isSafeInteger(proof.sourceRouteEventOrdinal) && proof.sourceRouteEventOrdinal >= 1 &&
-				proof.abortGeneration === proof.sourceGeneration + 1 &&
-				proof.abortRouteEventOrdinal === proof.sourceRouteEventOrdinal + 1 &&
-				proof.dispatchOpen === true &&
+				proof.abortRouteEventOrdinal === proof.sourceRouteEventOrdinal + 1;
+			const queuedHashchangePair = proof.sourceRouteEventLive === true &&
+				proof.sourceRouteEventKind === "hashchange" && proof.abortRouteEventKind === "hashchange" &&
+				proof.sourceRouteEventNewHash === proof.abortRouteEventOldHash &&
+				proof.abortRouteEventNewHash === proof.sourceHash &&
+				proof.sourceHash === proof.abortHash;
+			const settledReplacePair = proof.sourceRouteEventLive === false &&
+				proof.sourceRouteEventKind === "replace-state" && proof.abortRouteEventKind === "replace-state" &&
 				proof.sourceRouteEventNewHash === proof.sourceHash &&
+				proof.abortRouteEventOldHash === proof.sourceHash &&
 				proof.abortRouteEventNewHash === proof.abortHash &&
+				proof.sourceHash !== proof.abortHash;
+			return Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 1 &&
+				proof.abortGeneration === proof.sourceGeneration + 1 &&
+				proof.abortCaller === "route-generation" &&
+				consecutiveRouteEvents &&
+				proof.dispatchOpen === true &&
+				(queuedHashchangePair || settledReplacePair) &&
 				proof.sourceHash === proof.observedSourceHash &&
 				proof.abortHash === proof.terminalHash &&
 				proof.fetchTerminalAtAbort === "pending" &&
@@ -365,7 +429,8 @@
 				proof.fetchTerminal === "fetch-reject-after-signal" &&
 				proof.bodyTerminal === "pending";
 		}
-		return proof.dispatchOpen === true &&
+		return proof.abortRouteEventKind !== "replace-state" &&
+			proof.dispatchOpen === true &&
 			Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 0 &&
 			proof.abortGeneration === proof.sourceGeneration + 1 && proof.sourceHash === proof.observedSourceHash &&
 			proof.abortHash === proof.targetHash && proof.sourceHash !== proof.targetHash && proof.terminalHash === proof.targetHash &&
@@ -471,11 +536,15 @@
 						Object.assign(failure.clientSupersession, {
 							lookupStatus: "complete", sourceHash: value.sourceHash,
 							sourceGeneration: value.sourceGeneration, signalBearing: value.signalBearing,
-							reason: value.reason, abortHash: value.abortHash,
+							reason: value.reason, abortCaller: value.abortCaller,
+							abortHash: value.abortHash,
 							abortGeneration: value.abortGeneration,
 							sourceRouteEventOrdinal: value.sourceRouteEventOrdinal,
+							sourceRouteEventKind: value.sourceRouteEventKind,
 							sourceRouteEventNewHash: value.sourceRouteEventNewHash,
+							sourceRouteEventLive: value.sourceRouteEventLive,
 							abortRouteEventOrdinal: value.abortRouteEventOrdinal,
+							abortRouteEventKind: value.abortRouteEventKind,
 							abortRouteEventOldHash: value.abortRouteEventOldHash,
 							abortRouteEventNewHash: value.abortRouteEventNewHash,
 							fetchTerminalAtAbort: value.fetchTerminalAtAbort,
@@ -3278,7 +3347,15 @@
 						"nonempty event ID",
 						eventId,
 					);
-					await eventRows.first().click();
+					const eventTitle = eventRows.first().locator(".title");
+					requireCondition(
+						(await eventTitle.count()) === 1,
+						"narrow Timeline return",
+						"the first Timeline event lacked one noninteractive title target",
+						1,
+						await eventTitle.count(),
+					);
+					await eventTitle.click();
 					await waitForExactTimelineEvent(eventId);
 					await page.setViewportSize({
 						width: layouts[0].width,
@@ -3701,6 +3778,106 @@
 				},
 				teardown: teardownSection,
 			});
+
+		await diagnostics.section("Shakedown replace-state poll supersession", {
+			setup: () =>
+				open(
+					"changes?limit=100&order=change_id_asc",
+					layouts[0],
+					"replace-state poll supersession setup",
+				),
+			run: async () => {
+				const search = page.locator("#filter-text");
+				const sourceQuery = "uncommitted poll draft";
+				const targetQuery = "Browser matrix";
+				await search.fill(sourceQuery);
+				await search.press("Tab");
+				await page.waitForFunction((expected) => {
+					const query = location.hash.split("?", 2)[1] ?? "";
+					return new URLSearchParams(query).get("q") === expected;
+				}, sourceQuery);
+				await waitForLens("changes");
+
+				let releaseHeldProfile;
+				let resolveHeldProfile;
+				const heldProfile = new Promise((resolve) => {
+					resolveHeldProfile = resolve;
+				});
+				const releaseProfile = new Promise((resolve) => {
+					releaseHeldProfile = resolve;
+				});
+				const holdNextProfile = async (route) => {
+					resolveHeldProfile(route.request());
+					await releaseProfile;
+					try { await route.continue(); }
+					catch { /* An owned client abort can retire the intercepted route. */ }
+				};
+				const profilePattern = `${config.server.baseUrl}/api/v2/profile`;
+				const failuresBeforeReplace = requestFailures.length;
+				await page.route(profilePattern, holdNextProfile, { times: 1 });
+				try {
+					const interceptedProfile = await Promise.race([
+						heldProfile,
+						page.waitForTimeout(10_000).then(() => null),
+					]);
+					requireCondition(
+						interceptedProfile !== null,
+						"replace-state poll supersession",
+						"no natural profile poll reached the final bridge while the source search route was active",
+						"one pending profile poll",
+						null,
+					);
+					const failedProfile = page.waitForEvent("requestfailed", {
+						predicate: (request) => request === interceptedProfile,
+						timeout: 10_000,
+					});
+					await search.fill(targetQuery);
+					await search.press("Tab");
+					await page.waitForFunction((expected) => {
+						const query = location.hash.split("?", 2)[1] ?? "";
+						return new URLSearchParams(query).get("q") === expected;
+					}, targetQuery);
+					releaseHeldProfile();
+					await failedProfile;
+					await requestLifecycleOwner.active().settleClientFailureInspections();
+					const replacementFailures = requestFailures
+						.slice(failuresBeforeReplace)
+						.filter((failure) => failure.url === profilePattern);
+					requireCondition(
+						replacementFailures.length === 1,
+						"replace-state poll supersession",
+						"the held profile poll did not produce one exact client cancellation",
+						1,
+						replacementFailures.length,
+					);
+					const replacementFailure = replacementFailures[0];
+					const replacementProof = requestLifecycleOwner
+						.active()
+						.clientSupersessionProof(replacementFailure);
+					requireCondition(
+						isAdmissibleClientSupersessionFailure(
+							replacementFailure,
+							requestLifecycleOwner.active(),
+							config.server.baseUrl,
+						),
+						"replace-state poll supersession",
+						"the final bridge did not bind the held poll to the synchronous search route caller",
+						{
+							sourceRouteEventKind: "replace-state",
+							abortRouteEventKind: "replace-state",
+							abortCaller: "route-generation",
+							dispatchOpen: true,
+						},
+						replacementProof,
+					);
+				} finally {
+					releaseHeldProfile?.();
+					await page.unroute(profilePattern, holdNextProfile);
+				}
+				await screenshot("shakedown-replace-state-poll-supersession");
+			},
+			teardown: teardownSection,
+		});
 		recordCurrentFocusedRequestHealth();
 		const focusedShakedownResult = diagnostics.result({
 			screenshotCount: screenshots,
@@ -5585,7 +5762,15 @@
 				narrowTimelineHash,
 				narrowEventId,
 			);
-			await narrowEventRows.first().click();
+			const narrowEventTitle = narrowEventRows.first().locator(".title");
+			requireCondition(
+				(await narrowEventTitle.count()) === 1,
+				"narrow Timeline event",
+				"narrow Timeline row lacked one noninteractive title target",
+				1,
+				await narrowEventTitle.count(),
+			);
+			await narrowEventTitle.click();
 			const narrowEventIdentity = await waitForExactTimelineEvent(narrowEventId);
 			compareTimelineEventIdentity(
 				narrowEventId,

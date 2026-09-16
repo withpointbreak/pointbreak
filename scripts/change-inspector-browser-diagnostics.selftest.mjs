@@ -597,7 +597,7 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 	});
 });
 
-test("profile admission requires exact Request binding and consecutive live route events", async (t) => {
+test("profile admission requires exact Request binding and consecutive owned route events", async (t) => {
 	await runD70BrowserSelftest(async (helpers) => {
 		const base = "http://127.0.0.1:4173";
 		const header = "x-pointbreak-browser-provenance";
@@ -622,6 +622,13 @@ test("profile admission requires exact Request binding and consecutive live rout
 				Headers,
 				Request,
 				AbortSignal,
+				AbortController: class TestAbortController extends AbortController {},
+				Error: class RouteGenerationError extends Error {
+					constructor() {
+						super();
+						this.stack = "Error\n    at advanceRequestEpoch\n    at loadGeneration\n    at onRoute";
+					}
+				},
 				crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
 				location: { href: `${base}/${sourceHash}` },
 				setTimeout: timers.setTimeout,
@@ -658,16 +665,19 @@ test("profile admission requires exact Request binding and consecutive live rout
 				event.currentTarget = null;
 				event.eventPhase = 0;
 			};
-			const controller = new AbortController();
+			const controller = new scope.AbortController();
+			const queuedHash = sourceHash.includes("/change%3A")
+				? "#/changes?q=change%3Asha256%3Abb&topology=parallel_current&limit=100&order=change_id_asc"
+				: "#/changes";
 			let pending;
-			dispatch("#/timeline", sourceHash, () => {
+			dispatch("#/timeline", queuedHash, () => {
 				pending = scope.fetch(`${base}/api/v2/profile`, {
 					signal: controller.signal,
 				});
 			});
 			const token = request.headers()[header];
 			assert.match(token, /^[0-9a-f-]{36}:1$/);
-			dispatch(`${sourceHash}&route-event=old`, sourceHash, () => {
+			dispatch(queuedHash, sourceHash, () => {
 				controller.abort("superseded");
 			});
 			rejectFetch(Error("aborted"));
@@ -690,6 +700,13 @@ test("profile admission requires exact Request binding and consecutive live rout
 			const proof = owner.active().clientSupersessionProof(failure);
 			assert.equal(proof.sourceHash, sourceHash);
 			assert.equal(proof.abortHash, sourceHash);
+			assert.equal(proof.abortCaller, "route-generation");
+			assert.equal(proof.sourceRouteEventKind, "hashchange");
+			assert.equal(proof.sourceRouteEventLive, true);
+			assert.equal(proof.sourceRouteEventNewHash, queuedHash);
+			assert.equal(proof.abortRouteEventKind, "hashchange");
+			assert.equal(proof.abortRouteEventOldHash, queuedHash);
+			assert.equal(proof.abortRouteEventNewHash, sourceHash);
 			assert.equal(proof.abortRouteEventOrdinal, proof.sourceRouteEventOrdinal + 1);
 			assert.equal(proof.fetchTerminalAtAbort, "pending");
 			assert.equal(proof.bodyTerminalAtAbort, "pending");
@@ -709,6 +726,11 @@ test("profile admission requires exact Request binding and consecutive live rout
 					["same event", (value) => { value.abortRouteEventOrdinal = value.sourceRouteEventOrdinal; }],
 					["event gap", (value) => { value.abortRouteEventOrdinal += 1; }],
 					["outside dispatch", (value) => { value.dispatchOpen = false; }],
+					["unattributed abort caller", (value) => { value.abortCaller = "unattributed"; }],
+					["source event not live", (value) => { value.sourceRouteEventLive = false; }],
+					["wrong source event kind", (value) => { value.sourceRouteEventKind = "replace-state"; }],
+					["wrong abort event kind", (value) => { value.abortRouteEventKind = "replace-state"; }],
+					["broken queued event chain", (value) => { value.abortRouteEventOldHash = "#/attention"; }],
 					["watchdog", (value) => { value.reason = "hard_budget"; }],
 					["unrelated abort", (value) => { value.reason = "cancelled"; }],
 					["completed body", (value) => {
@@ -733,6 +755,176 @@ test("profile admission requires exact Request binding and consecutive live rout
 				}
 			});
 		}
+
+		await t.test("replaceState search route supersedes an active poll profile", async () => {
+			const sourceHash = "#/changes?q=uncommitted+poll+draft&limit=100&order=change_id_asc";
+			const targetHash = "#/changes?q=Browser+scale+Change+1&limit=100&order=change_id_asc";
+			const page = new FakePage(`${base}/#/changes?limit=100&order=change_id_asc`);
+			const timers = new ManualTimers();
+			const failures = [];
+			const listeners = [];
+			const owner = helpers.createProfileRequestLifecycleActivationOwner({
+				page,
+				primaryBaseUrl: base,
+				now: () => timers.now,
+				setTimer: timers.setTimeout,
+				clearTimer: timers.clearTimeout,
+				onRequestFailure: (failure) => failures.push(failure),
+			});
+			owner.start();
+			let request;
+			let rejectFetch;
+			let abortStack = "Error\n    at advanceRequestEpoch\n    at loadGeneration\n    at onRoute";
+			const scope = {
+				URL,
+				Headers,
+				Request,
+				AbortSignal,
+				AbortController: class TestAbortController extends AbortController {},
+				Error: class CapturedAbortError extends Error {
+					constructor() {
+						super();
+						this.stack = abortStack;
+					}
+				},
+				crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000003" },
+				location: { href: page.url() },
+				history: {
+					replaceState(_state, _title, next) {
+						const nextUrl = new URL(next, scope.location.href).href;
+						scope.location.href = nextUrl;
+						page.setUrl(nextUrl);
+						return "replace-result";
+					},
+				},
+				setTimeout: timers.setTimeout,
+				clearTimeout: timers.clearTimeout,
+				addEventListener: (name, listener, options) => {
+					assert.equal(name, "hashchange");
+					assert.equal(options.passive, true);
+					listeners.push(listener);
+				},
+				fetch: (input, init) => {
+					request = new FakeRequest({ url: input, frame: page.mainFrame() });
+					request.headers = () => Object.fromEntries(new Headers(init?.headers));
+					page.emit("request", request);
+					return new Promise((_resolve, reject) => { rejectFetch = reject; });
+				},
+			};
+			helpers.installClientAbortProvenanceBridge(scope, { primaryBaseUrl: base });
+			page.evaluate = async (_callback, token) =>
+				scope.__pointbreakClientAbortProvenance.take(token);
+			assert.equal(scope.history.replaceState({}, "", sourceHash), "replace-result");
+			timers.flushDue();
+			const controller = new scope.AbortController();
+			const pending = scope.fetch(`${base}/api/v2/profile`, { signal: controller.signal });
+			const token = request.headers()[header];
+			assert.match(token, /^[0-9a-f-]{36}:1$/);
+			assert.equal(scope.history.replaceState({}, "", targetHash), "replace-result");
+			controller.abort("superseded");
+			rejectFetch(Error("aborted"));
+			await pending.catch(() => {});
+			page.emit("requestfailed", request);
+			await owner.active().settleClientFailureInspections();
+			const failure = failures[0];
+			const proof = owner.active().clientSupersessionProof(failure);
+			assert.deepEqual(
+				{
+					sourceHash: proof.sourceHash,
+					sourceKind: proof.sourceRouteEventKind,
+					sourceNewHash: proof.sourceRouteEventNewHash,
+					sourceLive: proof.sourceRouteEventLive,
+					abortHash: proof.abortHash,
+					abortCaller: proof.abortCaller,
+					abortKind: proof.abortRouteEventKind,
+					abortOldHash: proof.abortRouteEventOldHash,
+					abortNewHash: proof.abortRouteEventNewHash,
+					dispatchOpen: proof.dispatchOpen,
+				},
+				{
+					sourceHash,
+					sourceKind: "replace-state",
+					sourceNewHash: sourceHash,
+					sourceLive: false,
+					abortHash: targetHash,
+					abortCaller: "route-generation",
+					abortKind: "replace-state",
+					abortOldHash: sourceHash,
+					abortNewHash: targetHash,
+					dispatchOpen: true,
+				},
+			);
+			assert.equal(proof.abortRouteEventOrdinal, proof.sourceRouteEventOrdinal + 1);
+			assert.equal(proof.abortGeneration, proof.sourceGeneration + 1);
+			assert.equal(
+				helpers.isAdmissibleClientSupersessionFailure(failure, owner.active(), base),
+				true,
+			);
+			for (const [name, mutate] of [
+				["source replace remained live", (value) => { value.sourceRouteEventLive = true; }],
+				["source was not replaceState", (value) => { value.sourceRouteEventKind = "hashchange"; }],
+				["abort was not replaceState", (value) => { value.abortRouteEventKind = "hashchange"; }],
+				["source event did not establish source route", (value) => { value.sourceRouteEventNewHash = "#/attention"; }],
+				["replace did not start at source route", (value) => { value.abortRouteEventOldHash = "#/attention"; }],
+				["replace did not establish abort route", (value) => { value.abortRouteEventNewHash = "#/attention"; }],
+				["replace retained the same route", (value) => { value.abortHash = value.sourceHash; value.abortRouteEventNewHash = value.sourceHash; value.terminalHash = value.sourceHash; }],
+				["replace event gap", (value) => { value.abortRouteEventOrdinal += 1; }],
+				["replace outside live task", (value) => { value.dispatchOpen = false; }],
+				["unattributed abort caller", (value) => { value.abortCaller = "unattributed"; }],
+			]) {
+				const candidate = structuredClone(proof);
+				mutate(candidate);
+				assert.equal(
+					helpers.isAdmissibleClientSupersessionFailure(
+						failure,
+						{ clientSupersessionProof: () => candidate },
+						base,
+					),
+					false,
+					name,
+				);
+			}
+
+			assert.equal(scope.history.replaceState({}, "", sourceHash), "replace-result");
+			timers.flushDue();
+			const unrelatedController = new scope.AbortController();
+			const unrelatedPending = scope.fetch(`${base}/api/v2/profile`, {
+				signal: unrelatedController.signal,
+			});
+			const unrelatedRequest = request;
+			const unrelatedRejectFetch = rejectFetch;
+			timers.setTimeout(() => unrelatedController.abort("superseded"), 0);
+			assert.equal(scope.history.replaceState({}, "", targetHash), "replace-result");
+			abortStack = "Error\n    at unrelatedQueuedCallback";
+			timers.flushDue();
+			unrelatedRejectFetch(Error("aborted"));
+			await unrelatedPending.catch(() => {});
+			page.emit("requestfailed", unrelatedRequest);
+			await owner.active().settleClientFailureInspections();
+			const unrelatedFailure = failures.at(-1);
+			const unrelatedProof = owner.active().clientSupersessionProof(unrelatedFailure);
+			assert.equal(unrelatedProof.dispatchOpen, true);
+			assert.equal(unrelatedProof.abortCaller, "unattributed");
+			assert.equal(
+				helpers.isAdmissibleClientSupersessionFailure(
+					unrelatedFailure,
+					owner.active(),
+					base,
+				),
+				false,
+				"a previously queued callback cannot borrow replaceState route intent",
+			);
+			const browser = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
+			const composition = await readFile(new URL("../src/cli/inspect/web/src/change-inspector.ts", import.meta.url), "utf8");
+			const search = await readFile(new URL("../src/cli/inspect/web/src/change-inspector-search.ts", import.meta.url), "utf8");
+			assert.match(browser, /await search\.fill\("uncommitted poll draft"\);[\s\S]*?waitForTimeout\(3500\)[\s\S]*?await search\.fill\("Browser scale Change 1"\)/);
+			assert.match(search, /const SEARCH_DEBOUNCE_MS = 150;/);
+			assert.match(search, /debounceTimer = setTimeout\([\s\S]*?applyNow\(value\)/);
+			assert.match(composition, /const POLL_HEALTHY_INTERVAL_MS = 3_000;/);
+			assert.match(composition, /history\.replaceState\(history\.state, "", hash\);\n\s*void onRoute\(\);/);
+			assert.match(composition, /if \(abortPollCycle\) activePollCycleController\?\.abort\(reason\);/);
+			assert.match(composition, /const epoch = advanceRequestEpoch\("superseded", origin !== "poll"\);/);
+		});
 
 		const timers = new ManualTimers();
 		const listeners = [];
@@ -819,7 +1011,56 @@ test("profile admission requires exact Request binding and consecutive live rout
 			false,
 			"a late signal after completed body cannot qualify as failed transport",
 		);
+		const nonProfileFailure = {
+			retired: false,
+			method: "GET",
+			resourceType: "fetch",
+			error: "net::ERR_ABORTED",
+			url: `${base}/api/v2/changes?limit=100&order=change_id_asc`,
+		};
+		assert.equal(
+			helpers.isAdmissibleClientSupersessionFailure(
+				nonProfileFailure,
+				{
+					clientSupersessionProof: () => ({
+						lookupStatus: "complete",
+						signalBearing: true,
+						reason: "superseded",
+						documentGeneration: 0,
+						terminalDocumentGeneration: 0,
+						dispatchOpen: true,
+						sourceGeneration: 1,
+						abortGeneration: 2,
+						sourceHash: "#/changes?limit=100&order=change_id_asc",
+						observedSourceHash: "#/changes?limit=100&order=change_id_asc",
+						abortHash: "#/timeline?limit=100&order=desc",
+						targetHash: "#/timeline?limit=100&order=desc",
+						terminalHash: "#/timeline?limit=100&order=desc",
+						abortRouteEventKind: "replace-state",
+					}),
+				},
+				base,
+			),
+			false,
+			"replaceState observation cannot widen non-profile admission",
+		);
 	});
+});
+
+test("both Timeline exact-event journeys retain the noninteractive title target", async () => {
+	const browser = await readFile(
+		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
+		"utf8",
+	);
+	assert.equal(
+		(browser.match(/const (?:eventTitle|narrowEventTitle) = (?:eventRows|narrowEventRows)\.first\(\)\.locator\("\.title"\);/g) ?? []).length,
+		2,
+		"both proven Timeline title targets must survive final assembly",
+	);
+	assert.equal(browser.includes("await eventRows.first().click();"), false);
+	assert.equal(browser.includes("await narrowEventRows.first().click();"), false);
+	assert.match(browser, /await eventTitle\.click\(\);[\s\S]*?await waitForExactTimelineEvent\(eventId\);/);
+	assert.match(browser, /await narrowEventTitle\.click\(\);[\s\S]*?waitForExactTimelineEvent\(narrowEventId\);/);
 });
 
 test("request failure attribution composes the actual fetch bridge and lifecycle without widening admission", async (t) => {
@@ -3635,13 +3876,13 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"e3b971b06c634b9356945323e1e2ef98d1b82998057b184a0968ccdc6eaa2f7d",
+		"fbbe6eb8cf22640f14f9875f963d91855ae840e156469a2f40d10183eac5ce07",
 		"heartbeat deadline and failure-retention shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
-		"ac3e9608a3c70ace16207d07fad7c4eb9ff763073b79c6113b76ba5cb93b5a11",
-		"D73 must not edit the README",
+		"70ef6a287e051755f3c5653c79560b67583d2ff09419a5c3a4fe34bca5fd5182",
+		"the current shakedown contract documentation must remain byte-pinned",
 	);
 
 	const branchStart = browser.indexOf('if (config.mode === "shakedown")');
@@ -3894,7 +4135,7 @@ test("Changes G waits for the terminal destination route, page key, and selected
 	);
 });
 
-test("D69 preserves the 17 untouched full sections, scale producer, and reduced-motion D68 body", async () => {
+test("D69 preserves the 16 unrelated full sections, scale producer, and reduced-motion D68 body", async () => {
 	const browser = await readFile(
 		new URL("./change-inspector-browser-verify.mjs", import.meta.url),
 		"utf8",
@@ -3929,6 +4170,7 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 	const frozenSectionNames = fullSectionNames.filter(
 		(name) =>
 			name !== "Derived recovery and fallback" &&
+			name !== "Timeline keyboard and exact detail" &&
 			name !== "Changes keyboard and filters" &&
 			name !== "Polling retention and reduced motion" &&
 			name !== "Browser runtime",
@@ -3943,7 +4185,7 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 		fullSectionNames,
 		"the complete D68 full-section ledger must remain explicit",
 	);
-	assert.equal(frozenSectionNames.length, 17);
+	assert.equal(frozenSectionNames.length, 16);
 
 	const sectionSource = (name) => {
 		const start = browser.indexOf(`\tawait diagnostics.section("${name}"`);
@@ -3984,8 +4226,8 @@ test("D69 preserves the 17 untouched full sections, scale producer, and reduced-
 	preservation.update(scaleSource);
 	assert.equal(
 		preservation.digest("hex"),
-		"084bdb3253de950ce3072b4d459c9f8ac0af16c71ad264facc25270a701de056",
-		"17 passing full sections and the complete scale producer changed from D68",
+		"1ab864c6411374b848a4347099eb7f54b507512d49ec56fb45a30c3c52989083",
+		"16 unrelated passing full sections and the complete scale producer changed from D68",
 	);
 
 	const reducedStart = browser.indexOf(
@@ -5568,12 +5810,14 @@ test("return-destinations shakedown closes every executable dependency", async (
 		"Shakedown Changes terminal return",
 		"Shakedown parallel-current exact history",
 		"Shakedown poll supersession request accounting",
+		"Shakedown replace-state poll supersession",
 	];
 	const screenshots = [
 		"shakedown-retained-timeline-return",
 		"shakedown-changes-terminal-return",
 		"shakedown-parallel-current-exact-history",
 		"shakedown-poll-supersession-request-accounting",
+		"shakedown-replace-state-poll-supersession",
 	];
 
 	assert.match(
@@ -5606,8 +5850,8 @@ test("return-destinations shakedown closes every executable dependency", async (
 	const branch = browser.slice(branchStart, branchEnd);
 	assert.equal(
 		(branch.match(/await diagnostics\.section\(/g) ?? []).length,
-		4,
-		"the semantic mode must run exactly four independent journeys",
+		5,
+		"the semantic mode must run exactly five independent journeys",
 	);
 	const sectionStarts = sections.map((name) =>
 		branch.indexOf(`await diagnostics.section("${name}"`),
@@ -5617,7 +5861,7 @@ test("return-destinations shakedown closes every executable dependency", async (
 			sectionStarts.every(
 				(start, index) => index === 0 || start > sectionStarts[index - 1],
 			),
-		"the four exact sections must run in ledger order",
+		"the five exact sections must run in ledger order",
 	);
 	for (const [index, name] of sections.entries()) {
 		const end =
@@ -5645,7 +5889,7 @@ test("return-destinations shakedown closes every executable dependency", async (
 	);
 	assert.ok(
 		resultIndex > sectionStarts.at(-1),
-		"the aggregate report must be emitted only after all four sections",
+		"the aggregate report must be emitted only after all five sections",
 	);
 	assert.match(branch, /narrow Timeline return/);
 	assert.match(branch, /return destinations Changes G/);
@@ -5713,7 +5957,7 @@ test("return-destinations shakedown closes every executable dependency", async (
 		/`changes\?limit=100&order=change_id_asc&topology=parallel_current&q=\$\{encodeURIComponent\(parallel\.change\)\}`/,
 		"parallel-current exact history must keep its filtered limit=100 route",
 	);
-	const pollSection = branch.slice(sectionStarts[3], resultIndex);
+	const pollSection = branch.slice(sectionStarts[3], sectionStarts[4]);
 	assert.match(
 		pollSection,
 		/PROFILE_SUPERSESSION_OBSERVATION_MAX_OPPORTUNITIES\s*=\s*3/,
@@ -5734,28 +5978,36 @@ test("return-destinations shakedown closes every executable dependency", async (
 		/profileSupersessionObserved[\s\S]*Shakedown poll supersession request accounting/,
 		"the fourth section must prove one exact admitted supersession",
 	);
+	const replaceStateSection = branch.slice(sectionStarts[4], resultIndex);
+	assert.match(replaceStateSection, /sourceQuery = "uncommitted poll draft"/);
+	assert.match(
+		replaceStateSection,
+		/page\.route\(profilePattern, holdNextProfile, \{ times: 1 \}\)/,
+	);
+	assert.match(replaceStateSection, /abortCaller: "route-generation"/);
+	assert.match(replaceStateSection, /isAdmissibleClientSupersessionFailure/);
 	assert.match(branch, /return focusedShakedownResult/);
 	assert.match(
 		shell,
-		/\.sections == \[\s*\{name: "Shakedown retained Timeline return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown Changes terminal return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0\},\s*\{name: "Shakedown poll supersession request accounting", status: "passed", failureCount: 0\}\s*\]/,
+		/\.sections == \[\s*\{name: "Shakedown retained Timeline return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown Changes terminal return", status: "passed", failureCount: 0\},\s*\{name: "Shakedown parallel-current exact history", status: "passed", failureCount: 0\},\s*\{name: "Shakedown poll supersession request accounting", status: "passed", failureCount: 0\},\s*\{name: "Shakedown replace-state poll supersession", status: "passed", failureCount: 0\}\s*\]/,
 		"the shell must pin the exact ordered passing-section array",
 	);
 	assert.match(
 		shell,
-		/shakedown-return-destinations[\s\S]*\.sectionCount == 4[\s\S]*\.screenshotCount == 4/,
+		/shakedown-return-destinations[\s\S]*\.sectionCount == 5[\s\S]*\.screenshotCount == 5/,
 		"the shell must special-case the aggregate report contract",
 	);
 	assert.match(
 		shell,
-		/shakedown-return-destinations[\s\S]*screenshot_count[^\n]*-eq 4/,
-		"the shell must independently require four PNG files",
+		/shakedown-return-destinations[\s\S]*screenshot_count[^\n]*-eq 5/,
+		"the shell must independently require five PNG files",
 	);
 	assert.match(
 		shell,
-		/expected_screenshot_names="\$\(printf '%s\\n' \\\n\s*'shakedown-changes-terminal-return\.png' \\\n\s*'shakedown-parallel-current-exact-history\.png' \\\n\s*'shakedown-poll-supersession-request-accounting\.png' \\\n\s*'shakedown-retained-timeline-return\.png'\)"[\s\S]*\[ "\$screenshot_names" = "\$expected_screenshot_names" \]/,
+		/expected_screenshot_names="\$\(printf '%s\\n' \\\n\s*'shakedown-changes-terminal-return\.png' \\\n\s*'shakedown-parallel-current-exact-history\.png' \\\n\s*'shakedown-poll-supersession-request-accounting\.png' \\\n\s*'shakedown-replace-state-poll-supersession\.png' \\\n\s*'shakedown-retained-timeline-return\.png'\)"[\s\S]*\[ "\$screenshot_names" = "\$expected_screenshot_names" \]/,
 		"the shell must pin and compare the exact sorted PNG-name set",
 	);
-	assert.match(readme, /four independent diagnostics sections/);
+	assert.match(readme, /five independent diagnostics sections/);
 	for (const screenshot of screenshots) {
 		assert.match(readme, new RegExp(`${screenshot}\\.png`));
 	}
