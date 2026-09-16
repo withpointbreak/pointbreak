@@ -395,7 +395,10 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 
 		const families = [
 			["changes", "/api/v2/changes?limit=100&order=change_id_asc"],
+			["changes", "/api/v2/changes?limit=100&order=activity_desc"],
 			["attention", "/api/v2/attention?limit=100&order=change_id_asc"],
+			["attention", "/api/v2/attention?limit=100&order=activity_desc"],
+			["attention", "/api/v2/attention?limit=100&order=attention_wait"],
 			["history", "/api/v2/history?limit=100&order=desc"],
 			["change", "/api/v2/changes/change%3Ac"],
 			["revision", exact],
@@ -421,6 +424,8 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			["POST", { method: "POST" }], ["document", { resourceType: "document" }],
 			["other error", { error: "net::ERR_FAILED" }], ["profile overlap", { url: `${base}/api/v2/profile` }],
 			["identity", { url: `${base}/api/identity` }],
+			["wrong origin admitted order", { url: `http://127.0.0.1:4174/api/v2/attention?limit=100&order=attention_wait` }],
+			["failed proof admitted order", { url: `${base}/api/v2/attention?limit=100&order=attention_wait`, provenance: { ...provenance(), dispatchOpen: false } }],
 		];
 		for (const reason of ["hard_budget", "postflight_budget", "refresh_expiry", "cancelled", "stopped", "unknown"]) {
 			negatives.push([reason, { provenance: { ...provenance(), reason } }]);
@@ -440,6 +445,12 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 		for (const path of [
 			"/api/v2/profile", "/api/identity", "/api/v2/changes-extra", "/api/v2/changes/",
 			"/api/v2/changes?limit=101&order=change_id_asc", "/api/v2/changes?limit=100&order=desc",
+			"/api/v2/changes?limit=100&order=attention_wait", "/api/v2/changes?limit=100&order=asc",
+			"/api/v2/attention?limit=100", "/api/v2/attention?limit=100&order=",
+			"/api/v2/attention?limit=100&order=activity_desc&order=change_id_asc",
+			"/api/v2/attention?limit=0&order=activity_desc", "/api/v2/attention?limit=100&order=unknown",
+			"/api/v2/attention?limit=100&order=attention_wait&unknown=x",
+			"/api/v2/attention?limit=100&order=attention_wait&topology=unknown",
 			"/api/v2/changes?limit=100&order=change_id_asc&unknown=x",
 			"/api/v2/history?limit=100&order=desc&at=a&after=b",
 			"/api/v2/history?limit=100&order=desc&revision=r", "/api/v2/history?limit=100&order=no",
@@ -575,7 +586,7 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 		assert.match(reading, /revisions\/\$\{encoded\(revision\.revisionId\)\}\/resource\?artifactHash=/);
 		assert.match(reading, /\/interdiff\/\$\{encoded\(route\.from\.revisionId\)\}\/\$\{encoded\(route\.to\.revisionId\)\}/);
 		assert.match(composition, /fetchEntryJSON\(request, signal\)/);
-		assert.deepEqual(families.map(([name]) => name).sort(), ["attention", "change", "changes", "history", "interdiff", "resource", "revision"]);
+		assert.deepEqual([...new Set(families.map(([name]) => name))].sort(), ["attention", "change", "changes", "history", "interdiff", "resource", "revision"]);
 		const browser = await readFile(new URL("./change-inspector-browser-verify.mjs", import.meta.url), "utf8");
 		assert.ok(browser.indexOf("await page.addInitScript(") < browser.indexOf("await page.goto(bootstrapUrl(config.server)"), "bridge precedes bootstrap");
 		assert.match(browser, /const teardownSection = async[\s\S]*?settleClientFailureInspections\(\)/, "focused snapshots follow joined teardown");

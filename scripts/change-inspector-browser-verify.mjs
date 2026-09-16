@@ -256,7 +256,9 @@
 		const exactQuery = (required) => only(required) && required.every((key) => query[key]);
 		const bounded = /^\d+$/.test(query.limit ?? "") && Number(query.limit) >= 1 && Number(query.limit) <= 100;
 		if (path === "/api/v2/changes" || path === "/api/v2/attention") {
-			if (!bounded || query.order !== "change_id_asc" ||
+			const validOrder = query.order === "change_id_asc" || query.order === "activity_desc" ||
+				(path === "/api/v2/attention" && query.order === "attention_wait");
+			if (!bounded || !validOrder ||
 				!only(["limit", "order", "after", "q", "topology", "lifecycle", "attention", "availability"])) return null;
 			const enums = {
 				topology: ["initial", "replacement", "replacement_divergent", "consolidation", "parallel_current", "mixed", "incomplete", "cycle_conflicted"],
