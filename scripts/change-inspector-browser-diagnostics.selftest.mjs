@@ -409,6 +409,10 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			assert.equal(helpers.clientSupersessionEndpoint(`${base}${path}`, base), family);
 			assert.equal((await replay({ url: `${base}${path}` })).health.unexpectedRequestFailures.length, 0, family);
 		}
+		assert.equal(
+			helpers.clientSupersessionEndpoint(`${base}/api/v2/profile`, base),
+			"profile",
+		);
 		const negatives = [
 			["missing token", { noToken: true }], ["malformed token", { token: "bad" }],
 			["duplicate token", { duplicateToken: true }], ["unknown token", { lookup: async () => null }],
@@ -422,7 +426,7 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			["document changed without root", { dcl: true }], ["duplicate terminal", { duplicateTerminal: true }],
 			["wrong origin", { url: `http://127.0.0.1:4174${exact}` }],
 			["POST", { method: "POST" }], ["document", { resourceType: "document" }],
-			["other error", { error: "net::ERR_FAILED" }], ["profile overlap", { url: `${base}/api/v2/profile` }],
+			["other error", { error: "net::ERR_FAILED" }],
 			["identity", { url: `${base}/api/identity` }],
 			["wrong origin admitted order", { url: `http://127.0.0.1:4174/api/v2/attention?limit=100&order=attention_wait` }],
 			["failed proof admitted order", { url: `${base}/api/v2/attention?limit=100&order=attention_wait`, provenance: { ...provenance(), dispatchOpen: false } }],
@@ -443,7 +447,7 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 		}
 		assert.equal(helpers.isAdmissibleClientSupersessionFailure(first.failures[0], (await replay()).lifecycle, base), false, "different lifecycle");
 		for (const path of [
-			"/api/v2/profile", "/api/identity", "/api/v2/changes-extra", "/api/v2/changes/",
+			"/api/identity", "/api/v2/changes-extra", "/api/v2/changes/",
 			"/api/v2/changes?limit=101&order=change_id_asc", "/api/v2/changes?limit=100&order=desc",
 			"/api/v2/changes?limit=100&order=attention_wait", "/api/v2/changes?limit=100&order=asc",
 			"/api/v2/attention?limit=100", "/api/v2/attention?limit=100&order=",
@@ -494,7 +498,6 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 			return { scope, calls, timers, dispatch, take };
 		};
 		for (const [path, options] of [
-			[`${base}/api/v2/profile`, { signal: new AbortController().signal }],
 			[`${base}${exact}`, {}], [`http://elsewhere.test${exact}`, { signal: new AbortController().signal }],
 			[`${base}${exact}`, { method: "POST", signal: new AbortController().signal }],
 		]) {
@@ -594,6 +597,231 @@ test("D83 binds only exact client route-dispatch supersession across the closed 
 	});
 });
 
+test("profile admission requires exact Request binding and consecutive live route events", async (t) => {
+	await runD70BrowserSelftest(async (helpers) => {
+		const base = "http://127.0.0.1:4173";
+		const header = "x-pointbreak-browser-provenance";
+		const runShape = async (sourceHash) => {
+			const page = new FakePage(`${base}/${sourceHash}`);
+			const timers = new ManualTimers();
+			const failures = [];
+			const listeners = [];
+			const owner = helpers.createProfileRequestLifecycleActivationOwner({
+				page,
+				primaryBaseUrl: base,
+				now: () => timers.now,
+				setTimer: timers.setTimeout,
+				clearTimer: timers.clearTimeout,
+				onRequestFailure: (failure) => failures.push(failure),
+			});
+			owner.start();
+			let request;
+			let rejectFetch;
+			const scope = {
+				URL,
+				Headers,
+				Request,
+				AbortSignal,
+				crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
+				location: { href: `${base}/${sourceHash}` },
+				setTimeout: timers.setTimeout,
+				clearTimeout: timers.clearTimeout,
+				addEventListener: (name, listener, options) => {
+					assert.equal(name, "hashchange");
+					assert.equal(options.passive, true);
+					listeners.push(listener);
+				},
+				fetch: (input, init) => {
+					request = new FakeRequest({ url: input, frame: page.mainFrame() });
+					request.headers = () => Object.fromEntries(new Headers(init?.headers));
+					page.emit("request", request);
+					return new Promise((_resolve, reject) => {
+						rejectFetch = reject;
+					});
+				},
+			};
+			helpers.installClientAbortProvenanceBridge(scope, {
+				primaryBaseUrl: base,
+			});
+			page.evaluate = async (_callback, token) =>
+				scope.__pointbreakClientAbortProvenance.take(token);
+			const dispatch = (oldHash, newHash, callback) => {
+				scope.location.href = `${base}/${sourceHash}`;
+				const event = {
+					currentTarget: scope,
+					eventPhase: 2,
+					oldURL: `${base}/${oldHash}`,
+					newURL: `${base}/${newHash}`,
+				};
+				listeners[0](event);
+				callback();
+				event.currentTarget = null;
+				event.eventPhase = 0;
+			};
+			const controller = new AbortController();
+			let pending;
+			dispatch("#/timeline", sourceHash, () => {
+				pending = scope.fetch(`${base}/api/v2/profile`, {
+					signal: controller.signal,
+				});
+			});
+			const token = request.headers()[header];
+			assert.match(token, /^[0-9a-f-]{36}:1$/);
+			dispatch(`${sourceHash}&route-event=old`, sourceHash, () => {
+				controller.abort("superseded");
+			});
+			rejectFetch(Error("aborted"));
+			await pending.catch(() => {});
+			page.emit("requestfailed", request);
+			await owner.active().settleClientFailureInspections();
+			const health = helpers.createRequestHealthSnapshot({
+				requestFailures: failures,
+				isAdmissibleRequestFailure: () => false,
+				isAdmissibleClientFailure: (failure) =>
+					helpers.isAdmissibleClientSupersessionFailure(
+						failure,
+						owner.active(),
+						base,
+					),
+			});
+			assert.equal(health.unexpectedRequestFailures.length, 0);
+			assert.equal(health.clientSupersessionFailureEvidence.length, 1);
+			const failure = failures[0];
+			const proof = owner.active().clientSupersessionProof(failure);
+			assert.equal(proof.sourceHash, sourceHash);
+			assert.equal(proof.abortHash, sourceHash);
+			assert.equal(proof.abortRouteEventOrdinal, proof.sourceRouteEventOrdinal + 1);
+			assert.equal(proof.fetchTerminalAtAbort, "pending");
+			assert.equal(proof.bodyTerminalAtAbort, "pending");
+			assert.equal(proof.fetchTerminal, "fetch-reject-after-signal");
+			assert.equal(proof.bodyTerminal, "pending");
+			return { failure, proof };
+		};
+
+		for (const route of [
+			"#/changes?limit=100&order=change_id_asc",
+			"#/changes/change%3Asha256%3Aaa?limit=100&order=change_id_asc",
+		]) {
+			await t.test(route, async () => {
+				const { failure, proof } = await runShape(route);
+				for (const [name, mutate] of [
+					["missing source event", (value) => { value.sourceRouteEventOrdinal = null; }],
+					["same event", (value) => { value.abortRouteEventOrdinal = value.sourceRouteEventOrdinal; }],
+					["event gap", (value) => { value.abortRouteEventOrdinal += 1; }],
+					["outside dispatch", (value) => { value.dispatchOpen = false; }],
+					["watchdog", (value) => { value.reason = "hard_budget"; }],
+					["unrelated abort", (value) => { value.reason = "cancelled"; }],
+					["completed body", (value) => {
+						value.bodyTerminalAtAbort = "resolved:text";
+						value.bodyTerminal = "resolved:text";
+					}],
+					["response transport", (value) => { value.fetchTerminal = "response"; }],
+					["wrong route event", (value) => { value.abortRouteEventNewHash = "#/attention"; }],
+					["document boundary", (value) => { value.terminalDocumentGeneration += 1; }],
+				]) {
+					const candidate = structuredClone(proof);
+					mutate(candidate);
+					assert.equal(
+						helpers.isAdmissibleClientSupersessionFailure(
+							failure,
+							{ clientSupersessionProof: () => candidate },
+							base,
+						),
+						false,
+						name,
+					);
+				}
+			});
+		}
+
+		const timers = new ManualTimers();
+		const listeners = [];
+		let bodyController;
+		const response = new Response(
+			new ReadableStream({
+				start(controller) {
+					bodyController = controller;
+				},
+			}),
+		);
+		const scope = {
+			URL,
+			Headers,
+			Request,
+			AbortSignal,
+			crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000002" },
+			location: { href: `${base}/#/changes?limit=100&order=change_id_asc` },
+			setTimeout: timers.setTimeout,
+			clearTimeout: timers.clearTimeout,
+			addEventListener: (_name, listener) => listeners.push(listener),
+			fetch: () => Promise.resolve(response),
+		};
+		helpers.installClientAbortProvenanceBridge(scope, { primaryBaseUrl: base });
+		const event = (oldHash, newHash, callback) => {
+			const value = {
+				currentTarget: scope,
+				eventPhase: 2,
+				oldURL: `${base}/${oldHash}`,
+				newURL: `${base}/${newHash}`,
+			};
+			listeners[0](value);
+			callback();
+			value.currentTarget = null;
+			value.eventPhase = 0;
+		};
+		const controller = new AbortController();
+		let completed;
+		event("#/timeline", "#/changes?limit=100&order=change_id_asc", () => {
+			completed = scope.fetch(`${base}/api/v2/profile`, {
+				signal: controller.signal,
+			});
+		});
+		const completedResponse = await completed;
+		const completedToken = completedResponse === response
+			? "00000000-0000-4000-8000-000000000002:1"
+			: null;
+		const completedBody = completedResponse.text();
+		bodyController.enqueue(new TextEncoder().encode("{}"));
+		bodyController.close();
+		await completedBody;
+		await Promise.resolve();
+		event(
+			"#/changes?limit=100&order=change_id_asc&route-event=old",
+			"#/changes?limit=100&order=change_id_asc",
+			() => controller.abort("superseded"),
+		);
+		const late = scope.__pointbreakClientAbortProvenance.take(completedToken);
+		assert.equal(late.fetchTerminal, "response");
+		assert.equal(late.bodyTerminal, "resolved:text");
+		assert.equal(late.fetchTerminalAtAbort, "response");
+		assert.equal(late.bodyTerminalAtAbort, "resolved:text");
+		assert.equal(
+			helpers.isAdmissibleClientSupersessionFailure(
+				{
+					retired: false,
+					method: "GET",
+					resourceType: "fetch",
+					error: "net::ERR_ABORTED",
+					url: `${base}/api/v2/profile`,
+				},
+				{
+					clientSupersessionProof: () => ({
+						...late,
+						lookupStatus: "complete",
+						observedSourceHash: late.sourceHash,
+						terminalHash: late.abortHash,
+						documentGeneration: 0,
+						terminalDocumentGeneration: 0,
+					}),
+				},
+				base,
+			),
+			false,
+			"a late signal after completed body cannot qualify as failed transport",
+		);
+	});
+});
+
 test("request failure attribution composes the actual fetch bridge and lifecycle without widening admission", async (t) => {
 	await runD70BrowserSelftest(async (helpers) => {
 		const base = "http://127.0.0.1:4173";
@@ -601,8 +829,8 @@ test("request failure attribution composes the actual fetch bridge and lifecycle
 		const targetHash = "#/timeline?limit=100&order=desc";
 		const cases = [
 			["instrumented read", {}, "present", true],
-			["product profile", { profile: true }, "profile-excluded", false],
-			["harness profile without signal", { profile: true, noSignal: true }, "profile-excluded", false],
+			["product profile without route-event ownership", { profile: true }, "present", false],
+			["harness profile without signal", { profile: true, noSignal: true }, "token-missing", false],
 			["harness read without signal", { noSignal: true }, "token-missing", false],
 			["fetch before instrumentation", { bridgeLate: true }, "token-missing", false],
 			["request before lifecycle activation", { activateLate: true }, "request-missing", false],

@@ -160,9 +160,10 @@
 		let invalid = false;
 		let ordinal = 0;
 		let generation = 0;
+		let routeEventOrdinal = 0;
 		let dispatch = null;
-		const redactedHash = () => {
-			const hash = new scope.URL(scope.location.href).hash;
+		const redactedHashFrom = (value) => {
+			const hash = new scope.URL(value, scope.location.href).hash;
 			const separator = hash.indexOf("?");
 			if (separator < 0) return hash;
 			const query = hash.slice(separator + 1).split("&").filter(Boolean).filter((entry) => {
@@ -172,9 +173,17 @@
 			}).join("&");
 			return hash.slice(0, separator) + (query ? `?${query}` : "");
 		};
+		const redactedHash = () => redactedHashFrom(scope.location.href);
 		scope.addEventListener("hashchange", (event) => {
 			generation += 1;
-			const current = { event, targetHash: redactedHash() };
+			routeEventOrdinal += 1;
+			const current = {
+				event,
+				ordinal: routeEventOrdinal,
+				oldHash: redactedHashFrom(event.oldURL),
+				newHash: redactedHashFrom(event.newURL),
+				targetHash: redactedHash(),
+			};
 			dispatch = current;
 			scope.setTimeout(() => { if (dispatch === current) dispatch = null; }, 0);
 		}, { passive: true });
@@ -193,8 +202,8 @@
 			let url;
 			try { url = new scope.URL(request?.url ?? input, scope.location.href); }
 			catch { return originalFetch.call(this, input, options); }
-			if (url.origin !== origin || url.pathname === "/api/v2/profile" ||
-				method !== "GET" || !(signal instanceof scope.AbortSignal)) {
+			if (url.origin !== origin || method !== "GET" ||
+				!(signal instanceof scope.AbortSignal)) {
 				return originalFetch.call(this, input, options);
 			}
 			const headers = new scope.Headers(options?.headers ?? request?.headers);
@@ -205,13 +214,26 @@
 			ordinal += 1;
 			const token = `${nonce}:${ordinal}`;
 			headers.set(header, token);
-			const record = { sourceHash: redactedHash(), sourceGeneration: generation, signalBearing: true };
+			const record = {
+				sourceHash: redactedHash(),
+				sourceGeneration: generation,
+				sourceRouteEventOrdinal: dispatch?.ordinal ?? null,
+				sourceRouteEventNewHash: dispatch?.newHash ?? null,
+				signalBearing: true,
+				fetchTerminal: "pending",
+				bodyTerminal: "pending",
+			};
 			if (records.size >= limit) invalid = true;
 			if (!invalid) records.set(token, record);
 			const aborted = () => {
 				record.reason = typeof signal.reason === "string" ? signal.reason : null;
 				record.abortHash = redactedHash();
 				record.abortGeneration = generation;
+				record.abortRouteEventOrdinal = dispatch?.ordinal ?? null;
+				record.abortRouteEventOldHash = dispatch?.oldHash ?? null;
+				record.abortRouteEventNewHash = dispatch?.newHash ?? null;
+				record.fetchTerminalAtAbort = record.fetchTerminal;
+				record.bodyTerminalAtAbort = record.bodyTerminal;
 				// The event's live dispatch state excludes a previously queued timeout even
 				// if it runs before our zero-delay cleanup task. No elapsed-time allowance.
 				record.dispatchOpen = dispatch !== null && dispatch.event.currentTarget === scope &&
@@ -223,11 +245,46 @@
 				signal.removeEventListener("abort", aborted);
 				if (!keep) records.delete(token);
 			};
+			const observeBody = (response) => {
+				let wrapped = false;
+				for (const methodName of ["text", "json", "arrayBuffer", "blob", "formData"]) {
+					if (typeof response?.[methodName] !== "function") continue;
+					wrapped = true;
+					const original = response[methodName].bind(response);
+					response[methodName] = function (...args) {
+						const body = original(...args);
+						void Promise.resolve(body).then(
+							() => {
+								record.bodyTerminal = `resolved:${methodName}`;
+								scope.setTimeout(() => cleanup(signal.aborted), 0);
+							},
+							() => {
+								record.bodyTerminal = `rejected:${methodName}`;
+								scope.setTimeout(() => cleanup(signal.aborted), 0);
+							},
+						);
+						return body;
+					};
+				}
+				if (!wrapped) cleanup(false);
+				return response;
+			};
 			let result;
 			try { result = originalFetch.call(this, input, { ...options, headers }); }
 			catch (error) { cleanup(false); throw error; }
 			// Observe settlement without substituting the Promise returned to the client.
-			void result.then(() => cleanup(false), () => cleanup(signal.aborted));
+			void result.then(
+				(response) => {
+					record.fetchTerminal = "response";
+					observeBody(response);
+				},
+				() => {
+					record.fetchTerminal = signal.aborted
+						? "fetch-reject-after-signal"
+						: "fetch-reject";
+					cleanup(signal.aborted);
+				},
+			);
 			return result;
 		};
 	}
@@ -255,6 +312,7 @@
 		const only = (allowed) => keys.every((key) => allowed.includes(key));
 		const exactQuery = (required) => only(required) && required.every((key) => query[key]);
 		const bounded = /^\d+$/.test(query.limit ?? "") && Number(query.limit) >= 1 && Number(query.limit) <= 100;
+		if (path === "/api/v2/profile" && keys.length === 0) return "profile";
 		if (path === "/api/v2/changes" || path === "/api/v2/attention") {
 			const validOrder = query.order === "change_id_asc" || query.order === "activity_desc" ||
 				(path === "/api/v2/attention" && query.order === "attention_wait");
@@ -286,10 +344,29 @@
 
 	function isAdmissibleClientSupersessionFailure(failure, lifecycle, primaryBaseUrl) {
 		const proof = lifecycle?.clientSupersessionProof(failure);
+		const endpoint = clientSupersessionEndpoint(failure.url, primaryBaseUrl);
 		if (!proof || failure.retired || failure.method !== "GET" || failure.resourceType !== "fetch" ||
-			failure.error !== "net::ERR_ABORTED" || clientSupersessionEndpoint(failure.url, primaryBaseUrl) === null) return false;
-		return proof.lookupStatus === "complete" && proof.signalBearing === true && proof.reason === "superseded" &&
-			proof.dispatchOpen === true && Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 0 &&
+			failure.error !== "net::ERR_ABORTED" || endpoint === null) return false;
+		const common = proof.lookupStatus === "complete" && proof.signalBearing === true && proof.reason === "superseded" &&
+			proof.documentGeneration === proof.terminalDocumentGeneration;
+		if (!common) return false;
+		if (endpoint === "profile") {
+			return Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 1 &&
+				Number.isSafeInteger(proof.sourceRouteEventOrdinal) && proof.sourceRouteEventOrdinal >= 1 &&
+				proof.abortGeneration === proof.sourceGeneration + 1 &&
+				proof.abortRouteEventOrdinal === proof.sourceRouteEventOrdinal + 1 &&
+				proof.dispatchOpen === true &&
+				proof.sourceRouteEventNewHash === proof.sourceHash &&
+				proof.abortRouteEventNewHash === proof.abortHash &&
+				proof.sourceHash === proof.observedSourceHash &&
+				proof.abortHash === proof.terminalHash &&
+				proof.fetchTerminalAtAbort === "pending" &&
+				proof.bodyTerminalAtAbort === "pending" &&
+				proof.fetchTerminal === "fetch-reject-after-signal" &&
+				proof.bodyTerminal === "pending";
+		}
+		return proof.dispatchOpen === true &&
+			Number.isSafeInteger(proof.sourceGeneration) && proof.sourceGeneration >= 0 &&
 			proof.abortGeneration === proof.sourceGeneration + 1 && proof.sourceHash === proof.observedSourceHash &&
 			proof.abortHash === proof.targetHash && proof.sourceHash !== proof.targetHash && proof.terminalHash === proof.targetHash &&
 			proof.documentGeneration === proof.terminalDocumentGeneration;
@@ -395,7 +472,17 @@
 							lookupStatus: "complete", sourceHash: value.sourceHash,
 							sourceGeneration: value.sourceGeneration, signalBearing: value.signalBearing,
 							reason: value.reason, abortHash: value.abortHash,
-							abortGeneration: value.abortGeneration, dispatchOpen: value.dispatchOpen,
+							abortGeneration: value.abortGeneration,
+							sourceRouteEventOrdinal: value.sourceRouteEventOrdinal,
+							sourceRouteEventNewHash: value.sourceRouteEventNewHash,
+							abortRouteEventOrdinal: value.abortRouteEventOrdinal,
+							abortRouteEventOldHash: value.abortRouteEventOldHash,
+							abortRouteEventNewHash: value.abortRouteEventNewHash,
+							fetchTerminalAtAbort: value.fetchTerminalAtAbort,
+							bodyTerminalAtAbort: value.bodyTerminalAtAbort,
+							fetchTerminal: value.fetchTerminal,
+							bodyTerminal: value.bodyTerminal,
+							dispatchOpen: value.dispatchOpen,
 						});
 					}
 					resolve();
@@ -826,10 +913,10 @@
 			recordsByRequest.set(request, record);
 			const headers = safeRequestValue(request, "headers", null);
 			const clientToken = headers?.["x-pointbreak-browser-provenance"];
-			record.clientRecordStatus = record.url === `${primaryOrigin}/api/v2/profile` ? "profile-excluded" :
-				headers === null ? "headers-unavailable" : clientToken === undefined ? "token-missing" : "token-invalid";
+			record.clientRecordStatus = headers === null ? "headers-unavailable" :
+				clientToken === undefined ? "token-missing" : "token-invalid";
 			if (typeof clientToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$/.test(clientToken) &&
-				record.url !== `${primaryOrigin}/api/v2/profile`) {
+				clientSupersessionEndpoint(record.url, primaryBaseUrl) !== null) {
 				const previous = clientTokens.get(clientToken);
 				if (previous) clientRecords.get(previous).invalid = true;
 				if (clientTokens.size >= 512) clientInspectionOverflow = true;
@@ -1376,7 +1463,9 @@
 				const entry = clientFailures.get(failure);
 				if (!entry || clientInspectionOverflow) return null;
 				const { record, client } = entry;
-				if (client.invalid || client.failureCount !== 1 || client.targetHash === null ||
+				const endpoint = clientSupersessionEndpoint(record.url, primaryBaseUrl);
+				if (client.invalid || client.failureCount !== 1 || endpoint === null ||
+					(endpoint !== "profile" && client.targetHash === null) ||
 					failure.request !== record.request || recordsByRequest.get(failure.request) !== record ||
 					clientTokens.get(client.token) !== record || record.retired) return null;
 				return failure.clientSupersession;
