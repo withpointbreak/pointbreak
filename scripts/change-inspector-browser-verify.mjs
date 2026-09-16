@@ -222,7 +222,6 @@
 					abortCallers.set(
 						signal,
 						/\bat advanceRequestEpoch\b/.test(abortStack) &&
-							/\bat loadGeneration\b/.test(abortStack) &&
 							/\bat onRoute\b/.test(abortStack)
 							? "route-generation"
 							: "unattributed",

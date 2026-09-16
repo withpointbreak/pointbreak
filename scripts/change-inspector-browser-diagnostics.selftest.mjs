@@ -626,7 +626,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 				Error: class RouteGenerationError extends Error {
 					constructor() {
 						super();
-						this.stack = "Error\n    at advanceRequestEpoch\n    at loadGeneration\n    at onRoute";
+						this.stack = "Error\n    at advanceRequestEpoch\n    at onRoute";
 					}
 				},
 				crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
@@ -774,7 +774,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			owner.start();
 			let request;
 			let rejectFetch;
-			let abortStack = "Error\n    at advanceRequestEpoch\n    at loadGeneration\n    at onRoute";
+			let abortStack = "Error\n    at advanceRequestEpoch\n    at onRoute";
 			const scope = {
 				URL,
 				Headers,
@@ -895,7 +895,7 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			const unrelatedRejectFetch = rejectFetch;
 			timers.setTimeout(() => unrelatedController.abort("superseded"), 0);
 			assert.equal(scope.history.replaceState({}, "", targetHash), "replace-result");
-			abortStack = "Error\n    at unrelatedQueuedCallback";
+			abortStack = "Error\n    at advanceRequestEpoch\n    at unrelatedQueuedCallback";
 			timers.flushDue();
 			unrelatedRejectFetch(Error("aborted"));
 			await unrelatedPending.catch(() => {});
@@ -924,6 +924,11 @@ test("profile admission requires exact Request binding and consecutive owned rou
 			assert.match(composition, /history\.replaceState\(history\.state, "", hash\);\n\s*void onRoute\(\);/);
 			assert.match(composition, /if \(abortPollCycle\) activePollCycleController\?\.abort\(reason\);/);
 			assert.match(composition, /const epoch = advanceRequestEpoch\("superseded", origin !== "poll"\);/);
+			assert.match(
+				composition,
+				/const onRoute = async \(\): Promise<void> => \{[\s\S]*?advanceRequestEpoch\(\);[\s\S]*?await loadGeneration\(route, newProjectionRetryBudget\(\)\);[\s\S]*?\n  \};/,
+				"onRoute must synchronously advance the request epoch before its later generation load",
+			);
 		});
 
 		const timers = new ManualTimers();
