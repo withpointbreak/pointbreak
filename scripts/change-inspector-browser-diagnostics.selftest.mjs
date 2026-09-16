@@ -3407,12 +3407,12 @@ test("D73 base shakedown repeats its exact-detail open without widening the harn
 		);
 	assert.equal(
 		createHash("sha256").update(canonicalShell).digest("hex"),
-		"46ede97829420255633389b548d6805f44f44daff3f91418222da986fc541340",
+		"e3b971b06c634b9356945323e1e2ef98d1b82998057b184a0968ccdc6eaa2f7d",
 		"heartbeat deadline and failure-retention shell outside D78 proof plumbing must remain byte-pinned",
 	);
 	assert.equal(
 		createHash("sha256").update(readme).digest("hex"),
-		"697bc42fd0126b7e992da6cf24567dfdfd80c63f5f70cd09edcfa844bd2937e5",
+		"ac3e9608a3c70ace16207d07fad7c4eb9ff763073b79c6113b76ba5cb93b5a11",
 		"D73 must not edit the README",
 	);
 
@@ -5141,18 +5141,18 @@ test("D70 stage contracts are production-bounded, inventoried, and documented", 
 		"handled stage signals must remain owned through terminal publication",
 	);
 	const browserStageCall = shell.indexOf("run_browser_program_stage ", 1);
-	const browserStageStatusCheck = shell.indexOf(
-		'if [ "$browser_gate_status" -ne 0 ]',
+	const browserResultParserCall = shell.indexOf(
+		'node "$browser_result_parser"',
 		browserStageCall,
 	);
-	const browserResultWrite = shell.indexOf(
-		'printf \'%s\\n\' "$browser_result_line" >"$browser_result"',
-		browserStageCall,
+	const browserResultStatusArgument = shell.indexOf(
+		'"$log_dir/browser-gate.log" "$browser_result" "$browser_gate_status"',
+		browserResultParserCall,
 	);
 	assert.ok(
-		browserStageStatusCheck > browserStageCall &&
-			browserStageStatusCheck < browserResultWrite,
-		"a failed browser-program stage must stop before browser-result publication",
+		browserResultParserCall > browserStageCall &&
+			browserResultStatusArgument > browserResultParserCall,
+		"browser-result publication must pass the exact stage status through the strict parser",
 	);
 	assert.doesNotMatch(
 		shell.slice(shell.indexOf("usage()"), shell.indexOf("EOF", shell.indexOf("usage()"))),

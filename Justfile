@@ -575,8 +575,13 @@ review-decision-browser-verify root:
 
 # Exercise Change-first browser diagnostic aggregation without a browser or fixture.
 [group('review-evidence')]
-change-inspector-browser-selftest:
+change-inspector-browser-selftest: change-inspector-browser-contract-selftest
     node --test scripts/change-inspector-browser-diagnostics.selftest.mjs
+
+# Exercise browser renderer, parser, readiness, and transport-observer contracts offline.
+[group('review-evidence')]
+change-inspector-browser-contract-selftest:
+    node --test scripts/change-inspector-browser-contracts.selftest.mjs
 
 # Verify the Change-first Inspector with an injected exact binary and a disposable public L2 matrix.
 [group('review-evidence')]

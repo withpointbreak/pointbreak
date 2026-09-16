@@ -36,6 +36,9 @@ script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 browser_program_template="$script_dir/change-inspector-browser-verify.mjs"
 browser_diagnostics="$script_dir/change-inspector-browser-diagnostics.mjs"
+browser_contracts="$script_dir/change-inspector-browser-contracts.mjs"
+browser_renderer="$script_dir/change-inspector-browser-render.mjs"
+browser_result_parser="$script_dir/change-inspector-browser-result.mjs"
 browser_manifest_publisher="$script_dir/change-inspector-browser-manifest.mjs"
 matrix_materializer="$script_dir/materialize-inspector-decision-matrix.sh"
 pointbreak_binary="${POINTBREAK_BINARY:-}"
@@ -800,6 +803,9 @@ case "${POINTBREAK_DERIVED_ACCESS:-}" in
 esac
 [ -f "$browser_program_template" ] || die "browser program is missing: $browser_program_template"
 [ -f "$browser_diagnostics" ] || die "browser diagnostics are missing: $browser_diagnostics"
+[ -f "$browser_contracts" ] || die "browser contracts are missing: $browser_contracts"
+[ -f "$browser_renderer" ] || die "browser renderer is missing: $browser_renderer"
+[ -f "$browser_result_parser" ] || die "browser result parser is missing: $browser_result_parser"
 [ -f "$browser_manifest_publisher" ] || die "browser manifest publisher is missing: $browser_manifest_publisher"
 [ -x "$matrix_materializer" ] || die "matrix materializer is not executable: $matrix_materializer"
 
@@ -931,6 +937,12 @@ git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-verify
   >"$snapshot_scripts/change-inspector-browser-verify.mjs"
 git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-diagnostics.mjs" \
   >"$snapshot_scripts/change-inspector-browser-diagnostics.mjs"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-contracts.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-contracts.mjs"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-render.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-render.mjs"
+git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-result.mjs" \
+  >"$snapshot_scripts/change-inspector-browser-result.mjs"
 git -C "$repo_root" show "$source_commit:scripts/change-inspector-browser-manifest.mjs" \
   >"$snapshot_scripts/change-inspector-browser-manifest.mjs"
 git -C "$repo_root" show "$source_commit:scripts/materialize-inspector-decision-matrix.sh" \
@@ -963,6 +975,9 @@ snapshot_git_tree \
 chmod 0444 \
   "$snapshot_scripts/change-inspector-browser-verify.mjs" \
   "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" \
+  "$snapshot_scripts/change-inspector-browser-contracts.mjs" \
+  "$snapshot_scripts/change-inspector-browser-render.mjs" \
+  "$snapshot_scripts/change-inspector-browser-result.mjs" \
   "$snapshot_scripts/change-inspector-browser-manifest.mjs" \
   "$snapshot_ready_store/$activation_fixture" \
   "$snapshot_ready_store/$completion_fixture"
@@ -980,6 +995,9 @@ chmod 0555 "$binary_snapshot"
 shell_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-verify.sh" | awk '{print $1}')"
 template_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-verify.mjs" | awk '{print $1}')"
 diagnostics_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-diagnostics.mjs" | awk '{print $1}')"
+contracts_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-contracts.mjs" | awk '{print $1}')"
+renderer_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-render.mjs" | awk '{print $1}')"
+result_parser_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-result.mjs" | awk '{print $1}')"
 publisher_sha256="$(shasum -a 256 "$snapshot_scripts/change-inspector-browser-manifest.mjs" | awk '{print $1}')"
 materializer_sha256="$(shasum -a 256 "$snapshot_scripts/materialize-inspector-decision-matrix.sh" | awk '{print $1}')"
 activation_fixture_sha256="$(shasum -a 256 "$snapshot_ready_store/$activation_fixture" | awk '{print $1}')"
@@ -1005,6 +1023,9 @@ jq -n \
   --arg shellSha256 "$shell_sha256" \
   --arg templateSha256 "$template_sha256" \
   --arg diagnosticsSha256 "$diagnostics_sha256" \
+  --arg contractsSha256 "$contracts_sha256" \
+  --arg rendererSha256 "$renderer_sha256" \
+  --arg resultParserSha256 "$result_parser_sha256" \
   --arg publisherSha256 "$publisher_sha256" \
   --arg materializerSha256 "$materializer_sha256" \
   --arg activationFixture "$activation_fixture" \
@@ -1019,6 +1040,9 @@ jq -n \
       {path: "scripts/change-inspector-browser-verify.sh", sha256: $shellSha256},
       {path: "scripts/change-inspector-browser-verify.mjs", sha256: $templateSha256},
       {path: "scripts/change-inspector-browser-diagnostics.mjs", sha256: $diagnosticsSha256},
+      {path: "scripts/change-inspector-browser-contracts.mjs", sha256: $contractsSha256},
+      {path: "scripts/change-inspector-browser-render.mjs", sha256: $rendererSha256},
+      {path: "scripts/change-inspector-browser-result.mjs", sha256: $resultParserSha256},
       {path: "scripts/change-inspector-browser-manifest.mjs", sha256: $publisherSha256},
       {path: "scripts/materialize-inspector-decision-matrix.sh", sha256: $materializerSha256},
       {path: ("tests/support/assets/change-ready-store/" + $activationFixture), sha256: $activationFixtureSha256},
@@ -1029,6 +1053,9 @@ harness_record_sha256="$(shasum -a 256 "$log_dir/harness-digests.json" | awk '{p
 pointbreak_binary="$binary_snapshot"
 browser_program_template="$snapshot_scripts/change-inspector-browser-verify.mjs"
 browser_diagnostics="$snapshot_scripts/change-inspector-browser-diagnostics.mjs"
+browser_contracts="$snapshot_scripts/change-inspector-browser-contracts.mjs"
+browser_renderer="$snapshot_scripts/change-inspector-browser-render.mjs"
+browser_result_parser="$snapshot_scripts/change-inspector-browser-result.mjs"
 browser_manifest_publisher="$snapshot_scripts/change-inspector-browser-manifest.mjs"
 matrix_materializer="$snapshot_scripts/materialize-inspector-decision-matrix.sh"
 "$pointbreak_binary" version --format json >"$log_dir/pointbreak-version.json"
@@ -1616,24 +1643,8 @@ browser_config="$(jq -cn \
     readerServers: $readerServers,
     fixture: ($fixture[0] + {matrix: $matrix[0]})}')"
 browser_program="$log_dir/browser-program.mjs"
-# shellcheck disable=SC2016 # JavaScript template literals are intentionally single-quoted from Bash.
-node --input-type=module -e '
-import fs from "node:fs";
-import { pathToFileURL } from "node:url";
-const source = fs.readFileSync(process.argv[1], "utf8");
-const diagnostics = await import(pathToFileURL(process.argv[2]));
-const replacements = new Map([
-  ["__POINTBREAK_BROWSER_DIAGNOSTIC_FAILURE__", diagnostics.BrowserDiagnosticFailure.toString()],
-  ["__POINTBREAK_BROWSER_DIAGNOSTICS__", diagnostics.createBrowserDiagnostics.toString()],
-  ["__POINTBREAK_CHANGE_BROWSER_CONFIG__", process.argv[3]],
-]);
-let rendered = source;
-for (const [marker, value] of replacements) {
-  if (!rendered.includes(marker)) throw new Error(`browser program marker is missing: ${marker}`);
-  rendered = rendered.replace(marker, value);
-}
-fs.writeFileSync(process.argv[4], rendered);
-' "$browser_program_template" "$browser_diagnostics" "$browser_config" "$browser_program"
+node "$browser_renderer" \
+  "$browser_program_template" "$browser_diagnostics" "$browser_config" "$browser_program"
 
 # Create the session without visiting the Inspector. The injected program installs
 # console, page-error, and request-failure observers before it performs the
@@ -1675,38 +1686,11 @@ run_browser_program_stage \
   -- run_pw run-code --filename="$browser_program" \
   || browser_gate_status=$?
 browser_result="$log_dir/browser-result.json"
-if [ "$browser_gate_status" -ne 0 ]; then
+if ! node "$browser_result_parser" \
+  "$log_dir/browser-gate.log" "$browser_result" "$browser_gate_status"; then
   sed -n '1,240p' "$log_dir/browser-gate.log" >&2
-  die "real-browser Change Inspector gate failed"
+  die "real-browser Change Inspector gate emitted no valid terminal report"
 fi
-browser_result_line="$(awk '
-  {
-    line = $0
-    sub(/\r$/, "", line)
-    if (after_result) {
-      result = line
-      after_result = 0
-    }
-    if (line == "### Result") after_result = 1
-  }
-  END {
-    if (result != "") print result
-  }
-' "$log_dir/browser-gate.log")"
-if [ -n "$browser_result_line" ]; then
-  printf '%s\n' "$browser_result_line" >"$browser_result"
-  jq -e '
-    .schema == "pointbreak.change-inspector-browser-report" and .version == 1 and
-    (.status == "passed" or .status == "failed") and
-    (.assertionCount | type == "number") and (.assertionCount >= 0) and
-    (.screenshotCount | type == "number") and (.screenshotCount >= 0) and
-    (.sectionCount | type == "number") and (.sectionCount > 0) and
-    (.globalInvalid | type == "boolean") and
-    (.sections | type == "array") and ((.sections | length) == .sectionCount) and
-    (.failures | type == "array")
-  ' "$browser_result" >/dev/null || die "browser emitted an invalid diagnostic report"
-fi
-[ -s "$browser_result" ] || die "browser did not emit its diagnostic report"
 jq -e '
   .status == "passed" and .globalInvalid == false and
   (.failures | length == 0) and
@@ -1925,6 +1909,12 @@ reported_screenshot_count="$(jq -er '.screenshotCount' "$browser_result")"
   || die "browser program snapshot changed during qualification"
 [ "$(shasum -a 256 "$browser_diagnostics" | awk '{print $1}')" = "$diagnostics_sha256" ] \
   || die "browser diagnostics snapshot changed during qualification"
+[ "$(shasum -a 256 "$browser_contracts" | awk '{print $1}')" = "$contracts_sha256" ] \
+  || die "browser contracts snapshot changed during qualification"
+[ "$(shasum -a 256 "$browser_renderer" | awk '{print $1}')" = "$renderer_sha256" ] \
+  || die "browser renderer snapshot changed during qualification"
+[ "$(shasum -a 256 "$browser_result_parser" | awk '{print $1}')" = "$result_parser_sha256" ] \
+  || die "browser result parser snapshot changed during qualification"
 [ "$(shasum -a 256 "$browser_manifest_publisher" | awk '{print $1}')" = "$publisher_sha256" ] \
   || die "manifest publisher snapshot changed during qualification"
 [ "$(shasum -a 256 "$matrix_materializer" | awk '{print $1}')" = "$materializer_sha256" ] \
