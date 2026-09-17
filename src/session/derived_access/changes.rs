@@ -2476,8 +2476,8 @@ mod tests {
     };
     use crate::session::store::resolution::{opaque_path_identity, resolve_store};
     use crate::session::{
-        AUTHORITY_CURSOR_SCHEMA_V2, AuthorityCursorV2, EventStore, EventWriteOutcome,
-        StoreCapabilityInspection,
+        AUTHORITY_CURSOR_SCHEMA_V2, AuthorityCursorV2, DerivedWriteAvailabilityV1, EventStore,
+        EventWriteOutcome, StoreCapabilityInspection,
     };
 
     const PAGE_TEST_STAMP: &str = "sha256:bodyless-page-test";
@@ -3777,11 +3777,22 @@ mod tests {
     }
 
     fn record_fixture_event(store: &EventStore, event: ShoreEvent) {
+        let acknowledgement = store
+            .record_event_once_acknowledged(&event)
+            .expect("record fixture event");
+        if acknowledgement.derived.availability != DerivedWriteAvailabilityV1::Current {
+            eprintln!(
+                "fixture event {} produced derived acknowledgement {:?} with diagnostics {:?}",
+                event.event_id.as_str(),
+                acknowledgement.derived,
+                acknowledgement.diagnostics,
+            );
+        }
         assert_eq!(
-            store
-                .record_event_once(&event)
-                .expect("record fixture event"),
-            EventWriteOutcome::Created
+            acknowledgement.outcome,
+            EventWriteOutcome::Created,
+            "fixture event {} must create one authoritative record",
+            event.event_id.as_str(),
         );
     }
 
@@ -3995,7 +4006,9 @@ mod tests {
         };
         assert_eq!(
             document.code(),
-            DerivedProjectionFailureCodeV1::ProjectionInvalid
+            DerivedProjectionFailureCodeV1::ProjectionInvalid,
+            "unexpected projection failure detail: {}",
+            document.message(),
         );
         assert!(!document.is_retryable());
         assert!(
