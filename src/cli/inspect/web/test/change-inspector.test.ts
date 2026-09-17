@@ -13,6 +13,8 @@ import {
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+
 const profile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
@@ -433,12 +435,13 @@ function setNarrowViewport(narrow: boolean): void {
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
   localStorage.clear();
   sessionStorage.clear();
   mountInspectorDom();
   history.replaceState(null, "", "/#/changes");
+  await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
 });
 afterEach(async () => {
   const reader = await import("../src/change-inspector");
@@ -3121,12 +3124,15 @@ describe("Change-first composition", () => {
   });
 
   it("clears an accepted exact surface when poll hydration fails", async () => {
-    vi.useFakeTimers();
     history.replaceState(
       null,
       "",
       "/#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact",
     );
+    // Happy DOM emits a non-standard hashchange for replaceState on its own
+    // timer. Drain it before the composition registers its route listener.
+    await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
+    vi.useFakeTimers();
     let generation = 1;
     let exactRequests = 0;
     let failPollHydration!: (response: Response) => void;
