@@ -3129,6 +3129,10 @@ describe("Change-first composition", () => {
     );
     let generation = 1;
     let exactRequests = 0;
+    let failPollHydration!: (response: Response) => void;
+    const pollHydrationFailure = new Promise<Response>((resolve) => {
+      failPollHydration = resolve;
+    });
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
       if (path === "/api/identity")
@@ -3157,9 +3161,7 @@ describe("Change-first composition", () => {
         exactRequests += 1;
         return exactRequests === 1
           ? new Response(JSON.stringify(revisionDetail(stamp)))
-          : new Response(JSON.stringify({ error: "hydration unavailable" }), {
-              status: 500,
-            });
+          : pollHydrationFailure;
       }
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
@@ -3175,12 +3177,22 @@ describe("Change-first composition", () => {
     generation = 2;
     await vi.advanceTimersByTimeAsync(3_000);
     await vi.waitFor(() => expect(exactRequests).toBe(2));
+    failPollHydration(
+      new Response(JSON.stringify({ error: "hydration unavailable" }), {
+        status: 500,
+      }),
+    );
+    await vi.waitFor(
+      () =>
+        expect(document.querySelector("#refresh-status")?.textContent).toBe(
+          "response error",
+        ),
+      { timeout: 5_000 },
+    );
 
+    expect(exactRequests).toBe(2);
     expect(detail?.dataset.changeReadingKey).toBeUndefined();
     expect(detail?.textContent).not.toContain("Exact Revision");
-    expect(document.querySelector("#refresh-status")?.textContent).toBe(
-      "response error",
-    );
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
       "degraded",
     );
