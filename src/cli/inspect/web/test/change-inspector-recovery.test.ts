@@ -3,6 +3,8 @@ import { CHANGE_READER_DOCUMENTS } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
+const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+
 const profile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
@@ -115,10 +117,13 @@ const identity = {
   placement: { tier: "clone", label: "clone store" },
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
   mountInspectorDom();
   history.replaceState(null, "", "/#/changes");
+  // Happy DOM emits a non-standard hashchange for replaceState. Drain it
+  // before any Inspector route listener can observe this fixture setup.
+  await new Promise<void>((resolve) => realSetTimeout(resolve, 0));
 });
 afterEach(async () => {
   (await import("../src/change-inspector")).stopChangeInspector();
