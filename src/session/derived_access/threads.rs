@@ -178,6 +178,7 @@ mod tests {
         EventTarget, EventType, ReviewInitializedPayload, Revision, ShoreEvent, WorkObjectProposal,
         WorkObjectProposedPayload, Writer,
     };
+    use crate::session::store::backend::StoreBackend;
     use crate::session::store::resolution::resolve_read_store;
     use crate::session::workflow::{
         AttentionListOptions, CaptureOptions, capture_worktree_review, list_attention,
@@ -222,64 +223,52 @@ mod tests {
             .expect("read fixture checkpoint")
     }
 
-    /// A distinct proposal carrier for an already-proposed revision whose event id
-    /// sorts before the stored one, so the semantic representative for that
-    /// revision moves to the new carrier when it is applied.
-    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
-        let proposes = |event: &ShoreEvent| {
-            event.event_type == EventType::WorkObjectProposed
-                && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
-                    .ok()
-                    .is_some_and(|payload| {
-                        matches!(
-                            &payload.work_object,
-                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
-                        )
-                    })
-        };
-        let stored = store
-            .list_events()
-            .expect("list store events")
-            .into_iter()
-            .find(proposes)
-            .expect("stored proposal for the revision");
-        let payload: WorkObjectProposedPayload =
-            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
-        (0..1024u32)
-            .map(|nonce| {
-                ShoreEvent::new(
-                    EventType::WorkObjectProposed,
-                    format!("work_object_proposed:replacement:{nonce}"),
-                    stored.target.clone(),
-                    stored.writer.clone(),
-                    payload.clone(),
-                    stored.occurred_at.clone(),
-                )
-                .expect("mint replacement carrier")
-            })
-            .find(|candidate| candidate.event_id < stored.event_id)
-            .expect("a canonically earlier carrier within the nonce budget")
+    fn active_representative_fixture() -> (TempDir, DerivedHistoryAccess, RevisionId, ShoreEvent) {
+        let root = TempDir::new().expect("create representative fixture root");
+        let (seed, revision_id) = fresh_revision_proposal();
+        let carriers =
+            crate::session::derived_access::support::ordered_representative_carriers(&seed);
+        let store = EventStore::open(root.path());
+        assert_eq!(
+            store
+                .record_event_once(&carriers.initial)
+                .expect("record initial representative"),
+            EventWriteOutcome::Created
+        );
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            root.path(),
+            "store:test",
+        )
+        .expect("create representative lifecycle");
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish representative generation");
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend: StoreBackend::Local(root.path().to_path_buf()),
+        });
+        (root, access, revision_id, carriers.replacement)
     }
 
     #[test]
     fn legacy_threads_refuses_a_representative_replacement_after_the_context_read() {
-        let (repo, access) = active_forked_repo();
-        let read_store = resolve_read_store(repo.path()).expect("resolve store");
-        let store = EventStore::open(read_store.store_dir());
-        let governed = governed_append_fixture(read_store.store_dir(), &access);
+        let (root, access, revision_id, replacement) = active_representative_fixture();
+        let governed = governed_append_fixture(root.path(), &access);
         let DerivedThreadsRoute::Ready(initial) = access.threads().expect("read initial threads")
         else {
             panic!("published generation should serve initial threads");
         };
-        let revision_id = initial
-            .supersession
-            .components
-            .iter()
-            .flatten()
-            .next()
-            .cloned()
-            .expect("fixture revision");
-        let replacement = earlier_carrier_for(&store, &revision_id);
+        assert!(
+            initial
+                .supersession
+                .components
+                .iter()
+                .any(|component| component.contains(&revision_id)),
+            "initial representative fixture must name the revision"
+        );
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
         let route = access

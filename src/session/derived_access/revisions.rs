@@ -928,12 +928,15 @@ mod tests {
         ArtifactRemovedPayload, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent,
         WorkObjectProposal, WorkObjectProposedPayload, Writer,
     };
+    use crate::session::store::backend::StoreBackend;
     use crate::session::store::resolution::resolve_read_store;
     use crate::session::workflow::{
         CaptureOptions, RevisionOverviewsOptions, capture_worktree_review, show_revision,
         show_revision_for_inspector, show_revision_overviews,
     };
-    use crate::session::{EventStore, EventWriteOutcome};
+    use crate::session::{
+        EventStore, EventWriteOutcome, RevisionFingerprint, read_bound_object_artifact,
+    };
 
     fn git(repo: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -1150,10 +1153,29 @@ mod tests {
             .expect("read fixture checkpoint")
     }
 
-    /// A distinct proposal carrier for an already-proposed revision whose event id
-    /// sorts before the stored one, so the semantic representative for that
-    /// revision moves to the new carrier when it is applied.
-    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
+    fn active_revision_representative_fixture() -> (
+        TempDir,
+        TempDir,
+        DerivedHistoryAccess,
+        RevisionId,
+        ShoreEvent,
+    ) {
+        let repo = TempDir::new().expect("create representative donor repository");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["config", "user.name", "Pointbreak Tests"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "pointbreak-tests@example.com"],
+        );
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("source.txt"), "before\n").expect("write base");
+        git(repo.path(), &["add", "--all"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        std::fs::write(repo.path().join("source.txt"), "after\n").expect("write change");
+        let capture =
+            capture_worktree_review(CaptureOptions::new(repo.path())).expect("capture donor");
+
+        let donor_store = resolve_read_store(repo.path()).expect("resolve donor store");
         let proposes = |event: &ShoreEvent| {
             event.event_type == EventType::WorkObjectProposed
                 && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
@@ -1161,41 +1183,88 @@ mod tests {
                     .is_some_and(|payload| {
                         matches!(
                             &payload.work_object,
-                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
+                            WorkObjectProposal::Revision { revision, .. }
+                                if revision.id == capture.revision_id
                         )
                     })
         };
-        let stored = store
+        let seed = EventStore::open(donor_store.store_dir())
             .list_events()
-            .expect("list store events")
+            .expect("list donor events")
             .into_iter()
             .find(proposes)
-            .expect("stored proposal for the revision");
+            .expect("donor proposal for the revision");
         let payload: WorkObjectProposedPayload =
-            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
-        (0..1024u32)
-            .map(|nonce| {
-                ShoreEvent::new(
-                    EventType::WorkObjectProposed,
-                    format!("work_object_proposed:replacement:{nonce}"),
-                    stored.target.clone(),
-                    stored.writer.clone(),
-                    payload.clone(),
-                    stored.occurred_at.clone(),
-                )
-                .expect("mint replacement carrier")
-            })
-            .find(|candidate| candidate.event_id < stored.event_id)
-            .expect("a canonically earlier carrier within the nonce budget")
+            serde_json::from_value(seed.payload.clone()).expect("decode donor proposal");
+        let WorkObjectProposal::Revision { revision, .. } = &payload.work_object else {
+            unreachable!("donor proposal is a revision")
+        };
+        let provenance = revision
+            .git_provenance
+            .as_ref()
+            .expect("captured donor has git provenance");
+        let fingerprint = RevisionFingerprint {
+            revision_id: revision.id.clone(),
+            object_id: revision.object_id.clone(),
+            engagement_id: payload.engagement_id.clone(),
+            source: provenance.source.clone(),
+            base: provenance.base.clone(),
+            target: provenance.target.clone(),
+        };
+        assert_eq!(fingerprint.revision_id, capture.revision_id);
+        assert_eq!(fingerprint.object_id, capture.object_id);
+        let artifact = read_bound_object_artifact(
+            repo.path(),
+            &capture.object_id,
+            &capture.object_artifact_content_hash,
+        )
+        .expect("read donor artifact");
+
+        let store_root = TempDir::new().expect("create representative store");
+        let backend = StoreBackend::Local(store_root.path().to_path_buf());
+        crate::session::object_artifact::write_prepared_object_artifact_to(
+            &backend,
+            &fingerprint,
+            artifact,
+        )
+        .expect("write representative artifact");
+        let carriers =
+            crate::session::derived_access::support::ordered_representative_carriers(&seed);
+        assert_eq!(
+            EventStore::open(store_root.path())
+                .record_event_once(&carriers.initial)
+                .expect("record initial representative"),
+            EventWriteOutcome::Created
+        );
+        let lifecycle = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            store_root.path(),
+            "store:test",
+        )
+        .expect("create representative lifecycle");
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("publish representative generation");
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend,
+        });
+        (
+            repo,
+            store_root,
+            access,
+            capture.revision_id,
+            carriers.replacement,
+        )
     }
 
     #[test]
     fn legacy_revision_page_refuses_a_representative_replacement_after_the_context_read() {
-        let (repo, access, revision_id) = active_captured_repo();
-        let read_store = resolve_read_store(repo.path()).expect("resolve store");
-        let store = EventStore::open(read_store.store_dir());
-        let governed = governed_append_fixture(read_store.store_dir(), &access);
-        let replacement = earlier_carrier_for(&store, &revision_id);
+        let (repo, store_root, access, revision_id, replacement) =
+            active_revision_representative_fixture();
+        let governed = governed_append_fixture(store_root.path(), &access);
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let request = RevisionPageRequest::new(None, None).unwrap();
         let DerivedRevisionPageRoute::Ready(initial) = access
@@ -1269,11 +1338,9 @@ mod tests {
 
     #[test]
     fn legacy_revision_detail_refuses_a_write_after_the_context_read() {
-        let (repo, access, revision_id) = active_captured_repo();
-        let read_store = resolve_read_store(repo.path()).expect("resolve store");
-        let store = EventStore::open(read_store.store_dir());
-        let governed = governed_append_fixture(read_store.store_dir(), &access);
-        let replacement = earlier_carrier_for(&store, &revision_id);
+        let (repo, store_root, access, revision_id, replacement) =
+            active_revision_representative_fixture();
+        let governed = governed_append_fixture(store_root.path(), &access);
         let options = || {
             RevisionShowOptions::new(repo.path())
                 .with_revision_id(revision_id.clone())

@@ -6,6 +6,58 @@ use rusqlite::types::Value;
 
 use super::cursor::TruthCursor;
 use crate::session::event::ShoreEvent;
+#[cfg(test)]
+use crate::session::event::{EventType, WorkObjectProposedPayload};
+
+#[cfg(test)]
+pub(super) struct RepresentativeCarrierPair {
+    pub(super) initial: ShoreEvent,
+    pub(super) replacement: ShoreEvent,
+}
+
+/// Build two content-equivalent proposal carriers and order them by event id.
+///
+/// Representative-replacement tests seed `initial`, publish the generation,
+/// then append `replacement` at the read boundary. Constructive ordering keeps
+/// the fixture bounded instead of searching a nonce space whose success depends
+/// on an unrelated capture-generated event id.
+#[cfg(test)]
+pub(super) fn ordered_representative_carriers(seed: &ShoreEvent) -> RepresentativeCarrierPair {
+    assert_eq!(
+        seed.event_type,
+        EventType::WorkObjectProposed,
+        "representative fixture requires a proposal carrier"
+    );
+    let payload: WorkObjectProposedPayload =
+        serde_json::from_value(seed.payload.clone()).expect("decode fixture proposal");
+    let carrier = |name: &str| {
+        ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            format!("{}:representative:{name}", seed.idempotency_key),
+            seed.target.clone(),
+            seed.writer.clone(),
+            payload.clone(),
+            seed.occurred_at.clone(),
+        )
+        .expect("mint representative fixture carrier")
+    };
+    let left = carrier("a");
+    let right = carrier("b");
+    assert_ne!(
+        left.event_id, right.event_id,
+        "fixture carrier keys must produce distinct event ids"
+    );
+    let (initial, replacement) = if left.event_id > right.event_id {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    assert!(replacement.event_id < initial.event_id);
+    RepresentativeCarrierPair {
+        initial,
+        replacement,
+    }
+}
 
 /// Find the authoritative carriers needed to interpret selected product rows.
 ///

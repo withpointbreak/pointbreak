@@ -1805,60 +1805,21 @@ mod tests {
         }
     }
 
-    /// A distinct proposal carrier for an already-proposed revision whose event id
-    /// sorts before the stored one, so the semantic representative for that
-    /// revision moves to the new carrier when it is applied.
-    fn earlier_carrier_for(store: &EventStore, revision_id: &RevisionId) -> ShoreEvent {
-        let proposes = |event: &ShoreEvent| {
-            event.event_type == EventType::WorkObjectProposed
-                && serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
-                    .ok()
-                    .is_some_and(|payload| {
-                        matches!(
-                            &payload.work_object,
-                            WorkObjectProposal::Revision { revision, .. } if revision.id == *revision_id
-                        )
-                    })
-        };
-        let stored = store
-            .list_events()
-            .expect("list store events")
-            .into_iter()
-            .find(proposes)
-            .expect("stored proposal for the revision");
-        let payload: WorkObjectProposedPayload =
-            serde_json::from_value(stored.payload.clone()).expect("decode stored proposal");
-        (0..1024u32)
-            .map(|nonce| {
-                ShoreEvent::new(
-                    EventType::WorkObjectProposed,
-                    format!("work_object_proposed:replacement:{nonce}"),
-                    stored.target.clone(),
-                    stored.writer.clone(),
-                    payload.clone(),
-                    stored.occurred_at.clone(),
-                )
-                .expect("mint replacement carrier")
-            })
-            .find(|candidate| candidate.event_id < stored.event_id)
-            .expect("a canonically earlier carrier within the nonce budget")
-    }
-
-    fn active_history_with_revision() -> (TempDir, DerivedHistoryAccess, RevisionId) {
+    fn active_history_with_revision() -> (TempDir, DerivedHistoryAccess, RevisionId, ShoreEvent) {
         let revision_id = RevisionId::new(format!("rev:sha256:{}", "ab".repeat(32)));
         let object_id = ObjectId::new(format!("object:sha256:{}", "cd".repeat(32)));
-        let (temp, access) = active_history_from_events(vec![
-            review_initialized(0),
-            captured_revision(&revision_id, &object_id, "2026-07-28T00:00:01Z"),
-        ]);
-        (temp, access, revision_id)
+        let carriers = crate::session::derived_access::support::ordered_representative_carriers(
+            &captured_revision(&revision_id, &object_id, "2026-07-28T00:00:01Z"),
+        );
+        let (temp, access) =
+            active_history_from_events(vec![review_initialized(0), carriers.initial]);
+        (temp, access, revision_id, carriers.replacement)
     }
 
     #[test]
     fn legacy_history_refuses_a_representative_replacement_after_the_context_read() {
-        let (temp, access, revision_id) = active_history_with_revision();
+        let (temp, access, _revision_id, replacement) = active_history_with_revision();
         let governed = governed_append_fixture(temp.path(), &access);
-        let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
         let config = BaseProjectionConfig::default();
@@ -1906,9 +1867,8 @@ mod tests {
 
     #[test]
     fn legacy_attention_refuses_a_write_after_the_snapshot_read() {
-        let (temp, access, revision_id) = active_history_with_revision();
+        let (temp, access, _revision_id, replacement) = active_history_with_revision();
         let governed = governed_append_fixture(temp.path(), &access);
-        let replacement = earlier_carrier_for(&EventStore::open(temp.path()), &revision_id);
         let epoch = current_checkpoint(&access).epoch;
         let before = current_checkpoint(&access).sequence;
         let route = access
