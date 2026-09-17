@@ -960,6 +960,49 @@ struct CaptureOperationEvidence {
     receipt_state: OperationReceiptStateV1,
 }
 
+#[cfg(test)]
+type CaptureReceiptAfterReadyForTest = Box<
+    dyn FnOnce(
+        &Path,
+        &RevisionRefV1,
+        &ChangeOperationReceiptV1,
+        &crate::session::ChangeReaderReadyV1,
+    ) -> Result<()>,
+>;
+
+// Single-use, thread-local interleave for deterministic receipt-boundary tests.
+// Production has no callback path, and parallel tests cannot share this slot.
+#[cfg(test)]
+std::thread_local! {
+    static CAPTURE_RECEIPT_AFTER_READY_FOR_TEST: std::cell::RefCell<Option<CaptureReceiptAfterReadyForTest>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_capture_receipt_after_ready_for_test(callback: CaptureReceiptAfterReadyForTest) {
+    CAPTURE_RECEIPT_AFTER_READY_FOR_TEST.with(|slot| {
+        assert!(
+            slot.borrow_mut().replace(callback).is_none(),
+            "capture receipt test interleave is already installed"
+        );
+    });
+}
+
+#[cfg(test)]
+fn run_capture_receipt_after_ready_for_test(
+    repo: &Path,
+    revision: &RevisionRefV1,
+    operation: &ChangeOperationReceiptV1,
+    ready: &crate::session::ChangeReaderReadyV1,
+) -> Result<()> {
+    CAPTURE_RECEIPT_AFTER_READY_FOR_TEST.with(|slot| {
+        let callback = slot.borrow_mut().take();
+        callback.map_or(Ok(()), |callback| {
+            callback(repo, revision, operation, ready)
+        })
+    })
+}
+
 fn capture_receipt(
     repo: &Path,
     revision: RevisionRefV1,
@@ -974,11 +1017,14 @@ fn capture_receipt(
         receipt_state,
     } = operation;
     let ready = ready_for_mutation(repo)?;
+    #[cfg(test)]
+    run_capture_receipt_after_ready_for_test(repo, &revision, &operation, &ready)?;
     let change = change_for_mutation(&ready, &operation.change_id)?;
-    let shown = crate::session::show_revision_for_change_reader(
+    let shown = crate::session::show_revision_for_change_reader_ready(
         crate::session::RevisionShowOptions::new(repo)
             .with_revision_id(revision.revision_id.clone())
             .with_exact(true),
+        &ready,
     )?;
     let source_request = shown
         .revision
@@ -1002,10 +1048,11 @@ fn capture_receipt(
             }
         })
         .unwrap_or(crate::session::ReviewSourceRequestV1::Captured);
-    let source_binding = match crate::session::review_source_binding(
+    let source_binding = match crate::session::review_source_binding_from_shown(
         repo,
         &revision,
         source_request,
+        &shown,
     ) {
         Err(ShoreError::WorkflowInputInvalid { reason })
             if capture.is_none() && reason.starts_with("review_cursor_source_changed:") =>
@@ -1981,6 +2028,333 @@ mod tests {
     }
 
     #[test]
+    fn capture_receipt_uses_one_ready_generation_across_later_capability_control() {
+        let before = ready_repo();
+        let before_store =
+            crate::session::store::resolution::resolve_change_read_backend(before.path()).unwrap();
+        append_unknown_capability_control(before.path()).unwrap();
+        let operation_id = "change-operation:test-control-before-ready";
+        let plan_path = operation_plan_path(before_store.store_dir(), operation_id);
+        let error = capture_change_revision(ChangeCaptureOptions::initial(
+            operation_id,
+            crate::session::CaptureOptions::new(before.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x64; 32]),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown"), "{error}");
+        assert!(
+            !plan_path.exists(),
+            "control refusal must precede operation state"
+        );
+
+        let after = ready_repo();
+        std::fs::write(after.path().join("sample.txt"), "captured\n").unwrap();
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, _, _, _| {
+            append_unknown_capability_control(repo)
+        }));
+        let receipt = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-control-after-ready",
+            crate::session::CaptureOptions::new(after.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x65; 32]),
+        ))
+        .unwrap();
+        assert!(receipt.complete);
+
+        let next_operation_id = "change-operation:test-control-next-operation";
+        let after_store =
+            crate::session::store::resolution::resolve_change_read_backend(after.path()).unwrap();
+        let next_plan_path = operation_plan_path(after_store.store_dir(), next_operation_id);
+        let error = capture_change_revision(ChangeCaptureOptions::initial(
+            next_operation_id,
+            crate::session::CaptureOptions::new(after.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x66; 32]),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown"), "{error}");
+        assert!(
+            !next_plan_path.exists(),
+            "the next operation must observe the control before creating operation state"
+        );
+    }
+
+    #[test]
+    fn capture_receipt_excludes_a_removal_appended_after_its_ready_generation() {
+        let root = ready_repo();
+        std::fs::write(
+            root.path().join("sample.txt"),
+            "captured removal boundary\n",
+        )
+        .unwrap();
+        let options = || {
+            ChangeCaptureOptions::initial(
+                "change-operation:test-removal-after-ready",
+                crate::session::CaptureOptions::new(root.path()),
+                ChangeIdentityDescriptorV1::opaque_nonce([0x67; 32]),
+            )
+        };
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, revision, _, _| {
+            append_artifact_removal(repo, &revision.object_artifact_content_hash)
+        }));
+
+        let receipt = capture_change_revision(options()).unwrap();
+        assert!(receipt.complete);
+        assert!(receipt.diffstat.file_count > 0);
+
+        let error = capture_change_revision(options()).unwrap_err();
+        assert!(
+            error.to_string().contains("operation_source_changed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn capture_receipt_keeps_live_source_check_after_ready_reuse() {
+        let root = ready_repo();
+        std::fs::write(
+            root.path().join("sample.txt"),
+            "captured before source race\n",
+        )
+        .unwrap();
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, _, _, _| {
+            std::fs::write(repo.join("sample.txt"), "changed after ready\n")
+                .map_err(|error| io_error("mutate receipt source", repo, error))?;
+            Ok(())
+        }));
+
+        let error = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-source-after-ready",
+            crate::session::CaptureOptions::new(root.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x68; 32]),
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("review_cursor_source_changed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn capture_receipt_fails_when_bound_artifact_disappears_after_ready() {
+        let root = ready_repo();
+        std::fs::write(
+            root.path().join("sample.txt"),
+            "captured before artifact loss\n",
+        )
+        .unwrap();
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, revision, _, _| {
+            let store = crate::session::store::resolution::resolve_change_read_backend(repo)?;
+            let path = crate::session::object_artifact::object_artifact_path_for_hash(
+                store.store_dir(),
+                &revision.object_artifact_content_hash,
+            );
+            std::fs::remove_file(&path)
+                .map_err(|error| io_error("remove receipt artifact", &path, error))?;
+            Ok(())
+        }));
+
+        let error = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-artifact-loss-after-ready",
+            crate::session::CaptureOptions::new(root.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x69; 32]),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("missing artifact"), "{error}");
+    }
+
+    #[test]
+    fn capture_receipt_cursor_becomes_stale_after_later_membership_withdrawal() {
+        let root = ready_repo();
+        std::fs::write(
+            root.path().join("sample.txt"),
+            "captured membership boundary\n",
+        )
+        .unwrap();
+        let options = || {
+            ChangeCaptureOptions::initial(
+                "change-operation:test-membership-after-ready",
+                crate::session::CaptureOptions::new(root.path()),
+                ChangeIdentityDescriptorV1::opaque_nonce([0x6a; 32]),
+            )
+        };
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, _, operation, ready| {
+            let membership_receipt = operation
+                .events
+                .iter()
+                .find(|event| event.event_type == "change_membership_asserted")
+                .expect("capture operation has a membership assertion");
+            let event = ready
+                .events()
+                .iter()
+                .find(|event| event.event_id == membership_receipt.event_id)
+                .expect("ready generation contains the membership assertion");
+            let payload: crate::session::event::ChangeMembershipAssertedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            withdraw_revision_from_change(ChangeMembershipWithdrawalOptions::new(
+                repo,
+                "change-operation:test-membership-after-ready-withdrawal",
+                payload.membership_claim_id,
+            ))?;
+            Ok(())
+        }));
+
+        let receipt = capture_change_revision(options()).unwrap();
+        assert!(receipt.complete);
+        let error = capture_change_revision(options()).unwrap_err();
+        assert!(
+            error.to_string().contains("change_state_unresolved"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn capture_receipt_cursor_becomes_stale_after_later_replacement_relation() {
+        let root = ready_repo();
+        std::fs::write(root.path().join("sample.txt"), "replacement root\n").unwrap();
+        let initial = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-replacement-boundary-root",
+            crate::session::CaptureOptions::new(root.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x6b; 32]),
+        ))
+        .unwrap();
+        std::fs::write(root.path().join("sample.txt"), "parallel candidate\n").unwrap();
+        let parallel = capture_change_revision(ChangeCaptureOptions::advance(
+            "change-operation:test-replacement-boundary-parallel",
+            crate::session::CaptureOptions::new(root.path()),
+            initial.review_cursor.token,
+            ChangeAdvanceV1::Parallel,
+        ))
+        .unwrap();
+
+        std::fs::write(root.path().join("sample.txt"), "boundary candidate\n").unwrap();
+        set_capture_receipt_after_ready_for_test(Box::new(|repo, revision, operation, ready| {
+            let change = ready
+                .projection
+                .changes
+                .get(&operation.change_id)
+                .expect("ready generation contains the capture Change");
+            let successor_id = change
+                .current_revisions
+                .iter()
+                .find(|candidate| *candidate != &revision.revision_id)
+                .expect("parallel Change has another current Revision");
+            let successor = ready.document_projection.revision_refs[successor_id]
+                .first()
+                .expect("current Revision has one exact ref")
+                .clone();
+            assert_change_revision_relation(ChangeRelationOptions::new(
+                repo,
+                "change-operation:test-replacement-after-ready-relation",
+                operation.change_id.clone(),
+                successor,
+                revision.clone(),
+            ))?;
+            Ok(())
+        }));
+        let boundary = capture_change_revision(ChangeCaptureOptions::advance(
+            "change-operation:test-replacement-after-ready",
+            crate::session::CaptureOptions::new(root.path()),
+            parallel.review_cursor.token,
+            ChangeAdvanceV1::Parallel,
+        ))
+        .unwrap();
+        assert!(boundary.complete);
+
+        std::fs::write(root.path().join("sample.txt"), "next candidate\n").unwrap();
+        let error = capture_change_revision(ChangeCaptureOptions::advance(
+            "change-operation:test-replacement-after-ready-next",
+            crate::session::CaptureOptions::new(root.path()),
+            boundary.review_cursor.token,
+            ChangeAdvanceV1::Replace,
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("change_graph_stale"), "{error}");
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn fresh_capture_at_h30_decodes_seven_histories_plus_new_events() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "--quiet"]);
+        git(root.path(), &["config", "user.name", "Pointbreak Test"]);
+        git(
+            root.path(),
+            &["config", "user.email", "pointbreak@example.test"],
+        );
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.path().join("sample.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "sample.txt"]);
+        git(root.path(), &["commit", "--quiet", "-m", "base"]);
+
+        let (store, _) = crate::session::store::resolution::resolve_change_read_store(root.path())
+            .expect("resolve counting fixture store");
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::EmptyL2,
+        )
+        .expect("activate empty L2 store");
+        let event_store = crate::session::EventStore::from_backend(store.backend());
+        for ordinal in 0_u64..30 {
+            let mut descriptor_nonce = [0_u8; 32];
+            descriptor_nonce[..8].copy_from_slice(&ordinal.to_be_bytes());
+            descriptor_nonce[31] = 0x41;
+            let mut declaration_nonce = [0_u8; 32];
+            declaration_nonce[..8].copy_from_slice(&ordinal.to_be_bytes());
+            declaration_nonce[31] = 0x82;
+            let declaration = build_change_declared(
+                ChangeIdentityDescriptorV1::opaque_nonce(descriptor_nonce),
+                declaration_nonce,
+            )
+            .expect("build seed declaration");
+            let event = ShoreEvent::new(
+                crate::session::event::EventType::ChangeDeclared,
+                format!("capture-counting:seed:{ordinal}"),
+                EventTarget::for_journal(JournalId::new("journal:capture-counting")),
+                crate::session::event::Writer::shore_local("capture-counting-test"),
+                declaration,
+                "2026-09-17T01:00:00Z",
+            )
+            .expect("build seed event");
+            assert_eq!(
+                event_store
+                    .record_change_event_once(&event)
+                    .expect("record seed event"),
+                EventWriteOutcome::Created
+            );
+        }
+        assert_eq!(
+            event_store.list_change_events().unwrap().len(),
+            30,
+            "the counting scope must begin at exactly H=30"
+        );
+        std::fs::write(root.path().join("sample.txt"), "candidate\n").unwrap();
+
+        let scope =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("c".repeat(64))
+                .expect("valid counting identity");
+        let receipt = {
+            let _guard = scope.enter();
+            capture_change_revision(ChangeCaptureOptions::initial(
+                "change-operation:test-counting-h30",
+                crate::session::CaptureOptions::new(root.path()),
+                ChangeIdentityDescriptorV1::opaque_nonce([0xc3; 32]),
+            ))
+            .expect("capture fresh initial Revision")
+        };
+
+        assert!(receipt.complete);
+        assert_eq!(
+            receipt.acknowledgement.derived.availability,
+            crate::session::DerivedWriteAvailabilityV1::Unavailable,
+            "the structural count covers the unavailable-derived case"
+        );
+        assert_eq!(
+            scope.snapshot().counters.event_decodes,
+            217,
+            "fresh capture must decode seven H-sized histories plus seven newly appended events"
+        );
+    }
+
+    #[test]
     fn relation_correction_can_add_a_current_fork_edge_to_a_historical_member() {
         let root = ready_repo();
         std::fs::write(root.path().join("sample.txt"), "fork root\n").unwrap();
@@ -2295,6 +2669,33 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    fn append_unknown_capability_control(repo: &Path) -> Result<()> {
+        let store = crate::session::store::resolution::resolve_change_read_backend(repo)?;
+        store.backend().journal().create_record_once(
+            "receipt-boundary-unknown",
+            br#"{"schema":"pointbreak.unknown","version":1}"#,
+        )?;
+        Ok(())
+    }
+
+    fn append_artifact_removal(repo: &Path, content_hash: &str) -> Result<()> {
+        use crate::session::event::{ArtifactRemovedPayload, EventTarget, EventType, Writer};
+
+        let event = ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(content_hash),
+            EventTarget::for_journal(JournalId::new("journal:default")),
+            Writer::shore_local("0.1.0"),
+            ArtifactRemovedPayload {
+                content_hash: content_hash.to_owned(),
+            },
+            "2026-09-17T01:00:00Z",
+        )?;
+        let store = crate::session::store::resolution::resolve_change_read_backend(repo)?;
+        crate::session::EventStore::from_backend(store.backend()).record_event_once(&event)?;
+        Ok(())
     }
 
     fn membership_claim_for_event(
