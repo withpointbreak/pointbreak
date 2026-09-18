@@ -300,7 +300,87 @@ fn accepted_after_failed_validation_clears_the_attention_item() {
 }
 
 #[test]
-fn change_scoped_successor_does_not_create_legacy_stale_assessment() {
+fn replacing_a_revision_clears_its_failed_check() {
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap().to_owned();
+    let first = pointbreak(["capture", "--repo", &repo_arg]);
+    assert!(
+        first.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_document = parse_json(&first.stdout);
+    let first_revision = first_document["revision"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_cursor = first_document["reviewCursor"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let failed = pointbreak([
+        "validation",
+        "add",
+        "--repo",
+        &repo_arg,
+        "--track",
+        "agent:codex",
+        "--check-name",
+        "red proof",
+        "--status",
+        "failed",
+        "--revision",
+        &first_revision,
+    ]);
+    assert!(
+        failed.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let before = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
+    assert_eq!(before["items"][0]["kind"], "failed_validation");
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = pointbreak([
+        "capture",
+        "--repo",
+        &repo_arg,
+        "--review-cursor",
+        &first_cursor,
+        "--advance",
+        "replace",
+    ]);
+    assert!(
+        second.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    // The replacement is the clearing fact; no passing rerun on replaced bytes
+    // is needed, and the document shape is unchanged.
+    let after = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
+    assert_eq!(after["schema"], "pointbreak.attention-list");
+    assert_eq!(after["version"], 1);
+    assert_eq!(after["items"].as_array().unwrap().len(), 0, "{after}");
+
+    // Scope stays exact: nothing is anchored on either Revision.
+    let scoped = parse_json(
+        &pointbreak([
+            "attention",
+            "list",
+            "--repo",
+            &repo_arg,
+            "--revision",
+            &first_revision,
+        ])
+        .stdout,
+    );
+    assert_eq!(scoped["items"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn change_scoped_successor_makes_the_replaced_call_stale_until_it_is_judged() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap().to_owned();
     let first = pointbreak(["capture", "--repo", &repo_arg]);
@@ -356,19 +436,20 @@ fn change_scoped_successor_does_not_create_legacy_stale_assessment() {
         .unwrap()
         .to_owned();
 
-    // Replacement now lives exclusively in the Change relation graph. The
-    // compatibility attention projection must not infer a legacy proposal-borne
-    // supersession edge from that relation.
+    // Replacement lives exclusively in the Change relation graph, and that
+    // graph is what attention reads: the accepting call on the replaced
+    // Revision is stale until its successor has been judged.
     let before = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
-    let kinds: Vec<String> = before["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["kind"].as_str().unwrap().to_owned())
-        .collect();
-    assert!(
-        kinds.is_empty(),
-        "legacy attention leaked Change relations: {kinds:?}"
+    assert_eq!(before["schema"], "pointbreak.attention-list");
+    assert_eq!(before["version"], 1);
+    let items = before["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["kind"], "stale_assessment");
+    assert_eq!(items[0]["revisionId"], first_revision.as_str());
+    assert_eq!(items[0]["freshness"]["state"], "superseded");
+    assert_eq!(
+        items[0]["freshness"]["supersededBy"],
+        serde_json::json!([second_revision])
     );
 
     let re_judged = pointbreak([
@@ -389,7 +470,7 @@ fn change_scoped_successor_does_not_create_legacy_stale_assessment() {
         String::from_utf8_lossy(&re_judged.stderr)
     );
 
-    // Judging the successor remains valid and does not create legacy attention.
+    // Judging the successor is the clearing fact.
     let after = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
     assert_eq!(after["items"].as_array().unwrap().len(), 0);
 }

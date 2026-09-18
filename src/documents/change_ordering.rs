@@ -19,7 +19,7 @@
 //!
 //! Instant ordering goes through `compare_event_instants` only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +28,8 @@ use crate::model::{ChangeId, EventId};
 use crate::session::event::ShoreEvent;
 use crate::session::{
     AttentionItem, AttentionWaitKeyV1, ChangeDocumentProjectionV1, ChangeProjection,
-    attention_from_events, attention_tier_rank, compare_event_instants,
-    project_selected_event_history_without_trust,
+    attention_events_for_revisions, attention_from_events_with_changes, attention_tier_rank,
+    compare_event_instants, project_selected_event_history_without_trust,
 };
 
 /// Composition-time ordering keys for one Change document generation.
@@ -128,6 +128,63 @@ pub fn attention_wait_keys(
     keys
 }
 
+/// Changes that hold a Revision some other Change also holds. Only these can
+/// read differently under Change-local replacement than under the store-wide
+/// view, so only these are re-folded.
+pub(crate) fn changes_sharing_a_member(semantic: &ChangeProjection) -> BTreeSet<ChangeId> {
+    let mut holders: BTreeMap<&crate::model::RevisionId, Vec<&ChangeId>> = BTreeMap::new();
+    for view in semantic.changes.values() {
+        for member in &view.members {
+            holders.entry(member).or_default().push(&view.change_id);
+        }
+    }
+    holders
+        .into_values()
+        .filter(|changes| changes.len() > 1)
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+/// The projection that holds `change_id` alone: replacement read through it is
+/// that Change's own, whatever any other Change says about a shared member.
+pub(crate) fn single_change_projection(
+    semantic: &ChangeProjection,
+    change_id: &ChangeId,
+) -> ChangeProjection {
+    ChangeProjection {
+        changes: semantic
+            .changes
+            .get(change_id)
+            .map(|view| (change_id.clone(), view.clone()))
+            .into_iter()
+            .collect(),
+        links: Vec::new(),
+    }
+}
+
+/// Replace the wait key of every Change that shares a member with its
+/// Change-local key. A Change's wait key is local to it: a Revision the Change
+/// has replaced stops holding that Change's key even while another Change
+/// still holds it current, where it holds that Change's key instead.
+/// `local_items` folds attention over one Change's members under that Change's
+/// own replacement.
+pub(crate) fn apply_change_local_wait_keys<E>(
+    attention_wait: &mut BTreeMap<ChangeId, AttentionWaitKeyV1>,
+    semantic: &ChangeProjection,
+    mut local_items: impl FnMut(&ChangeProjection) -> std::result::Result<Vec<AttentionItem>, E>,
+) -> std::result::Result<(), E> {
+    for change_id in changes_sharing_a_member(semantic) {
+        let local = single_change_projection(semantic, &change_id);
+        let items = local_items(&local)?;
+        match attention_wait_keys(&items, &local).remove(&change_id) {
+            Some(key) => attention_wait.insert(change_id, key),
+            None => attention_wait.remove(&change_id),
+        };
+    }
+    Ok(())
+}
+
 /// The authoritative lane: both keys from the validated event generation,
 /// attribution taken from the Timeline projection itself.
 pub(crate) fn change_ordering_projection(
@@ -147,10 +204,20 @@ pub(crate) fn change_ordering_projection(
             event_id: &entry.event_id,
         }
     }));
-    let attention = attention_from_events(events, None)?;
+    let attention = attention_from_events_with_changes(events, None, semantic)?;
+    let mut attention_wait = attention_wait_keys(&attention.items, semantic);
+    apply_change_local_wait_keys(&mut attention_wait, semantic, |local| {
+        let members = local
+            .changes
+            .values()
+            .flat_map(|view| view.members.iter().cloned())
+            .collect();
+        let selected = attention_events_for_revisions(events, &members)?;
+        attention_from_events_with_changes(&selected, None, local).map(|fold| fold.items)
+    })?;
     Ok(ChangeOrderingV1 {
         activity,
-        attention_wait: attention_wait_keys(&attention.items, semantic),
+        attention_wait,
         source_projection_stamp: provenance.projection_stamp.clone(),
     })
 }

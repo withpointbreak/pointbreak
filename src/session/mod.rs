@@ -68,7 +68,9 @@ pub use derived_access::timeline::{
     DerivedTimelineTraversalV1,
 };
 pub(crate) use projection::event_history::project_selected_event_history_without_trust;
-pub(crate) use workflow::attention::{attention_from_events, attention_tier_rank};
+pub(crate) use workflow::attention::{
+    attention_events_for_revisions, attention_from_events_with_changes, attention_tier_rank,
+};
 
 /// Drain process-local, user-actionable diagnostics produced while coordinating
 /// disposable derived state around authoritative writes.

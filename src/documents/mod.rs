@@ -79,10 +79,10 @@ pub(crate) use change::{
 };
 #[doc(hidden)]
 pub use change::{change_summary_order_key, normalize_fact_presentations};
-pub(crate) use change_ordering::change_ordering_projection;
 pub use change_ordering::{
     ChangeActivityContributionV1, ChangeOrderingV1, attention_wait_keys, fold_change_activity,
 };
+pub(crate) use change_ordering::{apply_change_local_wait_keys, change_ordering_projection};
 pub use event_history::{
     EventHistoryCompletionV1, EventHistoryDocumentV1, EventHistoryEntryV1, EventHistoryFacadeV1,
     EventHistoryOrderV1, EventHistorySubjectV1, EventHistorySummaryV1,
