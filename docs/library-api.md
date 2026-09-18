@@ -154,7 +154,7 @@ Verification is advisory by default. Callers can select:
 `IngestEventsOptions`, `ImportEventOptions`, and `ReviewHistoryOptions` can carry a verification
 policy and trust set. Ingest evaluates the policy before committing any event in the batch. Read
 surfaces such as `review_history` report verification status only when requested; they do not
-persist that status into event files or `state.json`.
+persist that status into event files.
 
 An idempotent re-ingest keeps the first stored event. If a later event has the same idempotency key
 and payload hash but a different signer or signature, Pointbreak keeps the first stored event and,
@@ -233,7 +233,8 @@ Signature verification is advisory by default, preserving the reader-owned polic
 keys, or unsigned events should remain diagnostics or reject ingest. Read surfaces expose requested
 verification status without changing the stored event or projection. A re-ingest of an
 already-present event is a no-op; a conflicting payload under the same idempotency key is rejected.
-The projection (`state.json`) is rebuilt once after the batch.
+No projection file is written: state summaries are in-memory folds of `read_events`
+(`SessionState::from_events`).
 
 When a strict policy rejects an event, `ingest_events` / `import_event` return
 `ShoreError::EventVerificationRejected { event_id, status }` before anything is written, so

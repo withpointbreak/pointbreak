@@ -19,7 +19,6 @@ use crate::session::event::{
     BodyContentType, EventTarget, EventType, ShoreEvent, ValidationCheckRecordedPayload,
     review_subject_id,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -414,15 +413,8 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(ValidationAddResult {
         acknowledgement,

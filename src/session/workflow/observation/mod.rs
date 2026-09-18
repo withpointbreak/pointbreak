@@ -414,7 +414,33 @@ mod tests {
     }
 
     #[test]
-    fn record_observation_state_json_equals_full_replay_after_created_and_existing_paths() {
+    fn record_observation_never_creates_a_state_projection_file() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        let result = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_track("agent:codex")
+                .with_title("no projection file")
+                .with_body("body"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(!resolved_store_dir(repo.path()).join("state.json").exists());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "legacy_state_projection_refresh_failed")
+        );
+    }
+
+    #[test]
+    fn record_observation_creates_no_state_projection_on_created_and_existing_paths() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
@@ -426,71 +452,25 @@ mod tests {
         let first = record_observation(options.clone()).unwrap();
         assert_eq!(first.events_created, 1);
         assert_eq!(first.events_existing, 0);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Created path drifted from full replay");
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Created path created a state projection"
+        );
 
         let second = record_observation(options).unwrap();
         assert_eq!(second.events_created, 0);
         assert_eq!(second.events_existing, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Existing path drifted from full replay");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn observation_add_reports_legacy_state_refresh_failure_without_failing_truth() {
-        let repo = modified_repo();
-        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        let store = resolved_store_dir(repo.path());
-        record_observation(
-            ObservationAddOptions::new(repo.path())
-                .with_track("agent:codex")
-                .with_title("materializes the projection")
-                .with_body("first"),
-        )
-        .unwrap();
-        let events_before = EventStore::open(&store).list_events().unwrap().len();
-
-        // Make the projection un-replaceable while events/ and the authority
-        // lock file stay writable.
-        std::fs::remove_file(store.join("state.json")).unwrap();
-        std::fs::create_dir(store.join("state.json")).unwrap();
-
-        let outcome = record_observation(
-            ObservationAddOptions::new(repo.path())
-                .with_track("agent:codex")
-                .with_title("distinct observation")
-                .with_body("second"),
-        );
-        let _ = std::fs::remove_dir(store.join("state.json"));
-
         assert_eq!(
-            EventStore::open(&store).list_events().unwrap().len(),
-            events_before + 1,
-            "truth is durable regardless of the projection"
+            second.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        let outcome = outcome.expect("durable truth must be acknowledged as success");
-        assert_eq!(outcome.events_created, 1);
         assert!(
-            outcome
-                .diagnostics
-                .iter()
-                .any(|diagnostic| { diagnostic.code == "legacy_state_projection_refresh_failed" }),
-            "a failed projection refresh degrades to a diagnostic, never an error"
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Existing path created a state projection"
         );
     }
 

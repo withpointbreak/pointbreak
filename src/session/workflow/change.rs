@@ -27,9 +27,9 @@ use crate::session::event::{
 use crate::session::store::capabilities::preflight_change_writer;
 use crate::session::store::resolution::resolve_change_write_store;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, LegacyProjectionStateV1,
-    OperationReceiptAcknowledgementV1, OperationReceiptStateV1, WriteAcknowledgementV1,
-    current_timestamp, sign_event_if_requested, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, OperationReceiptAcknowledgementV1,
+    OperationReceiptStateV1, WriteAcknowledgementV1, current_timestamp, sign_event_if_requested,
+    writer_from_options,
 };
 
 pub const CHANGE_OPERATION_SCHEMA_V1: &str = "pointbreak.change-operation.v1";
@@ -1099,12 +1099,9 @@ fn capture_receipt(
         });
     }
     let mut derived = DerivedWriteAggregate::default();
-    let legacy_state = if let Some(capture) = &capture {
+    if let Some(capture) = &capture {
         derived.add(capture.acknowledgement.derived.clone(), []);
-        capture.acknowledgement.legacy_projection_state.clone()
-    } else {
-        LegacyProjectionStateV1::NotAttempted
-    };
+    }
     derived.add(operation_derived.derived, operation_derived.diagnostics);
     let change_created = operation
         .events
@@ -1114,7 +1111,6 @@ fn capture_receipt(
     let mut acknowledgement = derived.finish(
         revision_events_created + change_created,
         revision_events_existing + operation.events.len() - change_created,
-        legacy_state,
         &mut diagnostics,
     );
     let receipt_id = (receipt_state != OperationReceiptStateV1::NotRecorded)
@@ -1684,48 +1680,9 @@ mod tests {
             ChangeOperationEventOutcomeV1::Existing
         );
         assert_eq!(first.events[0].event_id, retry.events[0].event_id);
-    }
-
-    #[test]
-    fn change_create_leaves_legacy_state_projection_stale() {
-        // Two captures materialized `state.json`; the store is then activated to L2.
-        let root = ready_repo();
-        let (store, _) =
-            crate::session::store::resolution::resolve_change_read_store(root.path()).unwrap();
-        let state_path = store.store_dir().join("state.json");
-        let bytes_before = std::fs::read(&state_path).unwrap();
-        let projected_before: serde_json::Value = serde_json::from_slice(&bytes_before).unwrap();
-        let event_count_before = projected_before["eventCount"].as_u64().unwrap();
-        let event_store = crate::session::EventStore::from_backend(store.backend());
-        let change_events_before = event_store.list_change_events().unwrap().len();
-
-        let receipt = create_change(ChangeCreateOptions::new(
-            root.path(),
-            "change-operation:test-stale-projection",
-            ChangeIdentityDescriptorV1::opaque_nonce([0x42; 32]),
-        ))
-        .unwrap();
-
-        assert!(receipt.complete);
-        assert_eq!(receipt.events.len(), 1);
-        assert_eq!(
-            receipt.events[0].outcome,
-            ChangeOperationEventOutcomeV1::Created
-        );
-        assert_eq!(
-            event_store.list_change_events().unwrap().len(),
-            change_events_before + 1,
-            "the Change event is durable"
-        );
-        // The receipt carries no diagnostics channel at all, and the legacy
-        // projection is neither refreshed nor marked: its bytes and count are
-        // exactly what the last capture published.
-        assert_eq!(std::fs::read(&state_path).unwrap(), bytes_before);
-        let projected_after: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-        assert_eq!(
-            projected_after["eventCount"].as_u64().unwrap(),
-            event_count_before
+        assert!(
+            !store.store_dir().join("state.json").exists(),
+            "a Change write creates no state projection"
         );
     }
 
@@ -1912,7 +1869,7 @@ mod tests {
         );
         assert_eq!(
             retry.acknowledgement.legacy_projection_state,
-            LegacyProjectionStateV1::NotAttempted
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
         assert_eq!(retry.revision, initial.revision);
         assert!(

@@ -9,7 +9,6 @@ use crate::session::event::{
     EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, resolve_effective_signer,
     stamp_ingest_provenance,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::EventWriteBatch;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -250,13 +249,9 @@ impl<'a> IngestBatchSession<'a> {
         Ok(())
     }
 
-    /// Perform the one complete post-write replay, rebuild `state.json`, and
-    /// release the batch authority only after projection publication.
-    pub(crate) fn finish(
-        self,
-        storage: &LocalStorage,
-        store_dir: &Path,
-    ) -> Result<IngestBatchCompletion> {
+    /// Perform the one complete post-write replay, then release the batch
+    /// authority. No projection file is published.
+    pub(crate) fn finish(self) -> Result<IngestBatchCompletion> {
         let Self {
             derived,
             event_store,
@@ -271,19 +266,10 @@ impl<'a> IngestBatchSession<'a> {
         drop(carrier_targets);
         let events = event_store.list_events()?;
         let state = SessionState::from_events(&events)?;
-        // Publish the projection before releasing the batch authority; a failed
-        // replacement is reported, never a failed batch.
-        let projection_refresh = publish_legacy_state_projection(storage, store_dir, &state);
         drop(batch_writer);
         let mut diagnostics = state.diagnostics.clone();
         diagnostics.extend(ingest_diagnostics);
-        let acknowledgement = derived.finish(
-            events_created,
-            events_existing,
-            projection_refresh.state,
-            &mut diagnostics,
-        );
-        diagnostics.extend(projection_refresh.diagnostic);
+        let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
         Ok(IngestBatchCompletion {
             acknowledgement,
             events_created,
@@ -338,11 +324,10 @@ pub fn import_event(options: ImportEventOptions) -> Result<IngestEventsResult> {
 /// event whose `writer.actor_id` is not a well-formed `actor:` id is rejected
 /// before anything is written, so the whole batch is atomic on attribution.
 ///
-/// After recording, the projection (`state.json`) is rebuilt once from the full
-/// event log. If a write fails partway through a batch (e.g. a conflict), the
-/// events already written remain durable and the projection is still rebuilt to
-/// match what is on disk before the error is returned — re-ingesting the batch
-/// is safe.
+/// After recording, the event log is replayed once for the reducer diagnostics
+/// the result carries; no projection file is written. If a write fails partway
+/// through a batch (e.g. a conflict), the events already written remain durable
+/// and the error is returned — re-ingesting the batch is safe.
 pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult> {
     ingest_events_with_clock(options, &SystemIngestClock)
 }
@@ -373,7 +358,7 @@ pub(crate) fn ingest_events_with_clock(
     let write_error = session
         .record_verified_events(&stamped, &mut verification)
         .err();
-    let completed = session.finish(&storage, store_dir)?;
+    let completed = session.finish()?;
     if let Some(err) = write_error {
         return Err(err);
     }
@@ -923,20 +908,6 @@ mod tests {
             })
             .count();
         assert_eq!(physical_authority_locks, 1);
-    }
-
-    fn on_disk_state(repo: &Path) -> serde_json::Value {
-        serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo).join("state.json")).unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn replayed_state(repo: &Path) -> serde_json::Value {
-        let events = EventStore::open(resolved_store_dir(repo))
-            .list_events()
-            .unwrap();
-        serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap()
     }
 
     fn signed_captured_event() -> (ShoreEvent, DeterministicSigner, ActorId) {
@@ -2062,43 +2033,30 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn ingest_batch_reports_legacy_state_refresh_failure_without_failing_truth() {
+    fn ingest_batch_never_creates_a_state_projection_file() {
         let (_origin, events) = origin_events();
         let total = events.len();
         let dest = dest_repo();
-        let store = resolved_store_dir(dest.path());
-        // The batch publishes the projection before releasing its authority
-        // lock; a directory in the projection's place fails only that rename.
-        std::fs::create_dir_all(&store).unwrap();
-        std::fs::create_dir(store.join("state.json")).unwrap();
 
-        let outcome = ingest_events(IngestEventsOptions::new(dest.path(), events));
-        let _ = std::fs::remove_dir(store.join("state.json"));
+        let outcome = ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
 
-        assert_eq!(
-            EventStore::open(&store).list_events().unwrap().len(),
-            total,
-            "truth is durable regardless of the projection"
-        );
-        let outcome = outcome.expect("durable truth must be acknowledged as success");
         assert_eq!(outcome.events_created, total);
         assert_eq!(
             outcome.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::RefreshFailed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
+        assert!(!resolved_store_dir(dest.path()).join("state.json").exists());
         assert!(
             outcome
                 .diagnostics
                 .iter()
-                .any(|diagnostic| { diagnostic.code == "legacy_state_projection_refresh_failed" }),
-            "a failed projection refresh degrades to a diagnostic, never an error"
+                .all(|diagnostic| diagnostic.code != "legacy_state_projection_refresh_failed")
         );
     }
 
     #[test]
-    fn ingest_events_reconstructs_projection_and_is_idempotent() {
+    fn ingest_events_is_idempotent_and_writes_no_state_projection() {
         let (_origin, events) = origin_events();
         let total = events.len();
         assert!(
@@ -2130,11 +2088,20 @@ mod tests {
             "actor:agent:remote-reviewer"
         );
 
-        // Projection equals a full replay, and re-ingest is a no-op.
-        assert_eq!(on_disk_state(dest.path()), replayed_state(dest.path()));
+        // No projection file is written, and re-ingest is a no-op.
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(!resolved_store_dir(dest.path()).join("state.json").exists());
         let second = ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
         assert_eq!(second.events_created, 0);
         assert_eq!(second.events_existing, total);
+        assert_eq!(
+            second.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(!resolved_store_dir(dest.path()).join("state.json").exists());
     }
 
     #[test]
@@ -2180,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn ingest_conflict_mid_batch_keeps_projection_consistent_with_disk() {
+    fn ingest_conflict_mid_batch_keeps_good_events_durable_and_replayable() {
         let (_origin, events) = origin_events();
         let opened = events
             .iter()
@@ -2210,8 +2177,13 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        // The good events are durable and the projection matches the event log on disk.
-        assert_eq!(on_disk_state(dest.path()), replayed_state(dest.path()));
+        // The good events are durable, replay cleanly, and no projection file is written.
+        let durable = EventStore::open(resolved_store_dir(dest.path()))
+            .list_events()
+            .unwrap();
+        assert_eq!(durable.len(), 2);
+        assert_eq!(SessionState::from_events(&durable).unwrap().event_count, 2);
+        assert!(!resolved_store_dir(dest.path()).join("state.json").exists());
     }
 
     // -- end-to-end: ingest/bundle -> resumption binding (ADR-0009) ----------

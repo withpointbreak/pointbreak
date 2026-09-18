@@ -16,7 +16,6 @@ use crate::session::event::{
     EventTarget, EventType, FactPortRelationV1, FactRefV1, ReviewFactPortDraftV1, ShoreEvent,
     build_review_fact_ported,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, InputRequestStatus,
@@ -192,17 +191,13 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
     let mut derived = DerivedWriteAggregate::default();
     let outcome = derived.record(event_store.record_change_event_once_acknowledged(&event)?);
     let state = SessionState::from_events(&event_store.list_change_events()?)?;
-    let projection_refresh =
-        publish_legacy_state_projection(&storage, write_store.store_dir(), &state);
     let mut diagnostics = state.diagnostics;
     let created = outcome == EventWriteOutcome::Created;
     let acknowledgement = derived.finish(
         usize::from(created),
         usize::from(!created),
-        projection_refresh.state,
         &mut diagnostics,
     );
-    diagnostics.extend(projection_refresh.diagnostic);
     Ok(FactPortResultV1 {
         schema: "pointbreak.review-fact-port.v1".to_owned(),
         port_id: payload.port_id,
@@ -382,7 +377,7 @@ mod tests {
         );
         assert_eq!(
             first_port.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::Refreshed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
         assert_eq!(first_port.diagnostics.len(), 1);
         assert_eq!(
@@ -415,12 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn fact_port_acknowledgement_keeps_durable_truth_when_refresh_fails() {
+    fn fact_port_acknowledgement_retry_is_existing_and_writes_no_state_projection() {
         let fixture = carried_open_fixture();
         let write_store = resolve_change_write_store(fixture.root.path()).unwrap();
-        let path = write_store.store_dir().join("state.json");
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
         let options = FactPortOptions::new(
             fixture.root.path(),
             fixture.origin,
@@ -431,41 +423,27 @@ mod tests {
             FactPortRelationV1::ContextOnly,
             "track:author",
         );
-        let first = port_review_fact(options.clone()).expect("refresh cannot fail a durable port");
+        let first = port_review_fact(options.clone()).unwrap();
         assert!(first.created);
         assert_eq!(
             first.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::RefreshFailed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        assert_eq!(
-            first
-                .diagnostics
-                .iter()
-                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
-                .count(),
-            1
-        );
-        std::fs::remove_dir(&path).unwrap();
         let retry = port_review_fact(options).unwrap();
         assert!(!retry.created);
         assert_eq!(retry.event_id, first.event_id);
         assert_eq!(
             retry.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::Refreshed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        let expected = SessionState::from_events(
-            &write_store
-                .event_store()
-                .unwrap()
-                .list_change_events()
-                .unwrap(),
-        )
-        .unwrap();
-        let actual: SessionState = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::to_value(actual).unwrap(),
-            serde_json::to_value(expected).unwrap()
+        assert!(
+            first
+                .diagnostics
+                .iter()
+                .chain(&retry.diagnostics)
+                .all(|d| d.code != "legacy_state_projection_refresh_failed")
         );
+        assert!(!write_store.store_dir().join("state.json").exists());
     }
 
     #[test]

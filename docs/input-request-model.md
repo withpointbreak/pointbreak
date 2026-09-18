@@ -88,7 +88,7 @@ pointbreak input-request respond <input-request-id> --outcome approved [--reason
 ```
 
 The V1 read surface is polling-oriented. `list` and `show` replay events from the resolved store;
-they do not depend on `state.json` as authority. Bodies and response reasons may use internal
+they do not depend on any cached projection as authority. Bodies and response reasons may use internal
 `shore.note-body` artifacts, but command output does not expose artifact paths.
 
 Open input requests also surface in `pointbreak attention list` — operative requests as primary
@@ -100,7 +100,7 @@ write is the same event-file retry; `inputRequestId` and `inputRequestResponseId
 read output represents one logical request or response. Duplicate semantic IDs are preserved in
 storage and reported through diagnostics rather than silently hidden.
 
-Bounded `state.json` exposes only summary counters:
+The bounded in-memory state summary exposes only summary counters:
 
 ```text
 inputRequestCount
@@ -109,7 +109,7 @@ openOperativeInputRequestCount
 ```
 
 The authoritative store is the event log plus any body or object artifacts in the resolved store.
-`state.json`, command-output views, and future read indexes are rebuildable projections derived from
+Command-output views and read indexes are rebuildable projections derived from
 that durable storage. Use `pointbreak store paths` to discover the active common or ephemeral
 location.
 

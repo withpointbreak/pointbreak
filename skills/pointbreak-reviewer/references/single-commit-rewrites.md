@@ -53,7 +53,7 @@ commit-source comparison.
 
 Preview returns `pointbreak.association-land-preview.v1` with exact identities and the full canonical
 proof. It performs no write-store preparation, signing-key load, artifact/event publication,
-`state.json` refresh, migration, rebuild or activation. It has no write acknowledgement or
+migration, rebuild or activation. It has no write acknowledgement or
 created/landed claim. Redirecting its JSON only saves a local inspection receipt.
 
 Preview does not require `--expect-proof`, but checks it when supplied on either route. Parent-mode

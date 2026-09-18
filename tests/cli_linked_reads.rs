@@ -762,7 +762,7 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
 }
 
 #[test]
-fn linked_fact_write_state_json_is_orphan_free() {
+fn linked_fact_write_is_orphan_free() {
     let fixture = LinkedFixture::new();
     fixture.observation_add(
         &fixture.reader,
@@ -770,20 +770,23 @@ fn linked_fact_write_state_json_is_orphan_free() {
         "cross-worktree note",
     );
 
-    // The fact's state.json is rebuilt in the clone-local store (write-through).
-    // The StateReducer does not cross-check facts against captures, so there is
+    // The fact lands in the clone-local store (write-through). The StateReducer
+    // does not cross-check facts against captures, so a fold of that store has
     // no orphan diagnostic even though the capture and fact may interleave.
-    let bytes = fs::read(fixture.linked_store_dir().join("state.json"))
-        .expect("read clone-local state.json");
-    let state: Value = serde_json::from_slice(&bytes).expect("state.json is json");
-    assert!(state["observationCount"].as_u64().unwrap() >= 1);
+    let state = pointbreak::session::SessionState::from_events(&read_store_events(
+        &fixture.linked_store_dir(),
+    ))
+    .expect("clone-local events fold");
+    assert!(state.observation_count >= 1);
     assert!(
-        !state_diagnostic_codes(&state)
+        !state
+            .diagnostics
             .iter()
-            .any(|code| code.contains("orphan")),
-        "diagnostics: {}",
-        state["diagnostics"]
+            .any(|diagnostic| diagnostic.code.contains("orphan")),
+        "diagnostics: {:?}",
+        state.diagnostics
     );
+    assert!(!fixture.linked_store_dir().join("state.json").exists());
 }
 
 #[test]
@@ -865,18 +868,6 @@ fn json_file_names(dir: &Path) -> Vec<String> {
     };
     names.sort();
     names
-}
-
-fn state_diagnostic_codes(state: &Value) -> Vec<String> {
-    state["diagnostics"]
-        .as_array()
-        .map(|diagnostics| {
-            diagnostics
-                .iter()
-                .filter_map(|diagnostic| diagnostic["code"].as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[test]

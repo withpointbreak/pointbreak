@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn record_review_assessment_state_json_equals_full_replay_after_created_and_existing_paths() {
+    fn record_review_assessment_creates_no_state_projection_on_created_and_existing_paths() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
@@ -160,27 +160,25 @@ mod tests {
 
         let first = record_assessment(options.clone()).unwrap();
         assert_eq!(first.events_created, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Assessment Created path drifted");
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Assessment Created path created a state projection"
+        );
 
         let second = record_assessment(options).unwrap();
         assert_eq!(second.events_existing, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Assessment Existing path drifted");
+        assert_eq!(
+            second.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Assessment Existing path created a state projection"
+        );
     }
 
     #[test]

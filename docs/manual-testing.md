@@ -71,7 +71,7 @@ caller would see them.
 
 **Goal.** Confirm that `pointbreak capture` records a `work_object_proposed` event (plus the
 `revision_ref_associated` event that binds the revision ref), writes a snapshot artifact, and
-rebuilds `<git-common-dir>/pointbreak/state.json`.
+creates no `state.json` projection.
 
 ```bash
 # Add a tracked file on top of the baseline commit, then modify it so the
@@ -94,7 +94,8 @@ ls "$STORE/events/" "$STORE/artifacts/objects/"
 - `<git-common-dir>/pointbreak/events/` contains exactly two event files — one `work_object_proposed` and one
   `revision_ref_associated`.
 - `<git-common-dir>/pointbreak/artifacts/objects/` contains exactly one snapshot artifact.
-- `<git-common-dir>/pointbreak/state.json` exists and reports `revisionCount: 1` with `eventCount: 2`.
+- No `<git-common-dir>/pointbreak/state.json` is created. `pointbreak store status --format json | jq .inventory.eventCount`
+  reports `2`, and `pointbreak revision list --format json | jq .revisionCount` reports `1`.
 - Nothing lands in the working tree: the default store is inside `.git/`, so no `.pointbreak/` directory
   is created, the root `.gitignore` is untouched, and `git status --short` shows only your own
   change (` M src.txt`). (An ephemeral-mode worktree instead materializes `.pointbreak/data/` guarded by
@@ -358,11 +359,10 @@ pointbreak revision show --format json-pretty --track agent:codex \
   the rows for the kept facts remain). `snapshot_remainder_count` is the same as without the
   filter, and the snapshot remainder still includes every captured file.
 
-## I. Storage soundness — events, artifacts, and projection rebuildability
+## I. Storage soundness — events and artifacts are the whole store
 
 **Goal.** Confirm that `.pointbreak/data/events/` and `.pointbreak/data/artifacts/` together are the authoritative
-durable store, and that `.pointbreak/data/state.json` is a pure projection that can be deleted and
-regenerated.
+durable store, and that no `state.json` projection is created by reads or writes.
 
 This section runs in its **own** fresh temp repo switched to **ephemeral** mode, so the store lands
 at a visible, worktree-local `.pointbreak/data/` you can list and delete directly. (The default store
@@ -390,32 +390,34 @@ shown here with the ephemeral `.pointbreak/data/` paths):
   input request, and assessment payloads (`artifacts/notes/`). `revision show` reads the
   snapshot artifact for the selected revision; the event log alone cannot reconstruct snapshot
   rows or large note bodies.
-- `.pointbreak/data/state.json` — rebuildable projection summary. Reads do not depend on its existence;
-  writes regenerate it.
+
+There is no `.pointbreak/data/state.json`: summaries and `eventSetHash` are computed from the event log at
+read time. A leftover file from an earlier version is inert and may be deleted.
 
 ```bash
 ls .pointbreak/data/events/
 ls .pointbreak/data/artifacts/objects/
 ls .pointbreak/data/artifacts/notes/        # only populated for large-body events
 
-# Read commands work without state.json
-HASH_BEFORE=$(jq -r .eventSetHash .pointbreak/data/state.json)
-rm .pointbreak/data/state.json
-pointbreak history --format json-pretty | jq -r .eventSetHash    # same hash
+# Reads compute freshness from the event log; no projection file exists
+test -e .pointbreak/data/state.json && echo "unexpected state.json" || echo "no state.json (expected)"
+HASH_BEFORE=$(pointbreak history --format json-pretty | jq -r .eventSetHash)
+COUNT_BEFORE=$(pointbreak store status --format json | jq .inventory.eventCount)
 pointbreak revision show --format json-pretty >/dev/null
-test -f .pointbreak/data/state.json && echo "rebuilt" || echo "still missing (expected for reads)"
 
-# A write command rebuilds the projection
-pointbreak observation add --track agent:codex --title "trigger rebuild" >/dev/null
-jq '.eventCount, .eventSetHash' .pointbreak/data/state.json
+# A write command changes the event set and still creates no projection file
+pointbreak observation add --track agent:codex --title "one more fact" >/dev/null
+pointbreak history --format json-pretty | jq -r .eventSetHash    # differs from $HASH_BEFORE
+pointbreak store status --format json | jq .inventory.eventCount  # higher than $COUNT_BEFORE
+test -e .pointbreak/data/state.json && echo "unexpected state.json" || echo "no state.json (expected)"
 ```
 
 **Expect.**
 
-- `pointbreak history` and `pointbreak revision show` both succeed without `state.json` present.
-  Their `eventSetHash` matches the value that was in the deleted projection.
-- After the next write command, `.pointbreak/data/state.json` exists again and reports a higher
-  `eventCount` and a new `eventSetHash`.
+- `pointbreak history` and `pointbreak revision show` both succeed; no `state.json` exists before or
+  after them.
+- After the next write command, `eventSetHash` changes and `inventory.eventCount` is higher; still no
+  `.pointbreak/data/state.json` is created.
 - Event files in `.pointbreak/data/events/` are never moved, renamed, or removed during any of this. You can
   list them before and after and confirm the set only grows.
 

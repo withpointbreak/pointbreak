@@ -233,7 +233,7 @@ pub fn migrate_store_to_common_dir(
 
 /// The retire-path classification of a worktree-local source store, by durable
 /// file counts under `events/` and `artifacts/` (excluding in-flight `*.tmp`
-/// files; the regenerable store-root `state.json` is a sibling of those trees
+/// files; a leftover store-root `state.json` is a sibling of those trees
 /// and is never counted — a nested file merely NAMED `state.json` is durable).
 enum RetireSourceShape {
     /// Event files present: fold, verify, then delete.
@@ -413,7 +413,7 @@ mod tests {
         assert!(result.artifacts_created >= 1);
         assert!(common.join("events").is_dir());
         assert!(common.join("artifacts/objects").is_dir());
-        assert!(common.join("state.json").is_file());
+        assert!(!common.join("state.json").exists());
         // Source is NEVER deleted (non-destructive).
         assert!(local.join("events").is_dir());
         let source_events = EventStore::open(&local).list_events().unwrap();
@@ -525,11 +525,12 @@ mod tests {
     }
 
     #[test]
-    fn migrate_acknowledgement_keeps_retirement_verification_after_failed_refresh() {
+    fn migrate_acknowledgement_leaves_a_leftover_target_state_json_inert() {
         let repo = modified_repo();
         seed_worktree_local_capture(&repo);
         let target = git_common_dir(repo.path()).unwrap().join("pointbreak");
-        fs::create_dir_all(target.join("state.json")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("state.json"), "leftover").unwrap();
         let result = migrate_store_to_common_dir(
             MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
         )
@@ -538,16 +539,16 @@ mod tests {
         assert!(result.verified_events > 0 && result.verified_artifacts > 0);
         assert_eq!(
             result.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::RefreshFailed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        assert_eq!(
+        assert!(
             result
                 .diagnostics
                 .iter()
-                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
-                .count(),
-            1
+                .all(|d| d.code != "legacy_state_projection_refresh_failed")
         );
+        // The fold neither refreshes, reads nor removes the target's leftover file.
+        assert_eq!(fs::read(target.join("state.json")).unwrap(), b"leftover");
     }
 
     #[test]
@@ -612,7 +613,7 @@ mod tests {
         let repo = modified_repo();
         // A .pointbreak/data holding only a stale state.json plus the EMPTY dirs the
         // writer pre-creates trips the populated guard but has nothing durable:
-        // state.json is a regenerable projection, the dirs are empty.
+        // state.json is an inert leftover, the dirs are empty.
         // Classification is by FILE COUNT, so the empty events/ dir must not
         // route this down the populated path.
         fs::create_dir_all(repo.path().join(".pointbreak/data/events")).unwrap();
@@ -659,7 +660,7 @@ mod tests {
 
     #[test]
     fn retire_source_refuses_a_nested_file_named_state_json_under_artifacts() {
-        // Only the STORE-ROOT state.json is regenerable; a nested file merely
+        // Only the STORE-ROOT state.json is an inert leftover; a nested file merely
         // NAMED state.json is durable bytes — it must classify as an artifact
         // file (refusal), never be skipped as a husk and deleted unverified.
         let repo = modified_repo();

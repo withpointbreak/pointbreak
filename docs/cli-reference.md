@@ -31,7 +31,7 @@ unambiguous by field presence. Consumers of such a command must accept the docum
 union rather than requiring one lane's field. `eventSetHash` (authoritative journal reads) and
 `projectionStamp` (derived reads) are that pair on the history, attention, and bounded revision-list
 documents. Raw event files,
-artifact paths, event filenames, and the store's `state.json` are internal storage details unless a
+artifact paths, and event filenames are internal storage details unless a
 command explicitly returns them.
 
 Document-emitting commands accept `--format <fmt>`, where `<fmt>` is `json`, `json-pretty`, or
@@ -52,7 +52,7 @@ views are current. The four independent fields describe only this invocation:
 | --- | --- |
 | `authorityOutcome` | `created` when all attempted authoritative components were new; `existing` when all were already present; `mixed` when both occurred; `unchanged` when none were attempted. Existing IDs, booleans, and counts remain the detailed result. |
 | `derived.availability` | `off` when the event writer had no derived coordinator; `current` when that write's catch-up succeeded; `catching_up` when its truth is durable but catch-up was deferred; `unavailable` when no usable derived observation could be returned; `not_observed` when no event write occurred. |
-| `legacyProjectionState` | `refreshed`, `refresh_failed`, or `not_attempted`. The synchronous `state.json` replacement remains best effort after durable truth. A failed replacement reports an advisory diagnostic and does not undo the write. |
+| `legacyProjectionState` | Always `not_attempted`. The legacy `state.json` projection is retired; no write creates, refreshes or reads it. `refreshed` and `refresh_failed` remain decodable for receipts produced by earlier versions. |
 | `operationReceipt` | `{ "state": "not_recorded" }` unless the invocation created or reused an existing durable operation binding. A response is not itself a durable operation receipt. |
 
 `current` and `catching_up` include `derived.token` with `generationId`, `epoch`, and `headSequence`;
@@ -60,8 +60,8 @@ the other states omit it. This is a coordinate obtained from the event write, no
 later read. Compare head sequences only within the same generation and epoch. A composite result
 retains the highest compatible head sequence; incompatible generations or epochs yield `unavailable`
 and a diagnostic. For multiple writes, unavailable dominates catching-up, then current, then off.
-An empty import/fold reports unchanged authority, not-observed derived state, no attempted legacy
-refresh, and no recorded operation receipt.
+An empty import/fold reports unchanged authority, not-observed derived state, and no recorded
+operation receipt.
 
 Change capture names its existing durable recovery binding using `operationReceipt.receiptId`, equal
 to its `operationId`: state `recorded` means this invocation created that binding, and `existing`
@@ -71,8 +71,7 @@ means it reused it. Reuse does **not** imply the requested Change operation had 
 later action.
 
 Call-specific diagnostics appear once in the existing top-level `diagnostics` array, never inside
-`acknowledgement`. Multi-event derived diagnostics retain the first occurrence of each code. Land
-retains diagnostics from both legacy refresh attempts, even if the second refresh succeeds. Store
+`acknowledgement`. Multi-event derived diagnostics retain the first occurrence of each code. Store
 link/migrate append their existing warnings after workflow diagnostics.
 
 A writer reports derived-generation admission failure on its first attempted publication,
@@ -559,11 +558,12 @@ proposal rather than an edit; choose the label on the initial capture.
   `.pointbreak/allowed-signers.json`, `.pointbreak/store.json`) stay tracked; only `.pointbreak/data/` and the
   private `.pointbreak/delegates.local.json`, `.pointbreak/actor-attributes.local.json`, and
   `.pointbreak/store.local.json` overrides are excluded.
-- The store subtree (`events/`, `state.json`, and `artifacts/`) is the same wherever it resolves:
+- The store subtree (`events/` and `artifacts/`) is the same wherever it resolves:
   the shared common-dir store at `<git-common-dir>/pointbreak` by default, or an `ephemeral` worktree's own
   `.pointbreak/data/`.
 - `events/` stores immutable event files.
-- `state.json` is a rebuildable projection, not the authority.
+- No `state.json` projection is written. A leftover file from an earlier version is inert and may
+  be deleted.
 - Full captured snapshots are Pointbreak-owned immutable object artifacts under `artifacts/objects/`.
 - The `work_object_proposed` event binds to the object artifact's canonical content hash; the
   content-only artifact body carries no revision identity or endpoints (those live on the event).
@@ -838,13 +838,13 @@ this build; the command fails closed as described above.
 
 **`--retire-source`** completes the switch in one command: after the fold, an independent
 verification walks every durable file in the source store (`events/` and `artifacts/`, recursively;
-only in-flight `*.tmp` files are excluded — the regenerable store-root `state.json` sits outside
+only in-flight `*.tmp` files are excluded — a leftover store-root `state.json` sits outside
 those trees, and a nested file merely named `state.json` is verified like any other) and requires each to be
 present in the shared store with identical content — byte-identical for artifacts, canonically
 identical modulo the import's own ingest-provenance stamp for events. Only then is `.pointbreak/data`
 deleted, so the very next read resolves. On **any** missing or divergent file — including an orphan
 artifact no event references, which the fold deliberately does not carry — the command errors,
-names the offending paths, and deletes nothing. A source with no durable files at all (only the store-root
+names the offending paths, and deletes nothing. A source with no durable files at all (only a leftover store-root
 `state.json` or the empty directories the writer pre-creates) is removed as a husk without a fold;
 a source holding artifact files but no event files is refused outright. Classification is by file
 counts, never directory existence.
@@ -923,7 +923,7 @@ recorded removal still fails the read with the `import referenced artifacts` gui
 
 Command output is the machine-integration surface, under the tiered stability promise described at
 the [top of this reference](#cli-reference) (a frozen hard core; an additive-evolvable soft shell).
-Raw store paths, event files, artifact paths, `.git` paths, `.pointbreak/data` paths, and `state.json`
+Raw store paths, event files, artifact paths, `.git` paths, and `.pointbreak/data` paths
 remain internal storage details.
 
 ## `pointbreak identity`
@@ -1395,7 +1395,7 @@ pointbreak association land --review-cursor "$rewrite_cursor" --track "$track" \
 
 `--dry-run` also works on the ordinary route. It returns `pointbreak.association-land-preview.v1` with
 exact Revision, commit/tree OIDs and the full canonical proof. It performs no write-store preparation,
-signing-key load, artifact/event publication, `state.json` refresh, migration, rebuild or activation.
+signing-key load, artifact/event publication, migration, rebuild or activation.
 There is no write acknowledgement or created/landed claim. Preview does not require `--expect-proof`,
 but checks it when supplied: a mismatched hash refuses without writing anything. Recording in parent
 mode requires the hash emitted by the current preview. Any supplied expected hash on ordinary

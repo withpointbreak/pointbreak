@@ -542,3 +542,21 @@ locks, and reader leases permit an exclusive move; conflicts are reported rather
 deleted. Operators diagnose or repair disposable state with
 `pointbreak store derived status|build|rebuild`. No authoritative truth migration, backend replacement, or
 logical-transfer change is part of this rollout.
+
+## Amendment: The `state.json` Projection Is Retired (2026-09-18)
+
+D4's byte-stability guarantee for the materialized `state.json` and D5's "projection write stays on
+`LocalStorage`" clause no longer apply: no product path writes, refreshes or reads a store-root
+`state.json`. D11's observation that there is exactly one materialized view is likewise historical; the
+store now holds no materialized state projection, and the `ProjectionStore` seam stays deferred.
+
+`SessionState` remains the in-memory reducer behind every read surface, and D4's deterministic listing
+order is unchanged. Its serialized shape is frozen so longitudinal receipt digests, which hash the
+in-memory fold, stay comparable with retained receipts. The write acknowledgement's
+`legacyProjectionState` field remains on the wire and always reports `not_attempted`; `refreshed` and
+`refresh_failed` stay decodable for receipts produced by earlier versions.
+
+Existing `state.json` files are inert leftovers. Store detection, inventory, fingerprints and bundles
+ignore them, no command deletes them except the unchanged `store migrate common-dir --retire-source`
+husk removal, and an operator may delete them. `Durability::Projection` remains the atomic-write class
+for the family `registry.json`.

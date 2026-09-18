@@ -23,7 +23,6 @@ use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
     validated_track_id,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -196,7 +195,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     prepare_write_landing(&write_store, &storage)?;
 
     // The write half lands in the resolved write store (the clone-local store in
-    // linked mode) and rebuilds its state.json there.
+    // linked mode).
     let event_store = write_store.event_store()?;
 
     // Validation/derivation reads resolve the writer-visible union so the unit,
@@ -373,19 +372,11 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
-
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(competing_candidates);
     diagnostics.extend(cross_actor_replacement);
     diagnostics.extend(unlinked_follow_up);
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     let result = AssessmentAddResult {
         acknowledgement,

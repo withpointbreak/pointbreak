@@ -120,8 +120,8 @@ pub use projection::{
     RevisionRefUnavailableReasonV1, RevisionsByBase, SessionState, StoreIdIndex, SupersessionView,
     WithdrawnCommitAssociation, WithdrawnRefAssociation, change_document_projection_stamp,
     project_change_documents, project_changes, read_events, read_events_for_display,
-    rebind_event_history_source_projection_stamp, rebuild_state,
-    revision_supersession_classification, store_id_index,
+    rebind_event_history_source_projection_stamp, revision_supersession_classification,
+    store_id_index,
 };
 pub use sensitivity_vocabulary::{SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity};
 pub use signing::{
@@ -155,7 +155,7 @@ pub use store::{
 };
 pub(crate) use store::{
     EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, build_object_artifact_v2,
-    sweep_stale_temp_files, worktree_fingerprint_for_files,
+    worktree_fingerprint_for_files,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, object_artifact, store_init};
 pub use workflow::{

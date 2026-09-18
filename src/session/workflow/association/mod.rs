@@ -27,7 +27,6 @@ use crate::session::event::{
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_read_store, resolve_write_store,
@@ -910,15 +909,8 @@ where
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(AssociationWriteOutcome {
         acknowledgement,
@@ -1104,13 +1096,13 @@ mod tests {
     }
 
     #[test]
-    fn association_persists_a_full_event_log_rebuild() {
-        // The state.json a write workflow persists is a rebuild of the whole
-        // event log, not the batch the workflow loaded for itself: after
-        // recording an association, the on-disk projection must equal a fresh
-        // replay of every event in the store.
+    fn association_result_folds_the_whole_event_log_and_writes_no_state_projection() {
+        // The reducer diagnostics a write result carries come from a fold of the
+        // whole event log, not the batch the workflow loaded for itself: after
+        // recording an association, a fresh replay sees every event in the store,
+        // and no projection file is persisted.
         let (repo, _unit) = Repo::with_capture();
-        associate_commit(
+        let result = associate_commit(
             AssociateCommitOptions::new(repo.path(), "HEAD").with_track("agent:codex"),
         )
         .unwrap();
@@ -1118,11 +1110,13 @@ mod tests {
         let store_dir = resolved_store_dir(repo.path());
         let events = EventStore::open(&store_dir).list_events().unwrap();
         let replay = SessionState::from_events(&events).unwrap();
-        let persisted: SessionState =
-            serde_json::from_slice(&std::fs::read(store_dir.join("state.json")).unwrap()).unwrap();
 
-        assert_eq!(persisted, replay);
-        assert_eq!(persisted.event_count, events.len());
+        assert_eq!(replay.event_count, events.len());
+        assert_eq!(
+            result.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(!store_dir.join("state.json").exists());
     }
 
     #[test]

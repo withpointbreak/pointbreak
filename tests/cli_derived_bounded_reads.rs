@@ -778,7 +778,7 @@ fn conflicting_namespace_write_acknowledgement_is_characterized() {
         "{document:#}"
     );
     assert_eq!(
-        document["acknowledgement"]["legacyProjectionState"], "refreshed",
+        document["acknowledgement"]["legacyProjectionState"], "not_attempted",
         "{document:#}"
     );
 }

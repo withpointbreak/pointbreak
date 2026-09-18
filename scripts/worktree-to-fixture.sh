@@ -261,22 +261,17 @@ grep -qxF 'FIXTURE.md' "$DEST_EXCLUDE" 2>/dev/null || printf '%s\n' 'FIXTURE.md'
 STORE_DIR="$DEST_STORE"
 STORE_SUMMARY="(no store found in worktree)"
 if [ -d "$STORE_DIR" ]; then
-  SJ="$STORE_DIR/state.json"
   EVENTS_N="$(ls "$STORE_DIR/events" 2>/dev/null | wc -l | tr -d ' ')"
-  if [ -f "$SJ" ] && command -v jq >/dev/null 2>&1; then
-    STORE_SUMMARY="$(jq -r '"\(.eventCount) events, \(.revisionCount) revisions, \(.observationCount) observations, \(.assessmentCount) assessments, \(.inputRequestCount) input requests" + (if (.diagnostics // []) | length > 0 then "; diagnostics: " + ((.diagnostics | map(.code)) | join(", ")) else "" end) + "\n  eventSetHash: \(.eventSetHash)"' "$SJ")"
-  elif [ -f "$SJ" ] && command -v python3 >/dev/null 2>&1; then
-    STORE_SUMMARY="$(python3 - "$SJ" <<'PY'
+  STATUS_JSON="$("$POINTBREAK_BIN" store status --repo "$DEST" --format json 2>/dev/null || true)"
+  if [ -n "$STATUS_JSON" ] && command -v jq >/dev/null 2>&1; then
+    STORE_SUMMARY="$(printf '%s' "$STATUS_JSON" | jq -r '.inventory | "\(.eventCount) events, \(.artifactCount) artifacts, \(.revisionObjects | length) revision objects, \(.totalBytes) bytes"')"
+  elif [ -n "$STATUS_JSON" ] && command -v python3 >/dev/null 2>&1; then
+    STORE_SUMMARY="$(printf '%s' "$STATUS_JSON" | python3 -c '
 import json,sys
-d=json.load(open(sys.argv[1]))
-diag=", ".join(x.get("code","") for x in d.get("diagnostics",[]))
-s="%s events, %s revisions, %s observations, %s assessments, %s input requests"%(
-  d.get("eventCount"),d.get("revisionCount"),d.get("observationCount"),d.get("assessmentCount"),d.get("inputRequestCount"))
-if diag: s+="; diagnostics: "+diag
-s+="\n  eventSetHash: %s"%d.get("eventSetHash")
-print(s)
-PY
-)"
+i=json.load(sys.stdin)["inventory"]
+print("%s events, %s artifacts, %s revision objects, %s bytes"%(
+  i.get("eventCount"),i.get("artifactCount"),len(i.get("revisionObjects",[])),i.get("totalBytes")))
+')"
   else
     STORE_SUMMARY="$EVENTS_N events (install jq or python3 for full stats)"
   fi

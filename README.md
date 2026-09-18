@@ -79,7 +79,7 @@ whoever asserted it. See [the review workflow](docs/review-workflow.md) and
 Repository config lives in `.pointbreak/`. Review facts normally live in the Git common directory's
 `pointbreak/` store, shared by every linked worktree; an ephemeral worktree uses `.pointbreak/data/`.
 Run `pointbreak store paths --format text` to see the canonical locations for a repository. Command
-output JSON is the integration surface; raw event files, artifact paths, and `state.json` are internal
+output JSON is the integration surface; raw event files and artifact paths are internal
 storage details unless a command explicitly documents them. Consumers that prefer to read and write
 those facts in process can use the supported library API instead of the CLI — see
 [docs/library-api.md](docs/library-api.md).

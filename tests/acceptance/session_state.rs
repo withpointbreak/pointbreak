@@ -2,8 +2,7 @@ use pointbreak::git::{git_worktree_root, ingest_tracked_diff};
 use pointbreak::session::event::EventType;
 use pointbreak::session::{
     CaptureOptions, SessionState, capture_worktree_fingerprint, capture_worktree_review,
-    ensure_pointbreak_gitignore, read_events, read_object_artifact, rebuild_state,
-    store_dir_for_repo,
+    ensure_pointbreak_gitignore, read_events, read_object_artifact, store_dir_for_repo,
 };
 
 use crate::support::git_repo::GitRepo;
@@ -139,18 +138,6 @@ fn read_events_uses_worktree_store_dir_from_subdirectory() {
 }
 
 #[test]
-fn rebuild_state_resolves_the_store_from_a_subdirectory() {
-    let repo = modified_repo();
-    capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-    let store = common_dir_store(repo.path());
-    std::fs::remove_file(store.join("state.json")).unwrap();
-
-    rebuild_state(repo.path().join("src")).unwrap();
-
-    assert!(store.join("state.json").is_file());
-}
-
-#[test]
 fn nested_git_repo_uses_its_own_worktree_root() {
     let outer = GitRepo::new();
     outer.write("nested/.keep", "");
@@ -230,7 +217,7 @@ fn git_ingestion_uses_content_derived_snapshot_id() {
 }
 
 #[test]
-fn first_capture_creates_shore_store_events_artifacts_and_state() {
+fn first_capture_creates_shore_store_events_artifacts_and_no_state_projection() {
     let repo = modified_repo();
 
     let result =
@@ -239,7 +226,10 @@ fn first_capture_creates_shore_store_events_artifacts_and_state() {
     let store = common_dir_store(repo.path());
     assert!(store.join("events").is_dir());
     assert!(store.join("artifacts/objects").is_dir());
-    assert!(store.join("state.json").is_file());
+    assert!(
+        !store.join("state.json").exists(),
+        "no write creates a store-root state projection"
+    );
     // The shared store lives inside .git/, which git already ignores, so a
     // shared-store capture writes NO ignore entries anywhere: no generated
     // .pointbreak/.gitignore, nothing in the repo-local exclude, no root .gitignore.
@@ -259,9 +249,8 @@ fn first_capture_creates_shore_store_events_artifacts_and_state() {
     );
     assert_eq!(result.events_created_by_type["work_object_proposed"], 1);
 
-    let state: SessionState =
-        serde_json::from_str(&std::fs::read_to_string(store.join("state.json")).unwrap())
-            .expect("state decodes");
+    let state = SessionState::from_events(&read_events(repo.path()).expect("events list"))
+        .expect("state folds from events");
     assert_eq!(state.current_revision_id, Some(result.revision_id));
     assert_eq!(state.revision_count, 1);
     assert_eq!(state.event_count, 2);
@@ -348,52 +337,17 @@ fn capture_writer_identity_prefers_git_config_email() {
 fn state_event_set_hash_changes_when_events_change() {
     let repo = modified_repo();
     capture_worktree_review(CaptureOptions::new(repo.path())).expect("capture succeeds");
-    let store = common_dir_store(repo.path());
-    let capture_state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(store.join("state.json")).unwrap())
-            .expect("capture state");
+    let capture_state = SessionState::from_events(&read_events(repo.path()).expect("events list"))
+        .expect("capture state folds");
 
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     capture_worktree_review(CaptureOptions::new(repo.path())).expect("second capture succeeds");
-    let second_state: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(store.join("state.json")).unwrap())
-            .expect("second capture state");
+    let second_state = SessionState::from_events(&read_events(repo.path()).expect("events list"))
+        .expect("second capture state folds");
 
-    assert_eq!(capture_state["eventCount"], 2);
-    assert_ne!(capture_state["eventSetHash"], second_state["eventSetHash"]);
-}
-
-#[test]
-fn state_can_be_deleted_and_rebuilt_from_events() {
-    let repo = bounded_journal_repo();
-    let store = common_dir_store(repo.path());
-    let original_state = std::fs::read_to_string(store.join("state.json")).unwrap();
-    std::fs::remove_file(store.join("state.json")).unwrap();
-
-    let rebuilt = rebuild_state(repo.path()).expect("state rebuilds");
-    let rebuilt_state = std::fs::read_to_string(store.join("state.json")).unwrap();
-
-    assert!(store.join("state.json").is_file());
-    assert!(rebuilt.event_count >= 1);
-    let original: serde_json::Value = serde_json::from_str(&original_state).unwrap();
-    let rebuilt: serde_json::Value = serde_json::from_str(&rebuilt_state).unwrap();
-    assert_eq!(rebuilt, original);
-}
-
-#[test]
-fn corrupt_state_json_is_ignored_and_rebuilt_from_events() {
-    let repo = bounded_journal_repo();
-    let store = common_dir_store(repo.path());
-    let original_state = std::fs::read_to_string(store.join("state.json")).unwrap();
-    std::fs::write(store.join("state.json"), "{").unwrap();
-
-    rebuild_state(repo.path()).expect("state rebuilds from events");
-    let rebuilt_state = std::fs::read_to_string(store.join("state.json")).unwrap();
-
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&rebuilt_state).unwrap(),
-        serde_json::from_str::<serde_json::Value>(&original_state).unwrap()
-    );
+    assert_eq!(capture_state.event_count, 2);
+    assert!(capture_state.event_set_hash.is_some());
+    assert_ne!(capture_state.event_set_hash, second_state.event_set_hash);
 }
 
 #[test]
@@ -401,7 +355,7 @@ fn event_store_detects_corrupted_event_payload_hash() {
     let repo = bounded_journal_repo();
     corrupt_first_event_payload(&common_dir_store(repo.path()));
 
-    let error = rebuild_state(repo.path()).expect_err("corrupt event is rejected");
+    let error = read_events(repo.path()).expect_err("corrupt event is rejected");
 
     assert!(error.to_string().contains("payload"));
 }

@@ -32,7 +32,6 @@ use crate::session::event::{
 };
 use crate::session::object_artifact::decode_and_validate_object_artifact;
 use crate::session::projection::cosignature::CosignatureIndex;
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -187,19 +186,11 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
         });
     }
 
-    // Regenerable projection rebuild from the full log (ArtifactRemoved does not
-    // change SessionState; the rebuild keeps state.json fresh for concurrent
-    // writers, never as the authority).
+    // Full-log fold for the reducer diagnostics carried on the result
+    // (ArtifactRemoved does not change SessionState).
     let state = SessionState::from_events(&event_store.list_events()?)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, &store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(RemoveResult {
         acknowledgement,
@@ -479,8 +470,8 @@ pub struct CompactResult {
 }
 
 /// Physically delete the content-addressed blobs whose `content_hash` was marked
-/// removed. A local, non-event maintenance sweep — it appends no event, rewrites
-/// no `state.json`, and is fully re-derivable from the log. `gc` and `compact`
+/// removed. A local, non-event maintenance sweep — it appends no event and is
+/// fully re-derivable from the log. `gc` and `compact`
 /// are the same operation; re-capturing the same content re-materializes a swept
 /// blob (there is no un-remove — the removal fact persists in the log).
 pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
@@ -1118,13 +1109,13 @@ mod tests {
         assert_eq!(swept.outcome, SweepOutcome::Removed);
         assert!(result.bytes_reclaimed > 0);
 
-        // The event log and projection are never swept.
+        // The event log is never swept, and no write created a state projection.
         assert!(
             list_events(&repo)
                 .iter()
                 .any(|event| event.event_type == EventType::WorkObjectProposed)
         );
-        assert!(resolved_store_dir(repo.path()).join("state.json").exists());
+        assert!(!resolved_store_dir(repo.path()).join("state.json").exists());
     }
 
     #[test]

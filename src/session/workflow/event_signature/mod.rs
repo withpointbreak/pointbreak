@@ -31,7 +31,6 @@ use crate::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
     ShoreEvent, Writer, event_signature_pre_authentication_encoding,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
@@ -100,7 +99,7 @@ pub fn record_event_signature(
     prepare_write_landing(&write_store, &storage)?;
 
     // The write half lands in the resolved write store (the clone-local store in
-    // linked mode) and rebuilds its state.json there.
+    // linked mode).
     let event_store = write_store.event_store()?;
 
     // Resolve the target against the writer-visible union so a linked-only target
@@ -169,8 +168,6 @@ pub fn record_event_signature(
     };
 
     let state = SessionState::from_events(&event_store.list_events()?)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
-
     let mut diagnostics = state.diagnostics;
     let mut derived = DerivedWriteAggregate::default();
     derived.record(
@@ -178,13 +175,7 @@ pub fn record_event_signature(
             .acknowledgement
             .expect("stored carrier yields acknowledgement"),
     );
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(EventSignatureRecordResult {
         acknowledgement,

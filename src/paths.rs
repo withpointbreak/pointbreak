@@ -42,10 +42,6 @@ impl RepositoryPaths {
         &self.worktree_store
     }
 
-    pub fn state_path(&self) -> PathBuf {
-        self.worktree_store().join("state.json")
-    }
-
     pub fn gitignore(&self) -> PathBuf {
         self.config_dir().join(".gitignore")
     }

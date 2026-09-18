@@ -26,7 +26,7 @@ worktree-local `.pointbreak/data` store when the worktree is ephemeral. The on-d
 regardless of location. This is a deliberate split between canonical immutable facts and derived
 projections, not a temporary gap waiting to be replaced by a database.
 
-**Path convention.** Store paths below (`events/`, `artifacts/`, `state.json`, …) are shown relative
+**Path convention.** Store paths below (`events/`, `artifacts/`, …) are shown relative
 to the resolved store directory — `<git-common-dir>/pointbreak` by default, or `.pointbreak/data` when the worktree is
 ephemeral. They are not absolute repo paths; only the ephemeral opt-out and the legacy-migration
 notes name `.pointbreak/data` literally.
@@ -45,22 +45,29 @@ report the same common store and binding because both live under their shared Gi
 
 These are the only authoritative durable storage in V1. Everything else is a cache or projection.
 
-**Rebuildable projections.** `state.json`, command-output views such as `pointbreak.review-history` and
-`pointbreak.review-revision`, and any future read indexes are derived from durable events and artifacts.
-They may be deleted and regenerated. Freshness against the current event set is verified through
-`eventSetHash`, not through the projection's existence or `eventCount` alone.
+**Rebuildable projections.** The in-memory state summary, command-output views such as
+`pointbreak.review-history` and `pointbreak.review-revision`, and any read indexes are derived from
+durable events and artifacts. They may be discarded and regenerated. Freshness against the current
+event set is verified through `eventSetHash`, not through a projection's existence or `eventCount` alone.
 
-Write responses report authority and projection outcomes separately through the
-[write acknowledgement contract](cli-reference.md#write-acknowledgements). Ordinary projection-producing
-writes still attempt `state.json` replacement synchronously, after authoritative publication. Replacement
-failure is advisory, and neither a successful response nor a refreshed legacy file proves derived views
+**Retired projection.** Earlier versions persisted the state summary as a store-root `state.json`.
+That projection is retired: no command creates, refreshes or reads it, and the store is `events/` plus
+`artifacts/` (plus derived access). A leftover `state.json` from an earlier version is inert — ignored
+by store detection, inventory, fingerprints and bundles — and may be deleted by the operator. A
+`.pointbreak/data` that holds only such a file is no longer treated as a populated worktree-local store,
+so it does not route to `pointbreak store migrate`; the `store migrate common-dir --retire-source` husk
+rules are unchanged.
+
+Write responses report authority and derived outcomes separately through the
+[write acknowledgement contract](cli-reference.md#write-acknowledgements). Its `legacyProjectionState`
+field is always `not_attempted`. A successful response does not prove derived views
 are current. A response is not durable storage; Change capture may name its existing recovery binding
 without creating another authority or receipt carrier.
 
 **Consumer contract.** Stable automation should depend on Pointbreak commands and named JSON documents,
 not on raw storage paths. Commands and documents expose semantic IDs, content hashes, and freshness
-metadata as the public surface. Event filenames, artifact paths, fan-out layout, the internal shape
-of `state.json`, raw storage envelopes, and row or hunk identifier formatting are Pointbreak-owned
+metadata as the public surface. Event filenames, artifact paths, fan-out layout,
+raw storage envelopes, and row or hunk identifier formatting are Pointbreak-owned
 storage details. They may change without a deprecation cycle unless a later design explicitly
 promotes them to a stable contract.
 
@@ -78,7 +85,6 @@ committed config siblings always live under the worktree's `.pointbreak/`:
 ```text
 <git-common-dir>/pointbreak/               shared common-dir store (default; one per clone, shared by every worktree)
   events/                 immutable event log
-  state.json              rebuildable projection
   artifacts/              immutable or content-addressed support records
     notes/                optional content-addressed note-body records
     objects/              immutable captured revision object artifacts (content-only snapshots)
@@ -96,7 +102,7 @@ committed config siblings always live under the worktree's `.pointbreak/`:
 
 By default the store lives at `<git-common-dir>/pointbreak` under the clone's Git common directory, so every worktree
 of the clone resolves the same store; an ephemeral worktree instead keeps its store under its own
-`.pointbreak/data/`. Either way the store's on-disk layout (`events/`, `state.json`, `artifacts/…`) is the
+`.pointbreak/data/`. Either way the store's on-disk layout (`events/`, `artifacts/…`) is the
 same. The worktree's `.pointbreak/` directory always holds the committed config siblings (`store.json`,
 `delegates.json`, `actor-attributes.json`, `allowed-signers.json`). Only the ephemeral store subtree
 and the private `.local.json` overrides are kept out of Git, via a committed
@@ -119,8 +125,8 @@ generated `.pointbreak/.gitignore`, so a clone carrying one should delete that l
 `events/` is the authoritative log. Events are immutable, independently written, and never moved to
 `failed/`, retried in place, or rewritten on read.
 
-`state.json` is a cache/projection. It must be rebuildable from durable records. If it is missing,
-stale, or invalid, Pointbreak should rebuild it rather than treating it as authority.
+The state summary is an in-memory fold of durable records, recomputed on demand and never treated
+as authority.
 
 Revision capture follows the same authority split:
 
@@ -138,7 +144,7 @@ Revision capture follows the same authority split:
 - the separation is deliberate: the **revision id** is the captured unit's identity and the **object
   id** is a hash of its captured content alone, so two clones capturing identical content converge on
   one object while keeping distinct revisions
-- bounded `state.json` may summarize revision count and current unambiguous revision ID, but it
+- the bounded state summary may report revision count and current unambiguous revision ID, but it
   is not the source of revision identity or snapshot content
 
 `pointbreak capture` returns `pointbreak.change-capture-receipt.v1`. The receipt reports the stable Change,
@@ -192,8 +198,8 @@ The retired imported-notes pipeline left one storage remnant: old stores may car
 `review_note_imported` events in `events/` (and, for large imported bodies, note-body artifacts
 under `artifacts/notes/`). The event kind keeps its reserved type code forever — the type-code
 registry is append-only — so those stores still load, but no surface projects the kind anymore
-(ADR-0030, second Amendment). `state.json` keeps its `noteCount` field for wire-shape stability;
-it is structurally zero.
+(ADR-0030, second Amendment). The state summary keeps its `noteCount` field for serialized-shape
+stability; it is structurally zero.
 
 Native observations follow the revision ledger model:
 
@@ -202,7 +208,7 @@ Native observations follow the revision ledger model:
   snapshot
 - each observation belongs to a required track; tracks are review lanes, while actor/producer provenance
   remains in the event writer envelope
-- bounded `state.json` may summarize observation state, such as `observationCount`, but it does not
+- the bounded state summary may report observation state, such as `observationCount`, but it does not
   embed observation history or body content
 
 Observations are append-only. Corrections are new `review_observation_recorded` events that name
@@ -215,11 +221,11 @@ and emits a duplicate semantic diagnostic.
 Observation bodies use inline-or-artifact mechanics. Bodies under or
 equal to `BODY_INLINE_LIMIT` (4096 bytes today) stay inline in the event payload; bodies above the
 threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
-envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+envelope (schema `shore.note-body`, version `1`), keeping the state summary bounded and avoiding
 unbounded event payload growth.
 
 The direct read surface is `pointbreak observation list`, which replays events and can optionally
-hydrate bodies. Body artifact paths, event filenames, and `state.json` paths are internal storage
+hydrate bodies. Body artifact paths and event filenames are internal storage
 details, not command-output API. Native observations also appear in the composite
 `pointbreak revision show` projection.
 
@@ -231,7 +237,7 @@ Native input requests follow the same revision ledger model:
   revision
 - each request belongs to a required track; actor/producer provenance remains in the event writer
   envelope
-- bounded `state.json` summarizes input request state with `inputRequestCount`,
+- the bounded state summary reports input request state with `inputRequestCount`,
   `openInputRequestCount`, and `openOperativeInputRequestCount`, but it does not embed request
   history, response history, body content, or reason content
 
@@ -249,12 +255,12 @@ ambiguous.
 Input request bodies and response reasons use the shared inline-or-artifact mechanics. Text under
 or equal to `BODY_INLINE_LIMIT` (4096 bytes today) stays inline in the event payload; text above
 the threshold is externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
-envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+envelope (schema `shore.note-body`, version `1`), keeping the state summary bounded and avoiding
 unbounded event payload growth.
 
 The direct read surfaces are `pointbreak input-request list` and `pointbreak input-request show`,
 which replay events and can optionally hydrate bodies. Body artifact paths, reason artifact paths,
-event filenames, and `state.json` paths are internal storage details, not command-output API. Native
+and event filenames are internal storage details, not command-output API. Native
 input requests also appear in the composite `pointbreak revision show` projection.
 
 Native assessments follow the same revision ledger model:
@@ -264,7 +270,7 @@ Native assessments follow the same revision ledger model:
   request, or native assessment in that same revision
 - each assessment belongs to a required track; actor/producer provenance remains in the event writer
   envelope
-- bounded `state.json` summarizes assessment state with `assessmentCount`, but it does not embed
+- the bounded state summary reports assessment state with `assessmentCount`, but it does not embed
   assessment history, summaries, relationship graphs, or current-assessment candidates
 
 Assessment values are closed in V1. Stored event JSON and command JSON use `snake_case`: `accepted`,
@@ -285,11 +291,11 @@ timestamp winner.
 Assessment summaries use the shared inline-or-artifact mechanics. Summaries under or equal to
 `BODY_INLINE_LIMIT` (4096 bytes today) stay inline in the event payload; summaries above the
 threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
-envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+envelope (schema `shore.note-body`, version `1`), keeping the state summary bounded and avoiding
 unbounded event payload growth.
 
 The direct read surface is `pointbreak assessment show`, which replays events and can optionally
-hydrate summaries. Summary artifact paths, event filenames, and `state.json` paths are internal
+hydrate summaries. Summary artifact paths and event filenames are internal
 storage details, not command-output API. Native assessments also appear in the composite
 `pointbreak revision show` projection.
 
@@ -304,7 +310,7 @@ Validation evidence follows the same revision ledger model:
   revision identity
 - each validation check belongs to a required track; actor/producer provenance remains in the event
   writer envelope
-- bounded `state.json` summarizes validation evidence with `validationCheckCount`, but it does not
+- the bounded state summary reports validation evidence with `validationCheckCount`, but it does not
   embed validation history, summary content, logs, or reports
 
 Validation evidence is advisory. It may support review judgment in `pointbreak revision show`,
@@ -346,7 +352,7 @@ Review history is the chronological read surface over durable events:
 History preserves raw append-only facts. It does not collapse duplicate semantic events, choose
 current assessments, resolve input-request lifecycles, or build the full revision row projection.
 Shared state diagnostics are still included so callers can see duplicate semantic facts while
-inspecting the underlying events. Raw event files, artifact paths, event filenames, and `state.json`
+inspecting the underlying events. Raw event files, artifact paths, and event filenames
 are storage details, not history output API.
 
 `pointbreak revision show` is the composite read surface for one captured revision:
@@ -366,7 +372,7 @@ are storage details, not history output API.
   default output keeps large text omitted
 
 `pointbreak.review-revision` is command-output API. Object artifacts, note body artifacts, event files,
-event filenames, and `state.json` remain Pointbreak-owned storage details and are not exposed as stable
+and event filenames remain Pointbreak-owned storage details and are not exposed as stable
 paths.
 
 The review stream also surfaces stale and orphan notes as dedicated rows so reviewers can park the
@@ -387,12 +393,12 @@ machine-wide **user-level family store tier** (see
 multi-repository case [issue #153](https://github.com/withpointbreak/pointbreak/issues/153) named.
 
 Public commands expose the resolved store as command JSON using opaque refs. Callers must not depend
-on raw store paths, event filenames, artifact paths, `.git` paths, `.pointbreak/data` paths, or
-`state.json` layout — the JSON never prints them.
+on raw store paths, event filenames, artifact paths, `.git` paths, or `.pointbreak/data` paths — the
+JSON never prints them.
 
 The writer contract is direct. Review capture and the native review write commands — recording an
 observation, an input request open or response, an assessment, or validation evidence — write their
-event, artifacts, and rebuilt `state.json` directly into the shared common-dir
+event and artifacts directly into the shared common-dir
 store, the same store every read surface resolves. The fact is therefore visible to every worktree
 of the clone in place, with no setup step, and a write can attach a fact to a revision (or relate
 it to an observation, assessment, or request) captured in a sibling worktree. An **ephemeral**
@@ -473,8 +479,8 @@ Home](#signature-allow-list-and-key-home)); both the key home and the family sto
 root from one shared resolver rather than two copies. The `stores/` path segment keeps
 `<root>/{keys,stores}` disjoint from the key home by construction, so a family named `keys` still
 lands at `<root>/stores/keys` and can never collide with the keystore. A family directory reuses the
-existing store layout verbatim — `events/`, `artifacts/notes/`, `artifacts/objects/`, and the
-regenerable `state.json` — plus two new files, `family.json` and a generated `.gitignore`.
+existing store layout verbatim — `events/`, `artifacts/notes/`, and `artifacts/objects/` — plus two
+new files, `family.json` and a generated `.gitignore`.
 
 **Resolution precedence.** `resolve_store` grows one branch, giving the order **ephemeral opt-in >
 user-level opt-in > clone-local default** (the legacy flat-layout hard-cutover guard still fires
@@ -511,8 +517,8 @@ silent clone-local fallback. `registry.json` (`"shore.family-registry"`, version
 membership bookkeeping outside the event log: it records each member clone's path, re-validated
 bidirectionally (the path is a git repo *and* that clone's local config still names the family back),
 so `list`/`forget`/`status` derive liveness on demand rather than trusting stale entries. The family
-directory's generated `.gitignore` covers exactly `state.json` and `registry.json` — both
-machine-local, neither meant to be shared even if the family directory were ever placed under version
+directory's generated `.gitignore` covers exactly `state.json` (a leftover from earlier versions; no
+longer written) and `registry.json` — both machine-local, neither meant to be shared even if the family directory were ever placed under version
 control.
 
 **Non-guarantees.**
@@ -714,12 +720,13 @@ the same temp/rename path to avoid partial reads.
 
 ## Bounded Projections
 
-`state.json` must stay bounded. It should summarize current state, cursors, and active projections;
-it should not grow linearly with the event log.
+The state summary must stay bounded. It should summarize current state, cursors, and active
+projections; it should not grow linearly with the event log.
 
 If a projection needs unbounded history, split it into paged or content-addressed records under
-`artifacts/` and keep `state.json` as an index or summary. A large `state.json` is a design smell
-because it becomes a shared mutable file, a slow health check, and a crash-recovery hazard.
+`artifacts/` and keep the summary as an index. A large mutable summary file is a design smell
+because it becomes a shared mutable file, a slow health check, and a crash-recovery hazard — one
+reason the persisted `state.json` projection was retired.
 
 Imported review-note bodies follow this rule directly: bodies under or equal to `BODY_INLINE_LIMIT`
 (4096 bytes today) stay inline in the event payload; bodies above the threshold are externalized to
@@ -816,8 +823,8 @@ have to change to flip it — is recorded in the ADR's "Future Reversal" section
 
 ## Projection Freshness
 
-`state.json` records `eventSetHash` as derived freshness metadata for the event set used to build
-the projection. `eventCount` remains a cheap count, but it does not prove that a cached projection
+The state summary records `eventSetHash` as derived freshness metadata for the event set used to build
+it. `eventCount` remains a cheap count, but it does not prove that a cached projection
 matches the current `events/` set in the resolved store.
 
 `eventSetHash` is computed from Pointbreak's canonical JSON hash path over sorted `(eventId,
@@ -826,8 +833,8 @@ numbers, writer metadata, storage paths, and `occurredAt`. The hash describes wh
 the projection saw; it is not a causal ordering primitive or a raw event-file checksum.
 
 If a cached projection's `eventSetHash` does not match a fresh scan of the store's `events/`, the
-projection is stale and should be rebuilt from the event files. The event files remain authoritative;
-`state.json` is still safe to delete and regenerate. `pointbreak history` and
+projection is stale and should be rebuilt from the event files. The event files remain authoritative.
+`pointbreak history` and
 `pointbreak revision show` reuse this freshness primitive, and future derived-index projections should
 do the same rather than inventing per-projection hashes.
 
@@ -849,15 +856,15 @@ are explicit and tested.
 V1 has no store-directory lock: Pointbreak does not coordinate writers with lockfiles, leases, a
 daemon, IPC, or filesystem notifications. Concurrency safety rests on the store primitives instead.
 Events and object artifacts are written with content-addressed exclusive file creation, note-body
-artifacts are content-addressed by body hash, and `state.json` is a regenerable projection written by
-atomic rename. So concurrent writers to one store directory cannot corrupt each other: identical
+artifacts are content-addressed by body hash, and no shared mutable projection file is written. So
+concurrent writers to one store directory cannot corrupt each other: identical
 events converge (already-exists with a matching payload), different events never collide, and
-conflicting events under one idempotency key fail loud. A stale `state.json` is never read as
-authority because reads rebuild from the event log.
+conflicting events under one idempotency key fail loud. Reads fold the event log; no cached
+projection file is ever read as authority.
 
 The shared common-dir store depends on this directly. Capture and every native review write land in
 the `<git-common-dir>/pointbreak` store every read resolves, so multiple worktrees of the same clone may write that
-one store directory concurrently, and the content-addressed/regenerable primitives above keep that
+one store directory concurrently, and the content-addressed primitives above keep that
 safe without a lock. `pointbreak store migrate` reuses the same import path — content-hash-validated,
 artifacts before events — to fold a pre-flip worktree-local `.pointbreak/data/` store forward, scanning
 for sensitivity findings before movement and reporting them in its document. Any store-directory lock
@@ -869,18 +876,10 @@ same-key and same-payload retries are idempotent, while same-key and different-p
 conflicts. Different event files can be written independently, but reducers and projections decide
 whether the resulting event set is valid, ambiguous, or conflicting.
 
-`state.json` writes are projection cache writes. If projection writers race, events remain
-authoritative and the projection can be rebuilt.
-
-For the write commands whose results carry `diagnostics` (capture, observation/assessment/validation
-add, input-request open/respond, association record, event signature, artifact removal, ingest), a
-`state.json` replacement that fails after the authoritative event is durable does not fail the
-command: the command succeeds and its `diagnostics` carry `legacy_state_projection_refresh_failed`.
-The projection is regenerated by the next successful projection-producing write or by
-`rebuild_state`. Command success therefore acknowledges durable truth; it does not by itself
-acknowledge a fresh `state.json`. `association land`, `fact port`, and the `store link` /
-`store migrate common-dir` folds still return an error if that replacement fails, and Change writes
-(`change create`, link/join/withdraw, relation claims) and exact bundle import never refresh the file.
+No write command publishes a projection file, so there is no projection write to race or fail.
+Command success acknowledges durable truth; see the
+[write acknowledgement contract](cli-reference.md#write-acknowledgements) for what a result does and
+does not say about derived views.
 
 Workflow startup cleanup removes only Pointbreak temp files older than the workflow startup threshold.
 Preserving fresh `.shore-write.*.tmp` files avoids clobbering an in-flight write, but it is not a

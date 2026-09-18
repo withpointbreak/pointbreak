@@ -1996,7 +1996,7 @@ fn write_generated_longitudinal_l2_change_events_inner_v2(
             break;
         }
     }
-    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    let completed = ingest.finish()?;
     if let Some(error) = write_error {
         return Err(error);
     }
@@ -2137,7 +2137,7 @@ fn write_generated_longitudinal_l2_change_events_inner_v1(
             break;
         }
     }
-    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    let completed = ingest.finish()?;
     if let Some(error) = write_error {
         return Err(error);
     }
@@ -2669,18 +2669,11 @@ fn write_longitudinal_record_stream_v1(
         decoded_object_target_bytes += record.decoded_object_target_bytes;
     }
 
-    let completed = ingest.finish(&storage, write_store.store_dir())?;
+    let completed = ingest.finish()?;
     if let Some(error) = write_error {
         return Err(error);
     }
     let mut listed = completed.events;
-    let stored_state: SessionState =
-        storage.read_json(&write_store.store_dir().join("state.json"))?;
-    if completed.state != stored_state {
-        return Err(ShoreError::Message(
-            "longitudinal state.json does not match strict replay".to_owned(),
-        ));
-    }
     let ordered_event_id_set = ordered_event_ids.iter().cloned().collect::<BTreeSet<_>>();
     if l2_resume_block_count.is_some() {
         listed.retain(|event| ordered_event_id_set.contains(event.event_id.as_str()));
@@ -2738,12 +2731,9 @@ fn write_longitudinal_record_stream_v1(
             .map(|event| event.event_id.as_str())
             .collect::<Vec<_>>(),
     )?;
+    // Digest input is the in-memory fold of the listed events; there is no
+    // stored projection.
     let receipt_state = SessionState::from_events(&listed)?;
-    if l2_resume_block_count.is_none() && receipt_state != stored_state {
-        return Err(ShoreError::Message(
-            "longitudinal receipt replay does not match stored state".to_owned(),
-        ));
-    }
     let state_sha256 = canonical_sha256(&receipt_state)?;
     let projection_sha256 = canonical_sha256(&ProjectionReceiptV1::from(&receipt_state))?;
     let content_inventory_sha256 = canonical_sha256(&content_inventory)?;
@@ -3890,6 +3880,56 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+
+    /// The strict receipt digests hash the in-memory fold. A fold that is
+    /// serialized and read back hashes identically, so digests computed from the
+    /// fold equal digests computed from a stored copy of it; the serialized field
+    /// set is pinned because retained receipts compare against it.
+    #[test]
+    fn strict_receipt_digests_are_fold_derived_and_file_independent() {
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::DerivedAccessD0,
+            0,
+        ))
+        .expect("prepare deterministic D0 record");
+        let folded = SessionState::from_events(&record.events).unwrap();
+        let bytes = serde_json::to_vec(&folded).unwrap();
+        let reread: SessionState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            canonical_sha256(&folded).unwrap(),
+            canonical_sha256(&reread).unwrap()
+        );
+        assert_eq!(
+            canonical_sha256(&ProjectionReceiptV1::from(&folded)).unwrap(),
+            canonical_sha256(&ProjectionReceiptV1::from(&reread)).unwrap()
+        );
+
+        // Set equality: serde_json map order is not preserved in this build.
+        let value = serde_json::to_value(&folded).unwrap();
+        let keys: BTreeSet<String> = value.as_object().unwrap().keys().cloned().collect();
+        let expected: BTreeSet<String> = [
+            "schema",
+            "version",
+            "journalId",
+            "currentRevisionId",
+            "currentObjectId",
+            "revisionCount",
+            "eventCount",
+            "eventSetHash",
+            "noteCount",
+            "observationCount",
+            "assessmentCount",
+            "validationCheckCount",
+            "inputRequestCount",
+            "openInputRequestCount",
+            "openOperativeInputRequestCount",
+            "diagnostics",
+        ]
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect();
+        assert_eq!(keys, expected);
+    }
 
     /// Regenerate the small, public historical-reader compatibility set used by
     /// the Inspector decision matrix. The matrix's current writers own its

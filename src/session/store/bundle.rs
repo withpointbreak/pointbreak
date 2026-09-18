@@ -9,13 +9,11 @@ use crate::model::id_prefix;
 use crate::session::acknowledgement::DerivedWriteAggregate;
 use crate::session::event::{EventType, IngestVia, ShoreEvent, stamp_ingest_provenance};
 use crate::session::object_artifact::decode_and_validate_object_artifact;
-use crate::session::projection::{
-    ArtifactRemovalProjection, LegacyProjectionRefresh, publish_legacy_state_projection,
-};
+use crate::session::projection::ArtifactRemovalProjection;
 use crate::session::store::body_artifact::{NoteBodyEnvelope, body_artifact_field};
 use crate::session::store::{EventStore, ObjectArtifact};
 use crate::session::{
-    EventVerificationPolicy, IngestEventVerification, ProjectionDiagnostic, SessionState, TrustSet,
+    EventVerificationPolicy, IngestEventVerification, ProjectionDiagnostic, TrustSet,
     WriteAcknowledgementV1, current_timestamp, verify_events_for_ingest,
 };
 use crate::storage::{CreateOutcome, Durability, LocalStorage};
@@ -102,7 +100,6 @@ pub(crate) struct ImportBundleResult {
 pub(crate) enum ImportCommitStep {
     Artifacts,
     Events,
-    State,
 }
 
 pub(crate) fn build_export_manifest(store_dir: impl AsRef<Path>) -> Result<ExportManifest> {
@@ -256,21 +253,14 @@ pub(crate) fn import_store_bundle_into_with_verification(
     let (acknowledgement, commit_order) = if events.is_empty() && artifacts.is_empty() {
         (WriteAcknowledgementV1::unchanged(), Vec::new())
     } else {
-        let refresh = rebuild_target_state(target_store_dir, target_event_store)?;
         let acknowledgement = derived.finish(
             artifacts_created + events_created,
             artifacts_existing + events_existing,
-            refresh.state,
             &mut diagnostics,
         );
-        diagnostics.extend(refresh.diagnostic);
         (
             acknowledgement,
-            vec![
-                ImportCommitStep::Artifacts,
-                ImportCommitStep::Events,
-                ImportCommitStep::State,
-            ],
+            vec![ImportCommitStep::Artifacts, ImportCommitStep::Events],
         )
     };
 
@@ -406,8 +396,8 @@ pub(crate) struct SourceSubsetVerification {
 /// projection, which cannot see orphan/unreferenced files — because this gate
 /// fronts an irreversible delete: a source artifact whose bytes are in NO
 /// target file (an orphan the fold never carried, or a corrupt file) is a real
-/// divergence and still blocks. Only in-flight `*.tmp` files are excluded; the
-/// regenerable store-root `state.json` sits outside the walked trees and a
+/// divergence and still blocks. Only in-flight `*.tmp` files are excluded; a
+/// leftover store-root `state.json` sits outside the walked trees and a
 /// nested file merely named `state.json` is verified like any other. Never
 /// consults import counters; re-reads both stores.
 pub(crate) fn verify_source_subset_of_target(
@@ -546,9 +536,9 @@ fn events_match_modulo_ingest_stamp(source_bytes: &[u8], target_bytes: &[u8]) ->
 }
 
 /// Recursively collect the durable files under `dir` as store-relative paths,
-/// skipping only in-flight `*.tmp` files. The regenerable store-root
+/// skipping only in-flight `*.tmp` files. A leftover store-root
 /// `state.json` needs no filename rule: the walk roots at `events/` and
-/// `artifacts/`, so the root projection is never enumerated — and a file
+/// `artifacts/`, so the root file is never enumerated — and a file
 /// merely NAMED `state.json` nested inside those trees is durable bytes that
 /// must be verified like any other (a filename skip here would let a retire
 /// delete it unverified). A missing directory contributes zero files (the
@@ -749,21 +739,6 @@ fn commit_events(
     }
 
     Ok((created, existing, derived))
-}
-
-fn rebuild_target_state(
-    target_store_dir: &Path,
-    target_store: &EventStore,
-) -> Result<LegacyProjectionRefresh> {
-    let events = target_store.list_events()?;
-    let state = SessionState::from_events(&events)?;
-    // Storage already roots this relative state.json path at the import destination.
-    let refresh = publish_legacy_state_projection(
-        &LocalStorage::new(target_store_dir),
-        Path::new(""),
-        &state,
-    );
-    Ok(refresh)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1474,7 +1449,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_acknowledgement_counts_artifacts_and_retains_advisory_refresh_failure() {
+    fn bundle_acknowledgement_counts_artifacts_and_attempts_no_projection() {
         use crate::session::{
             AuthorityWriteOutcomeV1 as Authority, DerivedWriteAvailabilityV1 as Derived,
             LegacyProjectionStateV1 as Legacy,
@@ -1483,35 +1458,27 @@ mod tests {
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let source = resolved_store_dir(repo.path());
         let target = tempfile::tempdir().unwrap();
-        let blocked = target.path().join("state.json");
-        fs::create_dir(&blocked).unwrap();
-        let first = import_store_bundle(&source, target.path())
-            .expect("durable import survives state refresh failure");
+        let first = import_store_bundle(&source, target.path()).unwrap();
         assert!(first.artifacts_created > 0 && first.events_created > 0);
         assert_eq!(first.acknowledgement.authority_outcome, Authority::Created);
         assert_eq!(
             first.acknowledgement.legacy_projection_state,
-            Legacy::RefreshFailed
+            Legacy::NotAttempted
         );
         assert_eq!(first.acknowledgement.derived.availability, Derived::Off);
-        assert_eq!(
+        assert!(
             first
                 .diagnostics
                 .iter()
-                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
-                .count(),
-            1
+                .all(|d| d.code != "legacy_state_projection_refresh_failed")
         );
-        fs::remove_dir(&blocked).unwrap();
         let retry = import_store_bundle(&source, target.path()).unwrap();
         assert_eq!(retry.acknowledgement.authority_outcome, Authority::Existing);
         assert_eq!(
             retry.acknowledgement.legacy_projection_state,
-            Legacy::Refreshed
+            Legacy::NotAttempted
         );
-        let bytes = fs::read(&blocked).unwrap();
-        import_store_bundle(&source, target.path()).unwrap();
-        assert_eq!(bytes, fs::read(&blocked).unwrap());
+        assert!(!target.path().join("state.json").exists());
         // Existing artifacts plus all-new events must be mixed, not created.
         let mixed_target = tempfile::tempdir().unwrap();
         let manifest = build_export_manifest(&source).unwrap();
@@ -1524,7 +1491,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_acknowledgement_keeps_relative_target_projection_path() {
+    fn bundle_acknowledgement_applies_a_relative_target_root_once() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let target = tempfile::Builder::new()
@@ -1542,16 +1509,18 @@ mod tests {
         .unwrap();
         assert_eq!(
             result.acknowledgement.legacy_projection_state,
-            crate::session::LegacyProjectionStateV1::Refreshed
+            crate::session::LegacyProjectionStateV1::NotAttempted
         );
+        assert!(result.events_created > 0);
         assert!(
-            target.path().join("state.json").is_file(),
-            "projection must use the same target root as artifacts and events"
+            target.path().join("events").is_dir(),
+            "events must land under the relative target root"
         );
         assert!(
             !target.path().join(relative).exists(),
             "target root must not be applied twice"
         );
+        assert!(!target.path().join("state.json").exists());
     }
 
     #[test]
@@ -1636,14 +1605,9 @@ mod tests {
     }
 
     #[test]
-    fn strict_import_commits_artifacts_before_events_and_rebuilds_state() {
+    fn strict_import_commits_artifacts_before_events_and_writes_no_state_projection() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        fs::write(
-            resolved_store_dir(repo.path()).join("state.json"),
-            r#"{"sourceState":"must not be imported as authority"}"#,
-        )
-        .unwrap();
         let target = tempfile::tempdir().unwrap();
         let target_store_dir = target.path().join(".pointbreak/data");
 
@@ -1652,17 +1616,11 @@ mod tests {
 
         assert_eq!(
             result.commit_order,
-            vec![
-                ImportCommitStep::Artifacts,
-                ImportCommitStep::Events,
-                ImportCommitStep::State,
-            ]
+            vec![ImportCommitStep::Artifacts, ImportCommitStep::Events]
         );
         assert!(target_store_dir.join("artifacts/objects").is_dir());
         assert!(target_store_dir.join("events").is_dir());
-        let rebuilt_state = fs::read_to_string(target_store_dir.join("state.json")).unwrap();
-        assert!(!rebuilt_state.contains("must not be imported"));
-        assert!(rebuilt_state.contains("journalId"));
+        assert!(!target_store_dir.join("state.json").exists());
     }
 
     #[test]
@@ -2196,7 +2154,7 @@ mod tests {
     #[test]
     fn verify_source_subset_does_not_skip_nested_files_named_state_json() {
         let (_repo, source, _target_root, target) = imported_pair();
-        // Only the STORE-ROOT state.json is a regenerable projection — and the
+        // Only the STORE-ROOT state.json is an inert leftover — and the
         // walk roots at events/ + artifacts/, so it is never enumerated at all.
         // A file merely NAMED state.json nested inside artifacts/ is durable
         // bytes like any other and must fail verification when the target lacks
@@ -2214,10 +2172,10 @@ mod tests {
     #[test]
     fn verify_source_subset_ignores_state_json_and_temp_files() {
         let (_repo, source, _target_root, target) = imported_pair();
-        // state.json is a regenerable projection and *.tmp is an in-flight temp
-        // file; neither is durable, so neither is required in the target. The
-        // capture already wrote the source state.json.
-        assert!(source.join("state.json").is_file());
+        // A store-root state.json is a leftover from an earlier version and *.tmp
+        // is an in-flight temp file; neither is durable, so neither is required in
+        // the target. No write creates the leftover, so seed one explicitly.
+        fs::write(source.join("state.json"), "{}").unwrap();
         fs::write(source.join("events/.shore-write.fresh.tmp"), "in flight").unwrap();
 
         let verification = verify_source_subset_of_target(&source, &target).unwrap();

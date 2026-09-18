@@ -7,9 +7,9 @@ executable journey — install to first Review to the complete paired author/rev
 [cli-reference.md](cli-reference.md). If the change was authored by a coding agent, start with
 [Agent authoring handoffs](agent-authoring.md) for the capture-at-end-of-work loop.
 
-Write results separate durable authority, derived visibility, legacy projection refresh, and durable
+Write results separate durable authority, derived visibility, and durable
 operation bindings through the [write acknowledgement contract](cli-reference.md#write-acknowledgements).
-A successful capture or fact write can carry an advisory refresh failure; inspect its diagnostics and
+A successful capture or fact write can carry advisory diagnostics; inspect its diagnostics and
 acknowledgement without treating the response as a new review fact, acceptance, or landing authority.
 
 ## The five stages
@@ -487,13 +487,10 @@ worktree is ephemeral:
 - `artifacts/` holds the immutable support records that events bind to:
   captured revision object artifacts, and the optional content-addressed bodies
   for large observation, input request, and assessment payloads.
-- `state.json` is a **rebuildable projection**, not the authority. It
-  may be deleted and regenerated; freshness against the current event set is
-  verified through `eventSetHash`.
 
-If `state.json` looks stale or inconsistent, Pointbreak rebuilds it from
-the event log. Do not write to `state.json` yourself, and do not depend on
-its internal shape.
+Summaries, counts, and `eventSetHash` freshness metadata are computed from the
+event log at read time. No `state.json` projection is written; a leftover
+file from an earlier version is inert and may be deleted.
 
 ### Command-output JSON is the integration surface
 
@@ -504,7 +501,7 @@ The stable surface for automation is **command-output JSON documents**:
 and `pointbreak.review-assessment-add` / `-show`.
 
 These documents expose semantic IDs, content hashes, and freshness metadata.
-Raw event files, event filenames, artifact paths, and `state.json` are
+Raw event files, event filenames, and artifact paths are
 Pointbreak-owned storage details. They can change without a deprecation cycle.
 
 ### Tracks
@@ -549,8 +546,7 @@ In particular:
 - Do not parse storage filenames. Event filenames, object artifact
   filenames, and note-body artifact filenames are derived from internal
   hashes and may change without a deprecation cycle.
-- Do not depend on artifact paths or the internal shape of
-  `state.json`.
+- Do not depend on artifact paths.
 
 ## 6. The canonical walkthrough
 

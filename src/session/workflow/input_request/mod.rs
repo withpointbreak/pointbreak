@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn open_input_request_state_json_equals_full_replay_after_created_and_existing_paths() {
+    fn open_input_request_creates_no_state_projection_on_created_and_existing_paths() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
@@ -349,31 +349,29 @@ mod tests {
 
         let first = open_input_request(options.clone()).unwrap();
         assert_eq!(first.events_created, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Created path drifted");
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Created path created a state projection"
+        );
 
         let second = open_input_request(options).unwrap();
         assert_eq!(second.events_existing, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Existing path drifted");
+        assert_eq!(
+            second.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Existing path created a state projection"
+        );
     }
 
     #[test]
-    fn respond_input_request_state_json_equals_full_replay_after_created_and_existing_paths() {
+    fn respond_input_request_creates_no_state_projection_on_created_and_existing_paths() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let request = open_input_request(
@@ -391,27 +389,25 @@ mod tests {
 
         let first = respond_input_request(options.clone()).unwrap();
         assert_eq!(first.events_created, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Resolve Created path drifted");
+        assert_eq!(
+            first.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Resolve Created path created a state projection"
+        );
 
         let second = respond_input_request(options).unwrap();
         assert_eq!(second.events_existing, 1);
-        let on_disk: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(resolved_store_dir(repo.path()).join("state.json")).unwrap(),
-        )
-        .unwrap();
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
-        assert_eq!(on_disk, replay, "Resolve Existing path drifted");
+        assert_eq!(
+            second.acknowledgement.legacy_projection_state,
+            crate::session::LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            !resolved_store_dir(repo.path()).join("state.json").exists(),
+            "Resolve Existing path created a state projection"
+        );
     }
 
     #[test]

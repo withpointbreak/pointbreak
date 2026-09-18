@@ -16,7 +16,6 @@ use crate::session::event::{
     InputRequestResponseOutcome, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::observation::staged_body;
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -132,7 +131,7 @@ pub fn respond_input_request(
     prepare_write_landing(&write_store, &storage)?;
 
     // The write half lands in the resolved write store (the clone-local store in
-    // linked mode) and rebuilds its state.json there.
+    // linked mode).
     let event_store = write_store.event_store()?;
 
     // The request being responded to may live only in the linked store: its
@@ -276,15 +275,8 @@ pub fn respond_input_request(
     } else {
         event_store.list_events()?
     })?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     let result = InputRequestRespondResult {
         acknowledgement,

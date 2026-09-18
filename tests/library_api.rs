@@ -320,12 +320,6 @@ fn review_history_can_include_verification_status_without_artifact_availability_
         capture_entry.verification_status,
         Some(EventVerificationStatus::Valid)
     );
-    assert!(
-        !fs::read_to_string(support::common_dir_store(origin.path()).join("state.json"))
-            .unwrap()
-            .contains("verificationStatus"),
-        "verification status is read-time state, not projection state"
-    );
     for entry in fs::read_dir(support::common_dir_store(origin.path()).join("events")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("json") {

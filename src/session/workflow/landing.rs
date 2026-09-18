@@ -31,15 +31,14 @@ use crate::session::evidence::{
     RelationProofManifestV1, canonical_candidate_diff_entries, canonical_diff_entries,
     evaluate_relation_proof_v1,
 };
-use crate::session::projection::{LegacyProjectionRefresh, publish_legacy_state_projection};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
     AssociateCommitOptions, AssociateCommitResult, BestEffortSkipSink, EventSigningOptions,
-    EventWriteOutcome, LegacyProjectionStateV1, ProjectionDiagnostic, ReviewCursorV1,
-    ReviewSourceBindingV1, RevisionShowOptions, RevisionShowResult, SessionState,
-    WriteAcknowledgementV1, associate_commit, current_timestamp, show_revision_for_change_reader,
-    sign_event_if_requested, validated_track_id, writer_from_options,
+    EventWriteOutcome, ProjectionDiagnostic, ReviewCursorV1, ReviewSourceBindingV1,
+    RevisionShowOptions, RevisionShowResult, WriteAcknowledgementV1, associate_commit,
+    current_timestamp, show_revision_for_change_reader, sign_event_if_requested,
+    validated_track_id, writer_from_options,
 };
 use crate::storage::{CreateOutcome, LocalStorage};
 
@@ -316,20 +315,12 @@ fn prepare_landing(options: &LandCommitOptions) -> Result<PreparedLanding> {
 }
 
 pub fn land_commit(options: LandCommitOptions) -> Result<LandCommitResultV1> {
-    land_commit_with_after_association(options, || {})
-}
-
-fn land_commit_with_after_association(
-    options: LandCommitOptions,
-    after_association: impl FnOnce(),
-) -> Result<LandCommitResultV1> {
-    land_commit_with_hooks(options, || {}, after_association)
+    land_commit_with_hooks(options, || {})
 }
 
 fn land_commit_with_hooks(
     options: LandCommitOptions,
     before_publication: impl FnOnce(),
-    after_association: impl FnOnce(),
 ) -> Result<LandCommitResultV1> {
     let prepared = prepare_landing(&options)?;
     if options.candidate_parent && options.expected_proof.is_none() {
@@ -385,8 +376,6 @@ fn land_commit_with_hooks(
         ));
     }
 
-    after_association();
-
     let attestation = build_revision_relation_attested(RevisionRelationAttestationDraftV1 {
         revision: revision.clone(),
         commit_association_id: association_id.clone(),
@@ -424,16 +413,8 @@ fn land_commit_with_hooks(
     let event_store = write_store.event_store()?;
     let attestation_acknowledgement = event_store.record_change_event_once_acknowledged(&event)?;
     let attestation_outcome = attestation_acknowledgement.outcome;
-    let events = event_store.list_change_events()?;
-    let state = SessionState::from_events(&events)?;
-    let projection_refresh =
-        publish_legacy_state_projection(&storage, write_store.store_dir(), &state);
-    let (acknowledgement, diagnostics) = landing_acknowledgement(
-        proof_outcome,
-        &association,
-        attestation_acknowledgement,
-        projection_refresh,
-    );
+    let (acknowledgement, diagnostics) =
+        landing_acknowledgement(proof_outcome, &association, attestation_acknowledgement);
 
     let message = match proof.result.semantic_relation {
         SemanticRevisionRelationV1::ExactMaterialization => {
@@ -485,29 +466,19 @@ fn landing_acknowledgement(
     proof: CreateOutcome,
     association: &AssociateCommitResult,
     attestation: EventWriteAcknowledgement,
-    refresh: LegacyProjectionRefresh,
 ) -> (WriteAcknowledgementV1, Vec<ProjectionDiagnostic>) {
     let mut derived = DerivedWriteAggregate::default();
     let mut diagnostics = association.diagnostics.clone();
     derived.add(association.acknowledgement.derived.clone(), []);
     let attestation_created = derived.record(attestation) == EventWriteOutcome::Created;
     let proof_created = proof == CreateOutcome::Created;
-    let legacy = if association.acknowledgement.legacy_projection_state
-        == LegacyProjectionStateV1::RefreshFailed
-    {
-        LegacyProjectionStateV1::RefreshFailed
-    } else {
-        refresh.state
-    };
     let acknowledgement = derived.finish(
         association.events_created + usize::from(proof_created) + usize::from(attestation_created),
         association.events_existing
             + usize::from(!proof_created)
             + usize::from(!attestation_created),
-        legacy,
         &mut diagnostics,
     );
-    diagnostics.extend(refresh.diagnostic);
     (acknowledgement, diagnostics)
 }
 
@@ -866,10 +837,8 @@ mod tests {
     #[test]
     fn landing_acknowledgement_merges_only_compatible_event_tokens() {
         use crate::session::acknowledgement::EventWriteAcknowledgement;
-        use crate::session::projection::LegacyProjectionRefresh;
         use crate::session::{
             DerivedVisibilityTokenV1, DerivedWriteAcknowledgementV1, DerivedWriteAvailabilityV1,
-            LegacyProjectionStateV1,
         };
         let (root, selected) = landing_fixture();
         let mut association = associate_commit(
@@ -899,15 +868,8 @@ mod tests {
                 }),
                 Vec::new(),
             );
-            let (ack, diagnostics) = landing_acknowledgement(
-                CreateOutcome::Created,
-                &association,
-                attestation,
-                LegacyProjectionRefresh {
-                    state: LegacyProjectionStateV1::Refreshed,
-                    diagnostic: None,
-                },
-            );
+            let (ack, diagnostics) =
+                landing_acknowledgement(CreateOutcome::Created, &association, attestation);
             assert_eq!(ack.derived.availability, expected);
             if expected == DerivedWriteAvailabilityV1::CatchingUp {
                 assert_eq!(ack.derived.token.unwrap().head_sequence, 9);
@@ -923,64 +885,46 @@ mod tests {
     }
 
     #[test]
-    fn landing_acknowledgement_preserves_each_refresh_failure() {
+    fn landing_acknowledgement_attempts_no_projection_on_land_or_retry() {
         use crate::session::LegacyProjectionStateV1;
-        for (structural_fails, final_fails) in [(true, false), (false, true), (true, true)] {
-            let (root, selected) = landing_fixture();
-            let write_store = resolve_change_write_store(root.path()).unwrap();
-            let path = write_store.store_dir().join("state.json");
-            if structural_fails {
-                std::fs::remove_file(&path).unwrap();
-                std::fs::create_dir(&path).unwrap();
-            }
-            let result = land_commit_with_after_association(
-                LandCommitOptions::new(root.path(), &selected, "track:author", "HEAD"),
-                || {
-                    if structural_fails && !final_fails {
-                        std::fs::remove_dir(&path).unwrap();
-                    }
-                    if !structural_fails && final_fails {
-                        std::fs::remove_file(&path).unwrap();
-                        std::fs::create_dir(&path).unwrap();
-                    }
-                },
-            )
-            .expect("legacy refresh failure follows durable truth and is advisory");
-            assert!(result.relation_attestation_created);
-            assert_eq!(
-                result.acknowledgement.legacy_projection_state,
-                LegacyProjectionStateV1::RefreshFailed
-            );
-            let failures: Vec<_> = result
+        let (root, selected) = landing_fixture();
+        let write_store = resolve_change_write_store(root.path()).unwrap();
+        let result = land_commit(LandCommitOptions::new(
+            root.path(),
+            &selected,
+            "track:author",
+            "HEAD",
+        ))
+        .unwrap();
+        assert!(result.relation_attestation_created);
+        assert_eq!(
+            result.acknowledgement.legacy_projection_state,
+            LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(
+            result
                 .diagnostics
                 .iter()
-                .filter(|d| d.code == "legacy_state_projection_refresh_failed")
-                .collect();
-            assert_eq!(
-                failures.len(),
-                usize::from(structural_fails) + usize::from(final_fails)
-            );
-            let json = serde_json::to_value(&result).unwrap();
-            assert_eq!(json["schema"], "pointbreak.association-land.v1");
-            assert_eq!(json["message"], result.message);
-            assert!(json["acknowledgement"].is_object());
-            assert!(json["diagnostics"].is_array());
-            if final_fails {
-                std::fs::remove_dir(&path).unwrap();
-            }
-            let retry = land_commit(LandCommitOptions::new(
-                root.path(),
-                selected,
-                "track:author",
-                "HEAD",
-            ))
-            .unwrap();
-            assert!(!retry.relation_attestation_created);
-            assert_eq!(
-                retry.acknowledgement.legacy_projection_state,
-                LegacyProjectionStateV1::Refreshed
-            );
-        }
+                .all(|d| d.code != "legacy_state_projection_refresh_failed")
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["schema"], "pointbreak.association-land.v1");
+        assert_eq!(json["message"], result.message);
+        assert!(json["acknowledgement"].is_object());
+        assert!(json["diagnostics"].is_array());
+        let retry = land_commit(LandCommitOptions::new(
+            root.path(),
+            selected,
+            "track:author",
+            "HEAD",
+        ))
+        .unwrap();
+        assert!(!retry.relation_attestation_created);
+        assert_eq!(
+            retry.acknowledgement.legacy_projection_state,
+            LegacyProjectionStateV1::NotAttempted
+        );
+        assert!(!write_store.store_dir().join("state.json").exists());
     }
 
     #[test]
@@ -1678,7 +1622,6 @@ mod tests {
                     &["commit", "--amend", "-m", "changed identity"],
                 );
             },
-            || {},
         );
         assert!(
             result.is_err(),
@@ -1828,7 +1771,6 @@ mod tests {
                     }
                     after_mutation = Some(store_inventory(root.path()));
                 },
-                || {},
             );
             let error = result.unwrap_err().to_string();
             assert!(

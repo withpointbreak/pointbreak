@@ -212,7 +212,6 @@ impl DerivedWriteAggregate {
         self,
         created: usize,
         existing: usize,
-        legacy_projection_state: LegacyProjectionStateV1,
         diagnostics: &mut Vec<ProjectionDiagnostic>,
     ) -> WriteAcknowledgementV1 {
         for diagnostic in self.diagnostics {
@@ -226,7 +225,8 @@ impl DerivedWriteAggregate {
         WriteAcknowledgementV1 {
             authority_outcome: AuthorityWriteOutcomeV1::from_counts(created, existing),
             derived: self.derived,
-            legacy_projection_state,
+            // The legacy state projection is retired: no write attempts a refresh.
+            legacy_projection_state: LegacyProjectionStateV1::NotAttempted,
             operation_receipt: OperationReceiptAcknowledgementV1::not_recorded(),
         }
     }
@@ -440,20 +440,36 @@ mod tests {
         );
     }
 
+    /// The product region of a source file: everything before its column-0
+    /// `mod tests` line. Guards never scan test modules. (Do not cut at
+    /// `#[cfg(test)]`: files such as read.rs carry a `#[cfg(test)] use` at the top.)
+    fn product_region(source: &str) -> &str {
+        let cut = source
+            .find("\nmod tests")
+            .map(|index| index + 1)
+            .unwrap_or(source.len());
+        &source[..cut]
+    }
+
+    fn sources(dir: &std::path::Path, result: &mut Vec<(std::path::PathBuf, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, result);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                result.push((path.clone(), std::fs::read_to_string(path).unwrap()));
+            }
+        }
+    }
+
+    /// Files under src/session/workflow that mention the acknowledgement aggregate but
+    /// are not acknowledgement producers: change.rs composes the capture result.
+    const PRODUCER_MATRIX_ALLOWLIST: &[&str] = &["change.rs"];
+
     #[test]
     fn acknowledgement_live_producer_matrix() {
         use std::collections::BTreeSet;
         use std::path::Path;
-        fn sources(dir: &Path, result: &mut Vec<(std::path::PathBuf, String)>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    sources(&path, result);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    result.push((path.clone(), std::fs::read_to_string(path).unwrap()));
-                }
-            }
-        }
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let workflow = root.join("src/session/workflow");
         let mut files = Vec::new();
@@ -462,15 +478,17 @@ mod tests {
             workflow.join("../store/bundle.rs"),
             std::fs::read_to_string(workflow.join("../store/bundle.rs")).unwrap(),
         ));
+        // Built by concatenation so this guard never matches its own source.
+        let marker = concat!("DerivedWrite", "Aggregate");
         let sites: BTreeSet<_> = files
             .iter()
-            .filter(|(_, source)| {
-                source.lines().any(|line| {
-                    line.contains("publish_legacy_state_projection(")
-                        || line.contains("Durability::Projection")
-                })
-            })
+            .filter(|(_, source)| product_region(source).contains(marker))
             .map(|(path, _)| path.strip_prefix(&workflow).unwrap())
+            .filter(|path| {
+                !PRODUCER_MATRIX_ALLOWLIST
+                    .iter()
+                    .any(|allowed| path == &Path::new(allowed))
+            })
             .collect();
         assert_eq!(
             sites,
@@ -507,6 +525,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Files whose product code may name the projection durability class: the
+    /// atomic-write primitive itself, and the family `registry.json` writer.
+    const PROJECTION_DURABILITY_ALLOWLIST: &[&str] =
+        &["src/storage/mod.rs", "src/session/store/user_level.rs"];
+
+    #[test]
+    fn no_legacy_projection_writes_remain() {
+        use std::path::Path;
+        // Needles are built by concatenation so this guard never matches its own source.
+        let durability = concat!("Durability::", "Projection");
+        let state_file_join = concat!("join(\"state", ".json\")");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        sources(&root.join("src"), &mut files);
+        files.sort();
+        let mut offenders = Vec::new();
+        for (path, source) in &files {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let durability_allowed = PROJECTION_DURABILITY_ALLOWLIST.contains(&relative.as_str());
+            for (index, line) in product_region(source).lines().enumerate() {
+                if line.contains(state_file_join)
+                    || (!durability_allowed && line.contains(durability))
+                {
+                    offenders.push(format!("{relative}:{}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "product code still writes or reads a store-root state projection:\n{}",
+            offenders.join("\n")
+        );
     }
 
     fn token(generation: &str, epoch: u64, sequence: u64) -> DerivedVisibilityTokenV1 {

@@ -60,8 +60,7 @@ impl StoreResolution {
     }
 
     /// The resolved storage backend handle. Journal/content consumers build their
-    /// wrappers from this; the `state.json` projection write and the file-only
-    /// maintenance paths keep using `store_dir`.
+    /// wrappers from this; the file-only maintenance paths keep using `store_dir`.
     pub(crate) fn backend(&self) -> &StoreBackend {
         &self.backend
     }
@@ -365,7 +364,7 @@ pub(crate) fn resolve_write_validation_store(
     })
 }
 
-/// The write-landing seam: events, artifacts, and `state.json` are written to the
+/// The write-landing seam: events and artifacts are written to the
 /// resolved store — the common-dir store shared across the clone (default), or the
 /// worktree-local `.pointbreak/data` when the worktree is Ephemeral. Reuses
 /// [`resolve_store`] so reads and writes can never disagree on the store.

@@ -19,7 +19,6 @@ use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, required_title, resolve_revision,
     staged_body, validated_track_id,
 };
-use crate::session::projection::publish_legacy_state_projection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
@@ -223,7 +222,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     )?;
 
     // The write half lands in the resolved write store (the clone-local store in
-    // linked mode) and rebuilds its state.json there.
+    // linked mode).
     let event_store = write_store.event_store()?;
     let track_id = validated_track_id(options.track.as_deref().ok_or_else(|| {
         ShoreError::WorkflowInputInvalid {
@@ -325,15 +324,8 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         event_store.list_events()?
     };
     let state = SessionState::from_events(&events)?;
-    let projection_refresh = publish_legacy_state_projection(&storage, store_dir, &state);
     let mut diagnostics = state.diagnostics;
-    let acknowledgement = derived.finish(
-        events_created,
-        events_existing,
-        projection_refresh.state,
-        &mut diagnostics,
-    );
-    diagnostics.extend(projection_refresh.diagnostic);
+    let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     let result = InputRequestOpenResult {
         acknowledgement,

@@ -52,10 +52,6 @@ fn repository_and_common_dir_objects_own_canonical_paths() {
         repository.sensitivity_local(),
         root.join(".pointbreak/sensitivity.local.json")
     );
-    assert_eq!(
-        repository.state_path(),
-        root.join(".pointbreak/data/state.json")
-    );
     assert_existing_paths_eq(common.common_dir(), &repo.path().join(".git"));
     assert_eq!(common.store_dir(), common.common_dir().join("pointbreak"));
     assert_eq!(

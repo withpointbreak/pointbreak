@@ -3057,12 +3057,10 @@ fn strict_preflight(
         }
     }
 
-    let stored_state: SessionState = read_json(&store_dir.join("state.json"))?;
+    // Digest input is the in-memory fold of the listed events; there is no
+    // stored projection.
     let rebuilt_state =
         SessionState::from_events(&events).map_err(|_| LongitudinalEvidenceError::Preflight)?;
-    if stored_state != rebuilt_state {
-        return Err(LongitudinalEvidenceError::Preflight);
-    }
     let event_set_sha256 = event_set_sha256(&events)?;
     let ordered_journal_sha256 = canonical_sha256(
         &events
@@ -3070,20 +3068,20 @@ fn strict_preflight(
             .map(|event| event.event_id.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let state_sha256 = canonical_sha256(&stored_state)?;
+    let state_sha256 = canonical_sha256(&rebuilt_state)?;
     let projection_sha256 = canonical_sha256(&serde_json::json!({
-        "journalId": &stored_state.journal_id,
-        "currentRevisionId": &stored_state.current_revision_id,
-        "currentObjectId": &stored_state.current_object_id,
-        "revisionCount": stored_state.revision_count,
-        "eventCount": stored_state.event_count,
-        "observationCount": stored_state.observation_count,
-        "assessmentCount": stored_state.assessment_count,
-        "validationCheckCount": stored_state.validation_check_count,
-        "inputRequestCount": stored_state.input_request_count,
-        "openInputRequestCount": stored_state.open_input_request_count,
-        "openOperativeInputRequestCount": stored_state.open_operative_input_request_count,
-        "diagnostics": &stored_state.diagnostics,
+        "journalId": &rebuilt_state.journal_id,
+        "currentRevisionId": &rebuilt_state.current_revision_id,
+        "currentObjectId": &rebuilt_state.current_object_id,
+        "revisionCount": rebuilt_state.revision_count,
+        "eventCount": rebuilt_state.event_count,
+        "observationCount": rebuilt_state.observation_count,
+        "assessmentCount": rebuilt_state.assessment_count,
+        "validationCheckCount": rebuilt_state.validation_check_count,
+        "inputRequestCount": rebuilt_state.input_request_count,
+        "openInputRequestCount": rebuilt_state.open_input_request_count,
+        "openOperativeInputRequestCount": rebuilt_state.open_operative_input_request_count,
+        "diagnostics": &rebuilt_state.diagnostics,
     }))?;
     let content_inventory_sha256 = canonical_sha256(&content_inventory)?;
     Ok(super::LongitudinalStrictSemanticReceiptV1 {

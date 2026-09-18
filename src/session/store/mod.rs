@@ -39,7 +39,5 @@ pub use store_config::{
     StoreMode, StoreModeOutcome, StoreModeSource, resolve_store_mode_for_repo,
     set_store_mode_for_repo,
 };
-pub(crate) use store_init::{
-    RepositoryPaths, pointbreak_generated_excluded_paths, sweep_stale_temp_files,
-};
+pub(crate) use store_init::{RepositoryPaths, pointbreak_generated_excluded_paths};
 pub use store_init::{ensure_pointbreak_gitignore, store_dir_for_repo};

@@ -52,8 +52,8 @@ pub struct ObjectArtifact {
 }
 
 /// Write a object artifact through the resolved store's backend handle. Capture
-/// resolves the write store once for the whole landing (artifact → event →
-/// `state.json` all target the same store). The content-addressed
+/// resolves the write store once for the whole landing (artifact → event
+/// both target the same store). The content-addressed
 /// exclusive-create write is idempotent: a byte-identical artifact already
 /// present returns `Ok` (INV-2/INV-3); a different artifact under the same path is
 /// a loud conflict.

@@ -17,14 +17,15 @@ pub fn store_dir_for_repo(repo: &Path) -> Result<PathBuf> {
 }
 
 /// Entries that establish whether a canonical worktree-local store contains data.
-pub(crate) const STORE_CONTENT_MARKERS: &[&str] = &["events", "artifacts", "state.json"];
+pub(crate) const STORE_CONTENT_MARKERS: &[&str] = &["events", "artifacts"];
 
 /// True when `<store_dir>` (`<root>/.pointbreak/data`) holds a real worktree-local
 /// store (any flat-store marker present), as opposed to an empty/absent dir. The
 /// legacy guard on the normal read/write resolution path uses this to direct the
 /// user to `pointbreak store migrate` when a worktree-local store predates the shared
-/// store default. A config-only `.pointbreak/` (no events/artifacts/state.json under
-/// `.pointbreak/data`) is not populated.
+/// store default. A config-only `.pointbreak/` (no events/artifacts under
+/// `.pointbreak/data`) is not populated, and neither is a `.pointbreak/data` holding
+/// only a leftover `state.json` from an earlier version: that file is inert.
 pub(crate) fn worktree_local_store_is_populated(store_dir: &Path) -> bool {
     STORE_CONTENT_MARKERS
         .iter()
@@ -76,7 +77,7 @@ pub(crate) fn prepare_store_writer_at(
 fn pointbreak_gitignore_specs() -> Vec<(String, &'static str)> {
     let paths = RepositoryPaths::from_worktree_root(PathBuf::new());
     [
-        (paths.state_path(), "data/"),
+        (paths.worktree_store().join("events"), "data/"),
         (paths.delegates_local(), "*.local.json"),
         (paths.actor_attributes_local(), "*.local.json"),
         (paths.store_config_local(), "*.local.json"),
@@ -248,16 +249,24 @@ mod tests {
             path_parent(path_parent(paths.worktree_store())),
             repo.path(),
         );
-        // state.json is <root>/.pointbreak/data/state.json.
-        assert_eq!(path_file_name(paths.state_path().as_path()), "state.json");
+        // The gitignore probe for the store is <root>/.pointbreak/data/events.
+        let probe = paths.worktree_store().join("events");
+        assert_eq!(path_file_name(path_parent(probe.as_path())), "data");
         assert_eq!(
-            path_file_name(path_parent(paths.state_path().as_path())),
-            "data"
-        );
-        assert_eq!(
-            path_file_name(path_parent(path_parent(paths.state_path().as_path()))),
+            path_file_name(path_parent(path_parent(probe.as_path()))),
             ".pointbreak"
         );
+    }
+
+    #[test]
+    fn a_lone_state_json_is_not_a_populated_worktree_local_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join(".pointbreak/data");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("state.json"), "{}").unwrap();
+        assert!(!worktree_local_store_is_populated(&store));
+        std::fs::create_dir_all(store.join("events")).unwrap();
+        assert!(worktree_local_store_is_populated(&store));
     }
 
     #[test]
