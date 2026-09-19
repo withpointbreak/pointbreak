@@ -213,13 +213,13 @@ impl SemanticSnapshot {
         let state = SemanticStateSnapshot::from_events(events)?;
         let revisions = revision::revision_documents(events)?;
         let threads = thread::thread_documents(events)?;
-        let attention = AttentionSemanticSnapshot::from_events(events)?;
+        let changes = crate::session::project_changes(events)?;
+        let attention = AttentionSemanticSnapshot::from_events(events, &changes)?;
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(events)?
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        let changes = crate::session::project_changes(events)?;
         Self::finish(
             as_of,
             state,
@@ -251,7 +251,8 @@ impl SemanticSnapshot {
         let state = SemanticStateSnapshot::from_facts(facts)?;
         let revisions = revision_documents_from_facts(facts)?;
         let threads = thread_documents_from_facts(facts)?;
-        let attention = AttentionSemanticSnapshot::from_facts(facts)?;
+        let changes = change_projection_from_facts(facts)?;
+        let attention = AttentionSemanticSnapshot::from_facts(facts, &changes)?;
         let removed_content = facts
             .iter()
             .filter_map(|fact| match fact.kind {
@@ -259,7 +260,6 @@ impl SemanticSnapshot {
                 _ => None,
             })
             .collect();
-        let changes = change_projection_from_facts(facts)?;
         Self::finish(
             as_of,
             state,
@@ -283,22 +283,36 @@ impl SemanticSnapshot {
         facts: &[SemanticFact],
     ) -> Result<Self, SemanticModelError> {
         let changes = change_projection_from_facts(facts)?;
-        Self::from_materialized_with_changes(as_of, state, facts, changes)
+        Self::from_materialized_with_changes(as_of, state, facts, facts, None, changes)
     }
 
     /// Assemble a scoped materialized response while retaining the store-wide
     /// Change projection. Change identity and topology span engagements; they
     /// must not make unrelated revision/thread facts visible in the scoped
     /// response merely because the same compact row contributes to Change.
+    ///
+    /// Attention reads its own selection. Thread heads are component-wide and a
+    /// replacement recorded as a Change relation crosses engagements, so a
+    /// scoped caller passes the facts of every Revision its scope depends on in
+    /// `attention_facts` and the Revisions it asked about in `attention_scope`;
+    /// only attention anchored on that scope is kept. An unscoped caller passes
+    /// `facts` again and `None`, which keeps everything.
     pub(crate) fn from_materialized_with_changes(
         as_of: TruthCursor,
         state: SemanticStateSnapshot,
         facts: &[SemanticFact],
+        attention_facts: &[SemanticFact],
+        attention_scope: Option<&BTreeSet<crate::model::RevisionId>>,
         changes: crate::session::ChangeProjection,
     ) -> Result<Self, SemanticModelError> {
         let revisions = revision_documents_from_facts(facts)?;
         let threads = thread_documents_from_facts(facts)?;
-        let attention = AttentionSemanticSnapshot::from_facts(facts)?;
+        let attention = match attention_scope {
+            Some(scope) => {
+                AttentionSemanticSnapshot::from_facts_scoped(attention_facts, &changes, scope)?
+            }
+            None => AttentionSemanticSnapshot::from_facts(attention_facts, &changes)?,
+        };
         let removed_content = facts
             .iter()
             .filter_map(|fact| match fact.kind {
@@ -326,13 +340,13 @@ impl SemanticSnapshot {
         state.event_set_hash = None;
         let revisions = revision::revision_documents(events)?;
         let threads = thread::thread_documents(events)?;
-        let attention = AttentionSemanticSnapshot::from_events(events)?;
+        let changes = crate::session::project_changes(events)?;
+        let attention = AttentionSemanticSnapshot::from_events(events, &changes)?;
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(events)?
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        let changes = crate::session::project_changes(events)?;
         Self::finish(
             as_of,
             state,
@@ -375,52 +389,71 @@ impl SemanticSnapshot {
             }
         }
 
-        let mut selected = Vec::new();
-        for event in events {
-            let include = match event.event_type {
-                EventType::WorkObjectProposed => {
-                    let payload: WorkObjectProposedPayload =
-                        serde_json::from_value(event.payload.clone())?;
-                    matches!(
-                        payload.work_object,
-                        WorkObjectProposal::Revision { revision, .. }
-                            if revision_ids.contains(&revision.id)
-                    )
+        let select = |revision_ids: &BTreeSet<crate::model::RevisionId>,
+                      content_hashes: &BTreeSet<String>|
+         -> Result<Vec<ShoreEvent>, SemanticModelError> {
+            let mut selected = Vec::new();
+            for event in events {
+                let include = match event.event_type {
+                    EventType::WorkObjectProposed => {
+                        let payload: WorkObjectProposedPayload =
+                            serde_json::from_value(event.payload.clone())?;
+                        matches!(
+                            payload.work_object,
+                            WorkObjectProposal::Revision { revision, .. }
+                                if revision_ids.contains(&revision.id)
+                        )
+                    }
+                    EventType::ReviewObservationRecorded
+                    | EventType::ReviewAssessmentRecorded
+                    | EventType::InputRequestOpened
+                    | EventType::InputRequestResponded
+                    | EventType::RevisionRefAssociated
+                    | EventType::RevisionRefWithdrawn
+                    | EventType::RevisionCommitAssociated
+                    | EventType::RevisionCommitWithdrawn
+                    | EventType::ValidationCheckRecorded => event
+                        .subject_revision_id()?
+                        .is_some_and(|revision_id| revision_ids.contains(&revision_id)),
+                    EventType::ArtifactRemoved => {
+                        let payload: ArtifactRemovedPayload =
+                            serde_json::from_value(event.payload.clone())?;
+                        content_hashes.contains(&payload.content_hash)
+                    }
+                    _ => false,
+                };
+                if include {
+                    selected.push(event.clone());
                 }
-                EventType::ReviewObservationRecorded
-                | EventType::ReviewAssessmentRecorded
-                | EventType::InputRequestOpened
-                | EventType::InputRequestResponded
-                | EventType::RevisionRefAssociated
-                | EventType::RevisionRefWithdrawn
-                | EventType::RevisionCommitAssociated
-                | EventType::RevisionCommitWithdrawn
-                | EventType::ValidationCheckRecorded => event
-                    .subject_revision_id()?
-                    .is_some_and(|revision_id| revision_ids.contains(&revision_id)),
-                EventType::ArtifactRemoved => {
-                    let payload: ArtifactRemovedPayload =
-                        serde_json::from_value(event.payload.clone())?;
-                    content_hashes.contains(&payload.content_hash)
-                }
-                _ => false,
-            };
-            if include {
-                selected.push(event.clone());
             }
-        }
+            Ok(selected)
+        };
+        let selected = select(&revision_ids, &content_hashes)?;
 
         let mut state = SemanticStateSnapshot::from_events(events)?;
         state.event_set_hash = None;
         let revisions = revision::revision_documents(&selected)?;
         let threads = thread::thread_documents(&selected)?;
-        let attention = AttentionSemanticSnapshot::from_events(&selected)?;
+        let changes = crate::session::project_changes(events)?;
+        // Attention depends on every Revision the engagement's Revisions are
+        // connected to: Change relations cross engagements, and thread heads
+        // are component-wide. Fold that whole selection, then keep what is
+        // anchored on the engagement.
+        let dependencies = attention_dependency_revisions(events, &revision_ids, &changes)?;
+        let attention = if dependencies == revision_ids {
+            AttentionSemanticSnapshot::from_events_scoped(&selected, &changes, &revision_ids)?
+        } else {
+            AttentionSemanticSnapshot::from_events_scoped(
+                &select(&dependencies, &BTreeSet::new())?,
+                &changes,
+                &revision_ids,
+            )?
+        };
         let removed_content =
             crate::session::projection::ArtifactRemovalProjection::from_events(&selected)?
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        let changes = crate::session::project_changes(events)?;
         Self::finish(
             as_of,
             state,
@@ -474,6 +507,46 @@ impl SemanticSnapshot {
             changes,
             semantic_receipt,
         })
+    }
+}
+
+/// The Revisions a scoped attention fold over `seed` depends on: `seed` closed
+/// under Change relations (either direction) and engagement co-membership.
+fn attention_dependency_revisions(
+    events: &[ShoreEvent],
+    seed: &BTreeSet<crate::model::RevisionId>,
+    changes: &crate::session::ChangeProjection,
+) -> Result<BTreeSet<crate::model::RevisionId>, SemanticModelError> {
+    let mut engagements = std::collections::BTreeMap::new();
+    for event in events {
+        if event.event_type != EventType::WorkObjectProposed {
+            continue;
+        }
+        let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
+        if let WorkObjectProposal::Revision { revision, .. } = payload.work_object {
+            engagements.insert(revision.id, payload.engagement_id);
+        }
+    }
+    let mut members =
+        crate::session::workflow::attention::change_connected_revisions(seed, changes);
+    loop {
+        let selected: BTreeSet<_> = members
+            .iter()
+            .filter_map(|revision| engagements.get(revision))
+            .collect();
+        let mut widened = members.clone();
+        widened.extend(
+            engagements
+                .iter()
+                .filter(|(_, engagement)| selected.contains(engagement))
+                .map(|(revision, _)| revision.clone()),
+        );
+        let widened =
+            crate::session::workflow::attention::change_connected_revisions(&widened, changes);
+        if widened == members {
+            return Ok(members);
+        }
+        members = widened;
     }
 }
 

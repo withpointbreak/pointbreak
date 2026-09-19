@@ -1182,9 +1182,12 @@ observations when needed.
 
 ## `pointbreak attention`
 
-This is the legacy Revision/proposal-supersession attention document. For an activated Change store, use
-`pointbreak change attention` so current-set topology and exact fact origins are interpreted across the
-store's stable Changes.
+This is the item-level attention document: one entry per outstanding fact, anchored to its exact Revision.
+`pointbreak change attention` is the Change-level view of the same record (which stable Changes still
+need judgment, with current-set topology and exact fact origins). Both read replacement the same way: on a
+store that holds Change claims, a Revision is superseded when the Changes that hold it replace it; a
+proposal-borne `supersedes` list is historical input and decides freshness only on a store with no Change
+claims.
 
 ```bash
 pointbreak attention list [--repo <path>] [--revision <revision-id>] [--format <fmt>]
@@ -1202,15 +1205,21 @@ The item and filter fields are identical in both cases.
 - `--repo` defaults to `.`; `--revision` scopes the read to one revision — its anchored items plus
   the competing-heads thread that covers it (a short id resolves via the shared id resolver).
 - Each item carries a kind-qualified `id`, a `tier` (`primary` or `secondary`), the anchoring
-  `revisionId` (absent only for thread-scoped `competing_heads`), a supersession-derived
-  `freshness` block, an `observedAt` stamp, and a `kind`-tagged detail. Items sort by tier, then
+  `revisionId` (absent only for thread-scoped `competing_heads`), a replacement-derived
+  `freshness` block, an `observedAt` stamp, and a `kind`-tagged detail. A Revision replaced in one
+  Change but still current in another stays `current`: it is still a live candidate somewhere.
+  `--revision` scope is exact, so a replaced Revision's items appear under its own id (marked
+  `superseded`), never under its successor's. Items sort by tier, then
   oldest `observedAt` first, then `id`.
 - Item kinds:
   - `open_input_request` — an open ask (operative → `primary`, advisory → `secondary`).
   - `ambiguous_assessment` — more than one current assessment on a revision, carried as peers;
     on a superseded revision the item resolves once every successor head has been re-judged.
-  - `competing_heads` — a supersession thread with two or more current heads. `headRevisionIds` is
-    sorted for determinism, **not** a priority ranking.
+  - `competing_heads` — a proposal-borne supersession thread with two or more current heads, on a store
+    with no Change claims. `headRevisionIds` is sorted for determinism, **not** a priority ranking. Once a
+    store holds Change claims this kind no longer occurs: replacement divergence inside a Change reads as
+    `conflicted` in `pointbreak change attention`, and two Changes that independently replace a shared
+    Revision do not compete.
   - `stale_assessment` — a current assessment anchored to a superseded revision, until every
     current head of the thread has been re-judged. `headRevisionIds` names that complete current
     head set; `freshness.supersededBy` continues to name direct superseders only.

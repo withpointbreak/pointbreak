@@ -16,9 +16,13 @@ use crate::session::event::{
     ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::identity::instant::{compare_event_instants, parse_event_instant};
+use crate::session::projection::change::ChangeProjection;
 use crate::session::projection::supersession::SupersessionView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::assessment::collect_assessment_records_by_revision;
+use crate::session::workflow::attention::effective::{
+    AttentionSupersession, change_aware_supersession,
+};
 use crate::session::workflow::input_request::{
     InputRequestProjectionRecords, collect_input_request_projection_records, open_input_request_ids,
 };
@@ -173,20 +177,34 @@ pub struct AttentionProjection {
 }
 
 /// Derive attention state from the event log. Deterministic and fallible: the
-/// collectors this wraps (`SupersessionView::from_events`, the input-request and
-/// assessment collectors) return `Result`, and their errors propagate — they are
-/// not folded into diagnostics (invariant 3). `scope` rides through the core
-/// because competing-heads containment (Task 2.9) is only decidable while the
-/// `SupersessionView` is in hand.
+/// collectors this wraps (`SupersessionView::from_events`, the Change fold, the
+/// input-request and assessment collectors) return `Result`, and their errors
+/// propagate — they are not folded into diagnostics (invariant 3). `scope` rides
+/// through the core because competing-heads containment (Task 2.9) is only
+/// decidable while the supersession views are in hand.
 pub(crate) fn attention_from_events(
     events: &[ShoreEvent],
     scope: Option<&RevisionId>,
 ) -> Result<AttentionProjection> {
+    let changes = crate::session::projection::change::project_changes(events)?;
+    attention_from_events_with_changes(events, scope, &changes)
+}
+
+/// [`attention_from_events`] for a caller that already holds the store-wide
+/// Change projection of the same events, so the Change fold runs once.
+pub(crate) fn attention_from_events_with_changes(
+    events: &[ShoreEvent],
+    scope: Option<&RevisionId>,
+    changes: &ChangeProjection,
+) -> Result<AttentionProjection> {
     #[cfg(any(test, feature = "longitudinal-counting"))]
     crate::bench_support::longitudinal::record_projection_rebuild();
-    // One SupersessionView per call — the freshness, competing-heads, stale, and
-    // failed-validation collectors all read from this single construction.
-    let supersession = SupersessionView::from_events(events)?;
+    // One pair of views per call. Replacement recorded as a Change relation is
+    // what makes a Revision superseded; competing heads read their own graph.
+    let AttentionSupersession {
+        replacement: supersession,
+        competition,
+    } = change_aware_supersession(&SupersessionView::from_events(events)?, changes);
     let current_assessments = current_assessment_records_by_revision(events)?;
     #[cfg(any(test, feature = "longitudinal-counting"))]
     crate::bench_support::longitudinal::record_event_folds(events.len());
@@ -197,7 +215,7 @@ pub(crate) fn attention_from_events(
 
     open_input_request_items(&request_records, &supersession, &mut items)?;
     ambiguous_assessment_items(&current_assessments, &supersession, &mut items);
-    competing_heads_items(&supersession, &captured_at, &mut items);
+    competing_heads_items(&competition, &captured_at, &mut items);
     stale_assessment_items(&current_assessments, &supersession, &mut items);
     #[cfg(any(test, feature = "longitudinal-counting"))]
     crate::bench_support::longitudinal::record_event_folds(events.len());
@@ -222,6 +240,58 @@ pub(crate) fn attention_from_events(
         items,
         diagnostics: supersession.diagnostics,
     })
+}
+
+/// The events an attention fold anchored on `revisions` reads: their
+/// proposals, every review fact recorded on them, and every response to a
+/// request opened on them, wherever that response was recorded.
+pub(crate) fn attention_events_for_revisions(
+    events: &[ShoreEvent],
+    revisions: &BTreeSet<RevisionId>,
+) -> Result<Vec<ShoreEvent>> {
+    let mut subjects: Vec<Option<RevisionId>> = Vec::with_capacity(events.len());
+    let mut requests: BTreeSet<InputRequestId> = BTreeSet::new();
+    for event in events {
+        let subject = match event.event_type {
+            EventType::WorkObjectProposed => {
+                let payload: WorkObjectProposedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                match payload.work_object {
+                    WorkObjectProposal::Revision { revision, .. } => Some(revision.id),
+                    _ => None,
+                }
+            }
+            EventType::ReviewObservationRecorded
+            | EventType::ReviewAssessmentRecorded
+            | EventType::InputRequestOpened
+            | EventType::InputRequestResponded
+            | EventType::ValidationCheckRecorded => event.subject_revision_id()?,
+            _ => None,
+        };
+        if event.event_type == EventType::InputRequestOpened
+            && subject
+                .as_ref()
+                .is_some_and(|revision| revisions.contains(revision))
+        {
+            let payload =
+                crate::session::event::decode_input_request_opened_payload(event.payload.clone())?;
+            requests.insert(payload.input_request_id);
+        }
+        subjects.push(subject);
+    }
+    let mut selected = Vec::new();
+    for (event, subject) in events.iter().zip(subjects) {
+        let anchored = subject.is_some_and(|revision| revisions.contains(&revision));
+        let answers = event.event_type == EventType::InputRequestResponded && {
+            let payload: crate::session::event::InputRequestRespondedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            requests.contains(&payload.input_request_id)
+        };
+        if anchored || answers {
+            selected.push(event.clone());
+        }
+    }
+    Ok(selected)
 }
 
 pub(crate) fn scope_attention_items(
@@ -792,14 +862,17 @@ fn open_input_request_items(
 mod tests {
     use super::*;
     use crate::model::{
+        ChangeIdentityDescriptorV1, ChangeMembershipClaimId, ChangeRevisionRelationClaimId,
         EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId, ReviewEndpoint,
-        ReviewTargetRef, RevisionSource, TargetRef, TaskTargetRef, ValidationTrigger, WorkObjectId,
-        WorktreeCaptureMode,
+        ReviewTargetRef, RevisionRefV1, RevisionSource, TargetRef, TaskTargetRef,
+        ValidationTrigger, WorkObjectId, WorktreeCaptureMode,
     };
     use crate::session::event::{
-        EventTarget, EventType, GitProvenance, InputRequestOpenedPayload,
+        EventPayload, EventTarget, EventType, GitProvenance, InputRequestOpenedPayload,
         InputRequestRespondedPayload, InputRequestResponseOutcome, ReviewAssessmentRecordedPayload,
         Revision, WorkObjectProposal, WorkObjectProposedPayload, Writer, WriterProducer,
+        build_change_declared, build_membership_asserted, build_membership_withdrawn,
+        build_revision_relation_asserted, build_revision_relation_withdrawn,
     };
 
     #[allow(clippy::too_many_arguments)]
@@ -945,6 +1018,20 @@ mod tests {
     /// A review-domain revision proposal (`WorkObjectProposed`), optionally
     /// superseding earlier revisions. Mirrors the supersession suite's fixture.
     fn revision_event(suffix: &str, supersedes: Vec<RevisionId>, occurred_at: &str) -> ShoreEvent {
+        revision_event_with_hash(
+            suffix,
+            format!("sha256:artifact:{suffix}"),
+            supersedes,
+            occurred_at,
+        )
+    }
+
+    fn revision_event_with_hash(
+        suffix: &str,
+        object_artifact_content_hash: String,
+        supersedes: Vec<RevisionId>,
+        occurred_at: &str,
+    ) -> ShoreEvent {
         let revision_id = rev(suffix);
         ShoreEvent::new(
             EventType::WorkObjectProposed,
@@ -974,7 +1061,7 @@ mod tests {
                         }),
                     },
                     summary: None,
-                    object_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                    object_artifact_content_hash,
                     supersedes,
                 },
             },
@@ -3071,5 +3158,419 @@ mod tests {
                 .any(|item| item.id == "ambiguous_assessment:rev:sha256:a"),
             "ambiguity on a current head is always judgment-worthy",
         );
+    }
+
+    /// A revision proposal whose artifact hash is well-formed, so Change relation
+    /// claims can name it exactly.
+    fn exact_revision_event(
+        suffix: &str,
+        byte: char,
+        supersedes: Vec<RevisionId>,
+        occurred_at: &str,
+    ) -> (RevisionRefV1, ShoreEvent) {
+        let hash = format!("sha256:{}", byte.to_string().repeat(64));
+        let reference = RevisionRefV1::new(rev(suffix), hash.clone()).unwrap();
+        (
+            reference,
+            revision_event_with_hash(suffix, hash, supersedes, occurred_at),
+        )
+    }
+
+    fn change_claim_event<P: EventPayload>(payload: P, key: String) -> ShoreEvent {
+        ShoreEvent::new(
+            payload.event_type(),
+            key,
+            EventTarget::for_journal(JournalId::new("journal:default")),
+            writer("actor:human:kevin"),
+            payload,
+            "2026-06-04T00:00:05Z",
+        )
+        .unwrap()
+    }
+
+    /// The claims one Change was built from, kept so a test can withdraw them.
+    struct ChangeClaims {
+        events: Vec<ShoreEvent>,
+        memberships: BTreeMap<RevisionId, ChangeMembershipClaimId>,
+        relations: Vec<ChangeRevisionRelationClaimId>,
+    }
+
+    /// Declares one Change holding `members` with `(successor, predecessor)`
+    /// replacement claims. `nonce` must be unique per Change and leave room for
+    /// its claims.
+    fn change_claims(
+        nonce: u8,
+        members: &[&RevisionRefV1],
+        relations: &[(&RevisionRefV1, &RevisionRefV1)],
+    ) -> ChangeClaims {
+        let declared = build_change_declared(
+            ChangeIdentityDescriptorV1::opaque_nonce([nonce; 32]),
+            [nonce.wrapping_add(1); 32],
+        )
+        .unwrap();
+        let change_id = declared.change_id.clone();
+        let mut claims = ChangeClaims {
+            events: vec![change_claim_event(declared, format!("change:{nonce}"))],
+            memberships: BTreeMap::new(),
+            relations: Vec::new(),
+        };
+        let mut next = nonce.wrapping_add(2);
+        for member in members {
+            let payload =
+                build_membership_asserted(&change_id, &member.revision_id, [next; 32]).unwrap();
+            claims.memberships.insert(
+                member.revision_id.clone(),
+                payload.membership_claim_id.clone(),
+            );
+            claims
+                .events
+                .push(change_claim_event(payload, format!("membership:{next}")));
+            next = next.wrapping_add(1);
+        }
+        for (successor, predecessor) in relations {
+            let payload = build_revision_relation_asserted(
+                &change_id,
+                (*successor).clone(),
+                (*predecessor).clone(),
+                [next; 32],
+            )
+            .unwrap();
+            claims.relations.push(payload.relation_claim_id.clone());
+            claims
+                .events
+                .push(change_claim_event(payload, format!("relation:{next}")));
+            next = next.wrapping_add(1);
+        }
+        claims
+    }
+
+    fn failed_check(revision: &RevisionId, check_id: &str) -> ShoreEvent {
+        validation_event(
+            revision,
+            "agent:codex",
+            "actor:agent:codex",
+            check_id,
+            "cargo test",
+            ValidationStatus::Failed,
+            Some(101),
+            Some("2026-06-04T00:01:00Z"),
+            "2026-06-04T00:01:00Z",
+            vec![],
+        )
+    }
+
+    fn accepted(revision: &RevisionId, actor: &str, assess_id: &str, at: &str) -> ShoreEvent {
+        assessment_event(
+            revision,
+            &format!("agent:{actor}"),
+            &format!("actor:agent:{actor}"),
+            assess_id,
+            ReviewAssessment::Accepted,
+            vec![],
+            vec![],
+            at,
+        )
+    }
+
+    fn ids_with_prefix(projection: &AttentionProjection, prefix: &str) -> Vec<String> {
+        projection
+            .items
+            .iter()
+            .filter(|item| item.id.starts_with(prefix))
+            .map(|item| item.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn failed_check_on_a_change_replaced_revision_is_not_an_item() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![a_event, b_event, failed_check(&a.revision_id, "fail")];
+        assert!(has_failed_validation_item(
+            &attention_from_events(&events, None).expect("projects"),
+            "fail"
+        ));
+
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(no_failed_validation_items(&projection));
+    }
+
+    #[test]
+    fn failed_check_stays_when_the_revision_is_current_in_another_change() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![a_event, b_event, failed_check(&a.revision_id, "fail")];
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+        events.extend(change_claims(0x30, &[&a], &[]).events);
+
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(has_failed_validation_item(&projection, "fail"));
+    }
+
+    #[test]
+    fn assessment_on_a_change_replaced_revision_is_stale_until_the_head_is_assessed() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![
+            a_event,
+            b_event,
+            accepted(&a.revision_id, "codex", "on-a", "2026-06-04T00:01:00Z"),
+        ];
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+
+        let projection = attention_from_events(&events, None).expect("projects");
+        let stale = projection
+            .items
+            .iter()
+            .find(|item| item.id == "stale_assessment:assess:sha256:on-a")
+            .expect("the call on the replaced revision is stale");
+        assert_eq!(stale.freshness.state, AttentionFreshnessState::Superseded);
+        assert_eq!(stale.freshness.superseded_by, vec![b.revision_id.clone()]);
+
+        events.push(accepted(
+            &b.revision_id,
+            "codex",
+            "on-b",
+            "2026-06-04T00:03:00Z",
+        ));
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(ids_with_prefix(&projection, "stale_assessment:").is_empty());
+    }
+
+    #[test]
+    fn ambiguous_pair_on_a_change_replaced_revision_is_suppressed_once_heads_are_assessed() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![
+            a_event,
+            b_event,
+            accepted(&a.revision_id, "codex", "first", "2026-06-04T00:01:00Z"),
+            accepted(&a.revision_id, "claude", "second", "2026-06-04T00:01:30Z"),
+        ];
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert_eq!(
+            ids_with_prefix(&projection, "ambiguous_assessment:"),
+            vec!["ambiguous_assessment:rev:sha256:a".to_owned()]
+        );
+
+        events.push(accepted(
+            &b.revision_id,
+            "codex",
+            "on-b",
+            "2026-06-04T00:03:00Z",
+        ));
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(ids_with_prefix(&projection, "ambiguous_assessment:").is_empty());
+    }
+
+    #[test]
+    fn open_request_on_a_change_replaced_revision_stays_and_names_its_successors() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![
+            a_event,
+            b_event,
+            open_request_event(
+                &a.revision_id,
+                "agent:codex",
+                "actor:agent:codex",
+                "ask",
+                InputRequestReasonCode::ManualDecisionRequired,
+                "Which way?",
+                AssertionMode::Advisory,
+                "2026-06-04T00:01:00Z",
+            ),
+        ];
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+
+        let projection = attention_from_events(&events, None).expect("projects");
+        let item = projection
+            .items
+            .iter()
+            .find(|item| item.id.starts_with("open_input_request:"))
+            .expect("an open ask is never cleared by replacement");
+        assert_eq!(item.freshness.state, AttentionFreshnessState::Superseded);
+        assert_eq!(item.freshness.superseded_by, vec![b.revision_id.clone()]);
+    }
+
+    #[test]
+    fn revision_scope_stays_exact_across_change_replacement() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![
+            a_event,
+            b_event,
+            open_request_event(
+                &a.revision_id,
+                "agent:codex",
+                "actor:agent:codex",
+                "ask",
+                InputRequestReasonCode::ManualDecisionRequired,
+                "Which way?",
+                AssertionMode::Advisory,
+                "2026-06-04T00:01:00Z",
+            ),
+        ];
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+
+        let on_a = attention_from_events(&events, Some(&a.revision_id)).expect("projects");
+        assert_eq!(on_a.items.len(), 1);
+        assert_eq!(
+            on_a.items[0].freshness.state,
+            AttentionFreshnessState::Superseded
+        );
+        let on_b = attention_from_events(&events, Some(&b.revision_id)).expect("projects");
+        assert!(on_b.items.is_empty());
+    }
+
+    #[test]
+    fn change_scoped_divergence_emits_no_competing_heads_item() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let (c, c_event) = exact_revision_event("c", 'c', vec![], "2026-06-04T00:02:30Z");
+        let revisions = vec![a_event, b_event, c_event];
+
+        // One Change whose replacement diverges.
+        let mut events = revisions.clone();
+        events.extend(change_claims(0x10, &[&a, &b, &c], &[(&b, &a), (&c, &a)]).events);
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(ids_with_prefix(&projection, "competing_heads:").is_empty());
+
+        // Two Changes that independently replace a shared Revision.
+        let mut events = revisions;
+        events.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+        events.extend(change_claims(0x30, &[&a, &c], &[(&c, &a)]).events);
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(ids_with_prefix(&projection, "competing_heads:").is_empty());
+
+        // A proposal-borne fork in a store that also holds a Change claim.
+        let (p, p_event) = exact_revision_event("p", 'd', vec![], "2026-06-04T00:00:00Z");
+        let mut events = vec![
+            p_event,
+            revision_event("q", vec![p.revision_id.clone()], "2026-06-04T00:00:01Z"),
+            revision_event("r", vec![p.revision_id.clone()], "2026-06-04T00:00:02Z"),
+        ];
+        assert_eq!(
+            ids_with_prefix(
+                &attention_from_events(&events, None).expect("projects"),
+                "competing_heads:"
+            )
+            .len(),
+            1
+        );
+        events.extend(change_claims(0x50, &[&p], &[]).events);
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(ids_with_prefix(&projection, "competing_heads:").is_empty());
+    }
+
+    #[test]
+    fn withdrawing_a_migrated_relation_makes_the_predecessor_current_again() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![rev("a")], "2026-06-04T00:02:00Z");
+        let claims = change_claims(0x10, &[&a, &b], &[(&b, &a)]);
+        let mut events = vec![a_event, b_event, failed_check(&a.revision_id, "fail")];
+        events.extend(claims.events.clone());
+        assert!(no_failed_validation_items(
+            &attention_from_events(&events, None).expect("projects")
+        ));
+
+        events.push(change_claim_event(
+            build_revision_relation_withdrawn(&claims.relations[0], [0x70; 32]).unwrap(),
+            "relation:withdrawn".to_owned(),
+        ));
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(has_failed_validation_item(&projection, "fail"));
+    }
+
+    #[test]
+    fn withdrawing_the_last_membership_does_not_revive_the_proposal_edge() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![rev("a")], "2026-06-04T00:02:00Z");
+        let claims = change_claims(0x10, &[&a, &b], &[(&b, &a)]);
+        let mut events = vec![a_event, b_event, failed_check(&a.revision_id, "fail")];
+        events.extend(claims.events.clone());
+        events.push(change_claim_event(
+            build_revision_relation_withdrawn(&claims.relations[0], [0x70; 32]).unwrap(),
+            "relation:withdrawn".to_owned(),
+        ));
+        events.push(change_claim_event(
+            build_membership_withdrawn(&claims.memberships[&a.revision_id], [0x71; 32]).unwrap(),
+            "membership:withdrawn".to_owned(),
+        ));
+
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(has_failed_validation_item(&projection, "fail"));
+    }
+
+    #[test]
+    fn crossed_change_histories_clear_once_their_shared_head_is_judged() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:00:10Z");
+        let (c, c_event) = exact_revision_event("c", 'c', vec![], "2026-06-04T00:00:20Z");
+        let mut events = vec![
+            a_event,
+            b_event,
+            c_event,
+            accepted(&a.revision_id, "codex", "on-a", "2026-06-04T00:01:00Z"),
+        ];
+        // Two acyclic histories over the same Revisions, both ending at `c`.
+        events.extend(change_claims(0x10, &[&a, &b, &c], &[(&b, &a), (&c, &b)]).events);
+        events.extend(change_claims(0x30, &[&a, &b, &c], &[(&a, &b), (&c, &a)]).events);
+
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(
+            projection.diagnostics.is_empty(),
+            "{:?}",
+            projection.diagnostics
+        );
+        let stale = projection
+            .items
+            .iter()
+            .find(|item| item.id == "stale_assessment:assess:sha256:on-a")
+            .expect("stale until the shared head is judged");
+        match &stale.detail {
+            AttentionDetail::StaleAssessment {
+                head_revision_ids, ..
+            } => assert_eq!(head_revision_ids, &vec![c.revision_id.clone()]),
+            other => panic!("unexpected detail: {other:?}"),
+        }
+
+        events.push(accepted(
+            &c.revision_id,
+            "codex",
+            "on-c",
+            "2026-06-04T00:03:00Z",
+        ));
+        let projection = attention_from_events(&events, None).expect("projects");
+        assert!(
+            projection.diagnostics.is_empty(),
+            "{:?}",
+            projection.diagnostics
+        );
+        assert!(ids_with_prefix(&projection, "stale_assessment:").is_empty());
+    }
+
+    #[test]
+    fn replaced_revision_failures_do_not_hold_the_attention_wait_key() {
+        let (a, a_event) = exact_revision_event("a", 'a', vec![], "2026-06-04T00:00:00Z");
+        let (b, b_event) = exact_revision_event("b", 'b', vec![], "2026-06-04T00:02:00Z");
+        let mut events = vec![a_event, b_event, failed_check(&a.revision_id, "fail")];
+        let ordering = |events: &[ShoreEvent]| {
+            let semantic = crate::session::project_changes(events).unwrap();
+            let provenance = crate::session::project_change_documents(events).unwrap();
+            crate::documents::change_ordering_projection(&semantic, &provenance, events).unwrap()
+        };
+
+        // While `a` is the Change's current Revision its failed check waits.
+        events.extend(change_claims(0x10, &[&a], &[]).events);
+        assert_eq!(ordering(&events).attention_wait.len(), 1);
+
+        // The same Change with `b` replacing `a`: nothing waits any more.
+        let mut replaced = events.clone();
+        replaced.truncate(3);
+        replaced.extend(change_claims(0x10, &[&a, &b], &[(&b, &a)]).events);
+        assert!(ordering(&replaced).attention_wait.is_empty());
     }
 }

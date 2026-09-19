@@ -3176,6 +3176,42 @@ mod tests {
         .expect("request event")
     }
 
+    fn ordering_accepted(revision_id: &RevisionId, key: &str, occurred_at: &str) -> ShoreEvent {
+        let track_id = TrackId::new("agent:ordering-test");
+        ShoreEvent::new(
+            EventType::ReviewAssessmentRecorded,
+            crate::session::event::ReviewAssessmentRecordedPayload::idempotency_key(
+                revision_id,
+                &track_id,
+                key,
+            ),
+            EventTarget::for_revision(
+                JournalId::new("journal:change-endpoint"),
+                revision_id.clone(),
+                Some(track_id),
+            )
+            .expect("assessment target"),
+            Writer::shore_local("change-endpoint-test"),
+            crate::session::event::ReviewAssessmentRecordedPayload {
+                assessment_id: crate::model::AssessmentId::new(format!("assess:sha256:{key}")),
+                target: ReviewTargetRef::Revision {
+                    revision_id: revision_id.clone(),
+                },
+                assessment: crate::session::event::ReviewAssessment::Accepted,
+                summary: None,
+                summary_content_type: BodyContentType::TextPlain,
+                summary_artifact_path: None,
+                summary_byte_size: None,
+                summary_content_hash: None,
+                replaces_assessment_ids: Vec::new(),
+                related_observation_ids: Vec::new(),
+                related_input_request_ids: Vec::new(),
+            },
+            occurred_at,
+        )
+        .expect("assessment event")
+    }
+
     fn derived_activity(fixture: &ActiveChangeFixture, change_id: &ChangeId) -> Option<String> {
         let DerivedChangeOutcomeV1::Ready(list) = fixture.access.review_list_document().unwrap()
         else {
@@ -3185,6 +3221,60 @@ mod tests {
             .into_iter()
             .find(|summary| &summary.change_id == change_id)
             .and_then(|summary| summary.activity_at)
+    }
+
+    #[test]
+    fn a_shared_member_holds_the_wait_key_only_of_the_change_that_replaced_it() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("first")], &[Some("second")]]);
+        fixture.runtime.pause_background_worker_for_test();
+        let first = fixture.changes[0].clone();
+        let second = fixture.changes[1].clone();
+
+        // An accepting call on a current Revision asks for nothing.
+        record_fixture_event(
+            &fixture.store,
+            ordering_accepted(
+                &first.revision.revision_id,
+                "shared",
+                "2026-09-02T00:00:00Z",
+            ),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "accepted current Revision");
+        assert!(strict_ordering(&fixture).attention_wait.is_empty());
+
+        // The second Change adopts that Revision and replaces it with its own,
+        // unjudged one. Store-wide the Revision is still a live candidate in
+        // the first Change, so item-level attention stays quiet; but inside the
+        // second Change its call is now stale, and that is the second Change's
+        // wait, not the first's.
+        let adopted =
+            build_membership_asserted(&second.change_id, &first.revision.revision_id, [91; 32])
+                .expect("membership");
+        record_fixture_event(
+            &fixture.store,
+            ordering_change_event("shared-member", adopted, "2026-09-03T00:00:00Z"),
+        );
+        let replaced = build_revision_relation_asserted(
+            &second.change_id,
+            second.revision.clone(),
+            first.revision.clone(),
+            [92; 32],
+        )
+        .expect("relation");
+        record_fixture_event(
+            &fixture.store,
+            ordering_change_event("shared-replaced", replaced, "2026-09-03T00:00:01Z"),
+        );
+        assert_derived_ordering_matches_strict(&fixture, "shared member replaced in one Change");
+        let strict = strict_ordering(&fixture);
+        assert!(!strict.attention_wait.contains_key(&first.change_id));
+        assert_eq!(
+            strict
+                .attention_wait
+                .get(&second.change_id)
+                .map(|key| key.oldest_observed_at.as_str()),
+            Some("2026-09-02T00:00:00Z")
+        );
     }
 
     #[test]

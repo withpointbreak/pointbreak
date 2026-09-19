@@ -2388,6 +2388,10 @@ impl SqliteSemantic {
             None,
             MaterializedFactFamilies::Attention,
         )?;
+        // Replacement authority is the Change projection at the same checkpoint;
+        // it is read before the settled re-read below so that guard covers it.
+        let changes =
+            query_materialized_change_projection(&connection, as_of.epoch, as_of.sequence)?;
         // The state and fact reads ran in separate implicit snapshots after the
         // checkpoint read, and the sequence bound does not freeze representative
         // rows a later canonical carrier can replace. Re-read the checkpoint last
@@ -2400,16 +2404,18 @@ impl SqliteSemantic {
                 observed,
             });
         }
-        let supersession =
-            crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?;
+        let views = crate::session::workflow::attention::change_aware_supersession(
+            &crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?,
+            &changes,
+        );
         let attention = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts_with_supersession(
             &facts,
-            &supersession,
+            &views,
         )?;
         Ok(LocatorRead::Ready(MaterializedAttentionSnapshot {
             as_of,
             state,
-            supersession,
+            supersession: views.replacement,
             attention,
         }))
     }
@@ -2442,8 +2448,65 @@ impl SqliteSemantic {
         )?);
         let changes =
             query_materialized_change_projection(&connection, observed.epoch, observed.sequence)?;
+        // Attention folds every Revision the engagement's Revisions depend on:
+        // a Change relation crosses engagements and thread heads are
+        // component-wide. Revision and thread documents keep the engagement.
+        let scope: BTreeSet<RevisionId> = facts
+            .iter()
+            .filter(|fact| matches!(fact.kind, SemanticFactKind::Revision(_)))
+            .filter_map(|fact| fact.revision_id.clone())
+            .map(RevisionId::new)
+            .collect();
+        let dependencies = query_attention_dependency_revisions(
+            &connection,
+            observed.epoch,
+            observed.sequence,
+            &scope,
+            &changes,
+        )?;
+        let widened;
+        let attention_facts = if dependencies == scope {
+            &facts
+        } else {
+            let names = dependencies
+                .iter()
+                .map(RevisionId::as_str)
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            let mut merged = Vec::new();
+            for engagement in
+                query_revision_engagements(&connection, observed.epoch, observed.sequence, &names)?
+            {
+                for fact in hydrated_facts_only(query_materialized_facts(
+                    &connection,
+                    &journal,
+                    observed.epoch,
+                    observed.sequence,
+                    Some(&engagement),
+                    MaterializedFactFamilies::AllExceptObservations,
+                )?) {
+                    if seen.insert(fact.cursor.sequence) {
+                        merged.push(fact);
+                    }
+                }
+            }
+            merged.sort_by(|left, right| {
+                left.replay_key
+                    .cmp(&right.replay_key)
+                    .then_with(|| left.logical_reread_key.cmp(&right.logical_reread_key))
+            });
+            widened = merged;
+            &widened
+        };
         Ok(LocatorRead::Ready(
-            SemanticSnapshot::from_materialized_with_changes(observed, state, &facts, changes)?,
+            SemanticSnapshot::from_materialized_with_changes(
+                observed,
+                state,
+                &facts,
+                attention_facts,
+                Some(&scope),
+                changes,
+            )?,
         ))
     }
 
@@ -5213,15 +5276,38 @@ fn query_change_ordering(
             )?
         }
     };
-    let supersession =
-        crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?;
+    let views = crate::session::workflow::attention::change_aware_supersession(
+        &crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?,
+        semantic,
+    );
     let attention = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts_with_supersession(
         &facts,
-        &supersession,
+        &views,
     )?;
+    // A Change's wait key is local to it. A scoped read holds that one Change's
+    // narrowed projection, so its fold is already Change-local; the
+    // whole-generation read re-folds each Change that shares a member.
+    let mut attention_wait = attention_wait_keys(&attention.items, semantic);
+    match scope {
+        Some(change_id) => attention_wait.retain(|keyed, _| keyed == change_id),
+        None => crate::documents::apply_change_local_wait_keys(
+            &mut attention_wait,
+            semantic,
+            |local| {
+                let members = local
+                    .changes
+                    .values()
+                    .flat_map(|view| view.members.iter().cloned())
+                    .collect();
+                let selected = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::facts_for_revisions(&facts, &members);
+                crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts(&selected, local)
+                    .map(|fold| fold.items)
+            },
+        )?,
+    }
     Ok(ChangeOrderingV1 {
         activity,
-        attention_wait: attention_wait_keys(&attention.items, semantic),
+        attention_wait,
         source_projection_stamp: source_projection_stamp.to_owned(),
     })
 }
@@ -5237,6 +5323,41 @@ fn query_change_scoped_attention_facts(
     sequence: u64,
     members: &[&str],
 ) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
+    if members.is_empty() {
+        return Ok(Vec::new());
+    }
+    let engagements = query_revision_engagements(connection, epoch, sequence, members)?;
+    let mut seen = BTreeSet::new();
+    let mut facts = Vec::new();
+    for engagement in engagements {
+        for fact in query_materialized_compact_facts_with_attention_closure(
+            connection,
+            epoch,
+            sequence,
+            Some(&engagement),
+            MaterializedFactFamilies::Attention,
+            true,
+        )? {
+            if seen.insert(fact.cursor.sequence) {
+                facts.push(fact);
+            }
+        }
+    }
+    facts.sort_by(|left, right| {
+        left.replay_key
+            .cmp(&right.replay_key)
+            .then_with(|| left.logical_reread_key.cmp(&right.logical_reread_key))
+    });
+    Ok(facts)
+}
+
+/// The engagements the given Revisions were proposed in, at one checkpoint.
+fn query_revision_engagements(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    members: &[&str],
+) -> Result<Vec<String>, SqliteSemanticError> {
     if members.is_empty() {
         return Ok(Vec::new());
     }
@@ -5261,37 +5382,85 @@ fn query_change_scoped_attention_facts(
     let sequence = to_i64(sequence, "Change attention scope sequence")?;
     let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&epoch, &sequence];
     parameters.extend(members.iter().map(|member| member as &dyn rusqlite::ToSql));
-    let engagements = connection
+    connection
         .prepare(&sql)
         .map_err(|error| sqlite_error("prepare Change attention engagements", error))?
         .query_map(parameters.as_slice(), |row| row.get::<_, String>(0))
         .map_err(|error| sqlite_error("query Change attention engagements", error))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| sqlite_error("read Change attention engagements", error))?;
-    let epoch = u64::try_from(epoch).unwrap_or_default();
-    let sequence = u64::try_from(sequence).unwrap_or_default();
-    let mut seen = BTreeSet::new();
-    let mut facts = Vec::new();
-    for engagement in engagements {
-        for fact in query_materialized_compact_facts_with_attention_closure(
-            connection,
-            epoch,
-            sequence,
-            Some(&engagement),
-            MaterializedFactFamilies::Attention,
-            true,
-        )? {
-            if seen.insert(fact.cursor.sequence) {
-                facts.push(fact);
-            }
-        }
+        .map_err(|error| sqlite_error("read Change attention engagements", error))
+}
+
+/// Every Revision proposed in the given engagements, at one checkpoint.
+fn query_engagement_revisions(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    engagements: &[String],
+) -> Result<BTreeSet<RevisionId>, SqliteSemanticError> {
+    if engagements.is_empty() {
+        return Ok(BTreeSet::new());
     }
-    facts.sort_by(|left, right| {
-        left.replay_key
-            .cmp(&right.replay_key)
-            .then_with(|| left.logical_reread_key.cmp(&right.logical_reread_key))
-    });
-    Ok(facts)
+    let placeholders = (0..engagements.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT DISTINCT event.revision_id
+         FROM semantic_revision_fact AS revision
+         JOIN semantic_event_fact_text AS event ON event.sequence = revision.sequence
+         JOIN locator_event AS locator ON locator.sequence = event.sequence
+         JOIN semantic_representative AS representative
+           ON representative.family_id = 1
+          AND representative.sequence = event.sequence
+         WHERE locator.epoch = ?1
+           AND event.sequence <= ?2
+           AND revision.engagement_id IN ({placeholders})
+           AND event.revision_id IS NOT NULL"
+    );
+    let epoch = to_i64(epoch, "attention dependency epoch")?;
+    let sequence = to_i64(sequence, "attention dependency sequence")?;
+    let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&epoch, &sequence];
+    parameters.extend(
+        engagements
+            .iter()
+            .map(|engagement| engagement as &dyn rusqlite::ToSql),
+    );
+    connection
+        .prepare(&sql)
+        .map_err(|error| sqlite_error("prepare attention dependency revisions", error))?
+        .query_map(parameters.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("query attention dependency revisions", error))?
+        .map(|row| {
+            row.map(RevisionId::new)
+                .map_err(|error| sqlite_error("read attention dependency revisions", error))
+        })
+        .collect()
+}
+
+/// The Revisions a scoped attention fold over `seed` depends on: `seed` closed
+/// under Change relations (either direction) and engagement co-membership.
+fn query_attention_dependency_revisions(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    seed: &BTreeSet<RevisionId>,
+    changes: &crate::session::ChangeProjection,
+) -> Result<BTreeSet<RevisionId>, SqliteSemanticError> {
+    let mut members =
+        crate::session::workflow::attention::change_connected_revisions(seed, changes);
+    loop {
+        let names = members.iter().map(RevisionId::as_str).collect::<Vec<_>>();
+        let engagements = query_revision_engagements(connection, epoch, sequence, &names)?;
+        let mut widened = query_engagement_revisions(connection, epoch, sequence, &engagements)?;
+        widened.extend(members.iter().cloned());
+        let widened =
+            crate::session::workflow::attention::change_connected_revisions(&widened, changes);
+        if widened == members {
+            return Ok(members);
+        }
+        members = widened;
+    }
 }
 
 /// Fold the newest correlated event instant per Change over the maintained

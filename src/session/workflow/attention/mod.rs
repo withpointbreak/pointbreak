@@ -6,15 +6,22 @@
 //! follow-ups — as peer items; it never tie-breaks and never carries a
 //! per-revision lifecycle stage. "Attention guides, never gates" (ADR-0019 D4).
 
+mod effective;
 mod items;
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use effective::{
+    AttentionSupersession, change_aware_supersession, change_connected_revisions,
+};
 pub use items::{
     AttentionAssessmentRecord, AttentionDetail, AttentionFreshness, AttentionFreshnessState,
     AttentionItem, AttentionProjection, AttentionTier,
 };
-pub(crate) use items::{attention_from_events, attention_tier_rank, scope_attention_items};
+pub(crate) use items::{
+    attention_events_for_revisions, attention_from_events, attention_from_events_with_changes,
+    attention_tier_rank, scope_attention_items,
+};
 
 use crate::error::{Result, ShoreError};
 use crate::model::RevisionId;

@@ -11,11 +11,12 @@ use crate::model::{
     ValidationStatus,
 };
 use crate::session::event::{AssertionMode, ReviewAssessment, ShoreEvent};
-use crate::session::projection::SupersessionView;
+use crate::session::projection::{ChangeProjection, SupersessionView};
 use crate::session::workflow::assessment::collect_assessment_records_by_revision;
 use crate::session::workflow::attention::{
     AttentionAssessmentRecord, AttentionDetail, AttentionFreshness, AttentionFreshnessState,
-    AttentionItem, AttentionTier, attention_from_events,
+    AttentionItem, AttentionSupersession, AttentionTier, attention_from_events_with_changes,
+    change_aware_supersession,
 };
 use crate::session::workflow::input_request::{
     collect_input_request_projection_records, open_input_request_ids,
@@ -50,7 +51,10 @@ pub(crate) struct AttentionSemanticSnapshot {
 }
 
 impl AttentionSemanticSnapshot {
-    pub(crate) fn from_events(events: &[ShoreEvent]) -> ProductResult<Self> {
+    pub(crate) fn from_events(
+        events: &[ShoreEvent],
+        changes: &ChangeProjection,
+    ) -> ProductResult<Self> {
         let by_revision = collect_assessment_records_by_revision(events)?;
         let mut current_assessments = Vec::new();
         for (revision_id, records) in by_revision {
@@ -102,7 +106,7 @@ impl AttentionSemanticSnapshot {
                 .then_with(|| left.input_request_id.cmp(&right.input_request_id))
         });
 
-        let attention = attention_from_events(events, None)?;
+        let attention = attention_from_events_with_changes(events, None, changes)?;
         Ok(Self {
             current_assessments,
             open_requests,
@@ -113,15 +117,101 @@ impl AttentionSemanticSnapshot {
 
     pub(crate) fn from_facts(
         facts: &[SemanticFact],
+        changes: &ChangeProjection,
     ) -> std::result::Result<Self, SemanticModelError> {
-        let supersession = super::thread::supersession_from_facts(facts)?;
-        Self::from_facts_with_supersession(facts, &supersession)
+        let views =
+            change_aware_supersession(&super::thread::supersession_from_facts(facts)?, changes);
+        Self::from_facts_with_supersession(facts, &views)
+    }
+
+    /// The fold over `events`, keeping only what is anchored on `scope`. The
+    /// caller supplies the events of every Revision `scope` depends on.
+    pub(crate) fn from_events_scoped(
+        events: &[ShoreEvent],
+        changes: &ChangeProjection,
+        scope: &BTreeSet<RevisionId>,
+    ) -> ProductResult<Self> {
+        let mut snapshot = Self::from_events(events, changes)?;
+        let views = change_aware_supersession(&SupersessionView::from_events(events)?, changes);
+        snapshot.retain_scope(scope, &views.competition);
+        Ok(snapshot)
+    }
+
+    /// [`Self::from_events_scoped`] over compact facts.
+    pub(crate) fn from_facts_scoped(
+        facts: &[SemanticFact],
+        changes: &ChangeProjection,
+        scope: &BTreeSet<RevisionId>,
+    ) -> std::result::Result<Self, SemanticModelError> {
+        let views =
+            change_aware_supersession(&super::thread::supersession_from_facts(facts)?, changes);
+        let mut snapshot = Self::from_facts_with_supersession(facts, &views)?;
+        snapshot.retain_scope(scope, &views.competition);
+        Ok(snapshot)
+    }
+
+    /// The facts an attention fold anchored on `revisions` reads: every fact on
+    /// them, and every response to a request opened on them, wherever that
+    /// response was recorded.
+    pub(crate) fn facts_for_revisions(
+        facts: &[SemanticFact],
+        revisions: &BTreeSet<RevisionId>,
+    ) -> Vec<SemanticFact> {
+        let anchored = |fact: &SemanticFact| {
+            fact.revision_id
+                .as_deref()
+                .is_some_and(|revision| revisions.contains(&RevisionId::new(revision)))
+        };
+        let requests: BTreeSet<&str> = facts
+            .iter()
+            .filter(|fact| {
+                matches!(fact.kind, SemanticFactKind::InputRequestOpened(_)) && anchored(fact)
+            })
+            .filter_map(|fact| fact.semantic_id.as_deref())
+            .collect();
+        facts
+            .iter()
+            .filter(|fact| {
+                anchored(fact)
+                    || matches!(
+                        &fact.kind,
+                        SemanticFactKind::InputRequestResponded(response)
+                            if requests.contains(response.request_id.as_str())
+                    )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Anchored facts stay when their Revision is in scope; a competing-heads
+    /// item names no Revision and stays when its thread reaches the scope.
+    fn retain_scope(&mut self, scope: &BTreeSet<RevisionId>, competition: &SupersessionView) {
+        self.items.retain(|item| match &item.revision_id {
+            Some(revision_id) => scope.contains(revision_id),
+            None => match &item.detail {
+                AttentionDetail::CompetingHeads {
+                    head_revision_ids, ..
+                } => head_revision_ids.iter().any(|head| {
+                    competition
+                        .component_of(head)
+                        .is_some_and(|component| !component.is_disjoint(scope))
+                }),
+                _ => false,
+            },
+        });
+        self.current_assessments
+            .retain(|fact| scope.contains(&RevisionId::new(fact.revision_id.clone())));
+        self.open_requests
+            .retain(|fact| scope.contains(&RevisionId::new(fact.revision_id.clone())));
     }
 
     pub(crate) fn from_facts_with_supersession(
         facts: &[SemanticFact],
-        supersession: &SupersessionView,
+        views: &AttentionSupersession,
     ) -> std::result::Result<Self, SemanticModelError> {
+        // Competing heads read their own graph; every other rule reads the
+        // replacement authority.
+        let supersession = &views.replacement;
         let current = current_assessment_records(facts)?;
         let (requests, open_request_ids) = open_request_records(facts)?;
         let mut items = Vec::new();
@@ -148,7 +238,7 @@ impl AttentionSemanticSnapshot {
             });
         }
         ambiguous_items(&current, supersession, &mut items);
-        competing_head_items(facts, supersession, &mut items)?;
+        competing_head_items(facts, &views.competition, &mut items)?;
         stale_items(&current, supersession, &mut items);
         failed_validation_items(facts, &current, supersession, &mut items)?;
         follow_up_items(&current, &open_request_ids, supersession, &mut items);

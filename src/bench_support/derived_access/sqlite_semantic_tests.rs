@@ -2538,6 +2538,436 @@ fn selected_engagement_retains_store_wide_change_semantics() {
     assert_eq!(selected.changes.changes.len(), 2);
 }
 
+/// A revision proposal with a well-formed artifact hash in its own engagement,
+/// so Change relation claims can name it exactly.
+fn exact_revision_event(
+    suffix: &str,
+    byte: char,
+    engagement_id: &str,
+    supersedes: Vec<RevisionId>,
+    occurred_at: &str,
+) -> (RevisionRefV1, ShoreEvent) {
+    let exact = RevisionRefV1::new(revision_id(suffix), valid_hash(byte)).unwrap();
+    let event = ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        format!("work_object_proposed:{}", exact.revision_id.as_str()),
+        EventTarget::for_revision(
+            JournalId::new(JOURNAL),
+            exact.revision_id.clone(),
+            Some(TrackId::new(TRACK)),
+        )
+        .expect("proposal target"),
+        Writer::shore_local("0.10.0"),
+        WorkObjectProposedPayload {
+            engagement_id: EngagementId::new(engagement_id),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: exact.revision_id.clone(),
+                    object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
+                    git_provenance: None,
+                },
+                summary: None,
+                object_artifact_content_hash: exact.object_artifact_content_hash.clone(),
+                supersedes,
+            },
+        },
+        occurred_at,
+    )
+    .expect("exact revision event");
+    (exact, event)
+}
+
+const REPLACED_ENGAGEMENT: &str = ENGAGEMENT;
+const SUCCESSOR_ENGAGEMENT: &str = "engagement:sha256:replacement-successor";
+const OTHER_SUCCESSOR_ENGAGEMENT: &str = "engagement:sha256:replacement-other-successor";
+const WITHDRAWN_ENGAGEMENT: &str = "engagement:sha256:replacement-withdrawn";
+
+/// Replacement recorded only as Change relations, crossing engagements and
+/// Changes: `a` carries a failed check, an accepting call and an open request,
+/// and is replaced by `b` in one Change and by `c` in another. `b` is assessed,
+/// `c` is not. Separately, `e` supersedes `d` by a proposal-borne edge whose
+/// migrated relation claim, and then `d`'s last membership, are withdrawn.
+fn change_replacement_schedule() -> Vec<ShoreEvent> {
+    let (a, a_event) = exact_revision_event(
+        "replaced",
+        'a',
+        REPLACED_ENGAGEMENT,
+        Vec::new(),
+        "2026-09-01T00:00:00Z",
+    );
+    let (b, b_event) = exact_revision_event(
+        "successor",
+        'b',
+        SUCCESSOR_ENGAGEMENT,
+        Vec::new(),
+        "2026-09-01T00:00:10Z",
+    );
+    let (c, c_event) = exact_revision_event(
+        "other-successor",
+        'c',
+        OTHER_SUCCESSOR_ENGAGEMENT,
+        Vec::new(),
+        "2026-09-01T00:00:11Z",
+    );
+    let (d, d_event) = exact_revision_event(
+        "withdrawn-predecessor",
+        'd',
+        WITHDRAWN_ENGAGEMENT,
+        Vec::new(),
+        "2026-09-01T00:00:12Z",
+    );
+    let (e, e_event) = exact_revision_event(
+        "withdrawn-successor",
+        'e',
+        WITHDRAWN_ENGAGEMENT,
+        vec![d.revision_id.clone()],
+        "2026-09-01T00:00:13Z",
+    );
+
+    let first = build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([61; 32]), [62; 32])
+        .unwrap();
+    let second =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([71; 32]), [72; 32])
+            .unwrap();
+    let third = build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([81; 32]), [82; 32])
+        .unwrap();
+    let member = |change: &crate::model::ChangeId, exact: &RevisionRefV1, nonce: u8| {
+        build_membership_asserted(change, &exact.revision_id, [nonce; 32]).unwrap()
+    };
+    let replaces = |change: &crate::model::ChangeId,
+                    successor: &RevisionRefV1,
+                    predecessor: &RevisionRefV1,
+                    nonce: u8| {
+        build_revision_relation_asserted(
+            change,
+            successor.clone(),
+            predecessor.clone(),
+            [nonce; 32],
+        )
+        .unwrap()
+    };
+    let d_membership = member(&third.change_id, &d, 83);
+    let migrated = replaces(&third.change_id, &e, &d, 85);
+    let migrated_withdrawn =
+        build_revision_relation_withdrawn(&migrated.relation_claim_id, [86; 32]).unwrap();
+    let d_membership_withdrawn =
+        build_membership_withdrawn(&d_membership.membership_claim_id, [87; 32]).unwrap();
+    let request_on_a = InputRequestId::new("input-request:sha256:replacement-a");
+    let request_on_d = InputRequestId::new("input-request:sha256:replacement-d");
+
+    vec![
+        a_event,
+        validation_event(&a.revision_id),
+        assessment_event(
+            &a.revision_id,
+            "replacement-a-call",
+            "assess:sha256:replacement-a",
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            None,
+            "2026-09-01T00:00:02Z",
+        ),
+        request_opened(&a.revision_id, &request_on_a),
+        b_event,
+        c_event,
+        change_event(20, member(&first.change_id, &a, 63)),
+        change_event(21, member(&first.change_id, &b, 64)),
+        change_event(22, first.clone()),
+        change_event(23, replaces(&first.change_id, &b, &a, 65)),
+        change_event(24, second.clone()),
+        change_event(25, member(&second.change_id, &a, 73)),
+        change_event(26, member(&second.change_id, &c, 74)),
+        change_event(27, replaces(&second.change_id, &c, &a, 75)),
+        assessment_event(
+            &b.revision_id,
+            "replacement-b-call",
+            "assess:sha256:replacement-b",
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            None,
+            "2026-09-01T00:00:28Z",
+        ),
+        d_event,
+        e_event,
+        request_opened(&d.revision_id, &request_on_d),
+        change_event(30, third.clone()),
+        change_event(31, d_membership),
+        change_event(32, member(&third.change_id, &e, 84)),
+        change_event(33, migrated),
+        change_event(34, migrated_withdrawn),
+        change_event(35, d_membership_withdrawn),
+    ]
+}
+
+/// Every lane and every scope agrees with strict replay at every prefix, from
+/// before the first Change claim (proposal-borne authority) to after the last
+/// withdrawal.
+#[test]
+fn change_replacement_attention_equals_strict_replay_after_every_prefix() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let schedule = change_replacement_schedule();
+    let mut stored = Vec::new();
+
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+        stored.push(event.clone());
+        let prefix = attempt + 1;
+
+        let audit = ready(adapter.semantic_audit_snapshot().expect("audit snapshot"));
+        let strict = strict_bodyless_semantic_snapshot(&stored).expect("strict snapshot");
+        assert_eq!(audit, strict, "audit prefix {prefix}");
+
+        let materialized = ready(
+            adapter
+                .semantic_materialized_audit_snapshot()
+                .expect("materialized snapshot"),
+        );
+        let strict_materialized =
+            strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+        assert_eq!(
+            materialized, strict_materialized,
+            "materialized prefix {prefix}"
+        );
+
+        for engagement in [
+            REPLACED_ENGAGEMENT,
+            SUCCESSOR_ENGAGEMENT,
+            OTHER_SUCCESSOR_ENGAGEMENT,
+            WITHDRAWN_ENGAGEMENT,
+        ] {
+            let selected = ready(
+                adapter
+                    .semantic_materialized_engagement_snapshot(engagement)
+                    .expect("selected snapshot"),
+            );
+            let selected_strict =
+                strict_bodyless_materialized_engagement_snapshot(&stored, engagement)
+                    .expect("selected strict oracle");
+            assert_eq!(selected, selected_strict, "{engagement} prefix {prefix}");
+
+            // A scoped read is the store-wide fold kept to the scope's Revisions.
+            let scope: std::collections::BTreeSet<RevisionId> = stored
+                .iter()
+                .filter(|event| event.event_type == EventType::WorkObjectProposed)
+                .filter_map(|event| {
+                    let payload: WorkObjectProposedPayload =
+                        serde_json::from_value(event.payload.clone()).unwrap();
+                    match payload.work_object {
+                        WorkObjectProposal::Revision { revision, .. }
+                            if payload.engagement_id.as_str() == engagement =>
+                        {
+                            Some(revision.id)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            let expected: Vec<_> = strict_materialized
+                .attention
+                .items
+                .iter()
+                .filter(|item| {
+                    item.revision_id
+                        .as_ref()
+                        .is_some_and(|revision| scope.contains(revision))
+                })
+                .cloned()
+                .collect();
+            assert_eq!(
+                selected.attention.items, expected,
+                "{engagement} scoped attention prefix {prefix}"
+            );
+        }
+    }
+
+    let strict = strict_bodyless_materialized_snapshot(&stored).expect("final strict oracle");
+    let ids: Vec<&str> = strict
+        .attention
+        .items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    // Replaced through Change relations: the failed check stops reporting, the
+    // open request stays, and the accepting call is stale because one of the two
+    // successors is unassessed.
+    assert!(
+        !ids.iter().any(|id| id.starts_with("failed_validation:")),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"open_input_request:input-request:sha256:replacement-a"),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"stale_assessment:assess:sha256:replacement-a"),
+        "{ids:?}"
+    );
+    // Withdrawals never revive the proposal-borne edge: the request on `d` is
+    // current, not superseded by `e`.
+    let on_d = strict
+        .attention
+        .items
+        .iter()
+        .find(|item| item.id == "open_input_request:input-request:sha256:replacement-d")
+        .expect("request on the withdrawn predecessor");
+    assert_eq!(
+        on_d.freshness.state,
+        crate::session::AttentionFreshnessState::Current
+    );
+}
+
+/// Two individually acyclic Change histories over the same Revisions
+/// (`a -> b -> c` and `b -> a -> c`) loop only in their union. Every lane must
+/// read that as two valid histories, not a cycle: the call on `a` is stale
+/// while the shared head `c` is unjudged and clears once it is judged.
+#[test]
+fn crossed_change_histories_equal_strict_replay_after_every_prefix() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let (a, a_event) = exact_revision_event(
+        "crossed-a",
+        'a',
+        ENGAGEMENT,
+        Vec::new(),
+        "2026-09-02T00:00:00Z",
+    );
+    let (b, b_event) = exact_revision_event(
+        "crossed-b",
+        'b',
+        "engagement:sha256:crossed-b",
+        Vec::new(),
+        "2026-09-02T00:00:01Z",
+    );
+    let (c, c_event) = exact_revision_event(
+        "crossed-c",
+        'c',
+        "engagement:sha256:crossed-c",
+        Vec::new(),
+        "2026-09-02T00:00:02Z",
+    );
+    let first = build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([91; 32]), [92; 32])
+        .unwrap();
+    let second = build_change_declared(
+        ChangeIdentityDescriptorV1::opaque_nonce([101; 32]),
+        [102; 32],
+    )
+    .unwrap();
+    let mut schedule = vec![
+        a_event,
+        b_event,
+        c_event,
+        assessment_event(
+            &a.revision_id,
+            "crossed-a-call",
+            "assess:sha256:crossed-a",
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            None,
+            "2026-09-02T00:00:03Z",
+        ),
+        change_event(40, first.clone()),
+        change_event(41, second.clone()),
+    ];
+    let mut index = 42;
+    let mut nonce = 110_u8;
+    for (change, order) in [(&first, [&a, &b, &c]), (&second, [&b, &a, &c])] {
+        for member in order {
+            schedule.push(change_event(
+                index,
+                build_membership_asserted(&change.change_id, &member.revision_id, [nonce; 32])
+                    .unwrap(),
+            ));
+            index += 1;
+            nonce += 1;
+        }
+        for pair in order.windows(2) {
+            schedule.push(change_event(
+                index,
+                build_revision_relation_asserted(
+                    &change.change_id,
+                    pair[1].clone(),
+                    pair[0].clone(),
+                    [nonce; 32],
+                )
+                .unwrap(),
+            ));
+            index += 1;
+            nonce += 1;
+        }
+    }
+    let unjudged_prefix = schedule.len();
+    schedule.push(assessment_event(
+        &c.revision_id,
+        "crossed-c-call",
+        "assess:sha256:crossed-c",
+        ReviewAssessment::Accepted,
+        Vec::new(),
+        None,
+        "2026-09-02T00:00:59Z",
+    ));
+
+    let mut stored = Vec::new();
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+        stored.push(event.clone());
+        let prefix = attempt + 1;
+        let strict =
+            strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+        let materialized = ready(
+            adapter
+                .semantic_materialized_audit_snapshot()
+                .expect("materialized snapshot"),
+        );
+        assert_eq!(materialized, strict, "materialized prefix {prefix}");
+        let audit = ready(adapter.semantic_audit_snapshot().expect("audit snapshot"));
+        assert_eq!(
+            audit,
+            strict_bodyless_semantic_snapshot(&stored).expect("strict snapshot"),
+            "audit prefix {prefix}"
+        );
+        let selected = ready(
+            adapter
+                .semantic_materialized_engagement_snapshot(ENGAGEMENT)
+                .expect("selected snapshot"),
+        );
+        assert_eq!(
+            selected,
+            strict_bodyless_materialized_engagement_snapshot(&stored, ENGAGEMENT)
+                .expect("selected strict oracle"),
+            "selected prefix {prefix}"
+        );
+        assert!(
+            strict.attention.diagnostics.is_empty(),
+            "prefix {prefix}: {:?}",
+            strict.attention.diagnostics
+        );
+
+        let stale: Vec<&str> = strict
+            .attention
+            .items
+            .iter()
+            .filter(|item| item.id.starts_with("stale_assessment:"))
+            .map(|item| item.id.as_str())
+            .collect();
+        if prefix == unjudged_prefix {
+            assert_eq!(stale, ["stale_assessment:assess:sha256:crossed-a"]);
+            assert_eq!(
+                selected.attention.items.len(),
+                1,
+                "scoped read keeps the stale call"
+            );
+        }
+        if prefix == schedule.len() {
+            assert!(
+                stale.is_empty(),
+                "judging the shared head clears it: {stale:?}"
+            );
+            assert!(selected.attention.items.is_empty());
+        }
+    }
+}
+
 #[test]
 fn incremental_semantic_snapshot_equals_strict_full_replay_after_every_prefix() {
     let root = tempfile::tempdir().expect("root");

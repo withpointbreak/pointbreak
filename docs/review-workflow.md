@@ -449,9 +449,13 @@ never a fact about the queue (ADR-0019's judgment-subsumption amendment):
   check (`skipped` never clears), replace the Revision, or record a later,
   unanimously accepting judgment on it: a reviewer who accepts a revision
   with the failure in evidence has rendered the judgment the item was
-  waiting for.
-- replacement divergence — use explicit Change relation claims to reconcile or consolidate the conflicting
-  current set; Pointbreak never chooses a winner by time.
+  waiting for. Replacing the Revision through the Change cursor clears the item in
+  `pointbreak attention list` as well as in `pointbreak change attention`, and an assessment left on
+  the replaced Revision reads as stale until every successor has been judged. A Revision that is
+  still current in another Change keeps its items.
+- replacement divergence — `pointbreak change attention` reports the Change as `conflicted`; use
+  explicit Change relation claims to reconcile or consolidate the conflicting current set. Pointbreak
+  never chooses a winner by time. Item-level `competing_heads` covers only stores with no Change claims.
 
 ### Landing: commit association
 
