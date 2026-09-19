@@ -62,7 +62,9 @@ Write responses report authority and derived outcomes separately through the
 [write acknowledgement contract](cli-reference.md#write-acknowledgements). Its `legacyProjectionState`
 field is always `not_attempted`. A successful response does not prove derived views
 are current. A response is not durable storage; Change capture may name its existing recovery binding
-without creating another authority or receipt carrier.
+without creating another authority or receipt carrier. A write does not refold the event history
+after recording: its response carries only diagnostics about that invocation, and store-wide hygiene
+diagnostics such as duplicate semantic facts come from the read surfaces that fold the history.
 
 **Consumer contract.** Stable automation should depend on Pointbreak commands and named JSON documents,
 not on raw storage paths. Commands and documents expose semantic IDs, content hashes, and freshness

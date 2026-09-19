@@ -331,6 +331,33 @@ mod tests {
     }
 
     #[test]
+    fn record_observation_performs_no_whole_history_replay() {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        let scope = LongitudinalCountingScopeV1::new("0".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let result = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_track("agent:codex")
+                .with_title("Check return value")
+                .with_body("The value changed."),
+        )
+        .unwrap();
+        drop(guard);
+
+        assert_eq!(result.events_created, 1);
+        let counters = scope.snapshot().counters;
+        assert_eq!(
+            counters.state_rebuilds, 0,
+            "a write must not fold the event history into a session state"
+        );
+        assert_eq!(counters.event_folds, 0);
+    }
+
+    #[test]
     fn record_observation_with_actor_id_attributes_override_and_changes_derived_id() {
         use crate::model::ActorId;
 

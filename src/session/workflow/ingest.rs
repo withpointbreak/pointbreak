@@ -9,7 +9,7 @@ use crate::session::event::{
     EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, resolve_effective_signer,
     stamp_ingest_provenance,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::EventWriteBatch;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
@@ -103,7 +103,7 @@ impl ImportEventOptions {
 
 /// The outcome of an ingest: how many events were newly written vs. already
 /// present (idempotent re-ingest), a per-type breakdown of the newly written
-/// events, and the projection diagnostics after the rebuild.
+/// events, and the diagnostics this ingest produced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IngestEventsResult {
     pub acknowledgement: WriteAcknowledgementV1,
@@ -134,17 +134,11 @@ pub(crate) struct IngestBatchSession<'a> {
     events_created_by_type: BTreeMap<String, usize>,
 }
 
-#[allow(
-    dead_code,
-    reason = "complete replay state is consumed by the bench-gated deterministic stream writer"
-)]
 pub(crate) struct IngestBatchCompletion {
     pub(crate) acknowledgement: WriteAcknowledgementV1,
     pub(crate) events_created: usize,
     pub(crate) events_existing: usize,
     pub(crate) events_created_by_type: BTreeMap<String, usize>,
-    pub(crate) events: Vec<ShoreEvent>,
-    pub(crate) state: SessionState,
     pub(crate) diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -249,12 +243,11 @@ impl<'a> IngestBatchSession<'a> {
         Ok(())
     }
 
-    /// Perform the one complete post-write replay, then release the batch
-    /// authority. No projection file is published.
-    pub(crate) fn finish(self) -> Result<IngestBatchCompletion> {
+    /// Release the batch authority and report the batch. The event history is
+    /// neither listed nor folded, so the diagnostics are this batch's own.
+    pub(crate) fn finish(self) -> IngestBatchCompletion {
         let Self {
             derived,
-            event_store,
             batch_writer,
             carrier_targets,
             ingest_diagnostics,
@@ -264,21 +257,16 @@ impl<'a> IngestBatchSession<'a> {
             ..
         } = self;
         drop(carrier_targets);
-        let events = event_store.list_events()?;
-        let state = SessionState::from_events(&events)?;
         drop(batch_writer);
-        let mut diagnostics = state.diagnostics.clone();
-        diagnostics.extend(ingest_diagnostics);
+        let mut diagnostics = ingest_diagnostics;
         let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
-        Ok(IngestBatchCompletion {
+        IngestBatchCompletion {
             acknowledgement,
             events_created,
             events_existing,
             events_created_by_type,
-            events,
-            state,
             diagnostics,
-        })
+        }
     }
 }
 
@@ -324,10 +312,10 @@ pub fn import_event(options: ImportEventOptions) -> Result<IngestEventsResult> {
 /// event whose `writer.actor_id` is not a well-formed `actor:` id is rejected
 /// before anything is written, so the whole batch is atomic on attribution.
 ///
-/// After recording, the event log is replayed once for the reducer diagnostics
-/// the result carries; no projection file is written. If a write fails partway
-/// through a batch (e.g. a conflict), the events already written remain durable
-/// and the error is returned — re-ingesting the batch is safe.
+/// The result carries only this ingest's own diagnostics; the event log is not
+/// replayed after the write and no projection file is written. If a write fails
+/// partway through a batch (e.g. a conflict), the events already written remain
+/// durable and the error is returned — re-ingesting the batch is safe.
 pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult> {
     ingest_events_with_clock(options, &SystemIngestClock)
 }
@@ -358,7 +346,7 @@ pub(crate) fn ingest_events_with_clock(
     let write_error = session
         .record_verified_events(&stamped, &mut verification)
         .err();
-    let completed = session.finish()?;
+    let completed = session.finish();
     if let Some(err) = write_error {
         return Err(err);
     }
@@ -749,9 +737,9 @@ mod tests {
     use crate::session::{
         CaptureOptions, EventSignatureRecordOptions, EventVerificationPolicy,
         InputRequestListOptions, InputRequestOpenOptions, InputRequestRespondOptions,
-        InputRequestStatus, InputRequestStatusFilter, TrustSet, capture_worktree_review,
-        event_signature_trust_set, list_input_requests, open_input_request, record_event_signature,
-        respond_input_request, verify_event_signature,
+        InputRequestStatus, InputRequestStatusFilter, SessionState, TrustSet,
+        capture_worktree_review, event_signature_trust_set, list_input_requests,
+        open_input_request, record_event_signature, respond_input_request, verify_event_signature,
     };
 
     struct TestRepo {
@@ -894,10 +882,8 @@ mod tests {
 
         assert_eq!(result.events_created, expected_event_count);
         let snapshot = scope.snapshot();
-        assert_eq!(
-            snapshot.counters.directory_entries_walked,
-            u64::try_from(expected_event_count + 2).unwrap()
-        );
+        // The batch never lists the event directory after writing.
+        assert_eq!(snapshot.counters.directory_entries_walked, 0);
         assert_eq!(snapshot.counters.change_capability_carriers_opened, 4);
         let physical_authority_locks = snapshot
             .lock_facts
@@ -2053,6 +2039,28 @@ mod tests {
                 .iter()
                 .all(|diagnostic| diagnostic.code != "legacy_state_projection_refresh_failed")
         );
+    }
+
+    #[test]
+    fn ingest_batch_performs_no_whole_history_replay() {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+
+        let (_origin, events) = origin_events();
+        let total = events.len();
+        let dest = dest_repo();
+
+        let scope = LongitudinalCountingScopeV1::new("0".repeat(64)).unwrap();
+        let guard = scope.enter();
+        let outcome = ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
+        drop(guard);
+
+        assert_eq!(outcome.events_created, total);
+        let counters = scope.snapshot().counters;
+        assert_eq!(
+            counters.state_rebuilds, 0,
+            "an ingest batch must not fold the event history into a session state"
+        );
+        assert_eq!(counters.event_folds, 0);
     }
 
     #[test]

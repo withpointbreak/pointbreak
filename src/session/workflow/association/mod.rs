@@ -27,7 +27,7 @@ use crate::session::event::{
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_read_store, resolve_write_store,
     resolve_write_validation_store,
@@ -795,15 +795,15 @@ struct AssociationWriteOutcome {
     events_existing: usize,
     events_created_by_type: BTreeMap<String, usize>,
     diagnostics: Vec<ProjectionDiagnostic>,
-    /// The post-write event list the state re-projection already read; carried
-    /// so `associate_commit`'s advisory content guard never re-reads the store.
+    /// The post-write event list, read once for `associate_commit`'s advisory
+    /// content guard.
     events: Vec<ShoreEvent>,
 }
 
 /// Shared scaffold: resolve the unit and write store, let the caller build the
 /// payload (track-free), then build the envelope (track on it only), sign,
-/// record unconditionally, and re-project state. Records always — withdrawals
-/// never check their referent.
+/// and record unconditionally. Records always — withdrawals never check their
+/// referent.
 #[allow(
     clippy::too_many_arguments,
     reason = "the shared association seam keeps its three mutually exclusive selectors explicit"
@@ -903,13 +903,15 @@ where
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
+    // The one post-write read of the whole history is the input of
+    // `associate_commit`'s advisory content guard, which needs every earlier
+    // capture proposal; nothing folds it into a session state.
     let events = if change_write {
         event_store.list_change_events()?
     } else {
         event_store.list_events()?
     };
-    let state = SessionState::from_events(&events)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(AssociationWriteOutcome {
@@ -1096,27 +1098,75 @@ mod tests {
     }
 
     #[test]
-    fn association_result_folds_the_whole_event_log_and_writes_no_state_projection() {
-        // The reducer diagnostics a write result carries come from a fold of the
-        // whole event log, not the batch the workflow loaded for itself: after
-        // recording an association, a fresh replay sees every event in the store,
-        // and no projection file is persisted.
-        let (repo, _unit) = Repo::with_capture();
+    fn association_result_carries_no_reducer_diagnostics_and_guards_against_the_whole_history() {
+        // The store holds a duplicate semantic observation, and the capture
+        // proposal the association targets is not the latest event. The write
+        // result reports only this call: no store-wide duplicate diagnostic, no
+        // session-state fold, and the content guard still finds the earlier
+        // capture in the whole history it reads after the write.
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+        use crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE;
+        use crate::session::{
+            ObservationAddOptions, ObservationListOptions, list_observations, record_observation,
+        };
+
+        let (repo, unit) = Repo::with_capture();
+        for key in ["retry-a", "retry-b"] {
+            record_observation(
+                ObservationAddOptions::new(repo.path())
+                    .with_track("agent:codex")
+                    .with_title("Same finding")
+                    .with_body("same body")
+                    .with_idempotency_key(key),
+            )
+            .unwrap();
+        }
+        let listed = list_observations(ObservationListOptions::new(repo.path())).unwrap();
+        assert!(
+            listed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE),
+            "reads still report the store-wide duplicate: {:?}",
+            listed.diagnostics
+        );
+        std::fs::write(repo.path().join("unrelated.txt"), "elsewhere\n").unwrap();
+        repo.git(["add", "unrelated.txt"]);
+        repo.git(["commit", "-m", "unrelated"]);
+
+        let scope = LongitudinalCountingScopeV1::new("0".repeat(64)).unwrap();
+        let guard = scope.enter();
         let result = associate_commit(
-            AssociateCommitOptions::new(repo.path(), "HEAD").with_track("agent:codex"),
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_revision_id(unit)
+                .with_track("agent:codex"),
         )
         .unwrap();
+        drop(guard);
 
-        let store_dir = resolved_store_dir(repo.path());
-        let events = EventStore::open(&store_dir).list_events().unwrap();
-        let replay = SessionState::from_events(&events).unwrap();
-
-        assert_eq!(replay.event_count, events.len());
+        assert_eq!(result.events_created, 1);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.starts_with("duplicate_semantic_")),
+            "a write reports only its own diagnostics: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE),
+            "the content guard still sees the earlier capture: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(scope.snapshot().counters.state_rebuilds, 0);
         assert_eq!(
             result.acknowledgement.legacy_projection_state,
             crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        assert!(!store_dir.join("state.json").exists());
+        assert!(!resolved_store_dir(repo.path()).join("state.json").exists());
     }
 
     #[test]

@@ -565,6 +565,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn no_post_write_history_replay_remains() {
+        use std::collections::BTreeSet;
+        use std::path::Path;
+        // Built by concatenation so this guard never matches its own source.
+        let fold = concat!("SessionState::", "from_events(");
+        let workflow = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/session/workflow");
+        let producer_files: BTreeSet<_> = PRODUCERS.iter().map(|row| row.0).collect();
+        assert_eq!(producer_files.len(), 13);
+        let mut offenders = Vec::new();
+        for file in producer_files {
+            let source = std::fs::read_to_string(workflow.join(file)).unwrap();
+            for (index, line) in product_region(&source).lines().enumerate() {
+                if line.contains(fold) {
+                    offenders.push(format!("{file}:{}", index + 1));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "write producers still fold the whole event history after their write:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     fn token(generation: &str, epoch: u64, sequence: u64) -> DerivedVisibilityTokenV1 {
         DerivedVisibilityTokenV1 {
             generation_id: generation.into(),

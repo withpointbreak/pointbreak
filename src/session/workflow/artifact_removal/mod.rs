@@ -32,7 +32,7 @@ use crate::session::event::{
 };
 use crate::session::object_artifact::decode_and_validate_object_artifact;
 use crate::session::projection::cosignature::CosignatureIndex;
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
@@ -186,10 +186,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
         });
     }
 
-    // Full-log fold for the reducer diagnostics carried on the result
-    // (ArtifactRemoved does not change SessionState).
-    let state = SessionState::from_events(&event_store.list_events()?)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(RemoveResult {

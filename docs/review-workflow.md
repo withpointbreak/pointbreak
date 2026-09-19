@@ -9,8 +9,9 @@ executable journey — install to first Review to the complete paired author/rev
 
 Write results separate durable authority, derived visibility, and durable
 operation bindings through the [write acknowledgement contract](cli-reference.md#write-acknowledgements).
-A successful capture or fact write can carry advisory diagnostics; inspect its diagnostics and
-acknowledgement without treating the response as a new review fact, acceptance, or landing authority.
+A successful capture or fact write can carry advisory diagnostics about that call; inspect its
+diagnostics and acknowledgement without treating the response as a new review fact, acceptance, or
+landing authority. Store-wide diagnostics, such as duplicate semantic facts, appear on read surfaces.
 
 ## The five stages
 

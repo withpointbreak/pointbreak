@@ -16,7 +16,7 @@ use crate::session::event::{
     InputRequestResponseOutcome, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::observation::staged_body;
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_write_store,
@@ -270,12 +270,7 @@ pub fn respond_input_request(
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&if change_write {
-        event_store.list_change_events()?
-    } else {
-        event_store.list_events()?
-    })?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     let result = InputRequestRespondResult {

@@ -29,8 +29,7 @@ use crate::session::store::resolution::{
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, ProjectionDiagnostic,
-    SessionState, WriteAcknowledgementV1, current_timestamp, sign_event_if_requested,
-    writer_from_options,
+    WriteAcknowledgementV1, current_timestamp, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -408,8 +407,7 @@ pub fn diffstat_from_files(files: &[DiffFile]) -> CaptureDiffstat {
 /// Canonical capture entry point. Dispatches on the options' source spec to a
 /// source adapter (worktree by default, or a commit range), then runs the
 /// shared tail: write the object artifact, record the idempotent
-/// `revision_captured` event, rebuild projection state, and surface the
-/// clone-local diagnostic.
+/// `revision_captured` event, and report the call's own diagnostics.
 pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     capture_review_with_policy(options, CaptureWritePolicy::EventOnly, None)
 }
@@ -624,16 +622,10 @@ fn capture_review_with_policy(
         });
     }
 
-    let events = match write_policy {
-        CaptureWritePolicy::EventOnly => event_store.list_events()?,
-        CaptureWritePolicy::Change => event_store.list_change_events()?,
-    };
-    let state = SessionState::from_events(&events)?;
     // Write-through (INV-1) lands the capture in the store reads already resolve,
     // so there is no longer a batch-only diagnostic telling the user to run
     // `pointbreak store link` before their own capture is visible.
-    let mut diagnostics = state.diagnostics;
-    diagnostics.extend(auto_record_diagnostics);
+    let mut diagnostics = auto_record_diagnostics;
     let acknowledgement = recorder.derived.finish(
         recorder.events_created,
         recorder.events_existing,

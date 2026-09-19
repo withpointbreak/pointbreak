@@ -2306,8 +2306,8 @@ mod tests {
         );
         assert_eq!(
             scope.snapshot().counters.event_decodes,
-            217,
-            "fresh capture must decode seven H-sized histories plus seven newly appended events"
+            186,
+            "fresh capture must decode six H-sized histories plus six newly appended events"
         );
     }
 

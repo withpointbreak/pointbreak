@@ -74,6 +74,12 @@ Call-specific diagnostics appear once in the existing top-level `diagnostics` ar
 `acknowledgement`. Multi-event derived diagnostics retain the first occurrence of each code. Store
 link/migrate append their existing warnings after workflow diagnostics.
 
+Write results report diagnostics about this invocation only (derived write state, skipped
+auto-record, ingest warnings). A write does not replay the event history after recording, so it
+does not report duplicates that already existed in the store. Store-wide hygiene diagnostics such as
+`duplicate_semantic_*` are reported by read commands (`history`, `observation list`,
+`input-request list`, `validation list`, `assessment show`) and the Inspector.
+
 A writer reports derived-generation admission failure on its first attempted publication,
 not when its handle is constructed. For example, writing without a usable derived generation
 can succeed durably with `derived.availability: unavailable` and the top-level diagnostic
