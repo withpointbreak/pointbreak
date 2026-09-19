@@ -69,8 +69,9 @@ A review moves through five stages: Work -> Claims -> Evidence -> Questions -> C
   Questions — what still needs judgment: input-request
   Call — the current assessment: assessment
 
-Across the stages, attention lists the outstanding judgment, and association
-records where the reviewed work landed.
+Across the stages, attention lists the outstanding items that need judgment (change
+attention lists the Changes still awaiting a call), and association records where
+the reviewed work landed.
 
 First review, from a real tracked change in a Git repository:
 

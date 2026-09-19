@@ -27,8 +27,8 @@ command family:
 | Questions | What still needs judgment? | `input-request` |
 | Call | What is the current assessment? | `assessment` |
 
-Two supporting nouns complete the picture: `attention` lists the outstanding judgment across
-stages, and `association` records where the reviewed work landed. Review — the local web surface
+Two supporting nouns complete the picture: `attention` lists the outstanding items that need judgment
+across stages (and `change attention` the Changes still awaiting a call), and `association` records where the reviewed work landed. Review — the local web surface
 opened by `pointbreak inspect --open` — is read-only and advisory: it renders the durable record
 and never executes commands or writes to the store.
 
@@ -422,14 +422,41 @@ evidence.
 
 ### Attention
 
-`pointbreak change attention` surfaces what still needs an actor's judgment across the store's stable
-Changes: open asks, ambiguous assessments, unresolved current members, failed checks, and outstanding
-follow-ups. It is a projection over the same durable facts the commands above record — nothing new is
-written by reading it.
+Two complementary reads answer "what is outstanding?". Neither is derivable from the other, so check
+both; an empty result from one says nothing about the other.
 
 ```bash
-pointbreak change attention
+pointbreak attention list      # per fact: what specific things need judgment
+pointbreak change attention    # per Change: which Changes are not yet accepted
 ```
+
+- `pointbreak attention list` is the item queue: open asks (operative and advisory), ambiguous
+  assessments, assessments left stale on a replaced Revision, the latest failed check per
+  `(revision, track, checkName)`, and accepted-with-follow-up calls whose linked request is still open.
+- `pointbreak change attention` lists every Change whose lifecycle is not `accepted`: a current
+  Revision with no assessment, a current Revision whose single call is `needs_changes` or
+  `needs_clarification`, a Change with no current Revision, an unresolved operative request, and
+  `incomplete` or `conflicted` Changes. It carries Change identity, topology, current Revision refs,
+  availability, and diagnostics rather than item detail.
+
+The two overlap without being subsets. A freshly captured Revision that nobody has assessed is normal
+handoff state: it is no item, yet its Change is awaiting a call. An advisory open request, or a failed
+check on a Change that is already accepted, is an item that puts no Change in `change attention`. An
+**operative** request shows up both ways: as an item and as the reason its Change is in progress.
+
+Both read replacement from effective Change relations, at different scope. Item attention is
+store-wide: a Revision stays current while *any* Change that holds it still has it current. Change
+lifecycle, and the wait-time order of `change attention`, follow each Change's own replacement. So
+for a Revision replaced in Change A but still current in Change B, a failed check stays an item
+(it is current somewhere) yet no longer holds A's place in the wait order, and A's acceptance
+depends on its successor's call rather than on that Revision's. Replacement does not retire
+everything, though: an open request on the replaced Revision still needs a response (or, for an
+operative one, to be carried open onto the successor with `pointbreak fact port`). An operative
+one keeps A in progress, and any open request keeps its item and A's wait key, because a Change
+answers for the requests on all of its members, not only the current one.
+
+Both are projections over the same durable facts the commands above record — nothing new is written
+by reading them.
 
 Attention *guides, never gates* (ADR-0019): the list is derived attention
 state, never a write precondition; a cooperative actor uses it to decide where
@@ -450,9 +477,8 @@ never a fact about the queue (ADR-0019's judgment-subsumption amendment):
   check (`skipped` never clears), replace the Revision, or record a later,
   unanimously accepting judgment on it: a reviewer who accepts a revision
   with the failure in evidence has rendered the judgment the item was
-  waiting for. Replacing the Revision through the Change cursor clears the item in
-  `pointbreak attention list` as well as in `pointbreak change attention`, and an assessment left on
-  the replaced Revision reads as stale until every successor has been judged. A Revision that is
+  waiting for. Replacing the Revision through the Change cursor clears the item, and an assessment left
+  on the replaced Revision reads as stale until every successor has been judged. A Revision that is
   still current in another Change keeps its items.
 - replacement divergence — `pointbreak change attention` reports the Change as `conflicted`; use
   explicit Change relation claims to reconcile or consolidate the conflicting current set. Pointbreak

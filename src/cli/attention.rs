@@ -294,22 +294,37 @@ fn run_authoritative_fallback<T>(
     fallback()
 }
 
+/// Where Change lifecycle triage lives. The item list and that list are
+/// complementary: a freshly captured or not-yet-accepted Revision is no item, so
+/// an item digest must never read as an all-clear for the store.
+const CHANGE_TRIAGE_HINT: &str =
+    "Changes still awaiting a call are listed by `pointbreak change attention`.";
+
 /// Bespoke text lane for `attention list` (ADR-0029: text is disposable, never
 /// byte-pinned). A count headline, then one scannable line per item — the tier
 /// from the document's own field, the kebab kind label, and a shortened anchor
 /// id. Items already sort primary-before-secondary, so the lines do too. An empty
-/// projection renders a `nothing needs attention` line, never silence.
+/// projection says there are no outstanding items, never silence, and both
+/// states close by pointing at Change lifecycle triage: this digest speaks for
+/// items only. It is a cross-reference rather than a second read because the
+/// two documents carry different authority identities.
 fn render_attention_list_text(result: &AttentionListResult) -> String {
+    let scope = if result.revision.is_some() {
+        " for this revision"
+    } else {
+        ""
+    };
     if result.items.is_empty() {
-        return "nothing needs attention".to_owned();
+        return format!("no outstanding attention items{scope}\n{CHANGE_TRIAGE_HINT}");
     }
     let mut lines = vec![format!(
-        "attention: {} item(s) need judgment:",
+        "attention: {} item(s) need judgment{scope}:",
         result.items.len()
     )];
     for item in &result.items {
         lines.push(render_attention_item_line(item));
     }
+    lines.push(CHANGE_TRIAGE_HINT.to_owned());
     lines.join("\n")
 }
 
