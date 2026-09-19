@@ -150,6 +150,17 @@ pub struct ShoreEvent {
     pub payload: serde_json::Value,
 }
 
+/// The event id minted for a write's idempotency key. An event id commits to
+/// the key alone, never to the payload, so the same logical write always lands
+/// on the same id.
+pub(crate) fn event_id_for_idempotency_key(idempotency_key: &str) -> EventId {
+    EventId::new(format!(
+        "{}:sha256:{}",
+        id_prefix::EVENT,
+        sha256_bytes_hex(idempotency_key.as_bytes())
+    ))
+}
+
 impl ShoreEvent {
     pub fn new<P>(
         event_type: EventType,
@@ -181,11 +192,7 @@ impl ShoreEvent {
 
         let payload = serde_json::to_value(payload)?;
         let payload_hash = sha256_json_prefixed(&payload)?;
-        let event_id = EventId::new(format!(
-            "{}:sha256:{}",
-            id_prefix::EVENT,
-            sha256_bytes_hex(idempotency_key.as_bytes())
-        ));
+        let event_id = event_id_for_idempotency_key(&idempotency_key);
 
         Ok(Self {
             schema: EVENT_SCHEMA.to_owned(),
@@ -316,6 +323,16 @@ mod tests {
 
         assert_eq!(second.event_id, first.event_id);
         assert_ne!(second.payload_hash, first.payload_hash);
+    }
+
+    #[test]
+    fn event_id_for_idempotency_key_matches_the_constructed_event_id() {
+        let event = valid_revision_captured_event();
+
+        assert_eq!(
+            event_id_for_idempotency_key(&event.idempotency_key),
+            event.event_id
+        );
     }
 
     #[test]

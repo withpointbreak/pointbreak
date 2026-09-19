@@ -38,6 +38,7 @@ mod observation;
 mod output;
 mod revision;
 mod store;
+mod summary;
 mod theme;
 mod validation;
 mod version;
@@ -151,6 +152,8 @@ enum Command {
     Revision(revision::RevisionArgs),
     /// Inspect and manage the resolved Pointbreak store
     Store(store::StoreArgs),
+    /// Summarize recorded review cycles for this store
+    Summary(summary::SummaryArgs),
     /// Record and read validation evidence (the Evidence stage)
     Validation(validation::ValidationArgs),
     Version(version::VersionArgs),
@@ -343,6 +346,7 @@ fn classify_invocation_read_v1(cli: &Cli) -> InvocationReadCatalogV1 {
         | Command::InputRequest(_)
         | Command::Observation(_)
         | Command::Revision(_)
+        | Command::Summary(_)
         | Command::Validation(_) => LegacyPreflight(LegacyPreflightKindV1::Unqualified),
     }
 }
@@ -1373,6 +1377,7 @@ fn run_cli(
             None => revision::run(args, stdout),
         },
         Command::Store(args) => store::run(args, stdout, stderr),
+        Command::Summary(args) => summary::run(args, stdout),
         Command::Validation(args) => match public_read_context.take() {
             Some(context) => validation::run_with_public_read_context(args, context, stdout),
             None => validation::run(args, stdout, stderr),
