@@ -798,7 +798,7 @@ fn manual_testing_fixes_the_first_use_walkthrough_protocol() {
             "store paths",
             "key enroll",
             "operative request",
-            "legacy `attention list`",
+            "`pointbreak attention list`",
             "intervention",
             "do not recapture",
             "five-minute",

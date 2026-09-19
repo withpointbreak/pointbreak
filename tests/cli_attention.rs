@@ -220,13 +220,37 @@ fn text_digest_renders_counts_items_and_empty_state() {
         "text",
     ]);
     let empty_stdout = String::from_utf8_lossy(&empty_out.stdout);
+    // The digest speaks for attention items only. This store's one Change is
+    // freshly captured and unassessed, which is no item but is still work
+    // awaiting a call, so the empty state must not read as an all-clear.
     assert!(
-        empty_stdout
+        empty_stdout.contains("no outstanding attention items"),
+        "stdout:\n{empty_stdout}"
+    );
+    assert!(
+        !empty_stdout
             .to_lowercase()
             .contains("nothing needs attention"),
         "stdout:\n{empty_stdout}"
     );
-    assert!(!empty_stdout.trim().is_empty());
+    assert!(
+        empty_stdout.contains("pointbreak change attention"),
+        "the empty state points at Change lifecycle triage:\n{empty_stdout}"
+    );
+    let awaiting = parse_json(
+        &pointbreak([
+            "change",
+            "attention",
+            "--repo",
+            empty.path().to_str().unwrap(),
+        ])
+        .stdout,
+    );
+    assert_eq!(
+        awaiting["changes"].as_array().unwrap().len(),
+        1,
+        "an empty item list coexists with a Change that still awaits a call"
+    );
 }
 
 fn modified_repo() -> GitRepo {
