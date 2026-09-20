@@ -1229,17 +1229,18 @@ mod tests {
         );
     }
 
-    /// A `--review-cursor` association folds the history several times over,
-    /// and this change removes exactly one of those folds. The cursor validator
-    /// in `exact_revision_from_review_cursor` builds a Change reader state of
-    /// its own, `record_association` builds another to resolve the Revision,
-    /// and the capability preflights fold again; deduplicating those readers
-    /// means threading one reader state through the cursor seam, which is a
-    /// separate change.
+    /// A `--review-cursor` association decodes the history once per Change
+    /// reader it builds, and builds three: `exact_revision_from_review_cursor`
+    /// builds one to validate the cursor, its source comparison builds another
+    /// through `exact_revision_source` -> `show_revision_for_change_reader`,
+    /// and `record_association` builds a third to resolve the Revision. The
+    /// capability preflights are not among them — those read two named records,
+    /// not the history. Collapsing the three means threading one validated
+    /// reader state through the cursor seam, which is a separate change.
     ///
     /// What this pins is a *total* decode budget for the path, not the
     /// post-write read in isolation: the aggregate counter cannot attribute a
-    /// fold to the reader that made it. Within that limit it is still the
+    /// decode to the reader that made it. Within that limit it is still the
     /// useful assertion — while the other readers on this path cost what they
     /// cost today, a reinstated post-write read is a whole extra pass and
     /// exceeds the budget. It is stated as an inequality rather than the exact
@@ -1286,11 +1287,11 @@ mod tests {
             .unwrap();
         }
 
-        // Measured on this fixture: 6 folds of a 12-event history (72) after
-        // the change, 85 with the post-write read restored. The budget sits
-        // between them.
+        // Measured on this fixture: 3 folds of a 12-event history (36), down
+        // from 6 before the Change reader stopped decoding the history twice.
+        // A restored post-write read adds a whole further pass.
         let decodes = scope.snapshot().counters.event_decodes;
-        let reader_budget = 6;
+        let reader_budget = 3;
         assert!(
             decodes <= history * reader_budget,
             "a Change-cursor association exceeded its whole-history decode budget: \
