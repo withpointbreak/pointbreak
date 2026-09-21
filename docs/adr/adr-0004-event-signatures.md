@@ -935,3 +935,17 @@ read-path surface.
 
 The reference docs — `docs/store-migration.md` §1a and `docs/event-versioning.md` — already describe this
 fail-loud floor and frame `payloadVersion` as reserved for a future interpretation change.
+
+## Amendment: First Use of the Canonical-Map Entry Shape (2026-09-19)
+
+The reserved `shore.event-set.canonical-map.v1` entry shape (see *Deferred Vocabulary*) is first
+implemented by the review summary's counted-input receipt (`pointbreak summary show`). The receipt
+digests the entry lines `eventId SP payloadHash SP eventRecordHash LF`, sorted by `eventId` then
+`eventRecordHash`, exactly as reserved, and reports it as `sha256:<hex>` in a field named `digest`.
+
+It is computed over a **subset** of events — the facts one summary counted — so it is not an
+`eventSetRoot`, is not a store-state commitment, and signs nothing. Each receipt entry also reports the
+reader's `verificationStatus` for that event; the status depends on the reader's trust set and is
+deliberately outside the digest, so two readers with different allow-lists agree on the digest. Signed
+heads and event-set roots remain deferred; a future root over the whole event set can reuse the same
+entry shape without reinterpreting any receipt.

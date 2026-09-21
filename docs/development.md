@@ -195,6 +195,12 @@ release verification and any required installed-product or browser evidence.
 
 Do not turn a fail-closed identity or protected-proof check into a write path merely to make it green.
 
+Do not build or install into a target directory while a gate is running in it: concurrently building or
+installing into a target used by a running suite can replace the executable the suite spawns. The signals
+are `run pointbreak binary: ... NotFound` and, under `just test-full`, a binary built without the
+feature that rejects `--longitudinal-counting`. Rerun once nothing else is building in that target
+directory.
+
 ## Prerequisites and setup
 
 - Provision the toolchain with `nix develop`, `mise install`, or a manual `rustup` setup; see

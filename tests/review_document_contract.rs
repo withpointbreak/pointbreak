@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::pointbreak;
+use support::{pointbreak, pointbreak_env};
 
 fn snapshot_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/review_documents")
@@ -57,11 +57,19 @@ fn normalize_hashes(text: &str) -> String {
 
 /// Replace locally minted timestamp fields with the snapshot's stable token.
 fn normalize_timestamps(text: &str) -> String {
-    ["occurredAt", "createdAt", "observedAt", "capturedAt"]
-        .into_iter()
-        .fold(text.to_owned(), |text, key| {
-            normalize_timestamp_field(&text, key)
-        })
+    [
+        "occurredAt",
+        "createdAt",
+        "observedAt",
+        "capturedAt",
+        "computedAt",
+        "from",
+        "to",
+    ]
+    .into_iter()
+    .fold(text.to_owned(), |text, key| {
+        normalize_timestamp_field(&text, key)
+    })
 }
 
 fn normalize_timestamp_field(text: &str, key: &str) -> String {
@@ -397,6 +405,127 @@ fn version_document_is_byte_stable() {
     let repo = GitRepo::new();
     let output = run_command(&repo, &["version"]);
     assert_snapshot("version", &output);
+}
+
+/// The review summary over one captured, assessed Revision, with every
+/// counted-input entry inlined so the entry shape is pinned too.
+#[test]
+fn review_summary_document_is_byte_stable() {
+    let (repo, _) = fixture_repo();
+    let repo_path = repo_arg(&repo);
+    run_command(
+        &repo,
+        &[
+            "assessment",
+            "add",
+            "--repo",
+            &repo_path,
+            "--track",
+            "human:kevin",
+            "--assessment",
+            "accepted",
+        ],
+    );
+
+    let summary = run_command(
+        &repo,
+        &[
+            "summary",
+            "show",
+            "--repo",
+            &repo_path,
+            "--receipt",
+            "entries",
+        ],
+    );
+    assert_snapshot("review_summary", &summary);
+}
+
+/// The receipt re-check over a saved summary whose first counted event has been
+/// deleted from the store, so the difference shape is pinned as well.
+#[test]
+fn review_summary_check_document_is_byte_stable() {
+    // Every binary invocation, the capture included, runs under a scratch home and
+    // a non-agent actor id so nothing reaches the caller's home or keys.
+    let home = tempfile::tempdir().expect("isolated home");
+    let home_path = home.path().to_str().expect("utf-8 home path");
+    let env = [
+        ("POINTBREAK_HOME", home_path),
+        ("POINTBREAK_ACTOR_ID", "actor:human:snapshot-reviewer"),
+    ];
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_path = repo_arg(&repo);
+    let captured = pointbreak_env(["capture", "--repo", &repo_path], &env);
+    assert!(captured.status.success());
+    let assessed = pointbreak_env(
+        [
+            "assessment",
+            "add",
+            "--repo",
+            &repo_path,
+            "--track",
+            "human:kevin",
+            "--assessment",
+            "accepted",
+        ],
+        &env,
+    );
+    assert!(assessed.status.success());
+    let saved = pointbreak_env(
+        [
+            "summary",
+            "show",
+            "--repo",
+            &repo_path,
+            "--receipt",
+            "entries",
+        ],
+        &env,
+    );
+    assert!(saved.status.success());
+    let receipt = home.path().join("saved-summary.json");
+    fs::write(&receipt, &saved.stdout).expect("save summary");
+
+    let summary: Value = serde_json::from_slice(&saved.stdout).expect("summary JSON");
+    let event_id = summary["provenance"]["countedInputs"]["entries"][0]["eventId"]
+        .as_str()
+        .expect("counted event id");
+    let events = Path::new(&canonical_repo_path(&repo)).join(".git/pointbreak/events");
+    let stored = fs::read_dir(events)
+        .expect("read events")
+        .map(|entry| entry.expect("event entry").path())
+        .find(|path| {
+            fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|event| event["eventId"] == event_id)
+        })
+        .expect("stored counted event");
+    fs::remove_file(stored).expect("delete counted event");
+
+    let checked = pointbreak_env(
+        [
+            "summary",
+            "check",
+            receipt.to_str().expect("utf-8 receipt path"),
+            "--repo",
+            &repo_path,
+        ],
+        &env,
+    );
+    assert!(
+        checked.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let raw = String::from_utf8(checked.stdout).expect("stdout is utf-8");
+    assert_snapshot(
+        "review_summary_check",
+        &normalize(&raw, &canonical_repo_path(&repo)),
+    );
 }
 
 /// Build the deterministic fixture repo and capture a single Revision, returning

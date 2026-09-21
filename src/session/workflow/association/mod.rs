@@ -850,19 +850,34 @@ where
     // Change branch's reader routes an activated root (which
     // `resolve_change_write_store` has already required) through the same
     // journal inspection `list_change_events` uses.
-    let validation_events = if change_write {
-        crate::session::change_reader_state_for_repo(repo)?
-            .ready()
-            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
-                reason: "complete Change authority is unavailable".to_owned(),
-            })?
-            .events()
-            .to_vec()
+    //
+    // On the Change branch that one reader also validates the cursor — its
+    // graph, selection, and source comparison — before anything is appended,
+    // so the cursor never builds a reader of its own.
+    let change_state = if change_write {
+        Some(crate::session::change_reader_state_for_repo(repo)?)
     } else {
-        resolve_write_validation_store(repo)?.validation_events()?
+        None
+    };
+    let change_ready = change_state
+        .as_ref()
+        .map(|state| {
+            state
+                .ready()
+                .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                    reason: "complete Change authority is unavailable".to_owned(),
+                })
+        })
+        .transpose()?;
+    let validation_events = match change_ready {
+        Some(ready) => ready.events().to_vec(),
+        None => resolve_write_validation_store(repo)?.validation_events()?,
     };
     let cursor_revision = review_cursor
-        .map(|cursor| super::exact_revision_from_review_cursor(repo, cursor))
+        .zip(change_ready)
+        .map(|(cursor, ready)| {
+            super::exact_revision_from_review_cursor_with_ready(repo, cursor, ready)
+        })
         .transpose()?;
     let resolved = resolve_revision(
         &validation_events,
@@ -1229,31 +1244,62 @@ mod tests {
         );
     }
 
-    /// A `--review-cursor` association decodes the history once per Change
-    /// reader it builds, and builds three: `exact_revision_from_review_cursor`
-    /// builds one to validate the cursor, its source comparison builds another
-    /// through `exact_revision_source` -> `show_revision_for_change_reader`,
-    /// and `record_association` builds a third to resolve the Revision. The
-    /// capability preflights are not among them — those read two named records,
-    /// not the history. Collapsing the three means threading one validated
-    /// reader state through the cursor seam, which is a separate change.
+    /// A `--review-cursor` association decodes the stored history exactly once.
     ///
-    /// What this pins is a *total* decode budget for the path, not the
-    /// post-write read in isolation: the aggregate counter cannot attribute a
-    /// decode to the reader that made it. Within that limit it is still the
-    /// useful assertion — while the other readers on this path cost what they
-    /// cost today, a reinstated post-write read is a whole extra pass and
-    /// exceeds the budget. It is stated as an inequality rather than the exact
-    /// count so that small movements below the budget do not churn the pin.
+    /// Three consumers on this path need the Change authority: the cursor's
+    /// graph/selection validation, its source comparison (which reads the exact
+    /// Revision to compare against the live worktree or a commit), and
+    /// `record_association`'s Revision resolution, whose event set is then the
+    /// content guard's input. They share one validated Change reader state,
+    /// built once before the append; none of them builds its own. The capability
+    /// preflights are not readers — they read two named records, not the
+    /// history.
     ///
-    /// It is deliberately not a proof that only post-write work can cross the
-    /// line. Removing one of the other readers would leave room for a restored
-    /// post-write read to pass, and adding a reader would fail this without one.
-    /// Isolating the post-write read specifically would need per-reader
-    /// instrumentation, which is a separate design choice.
+    /// Because every consumer shares the one reader, the count is exact: a
+    /// reinstated post-write read, or any consumer that goes back to building
+    /// its own reader, is a whole further pass and fails here.
+    ///
+    /// The fixture cursor carries a mutable source binding, so the source
+    /// comparison really runs — a `Captured` binding would skip it and make the
+    /// pin vacuous for that consumer.
     #[test]
-    fn change_cursor_association_performs_no_post_write_decode() {
+    fn change_cursor_association_decodes_the_history_exactly_once() {
         use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+        use crate::session::workflow::{ReviewCursorV1, ReviewSourceBindingV1};
+
+        let (repo, token) = change_capture("change-operation:test-794-cursor-counting");
+        assert!(
+            !matches!(
+                ReviewCursorV1::decode_token(&token).unwrap().source_binding,
+                ReviewSourceBindingV1::Captured
+            ),
+            "the fixture cursor must exercise the source comparison"
+        );
+
+        let history = stored_history_len(repo.path());
+        let scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        {
+            let _guard = scope.enter();
+            associate_commit(
+                AssociateCommitOptions::new(repo.path(), "HEAD")
+                    .with_review_cursor(token)
+                    .with_track("agent:codex"),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            scope.snapshot().counters.event_decodes,
+            history,
+            "a Change-cursor association must decode the {history}-event history exactly \
+             once: cursor validation, its source comparison, and Revision resolution share \
+             one Change reader state"
+        );
+    }
+
+    /// A Change-capable repo with one initial Change capture of the worktree
+    /// edit, returning its Review cursor token.
+    fn change_capture(operation_id: &str) -> (Repo, String) {
         use crate::model::ChangeIdentityDescriptorV1;
         use crate::session::store::capabilities::{
             CapabilityFixtureState, write_capability_fixture_for_test,
@@ -1269,37 +1315,63 @@ mod tests {
         )
         .unwrap();
         let captured = capture_change_revision(ChangeCaptureOptions::initial(
-            "change-operation:test-794-cursor-counting",
+            operation_id,
             CaptureOptions::new(repo.path()),
             ChangeIdentityDescriptorV1::opaque_nonce([0x95; 32]),
         ))
         .unwrap();
+        (repo, captured.review_cursor.token)
+    }
 
-        let history = stored_history_len(repo.path());
-        let scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
-        {
-            let _guard = scope.enter();
-            associate_commit(
-                AssociateCommitOptions::new(repo.path(), "HEAD")
-                    .with_review_cursor(captured.review_cursor.token)
-                    .with_track("agent:codex"),
-            )
-            .unwrap();
-        }
+    /// Sharing one reader across the cursor's consumers must not move *when*
+    /// the cursor validates: a worktree that drifted from the captured Revision
+    /// is refused before the append, and nothing is recorded.
+    #[test]
+    fn change_cursor_association_refuses_a_changed_source_before_appending() {
+        let (repo, token) = change_capture("change-operation:test-797-source-changed");
+        std::fs::write(repo.path().join("src.txt"), "drifted\n").unwrap();
+        let before = stored_history_len(repo.path());
 
-        // Measured on this fixture: 3 folds of a 12-event history (36), down
-        // from 6 before the Change reader stopped decoding the history twice.
-        // A restored post-write read adds a whole further pass.
-        let decodes = scope.snapshot().counters.event_decodes;
-        let reader_budget = 3;
+        let error = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_review_cursor(token)
+                .with_track("agent:codex"),
+        )
+        .unwrap_err();
+
         assert!(
-            decodes <= history * reader_budget,
-            "a Change-cursor association exceeded its whole-history decode budget: \
-             {decodes} decodes over a {history}-event history is more than {reader_budget} \
-             folds. A reinstated post-write read is the likeliest cause; a reader added \
-             elsewhere on this path would also land here, and needs the budget requalified \
-             rather than raised on sight"
+            error.to_string().contains("review_cursor_source_changed"),
+            "{error}"
         );
+        assert_eq!(stored_history_len(repo.path()), before, "nothing appended");
+    }
+
+    /// A cursor minted before its Change advanced is refused against the one
+    /// shared reader state, before the append, and nothing is recorded.
+    #[test]
+    fn change_cursor_association_refuses_a_stale_change_graph_before_appending() {
+        use crate::session::{ChangeAdvanceV1, ChangeCaptureOptions, capture_change_revision};
+
+        let (repo, token) = change_capture("change-operation:test-797-graph-stale");
+        std::fs::write(repo.path().join("src.txt"), "advanced\n").unwrap();
+        capture_change_revision(ChangeCaptureOptions::advance(
+            "change-operation:test-797-graph-stale-advance",
+            CaptureOptions::new(repo.path()),
+            token.clone(),
+            ChangeAdvanceV1::Replace,
+        ))
+        .unwrap();
+        let before = stored_history_len(repo.path());
+
+        let error = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_review_cursor(token)
+                .with_track("agent:codex"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("change_graph_stale"), "{error}");
+        assert_eq!(stored_history_len(repo.path()), before, "nothing appended");
     }
 
     /// The stored history the writer holds, measured outside a counting scope.
@@ -1318,8 +1390,8 @@ mod tests {
     /// association never pays for a whole-history decode it cannot use.
     ///
     /// This covers the Revision-selector path only. A `--review-cursor` write
-    /// folds the history several times over; see
-    /// [`change_cursor_association_performs_no_post_write_decode`].
+    /// shares one Change reader across its consumers; see
+    /// [`change_cursor_association_decodes_the_history_exactly_once`].
     #[test]
     fn revision_selector_association_writes_decode_the_history_exactly_once() {
         use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;

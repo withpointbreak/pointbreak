@@ -111,10 +111,11 @@ fn package_identity_declares_only_pointbreak_binary_unconditionally() {
     );
 }
 
-#[test]
-fn cargo_install_exposes_only_pointbreak_executable() {
-    let install_root = tempfile::tempdir().expect("create cargo install root");
-    let output = Command::new(env!("CARGO"))
+/// The `cargo install` invocation the install test runs. Kept as a builder so a
+/// test can pin how it is isolated without paying for a real install.
+fn cargo_install_command(install_root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO"));
+    command
         .args([
             "install",
             "--locked",
@@ -122,8 +123,19 @@ fn cargo_install_exposes_only_pointbreak_executable() {
             env!("CARGO_MANIFEST_DIR"),
             "--root",
         ])
-        .arg(install_root.path())
-        .arg("--debug")
+        .arg(install_root)
+        // Persistent, so a repeat run reuses the compiled dependencies, yet apart from
+        // the suite's own target directory (see the pin test below).
+        .arg("--target-dir")
+        .arg(Path::new(env!("CARGO_TARGET_TMPDIR")).join("cargo-install-target"))
+        .arg("--debug");
+    command
+}
+
+#[test]
+fn cargo_install_exposes_only_pointbreak_executable() {
+    let install_root = tempfile::tempdir().expect("create cargo install root");
+    let output = cargo_install_command(install_root.path())
         .output()
         .expect("run cargo install");
     assert!(
@@ -252,4 +264,32 @@ fn ensure_executable(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn ensure_executable(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[test]
+fn cargo_install_never_rewrites_the_shared_uplifted_binary() {
+    // `cargo install` re-uplifts `<target>/debug/pointbreak` (delete, then copy) even
+    // when nothing needs rebuilding. Run in the suite's own target directory it swaps
+    // the binary every other test resolves through `CARGO_BIN_EXE_pointbreak` while
+    // those tests run: a default-features build under the feature-on suite (the
+    // counted cases then reject `--longitudinal-counting`) or, in the instant between
+    // the delete and the copy, no binary at all.
+    let command = cargo_install_command(Path::new("install-root"));
+    let args = command.get_args().collect::<Vec<_>>();
+    let target_dir = args
+        .iter()
+        .position(|arg| *arg == OsStr::new("--target-dir"))
+        .and_then(|flag| args.get(flag + 1))
+        .map(Path::new)
+        .expect("cargo install must build in a target directory of its own");
+
+    assert!(
+        target_dir.starts_with(env!("CARGO_TARGET_TMPDIR")),
+        "install target dir {target_dir:?} must live in the cargo-owned scratch area"
+    );
+    let uplifted = Path::new(env!("CARGO_BIN_EXE_pointbreak"));
+    assert!(
+        !uplifted.starts_with(target_dir),
+        "install target dir {target_dir:?} would uplift over {uplifted:?}"
+    );
 }

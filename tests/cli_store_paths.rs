@@ -95,6 +95,8 @@ fn version_registry_additions_preserve_the_frozen_document_set() {
     let mut actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     for approved_addition in [
         "pointbreak.change-capture-receipt.v1",
+        "pointbreak.review-summary",
+        "pointbreak.review-summary-check",
         "pointbreak.store-paths",
         "pointbreak.store-derived-build",
         "pointbreak.store-derived-rebuild",
