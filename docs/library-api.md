@@ -98,14 +98,21 @@ route through the same `resolve_write_validation_store` seam — it is domain-ag
 
 ### Store maintenance — `pointbreak::session`
 
-`link_store_to_family` with `StoreLinkOptions::with_retire_source(true)` carries the same retirement
-guarantees as `pointbreak store link --retire-source` (see
-[storage-model.md](storage-model.md#source-retirement)): it deletes only verified files, never
-deletes recursively, and keeps the store directory with its authority lock file; `source_retired` is
+`migrate_store_to_common_dir` with `MigrateToCommonDirOptions::with_retire_source(true)` and
+`link_store_to_family` with `StoreLinkOptions::with_retire_source(true)` carry the same retirement
+guarantees as `pointbreak store migrate --retire-source` and `pointbreak store link --retire-source`
+(see [storage-model.md](storage-model.md#source-retirement)): they delete only verified files, never
+delete recursively, and keep the store directory with its authority lock file; `source_retired` is
 true when nothing else remains. A busy source is reported the same way the CLI reports it, as an error whose text
 starts with `source_busy;`; kept late files arrive as a `source_retirement_residue` entry in the
 result's `diagnostics` with `source_retired` false. The CLI's store-capability refusal is policy, not
 the safety mechanism: the retirement guarantees above do not depend on it.
+
+`compact_store` takes no lock and is safe to call while other writers run: it erases only content the
+event log marks removed and eligible for erasure, so a sweep that races a writer can only erase less,
+never live content (see [storage-model.md](storage-model.md#content-removal-and-compaction)). A
+successful capture or import is not a promise that its bytes survive a removal already recorded in
+the log.
 
 ### Event signatures — `pointbreak::session` / `pointbreak::crypto`
 

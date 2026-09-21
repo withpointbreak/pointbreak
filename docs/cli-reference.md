@@ -850,14 +850,22 @@ this build; the command fails closed as described above.
 verification walks every durable file in the source store (`events/` and `artifacts/`, recursively;
 only in-flight `*.tmp` files are excluded — a leftover store-root `state.json` sits outside
 those trees, and a nested file merely named `state.json` is verified like any other) and requires each to be
-present in the shared store with identical content — byte-identical for artifacts, canonically
-identical modulo the import's own ingest-provenance stamp for events. Only then is `.pointbreak/data`
-deleted, so the very next read resolves. On **any** missing or divergent file — including an orphan
-artifact no event references, which the fold deliberately does not carry — the command errors,
-names the offending paths, and deletes nothing. A source with no durable files at all (only a leftover store-root
-`state.json` or the empty directories the writer pre-creates) is removed as a husk without a fold;
-a source holding artifact files but no event files is refused outright. Classification is by file
-counts, never directory existence.
+present in the shared store — artifacts by content, events by content ignoring the import's own
+ingest-provenance stamp. Retirement then deletes exactly the files it verified, plus disposable
+rebuildable data, and never deletes recursively. It keeps `.pointbreak/data` and its authority lock
+file, so a leftover directory holding only `authority.writer.lock` is expected and the very next read
+resolves; `sourceRetired` is `true` when nothing else remains (see
+[storage-model.md](./storage-model.md#source-retirement)). On **any** missing or divergent file —
+including an orphan artifact no event references, which the fold deliberately does not carry — the
+command errors, names the offending paths, and deletes nothing. It refuses before folding, with an
+error whose message begins `source_busy;`, while another Pointbreak writer holds `.pointbreak/data`,
+and refuses — naming the entry and deleting nothing — when the store holds an entry retirement does
+not verify, such as `operations/`. A record that appears while retirement is checking is kept:
+nothing is deleted, `sourceRetired` is `false`, and a `source_retirement_residue` diagnostic asks for
+a rerun. A source with no durable files at all (only a leftover store-root `state.json`, derived-access
+data, or the empty directories the writer pre-creates) is retired as a husk without a fold, under the
+same rules; a source holding artifact files but no event files is refused outright. Classification
+is by file counts, never directory existence.
 
 It emits `pointbreak.store-migrate` JSON with `eventsCreated`, `eventsExisting`, `artifactsCreated`,
 `artifactsExisting`, `sourceEmpty`, `sourceRetired`, `verifiedEvents`, and `verifiedArtifacts`.
