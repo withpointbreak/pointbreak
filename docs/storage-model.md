@@ -556,10 +556,15 @@ removal is the only step in the fold that deletes anything, and it deletes by pr
   ignoring the ingest-provenance stamp the fold adds (the reason folded unsigned removals must be
   re-issued; see [User-Level Family Store Tier](#user-level-family-store-tier)). Retirement unlinks
   exactly the files that walk proved present, one at a time, plus disposable rebuildable data: a
-  store-root `state.json`, in-flight `*.tmp` files, the derived-access entries, and the store's
-  authority lock file. It never deletes recursively and removes a directory only once it is empty.
-  Event files go last, so an interrupted retire still looks like a populated store and completes when
-  rerun.
+  store-root `state.json`, in-flight `*.tmp` files, and the derived-access entries. It never deletes
+  recursively and removes a directory only once it is empty. Event files go last, so an interrupted
+  retire still looks like a populated store and completes when rerun.
+- **The lock file stays.** Retirement keeps the store directory and its `authority.writer.lock`.
+  Deleting a lock file that another Pointbreak process has open would let that process and a newcomer
+  each lock a different file at the same path, so both would believe they had the store to
+  themselves. A leftover directory holding only that lock file is therefore an expected side effect
+  of retirement; it holds no review data, is safe to ignore, and can be removed by hand when no
+  Pointbreak process is using it. `sourceRetired` is `true` when nothing else remains.
 - **Busy stores refuse.** Before the fold reads the source, retirement takes the source store's
   existing authority lock without waiting and holds it until deletion ends. While another Pointbreak
   writer holds that store, the command fails with an error whose message begins `source_busy;` and
@@ -583,8 +588,9 @@ Limits of the current contract:
 - The lock excludes Pointbreak writers only. A tool that writes store files without Pointbreak is not
   excluded, but its files are still never deleted unverified.
 - A process that chose the clone-local store before retirement and writes after it — including one
-  that waited for the retire to finish — recreates that store. After a link, such a record is not
-  visible through the family store until the clone-local store is folded again.
+  that waited for the retire to finish — writes into the retained (or recreated) clone-local store.
+  After a link, such a record is not visible through the family store until the clone-local store is
+  folded again.
 
 ## Content Removal and Compaction
 

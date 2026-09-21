@@ -4,7 +4,8 @@
 //! source store's existing authority lock for the whole fold → verify → delete
 //! sequence (taken without blocking; a held lock refuses the retire), and it
 //! deletes only the individual files that subset verification proved present in
-//! the destination — never a recursive delete of the store.
+//! the destination — never a recursive delete of the store. The store directory
+//! and its authority lock file are left behind on purpose.
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -87,8 +88,10 @@ pub(in crate::session) struct SourceRetirementOutcome {
 
 /// Verify the source against the target, then delete only the verified paths.
 ///
-/// Consumes the admission guard and releases it just before the lock file and
-/// the store root are removed. Refuses, deleting nothing, when verification
+/// Consumes the admission guard and releases it after the outcome is observed.
+/// The store directory and its authority lock file are never removed, so the
+/// lock's identity is stable for any writer waiting on it; the source counts as
+/// retired when nothing else remains. Refuses, deleting nothing, when verification
 /// fails, when any symlink exists under the source, or when the store root
 /// holds an entry retirement does not understand. A file under `events/` or
 /// `artifacts/` that verification did not cover (it appeared after the
@@ -116,7 +119,7 @@ pub(in crate::session) fn retire_verified_source(
         .collect();
 
     #[cfg(test)]
-    run_after_verify_hook(source);
+    run_retirement_hook(RetirementHookPoint::AfterVerify, source);
 
     let plan = scan_source(source, &verified)?;
     if plan.residue_entries > 0 {
@@ -127,6 +130,9 @@ pub(in crate::session) fn retire_verified_source(
             residue_entries: plan.residue_entries,
         });
     }
+
+    #[cfg(test)]
+    run_retirement_hook(RetirementHookPoint::AfterScan, source);
 
     for relative in &plan.disposable_files {
         remove_file_if_present(&source.join(relative))?;
@@ -143,18 +149,14 @@ pub(in crate::session) fn retire_verified_source(
     }
     remove_empty_directories_below(source)?;
 
+    // The store directory and its authority lock file stay. Unlinking the lock
+    // file would let a writer that already opened it and a newcomer that creates
+    // a fresh one at the same path both hold "the" lock. So the source counts as
+    // retired when nothing but that lock file remains.
+    let residue_entries = count_files_other_than_the_lock(source)?;
+    let source_retired = residue_entries == 0;
     drop(guard);
-    // Another writer may take the lock the moment it is released; its lock file
-    // then stays and the root does not empty, which is reported below.
-    let _ = std::fs::remove_file(source.join(STORE_AUTHORITY_LOCK_FILE));
-    remove_directory_if_empty(source)?;
 
-    let source_retired = !path_exists(source)?;
-    let residue_entries = if source_retired {
-        0
-    } else {
-        count_remaining_files(source)?.max(1)
-    };
     Ok(SourceRetirementOutcome {
         source_retired,
         verified_events,
@@ -300,6 +302,27 @@ fn collect_files(root: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> Result
     Ok(())
 }
 
+/// Files left under the source other than its store-root authority lock file,
+/// plus any other store-root entry that is not a directory emptied below.
+fn count_files_other_than_the_lock(source: &Path) -> Result<usize> {
+    let mut files = Vec::new();
+    collect_files(source, Path::new(""), &mut files)?;
+    let remaining = files
+        .iter()
+        .filter(|path| path.as_path() != Path::new(STORE_AUTHORITY_LOCK_FILE))
+        .count();
+    if remaining > 0 {
+        return Ok(remaining);
+    }
+    // A directory that appeared after the directory pass holds no files but is
+    // still something retirement did not account for.
+    let stray_directories = read_directory(source)?
+        .iter()
+        .filter(|entry| entry.file_name() != STORE_AUTHORITY_LOCK_FILE)
+        .count();
+    Ok(stray_directories)
+}
+
 fn count_remaining_files(dir: &Path) -> Result<usize> {
     let mut files = Vec::new();
     collect_files(dir, Path::new(""), &mut files)?;
@@ -399,15 +422,6 @@ fn entry_kind(path: &Path) -> Result<std::fs::FileType> {
         })
 }
 
-fn path_exists(path: &Path) -> Result<bool> {
-    path.try_exists().map_err(|error| {
-        ShoreError::Message(format!(
-            "retire source store: could not inspect {}: {error}",
-            path.display()
-        ))
-    })
-}
-
 fn store_relative_display(path: &Path) -> String {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy())
@@ -415,13 +429,23 @@ fn store_relative_display(path: &Path) -> String {
         .join("/")
 }
 
+/// Where a test hook runs inside `retire_verified_source`.
 #[cfg(test)]
-type AfterVerifyHook = Box<dyn FnOnce(&Path)>;
+#[derive(Clone, Copy)]
+enum RetirementHookPoint {
+    /// After subset verification, before the pre-deletion scan.
+    AfterVerify,
+    /// After a residue-free scan, before the first unlink.
+    AfterScan,
+}
+
+#[cfg(test)]
+type RetirementHook = Box<dyn FnOnce(&Path)>;
 
 #[cfg(test)]
 thread_local! {
-    static AFTER_VERIFY_HOOK: std::cell::RefCell<Option<AfterVerifyHook>> =
-        const { std::cell::RefCell::new(None) };
+    static RETIREMENT_HOOKS: std::cell::RefCell<[Option<RetirementHook>; 2]> =
+        const { std::cell::RefCell::new([None, None]) };
 }
 
 /// Run `hook` once, on this thread, inside the next retirement: after subset
@@ -430,28 +454,48 @@ thread_local! {
 #[cfg(test)]
 pub(in crate::session) fn install_after_verify_hook(
     hook: impl FnOnce(&Path) + 'static,
-) -> AfterVerifyHookGuard {
-    AFTER_VERIFY_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    AfterVerifyHookGuard {
+) -> RetirementHookGuard {
+    install_retirement_hook(RetirementHookPoint::AfterVerify, Box::new(hook))
+}
+
+/// Run `hook` once, on this thread, inside the next retirement: after a
+/// residue-free scan and before the first file is unlinked. Dropping the
+/// returned guard clears a hook that never ran.
+#[cfg(test)]
+pub(in crate::session) fn install_after_scan_hook(
+    hook: impl FnOnce(&Path) + 'static,
+) -> RetirementHookGuard {
+    install_retirement_hook(RetirementHookPoint::AfterScan, Box::new(hook))
+}
+
+#[cfg(test)]
+fn install_retirement_hook(
+    point: RetirementHookPoint,
+    hook: RetirementHook,
+) -> RetirementHookGuard {
+    RETIREMENT_HOOKS.with(|slots| slots.borrow_mut()[point as usize] = Some(hook));
+    RetirementHookGuard {
+        point,
         _not_send: std::marker::PhantomData,
     }
 }
 
 #[cfg(test)]
-pub(in crate::session) struct AfterVerifyHookGuard {
+pub(in crate::session) struct RetirementHookGuard {
+    point: RetirementHookPoint,
     _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(test)]
-impl Drop for AfterVerifyHookGuard {
+impl Drop for RetirementHookGuard {
     fn drop(&mut self) {
-        AFTER_VERIFY_HOOK.with(|slot| slot.borrow_mut().take());
+        RETIREMENT_HOOKS.with(|slots| slots.borrow_mut()[self.point as usize].take());
     }
 }
 
 #[cfg(test)]
-fn run_after_verify_hook(source: &Path) {
-    if let Some(hook) = AFTER_VERIFY_HOOK.with(|slot| slot.borrow_mut().take()) {
+fn run_retirement_hook(point: RetirementHookPoint, source: &Path) {
+    if let Some(hook) = RETIREMENT_HOOKS.with(|slots| slots.borrow_mut()[point as usize].take()) {
         hook(source);
     }
 }
@@ -674,6 +718,19 @@ mod tests {
         (repo, source, target_root, target)
     }
 
+    /// Retirement keeps the store directory and its authority lock file so the
+    /// lock's identity never changes under a waiting writer; nothing else stays.
+    fn assert_only_the_lock_remains(source: &Path) {
+        let remaining = fs::read_dir(source)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining,
+            vec![std::ffi::OsString::from(STORE_AUTHORITY_LOCK_FILE)]
+        );
+    }
+
     #[test]
     fn retires_a_fully_verified_source() {
         let (_repo, source, _target_root, target) = folded_pair();
@@ -692,7 +749,7 @@ mod tests {
         let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
 
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
         assert_eq!(outcome.verified_events, events);
         assert_eq!(outcome.verified_artifacts, artifacts);
         assert!(outcome.verified_events >= 1 && outcome.verified_artifacts >= 1);
@@ -723,7 +780,7 @@ mod tests {
         let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
 
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
     }
 
     #[test]
@@ -781,7 +838,7 @@ mod tests {
         let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
 
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
     }
 
     #[cfg(unix)]
@@ -902,7 +959,7 @@ mod tests {
 
         let outcome = fold_and_retire(&source, &target).unwrap();
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
         assert!(target.join(&stragglers[0]).exists());
     }
 
@@ -956,7 +1013,7 @@ mod tests {
 
         let outcome = fold_and_retire(&source, &target).unwrap();
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
     }
 
     /// An interruption after the artifacts are gone still leaves event files,
@@ -977,12 +1034,12 @@ mod tests {
 
         let outcome = fold_and_retire(&source, &target).unwrap();
         assert!(outcome.source_retired);
-        assert!(!source.exists());
+        assert_only_the_lock_remains(&source);
     }
 
     /// A writer that blocks on the source lock during retirement proceeds once
-    /// the lock is released and may recreate the store; its record is kept on
-    /// disk. Only preservation is asserted, not visibility.
+    /// the lock is released and writes into the retained store directory; its
+    /// record is kept on disk. Only preservation is asserted, not visibility.
     #[test]
     fn writer_blocked_during_retirement_does_not_lose_its_event() {
         let (_repo, source, _target_root, target) = folded_pair();
@@ -994,16 +1051,7 @@ mod tests {
             let (started_tx, started_rx) = mpsc::channel();
             let handle = std::thread::spawn(move || {
                 started_tx.send(()).unwrap();
-                let mut attempts = 0;
-                let _lock = loop {
-                    match StoreAuthorityLock::acquire(&writer_source) {
-                        Ok(lock) => break lock,
-                        Err(error) => {
-                            attempts += 1;
-                            assert!(attempts < 100, "{error}");
-                        }
-                    }
-                };
+                let _lock = StoreAuthorityLock::acquire(&writer_source).unwrap();
                 fs::create_dir_all(writer_source.join("events")).unwrap();
                 fs::write(
                     writer_source.join("events/late-writer.json"),
@@ -1022,5 +1070,104 @@ mod tests {
             fs::read(source.join("events/late-writer.json")).unwrap(),
             b"{\"late\":true}"
         );
+    }
+
+    /// Retirement must not unlink the lock file: a writer that opened the
+    /// original lock before retirement finished would then hold one inode while
+    /// a newcomer creates and locks another at the same path.
+    #[test]
+    fn retirement_keeps_the_authority_lock_exclusive() {
+        let (_repo, source, _target_root, target) = folded_pair();
+        let lock_path = source.join(STORE_AUTHORITY_LOCK_FILE);
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let waiter: std::rc::Rc<std::cell::Cell<Option<std::thread::JoinHandle<()>>>> =
+            std::rc::Rc::default();
+        let slot = waiter.clone();
+        let _hook = install_after_verify_hook(move |_| {
+            let (opened_tx, opened_rx) = mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                let file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)
+                    .unwrap();
+                opened_tx.send(()).unwrap();
+                file.lock().unwrap();
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                drop(file);
+            });
+            opened_rx.recv().unwrap();
+            slot.set(Some(handle));
+        });
+
+        let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
+        locked_rx.recv().unwrap();
+
+        assert!(outcome.source_retired);
+        let contender = source.clone();
+        let contender_acquired = std::thread::spawn(move || {
+            StoreAuthorityLock::try_acquire(&contender)
+                .unwrap()
+                .is_some()
+        })
+        .join()
+        .unwrap();
+        assert!(
+            !contender_acquired,
+            "a newcomer must not acquire while the waiter holds the original lock"
+        );
+        assert_only_the_lock_remains(&source);
+        release_tx.send(()).unwrap();
+        waiter.take().unwrap().join().unwrap();
+    }
+
+    /// Files created after the scan are not in the deletion list, so they
+    /// survive the deletion passes while every verified path goes.
+    #[test]
+    fn late_files_during_deletion_survive() {
+        let (_repo, source, _target_root, target) = folded_pair();
+        let before = snapshot(&source);
+        let _hook = install_after_scan_hook(|source| {
+            fs::write(source.join("events/late-event.json"), b"{\"late\":1}").unwrap();
+            fs::write(source.join("artifacts/objects/late-object"), b"late").unwrap();
+        });
+
+        let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
+
+        assert!(!outcome.source_retired);
+        assert!(outcome.residue_entries >= 2);
+        assert_eq!(
+            fs::read(source.join("events/late-event.json")).unwrap(),
+            b"{\"late\":1}"
+        );
+        assert_eq!(
+            fs::read(source.join("artifacts/objects/late-object")).unwrap(),
+            b"late"
+        );
+        for path in before.keys() {
+            if path.starts_with("events") || path.starts_with("artifacts") {
+                assert!(
+                    !source.join(path).exists(),
+                    "{} was verified",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_lock_file_counts_as_retired() {
+        let (_repo, source, _target_root, target) = folded_pair();
+        let _hook = install_after_scan_hook(|source| {
+            fs::write(source.join("stray"), b"late").unwrap();
+        });
+
+        let outcome = retire_verified_source(admit(&source, &target), &source, &target).unwrap();
+
+        assert!(!outcome.source_retired);
+        assert_eq!(outcome.residue_entries, 1);
+        assert!(source.join("stray").exists());
     }
 }

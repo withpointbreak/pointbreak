@@ -884,7 +884,9 @@ forward with independent verification and flips the binding last, so an interrup
 clone still resolving its clone-local store. Omitting `<slug>` fails with a suggestion rather than
 picking one silently. `--retire-source` then retires the clone-local store: it deletes only the
 record files an independent re-verification proved present in the family store, plus disposable
-rebuildable data, and never deletes recursively (see
+rebuildable data, and never deletes recursively. It keeps the store directory and its authority lock
+file, so a leftover directory holding only `authority.writer.lock` is expected; `sourceRetired` is
+`true` when nothing else remains (see
 [storage-model.md](./storage-model.md#source-retirement)). It refuses with an error whose message
 begins `source_busy;` while another Pointbreak writer holds the clone-local store, and refuses — naming the
 entry, deleting nothing, and leaving the clone unlinked — when the store holds an entry retirement does

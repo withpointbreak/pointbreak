@@ -102,6 +102,10 @@ pub struct StoreLinkResult {
     /// them (old snapshots GC'd/migrated away). The fold carried the referencing
     /// events without their content; the CLI discloses this when > 0.
     pub folded_absent_artifact_count: usize,
+    /// True when `--retire-source` removed every verified record and disposable
+    /// entry from the clone-local store and nothing but the store directory and
+    /// its authority lock file remains. Those two are kept on purpose so a writer
+    /// waiting on the lock never races a newly created one.
     pub source_retired: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filesystem_warning: Option<String>,
@@ -1027,9 +1031,16 @@ mod tests {
         .unwrap();
 
         assert!(result.source_retired);
-        assert!(
-            !source.exists(),
-            "the clone-local store is retired only after verification"
+        let remaining = std::fs::read_dir(&source)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining,
+            vec![std::ffi::OsString::from(
+                crate::session::store::authority_lock::STORE_AUTHORITY_LOCK_FILE
+            )],
+            "only the authority lock file is left after a verified retire"
         );
     }
 
