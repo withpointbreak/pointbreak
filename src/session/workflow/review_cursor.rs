@@ -426,6 +426,30 @@ pub(crate) fn exact_revision_from_review_cursor(
         .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
             reason: "complete Change authority is unavailable for the Review cursor".to_owned(),
         })?;
+    exact_revision_from_decoded_review_cursor(repo, token, &cursor, ready)
+}
+
+/// [`exact_revision_from_review_cursor`] over a Change reader state the caller
+/// already built for the same write. The cursor's graph, selection, and source
+/// comparison all validate against `ready`, so a writer that needs the Change
+/// authority itself shares one whole-history decode instead of paying for one
+/// per consumer. The caller owns the ordering guarantee: `ready` must be built
+/// before the append it gates, exactly as the standalone form builds its own.
+pub(crate) fn exact_revision_from_review_cursor_with_ready(
+    repo: &std::path::Path,
+    token: &str,
+    ready: &crate::session::ChangeReaderReadyV1,
+) -> crate::error::Result<RevisionId> {
+    let cursor = ReviewCursorV1::decode_token(token)?;
+    exact_revision_from_decoded_review_cursor(repo, token, &cursor, ready)
+}
+
+fn exact_revision_from_decoded_review_cursor(
+    repo: &std::path::Path,
+    token: &str,
+    cursor: &ReviewCursorV1,
+    ready: &crate::session::ChangeReaderReadyV1,
+) -> crate::error::Result<RevisionId> {
     let change = ready
         .projection
         .changes
@@ -438,7 +462,7 @@ pub(crate) fn exact_revision_from_review_cursor(
             reason: refusal.to_string(),
         },
     )?;
-    let current_source_binding = current_review_source_binding(repo, &cursor)?;
+    let current_source_binding = current_review_source_binding(repo, cursor, ready)?;
     let validated = validate_review_cursor_for_write(
         token,
         change,
@@ -515,17 +539,23 @@ pub fn review_source_binding_from_shown(
     }
 }
 
+/// Recompute the cursor's source binding, reading the exact Revision from the
+/// Change reader state the cursor is validated against rather than building
+/// another one.
 fn current_review_source_binding(
     repo: &std::path::Path,
     cursor: &ReviewCursorV1,
+    ready: &crate::session::ChangeReaderReadyV1,
 ) -> crate::error::Result<ReviewSourceBindingV1> {
     match &cursor.source_binding {
         ReviewSourceBindingV1::Captured => Ok(ReviewSourceBindingV1::Captured),
         ReviewSourceBindingV1::WorktreeMatchV1 { .. } => {
-            worktree_source_binding(repo, &cursor.revision)
+            let shown = exact_revision_source_from_ready(repo, &cursor.revision, ready)?;
+            worktree_source_binding_from_shown(repo, &cursor.revision, &shown)
         }
         ReviewSourceBindingV1::CommitMatchV1 { commit_oid, .. } => {
-            commit_source_binding(repo, &cursor.revision, commit_oid)
+            let shown = exact_revision_source_from_ready(repo, &cursor.revision, ready)?;
+            commit_source_binding_from_shown(repo, &cursor.revision, commit_oid, &shown)
         }
     }
 }
@@ -635,6 +665,19 @@ fn exact_revision_source(
         crate::session::RevisionShowOptions::new(repo)
             .with_revision_id(revision.revision_id.clone())
             .with_exact(true),
+    )
+}
+
+fn exact_revision_source_from_ready(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    ready: &crate::session::ChangeReaderReadyV1,
+) -> crate::error::Result<crate::session::RevisionShowResult> {
+    crate::session::show_revision_for_change_reader_ready(
+        crate::session::RevisionShowOptions::new(repo)
+            .with_revision_id(revision.revision_id.clone())
+            .with_exact(true),
+        ready,
     )
 }
 
