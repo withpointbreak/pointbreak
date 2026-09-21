@@ -14,10 +14,12 @@ use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::event::EventType;
 use crate::session::store::bundle::{
     ExportFidelityStatus, import_store_bundle_into_with_verification, preview_import_store_bundle,
-    verify_source_subset_of_target,
 };
 use crate::session::store::resolution::{clone_local_store_dir, event_store_for_explicit_target};
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
+use crate::session::store::source_retirement::{
+    SOURCE_BUSY_PREFIX, SourceRetirementAdmission, admit_source_retirement, retire_verified_source,
+};
 use crate::session::store::store_config::{
     StoreMode, clear_family_binding_for_repo, resolve_family_binding, resolve_store_mode,
     set_family_binding_for_repo,
@@ -484,8 +486,11 @@ fn count_unsigned_artifact_removals(source: &Path) -> Result<usize> {
 /// Fold the clone-local store forward into the family store: verify-and-import
 /// (advisory policy — reported, never blocking), count the source's unsigned
 /// `ArtifactRemoved` events (the possession-stripping population the fold restamps),
-/// and — under `--retire-source` — delete the source only after
-/// `verify_source_subset_of_target` passes. An absent/empty source is a clean no-op.
+/// and — under `--retire-source` — retire the source through verified-path
+/// deletion. Retirement admission takes the clone-local store's authority lock
+/// before the fold reads it and holds it until the source is gone; a busy store
+/// refuses with `source_busy;` before anything is written. An absent/empty source
+/// is a clean no-op.
 fn fold_source_forward(
     source: &Path,
     family_dir: &Path,
@@ -497,6 +502,22 @@ fn fold_source_forward(
     if !source.join("events").exists() {
         return Ok(FoldOutcome::empty());
     }
+
+    let retirement = if retire_source {
+        match admit_source_retirement(source, family_dir)? {
+            SourceRetirementAdmission::Admitted(guard) => Some(guard),
+            SourceRetirementAdmission::Busy => {
+                return Err(ShoreError::Message(format!(
+                    "{SOURCE_BUSY_PREFIX} another Pointbreak writer holds the clone-local store \
+                     {}; nothing was folded or deleted and the clone was not linked — retry once it \
+                     finishes",
+                    source.display()
+                )));
+            }
+        }
+    } else {
+        None
+    };
 
     // Count the possession-stripping population BEFORE the fold restamps events with
     // BundleApply provenance: a prior UNSIGNED ArtifactRemoved loses operative
@@ -526,18 +547,23 @@ fn fold_source_forward(
         source_retired: false,
     };
 
-    if retire_source {
-        // Delete the clone-local store only after an independent subset
-        // re-verification confirms every durable source file in the family store
-        // (mirrors `store migrate`'s retire flow exactly).
-        verify_source_subset_of_target(source, family_dir)?;
-        std::fs::remove_dir_all(source).map_err(|error| {
-            ShoreError::Message(format!(
-                "remove retired source store {}: {error}",
-                source.display()
-            ))
-        })?;
-        outcome.source_retired = true;
+    if let Some(guard) = retirement {
+        // Deletes only files an independent subset re-verification proved present in
+        // the family store; anything it cannot account for stays and is reported.
+        let retired = retire_verified_source(guard, source, family_dir)?;
+        outcome.source_retired = retired.source_retired;
+        if retired.residue_entries > 0 {
+            outcome.diagnostics.push(ProjectionDiagnostic {
+                code: "source_retirement_residue".to_owned(),
+                message: format!(
+                    "the clone-local store {} was not retired: {} file(s) appeared after \
+                     verification or could not be removed and were kept; rerun the link with \
+                     --retire-source to fold and retire them",
+                    source.display(),
+                    retired.residue_entries
+                ),
+            });
+        }
     }
 
     Ok(outcome)
@@ -1004,6 +1030,133 @@ mod tests {
         assert!(
             !source.exists(),
             "the clone-local store is retired only after verification"
+        );
+    }
+
+    /// A captured clone with a pointbreak home, ready to link.
+    fn captured_clone() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let repo = modified_git_repo();
+        crate::session::capture_worktree_review(crate::session::CaptureOptions::new(repo.path()))
+            .unwrap();
+        let source = crate::session::store::resolution::clone_local_store_dir(repo.path()).unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        (repo, source, home)
+    }
+
+    fn assert_not_registered_or_bound(repo: &Path, family_dir: &Path) {
+        let registry = crate::session::store::user_level::read_family_registry(family_dir).unwrap();
+        assert!(registry.entries.is_empty(), "no registry entry was written");
+        assert!(
+            resolve_family_binding(repo).unwrap().is_none(),
+            "no family binding was written"
+        );
+    }
+
+    #[test]
+    fn retire_source_refuses_a_busy_clone_store() {
+        let (repo, source, home) = captured_clone();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_source = source.clone();
+        let holder = std::thread::spawn(move || {
+            let _lock =
+                crate::session::store::authority_lock::StoreAuthorityLock::acquire(&holder_source)
+                    .unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let before = tree_fingerprint(&source);
+
+        let (result, family_dir) = with_pointbreak_home(&home, || {
+            let result = link_store_to_family(
+                StoreLinkOptions::new(repo.path(), Some("fam".to_owned())).with_retire_source(true),
+            );
+            (result, user_level_store_dir("fam").unwrap())
+        });
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let message = result
+            .expect_err("a busy clone store must refuse")
+            .to_string();
+        assert!(message.starts_with("source_busy;"), "{message}");
+        assert_eq!(tree_fingerprint(&source), before);
+        assert_not_registered_or_bound(repo.path(), &family_dir);
+    }
+
+    #[test]
+    fn unverified_namespace_refuses_after_the_fold_and_before_the_binding() {
+        let (repo, source, home) = captured_clone();
+        std::fs::create_dir_all(source.join("operations")).unwrap();
+        std::fs::write(source.join("operations/op.json"), b"{}").unwrap();
+
+        let (result, family_dir) = with_pointbreak_home(&home, || {
+            let before = tree_fingerprint(&source);
+            let result = link_store_to_family(
+                StoreLinkOptions::new(repo.path(), Some("fam".to_owned())).with_retire_source(true),
+            );
+            let after = tree_fingerprint(&source);
+            let without_lock = |tree: BTreeMap<PathBuf, Vec<u8>>| {
+                tree.into_iter()
+                    .filter(|(path, _)| {
+                        !path.ends_with(
+                            crate::session::store::authority_lock::STORE_AUTHORITY_LOCK_FILE,
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            };
+            assert_eq!(
+                without_lock(after),
+                without_lock(before),
+                "clone store intact"
+            );
+            (result, user_level_store_dir("fam").unwrap())
+        });
+
+        let message = result
+            .expect_err("an unverified entry must refuse")
+            .to_string();
+        assert!(message.contains("operations/op.json"), "{message}");
+        assert!(
+            !crate::session::EventStore::open(&family_dir)
+                .list_events()
+                .unwrap()
+                .is_empty(),
+            "the fold's records stand in the family store"
+        );
+        assert_not_registered_or_bound(repo.path(), &family_dir);
+    }
+
+    #[test]
+    fn retire_residue_is_reported() {
+        let (repo, source, home) = captured_clone();
+        let _hook = crate::session::store::source_retirement::install_after_verify_hook(|source| {
+            std::fs::write(source.join("artifacts/objects/late"), b"late content").unwrap();
+        });
+
+        let result = with_pointbreak_home(&home, || {
+            link_store_to_family(
+                StoreLinkOptions::new(repo.path(), Some("fam".to_owned())).with_retire_source(true),
+            )
+        })
+        .unwrap();
+
+        assert!(!result.source_retired);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "source_retirement_residue"),
+            "{:?}",
+            result.diagnostics
+        );
+        assert!(source.join("artifacts/objects/late").exists());
+        assert!(source.join("events").is_dir(), "nothing was deleted");
+        assert!(
+            resolve_family_binding(repo.path()).unwrap().is_some(),
+            "the link still completes"
         );
     }
 
