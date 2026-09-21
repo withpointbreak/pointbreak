@@ -74,6 +74,12 @@ Call-specific diagnostics appear once in the existing top-level `diagnostics` ar
 `acknowledgement`. Multi-event derived diagnostics retain the first occurrence of each code. Store
 link/migrate append their existing warnings after workflow diagnostics.
 
+Write results report diagnostics about this invocation only (derived write state, skipped
+auto-record, ingest warnings). A write does not replay the event history after recording, so it
+does not report duplicates that already existed in the store. Store-wide hygiene diagnostics such as
+`duplicate_semantic_*` are reported by read commands (`history`, `observation list`,
+`input-request list`, `validation list`, `assessment show`) and the Inspector.
+
 A writer reports derived-generation admission failure on its first attempted publication,
 not when its handle is constructed. For example, writing without a usable derived generation
 can succeed durably with `derived.availability: unavailable` and the top-level diagnostic
@@ -306,6 +312,10 @@ Change id). `change_id_asc` remains available on both, and `attention_wait` is a
 `change attention`. The Inspector Changes and Attention pages use the same values and defaults, so
 the two front ends never present a different order for the same store. Each summary carries its
 `activityAt` instant and, when the Change has an anchored attention item, its `attentionWaitAt` key.
+
+`change attention` lists Changes by lifecycle, not by item. It does not show advisory asks, or failed
+checks on a Change that is already accepted; those are items in `pointbreak attention list`. Read both
+to answer "what is outstanding?".
 
 The Change reader begins with a complete capability profile. An untouched legacy root reports
 `migration_required`; a root with an admitted but incomplete transition reports `migration_in_progress`.
@@ -1183,11 +1193,20 @@ observations when needed.
 ## `pointbreak attention`
 
 This is the item-level attention document: one entry per outstanding fact, anchored to its exact Revision.
-`pointbreak change attention` is the Change-level view of the same record (which stable Changes still
-need judgment, with current-set topology and exact fact origins). Both read replacement the same way: on a
-store that holds Change claims, a Revision is superseded when the Changes that hold it replace it; a
-proposal-borne `supersedes` list is historical input and decides freshness only on a store with no Change
-claims.
+`pointbreak change attention` is its complement, not its summary: the Changes whose lifecycle is not yet
+`accepted`, with current-set topology and exact fact origins. Neither is derivable from the other. A
+freshly captured Revision nobody has assessed is no item, yet its Change is awaiting a call; an advisory
+ask, or a failed check on an already accepted Change, is an item that puts no Change in
+`change attention`. An empty item list is therefore not an all-clear, and the text digest says so by
+closing with a pointer to `pointbreak change attention`.
+
+Both read replacement from the same authority, at different scope. On a store that holds Change claims a
+Revision is superseded when the Changes that hold it replace it, and a proposal-borne `supersedes` list is
+historical input that decides freshness only on a store with no Change claims. Item attention applies that
+store-wide (a Revision stays current while any Change holding it still has it current); Change lifecycle
+and the `attention_wait` order follow each Change's own replacement. Replacement retires a replaced
+Revision's failed checks and qualifying call inside that Change, not its open requests: those still need a
+response, and an operative one keeps the Change in progress.
 
 ```bash
 pointbreak attention list [--repo <path>] [--revision <revision-id>] [--format <fmt>]

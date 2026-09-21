@@ -11,8 +11,7 @@ use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_fro
 use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::session::store::capabilities::{
-    event_entries_for_current_product, inspect_journal_records, preflight_change_writer,
-    preflight_current_product,
+    event_entries_for_current_product, preflight_change_writer, preflight_current_product,
 };
 use crate::storage::{CreateOutcome, LocalStorage};
 
@@ -243,7 +242,17 @@ impl EventStore {
     }
 
     /// List validated events only from a complete Change-capable Journal.
+    ///
+    /// Test-only since association writes stopped re-reading the history: every
+    /// caller is a `#[cfg(test)] mod tests`, and a whole-history read is not a
+    /// shape a production write path should reach for. Tests still want the
+    /// Change-capable counterpart of [`Self::list_events`] to read a store back.
+    #[cfg(test)]
     pub(crate) fn list_change_events(&self) -> Result<Vec<ShoreEvent>> {
+        // Imported here rather than at module scope: this is the only caller,
+        // and a module-scope import would be unused in a non-test build.
+        use crate::session::store::capabilities::inspect_journal_records;
+
         preflight_change_writer(self.journal.as_ref())?;
         inspect_journal_records(self.journal.as_ref())?
             .event_entries

@@ -1996,10 +1996,15 @@ fn write_generated_longitudinal_l2_change_events_inner_v2(
             break;
         }
     }
-    let completed = ingest.finish()?;
+    let completed = ingest.finish();
     if let Some(error) = write_error {
         return Err(error);
     }
+    // The ingest batch reports only its own counts, so the generator lists and
+    // folds the written history itself: a population the reducer rejects still
+    // fails generation.
+    let listed = event_store.list_events()?;
+    SessionState::from_events(&listed)?;
     let per_record: u64 = (0..LONGITUDINAL_L2_GROUPS_PER_RECORD_V1)
         .map(|ordinal| {
             longitudinal_l2_group_event_count_v1(longitudinal_l2_group_lifecycle_v1(ordinal))
@@ -2016,7 +2021,7 @@ fn write_generated_longitudinal_l2_change_events_inner_v2(
     Ok(LongitudinalL2ChangeWriteReceiptV2 {
         events_created: completed.events_created as u64,
         events_existing: completed.events_existing as u64,
-        final_event_count: completed.events.len() as u64,
+        final_event_count: listed.len() as u64,
         change_count,
         membership_count,
         relation_count,
@@ -2137,10 +2142,15 @@ fn write_generated_longitudinal_l2_change_events_inner_v1(
             break;
         }
     }
-    let completed = ingest.finish()?;
+    let completed = ingest.finish();
     if let Some(error) = write_error {
         return Err(error);
     }
+    // The ingest batch reports only its own counts, so the generator lists and
+    // folds the written history itself: a population the reducer rejects still
+    // fails generation.
+    let listed = event_store.list_events()?;
+    SessionState::from_events(&listed)?;
     let expected = block_count
         .checked_mul(210)
         .ok_or_else(|| ShoreError::Message("L2 capacity event count overflowed".to_owned()))?;
@@ -2153,7 +2163,7 @@ fn write_generated_longitudinal_l2_change_events_inner_v1(
         LongitudinalL2ChangeWriteReceiptV1 {
             events_created: completed.events_created as u64,
             events_existing: completed.events_existing as u64,
-            final_event_count: completed.events.len() as u64,
+            final_event_count: listed.len() as u64,
             change_count,
             membership_count,
             relation_count,
@@ -2669,11 +2679,11 @@ fn write_longitudinal_record_stream_v1(
         decoded_object_target_bytes += record.decoded_object_target_bytes;
     }
 
-    let completed = ingest.finish()?;
+    let completed = ingest.finish();
     if let Some(error) = write_error {
         return Err(error);
     }
-    let mut listed = completed.events;
+    let mut listed = event_store.list_events()?;
     let ordered_event_id_set = ordered_event_ids.iter().cloned().collect::<BTreeSet<_>>();
     if l2_resume_block_count.is_some() {
         listed.retain(|event| ordered_event_id_set.contains(event.event_id.as_str()));

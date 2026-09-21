@@ -728,6 +728,11 @@ fn abbreviated_revision_selectors_preserve_legacy_counted_paths() {
     for case in fact_route_cases(&repo, &fixture.revision) {
         let case_name = format!("fragment-{}", case.id);
         let fragment_arguments = arguments_with_revision_selector(&case.arguments, fragment);
+        // Three complete-history passes on a legacy fact route. Was five until
+        // the Change reader stopped decoding the history twice per build; the
+        // two attention cases below are unaffected because they do not build
+        // one. The contract here is the fragment/full parity above — this
+        // multiplicity is the cost pin that goes with it.
         run_legacy_fragment_case(
             &case_name,
             &case.arguments,
@@ -735,7 +740,7 @@ fn abbreviated_revision_selectors_preserve_legacy_counted_paths() {
             OFF_ENV,
             &receipt_dir,
             &fixture,
-            5,
+            3,
         );
     }
 

@@ -2229,7 +2229,7 @@ mod tests {
 
     #[cfg(feature = "longitudinal-counting")]
     #[test]
-    fn fresh_capture_at_h30_decodes_seven_histories_plus_new_events() {
+    fn fresh_capture_at_h30_decodes_three_histories_plus_new_events() {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "--quiet"]);
         git(root.path(), &["config", "user.name", "Pointbreak Test"]);
@@ -2306,8 +2306,8 @@ mod tests {
         );
         assert_eq!(
             scope.snapshot().counters.event_decodes,
-            217,
-            "fresh capture must decode seven H-sized histories plus seven newly appended events"
+            93,
+            "fresh capture must decode three H-sized histories plus three newly appended events"
         );
     }
 

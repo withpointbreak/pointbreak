@@ -61,12 +61,11 @@ impl SessionState {
     /// Rebuilds the bounded session projection from the full event set under
     /// the resolved store directory.
     ///
-    /// This is the single post-write rebuild entry point: every write workflow
-    /// calls it with a fresh `list_events()` after recording its event, so the
-    /// returned projection always reflects the whole log rather than the batch
-    /// a single writer happened to load. The event log is the canonical
-    /// authority; the returned `SessionState` is advisory and point-in-time as
-    /// of this read.
+    /// Callers pass the whole log they read, so the projection and its
+    /// store-wide hygiene diagnostics reflect every event rather than one
+    /// writer's batch. Write workflows do not call it after recording; read
+    /// surfaces do. The event log is the canonical authority; the returned
+    /// `SessionState` is advisory and point-in-time as of this read.
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         {

@@ -23,7 +23,7 @@ use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
     validated_track_id,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_write_store,
@@ -366,13 +366,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let events = if change_write {
-        event_store.list_change_events()?
-    } else {
-        event_store.list_events()?
-    };
-    let state = SessionState::from_events(&events)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     diagnostics.extend(competing_candidates);
     diagnostics.extend(cross_actor_replacement);
     diagnostics.extend(unlinked_follow_up);

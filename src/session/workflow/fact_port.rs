@@ -19,9 +19,9 @@ use crate::session::event::{
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, InputRequestStatus,
-    ProjectionDiagnostic, ReviewCursorV1, RevisionShowOptions, SessionState,
-    WriteAcknowledgementV1, current_timestamp, show_revision_for_change_reader,
-    sign_event_if_requested, validated_track_id, writer_from_options,
+    ProjectionDiagnostic, ReviewCursorV1, RevisionShowOptions, WriteAcknowledgementV1,
+    current_timestamp, show_revision_for_change_reader, sign_event_if_requested,
+    validated_track_id, writer_from_options,
 };
 use crate::storage::LocalStorage;
 
@@ -190,8 +190,7 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
     let event_store = write_store.event_store()?;
     let mut derived = DerivedWriteAggregate::default();
     let outcome = derived.record(event_store.record_change_event_once_acknowledged(&event)?);
-    let state = SessionState::from_events(&event_store.list_change_events()?)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let created = outcome == EventWriteOutcome::Created;
     let acknowledgement = derived.finish(
         usize::from(created),

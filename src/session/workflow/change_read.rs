@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::session::derived_access::semantic::change::{
-    ChangeSemanticBuildV2, build_change_semantic_generation,
-    build_change_semantic_generation_with_events,
+    ChangeSemanticBuildV2, build_change_semantic_generation_with_events,
 };
 use crate::session::event::ShoreEvent;
 #[cfg(test)]
@@ -15,8 +14,7 @@ use crate::session::store::capabilities::{
 };
 use crate::session::store::resolution::{ReadStore, resolve_change_read_store};
 use crate::session::{
-    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection, EventStore,
-    PublicReadCommandContextV1,
+    AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection, PublicReadCommandContextV1,
 };
 
 /// The complete strict semantic input for a Change-capable reader.
@@ -185,25 +183,13 @@ fn change_reader_state_from_inspection(
         minimum_reader_profile: inspection.minimum_reader_profile.clone(),
     };
     let ready = if matches!(inspection.status, StoreCapabilityStatus::Ready { .. }) {
-        let generation = build_change_semantic_generation(inspection)?;
-        generation.validate()?;
-        let events = inspection
-            .event_entries
-            .iter()
-            .map(|entry| {
-                EventStore::decode_qualification_entry(
-                    entry.key_digest.clone(),
-                    entry.bytes.clone(),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Some(ChangeReaderReadyV1 {
-            projection: generation.projection,
-            document_projection: generation.document_projection,
-            events: Arc::new(events),
-            event_set_hash: inspection.cursor.event_set_hash.clone(),
-            authority_cursor: inspection.cursor.clone(),
-        })
+        // The generation builder has already decoded every event to fold the
+        // projection; take its decoded set rather than decoding the history a
+        // second time. The fold happened once either way — it was the decode
+        // that was duplicated. `public_read_change_reader_v1` has always
+        // consumed the build this way.
+        let build = build_change_semantic_generation_with_events(inspection)?;
+        Some(change_reader_ready_from_build(inspection, build)?)
     } else {
         None
     };
@@ -261,6 +247,7 @@ mod tests {
     use super::*;
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::model::{JournalId, ObservationId, ReviewTargetRef, RevisionId, TrackId};
+    use crate::session::EventStore;
     use crate::session::event::{EventTarget, EventType, ReviewObservationRecordedPayload, Writer};
     use crate::session::store::capabilities::{
         CapabilityFixtureState, write_capability_fixture_for_test,

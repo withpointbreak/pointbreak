@@ -2,7 +2,7 @@
 //!
 //! `record_event_signature` builds and records a co-signature over an existing
 //! target event, mirroring `record_assessment`'s resolve → `ShoreEvent::new` →
-//! record → rebuild-state flow. The crux that makes a co-signature distinct from
+//! record flow. The crux that makes a co-signature distinct from
 //! an ordinary signed write: the embedded **attestation** is a direct signature
 //! over the **target's** signer-inclusive `event-tbs.v1` view (with `signer` set
 //! to the attesting signer), not over the carrier event being written.
@@ -31,7 +31,7 @@ use crate::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
     ShoreEvent, Writer, event_signature_pre_authentication_encoding,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
 };
@@ -167,8 +167,7 @@ pub fn record_event_signature(
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let mut derived = DerivedWriteAggregate::default();
     derived.record(
         record

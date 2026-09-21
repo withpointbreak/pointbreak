@@ -19,7 +19,7 @@ use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, required_title, resolve_revision,
     staged_body, validated_track_id,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_write_store,
@@ -318,13 +318,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let events = if change_write {
-        event_store.list_change_events()?
-    } else {
-        event_store.list_events()?
-    };
-    let state = SessionState::from_events(&events)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     let result = InputRequestOpenResult {

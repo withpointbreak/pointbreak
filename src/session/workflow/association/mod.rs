@@ -27,7 +27,7 @@ use crate::session::event::{
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
-use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_change_write_store, resolve_read_store, resolve_write_store,
     resolve_write_validation_store,
@@ -411,7 +411,7 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
     let mut diagnostics = outcome.diagnostics;
     if let Some(diagnostic) = commit_association_content_guard(
         &options.repo,
-        &outcome.events,
+        &outcome.validation_events,
         &outcome.revision_id,
         &commit_oid,
         &tree_oid,
@@ -795,15 +795,17 @@ struct AssociationWriteOutcome {
     events_existing: usize,
     events_created_by_type: BTreeMap<String, usize>,
     diagnostics: Vec<ProjectionDiagnostic>,
-    /// The post-write event list the state re-projection already read; carried
-    /// so `associate_commit`'s advisory content guard never re-reads the store.
-    events: Vec<ShoreEvent>,
+    /// The pre-write event set the write already read to resolve the Revision,
+    /// handed on as `associate_commit`'s advisory content-guard input. The guard
+    /// reads only capture proposals and supersession, which an association write
+    /// never emits, so the pre-write set and a post-write one are the same input.
+    validation_events: Vec<ShoreEvent>,
 }
 
 /// Shared scaffold: resolve the unit and write store, let the caller build the
 /// payload (track-free), then build the envelope (track on it only), sign,
-/// record unconditionally, and re-project state. Records always — withdrawals
-/// never check their referent.
+/// and record unconditionally. Records always — withdrawals never check their
+/// referent.
 #[allow(
     clippy::too_many_arguments,
     reason = "the shared association seam keeps its three mutually exclusive selectors explicit"
@@ -840,6 +842,14 @@ where
 
     let event_store = write_store.event_store()?;
 
+    // The write's one read of the stored history: it resolves the Revision here
+    // and is handed on as `associate_commit`'s content-guard input, so no
+    // association write reads the history a second time. Both branches open the
+    // store `write_store` landed in — `resolve_write_validation_store` and
+    // `resolve_write_store` bottom out in the same `resolve_store`, and the
+    // Change branch's reader routes an activated root (which
+    // `resolve_change_write_store` has already required) through the same
+    // journal inspection `list_change_events` uses.
     let validation_events = if change_write {
         crate::session::change_reader_state_for_repo(repo)?
             .ready()
@@ -903,13 +913,7 @@ where
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let events = if change_write {
-        event_store.list_change_events()?
-    } else {
-        event_store.list_events()?
-    };
-    let state = SessionState::from_events(&events)?;
-    let mut diagnostics = state.diagnostics;
+    let mut diagnostics = Vec::new();
     let acknowledgement = derived.finish(events_created, events_existing, &mut diagnostics);
 
     Ok(AssociationWriteOutcome {
@@ -920,7 +924,7 @@ where
         events_existing,
         events_created_by_type,
         diagnostics,
-        events,
+        validation_events,
     })
 }
 
@@ -1096,27 +1100,306 @@ mod tests {
     }
 
     #[test]
-    fn association_result_folds_the_whole_event_log_and_writes_no_state_projection() {
-        // The reducer diagnostics a write result carries come from a fold of the
-        // whole event log, not the batch the workflow loaded for itself: after
-        // recording an association, a fresh replay sees every event in the store,
-        // and no projection file is persisted.
-        let (repo, _unit) = Repo::with_capture();
+    fn association_result_carries_no_reducer_diagnostics_and_guards_against_the_whole_history() {
+        // The store holds a duplicate semantic observation, and the capture
+        // proposal the association targets is not the latest event. The write
+        // result reports only this call: no store-wide duplicate diagnostic, no
+        // session-state fold, and the content guard still finds the earlier
+        // capture in the event set the write read before it recorded.
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+        use crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE;
+        use crate::session::{
+            ObservationAddOptions, ObservationListOptions, list_observations, record_observation,
+        };
+
+        let (repo, unit) = Repo::with_capture();
+        for key in ["retry-a", "retry-b"] {
+            record_observation(
+                ObservationAddOptions::new(repo.path())
+                    .with_track("agent:codex")
+                    .with_title("Same finding")
+                    .with_body("same body")
+                    .with_idempotency_key(key),
+            )
+            .unwrap();
+        }
+        let listed = list_observations(ObservationListOptions::new(repo.path())).unwrap();
+        assert!(
+            listed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE),
+            "reads still report the store-wide duplicate: {:?}",
+            listed.diagnostics
+        );
+        std::fs::write(repo.path().join("unrelated.txt"), "elsewhere\n").unwrap();
+        repo.git(["add", "unrelated.txt"]);
+        repo.git(["commit", "-m", "unrelated"]);
+
+        let scope = LongitudinalCountingScopeV1::new("0".repeat(64)).unwrap();
+        let guard = scope.enter();
         let result = associate_commit(
-            AssociateCommitOptions::new(repo.path(), "HEAD").with_track("agent:codex"),
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_revision_id(unit)
+                .with_track("agent:codex"),
         )
         .unwrap();
+        drop(guard);
 
-        let store_dir = resolved_store_dir(repo.path());
-        let events = EventStore::open(&store_dir).list_events().unwrap();
-        let replay = SessionState::from_events(&events).unwrap();
-
-        assert_eq!(replay.event_count, events.len());
+        assert_eq!(result.events_created, 1);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.starts_with("duplicate_semantic_")),
+            "a write reports only its own diagnostics: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE),
+            "the content guard still sees the earlier capture: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(scope.snapshot().counters.state_rebuilds, 0);
         assert_eq!(
             result.acknowledgement.legacy_projection_state,
             crate::session::LegacyProjectionStateV1::NotAttempted
         );
-        assert!(!store_dir.join("state.json").exists());
+        assert!(!resolved_store_dir(repo.path()).join("state.json").exists());
+    }
+
+    /// The Change branch resolves its event set from the Change reader, not
+    /// from `list_change_events`, so pin that the guard still finds the earlier
+    /// capture proposal there: a `--review-cursor` association onto a commit
+    /// that shares no paths with the captured snapshot still earns the advisory
+    /// mismatch.
+    #[test]
+    fn change_cursor_association_still_flags_a_disjoint_commit() {
+        use crate::model::ChangeIdentityDescriptorV1;
+        use crate::session::store::capabilities::{
+            CapabilityFixtureState, write_capability_fixture_for_test,
+        };
+        use crate::session::{ChangeCaptureOptions, capture_change_revision};
+
+        // HEAD gains only `unrelated.txt`; `src.txt` stays dirty, so the Change
+        // capture that follows still sees exactly the `src.txt` edit and the
+        // review cursor keeps matching the live worktree.
+        let (repo, _unit) = Repo::with_capture();
+        std::fs::write(repo.path().join("unrelated.txt"), "elsewhere\n").unwrap();
+        repo.git(["add", "unrelated.txt"]);
+        repo.git(["commit", "-m", "unrelated"]);
+
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+
+        let captured = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-794-cursor-guard",
+            CaptureOptions::new(repo.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x94; 32]),
+        ))
+        .unwrap();
+
+        let result = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_review_cursor(captured.review_cursor.token)
+                .with_track("agent:codex"),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1, "advisory: the write still lands");
+        let mismatch = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE)
+            .expect("the Change-cursor path still reaches the content guard");
+        assert!(
+            mismatch
+                .message
+                .contains(captured.revision.revision_id.as_str()),
+            "message names the associated revision: {}",
+            mismatch.message
+        );
+    }
+
+    /// A `--review-cursor` association decodes the history once per Change
+    /// reader it builds, and builds three: `exact_revision_from_review_cursor`
+    /// builds one to validate the cursor, its source comparison builds another
+    /// through `exact_revision_source` -> `show_revision_for_change_reader`,
+    /// and `record_association` builds a third to resolve the Revision. The
+    /// capability preflights are not among them — those read two named records,
+    /// not the history. Collapsing the three means threading one validated
+    /// reader state through the cursor seam, which is a separate change.
+    ///
+    /// What this pins is a *total* decode budget for the path, not the
+    /// post-write read in isolation: the aggregate counter cannot attribute a
+    /// decode to the reader that made it. Within that limit it is still the
+    /// useful assertion — while the other readers on this path cost what they
+    /// cost today, a reinstated post-write read is a whole extra pass and
+    /// exceeds the budget. It is stated as an inequality rather than the exact
+    /// count so that small movements below the budget do not churn the pin.
+    ///
+    /// It is deliberately not a proof that only post-write work can cross the
+    /// line. Removing one of the other readers would leave room for a restored
+    /// post-write read to pass, and adding a reader would fail this without one.
+    /// Isolating the post-write read specifically would need per-reader
+    /// instrumentation, which is a separate design choice.
+    #[test]
+    fn change_cursor_association_performs_no_post_write_decode() {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+        use crate::model::ChangeIdentityDescriptorV1;
+        use crate::session::store::capabilities::{
+            CapabilityFixtureState, write_capability_fixture_for_test,
+        };
+        use crate::session::{ChangeCaptureOptions, capture_change_revision};
+
+        let (repo, _unit) = Repo::with_capture();
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+        let captured = capture_change_revision(ChangeCaptureOptions::initial(
+            "change-operation:test-794-cursor-counting",
+            CaptureOptions::new(repo.path()),
+            ChangeIdentityDescriptorV1::opaque_nonce([0x95; 32]),
+        ))
+        .unwrap();
+
+        let history = stored_history_len(repo.path());
+        let scope = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        {
+            let _guard = scope.enter();
+            associate_commit(
+                AssociateCommitOptions::new(repo.path(), "HEAD")
+                    .with_review_cursor(captured.review_cursor.token)
+                    .with_track("agent:codex"),
+            )
+            .unwrap();
+        }
+
+        // Measured on this fixture: 3 folds of a 12-event history (36), down
+        // from 6 before the Change reader stopped decoding the history twice.
+        // A restored post-write read adds a whole further pass.
+        let decodes = scope.snapshot().counters.event_decodes;
+        let reader_budget = 3;
+        assert!(
+            decodes <= history * reader_budget,
+            "a Change-cursor association exceeded its whole-history decode budget: \
+             {decodes} decodes over a {history}-event history is more than {reader_budget} \
+             folds. A reinstated post-write read is the likeliest cause; a reader added \
+             elsewhere on this path would also land here, and needs the budget requalified \
+             rather than raised on sight"
+        );
+    }
+
+    /// The stored history the writer holds, measured outside a counting scope.
+    fn stored_history_len(repo: &Path) -> u64 {
+        let store = resolve_read_store(repo).unwrap();
+        EventStore::from_backend(store.backend())
+            .list_events()
+            .unwrap()
+            .len() as u64
+    }
+
+    /// Under a Revision selector, each association write decodes the stored
+    /// history exactly once — the pre-write read that resolves the Revision.
+    /// Only `associate_commit` consults the advisory content guard, and the
+    /// guard reads that same pre-write set, so a withdrawal or a ref
+    /// association never pays for a whole-history decode it cannot use.
+    ///
+    /// This covers the Revision-selector path only. A `--review-cursor` write
+    /// folds the history several times over; see
+    /// [`change_cursor_association_performs_no_post_write_decode`].
+    #[test]
+    fn revision_selector_association_writes_decode_the_history_exactly_once() {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+
+        let (repo, unit) = Repo::with_capture();
+        repo.git(["add", "--all"]);
+        repo.git(["commit", "-m", "land src change"]);
+        let head_oid = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+
+        let mut run = 0_u32;
+        let mut measured = |repo: &Path, label: &str, write: &mut dyn FnMut()| {
+            run += 1;
+            let history = stored_history_len(repo);
+            let scope = LongitudinalCountingScopeV1::new(format!("{run:064x}")).unwrap();
+            {
+                let _guard = scope.enter();
+                write();
+            }
+            assert_eq!(
+                scope.snapshot().counters.event_decodes,
+                history,
+                "{label} must decode the {history}-event history exactly once"
+            );
+        };
+
+        let mut association_id = None;
+        measured(repo.path(), "associate_commit", &mut || {
+            association_id = Some(
+                associate_commit(
+                    AssociateCommitOptions::new(repo.path(), "HEAD")
+                        .with_revision_id(unit.clone())
+                        .with_track("agent:codex"),
+                )
+                .unwrap()
+                .commit_association_id,
+            );
+        });
+        let association_id = association_id.unwrap();
+
+        measured(repo.path(), "withdraw_commit", &mut || {
+            withdraw_commit(
+                WithdrawCommitOptions::new(repo.path(), association_id.clone())
+                    .with_revision_id(unit.clone())
+                    .with_track("agent:codex"),
+            )
+            .unwrap();
+        });
+
+        let mut ref_association_id = None;
+        measured(repo.path(), "associate_ref", &mut || {
+            ref_association_id = Some(
+                associate_ref(
+                    AssociateRefOptions::new(repo.path(), "refs/heads/main", head_oid.clone())
+                        .with_revision_id(unit.clone())
+                        .with_track("agent:codex"),
+                )
+                .unwrap()
+                .ref_association_id,
+            );
+        });
+        let ref_association_id = ref_association_id.unwrap();
+
+        measured(repo.path(), "withdraw_ref", &mut || {
+            withdraw_ref(
+                WithdrawRefOptions::new(repo.path(), ref_association_id.clone())
+                    .with_revision_id(unit.clone())
+                    .with_track("agent:codex"),
+            )
+            .unwrap();
+        });
     }
 
     #[test]
