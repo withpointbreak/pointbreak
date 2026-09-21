@@ -1,15 +1,18 @@
-// Document builder for the `pointbreak summary show` command.
+// Document builders for the `pointbreak summary show` and `summary check` commands.
 use serde::Serialize;
 
 use crate::documents::DiagnosticDocument;
 use crate::session::{
     ActorRelation, COUNTED_INPUT_DIGEST_ALGORITHM, Count, CountedInputReceipt,
-    EventVerificationStatus, FirstCaptureResults, Measure, Population, ReviewSummaryResult,
-    RoundProfile, format_rfc3339_utc_millis,
+    EventVerificationStatus, FirstCaptureResults, Measure, Population, ReceiptCheckResult,
+    ReceiptEntryDifference, ReceiptEntryOutcome, ReviewSummaryResult, RoundProfile,
+    format_rfc3339_utc_millis,
 };
 
 /// Emitted schema for `pointbreak summary show`.
 pub const REVIEW_SUMMARY_SCHEMA: &str = "pointbreak.review-summary";
+/// Emitted schema for `pointbreak summary check`.
+pub const REVIEW_SUMMARY_CHECK_SCHEMA: &str = "pointbreak.review-summary-check";
 /// Names the population and measure definitions a summary was computed under.
 pub const REVIEW_SUMMARY_METRIC_DEFINITIONS: &str = "pointbreak.review-summary/1";
 
@@ -106,6 +109,86 @@ fn review_summary_document_with_identity(
         },
         result.diagnostics.clone(),
     )
+}
+
+/// Documented body for `pointbreak.review-summary-check`: how each fact a saved
+/// receipt lists compares with the store now. It speaks only for the listed
+/// facts, never for the store as a whole.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSummaryCheckBody {
+    receipt: CheckedReceiptDocument,
+    digest_matches_entries: bool,
+    matched: usize,
+    changed: usize,
+    missing: usize,
+    differing: Vec<ReceiptDifferenceDocument>,
+    completeness: &'static str,
+}
+
+/// Build the `pointbreak.review-summary-check` document from a receipt re-check.
+pub fn review_summary_check_document(
+    result: &ReceiptCheckResult,
+) -> DiagnosticDocument<ReviewSummaryCheckBody> {
+    DiagnosticDocument::new(
+        REVIEW_SUMMARY_CHECK_SCHEMA,
+        ReviewSummaryCheckBody {
+            receipt: CheckedReceiptDocument {
+                algorithm: result.algorithm.clone(),
+                digest: result.recorded_digest.clone(),
+                count: result.recorded_count,
+            },
+            digest_matches_entries: result.digest_matches_entries,
+            matched: result.matched,
+            changed: result.changed,
+            missing: result.missing,
+            differing: result
+                .differing
+                .iter()
+                .map(ReceiptDifferenceDocument::new)
+                .collect(),
+            completeness: "notProven",
+        },
+        result.diagnostics.clone(),
+    )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckedReceiptDocument {
+    algorithm: String,
+    digest: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReceiptDifferenceDocument {
+    event_id: String,
+    outcome: &'static str,
+    recorded_payload_hash: String,
+    recorded_event_record_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_payload_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_event_record_hash: Option<String>,
+}
+
+impl ReceiptDifferenceDocument {
+    fn new(difference: &ReceiptEntryDifference) -> Self {
+        Self {
+            event_id: difference.event_id.clone(),
+            outcome: match difference.outcome {
+                ReceiptEntryOutcome::Matched => "matched",
+                ReceiptEntryOutcome::Changed => "changed",
+                ReceiptEntryOutcome::Missing => "missing",
+            },
+            recorded_payload_hash: difference.recorded_payload_hash.clone(),
+            recorded_event_record_hash: difference.recorded_event_record_hash.clone(),
+            current_payload_hash: difference.current_payload_hash.clone(),
+            current_event_record_hash: difference.current_event_record_hash.clone(),
+        }
+    }
 }
 
 /// A measure is either computed, carrying its counts and denominator, or
@@ -851,5 +934,104 @@ mod tests {
     #[test]
     fn review_summary_document_is_registered() {
         assert!(crate::documents::document_registry().contains(&("pointbreak.review-summary", 1)));
+    }
+
+    fn check_result() -> ReceiptCheckResult {
+        ReceiptCheckResult {
+            algorithm: "shore.event-set.canonical-map.v1".to_owned(),
+            recorded_digest: "sha256:digest".to_owned(),
+            recorded_count: 3,
+            digest_matches_entries: true,
+            matched: 1,
+            changed: 1,
+            missing: 1,
+            differing: vec![
+                ReceiptEntryDifference {
+                    event_id: "evt:sha256:c1".to_owned(),
+                    outcome: ReceiptEntryOutcome::Changed,
+                    recorded_payload_hash: "sha256:payload-c1".to_owned(),
+                    recorded_event_record_hash: "sha256:record-c1".to_owned(),
+                    current_payload_hash: Some("sha256:payload-c1b".to_owned()),
+                    current_event_record_hash: Some("sha256:record-c1b".to_owned()),
+                },
+                ReceiptEntryDifference {
+                    event_id: "evt:sha256:m1".to_owned(),
+                    outcome: ReceiptEntryOutcome::Missing,
+                    recorded_payload_hash: "sha256:payload-m1".to_owned(),
+                    recorded_event_record_hash: "sha256:record-m1".to_owned(),
+                    current_payload_hash: None,
+                    current_event_record_hash: None,
+                },
+            ],
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn review_summary_check_document_reports_counts_and_differences() {
+        let value = serde_json::to_value(review_summary_check_document(&check_result())).unwrap();
+
+        assert_eq!(value["schema"], "pointbreak.review-summary-check");
+        assert_eq!(value["version"], 1);
+        assert_eq!(
+            value["receipt"],
+            serde_json::json!({
+                "algorithm": "shore.event-set.canonical-map.v1",
+                "digest": "sha256:digest",
+                "count": 3
+            })
+        );
+        assert_eq!(value["digestMatchesEntries"], true);
+        assert_eq!(
+            (&value["matched"], &value["changed"], &value["missing"]),
+            (
+                &serde_json::json!(1),
+                &serde_json::json!(1),
+                &serde_json::json!(1)
+            )
+        );
+        assert_eq!(value["completeness"], "notProven");
+        assert_eq!(
+            value["differing"],
+            serde_json::json!([
+                {
+                    "eventId": "evt:sha256:c1",
+                    "outcome": "changed",
+                    "recordedPayloadHash": "sha256:payload-c1",
+                    "recordedEventRecordHash": "sha256:record-c1",
+                    "currentPayloadHash": "sha256:payload-c1b",
+                    "currentEventRecordHash": "sha256:record-c1b"
+                },
+                {
+                    "eventId": "evt:sha256:m1",
+                    "outcome": "missing",
+                    "recordedPayloadHash": "sha256:payload-m1",
+                    "recordedEventRecordHash": "sha256:record-m1"
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn review_summary_check_document_carries_no_ratio_or_identifier() {
+        let value = serde_json::to_value(review_summary_check_document(&check_result())).unwrap();
+        let mut leaves = 0;
+        walk(&value, None, &mut |_, leaf| {
+            leaves += 1;
+            assert!(!leaf.is_f64(), "no float in the document: {leaf}");
+            if let Some(text) = leaf.as_str() {
+                for forbidden in ["actor:", "did:key:", "@"] {
+                    assert!(!text.contains(forbidden), "{forbidden} in {text}");
+                }
+            }
+        });
+        assert!(leaves > 0);
+    }
+
+    #[test]
+    fn review_summary_check_document_is_registered() {
+        assert!(
+            crate::documents::document_registry().contains(&("pointbreak.review-summary-check", 1))
+        );
     }
 }

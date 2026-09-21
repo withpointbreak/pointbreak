@@ -1254,6 +1254,7 @@ The item and filter fields are identical in both cases.
 
 ```bash
 pointbreak summary show [--repo <path>] [--receipt digest|entries] [--format <fmt>]
+pointbreak summary check <file> [--repo <path>] [--format <fmt>]
 ```
 
 `summary show` describes the recorded review cycles in one store: how many captured Revisions each
@@ -1331,6 +1332,33 @@ the store is complete (`completeness: notProven`); a receipt minted after a rewr
 rewritten bytes, so keep a copy outside the store for it to mean anything.
 
 On a store that has not completed its migration, `summary show` refuses like every other ordinary read.
+
+### `pointbreak summary check`
+
+`summary check <file>` re-checks the receipt in a saved summary against the store as it is now. Save the
+summary with `--receipt entries` (`pointbreak summary show --receipt entries > summary.json`); a document
+with only the digest has nothing to re-check, and the command says so. The emitted document is
+`pointbreak.review-summary-check`, version 1. Like `summary show` it is a read-only projection: it records
+nothing and gates nothing, and it exits successfully whenever the check ran, so a difference is data for
+you to read, not a process failure.
+
+Each listed entry is compared with the event of the same `eventId` in the store:
+
+- `matched` — the event is present with the recorded `payloadHash` and the same `eventRecordHash`,
+  recomputed from the stored record now;
+- `changed` — the event is present but its payload or its record differs. Editing only a field outside
+  the payload (such as the recorded producer version) still changes the record hash, so a rewrite that
+  keeps the payload hash consistent is still caught, with no signing key required;
+- `missing` — the store holds no event with that id.
+
+`differing` lists the `changed` and `missing` entries with the recorded hashes and, for `changed`, the
+current ones. `digestMatchesEntries` reports whether the saved file's entries still reproduce its own
+digest, which catches an edited receipt file. `verificationStatus` is not compared: it depends on the
+reader's allowed-signers file.
+
+The check proves only the facts the receipt lists (`completeness: notProven`). Events added to or removed
+from the store elsewhere are out of its reach, and a receipt minted after a rewrite commits to the
+rewritten bytes.
 
 ## `pointbreak validation`
 

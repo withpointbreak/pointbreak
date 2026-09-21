@@ -1076,3 +1076,357 @@ fn assert_all_measures_unavailable(json: &Value) {
     assert_eq!(json["provenance"]["countedInputs"]["count"], 0);
     assert!(json["population"].get("observedWindow").is_none());
 }
+
+/// A small store with a captured, assessed Revision, built under an isolated
+/// home with non-agent actor ids.
+struct CheckStore {
+    repo: GitRepo,
+    home: tempfile::TempDir,
+}
+
+impl CheckStore {
+    fn new() -> Self {
+        let home = tempfile::tempdir().expect("isolated home");
+        let repo = dump_repo();
+        let store = Self { repo, home };
+        let repo_arg = repo_arg(&store.repo);
+        assert_success(&store.run(
+            AUTHOR,
+            &["capture", "--repo", &repo_arg, "--summary", "checked"],
+        ));
+        assert_success(&store.run(
+            REVIEWER,
+            &[
+                "assessment",
+                "add",
+                "--repo",
+                &repo_arg,
+                "--track",
+                REVIEW_TRACK,
+                "--assessment",
+                "accepted",
+            ],
+        ));
+        store
+    }
+
+    fn run(&self, actor: &str, args: &[&str]) -> std::process::Output {
+        let env = [
+            (
+                "POINTBREAK_HOME",
+                self.home.path().to_str().expect("utf-8 home path"),
+            ),
+            ("POINTBREAK_DERIVED_ACCESS", "off"),
+            ("POINTBREAK_ACTOR_ID", actor),
+        ];
+        pointbreak_env(args, &env)
+    }
+
+    fn saved_receipt(&self) -> std::path::PathBuf {
+        let repo_arg = repo_arg(&self.repo);
+        let output = self.run(
+            AUTHOR,
+            &[
+                "summary",
+                "show",
+                "--repo",
+                &repo_arg,
+                "--receipt",
+                "entries",
+            ],
+        );
+        assert_success(&output);
+        let path = self.home.path().join("saved-summary.json");
+        std::fs::write(&path, &output.stdout).expect("save summary");
+        path
+    }
+
+    fn check(&self, receipt: &Path, extra: &[&str]) -> std::process::Output {
+        let repo_arg = repo_arg(&self.repo);
+        let mut args = vec![
+            "summary",
+            "check",
+            receipt.to_str().expect("utf-8 receipt path"),
+            "--repo",
+            repo_arg.as_str(),
+        ];
+        args.extend_from_slice(extra);
+        self.run(AUTHOR, &args)
+    }
+
+    fn counted_event_ids(&self, receipt: &Path) -> Vec<String> {
+        let saved = parse_json(&std::fs::read(receipt).expect("read receipt"));
+        saved["provenance"]["countedInputs"]["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["eventId"].as_str().expect("event id").to_owned())
+            .collect()
+    }
+}
+
+/// The stored file of the event with `event_id`.
+fn stored_event_path(repo_root: &Path, event_id: &str) -> std::path::PathBuf {
+    std::fs::read_dir(common_dir_store(repo_root).join("events"))
+        .expect("read events")
+        .map(|entry| entry.expect("event entry").path())
+        .find(|path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|event| event["eventId"] == event_id)
+        })
+        .unwrap_or_else(|| panic!("no stored event {event_id}"))
+}
+
+/// The payload hash the store computes: sha256 over the payload with object
+/// keys sorted at every level.
+fn payload_hash_of(payload: &Value) -> String {
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+            Value::Object(map) => {
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort_unstable();
+                Value::Object(
+                    keys.into_iter()
+                        .map(|key| (key.clone(), canonical(&map[key])))
+                        .collect(),
+                )
+            }
+            other => other.clone(),
+        }
+    }
+    let bytes = serde_json::to_vec(&canonical(payload)).expect("serialize payload");
+    format!("sha256:{}", sha256_hex(&bytes))
+}
+
+fn rewrite_stored_event(path: &Path, edit: impl FnOnce(&mut Value)) {
+    let mut event = parse_json(&std::fs::read(path).expect("read event"));
+    edit(&mut event);
+    std::fs::write(path, serde_json::to_vec(&event).expect("serialize event"))
+        .expect("write event");
+}
+
+fn only_difference(json: &Value) -> &Value {
+    let differing = json["differing"].as_array().expect("differing");
+    assert_eq!(differing.len(), 1, "exactly one difference: {differing:?}");
+    &differing[0]
+}
+
+#[test]
+fn summary_check_matches_every_entry_of_a_fresh_receipt() {
+    let fixture = review_summary_fixture();
+    let saved = fixture.summary(&["--receipt", "entries"]);
+    assert_success(&saved);
+    let receipt = fixture.home.path().join("saved-summary.json");
+    std::fs::write(&receipt, &saved.stdout).expect("save summary");
+    let store = common_dir_store(fixture.repo.path());
+    let before = store_file_count(&store);
+
+    let repo_arg = fixture.repo_arg();
+    let env = [
+        ("POINTBREAK_HOME", fixture.home_arg()),
+        ("POINTBREAK_DERIVED_ACCESS", "off"),
+    ];
+    let output = pointbreak_env(
+        [
+            "summary",
+            "check",
+            receipt.to_str().expect("utf-8 path"),
+            "--repo",
+            repo_arg.as_str(),
+        ],
+        &env,
+    );
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+
+    let count = parse_json(&saved.stdout)["provenance"]["countedInputs"]["count"]
+        .as_u64()
+        .expect("count");
+    assert!(count > 0);
+    assert_eq!(json["schema"], "pointbreak.review-summary-check");
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["matched"], count);
+    assert_eq!(json["changed"], 0);
+    assert_eq!(json["missing"], 0);
+    assert_eq!(json["differing"], serde_json::json!([]));
+    assert_eq!(json["digestMatchesEntries"], true);
+    assert_eq!(json["completeness"], "notProven");
+    assert_eq!(json["receipt"]["count"], count);
+    assert_eq!(
+        json["receipt"]["digest"],
+        parse_json(&saved.stdout)["provenance"]["countedInputs"]["digest"]
+    );
+    assert_eq!(store_file_count(&store), before, "the check writes nothing");
+    assert!(json.get("eventsCreated").is_none());
+}
+
+#[test]
+fn summary_check_reports_a_rewritten_payload_as_changed() {
+    let store = CheckStore::new();
+    let receipt = store.saved_receipt();
+    let event_id = store.counted_event_ids(&receipt)[0].clone();
+    let path = stored_event_path(store.repo.path(), &event_id);
+    let before = parse_json(&std::fs::read(&path).expect("read event"));
+    // A self-consistent rewrite: the payload changes and the payload hash is
+    // recomputed, so the record still loads.
+    rewrite_stored_event(&path, |event| {
+        event["payload"]["rewritten"] = Value::Bool(true);
+        event["payloadHash"] = Value::String(payload_hash_of(&event["payload"]));
+    });
+
+    let output = store.check(&receipt, &[]);
+
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!((&json["changed"], &json["missing"]), (&1.into(), &0.into()));
+    let difference = only_difference(&json);
+    assert_eq!(difference["eventId"], event_id);
+    assert_eq!(difference["outcome"], "changed");
+    assert_eq!(difference["recordedPayloadHash"], before["payloadHash"]);
+    assert_ne!(difference["currentPayloadHash"], before["payloadHash"]);
+    assert!(difference["recordedEventRecordHash"].is_string());
+    assert!(difference["currentEventRecordHash"].is_string());
+    assert_ne!(
+        difference["currentEventRecordHash"],
+        difference["recordedEventRecordHash"]
+    );
+}
+
+#[test]
+fn summary_check_reports_a_record_edit_with_the_payload_untouched_as_changed() {
+    let store = CheckStore::new();
+    let receipt = store.saved_receipt();
+    let event_id = store.counted_event_ids(&receipt)[0].clone();
+    let path = stored_event_path(store.repo.path(), &event_id);
+    rewrite_stored_event(&path, |event| {
+        event["writer"]["producer"]["version"] = Value::String("edited".to_owned());
+    });
+
+    let output = store.check(&receipt, &[]);
+
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["changed"], 1);
+    let difference = only_difference(&json);
+    assert_eq!(difference["eventId"], event_id);
+    assert_eq!(
+        difference["currentPayloadHash"], difference["recordedPayloadHash"],
+        "only the record hash moved"
+    );
+    assert_ne!(
+        difference["currentEventRecordHash"],
+        difference["recordedEventRecordHash"]
+    );
+}
+
+#[test]
+fn summary_check_reports_a_deleted_event_as_missing() {
+    let store = CheckStore::new();
+    let receipt = store.saved_receipt();
+    let event_id = store.counted_event_ids(&receipt)[0].clone();
+    std::fs::remove_file(stored_event_path(store.repo.path(), &event_id))
+        .expect("delete stored event");
+
+    let output = store.check(&receipt, &[]);
+
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!((&json["changed"], &json["missing"]), (&0.into(), &1.into()));
+    let difference = only_difference(&json);
+    assert_eq!(difference["eventId"], event_id);
+    assert_eq!(difference["outcome"], "missing");
+    assert!(difference.get("currentPayloadHash").is_none());
+    assert!(difference.get("currentEventRecordHash").is_none());
+}
+
+#[test]
+fn summary_check_flags_a_saved_file_that_no_longer_reproduces_its_digest() {
+    let store = CheckStore::new();
+    let receipt = store.saved_receipt();
+    let mut saved = parse_json(&std::fs::read(&receipt).expect("read receipt"));
+    saved["provenance"]["countedInputs"]["entries"][0]["payloadHash"] =
+        Value::String("sha256:tampered".to_owned());
+    std::fs::write(&receipt, serde_json::to_vec(&saved).expect("serialize")).expect("save");
+
+    let output = store.check(&receipt, &[]);
+
+    assert_success(&output);
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["digestMatchesEntries"], false);
+    assert_eq!(json["changed"], 1, "the edited entry no longer matches");
+}
+
+#[test]
+fn summary_check_of_a_digest_only_document_says_to_rerun_with_entries() {
+    let store = CheckStore::new();
+    let repo_arg = repo_arg(&store.repo);
+    let digest_only = store.run(AUTHOR, &["summary", "show", "--repo", &repo_arg]);
+    assert_success(&digest_only);
+    let receipt = store.home.path().join("digest-only.json");
+    std::fs::write(&receipt, &digest_only.stdout).expect("save summary");
+
+    let output = store.check(&receipt, &[]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--receipt entries"), "{stderr}");
+}
+
+#[test]
+fn summary_check_of_a_file_that_is_not_a_summary_fails() {
+    let store = CheckStore::new();
+    let receipt = store.home.path().join("other.json");
+    std::fs::write(
+        &receipt,
+        br#"{"schema":"pointbreak.review-history","version":1}"#,
+    )
+    .expect("write file");
+
+    let output = store.check(&receipt, &[]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pointbreak.review-summary"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn summary_check_text_states_what_it_proves_and_names_no_actor() {
+    let store = CheckStore::new();
+    let receipt = store.saved_receipt();
+    let event_id = store.counted_event_ids(&receipt)[0].clone();
+    std::fs::remove_file(stored_event_path(store.repo.path(), &event_id))
+        .expect("delete stored event");
+
+    let json_output = store.check(&receipt, &["--format", "json"]);
+    let text_output = store.check(&receipt, &["--format", "text"]);
+    assert_success(&json_output);
+    assert_success(&text_output);
+    let text = String::from_utf8(text_output.stdout).expect("utf-8 text");
+
+    assert!(
+        text.contains("missing"),
+        "the missing fact is named in the text:\n{text}"
+    );
+    assert!(text.contains(&event_id), "{text}");
+    assert!(
+        text.trim_end().ends_with(
+            "Checks the facts this receipt lists. Facts added or removed elsewhere in the store \
+             are out of its reach."
+        ),
+        "{text}"
+    );
+    for rendered in [
+        String::from_utf8_lossy(&json_output.stdout).into_owned(),
+        text,
+    ] {
+        for needle in ["actor:", "did:key:", "@"] {
+            assert!(!rendered.contains(needle), "rendering names {needle}");
+        }
+    }
+}

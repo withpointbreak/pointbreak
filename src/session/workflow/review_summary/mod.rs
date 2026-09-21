@@ -4,11 +4,16 @@
 //! and gates nothing.
 
 mod authoritative;
+mod check;
 mod model;
 mod receipt;
 
 use std::path::{Path, PathBuf};
 
+pub use check::{
+    ReceiptCheckOptions, ReceiptCheckResult, ReceiptEntryDifference, ReceiptEntryOutcome,
+    check_counted_input_receipt,
+};
 pub(crate) use model::compute_review_summary;
 pub use model::{
     ActorRelation, BackfillExclusion, Count, CurrentAndHistorical, FirstCaptureResults, Measure,

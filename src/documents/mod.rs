@@ -113,7 +113,8 @@ pub use reader_profile::{
     STORE_MIGRATION_REQUIRED_SCHEMA,
 };
 pub use review_summary::{
-    REVIEW_SUMMARY_METRIC_DEFINITIONS, REVIEW_SUMMARY_SCHEMA, ReviewSummaryBody,
+    REVIEW_SUMMARY_CHECK_SCHEMA, REVIEW_SUMMARY_METRIC_DEFINITIONS, REVIEW_SUMMARY_SCHEMA,
+    ReviewSummaryBody, ReviewSummaryCheckBody, review_summary_check_document,
     review_summary_document,
 };
 pub use revision::{
@@ -173,6 +174,7 @@ const CLI_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
     ("pointbreak.review-revision", 2),
     ("pointbreak.review-revision-list", 1),
     (REVIEW_SUMMARY_SCHEMA, 1),
+    (REVIEW_SUMMARY_CHECK_SCHEMA, 1),
     ("pointbreak.review-validation-add", 1),
     ("pointbreak.review-validation-list", 1),
     ("pointbreak.store-compact", 1),

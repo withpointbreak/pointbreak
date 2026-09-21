@@ -2,8 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use pointbreak::documents::review_summary_document;
-use pointbreak::session::{ReviewSummaryOptions, now_rfc3339_utc, review_summary};
+use pointbreak::documents::{review_summary_check_document, review_summary_document};
+use pointbreak::session::{
+    ReceiptCheckOptions, ReviewSummaryOptions, check_counted_input_receipt, now_rfc3339_utc,
+    review_summary,
+};
 use serde_json::Value;
 
 use crate::cli::common::discover_trust_set;
@@ -18,6 +21,7 @@ pub(super) struct SummaryArgs {
 #[derive(Debug, Subcommand)]
 enum SummaryCommand {
     Show(SummaryShowArgs),
+    Check(SummaryCheckArgs),
 }
 
 /// Show review rounds per change with the evidence basis of every number.
@@ -29,6 +33,23 @@ struct SummaryShowArgs {
     /// How much of the counted-input receipt to include: the digest and counts, or every entry.
     #[arg(long, value_enum, default_value_t = ReceiptDetail::Digest)]
     receipt: ReceiptDetail,
+
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+/// Re-check the receipt in a saved summary against the store as it is now.
+///
+/// Reports, for each fact the receipt lists, whether the store still holds it
+/// unchanged. The saved summary must have been written with `--receipt entries`.
+/// Differences are reported, not treated as failures.
+#[derive(Debug, Args)]
+struct SummaryCheckArgs {
+    /// A summary saved from `summary show --receipt entries`.
+    file: PathBuf,
+
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
 
     #[command(flatten)]
     format_args: output::FormatArgs,
@@ -52,6 +73,12 @@ pub(super) fn run(
             tracing::debug!(command = "summary.show", "command_start");
             summary_show(args, stdout)
         }
+        SummaryCommand::Check(args) => {
+            let span = tracing::info_span!("shore.summary.check");
+            let _entered = span.enter();
+            tracing::debug!(command = "summary.check", "command_start");
+            summary_check(args, stdout)
+        }
     }
 }
 
@@ -73,6 +100,80 @@ fn summary_show(
             .map(|value| render_summary_text(&value))
             .unwrap_or_default()
     })
+}
+
+fn summary_check(
+    args: SummaryCheckArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let result = check_counted_input_receipt(ReceiptCheckOptions::new(&args.repo, &args.file))?;
+    let document = review_summary_check_document(&result);
+    output::write_document(stdout, format, &document, || {
+        serde_json::to_value(&document)
+            .map(|value| render_check_text(&value))
+            .unwrap_or_default()
+    })
+}
+
+/// Render the check document as plain lines: the receipt, the tally, each
+/// difference, and what the check does and does not speak for.
+fn render_check_text(document: &Value) -> String {
+    let receipt = &document["receipt"];
+    let mut lines = vec![
+        "Receipt re-check".to_owned(),
+        format!(
+            "  receipt: {} · digest {} ({})",
+            plural(&receipt["count"], "entry", "entries"),
+            text(&receipt["digest"]),
+            text(&receipt["algorithm"]),
+        ),
+        format!(
+            "  listed entries reproduce the receipt digest: {}",
+            if document["digestMatchesEntries"] == Value::Bool(true) {
+                "yes"
+            } else {
+                "no"
+            },
+        ),
+        format!(
+            "  matched: {} · changed: {} · missing: {}",
+            number(&document["matched"]),
+            number(&document["changed"]),
+            number(&document["missing"]),
+        ),
+    ];
+    let differing = array(&document["differing"]);
+    if differing.is_empty() {
+        lines.push("Differences: none".to_owned());
+    } else {
+        lines.push("Differences".to_owned());
+    }
+    for difference in &differing {
+        let recorded = format!(
+            "recorded payload {} · record {}",
+            text(&difference["recordedPayloadHash"]),
+            text(&difference["recordedEventRecordHash"]),
+        );
+        match text(&difference["outcome"]).as_str() {
+            "missing" => lines.push(format!(
+                "  missing {} ({recorded})",
+                text(&difference["eventId"]),
+            )),
+            _ => lines.push(format!(
+                "  changed {} ({recorded}; now payload {} · record {})",
+                text(&difference["eventId"]),
+                text(&difference["currentPayloadHash"]),
+                text(&difference["currentEventRecordHash"]),
+            )),
+        }
+    }
+    lines.push(
+        "Checks the facts this receipt lists. Facts added or removed elsewhere in the store are \
+         out of its reach."
+            .to_owned(),
+    );
+    lines.join("\n")
 }
 
 /// Render the summary document as plain lines, in a fixed order: population,
