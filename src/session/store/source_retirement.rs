@@ -518,6 +518,8 @@ mod tests {
     use super::*;
 
     /// Every file under `root` with its bytes, keyed by root-relative path.
+    /// The store-root authority lock file is left out: it holds no data, and on
+    /// Windows it cannot be read while another handle holds its lock.
     fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
         fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
             let Ok(entries) = fs::read_dir(dir) else {
@@ -528,7 +530,7 @@ mod tests {
                 let path = entry.path();
                 if entry.file_type().unwrap().is_dir() {
                     walk(&path, root, out);
-                } else {
+                } else if path.strip_prefix(root).unwrap() != Path::new(STORE_AUTHORITY_LOCK_FILE) {
                     out.insert(
                         path.strip_prefix(root).unwrap().to_path_buf(),
                         fs::read(&path).unwrap(),

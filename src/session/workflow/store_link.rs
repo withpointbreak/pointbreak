@@ -1078,7 +1078,18 @@ mod tests {
             let _ = release_rx.recv();
         });
         held_rx.recv().unwrap();
-        let before = tree_fingerprint(&source);
+        // The held lock file is unreadable on Windows while its lock is held,
+        // and it carries no data, so compare everything else.
+        let without_lock = |tree: BTreeMap<PathBuf, Vec<u8>>| {
+            tree.into_iter()
+                .filter(|(path, _)| {
+                    path != Path::new(
+                        crate::session::store::authority_lock::STORE_AUTHORITY_LOCK_FILE,
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = without_lock(tree_fingerprint(&source));
 
         let (result, family_dir) = with_pointbreak_home(&home, || {
             let result = link_store_to_family(
@@ -1093,7 +1104,7 @@ mod tests {
             .expect_err("a busy clone store must refuse")
             .to_string();
         assert!(message.starts_with("source_busy;"), "{message}");
-        assert_eq!(tree_fingerprint(&source), before);
+        assert_eq!(without_lock(tree_fingerprint(&source)), before);
         assert_not_registered_or_bound(repo.path(), &family_dir);
     }
 
