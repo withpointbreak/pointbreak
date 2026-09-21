@@ -1250,6 +1250,88 @@ The item and filter fields are identical in both cases.
     open.
 - This document is entirely soft shell: no field-path here joins the ADR-0029 hard core.
 
+## `pointbreak summary`
+
+```bash
+pointbreak summary show [--repo <path>] [--receipt digest|entries] [--format <fmt>]
+```
+
+`summary show` describes the recorded review cycles in one store: how many captured Revisions each
+Change went through, what the first capture's verdict was, and how much of the captured work carries an
+assessment or a commit association. It is a read-only projection: it records nothing, is never recorded
+itself, and gates nothing. The figures describe a store, not the people who wrote to it, and are
+advisory. The emitted document is `pointbreak.review-summary`, version 1.
+
+Every figure is a count with its denominator. A measure with nothing to count is
+`{"state":"unavailable","reasons":[…]}`, never `0`; the document carries no ratio, percentage, or
+score field. (`--format text` may print a whole percentage next to a nonzero denominator; that is a
+rendering only.) No actor id, signer, key, email, or track appears in the document.
+
+**Population.** A Change is *seen* when it has at least one membership claim. It is a *review Change*
+when at least one of those claims is not migration backfill. Migration backfill is identified by the
+store's signed activation record: the store migration names every record it wrote in the activation's
+manifest, by the same key the record's id is derived from, so exactly those records are backfill. A
+store without an activation record excludes nothing and says so. Every membership of a review Change
+counts, including backfill-written ones. A membership is *current* until a withdrawal names it; a
+review Change with no current membership is excluded as `noCurrentMembers` rather than dropped. The
+remaining Changes are *counted*, and their current-member Revisions are the *captured Revisions*.
+`population` reports these counts, the observed capture window, and both exclusions with their sizes
+(`migrationBackfill` names its `basis`: `storeActivationManifest` with `manifestHash`, or
+`noActivationManifest`). Membership and captured-Revision counts range over counted Changes, current and
+historical.
+
+**`reviewRounds`.** `profile` is the number of distinct current-member Revisions per counted Change, as
+a distribution. A round is one captured cycle, not a judgment of the work. `firstCapture` gives one
+result per counted Change from its earliest-captured Revision (by capture instant, legacy and RFC 3339
+timestamps compared as instants, ties by Revision id): `unassessed` when it has no live verdict (one that
+no later assessment replaces), otherwise `needsChanges` if any live verdict is `needs_changes`, else
+`accepted` if any is accepting, else `otherVerdict`.
+
+**`recordInternalMeasures`** measure the record against itself, denominated in captured Revisions,
+and say nothing about landed work:
+
+- `assessedCaptureShare` — captured Revisions with at least one assessment, replaced or not. A file-,
+  range-, or observation-scoped assessment counts for its Revision.
+- `commitAssociatedCaptureShare` — captured Revisions with at least one commit association. Withdrawn
+  associations still count here.
+- `firstCaptureAcceptance` — accepted first captures over first captures carrying a live verdict.
+- `actorDistinctAssessmentShare` — per captured Revision: `actorDistinct` when some assessment was
+  recorded under a different actor id than the capture, `actorSame` when every one shares it,
+  `undetermined` when there is no assessment or no capture record. Actor ids are asserted, not verified
+  identity; `keyEvidence` is reported separately and is `unavailable` because signing keys are not
+  compared.
+
+**`landedWorkCoverage`** always lists six rungs — `tipExact`, `associatedRange`, `assessedRange`,
+`acceptingVerdictRange`, `distinctIdentity`, `provedLanding` — denominated in commits on the integration
+branch (`provedLanding` in associations). This read does not walk the integration branch history, so
+each rung is `unavailable` with reason `integrationRefNotWalked` (and `signingKeysNotRead` on
+`distinctIdentity`). The two blocks share no field name.
+
+**`provenance`.** `basis` is `factSet`: the summary was computed from the store's facts, identified by
+`eventSetHash` and `eventCount`. `metricDefinitions` names the definitions above; `computedAt` is when
+the read ran.
+
+**Counted-input receipt.** `provenance.countedInputs` names exactly the facts the measures consumed for
+the counted population: the membership claims of counted Changes and the withdrawals naming them, the
+captures of captured Revisions, the assessments on captured Revisions and the assessments replacing
+them, and the commit associations on captured Revisions. Each entry has four fields:
+
+- `eventId` — commits to the write's idempotency key, not to its content;
+- `payloadHash` — commits to the payload;
+- `eventRecordHash` — commits to the record apart from its signatures and transport fields;
+- `verificationStatus` — how the reader's allowed-signers file verifies the record's signature
+  (`valid`, `untrusted_key`, `invalid`, or `unsigned`). It depends on the reader's trust set and is
+  outside the digest.
+
+`digest` is `sha256` over the lines `eventId SP payloadHash SP eventRecordHash LF`, sorted by `eventId`
+then `eventRecordHash` (`algorithm: shore.event-set.canonical-map.v1`). By default the receipt carries the
+digest, `count`, per-kind counts, and the verification tally (with `allowedSignersConfigured`);
+`--receipt entries` also inlines every entry. The receipt proves which facts were counted, never that
+the store is complete (`completeness: notProven`); a receipt minted after a rewrite commits to the
+rewritten bytes, so keep a copy outside the store for it to mean anything.
+
+On a store that has not completed its migration, `summary show` refuses like every other ordinary read.
+
 ## `pointbreak validation`
 
 ```bash

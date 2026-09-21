@@ -149,6 +149,7 @@ mod tests {
         );
         for approved_addition in [
             "pointbreak.change-capture-receipt.v1",
+            "pointbreak.review-summary",
             "pointbreak.store-paths",
             "pointbreak.store-derived-build",
             "pointbreak.store-derived-rebuild",

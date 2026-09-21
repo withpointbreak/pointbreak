@@ -57,11 +57,19 @@ fn normalize_hashes(text: &str) -> String {
 
 /// Replace locally minted timestamp fields with the snapshot's stable token.
 fn normalize_timestamps(text: &str) -> String {
-    ["occurredAt", "createdAt", "observedAt", "capturedAt"]
-        .into_iter()
-        .fold(text.to_owned(), |text, key| {
-            normalize_timestamp_field(&text, key)
-        })
+    [
+        "occurredAt",
+        "createdAt",
+        "observedAt",
+        "capturedAt",
+        "computedAt",
+        "from",
+        "to",
+    ]
+    .into_iter()
+    .fold(text.to_owned(), |text, key| {
+        normalize_timestamp_field(&text, key)
+    })
 }
 
 fn normalize_timestamp_field(text: &str, key: &str) -> String {
@@ -397,6 +405,40 @@ fn version_document_is_byte_stable() {
     let repo = GitRepo::new();
     let output = run_command(&repo, &["version"]);
     assert_snapshot("version", &output);
+}
+
+/// The review summary over one captured, assessed Revision, with every
+/// counted-input entry inlined so the entry shape is pinned too.
+#[test]
+fn review_summary_document_is_byte_stable() {
+    let (repo, _) = fixture_repo();
+    let repo_path = repo_arg(&repo);
+    run_command(
+        &repo,
+        &[
+            "assessment",
+            "add",
+            "--repo",
+            &repo_path,
+            "--track",
+            "human:kevin",
+            "--assessment",
+            "accepted",
+        ],
+    );
+
+    let summary = run_command(
+        &repo,
+        &[
+            "summary",
+            "show",
+            "--repo",
+            &repo_path,
+            "--receipt",
+            "entries",
+        ],
+    );
+    assert_snapshot("review_summary", &summary);
 }
 
 /// Build the deterministic fixture repo and capture a single Revision, returning

@@ -14,6 +14,7 @@ mod history;
 mod ingest;
 mod landing;
 mod review_cursor;
+pub(in crate::session) mod review_summary;
 mod revision_list;
 mod revision_projection;
 mod store_family;

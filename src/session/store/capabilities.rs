@@ -48,6 +48,80 @@ pub(crate) fn change_reader_activation_exists(journal: &dyn Journal) -> Result<b
     journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)
 }
 
+/// The migration backfill a store's signed root activation record names.
+///
+/// Bulk adoption reserves every record it writes in the activation's manifest
+/// under the record's idempotency key, and an event id is minted from that key,
+/// so the manifest names the backfill events exactly and is signed with the
+/// activation. A store never activated, or migrated by another mechanism, has
+/// an empty cohort and no manifest hash. Only the root activation is read; a
+/// successor activation's manifest would be outside this cohort.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BackfillCohort {
+    event_ids: BTreeSet<String>,
+    manifest_hash: Option<String>,
+}
+
+impl BackfillCohort {
+    pub(crate) fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Whether the full event id (`evt:sha256:…`) is migration backfill.
+    pub(crate) fn contains(&self, event_id: &str) -> bool {
+        self.event_ids.contains(event_id)
+    }
+
+    /// The hash of the activation manifest the cohort was read from.
+    pub(crate) fn manifest_hash(&self) -> Option<&str> {
+        self.manifest_hash.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.event_ids.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_event_ids_for_test(
+        event_ids: impl IntoIterator<Item = String>,
+        manifest_hash: Option<String>,
+    ) -> Self {
+        Self {
+            event_ids: event_ids.into_iter().collect(),
+            manifest_hash,
+        }
+    }
+}
+
+/// Read the backfill cohort from the store's root activation record: one keyed
+/// read, no Journal listing. A present record that does not parse or validate
+/// is an error, never an empty cohort, so a damaged manifest cannot silently
+/// widen the review population.
+pub(crate) fn backfill_cohort(journal: &dyn Journal) -> Result<BackfillCohort> {
+    let Some(bytes) = journal.read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)? else {
+        return Ok(BackfillCohort::empty());
+    };
+    let activation: StoreCapabilityActivationV1 = serde_json::from_slice(&bytes)?;
+    activation.validate()?;
+    if activation.logical_key() != ROOT_ACTIVATION_LOGICAL_KEY_V1 {
+        return capability_error("root capability activation does not match its logical key");
+    }
+    Ok(BackfillCohort {
+        event_ids: activation
+            .manifest()
+            .reserved_records
+            .iter()
+            .map(|record| {
+                crate::session::event::event_id_for_idempotency_key(&record.logical_key)
+                    .as_str()
+                    .to_owned()
+            })
+            .collect(),
+        manifest_hash: Some(activation.manifest_hash().to_owned()),
+    })
+}
+
 pub(crate) const REVIEW_CHANGE_REVISION_REQUIRED_CAPABILITIES_V1: &[&str] = &[
     "auxiliary_document_blob_v1",
     "auxiliary_document_manifest_v1",
@@ -2181,6 +2255,110 @@ mod tests {
     use super::*;
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::session::store::backend::StoreBackend;
+
+    fn backfill_cohort_of(backend: &StoreBackend) -> Result<BackfillCohort> {
+        backfill_cohort(backend.journal().as_ref())
+    }
+
+    #[test]
+    fn backfill_cohort_is_empty_without_an_activation_record() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+
+        let cohort = backfill_cohort_of(&backend).unwrap();
+
+        assert_eq!(cohort.manifest_hash(), None);
+        assert_eq!(cohort.len(), 0);
+    }
+
+    #[test]
+    fn backfill_cohort_names_exactly_the_manifest_reserved_events() {
+        use crate::session::event::{EventTarget, ReviewInitializedPayload, ShoreEvent};
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let ordinary = ShoreEvent::new(
+            crate::session::event::EventType::ReviewInitialized,
+            "review_initialized:after-activation",
+            EventTarget::for_journal(crate::model::JournalId::new("journal:test")),
+            Writer::shore_local("test"),
+            ReviewInitializedPayload {},
+            "2026-08-05T00:00:00Z",
+        )
+        .unwrap();
+        publish_test_record(
+            backend.journal().as_ref(),
+            &ordinary.idempotency_key,
+            &ordinary,
+        )
+        .unwrap();
+
+        let cohort = backfill_cohort_of(&backend).unwrap();
+        let events = EventStore::from_backend(&backend).list_events().unwrap();
+        let activation: StoreCapabilityActivationV1 = serde_json::from_slice(
+            &backend
+                .journal()
+                .read_event_bytes(ROOT_ACTIVATION_LOGICAL_KEY_V1)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+
+        let reserved = &activation.manifest().reserved_records;
+        assert!(!reserved.is_empty());
+        assert_eq!(cohort.len(), reserved.len());
+        assert_eq!(cohort.manifest_hash(), Some(activation.manifest_hash()));
+        for event in &events {
+            let expected = event.idempotency_key != ordinary.idempotency_key;
+            assert_eq!(
+                cohort.contains(event.event_id.as_str()),
+                expected,
+                "{} membership",
+                event.event_id.as_str()
+            );
+        }
+        assert_eq!(events.len(), reserved.len() + 1);
+    }
+
+    #[test]
+    fn backfill_cohort_rejects_a_corrupt_activation_record() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        backend
+            .journal()
+            .create_record_once(ROOT_ACTIVATION_LOGICAL_KEY_V1, b"{\"schema\":\"broken\"}")
+            .unwrap();
+
+        assert!(backfill_cohort_of(&backend).is_err());
+    }
+
+    #[test]
+    fn backfill_cohort_rejects_an_activation_that_fails_validation() {
+        use crate::crypto::TestEd25519Signer;
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        let signer = TestEd25519Signer::from_seed([29; 32]);
+        let manifest = BulkAdoptionManifestV1 {
+            schema: BULK_MANIFEST_SCHEMA_V1.to_owned(),
+            version: 1,
+            cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
+            source_authority_cursor: route_journal_entries(Vec::new()).unwrap().cursor,
+            reserved_records: Vec::new(),
+        };
+        let mut activation = signed_activation(&signer, manifest).unwrap();
+        activation.nonce = "tampered-after-signing".to_owned();
+        publish_test_record(
+            backend.journal().as_ref(),
+            ROOT_ACTIVATION_LOGICAL_KEY_V1,
+            &activation,
+        )
+        .unwrap();
+
+        assert!(backfill_cohort_of(&backend).is_err());
+    }
 
     #[test]
     fn umbrella_manifest_and_consumer_versions_are_frozen() {
