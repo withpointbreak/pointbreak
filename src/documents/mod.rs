@@ -32,6 +32,7 @@ mod input_request;
 mod inspect;
 mod observation;
 mod reader_profile;
+mod review_summary;
 mod revision;
 mod revision_interdiff;
 mod revision_resource;
@@ -111,6 +112,10 @@ pub use reader_profile::{
     ReaderUpgradeRequiredDocumentV1, STORE_MIGRATION_IN_PROGRESS_SCHEMA,
     STORE_MIGRATION_REQUIRED_SCHEMA,
 };
+pub use review_summary::{
+    REVIEW_SUMMARY_METRIC_DEFINITIONS, REVIEW_SUMMARY_SCHEMA, ReviewSummaryBody,
+    review_summary_document,
+};
 pub use revision::{
     RevisionListBody, RevisionShowBody, RevisionShowBodyV3, derived_revision_list_page_document,
     derived_revision_show_document, revision_list_document, revision_list_page_document,
@@ -167,6 +172,7 @@ const CLI_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
     ("pointbreak.review-observation-list", 1),
     ("pointbreak.review-revision", 2),
     ("pointbreak.review-revision-list", 1),
+    (REVIEW_SUMMARY_SCHEMA, 1),
     ("pointbreak.review-validation-add", 1),
     ("pointbreak.review-validation-list", 1),
     ("pointbreak.store-compact", 1),

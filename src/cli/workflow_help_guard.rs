@@ -133,6 +133,7 @@ fn command_inventory_is_exactly_the_shipped_flat_grammar() {
         "observation",
         "revision",
         "store",
+        "summary",
         "validation",
         "version",
     ];

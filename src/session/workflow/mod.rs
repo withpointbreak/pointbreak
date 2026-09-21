@@ -14,6 +14,7 @@ mod history;
 mod ingest;
 mod landing;
 mod review_cursor;
+pub(in crate::session) mod review_summary;
 mod revision_list;
 mod revision_projection;
 mod store_family;
@@ -298,8 +299,8 @@ pub use review_cursor::{
     validate_review_cursor_for_write,
 };
 pub(crate) use review_cursor::{
-    exact_revision_from_review_cursor, exact_revision_from_transition_cursor,
-    validate_review_cursor_for_transition,
+    exact_revision_from_review_cursor, exact_revision_from_review_cursor_with_ready,
+    exact_revision_from_transition_cursor, validate_review_cursor_for_transition,
 };
 pub(crate) use revision_list::list_revisions_from_selected_events;
 pub use revision_list::{

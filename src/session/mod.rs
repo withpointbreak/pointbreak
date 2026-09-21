@@ -160,6 +160,17 @@ pub(crate) use store::{
     worktree_fingerprint_for_files,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, object_artifact, store_init};
+pub use workflow::review_summary::{
+    ActorRelation, BackfillExclusion, COUNTED_INPUT_DIGEST_ALGORITHM, Count, CountedInputEntry,
+    CountedInputKindCounts, CountedInputReceipt, CurrentAndHistorical, FirstCaptureResults,
+    Measure, ObservedWindow, Population, ReviewSummary, ReviewSummaryOptions, ReviewSummaryResult,
+    RoundCount, RoundProfile, VerificationTally, review_summary,
+};
+#[cfg(test)]
+pub(crate) use workflow::review_summary::{
+    AssessmentInput, CaptureInput, CommitAssociationInput, CountedEventRef, MembershipClaimInput,
+    ReviewSummaryInputs, compute_review_summary,
+};
 pub use workflow::{
     ArtifactKind, ArtifactRef, AssessmentAddOptions, AssessmentAddResult, AssessmentRecordStatus,
     AssessmentShowFilters, AssessmentShowOptions, AssessmentShowResult, AssessmentTargetSelector,
