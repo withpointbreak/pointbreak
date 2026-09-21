@@ -415,9 +415,11 @@ contract folds that legacy store into the shared common-dir store
 validation and leaves `.pointbreak/data/` in place, so the operator can verify the result and then remove
 `.pointbreak/data/` to finish the switch — or completes the switch in one command with
 `--retire-source`, which independently re-verifies the fold from disk (a physical walk requiring
-every durable source file present with identical content in the shared store — never a
-manifest-driven check, which cannot see orphan/unreferenced files) and only then deletes
-`.pointbreak/data/`; on any divergence it errors and deletes nothing. It is idempotent — re-running
+every durable source file present in the shared store — artifacts by content, events by content
+ignoring the ingest-provenance stamp the fold adds — never a manifest-driven check, which cannot see
+orphan/unreferenced files) and only then deletes the files it verified, leaving `.pointbreak/data/`
+holding only its authority lock file (see [Source Retirement](#source-retirement)); on any divergence
+it errors and deletes nothing. It is idempotent — re-running
 reports already-present facts as existing — and refuses an ephemeral or sensitivity-flagged worktree
 unless `--include-ephemeral` is passed. It scans for sensitivity findings before moving data and
 reports them in the command document. During the Change-store transition this transfer writer is
@@ -430,7 +432,10 @@ The legacy-store guard deliberately keeps firing after a plain (no-retire) migra
 `.pointbreak/data/` is removed: the guard is not auto-suppressed once the fold looks like a subset,
 because that check would run on **every** read and write (each opens the store), and a
 suppressed-but-present `.pointbreak/data/` would silently diverge the moment anything wrote to it.
-`--retire-source` is the supported completion; the guard's hint names it.
+`--retire-source` is the supported completion; the guard's hint names it. The guard looks only for
+`events/` or `artifacts/`, so the lock-only `.pointbreak/data/` a retire leaves behind does not trip
+it, while a retire that kept late files leaves `events/` in place and the guard keeps firing until a
+rerun finishes.
 
 `pointbreak store status` is the public health and inventory surface for the resolved store. Its
 `inventory` reports event and artifact byte counts, total bytes, optional Git untracked bytes,
@@ -529,9 +534,10 @@ control.
   sync-managed directories (Dropbox, iCloud / Mobile Documents, OneDrive, Google Drive) are
   unsupported: `~/.pointbreak` looks syncable, which is exactly the footgun a best-effort path warning
   calls out at link time.
-- `compact` / `gc` should run against a **quiescent** family store. The compaction-versus-writer race
-  is inherited unchanged from the existing multi-worktree case — corruption-free, but benign
-  staleness is possible mid-race — and is not re-engineered for this tier.
+- `compact` / `gc` does not need a quiescent family store. It erases only content the event log marks
+  removed and eligible for erasure, so a sweep that races a writer can only erase less, never live
+  content; a capture or import success is not a promise against a removal already in the log (see
+  [Content Removal and Compaction](#content-removal-and-compaction)).
 - Linking **folds** a clone-local history forward through the same verified-import machinery `store
   migrate` uses. That fold stamps every folded event as bundle-applied, which strips the possession
   arm of content-targeted removal (see [Content Removal and
@@ -547,9 +553,12 @@ control.
 
 ## Source Retirement
 
-`pointbreak store link --retire-source`, and the `link_store_to_family` library workflow with
-`with_retire_source(true)`, remove the clone-local store after folding it into the family store. That
-removal is the only step in the fold that deletes anything, and it deletes by proof, not by directory:
+`pointbreak store migrate --retire-source` and `pointbreak store link --retire-source`, and the
+`migrate_store_to_common_dir` and `link_store_to_family` library workflows with
+`with_retire_source(true)`, remove the source store after folding it into the destination: the
+worktree-local `.pointbreak/data/` into the shared common-dir store for migrate, the clone-local store
+into the family store for link. That removal is the only step in the fold that deletes anything, and
+it deletes by proof, not by directory:
 
 - **Only verified files.** After the fold, an independent walk of the source's `events/` and
   `artifacts/` checks each file against the destination — artifacts by content, events by content
@@ -558,28 +567,33 @@ removal is the only step in the fold that deletes anything, and it deletes by pr
   exactly the files that walk proved present, one at a time, plus disposable rebuildable data: a
   store-root `state.json`, in-flight `*.tmp` files, and the derived-access entries. It never deletes
   recursively and removes a directory only once it is empty. Event files go last, so an interrupted
-  retire still looks like a populated store and completes when rerun.
+  retire still looks like a populated store and completes when rerun. A migrate source that holds no
+  record files at all is retired without a fold, under the same rules.
 - **The lock file stays.** Retirement keeps the store directory and its `authority.writer.lock`.
   Deleting a lock file that another Pointbreak process has open would let that process and a newcomer
   each lock a different file at the same path, so both would believe they had the store to
   themselves. A leftover directory holding only that lock file is therefore an expected side effect
   of retirement; it holds no review data, is safe to ignore, and can be removed by hand when no
-  Pointbreak process is using it. `sourceRetired` is `true` when nothing else remains.
+  Pointbreak process is using it. `sourceRetired` is `true` when nothing else remains. After a
+  migrate that directory is the worktree's `.pointbreak/data/`. The ignore rule that kept the store
+  out of Git status (normally `data/` in the generated `.pointbreak/.gitignore`) covers the lock file
+  too, and without `events/` or `artifacts/` the directory no longer counts as a worktree-local store.
 - **Busy stores refuse.** Before the fold reads the source, retirement takes the source store's
   existing authority lock without waiting and holds it until deletion ends. While another Pointbreak
   writer holds that store, the command fails with an error whose message begins `source_busy;` and
   changes nothing.
 - **Unknown entries refuse.** A store-root entry retirement does not verify — `operations/` is the
   known case — or a symbolic link anywhere in the source fails the command before anything is
-  deleted, naming the entry. The fold has already run and stays (it is idempotent), but the clone is
-  not registered with the family or bound to it.
+  deleted, naming the entry. A fold that already ran stays (it is idempotent), but a link does not
+  register the clone with the family or bind it.
 - **Late files are kept.** A record file that appears while retirement is checking is not in the
   verified set, so nothing at all is deleted; `sourceRetired` is `false` and a
   `source_retirement_residue` diagnostic asks for a rerun, which folds the new record and then
   retires. Content that no record in the source refers to is never folded, so a rerun keeps failing
   verification — still deleting nothing — until that file is dealt with by hand. A content file that
   appears later still, while deletion is under way, is kept too, but can leave a content-only
-  remainder that a later link skips as an empty store; inspect it by hand.
+  remainder that a later `store migrate --retire-source` refuses and a later link skips as an empty
+  store; inspect it by hand.
 
 Limits of the current contract:
 
@@ -587,10 +601,11 @@ Limits of the current contract:
   destination maintenance — notably `pointbreak store forget` of the family — during a retire.
 - The lock excludes Pointbreak writers only. A tool that writes store files without Pointbreak is not
   excluded, but its files are still never deleted unverified.
-- A process that chose the clone-local store before retirement and writes after it — including one
-  that waited for the retire to finish — writes into the retained (or recreated) clone-local store.
-  After a link, such a record is not visible through the family store until the clone-local store is
-  folded again.
+- A process that chose the source store before retirement and writes after it — including one that
+  waited for the retire to finish — writes into the retained (or recreated) source store. After a
+  link, such a record is not visible through the family store until the clone-local store is folded
+  again; after a migrate, it is back in `.pointbreak/data/` and not in the shared store until
+  migrated again.
 
 ## Content Removal and Compaction
 
@@ -630,6 +645,15 @@ is re-derivable from the event log. **Compaction — not removal — is the poin
 is one-way (there is no append-only un-remove), and once bytes are compacted they cannot be recovered
 by an event, only re-captured or re-imported. The operator rule for sensitive data is therefore
 **remove, then compact**.
+
+**Compaction beside writers.** The sweep takes no lock and needs no quiescent store: captures,
+imports and other writes may land while it runs. It reads the event log once and erases only content
+that listing marks removed and eligible for erasure. Removal is permanent in the log, and later
+events can only make more content eligible, never less, so a listing that misses newer events can
+only erase less than a later sweep would — never content that is still live. The one overlap is by
+design: content captured or imported again after its removal is erased again by the next sweep —
+possibly one already under way, before the capture or import reports success. A capture or import success is
+therefore not a promise that its bytes survive a removal already recorded in the log.
 
 This is complete only **before** the artifact is pushed or mirrored. The removal event converges to
 peers (they learn the content is removed and may collect their own copy), but **bytes already

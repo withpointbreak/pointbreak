@@ -5,8 +5,8 @@
 //! artifacts forward via `import_store_bundle` (content-addressed, idempotent,
 //! source untouched) so a worktree's prior captures are reachable from the common
 //! dir. It never deletes the source BY DEFAULT — the opt-in retire-source
-//! completion deletes it only after `verify_source_subset_of_target` confirms
-//! every durable source file in the shared store. It NEVER registers anything
+//! completion deletes only the source files an independent re-verification
+//! proves present in the shared store. It NEVER registers anything
 //! (registration is retired) and NEVER runs on a hot path — only the
 //! `pointbreak store migrate` subcommand / `just migrate-store-common-dir` driver
 //! invoke it. It REFUSES an ephemeral or scanned-sensitive worktree unless the
@@ -20,10 +20,14 @@ use serde::Serialize;
 use crate::error::{Result, ShoreError};
 use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::store::bundle::{
-    ImportBundleResult, import_store_bundle_into_with_verification, verify_source_subset_of_target,
+    ImportBundleResult, import_store_bundle_into_with_verification,
 };
 use crate::session::store::resolution::{clone_local_store_dir, event_store_for_explicit_target};
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
+use crate::session::store::source_retirement::{
+    SOURCE_BUSY_PREFIX, SourceRetirementAdmission, SourceRetirementGuard, SourceRetirementOutcome,
+    admit_source_retirement, retire_verified_source,
+};
 use crate::session::store::store_config::{StoreMode, resolve_store_mode};
 use crate::session::store::store_init::RepositoryPaths;
 use crate::session::{
@@ -54,11 +58,12 @@ impl MigrateToCommonDirOptions {
         self
     }
 
-    /// Opt in to deleting the worktree-local `.pointbreak/data` after the fold is
+    /// Opt in to retiring the worktree-local `.pointbreak/data` after the fold is
     /// independently verified (every source event and artifact file present in
     /// the shared store; see `verify_source_subset_of_target`), so reads
-    /// resolve in one command. Off by default: the source is never discarded
-    /// before the migration is confirmed.
+    /// resolve in one command. Retirement deletes only the verified files and
+    /// keeps the directory with its authority lock file. Off by default: the
+    /// source is never discarded before the migration is confirmed.
     pub fn with_retire_source(mut self, retire_source: bool) -> Self {
         self.retire_source = retire_source;
         self
@@ -79,8 +84,11 @@ pub struct MigrateToCommonDirResult {
     /// worktree is refused first, even when its source store is empty, so a
     /// refusal is never silently downgraded to a `sourceEmpty` no-op.
     pub source_empty: bool,
-    /// True when `--retire-source` deleted the worktree-local `.pointbreak/data`
-    /// (after a verified fold, or as a no-durable-files husk).
+    /// True when `--retire-source` removed every verified record and disposable
+    /// entry from the worktree-local `.pointbreak/data` (after a verified fold, or
+    /// as a no-durable-files husk) and nothing but the store directory and its
+    /// authority lock file remains. Those two are kept on purpose so a writer
+    /// waiting on the lock never races a newly created one.
     pub source_retired: bool,
     /// Files the retire verification confirmed in the shared store; zero when
     /// the retire was not requested or nothing needed verifying.
@@ -143,16 +151,7 @@ pub fn migrate_store_to_common_dir(
         match classify_retire_source(&source)? {
             RetireSourceShape::Populated => {} // fold, verify, then delete below
             RetireSourceShape::Husk => {
-                let source_retired = source.exists();
-                if source_retired {
-                    std::fs::remove_dir_all(&source).map_err(|error| {
-                        ShoreError::Message(format!(
-                            "remove retired source store {}: {error}",
-                            source.display()
-                        ))
-                    })?;
-                }
-                return Ok(MigrateToCommonDirResult {
+                let mut result = MigrateToCommonDirResult {
                     acknowledgement: WriteAcknowledgementV1::unchanged(),
                     diagnostics: Vec::new(),
                     events_created: 0,
@@ -160,12 +159,24 @@ pub fn migrate_store_to_common_dir(
                     artifacts_created: 0,
                     artifacts_existing: 0,
                     source_empty: true,
-                    source_retired,
+                    source_retired: false,
                     verified_events: 0,
                     verified_artifacts: 0,
                     absent_artifact_count: 0,
                     sensitivity_excluded_path_count,
-                });
+                };
+                // Nothing to fold, but retirement still deletes only what it
+                // recognizes: an entry it does not understand refuses. An
+                // absent husk stays absent (admission would create it).
+                if source.exists() {
+                    let target = clone_local_store_dir(&worktree_root)?;
+                    let guard = admit_worktree_store_retirement(&source, &target)?;
+                    result.record_retirement(
+                        &source,
+                        retire_verified_source(guard, &source, &target)?,
+                    );
+                }
+                return Ok(result);
             }
             RetireSourceShape::ArtifactsWithoutEvents => {
                 return Err(ShoreError::Message(format!(
@@ -199,11 +210,18 @@ pub fn migrate_store_to_common_dir(
     // Source is resolved via the raw `RepositoryPaths::resolve` and the target via
     // `clone_local_store_dir` (= `<git-common-dir>/shore`); both are reused, neither
     // recomputed. `import_store_bundle` only reads the source — by default this fn
-    // performs no `remove`/`remove_dir` on it; the opt-in retire below deletes it
-    // only after `verify_source_subset_of_target` confirms every durable source
-    // file in the target. (The in-place flat-store relocation is a different
-    // migration and must not be conflated.)
+    // performs no `remove`/`remove_dir` on it; the opt-in retire below deletes only
+    // the source files an independent re-verification proves present in the
+    // target. (The in-place flat-store relocation is a different migration and
+    // must not be conflated.)
     let target = clone_local_store_dir(&worktree_root)?;
+    // Retirement takes the source store's authority lock before the fold reads
+    // it and holds it through deletion, so no Pointbreak writer can land a record
+    // between the fold and the verification.
+    let retirement = options
+        .retire_source
+        .then(|| admit_worktree_store_retirement(&source, &target))
+        .transpose()?;
     let profile = DerivedAccessProfile::from_environment()
         .map_err(|error| ShoreError::Message(error.to_string()))?;
     let target_event_store = event_store_for_explicit_target(&target, profile)?;
@@ -216,19 +234,23 @@ pub fn migrate_store_to_common_dir(
     )?;
     let mut result = MigrateToCommonDirResult::from_import(imported);
     result.sensitivity_excluded_path_count = sensitivity_excluded_path_count;
-    if options.retire_source {
-        let verification = verify_source_subset_of_target(&source, &target)?;
-        std::fs::remove_dir_all(&source).map_err(|error| {
-            ShoreError::Message(format!(
-                "remove retired source store {}: {error}",
-                source.display()
-            ))
-        })?;
-        result.source_retired = true;
-        result.verified_events = verification.verified_events;
-        result.verified_artifacts = verification.verified_artifacts;
+    if let Some(guard) = retirement {
+        result.record_retirement(&source, retire_verified_source(guard, &source, &target)?);
     }
     Ok(result)
+}
+
+/// Take the worktree-local store's authority lock for retirement without
+/// waiting, or refuse while another Pointbreak writer holds it.
+fn admit_worktree_store_retirement(source: &Path, target: &Path) -> Result<SourceRetirementGuard> {
+    match admit_source_retirement(source, target)? {
+        SourceRetirementAdmission::Admitted(guard) => Ok(guard),
+        SourceRetirementAdmission::Busy => Err(ShoreError::Message(format!(
+            "{SOURCE_BUSY_PREFIX} another Pointbreak writer holds the worktree-local store {}; \
+             nothing was folded or deleted — retry once it finishes",
+            source.display()
+        ))),
+    }
 }
 
 /// The retire-path classification of a worktree-local source store, by durable
@@ -302,18 +324,43 @@ impl MigrateToCommonDirResult {
             sensitivity_excluded_path_count: None,
         }
     }
+
+    /// Copy a retirement outcome onto the result. Files retirement kept
+    /// become one diagnostic asking for a rerun.
+    fn record_retirement(&mut self, source: &Path, retired: SourceRetirementOutcome) {
+        self.source_retired = retired.source_retired;
+        self.verified_events = retired.verified_events;
+        self.verified_artifacts = retired.verified_artifacts;
+        if retired.residue_entries > 0 {
+            self.diagnostics.push(ProjectionDiagnostic {
+                code: "source_retirement_residue".to_owned(),
+                message: format!(
+                    "the worktree-local store {} was not retired: {} file(s) appeared after \
+                     verification or could not be removed and were kept; rerun the migrate with \
+                     --retire-source to fold and retire them",
+                    source.display(),
+                    retired.residue_entries
+                ),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::{MigrateToCommonDirOptions, migrate_store_to_common_dir};
     use crate::git::git_common_dir;
+    use crate::session::store::authority_lock::{STORE_AUTHORITY_LOCK_FILE, StoreAuthorityLock};
+    use crate::session::store::resolution::{clone_local_store_dir, resolve_store};
+    use crate::session::store::source_retirement::install_after_verify_hook;
     use crate::session::store::store_config::{StoreMode, write_store_config};
+    use crate::session::store::store_init::worktree_local_store_is_populated;
     use crate::session::{CaptureOptions, EventStore, capture_worktree_review};
 
     struct TestRepo {
@@ -392,6 +439,58 @@ mod tests {
             repo.path().join(".pointbreak/data/events").is_dir(),
             "the seed lands a worktree-local store to migrate"
         );
+    }
+
+    /// Record one more observation into the worktree-local store, the way a
+    /// writer that still resolves that store would. Runs on the calling thread,
+    /// so it can land while this thread holds the store's authority lock.
+    fn record_worktree_local_observation(repo: &Path) {
+        write_store_config(repo, StoreMode::Ephemeral).unwrap();
+        crate::session::record_observation(
+            crate::session::ObservationAddOptions::new(repo)
+                .with_track("agent:late-writer")
+                .with_title("Late observation")
+                .with_body("written after verification"),
+        )
+        .unwrap();
+        write_store_config(repo, StoreMode::Shared).unwrap();
+    }
+
+    /// Retirement keeps the store directory and its authority lock file, so the
+    /// lock's identity never changes under a waiting writer; nothing else stays.
+    fn assert_only_the_lock_remains(store: &Path) {
+        let remaining = fs::read_dir(store)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            remaining,
+            vec![std::ffi::OsString::from(STORE_AUTHORITY_LOCK_FILE)],
+            "only the authority lock file is left after a retire"
+        );
+    }
+
+    /// Every file under `root` with its bytes, keyed by root-relative path. The
+    /// store-root authority lock file is left out: it holds no data, and on
+    /// Windows it cannot be read while another handle holds its lock.
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, root: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                if path.is_dir() {
+                    walk(&path, root, out);
+                } else if relative != Path::new(STORE_AUTHORITY_LOCK_FILE) {
+                    out.insert(relative, fs::read(&path).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
     }
 
     #[test]
@@ -516,11 +615,8 @@ mod tests {
         assert!(result.source_retired);
         assert!(result.verified_events >= 1);
         assert!(result.verified_artifacts >= 1);
-        assert!(
-            !repo.path().join(".pointbreak/data").exists(),
-            "the verified fold retires the worktree-local store"
-        );
-        // The committed config siblings under .pointbreak/ survive — only data/ goes.
+        assert_only_the_lock_remains(&repo.path().join(".pointbreak/data"));
+        // The committed config siblings under .pointbreak/ survive.
         assert!(repo.path().join(".pointbreak/store.json").is_file());
     }
 
@@ -626,7 +722,7 @@ mod tests {
         .unwrap();
 
         assert!(result.source_retired);
-        assert!(!repo.path().join(".pointbreak/data").exists());
+        assert_only_the_lock_remains(&repo.path().join(".pointbreak/data"));
     }
 
     #[test]
@@ -759,5 +855,175 @@ mod tests {
 
         let after = EventStore::open(&local).list_event_file_names().unwrap();
         assert_eq!(before, after, "the source store is byte-for-byte preserved");
+    }
+
+    #[test]
+    fn retire_source_refuses_a_busy_worktree_store() {
+        let repo = modified_repo();
+        seed_worktree_local_capture(&repo);
+        let source = repo.path().join(".pointbreak/data");
+        let common = git_common_dir(repo.path()).unwrap().join("pointbreak");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_source = source.clone();
+        let holder = std::thread::spawn(move || {
+            let _lock = StoreAuthorityLock::acquire(&holder_source).unwrap();
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().unwrap();
+        let before = snapshot(&source);
+
+        let result = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let message = result
+            .expect_err("a busy worktree-local store must refuse")
+            .to_string();
+        assert!(message.starts_with("source_busy;"), "{message}");
+        assert_eq!(snapshot(&source), before, "the source is untouched");
+        assert!(
+            !common.join("events").exists(),
+            "nothing was folded into the shared store"
+        );
+    }
+
+    #[test]
+    fn retire_reports_residue_without_error() {
+        let repo = modified_repo();
+        seed_worktree_local_capture(&repo);
+        let source = repo.path().join(".pointbreak/data");
+        let before = snapshot(&source);
+        let repo_path = repo.path().to_path_buf();
+        let _hook = install_after_verify_hook(move |_| {
+            record_worktree_local_observation(&repo_path);
+        });
+
+        let result = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .unwrap();
+
+        assert!(!result.source_retired);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "source_retirement_residue"),
+            "{:?}",
+            result.diagnostics
+        );
+        let after = snapshot(&source);
+        for (path, bytes) in &before {
+            assert_eq!(after.get(path), Some(bytes), "{} was kept", path.display());
+        }
+        let late_events = after
+            .keys()
+            .filter(|path| path.starts_with("events") && !before.contains_key(*path))
+            .count();
+        assert_eq!(late_events, 1, "the late event is kept");
+
+        let rerun = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .unwrap();
+        assert!(rerun.source_retired, "the rerun folds the late event first");
+        assert_only_the_lock_remains(&source);
+    }
+
+    #[test]
+    fn husk_retire_never_recurses() {
+        let repo = modified_repo();
+        let source = repo.path().join(".pointbreak/data");
+        fs::create_dir_all(source.join("events")).unwrap();
+        fs::create_dir_all(source.join("operations")).unwrap();
+        fs::write(source.join("operations/op.json"), b"{}").unwrap();
+
+        let error = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .expect_err("an entry retirement does not understand must refuse");
+
+        assert!(error.to_string().contains("operations/op.json"), "{error}");
+        assert_eq!(fs::read(source.join("operations/op.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn husk_with_only_derived_entries_retires() {
+        let repo = modified_repo();
+        let source = repo.path().join(".pointbreak/data");
+        fs::create_dir_all(source.join("derived/generation")).unwrap();
+        fs::write(
+            source.join("derived/generation/index.sqlite"),
+            b"rebuildable",
+        )
+        .unwrap();
+        fs::write(source.join("derived.writer.lock"), b"").unwrap();
+        let options = || MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true);
+
+        let result = migrate_store_to_common_dir(options()).unwrap();
+
+        assert!(result.source_retired);
+        assert!(result.source_empty);
+        assert_only_the_lock_remains(&source);
+
+        let rerun = migrate_store_to_common_dir(options()).unwrap();
+        assert!(rerun.source_retired, "a lock-only store is a retired husk");
+        assert!(rerun.diagnostics.is_empty(), "{:?}", rerun.diagnostics);
+        assert_only_the_lock_remains(&source);
+        let resolution = resolve_store(repo.path()).unwrap();
+        assert_eq!(
+            resolution.store_dir(),
+            clone_local_store_dir(repo.path()).unwrap(),
+            "reads resolve the shared store"
+        );
+    }
+
+    #[test]
+    fn retired_worktree_store_does_not_read_as_populated() {
+        let repo = modified_repo();
+        seed_worktree_local_capture(&repo);
+        let source = repo.path().join(".pointbreak/data");
+
+        let result = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .unwrap();
+
+        assert!(result.source_retired);
+        assert!(!worktree_local_store_is_populated(&source));
+        let resolution = resolve_store(repo.path()).unwrap();
+        assert_eq!(
+            resolution.store_dir(),
+            clone_local_store_dir(repo.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn residue_keeps_the_worktree_store_populated_and_loud() {
+        let repo = modified_repo();
+        seed_worktree_local_capture(&repo);
+        let source = repo.path().join(".pointbreak/data");
+        let _hook = install_after_verify_hook(|source| {
+            fs::write(source.join("artifacts/objects/late"), b"late content").unwrap();
+        });
+
+        let result = migrate_store_to_common_dir(
+            MigrateToCommonDirOptions::new(repo.path()).with_retire_source(true),
+        )
+        .unwrap();
+
+        assert!(!result.source_retired);
+        assert!(worktree_local_store_is_populated(&source));
+        let message = resolve_store(repo.path())
+            .expect_err("a store left populated keeps the transfer refusal")
+            .to_string();
+        assert!(
+            message.contains("change_store_transfer_unavailable"),
+            "{message}"
+        );
     }
 }
