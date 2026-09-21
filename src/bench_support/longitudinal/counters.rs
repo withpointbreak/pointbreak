@@ -318,6 +318,8 @@ pub enum LongitudinalDerivedAccessPhaseV1 {
     ReadTransaction,
     CheckpointAndWal,
     GenerationLeaseAndRetention,
+    ReviewSummarySqlSelection,
+    ReviewSummaryCountedCarrierHydrationValidation,
 }
 
 pub const INTERACTION_FACT_CURRENT_REQUIRED_PHASES_V1: [LongitudinalDerivedAccessPhaseV1; 4] = [
@@ -355,7 +357,8 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::RevisionPageSqlSelection
             | Self::RevisionPageEventIdExpansion
             | Self::FactSqliteSelection
-            | Self::RevisionDetailSqlSelection => Ownership::DerivedAccess,
+            | Self::RevisionDetailSqlSelection
+            | Self::ReviewSummarySqlSelection => Ownership::DerivedAccess,
             Self::ChangePageCarrierHydrationValidation
             | Self::RevisionPageCarrierHydrationValidation
             | Self::FactSelectedCarrierHydrationValidation
@@ -363,6 +366,7 @@ impl LongitudinalDerivedAccessPhaseV1 {
             | Self::RevisionDetailSelectedCarrierHydrationValidation
             | Self::RevisionDetailSupportCarrierHydrationValidation
             | Self::RevisionDetailAuditCarrierHydrationValidation
+            | Self::ReviewSummaryCountedCarrierHydrationValidation
             | Self::GovernedWriteTruth
             | Self::CliCapabilityPreflightH1
             | Self::OrdinaryReadStoreResolutionH2
@@ -2532,6 +2536,8 @@ mod tests {
             LongitudinalDerivedAccessPhaseV1::ChangeSeekCorrelatedSelection,
             LongitudinalDerivedAccessPhaseV1::ChangeSeekProjectionFold,
             LongitudinalDerivedAccessPhaseV1::ChangeSeekComposition,
+            LongitudinalDerivedAccessPhaseV1::ReviewSummarySqlSelection,
+            LongitudinalDerivedAccessPhaseV1::ReviewSummaryCountedCarrierHydrationValidation,
         ];
         let spellings = phases
             .iter()
@@ -2564,6 +2570,8 @@ mod tests {
                 "change_seek_correlated_selection",
                 "change_seek_projection_fold",
                 "change_seek_composition",
+                "review_summary_sql_selection",
+                "review_summary_counted_carrier_hydration_validation",
             ]
             .into_iter()
             .map(serde_json::Value::from)
@@ -2596,6 +2604,8 @@ mod tests {
                 LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
                 LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
                 LongitudinalDerivedAccessPhaseOwnershipV1::ProductProjection,
+                LongitudinalDerivedAccessPhaseOwnershipV1::DerivedAccess,
+                LongitudinalDerivedAccessPhaseOwnershipV1::AuthoritativeTruth,
             ]
         );
     }

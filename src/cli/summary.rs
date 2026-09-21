@@ -2,10 +2,12 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use pointbreak::documents::{review_summary_check_document, review_summary_document};
+use pointbreak::documents::{
+    derived_review_summary_document, review_summary_check_document, review_summary_document,
+};
 use pointbreak::session::{
-    ReceiptCheckOptions, ReviewSummaryOptions, check_counted_input_receipt, now_rfc3339_utc,
-    review_summary,
+    ReceiptCheckOptions, ReviewSummaryOptions, RoutedReviewSummary, check_counted_input_receipt,
+    now_rfc3339_utc, review_summary_routed,
 };
 use serde_json::Value;
 
@@ -89,12 +91,25 @@ fn summary_show(
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let options =
         ReviewSummaryOptions::new(&args.repo).with_trust_set(discover_trust_set(&args.repo));
-    let result = review_summary(options)?;
-    let document = review_summary_document(
-        &result,
-        args.receipt == ReceiptDetail::Entries,
-        now_rfc3339_utc(),
-    );
+    let include_entries = args.receipt == ReceiptDetail::Entries;
+    let document = match review_summary_routed(options)? {
+        RoutedReviewSummary::Authoritative {
+            result,
+            fallback_hint,
+        } => {
+            crate::cli::derived_read::emit_claimed_authoritative_fallback_hint(fallback_hint);
+            review_summary_document(&result, include_entries, now_rfc3339_utc())
+        }
+        RoutedReviewSummary::Derived {
+            result,
+            projection_stamp,
+        } => derived_review_summary_document(
+            &result,
+            projection_stamp,
+            include_entries,
+            now_rfc3339_utc(),
+        ),
+    };
     output::write_document(stdout, format, &document, || {
         serde_json::to_value(&document)
             .map(|value| render_summary_text(&value))

@@ -528,6 +528,69 @@ fn review_summary_check_document_is_byte_stable() {
     );
 }
 
+/// The summary answered from a current derived generation: the provenance names
+/// the projection instead of the event set, and the rest of the shape is the
+/// same document.
+#[test]
+fn review_summary_projection_document_is_byte_stable() {
+    // Every binary invocation, the capture included, runs under a scratch home and
+    // a non-agent actor id so nothing reaches the caller's home or keys.
+    let home = tempfile::tempdir().expect("isolated home");
+    let home_path = home.path().to_str().expect("utf-8 home path");
+    let env = [
+        ("POINTBREAK_HOME", home_path),
+        ("POINTBREAK_ACTOR_ID", "actor:human:snapshot-reviewer"),
+        ("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1"),
+    ];
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_path = repo_arg(&repo);
+    let captured = pointbreak_env(["capture", "--repo", &repo_path], &env);
+    assert!(captured.status.success());
+    let assessed = pointbreak_env(
+        [
+            "assessment",
+            "add",
+            "--repo",
+            &repo_path,
+            "--track",
+            "human:kevin",
+            "--assessment",
+            "accepted",
+        ],
+        &env,
+    );
+    assert!(assessed.status.success());
+    let built = pointbreak_env(["store", "derived", "build", "--repo", &repo_path], &env);
+    assert!(built.status.success());
+
+    let summary = pointbreak_env(
+        [
+            "summary",
+            "show",
+            "--repo",
+            &repo_path,
+            "--receipt",
+            "entries",
+        ],
+        &env,
+    );
+    assert!(
+        summary.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&summary.stderr)
+    );
+    let raw = String::from_utf8(summary.stdout).expect("stdout is utf-8");
+    let document: Value = serde_json::from_str(&raw).expect("summary JSON");
+    assert_eq!(document["provenance"]["basis"], "projection");
+    assert_snapshot(
+        "review_summary_projection",
+        &normalize(&raw, &canonical_repo_path(&repo)),
+    );
+}
+
 /// Build the deterministic fixture repo and capture a single Revision, returning
 /// the captured review-unit id (already normalized in snapshots, used here only to
 /// pass back into commands as a literal argument).

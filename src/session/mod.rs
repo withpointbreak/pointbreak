@@ -165,8 +165,8 @@ pub use workflow::review_summary::{
     CountedInputKindCounts, CountedInputReceipt, CurrentAndHistorical, FirstCaptureResults,
     Measure, ObservedWindow, Population, ReceiptCheckOptions, ReceiptCheckResult,
     ReceiptEntryDifference, ReceiptEntryOutcome, ReviewSummary, ReviewSummaryOptions,
-    ReviewSummaryResult, RoundCount, RoundProfile, VerificationTally, check_counted_input_receipt,
-    review_summary,
+    ReviewSummaryResult, RoundCount, RoundProfile, RoutedReviewSummary, VerificationTally,
+    check_counted_input_receipt, review_summary, review_summary_routed,
 };
 #[cfg(test)]
 pub(crate) use workflow::review_summary::{

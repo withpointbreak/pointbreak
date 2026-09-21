@@ -114,8 +114,8 @@ pub use reader_profile::{
 };
 pub use review_summary::{
     REVIEW_SUMMARY_CHECK_SCHEMA, REVIEW_SUMMARY_METRIC_DEFINITIONS, REVIEW_SUMMARY_SCHEMA,
-    ReviewSummaryBody, ReviewSummaryCheckBody, review_summary_check_document,
-    review_summary_document,
+    ReviewSummaryBody, ReviewSummaryCheckBody, derived_review_summary_document,
+    review_summary_check_document, review_summary_document,
 };
 pub use revision::{
     RevisionListBody, RevisionShowBody, RevisionShowBodyV3, derived_revision_list_page_document,

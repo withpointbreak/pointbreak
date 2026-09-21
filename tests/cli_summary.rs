@@ -1430,3 +1430,363 @@ fn summary_check_text_states_what_it_proves_and_names_no_actor() {
         }
     }
 }
+
+/// The derived-access profile a current generation serves reads from.
+const DERIVED_ACTIVE: &str = "sqlite-wal-bodyless-v1";
+/// The one recovery action the fallback hint names.
+const DERIVED_HINT: &str = "pointbreak store derived build";
+
+impl ReviewSummaryFixture {
+    fn summary_with_access(&self, access: &str, extra: &[&str]) -> std::process::Output {
+        let repo_arg = self.repo_arg();
+        let mut args = vec!["summary", "show", "--repo", repo_arg.as_str()];
+        args.extend_from_slice(extra);
+        let env = [
+            ("POINTBREAK_HOME", self.home_arg()),
+            ("POINTBREAK_DERIVED_ACCESS", access),
+        ];
+        pointbreak_env(args, &env)
+    }
+
+    fn build_derived(&self) {
+        let repo_arg = self.repo_arg();
+        let env = [
+            ("POINTBREAK_HOME", self.home_arg()),
+            ("POINTBREAK_DERIVED_ACCESS", DERIVED_ACTIVE),
+        ];
+        assert_success(&pointbreak_env(
+            ["store", "derived", "build", "--repo", repo_arg.as_str()],
+            &env,
+        ));
+    }
+}
+
+impl CheckStore {
+    fn summary_with_access(&self, access: &str, extra: &[&str]) -> std::process::Output {
+        let repo_arg = repo_arg(&self.repo);
+        let mut args = vec!["summary", "show", "--repo", repo_arg.as_str()];
+        args.extend_from_slice(extra);
+        let env = [
+            (
+                "POINTBREAK_HOME",
+                self.home.path().to_str().expect("utf-8 home path"),
+            ),
+            ("POINTBREAK_DERIVED_ACCESS", access),
+        ];
+        pointbreak_env(args, &env)
+    }
+
+    fn build_derived(&self) {
+        let repo_arg = repo_arg(&self.repo);
+        let env = [
+            (
+                "POINTBREAK_HOME",
+                self.home.path().to_str().expect("utf-8 home path"),
+            ),
+            ("POINTBREAK_DERIVED_ACCESS", DERIVED_ACTIVE),
+        ];
+        assert_success(&pointbreak_env(
+            ["store", "derived", "build", "--repo", repo_arg.as_str()],
+            &env,
+        ));
+    }
+}
+
+/// The fixture store plus a range-scoped and an observation-scoped assessment,
+/// each its Revision's only assessment, with a current derived generation built
+/// over the result.
+fn parity_fixture() -> ReviewSummaryFixture {
+    let fixture = review_summary_fixture();
+    let repo_arg = fixture.repo_arg();
+
+    let range_scoped = fixture.capture("pub fn value() -> u32 { 14 }\n", &[]);
+    fixture.assess(
+        REVIEWER,
+        REVIEW_TRACK,
+        &revision_of(&range_scoped),
+        "needs-changes",
+        &[
+            "--file",
+            "src/lib.rs",
+            "--start-line",
+            "1",
+            "--end-line",
+            "1",
+        ],
+    );
+
+    let observed = fixture.capture("pub fn value() -> u32 { 15 }\n", &[]);
+    let observation = fixture.run(
+        REVIEWER,
+        &[
+            "observation",
+            "add",
+            "--repo",
+            &repo_arg,
+            "--exact-revision",
+            &revision_of(&observed),
+            "--track",
+            REVIEW_TRACK,
+            "--title",
+            "the value needs a test",
+        ],
+    );
+    let observation_id = observation["observationId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("observation id: {observation}"))
+        .to_owned();
+    fixture.assess(
+        REVIEWER,
+        REVIEW_TRACK,
+        &revision_of(&observed),
+        "accepted",
+        &["--observation", &observation_id],
+    );
+
+    fixture.build_derived();
+    fixture
+}
+
+/// The document without the four fields that name its basis.
+fn without_basis_fields(mut document: Value) -> Value {
+    let provenance = document["provenance"]
+        .as_object_mut()
+        .expect("provenance block");
+    for key in ["basis", "eventSetHash", "projectionStamp", "computedAt"] {
+        provenance.remove(key);
+    }
+    document
+}
+
+/// Every file under `root`, relative to it, with the hash of its bytes.
+fn files_under(root: &Path) -> std::collections::BTreeMap<String, String> {
+    fn walk_files(dir: &Path, root: &Path, files: &mut std::collections::BTreeMap<String, String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("store entry").path();
+            if path.is_dir() {
+                walk_files(&path, root, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root)
+                        .expect("path under root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    sha256_hex(&std::fs::read(&path).expect("read store file")),
+                );
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    walk_files(root, root, &mut files);
+    files
+}
+
+/// Files any derived read may leave beside the generation it served from: the
+/// reader's generation lease and SQLite's write-ahead index pair. Neither holds a
+/// fact or a projection row.
+fn is_derived_reader_residue(path: &str) -> bool {
+    (path.starts_with("derived.generation-lease-") && path.ends_with(".lock"))
+        || (path.starts_with("derived/generations/")
+            && (path.ends_with("/cursor.sqlite3-shm") || path.ends_with("/cursor.sqlite3-wal")))
+}
+
+#[test]
+fn summary_show_projection_and_fact_set_documents_agree_outside_the_basis() {
+    let fixture = parity_fixture();
+
+    for extra in [&[][..], &["--receipt", "entries"][..]] {
+        let fact_set = fixture.summary_with_access("off", extra);
+        let projection = fixture.summary_with_access(DERIVED_ACTIVE, extra);
+        assert_success(&fact_set);
+        assert_success(&projection);
+        assert!(
+            projection.stderr.is_empty(),
+            "a current generation answers without a hint:\n{}",
+            String::from_utf8_lossy(&projection.stderr)
+        );
+        let fact_set = parse_json(&fact_set.stdout);
+        let projection = parse_json(&projection.stdout);
+
+        assert_eq!(fact_set["provenance"]["basis"], "factSet");
+        assert!(fact_set["provenance"]["eventSetHash"].is_string());
+        assert!(fact_set["provenance"].get("projectionStamp").is_none());
+        assert_eq!(projection["provenance"]["basis"], "projection");
+        assert!(projection["provenance"]["projectionStamp"].is_string());
+        assert!(projection["provenance"].get("eventSetHash").is_none());
+        assert_eq!(
+            projection["provenance"]["countedInputs"]["digest"],
+            fact_set["provenance"]["countedInputs"]["digest"]
+        );
+        assert_eq!(
+            without_basis_fields(projection),
+            without_basis_fields(fact_set),
+            "receipt detail {extra:?}"
+        );
+    }
+}
+
+#[test]
+fn summary_show_without_a_built_generation_falls_back_with_one_hint_per_process() {
+    let store = CheckStore::new();
+
+    for _ in 0..2 {
+        let output = store.summary_with_access(DERIVED_ACTIVE, &[]);
+        assert_success(&output);
+        let json = parse_json(&output.stdout);
+        assert_eq!(json["provenance"]["basis"], "factSet");
+        assert!(json["provenance"]["eventSetHash"].is_string());
+        assert!(json["provenance"].get("projectionStamp").is_none());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.matches(DERIVED_HINT).count(), 1, "{stderr}");
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    }
+}
+
+#[test]
+fn summary_show_with_derived_access_off_reads_facts_without_a_hint() {
+    let store = CheckStore::new();
+    store.build_derived();
+
+    let output = store.summary_with_access("off", &[]);
+
+    assert_success(&output);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(parse_json(&output.stdout)["provenance"]["basis"], "factSet");
+}
+
+#[test]
+fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved() {
+    let store = CheckStore::new();
+    store.build_derived();
+    let root = common_dir_store(store.repo.path());
+    let before = files_under(&root);
+
+    let first = store.summary_with_access(DERIVED_ACTIVE, &["--receipt", "entries"]);
+    let second = store.summary_with_access(DERIVED_ACTIVE, &[]);
+
+    assert_success(&first);
+    assert_success(&second);
+    let after = files_under(&root);
+    for (path, hash) in &before {
+        assert_eq!(after.get(path), Some(hash), "{path} is unchanged");
+    }
+    let added = after
+        .keys()
+        .filter(|path| !before.contains_key(*path))
+        .collect::<Vec<_>>();
+    assert!(
+        added.iter().all(|path| is_derived_reader_residue(path)),
+        "the summary adds no fact, artifact, or projection file: {added:?}"
+    );
+    let first = parse_json(&first.stdout);
+    let second = parse_json(&second.stdout);
+    assert_eq!(first["provenance"]["basis"], "projection");
+    assert_eq!(
+        first["provenance"]["projectionStamp"],
+        second["provenance"]["projectionStamp"]
+    );
+    let generations = std::fs::read_dir(root.join("derived/generations"))
+        .expect("generations")
+        .map(|entry| entry.expect("generation").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 1, "one published generation");
+    let applied: i64 = rusqlite::Connection::open(generations[0].join("cursor.sqlite3"))
+        .expect("open generation")
+        .query_row(
+            "SELECT applied_sequence FROM locator_checkpoint WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("applied sequence");
+    assert_eq!(
+        Some(applied),
+        first["provenance"]["eventCount"].as_i64(),
+        "the generation still applies exactly the events it was built over"
+    );
+}
+
+/// Apply `sql` to the store's one published derived generation, as damage to the
+/// index would, and fold the change into the database file.
+fn tamper_with_the_generation(store: &CheckStore, sql: &str) -> usize {
+    let root = common_dir_store(store.repo.path());
+    let generations = std::fs::read_dir(root.join("derived/generations"))
+        .expect("generations")
+        .map(|entry| entry.expect("generation").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 1, "one published generation");
+    let connection =
+        rusqlite::Connection::open(generations[0].join("cursor.sqlite3")).expect("open generation");
+    let rewritten = connection.execute(sql, []).expect("rewrite the index");
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .expect("checkpoint");
+    rewritten
+}
+
+#[test]
+fn summary_show_fails_when_a_counted_row_disagrees_with_its_recorded_payload() {
+    let store = CheckStore::new();
+    store.build_derived();
+    let rewritten = tamper_with_the_generation(
+        &store,
+        "UPDATE locator_event SET payload_hash = zeroblob(32)
+         WHERE sequence = (SELECT sequence FROM product_revision LIMIT 1)",
+    );
+    assert_eq!(rewritten, 1);
+
+    let output = store.summary_with_access(DERIVED_ACTIVE, &[]);
+
+    assert!(
+        !output.status.success(),
+        "a disagreeing counted row fails the read instead of falling back:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("does not match"), "{stderr}");
+    assert!(!stderr.contains(DERIVED_HINT), "{stderr}");
+}
+
+#[test]
+fn summary_show_fails_when_a_counted_verdict_row_disagrees_with_its_recorded_event() {
+    let store = CheckStore::new();
+    store.build_derived();
+    // The carrier and its payload hash stay intact; only the indexed verdict moves.
+    let rewritten = tamper_with_the_generation(
+        &store,
+        "UPDATE semantic_assessment_fact SET assessment = 'needs_changes'
+         WHERE assessment = 'accepted'",
+    );
+    assert_eq!(rewritten, 1);
+
+    let projection = store.summary_with_access(DERIVED_ACTIVE, &["--receipt", "entries"]);
+    let fact_set = store.summary_with_access("off", &["--receipt", "entries"]);
+
+    assert!(
+        !projection.status.success(),
+        "a counted row that disagrees with its recorded event fails the read:\n{}",
+        String::from_utf8_lossy(&projection.stdout)
+    );
+    assert!(projection.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&projection.stderr);
+    assert!(
+        stderr.contains("disagrees with its recorded event"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(DERIVED_HINT), "{stderr}");
+    assert_success(&fact_set);
+    assert_eq!(
+        parse_json(&fact_set.stdout)["reviewRounds"]["firstCapture"]["accepted"],
+        1,
+        "the recorded facts are intact"
+    );
+}

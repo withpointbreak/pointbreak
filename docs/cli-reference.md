@@ -29,8 +29,8 @@ is a command with multiple authority lanes: it may expose mutually exclusive sof
 fields within one version when the command documents every alternative and the selected identity is
 unambiguous by field presence. Consumers of such a command must accept the documented identity
 union rather than requiring one lane's field. `eventSetHash` (authoritative journal reads) and
-`projectionStamp` (derived reads) are that pair on the history, attention, and bounded revision-list
-documents. Raw event files,
+`projectionStamp` (derived reads) are that pair on the history, attention, bounded revision-list, and
+review summary documents. Raw event files,
 artifact paths, and event filenames are internal storage details unless a
 command explicitly returns them.
 
@@ -715,8 +715,9 @@ publishes authoritative loose truth once and reports derived degradation, leavin
 for a later `build` or `rebuild`. Inspector is the interactive exception: it starts one asynchronous first
 build while keeping the shell and explicit authoritative fallback available.
 
-When the derived profile is active and current, output-bounded `history` pages, `attention list`, and
-explicitly bounded `revision list --limit` pages use it without enumerating the event directory. These
+When the derived profile is active and current, output-bounded `history` pages, `attention list`,
+explicitly bounded `revision list --limit` pages, and `summary show` use it without enumerating the event
+directory. These
 commands keep their domain document schemas and expose `projectionStamp` instead of pretending that the
 bounded freshness identity is an `eventSetHash`. An absent or unusable generation falls back to the
 authoritative journal for that invocation and prints one `store derived status|build` hint. Unbounded,
@@ -1308,9 +1309,16 @@ branch (`provedLanding` in associations). This read does not walk the integratio
 each rung is `unavailable` with reason `integrationRefNotWalked` (and `signingKeysNotRead` on
 `distinctIdentity`). The two blocks share no field name.
 
-**`provenance`.** `basis` is `factSet`: the summary was computed from the store's facts, identified by
-`eventSetHash` and `eventCount`. `metricDefinitions` names the definitions above; `computedAt` is when
-the read ran.
+**`provenance`.** `basis` says which read answered. When the derived profile is active and current, the
+summary is read from it: `basis` is `projection` and `projectionStamp` names that local index snapshot.
+The stamp identifies disposable local state, not the facts counted. Otherwise `basis` is `factSet` and
+`eventSetHash` identifies the store's facts; with the derived profile active but its generation absent,
+rebuilding, catching up, or moved during the read, the command prints one `pointbreak store derived build`
+hint per store and process and still succeeds. The read never builds or catches up the generation. On
+either basis the figures are the same and the receipt below is computed from the counted facts' recorded
+bytes, each re-read from its stored record, so it means the same thing on both. `eventCount` is the number
+of facts the read covered; `metricDefinitions` names the definitions above; `computedAt` is when the read
+ran.
 
 **Counted-input receipt.** `provenance.countedInputs` names exactly the facts the measures consumed for
 the counted population: the membership claims of counted Changes and the withdrawals naming them, the

@@ -26,7 +26,7 @@ pub(crate) struct CountedEventRef {
 }
 
 /// One membership claim placing a Revision in a Change.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MembershipClaimInput {
     pub(crate) source: CountedEventRef,
     pub(crate) claim_id: String,
@@ -38,14 +38,14 @@ pub(crate) struct MembershipClaimInput {
 }
 
 /// One withdrawal of a membership claim.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MembershipWithdrawalInput {
     pub(crate) source: CountedEventRef,
     pub(crate) claim_id: String,
 }
 
 /// One capture proposing a Revision.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CaptureInput {
     pub(crate) source: CountedEventRef,
     pub(crate) revision_id: String,
@@ -57,7 +57,7 @@ pub(crate) struct CaptureInput {
 }
 
 /// One recorded assessment.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AssessmentInput {
     pub(crate) source: CountedEventRef,
     pub(crate) assessment_id: String,
@@ -70,14 +70,14 @@ pub(crate) struct AssessmentInput {
 }
 
 /// One commit association recorded on a Revision.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommitAssociationInput {
     pub(crate) source: CountedEventRef,
     pub(crate) revision_id: String,
 }
 
 /// Everything the summary reads, in lane-neutral rows.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ReviewSummaryInputs {
     pub(crate) memberships: Vec<MembershipClaimInput>,
     pub(crate) withdrawals: Vec<MembershipWithdrawalInput>,

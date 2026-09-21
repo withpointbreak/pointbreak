@@ -40,6 +40,24 @@ pub fn review_summary_document(
     review_summary_document_with_identity(result, None, include_entries, computed_at)
 }
 
+/// Build the `pointbreak.review-summary` document from a summary read over a
+/// derived generation. `projection_stamp` names that local generation and binds
+/// no event content; the receipt is computed from the counted events' recorded
+/// bytes either way.
+pub fn derived_review_summary_document(
+    result: &ReviewSummaryResult,
+    projection_stamp: String,
+    include_entries: bool,
+    computed_at: String,
+) -> DiagnosticDocument<ReviewSummaryBody> {
+    review_summary_document_with_identity(
+        result,
+        Some(projection_stamp),
+        include_entries,
+        computed_at,
+    )
+}
+
 fn review_summary_document_with_identity(
     result: &ReviewSummaryResult,
     projection_stamp: Option<String>,
