@@ -502,7 +502,7 @@ refuses an Ephemeral-mode worktree and a sensitivity-`block` worktree unless exp
 refuses a slug already stamped for a different family, warns (without blocking) on a sync-managed
 filesystem path, and warns — advisory only — when the clone shares no git history with the family it
 is joining. It then folds the clone-local history forward by default, optionally retiring the source
-after a verified fold, and flips the local binding last. When a worktree writes to its clone-local
+after a verified fold (see [Source Retirement](#source-retirement)), and flips the local binding last. When a worktree writes to its clone-local
 store while a sibling worktree of the same clone is linked, `pointbreak store status` and `pointbreak capture`
 surface a one-line advisory pointing at `pointbreak store link <slug>` — the split is signalled, never
 silent. `pointbreak store unlink` detaches the clone back to clone-local, moving no data. `pointbreak store forget <slug>` is the whole-store destructive verb,
@@ -544,6 +544,53 @@ control.
   linking the same family at the same instant can lose one entry to the race; that is accepted
   (liveness is always re-derived on demand from the bidirectional check, so a lost entry is a missed
   listing, never corruption) rather than solved with a new lockfile.
+
+## Source Retirement
+
+`pointbreak store link --retire-source`, and the `link_store_to_family` library workflow with
+`with_retire_source(true)`, remove the clone-local store after folding it into the family store. That
+removal is the only step in the fold that deletes anything, and it deletes by proof, not by directory:
+
+- **Only verified files.** After the fold, an independent walk of the source's `events/` and
+  `artifacts/` checks each file against the destination — artifacts by content, events by content
+  ignoring the ingest-provenance stamp the fold adds (the reason folded unsigned removals must be
+  re-issued; see [User-Level Family Store Tier](#user-level-family-store-tier)). Retirement unlinks
+  exactly the files that walk proved present, one at a time, plus disposable rebuildable data: a
+  store-root `state.json`, in-flight `*.tmp` files, and the derived-access entries. It never deletes
+  recursively and removes a directory only once it is empty. Event files go last, so an interrupted
+  retire still looks like a populated store and completes when rerun.
+- **The lock file stays.** Retirement keeps the store directory and its `authority.writer.lock`.
+  Deleting a lock file that another Pointbreak process has open would let that process and a newcomer
+  each lock a different file at the same path, so both would believe they had the store to
+  themselves. A leftover directory holding only that lock file is therefore an expected side effect
+  of retirement; it holds no review data, is safe to ignore, and can be removed by hand when no
+  Pointbreak process is using it. `sourceRetired` is `true` when nothing else remains.
+- **Busy stores refuse.** Before the fold reads the source, retirement takes the source store's
+  existing authority lock without waiting and holds it until deletion ends. While another Pointbreak
+  writer holds that store, the command fails with an error whose message begins `source_busy;` and
+  changes nothing.
+- **Unknown entries refuse.** A store-root entry retirement does not verify — `operations/` is the
+  known case — or a symbolic link anywhere in the source fails the command before anything is
+  deleted, naming the entry. The fold has already run and stays (it is idempotent), but the clone is
+  not registered with the family or bound to it.
+- **Late files are kept.** A record file that appears while retirement is checking is not in the
+  verified set, so nothing at all is deleted; `sourceRetired` is `false` and a
+  `source_retirement_residue` diagnostic asks for a rerun, which folds the new record and then
+  retires. Content that no record in the source refers to is never folded, so a rerun keeps failing
+  verification — still deleting nothing — until that file is dealt with by hand. A content file that
+  appears later still, while deletion is under way, is kept too, but can leave a content-only
+  remainder that a later link skips as an empty store; inspect it by hand.
+
+Limits of the current contract:
+
+- Verification proves presence **at verification time**. The destination is not locked, so do not run
+  destination maintenance — notably `pointbreak store forget` of the family — during a retire.
+- The lock excludes Pointbreak writers only. A tool that writes store files without Pointbreak is not
+  excluded, but its files are still never deleted unverified.
+- A process that chose the clone-local store before retirement and writes after it — including one
+  that waited for the retire to finish — writes into the retained (or recreated) clone-local store.
+  After a link, such a record is not visible through the family store until the clone-local store is
+  folded again.
 
 ## Content Removal and Compaction
 

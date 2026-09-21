@@ -12,6 +12,7 @@ mod read_context;
 pub(in crate::session) mod resolution;
 pub(in crate::session) mod sensitivity;
 pub(in crate::session) mod sensitivity_config;
+pub(in crate::session) mod source_retirement;
 pub(in crate::session) mod store_config;
 pub(in crate::session) mod store_init;
 pub(in crate::session) mod user_level;

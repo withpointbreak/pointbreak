@@ -96,6 +96,17 @@ review-fact command; passing a task-attempt request id to `respond_input_request
 domain-boundary error. A future task-attempt response writer that wants cross-worktree validation can
 route through the same `resolve_write_validation_store` seam — it is domain-agnostic.
 
+### Store maintenance — `pointbreak::session`
+
+`link_store_to_family` with `StoreLinkOptions::with_retire_source(true)` carries the same retirement
+guarantees as `pointbreak store link --retire-source` (see
+[storage-model.md](storage-model.md#source-retirement)): it deletes only verified files, never
+deletes recursively, and keeps the store directory with its authority lock file; `source_retired` is
+true when nothing else remains. A busy source is reported the same way the CLI reports it, as an error whose text
+starts with `source_busy;`; kept late files arrive as a `source_retirement_residue` entry in the
+result's `diagnostics` with `source_retired` false. The CLI's store-capability refusal is policy, not
+the safety mechanism: the retirement guarantees above do not depend on it.
+
 ### Event signatures — `pointbreak::session` / `pointbreak::crypto`
 
 Per-event Ed25519 signatures are optional. Unsigned events remain valid and continue to omit
