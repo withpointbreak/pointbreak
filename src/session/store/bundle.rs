@@ -368,10 +368,14 @@ pub(crate) fn preview_import_store_bundle(
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceSubsetVerification {
     pub verified_events: usize,
     pub verified_artifacts: usize,
+    /// Store-relative paths (`events/…`, `artifacts/…`) this verification proved
+    /// present in the target, in enumeration order. It is the only set a
+    /// retirement may unlink.
+    pub verified_relative_paths: Vec<PathBuf>,
 }
 
 /// Independently re-verify, from disk, that everything durable in
@@ -421,6 +425,7 @@ pub(crate) fn verify_source_subset_of_target(
 
     let mut verified_events = 0usize;
     let mut verified_artifacts = 0usize;
+    let mut verified_relative_paths = Vec::with_capacity(relative_paths.len());
     let mut divergences: Vec<String> = Vec::new();
     for relative in &relative_paths {
         let source_bytes = std::fs::read(source_store_dir.join(relative)).map_err(|error| {
@@ -434,6 +439,7 @@ pub(crate) fn verify_source_subset_of_target(
                 Ok(target_bytes) => {
                     if events_match_modulo_ingest_stamp(&source_bytes, &target_bytes)? {
                         verified_events += 1;
+                        verified_relative_paths.push(relative.clone());
                     } else {
                         divergences.push(format!("{} diverges", store_relative_display(relative)));
                     }
@@ -453,6 +459,7 @@ pub(crate) fn verify_source_subset_of_target(
             }
         } else if target_artifact_hashes.contains(&sha256_bytes_hex(&source_bytes)) {
             verified_artifacts += 1;
+            verified_relative_paths.push(relative.clone());
         } else {
             divergences.push(format!(
                 "{} is missing in the target",
@@ -465,6 +472,7 @@ pub(crate) fn verify_source_subset_of_target(
         return Ok(SourceSubsetVerification {
             verified_events,
             verified_artifacts,
+            verified_relative_paths,
         });
     }
     let shown = divergences.iter().take(3).cloned().collect::<Vec<_>>();
@@ -2167,6 +2175,46 @@ mod tests {
             error.to_string().contains("state.json"),
             "names the file: {error}"
         );
+    }
+
+    #[test]
+    fn verify_source_subset_returns_exactly_the_paths_it_verified() {
+        let (_repo, source, _target_root, target) = imported_pair();
+        fs::write(source.join("events/.shore-write.fresh.tmp"), "in flight").unwrap();
+        fs::write(source.join("state.json"), "{}").unwrap();
+
+        let verification = verify_source_subset_of_target(&source, &target).unwrap();
+
+        let mut expected = Vec::new();
+        for top in ["events", "artifacts"] {
+            collect_files_for_test(&source.join(top), Path::new(top), &mut expected);
+        }
+        expected.retain(|path| !path.to_string_lossy().ends_with(".tmp"));
+        expected.sort();
+        let mut verified = verification.verified_relative_paths.clone();
+        verified.sort();
+        assert_eq!(verified, expected);
+        assert_eq!(
+            verification.verified_relative_paths.len(),
+            verification.verified_events + verification.verified_artifacts
+        );
+        assert!(verification.verified_events >= 1);
+        assert!(verification.verified_artifacts >= 1);
+    }
+
+    fn collect_files_for_test(dir: &Path, relative: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            let child = relative.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                collect_files_for_test(&entry.path(), &child, out);
+            } else {
+                out.push(child);
+            }
+        }
     }
 
     #[test]
