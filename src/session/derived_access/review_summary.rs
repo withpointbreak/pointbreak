@@ -67,6 +67,14 @@ impl DerivedReviewSummaryRead {
         self.event_count
     }
 
+    /// The same read pinned one sequence behind the checkpoint it was taken at,
+    /// as a read is once its generation has moved on.
+    #[cfg(test)]
+    fn pinned_behind_for_test(mut self) -> Self {
+        self.as_of = TruthCursor::new(self.as_of.epoch, self.as_of.sequence - 1);
+        self
+    }
+
     /// Envelopes for exactly these event ids, in request order, validated from
     /// their authoritative carriers as of the checkpoint the inputs were read at.
     pub(crate) fn hydrate_counted(&self, event_ids: &[String]) -> Result<CountedEnvelopes, String> {
@@ -781,20 +789,10 @@ mod tests {
     #[test]
     fn a_snapshot_that_moves_before_hydration_is_stale_not_partial() {
         let fixture = SummaryStore::new(true);
-        let read = fixture.ready();
-        let lifecycle = fixture.access.lifecycle().expect("active lifecycle");
-        let coordinator =
-            crate::session::derived_access::writer::DerivedWriteCoordinator::new(lifecycle.clone())
-                .expect("admit writer");
-        let governed =
-            EventStore::from_backend(&StoreBackend::Local(fixture._temp.path().to_path_buf()))
-                .with_coordinator(coordinator);
-        assert_eq!(
-            governed
-                .record_event_once(&capture(&rev("d4"), "2026-06-05T00:00:00Z"))
-                .expect("governed append"),
-            EventWriteOutcome::Created
-        );
+        // A governed append does not reliably advance a generation this read
+        // holds open (on Windows it does not), so the read is pinned behind the
+        // generation's checkpoint instead of racing a writer.
+        let read = fixture.ready().pinned_behind_for_test();
 
         let outcome = read
             .hydrate_counted(&[fixture.events[1].event_id.as_str().to_owned()])

@@ -1593,6 +1593,64 @@ fn is_derived_reader_residue(path: &str) -> bool {
             && (path.ends_with("/cursor.sqlite3-shm") || path.ends_with("/cursor.sqlite3-wal")))
 }
 
+/// The generation's SQLite files. SQLite may fold its own write-ahead log into
+/// the database file when a connection closes (it does on Windows), so these are
+/// compared by content through [`generation_fingerprint`], not by bytes.
+fn is_generation_database(path: &str) -> bool {
+    path.starts_with("derived/generations/")
+        && [
+            "/cursor.sqlite3",
+            "/cursor.sqlite3-wal",
+            "/cursor.sqlite3-shm",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+/// The directory of the store's one published derived generation.
+fn the_generation(store: &CheckStore) -> std::path::PathBuf {
+    let root = common_dir_store(store.repo.path());
+    let generations = std::fs::read_dir(root.join("derived/generations"))
+        .expect("generations")
+        .map(|entry| entry.expect("generation").path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(generations.len(), 1, "one published generation");
+    generations.into_iter().next().expect("one generation")
+}
+
+/// The generation's checkpoint and the size of every table the summary reads.
+fn generation_fingerprint(store: &CheckStore) -> Vec<i64> {
+    let connection = rusqlite::Connection::open(the_generation(store).join("cursor.sqlite3"))
+        .expect("open generation");
+    let mut fingerprint = connection
+        .query_row(
+            "SELECT epoch, applied_sequence, observed_sequence FROM locator_checkpoint
+             WHERE singleton = 1",
+            [],
+            |row| Ok(vec![row.get(0)?, row.get(1)?, row.get(2)?]),
+        )
+        .expect("generation checkpoint");
+    for table in [
+        "locator_event",
+        "semantic_event_fact",
+        "product_revision",
+        "product_history_membership_claim",
+        "product_history_membership_withdrawal",
+        "semantic_assessment_fact",
+        "semantic_commit_association_fact",
+    ] {
+        fingerprint.push(
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("table size"),
+        );
+    }
+    fingerprint
+}
+
 #[test]
 fn summary_show_projection_and_fact_set_documents_agree_outside_the_basis() {
     let fixture = parity_fixture();
@@ -1666,6 +1724,7 @@ fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved
     let store = CheckStore::new();
     store.build_derived();
     let root = common_dir_store(store.repo.path());
+    let generation_before = generation_fingerprint(&store);
     let before = files_under(&root);
 
     let first = store.summary_with_access(DERIVED_ACTIVE, &["--receipt", "entries"]);
@@ -1674,7 +1733,10 @@ fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved
     assert_success(&first);
     assert_success(&second);
     let after = files_under(&root);
-    for (path, hash) in &before {
+    for (path, hash) in before
+        .iter()
+        .filter(|(path, _)| !is_generation_database(path))
+    {
         assert_eq!(after.get(path), Some(hash), "{path} is unchanged");
     }
     let added = after
@@ -1692,22 +1754,13 @@ fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved
         first["provenance"]["projectionStamp"],
         second["provenance"]["projectionStamp"]
     );
-    let generations = std::fs::read_dir(root.join("derived/generations"))
-        .expect("generations")
-        .map(|entry| entry.expect("generation").path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    assert_eq!(generations.len(), 1, "one published generation");
-    let applied: i64 = rusqlite::Connection::open(generations[0].join("cursor.sqlite3"))
-        .expect("open generation")
-        .query_row(
-            "SELECT applied_sequence FROM locator_checkpoint WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("applied sequence");
+    let generation_after = generation_fingerprint(&store);
     assert_eq!(
-        Some(applied),
+        generation_after, generation_before,
+        "the generation's checkpoint and tables are unchanged"
+    );
+    assert_eq!(
+        Some(generation_after[1]),
         first["provenance"]["eventCount"].as_i64(),
         "the generation still applies exactly the events it was built over"
     );
@@ -1716,15 +1769,8 @@ fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved
 /// Apply `sql` to the store's one published derived generation, as damage to the
 /// index would, and fold the change into the database file.
 fn tamper_with_the_generation(store: &CheckStore, sql: &str) -> usize {
-    let root = common_dir_store(store.repo.path());
-    let generations = std::fs::read_dir(root.join("derived/generations"))
-        .expect("generations")
-        .map(|entry| entry.expect("generation").path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    assert_eq!(generations.len(), 1, "one published generation");
-    let connection =
-        rusqlite::Connection::open(generations[0].join("cursor.sqlite3")).expect("open generation");
+    let connection = rusqlite::Connection::open(the_generation(store).join("cursor.sqlite3"))
+        .expect("open generation");
     let rewritten = connection.execute(sql, []).expect("rewrite the index");
     connection
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
