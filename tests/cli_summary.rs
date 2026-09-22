@@ -1811,9 +1811,20 @@ fn summary_show_on_a_projection_writes_nothing_and_leaves_the_generation_unmoved
         second["provenance"]["projectionStamp"]
     );
     let generation = open_the_generation(&store);
+    let generation_after = generation_contents(&generation);
+    let changed = generation_before
+        .iter()
+        .zip(&generation_after)
+        .filter(|(before, after)| before != after)
+        .map(|((table, before), (_, after))| {
+            let removed = before.iter().filter(|row| !after.contains(row));
+            let added = after.iter().filter(|row| !before.contains(row));
+            format!("{table}: removed {removed:?} added {added:?}")
+        })
+        .collect::<Vec<_>>();
     assert!(
-        generation_contents(&generation) == generation_before,
-        "the generation's schema and every table row are unchanged"
+        changed.is_empty() && generation_after.len() == generation_before.len(),
+        "the generation's schema and every table row are unchanged: {changed:#?}"
     );
     assert_eq!(
         Some(generation_applied_sequence(&generation)),
