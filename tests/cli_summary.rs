@@ -1626,6 +1626,12 @@ fn open_the_generation(store: &CheckStore) -> rusqlite::Connection {
 
 /// The generation's logical content: its schema, then every row of every table,
 /// each table's rows sorted, independent of how SQLite lays out its files.
+///
+/// One column is left out: `cursor_meta.authority_stamp_json`, the runtime's
+/// record of where it last observed the store's own change journal. A reader
+/// may refresh that stamp after confirming the truth head is unchanged (it does
+/// on Windows, where the stamp carries an NTFS journal position). It describes
+/// the store, not the derived rows, and `head_sequence` beside it is compared.
 fn generation_contents(connection: &rusqlite::Connection) -> Vec<(String, Vec<String>)> {
     let mut schema = connection
         .prepare(
@@ -1655,11 +1661,17 @@ fn generation_contents(connection: &rusqlite::Connection) -> Vec<(String, Vec<St
         let mut statement = connection
             .prepare(&format!("SELECT * FROM \"{table}\""))
             .expect("select table");
-        let columns = statement.column_count();
+        let compared = (0..statement.column_count())
+            .filter(|&index| {
+                !(table == "cursor_meta"
+                    && statement.column_name(index).expect("column name") == "authority_stamp_json")
+            })
+            .collect::<Vec<_>>();
         let mut rows = statement
             .query_map([], |row| {
-                (0..columns)
-                    .map(|index| {
+                compared
+                    .iter()
+                    .map(|&index| {
                         row.get::<_, rusqlite::types::Value>(index)
                             .map(|value| format!("{value:?}"))
                     })
@@ -1695,6 +1707,16 @@ fn generation_contents_see_a_changed_cell_but_not_a_checkpoint() {
     connection
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .expect("checkpoint");
+    assert_eq!(generation_contents(&connection), built);
+
+    let restamped = connection
+        .execute(
+            "UPDATE cursor_meta SET authority_stamp_json = authority_stamp_json || ' '
+             WHERE singleton = 1",
+            [],
+        )
+        .expect("refresh the authority stamp");
+    assert_eq!(restamped, 1);
     assert_eq!(generation_contents(&connection), built);
 
     let changed = connection
