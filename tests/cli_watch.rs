@@ -20,7 +20,7 @@ use support::pointbreak;
 /// buffer in the background; killed on drop.
 struct Watcher {
     child: Child,
-    stdout: Arc<Mutex<String>>,
+    stdout: Arc<Mutex<Vec<u8>>>,
     _drain: thread::JoinHandle<()>,
 }
 
@@ -49,7 +49,7 @@ impl Watcher {
             .spawn()
             .expect("spawn pointbreak review history --watch");
 
-        let stdout = Arc::new(Mutex::new(String::new()));
+        let stdout = Arc::new(Mutex::new(Vec::new()));
         let mut child_stdout = child.stdout.take().expect("watcher stdout");
         let sink = Arc::clone(&stdout);
         let drain = thread::spawn(move || {
@@ -59,7 +59,7 @@ impl Watcher {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         if let Ok(mut guard) = sink.lock() {
-                            guard.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            guard.extend_from_slice(&buf[..n]);
                         }
                     }
                 }
@@ -73,12 +73,12 @@ impl Watcher {
         }
     }
 
-    /// Each render is one compact JSON document on its own line, so a render
-    /// count is the number of non-empty lines emitted so far.
+    /// Each render is one compact JSON document terminated by a newline, so a
+    /// render count is the number of complete non-empty lines emitted so far.
     fn render_count(&self) -> usize {
         self.stdout
             .lock()
-            .map(|guard| guard.lines().filter(|line| !line.trim().is_empty()).count())
+            .map(|guard| complete_lines(&guard).len())
             .unwrap_or(0)
     }
 
@@ -86,9 +86,8 @@ impl Watcher {
         self.stdout
             .lock()
             .map(|guard| {
-                guard
-                    .lines()
-                    .filter(|line| !line.trim().is_empty())
+                complete_lines(&guard)
+                    .iter()
                     .map(|line| serde_json::from_str(line).expect("watch render is JSON"))
                     .collect()
             })
@@ -220,4 +219,35 @@ fn render_titles(render: &Value) -> Vec<&str> {
         .iter()
         .map(|entry| entry["summary"]["title"].as_str().unwrap())
         .collect()
+}
+
+/// The complete (`\n`-terminated) lines in `buf`, each decoded as strict
+/// UTF-8. A trailing line without its newline is still being written and is
+/// not returned.
+fn complete_lines(buf: &[u8]) -> Vec<String> {
+    let mut lines: Vec<&[u8]> = buf.split(|&byte| byte == b'\n').collect();
+    // `split` yields the bytes after the last newline as a final segment: empty
+    // when `buf` ends in `\n`, otherwise a line still being written.
+    lines.pop();
+    lines
+        .into_iter()
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .map(|line| String::from_utf8(line.to_vec()).expect("watch render is UTF-8"))
+        .filter(|line| !line.trim().is_empty())
+        .collect()
+}
+
+#[test]
+fn complete_lines_ignores_a_trailing_partial_line() {
+    let buf = b"{\"a\":1}\n{\"a\":2}\n{\"a\":";
+    assert_eq!(complete_lines(buf), vec!["{\"a\":1}", "{\"a\":2}"]);
+}
+
+#[test]
+fn complete_lines_keeps_a_multibyte_character_split_across_reads() {
+    // "€" is E2 82 AC; the first read ends after E2.
+    let mut buf = b"{\"t\":\"\xE2".to_vec();
+    assert!(complete_lines(&buf).is_empty());
+    buf.extend_from_slice(b"\x82\xAC\"}\n");
+    assert_eq!(complete_lines(&buf), vec!["{\"t\":\"€\"}"]);
 }

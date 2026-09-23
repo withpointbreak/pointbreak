@@ -10,17 +10,18 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
+use std::{fmt, thread};
 
 use serde_json::Value;
 
 use super::git_repo::GitRepo;
 use super::pointbreak;
+use super::timing::{HANG_GUARD, poll_backoff};
 
 /// A repository plus a worktree on a fresh branch with one captured Revision.
 pub struct WorktreeCapture {
@@ -58,7 +59,7 @@ pub struct Inspector {
     addr: String,
     startup_output: String,
     bearer: Option<String>,
-    stderr: Arc<Mutex<String>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
     _stdout_drain: thread::JoinHandle<()>,
     _legacy_clone: Option<tempfile::TempDir>,
 }
@@ -206,10 +207,13 @@ impl Inspector {
             // developer shell happens to carry an explicit rollback selector.
             command.env_remove("POINTBREAK_DERIVED_ACCESS");
         }
+        // Surface derived-access worker warnings on stderr so a failure shows
+        // why background recovery stopped. A caller's own filter still wins.
+        command
+            .env("POINTBREAK_LOG", "pointbreak::session::derived_access=warn")
+            .env_remove("RUST_LOG");
         command.envs(env.iter().copied());
         let mut child = command
-            .env_remove("POINTBREAK_LOG")
-            .env_remove("RUST_LOG")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -217,18 +221,7 @@ impl Inspector {
 
         // Drain stderr in the background so it never blocks the server and is
         // available to explain a failure.
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let mut child_stderr = child.stderr.take().expect("inspector stderr");
-        {
-            let sink = Arc::clone(&stderr);
-            thread::spawn(move || {
-                let mut buffer = String::new();
-                let _ = child_stderr.read_to_string(&mut buffer);
-                if let Ok(mut guard) = sink.lock() {
-                    *guard = buffer;
-                }
-            });
-        }
+        let stderr = spawn_stderr_drain(child.stderr.take().expect("inspector stderr"));
 
         // Read the complete startup output for the selected mode, then keep
         // draining stdout so the server never stalls on a full pipe.
@@ -384,40 +377,65 @@ impl Inspector {
         assert!(status.contains("200 OK"), "{status}: {body}");
     }
 
+    /// Poll until the default reader is ready. Each tick sends one request,
+    /// alternating between the profile and status routes so that both exits
+    /// stay reachable, and backs off between ticks to bound connection churn.
     fn wait_for_default_derived_generation(&self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            // Activated Change stores intentionally do not build the legacy
-            // Revision-history sidecar. Their `/api/v2` reader is already the
-            // ready surface, so waiting for a generation that must remain
-            // absent would turn a contract failure into a misleading timeout.
-            if let Ok((_, body)) = self.try_get("/api/v2/profile")
-                && let Ok(profile) = serde_json::from_str::<Value>(&body)
-                && profile["availability"] == "ready"
-            {
-                return;
-            }
-            if let Ok((_, body)) = self.try_get("/api/derived-access/status")
-                && let Ok(status) = serde_json::from_str::<Value>(&body)
-            {
-                match status["availability"].as_str() {
-                    Some("current") => return,
-                    Some("rebuild_required" | "quarantined" | "unavailable")
-                        if status["rebuildInFlight"] != true =>
-                    {
-                        panic!("default derived generation failed to become current: {status}")
-                    }
-                    _ => {}
+        const PROFILE: &str = "/api/v2/profile";
+        const STATUS: &str = "/api/derived-access/status";
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        let mut last_profile: Option<Result<String, String>> = None;
+        let mut last_status: Option<Result<String, String>> = None;
+        for attempt in 0_u32.. {
+            if attempt % 2 == 0 {
+                // Activated Change stores intentionally do not build the legacy
+                // Revision-history sidecar. Their `/api/v2` reader is already the
+                // ready surface, so waiting for a generation that must remain
+                // absent would turn a contract failure into a misleading timeout.
+                let outcome = self.try_readiness_get(PROFILE);
+                if let Ok(body) = &outcome
+                    && let Ok(profile) = serde_json::from_str::<Value>(body)
+                    && profile["availability"] == "ready"
+                {
+                    return;
                 }
+                last_profile = Some(outcome);
+            } else {
+                let outcome = self.try_readiness_get(STATUS);
+                if let Ok(body) = &outcome
+                    && let Ok(status) = serde_json::from_str::<Value>(body)
+                {
+                    match status["availability"].as_str() {
+                        Some("current") => return,
+                        Some("rebuild_required" | "quarantined" | "unavailable")
+                            if status["rebuildInFlight"] != true =>
+                        {
+                            panic!("default derived generation failed to become current: {status}")
+                        }
+                        _ => {}
+                    }
+                }
+                last_status = Some(outcome);
             }
             if std::time::Instant::now() >= deadline {
                 panic!(
-                    "default derived generation did not become current; stderr: {}",
+                    "default derived generation did not become current within {HANG_GUARD:?}; last profile: {}; last status: {}; stderr: {}",
+                    readiness_outcome(&last_profile),
+                    readiness_outcome(&last_status),
                     drained(&self.stderr)
                 );
             }
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(poll_backoff(attempt));
         }
+    }
+
+    /// One readiness GET: the 200 body, or the transport or status failure as
+    /// text. Port exhaustion fails at once rather than polling on.
+    fn try_readiness_get(&self, path: &str) -> Result<String, String> {
+        self.try_get(path).map(|(_, body)| body).map_err(|error| {
+            self.fail_fast_on_port_exhaustion("GET", path, &error);
+            error.to_string()
+        })
     }
 
     pub fn get_json(&self, path: &str) -> Value {
@@ -428,17 +446,20 @@ impl Inspector {
     /// GET a path expected to succeed, returning the raw 200 response body.
     ///
     /// The inspector is a blocking HTTP/1.1 server that closes each connection
-    /// after responding. Under load (notably on Windows and Linux CI) the close can race
-    /// ahead of the client's read and surface as a connection reset before the
-    /// body is drained. GETs are idempotent, so retry a few times with a short
-    /// backoff before giving up.
+    /// after responding, and the client reads until that close. Under load
+    /// (notably on Windows and Linux CI) a request can still fail in transit, or
+    /// the route can answer with a transient non-200 status. GETs are
+    /// idempotent, so retry a few times with a short backoff before giving up.
+    /// Port exhaustion is the exception: it fails at once, because a retry
+    /// needs another port.
     pub fn get_text(&self, path: &str) -> String {
         let mut last_error = String::new();
         for attempt in 0..12 {
             match self.try_get(path) {
                 Ok((_, body)) => return body,
                 Err(error) => {
-                    last_error = error;
+                    self.fail_fast_on_port_exhaustion("GET", path, &error);
+                    last_error = error.to_string();
                     thread::sleep(Duration::from_millis(20 * (attempt + 1)));
                 }
             }
@@ -490,7 +511,8 @@ impl Inspector {
             match self.try_request(method, path, headers) {
                 Ok(response) => return response,
                 Err(error) => {
-                    last_error = error;
+                    self.fail_fast_on_port_exhaustion(method, path, &error);
+                    last_error = error.to_string();
                     thread::sleep(Duration::from_millis(20 * (attempt + 1)));
                 }
             }
@@ -501,13 +523,30 @@ impl Inspector {
         );
     }
 
+    /// Panic at once when the loopback ephemeral ports are exhausted. Every
+    /// retry would need another port, so retrying only deepens the exhaustion.
+    fn fail_fast_on_port_exhaustion(&self, method: &str, path: &str, error: &TransportError) {
+        if let TransportError::Io(error) = error
+            && is_port_exhaustion(error)
+        {
+            panic!(
+                "{method} {path}: loopback ephemeral ports exhausted (EADDRNOTAVAIL); not retrying — see #804; server stderr: {}",
+                drained(&self.stderr)
+            );
+        }
+    }
+
+    /// Send one request and read the response until the server closes the
+    /// connection. The request carries `Connection: close` and the client never
+    /// half-closes, so the server closes first and its side of the connection,
+    /// not a client ephemeral port, holds the TIME_WAIT state.
     fn try_request(
         &self,
         method: &str,
         path: &str,
         headers: &[(String, String)],
-    ) -> Result<(String, String), String> {
-        let mut stream = TcpStream::connect(&self.addr).map_err(|error| error.to_string())?;
+    ) -> Result<(String, String), TransportError> {
+        let mut stream = TcpStream::connect(&self.addr)?;
         let mut request = format!("{method} {path} HTTP/1.1\r\n");
         for (name, value) in headers {
             request.push_str(name);
@@ -516,18 +555,13 @@ impl Inspector {
             request.push_str("\r\n");
         }
         request.push_str("Connection: close\r\n\r\n");
-        stream
-            .write_all(request.as_bytes())
-            .map_err(|error| error.to_string())?;
-        let _ = stream.shutdown(Shutdown::Write);
+        stream.write_all(request.as_bytes())?;
         let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .map_err(|error| error.to_string())?;
+        stream.read_to_end(&mut response)?;
         let text = String::from_utf8_lossy(&response);
-        let (head, body) = text
-            .split_once("\r\n\r\n")
-            .ok_or_else(|| "response has no header/body delimiter".to_owned())?;
+        let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+            TransportError::Protocol("response has no header/body delimiter".to_owned())
+        })?;
         Ok((head.to_owned(), body.to_owned()))
     }
 
@@ -546,14 +580,14 @@ impl Inspector {
         head.lines().next().unwrap_or_default().to_owned()
     }
 
-    fn try_get(&self, path: &str) -> Result<(String, String), String> {
+    fn try_get(&self, path: &str) -> Result<(String, String), TransportError> {
         let (head, body) = self.try_request("GET", path, &self.default_headers())?;
         if !head.starts_with("HTTP/1.1 200") {
-            return Err(format!(
+            return Err(TransportError::Protocol(format!(
                 "unexpected status for {path}: {}; body: {}",
                 head.lines().next().unwrap_or_default(),
                 body
-            ));
+            )));
         }
         Ok((head, body))
     }
@@ -892,11 +926,76 @@ impl Drop for Inspector {
     }
 }
 
-/// Snapshot the background-captured server stderr, after a brief flush window so
-/// an early-exiting server's output has a chance to land.
-fn drained(stderr: &Arc<Mutex<String>>) -> String {
+/// Why one harness request failed.
+enum TransportError {
+    /// The socket failed. The error kind is kept so that port exhaustion can
+    /// fail fast instead of being retried.
+    Io(std::io::Error),
+    /// The server answered, but not with the expected response.
+    Protocol(String),
+}
+
+impl From<std::io::Error> for TransportError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(formatter),
+            Self::Protocol(message) => formatter.write_str(message),
+        }
+    }
+}
+
+/// A readiness route's last outcome, as shown in a timeout message.
+fn readiness_outcome(outcome: &Option<Result<String, String>>) -> String {
+    match outcome {
+        None => "no response yet".to_owned(),
+        Some(Ok(body)) => body.clone(),
+        Some(Err(error)) => format!("error: {error}"),
+    }
+}
+
+/// Whether a transport error means the loopback ephemeral port range is
+/// exhausted. Retrying cannot help, because each retry needs another port.
+pub fn is_port_exhaustion(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AddrNotAvailable
+}
+
+/// Drain a child's stderr on a background thread, appending each chunk to the
+/// returned buffer as it arrives, so the output is readable while the child
+/// is still running.
+pub fn spawn_stderr_drain(mut stderr: ChildStderr) -> Arc<Mutex<Vec<u8>>> {
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buffer);
+    thread::spawn(move || {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut guard) = sink.lock() {
+                        guard.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
+    buffer
+}
+
+/// Snapshot the background-captured server stderr, decoded for display only,
+/// after a brief flush window so an early-exiting server's output has a chance
+/// to land.
+fn drained(stderr: &Arc<Mutex<Vec<u8>>>) -> String {
     thread::sleep(Duration::from_millis(50));
-    stderr.lock().map(|guard| guard.clone()).unwrap_or_default()
+    stderr
+        .lock()
+        .map(|guard| String::from_utf8_lossy(&guard).into_owned())
+        .unwrap_or_default()
 }
 
 /// Run `pointbreak capture` against a repo, returning the captured Revision id.

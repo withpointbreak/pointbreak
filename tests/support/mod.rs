@@ -13,6 +13,8 @@ pub mod git_repo;
 pub mod inspect;
 #[allow(dead_code)]
 pub mod snapshots;
+#[allow(dead_code)]
+pub mod timing;
 mod write_acknowledgement;
 
 #[allow(dead_code)]

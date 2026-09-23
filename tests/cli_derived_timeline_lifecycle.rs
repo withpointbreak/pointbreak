@@ -342,10 +342,16 @@ fn timeline_trust_prepublication_failures_restore_authority() {
             .expect_err("post-stage fault must stop the diagnostic");
         match fault {
             DerivedTimelineInvalidSignatureDiagnosticFaultV1::AfterTrustStageIdentityRead => {
-                assert!(error.contains("injected post-stage identity read failure"));
+                assert!(
+                    error.contains("injected post-stage identity read failure"),
+                    "unexpected diagnostic error: {error}"
+                );
             }
             DerivedTimelineInvalidSignatureDiagnosticFaultV1::TrustStageReportsUnchangedIdentity => {
-                assert!(error.contains("Timeline trust stage did not change authority identity"));
+                assert!(
+                    error.contains("Timeline trust stage did not change authority identity"),
+                    "unexpected diagnostic error: {error}"
+                );
             }
             _ => unreachable!(),
         }

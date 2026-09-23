@@ -516,3 +516,89 @@ fn v2_elected_first_page_survives_a_later_derived_read_on_a_fresh_inspector() {
         );
     }
 }
+
+#[test]
+fn port_exhaustion_is_classified_by_error_kind() {
+    use std::io::{Error, ErrorKind};
+
+    assert!(support::inspect::is_port_exhaustion(&Error::from(
+        ErrorKind::AddrNotAvailable
+    )));
+    assert!(!support::inspect::is_port_exhaustion(&Error::from(
+        ErrorKind::ConnectionReset
+    )));
+    assert!(!support::inspect::is_port_exhaustion(&Error::from(
+        ErrorKind::ConnectionRefused
+    )));
+}
+
+#[test]
+fn poll_backoff_doubles_from_20ms_and_caps_at_250ms() {
+    let got: Vec<u64> = (0..7)
+        .map(|a| support::timing::poll_backoff(a).as_millis() as u64)
+        .collect();
+    assert_eq!(got, vec![20, 40, 80, 160, 250, 250, 250]);
+}
+
+/// Re-executed by `inspector_stderr_is_readable_while_the_server_runs` as a
+/// child that writes a marker to stderr and then stays alive until its stdin
+/// closes. Without the child environment variable it does nothing.
+#[test]
+fn stderr_drain_child_entrypoint() {
+    use std::io::{Read, Write};
+
+    if std::env::var("POINTBREAK_TEST_STDERR_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(b"stderr-drain-marker\n")
+        .expect("write the stderr marker");
+    stderr.flush().expect("flush the stderr marker");
+    drop(stderr);
+    let mut stdin = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut stdin)
+        .expect("read stdin until the parent closes it");
+}
+
+#[test]
+fn inspector_stderr_is_readable_while_the_server_runs() {
+    use std::process::{Command, Stdio};
+
+    use support::timing::HANG_GUARD;
+
+    let mut child = Command::new(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", "stderr_drain_child_entrypoint", "--nocapture"])
+        .env("POINTBREAK_TEST_STDERR_CHILD", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the stderr drain child");
+    let buffer = support::inspect::spawn_stderr_drain(child.stderr.take().expect("child stderr"));
+
+    let deadline = Instant::now() + HANG_GUARD;
+    loop {
+        let seen =
+            String::from_utf8_lossy(&buffer.lock().expect("stderr buffer lock")).into_owned();
+        if seen.contains("stderr-drain-marker") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!(
+                "stderr drain did not surface the child's marker within {HANG_GUARD:?}; buffer: {seen:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        child.try_wait().expect("poll the child").is_none(),
+        "the marker must be readable while the child is still running"
+    );
+
+    drop(child.stdin.take());
+    let status = child.wait().expect("wait for the child");
+    assert!(status.success(), "stderr drain child failed: {status}");
+}
