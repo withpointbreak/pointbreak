@@ -351,7 +351,7 @@ jobs:
           tool: just
       - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
-          tool: nextest@0.9.140
+          tool: nextest@0.9.146
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: ${{ runner.os == 'Windows' && 'windows-shards' || '' }}
@@ -403,7 +403,7 @@ jobs:
           tool: just
       - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
-          tool: nextest@0.9.140
+          tool: nextest@0.9.146
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: store-foundation-qualification
