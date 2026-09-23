@@ -430,10 +430,11 @@ impl Inspector {
     }
 
     /// One readiness GET: the 200 body, or the transport or status failure as
-    /// text. Port exhaustion fails at once rather than polling on.
+    /// text. Port exhaustion and a hung response fail at once rather than
+    /// polling on.
     fn try_readiness_get(&self, path: &str) -> Result<String, String> {
         self.try_get(path).map(|(_, body)| body).map_err(|error| {
-            self.fail_fast_on_port_exhaustion("GET", path, &error);
+            self.fail_fast_on_unretryable("GET", path, &error);
             error.to_string()
         })
     }
@@ -450,15 +451,15 @@ impl Inspector {
     /// (notably on Windows and Linux CI) a request can still fail in transit, or
     /// the route can answer with a transient non-200 status. GETs are
     /// idempotent, so retry a few times with a short backoff before giving up.
-    /// Port exhaustion is the exception: it fails at once, because a retry
-    /// needs another port.
+    /// Port exhaustion and a hung response are the exceptions: they fail at
+    /// once, because a retry needs another port or multiplies the wait.
     pub fn get_text(&self, path: &str) -> String {
         let mut last_error = String::new();
         for attempt in 0..12 {
             match self.try_get(path) {
                 Ok((_, body)) => return body,
                 Err(error) => {
-                    self.fail_fast_on_port_exhaustion("GET", path, &error);
+                    self.fail_fast_on_unretryable("GET", path, &error);
                     last_error = error.to_string();
                     thread::sleep(Duration::from_millis(20 * (attempt + 1)));
                 }
@@ -511,7 +512,7 @@ impl Inspector {
             match self.try_request(method, path, headers) {
                 Ok(response) => return response,
                 Err(error) => {
-                    self.fail_fast_on_port_exhaustion(method, path, &error);
+                    self.fail_fast_on_unretryable(method, path, &error);
                     last_error = error.to_string();
                     thread::sleep(Duration::from_millis(20 * (attempt + 1)));
                 }
@@ -523,46 +524,36 @@ impl Inspector {
         );
     }
 
-    /// Panic at once when the loopback ephemeral ports are exhausted. Every
-    /// retry would need another port, so retrying only deepens the exhaustion.
-    fn fail_fast_on_port_exhaustion(&self, method: &str, path: &str, error: &TransportError) {
-        if let TransportError::Io(error) = error
-            && is_port_exhaustion(error)
-        {
+    /// Panic at once on a transport failure that a retry cannot fix. When the
+    /// loopback ephemeral ports are exhausted, every retry would need another
+    /// port, so retrying only deepens the exhaustion. When a response did not
+    /// arrive within the request bound, retrying the hung route multiplies the
+    /// wait.
+    fn fail_fast_on_unretryable(&self, method: &str, path: &str, error: &TransportError) {
+        let TransportError::Io(error) = error else {
+            return;
+        };
+        if is_port_exhaustion(error) {
             panic!(
                 "{method} {path}: loopback ephemeral ports exhausted (EADDRNOTAVAIL); not retrying — see #804; server stderr: {}",
                 drained(&self.stderr)
             );
         }
+        if is_hung_response(error) {
+            panic!(
+                "{method} {path}: no response within {HANG_GUARD:?}; not retrying; server stderr: {}",
+                drained(&self.stderr)
+            );
+        }
     }
 
-    /// Send one request and read the response until the server closes the
-    /// connection. The request carries `Connection: close` and the client never
-    /// half-closes, so the server closes first and its side of the connection,
-    /// not a client ephemeral port, holds the TIME_WAIT state.
     fn try_request(
         &self,
         method: &str,
         path: &str,
         headers: &[(String, String)],
     ) -> Result<(String, String), TransportError> {
-        let mut stream = TcpStream::connect(&self.addr)?;
-        let mut request = format!("{method} {path} HTTP/1.1\r\n");
-        for (name, value) in headers {
-            request.push_str(name);
-            request.push_str(": ");
-            request.push_str(value);
-            request.push_str("\r\n");
-        }
-        request.push_str("Connection: close\r\n\r\n");
-        stream.write_all(request.as_bytes())?;
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response)?;
-        let text = String::from_utf8_lossy(&response);
-        let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
-            TransportError::Protocol("response has no header/body delimiter".to_owned())
-        })?;
-        Ok((head.to_owned(), body.to_owned()))
+        request_within(&self.addr, method, path, headers, HANG_GUARD)
     }
 
     fn default_headers(&self) -> Vec<(String, String)> {
@@ -927,7 +918,8 @@ impl Drop for Inspector {
 }
 
 /// Why one harness request failed.
-enum TransportError {
+#[derive(Debug)]
+pub enum TransportError {
     /// The socket failed. The error kind is kept so that port exhaustion can
     /// fail fast instead of being retried.
     Io(std::io::Error),
@@ -948,6 +940,50 @@ impl fmt::Display for TransportError {
             Self::Protocol(message) => formatter.write_str(message),
         }
     }
+}
+
+/// Send one request and read the response until the server closes the
+/// connection. The request carries `Connection: close` and the client never
+/// half-closes, so the server closes first and its side of the connection,
+/// not a client ephemeral port, holds the TIME_WAIT state. Each socket read
+/// and write is bounded, so a route that never answers fails instead of
+/// blocking the test.
+pub fn request_within(
+    addr: &str,
+    method: &str,
+    path: &str,
+    headers: &[(String, String)],
+    bound: Duration,
+) -> Result<(String, String), TransportError> {
+    let mut stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(bound))?;
+    stream.set_write_timeout(Some(bound))?;
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("Connection: close\r\n\r\n");
+    stream.write_all(request.as_bytes())?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let text = String::from_utf8_lossy(&response);
+    let (head, body) = text.split_once("\r\n\r\n").ok_or_else(|| {
+        TransportError::Protocol("response has no header/body delimiter".to_owned())
+    })?;
+    Ok((head.to_owned(), body.to_owned()))
+}
+
+/// Whether a transport error means the response did not arrive within the
+/// request's socket bound. A read timeout surfaces as `WouldBlock` on Unix
+/// and `TimedOut` on Windows.
+pub fn is_hung_response(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 /// A readiness route's last outcome, as shown in a timeout message.

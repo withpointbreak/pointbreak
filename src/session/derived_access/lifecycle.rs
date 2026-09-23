@@ -2417,6 +2417,7 @@ mod tests {
         CapabilityFixtureState, write_capability_fixture_for_test,
     };
     use crate::session::{EventStore, EventWriteOutcome};
+    use crate::test_timing::{HANG_GUARD, spawn_bounded};
 
     const CHANGE_READER_PROFILE_RESOURCE: &str = "change-reader-profile.json";
 
@@ -2736,12 +2737,10 @@ mod tests {
         assert!(lifecycle.rebuild_required_while_writer_idle().unwrap());
 
         let _writer_lock = StoreWriterLock::acquire(temp.path()).unwrap();
-        let started = std::time::Instant::now();
-        assert!(!lifecycle.rebuild_required_while_writer_idle().unwrap());
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "writer-idle confirmation must never wait behind an active writer"
-        );
+        let probe = lifecycle.clone();
+        let rebuild_required = spawn_bounded(move || probe.rebuild_required_while_writer_idle())
+            .wait("writer-idle confirmation waited behind the held writer lock");
+        assert!(!rebuild_required.unwrap());
     }
 
     #[test]
@@ -3503,7 +3502,7 @@ mod tests {
         let worker = lifecycle.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
+        let thread = spawn_bounded(move || {
             let mut reported = false;
             worker.rebuild(|progress| {
                 if !reported && progress.completed == 0 {
@@ -3514,17 +3513,28 @@ mod tests {
                 LifecycleControl::Continue
             })
         });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        started_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the rebuild did not report its first progress");
 
-        let status = lifecycle.status().unwrap();
+        let observer = lifecycle.clone();
+        let status = spawn_bounded(move || observer.status())
+            .wait("status waited behind the worker's writer lock")
+            .unwrap();
 
+        assert!(
+            !thread.is_finished(),
+            "status returned while the rebuild was still parked at its first progress report"
+        );
         assert_eq!(
             status.availability,
             DerivedAccessAvailability::Bootstrapping
         );
         assert_eq!((status.completed, status.total), (Some(0), Some(7)));
         release_tx.send(()).unwrap();
-        thread.join().unwrap().unwrap();
+        thread
+            .wait("the rebuild did not finish after release")
+            .unwrap();
     }
 
     #[test]
@@ -3566,7 +3576,7 @@ mod tests {
         let worker = lifecycle.clone();
         let (projection_tx, projection_rx) = mpsc::channel();
         let (continue_tx, continue_rx) = mpsc::channel();
-        let background = std::thread::spawn(move || {
+        let background = spawn_bounded(move || {
             let mut paused = false;
             worker.try_automatic_legacy_rebuild(|progress| {
                 if !paused
@@ -3580,19 +3590,33 @@ mod tests {
                 LifecycleControl::Continue
             })
         });
-        projection_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let authority = StoreAuthorityLock::acquire(temp.path()).unwrap();
+        projection_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the background rebuild did not reach projection population");
+        // The authority lock is reentrant only on its owning thread, so the
+        // rebuild that must wait for the lease acquires it on its own thread.
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let root = temp.path().to_path_buf();
+        let owner = lifecycle.clone();
+        let rebuild = spawn_bounded(move || {
+            let _authority = StoreAuthorityLock::acquire(&root).unwrap();
+            acquired_tx.send(()).unwrap();
+            owner.rebuild(|_| LifecycleControl::Continue)
+        });
+        acquired_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("authority lock was not acquired");
         let releaser = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
             continue_tx.send(()).unwrap();
         });
 
-        let receipt = lifecycle
-            .rebuild(|_| LifecycleControl::Continue)
+        let receipt = rebuild
+            .wait("the authority-owning rebuild never obtained the yielded lease")
             .expect("the authority-owning rebuild waits for the background lease");
 
         assert!(matches!(
-            background.join().unwrap(),
+            background.wait("the background rebuild did not finish after release"),
             Err(LifecycleError::RebuildBusy)
         ));
         assert_eq!(
@@ -3600,7 +3624,6 @@ mod tests {
             receipt.generation_id
         );
         releaser.join().unwrap();
-        drop(authority);
     }
 
     #[test]
@@ -3618,7 +3641,7 @@ mod tests {
                     PublicationBoundary::CandidateValidated => {
                         let acquired_tx = acquired_tx.clone();
                         let root = root.clone();
-                        contender = Some(std::thread::spawn(move || {
+                        contender = Some(spawn_bounded(move || {
                             let _authority = StoreAuthorityLock::acquire(&root).unwrap();
                             acquired_tx.send(()).unwrap();
                             let backend = StoreBackend::Local(root);
@@ -3646,8 +3669,12 @@ mod tests {
             )
             .unwrap();
 
-        acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        contender.unwrap().join().unwrap();
+        acquired_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("activation did not acquire authority after current publication");
+        contender
+            .unwrap()
+            .wait("the activation did not finish after current publication");
     }
 
     #[test]
@@ -3658,7 +3685,7 @@ mod tests {
         let worker = lifecycle.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
+        let thread = spawn_bounded(move || {
             worker.rebuild_with_hook(
                 |_| LifecycleControl::Continue,
                 |boundary| {
@@ -3669,20 +3696,24 @@ mod tests {
                 },
             )
         });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        started_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the rebuild did not reach GenerationPromoted");
         let observer = lifecycle.clone();
-        let (status_tx, status_rx) = mpsc::channel();
-        let status_thread = std::thread::spawn(move || status_tx.send(observer.status()).unwrap());
 
-        let status = status_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("status must not wait for the publication lock")
+        let status = spawn_bounded(move || observer.status())
+            .wait("status waited behind the held publication lock")
             .unwrap();
 
+        assert!(
+            !thread.is_finished(),
+            "status returned while generation publication was still parked at GenerationPromoted"
+        );
         assert_eq!(status.availability, DerivedAccessAvailability::Current);
         release_tx.send(()).unwrap();
-        status_thread.join().unwrap();
-        thread.join().unwrap().unwrap();
+        thread
+            .wait("the rebuild did not finish after release")
+            .unwrap();
     }
 
     #[test]
@@ -3692,7 +3723,7 @@ mod tests {
         let worker = lifecycle.clone();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
+        let thread = spawn_bounded(move || {
             let mut reported = false;
             worker.rebuild(|progress| {
                 if !reported && progress.completed == 0 {
@@ -3703,19 +3734,33 @@ mod tests {
                 LifecycleControl::Continue
             })
         });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        started_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the first rebuild did not report its first progress");
 
+        let second = lifecycle.clone();
         assert!(matches!(
-            lifecycle.rebuild(|_| LifecycleControl::Continue),
+            spawn_bounded(move || second.rebuild(|_| LifecycleControl::Continue))
+                .wait("the second rebuild waited instead of failing fast"),
             Err(LifecycleError::RebuildBusy)
         ));
+        let observer = lifecycle.clone();
         assert_eq!(
-            lifecycle.status().unwrap().availability,
+            spawn_bounded(move || observer.status())
+                .wait("status waited behind the parked rebuild")
+                .unwrap()
+                .availability,
             DerivedAccessAvailability::Bootstrapping
+        );
+        assert!(
+            !thread.is_finished(),
+            "the first rebuild left its first progress report before release"
         );
 
         release_tx.send(()).unwrap();
-        thread.join().unwrap().unwrap();
+        thread
+            .wait("the first rebuild did not finish after release")
+            .unwrap();
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::Current

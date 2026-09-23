@@ -757,6 +757,7 @@ mod tests {
     use crate::session::{
         AuthorityCursorV2, EventStore, EventVerificationPolicy, EventWriteOutcome, TrustSet,
     };
+    use crate::test_timing::{HANG_GUARD, spawn_bounded};
 
     type ProductAppendHook = Box<dyn FnMut(AppendCrashPoint)>;
 
@@ -851,36 +852,38 @@ mod tests {
         let (held_tx, held_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let first_root = root.path().to_path_buf();
-        let first = thread::spawn(move || {
+        let first = spawn_bounded(move || {
             let _hook = ProductAppendHookGuard::install(move |point| {
                 if point == AppendCrashPoint::AfterIntentCommit {
                     held_tx.send(()).unwrap();
-                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    release_rx.recv_timeout(HANG_GUARD).unwrap();
                 }
             });
             product_store(&first_root)
                 .record_change_event_once_acknowledged(&event(11))
                 .unwrap()
         });
-        held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        held_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the first append did not reach its intent commit");
         let (constructed_tx, constructed_rx) = mpsc::channel();
         let (publish_tx, publish_rx) = mpsc::channel();
         let second_root = root.path().to_path_buf();
-        let second = thread::spawn(move || {
+        let second = spawn_bounded(move || {
             let store = product_store(&second_root);
             constructed_tx.send(()).unwrap();
-            publish_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            publish_rx.recv_timeout(HANG_GUARD).unwrap();
             store
                 .record_change_event_once_acknowledged(&event(12))
                 .unwrap()
         });
         constructed_rx
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap();
+            .recv_timeout(HANG_GUARD)
+            .expect("the second product store was not constructed");
         release_tx.send(()).unwrap();
-        let first_ack = first.join().unwrap();
+        let first_ack = first.wait("the first append did not finish after release");
         publish_tx.send(()).unwrap();
-        let second_ack = second.join().unwrap();
+        let second_ack = second.wait("the second append did not finish after release");
         for (offset, ack) in [(1, first_ack), (2, second_ack)] {
             assert_eq!(ack.outcome, EventWriteOutcome::Created);
             assert_eq!(ack.derived.availability, Current);
@@ -1156,7 +1159,7 @@ mod tests {
         let (release_tx, release_rx) = mpsc::channel();
         let first_coordinator = coordinator.clone();
         let store_root = root.path().to_path_buf();
-        let first = thread::spawn(move || {
+        let first = spawn_bounded(move || {
             first_coordinator
                 .record_event_once_acknowledged_with_hook(
                     &event(0),
@@ -1164,20 +1167,33 @@ mod tests {
                     || EventStore::open(&store_root).record_event_once(&event(0)),
                     |_| {
                         entered_tx.send(()).unwrap();
-                        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        // Stay parked until the test releases it; a failing
+                        // test drops the sender, which unparks this call.
+                        release_rx.recv().unwrap();
                         Err("first call catch-up failure".into())
                     },
                 )
                 .unwrap()
         });
-        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let second = coordinator
-            .record_event_once_acknowledged(&event(1), || {
-                EventStore::open(root.path()).record_event_once(&event(1))
-            })
-            .unwrap();
+        entered_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the first call did not enter its catch-up");
+        let second_coordinator = Arc::clone(&coordinator);
+        let second_root = root.path().to_path_buf();
+        let second = spawn_bounded(move || {
+            second_coordinator
+                .record_event_once_acknowledged(&event(1), || {
+                    EventStore::open(&second_root).record_event_once(&event(1))
+                })
+                .unwrap()
+        })
+        .wait("the overlapping call waited behind the held catch-up writer lock");
+        assert!(
+            !first.is_finished(),
+            "the overlapping call returned while the first call was still parked in its catch-up"
+        );
         release_tx.send(()).unwrap();
-        let first = first.join().unwrap();
+        let first = first.wait("the first call did not finish after release");
         assert_eq!(first.derived.availability, CatchingUp);
         assert_eq!(first.derived.token.unwrap().head_sequence, 1);
         assert_eq!(first.diagnostics.len(), 1);
@@ -1281,17 +1297,17 @@ mod tests {
         // timeout releases it even if a regression starts waiting for this lock.
         let held = StoreWriterLock::acquire(root.path()).unwrap();
         let (result_tx, result_rx) = mpsc::channel();
-        let writer = thread::spawn(move || {
+        let writer = spawn_bounded(move || {
             let store = EventStore::open(&store_root).with_coordinator(coordinator);
             let outcome = store.record_event_once(&appended);
             result_tx
                 .send((outcome, store.take_write_diagnostics()))
                 .unwrap();
         });
-        let result = result_rx.recv_timeout(Duration::from_secs(5));
+        let result = result_rx.recv_timeout(HANG_GUARD);
         let published_while_busy = truth.event_exists(&idempotency_key).unwrap();
         drop(held);
-        writer.join().unwrap();
+        writer.wait("the product write did not finish after the writer lock was released");
 
         let (outcome, diagnostics) =
             result.expect("product truth publication must not require the derived lock");
@@ -1316,14 +1332,13 @@ mod tests {
         lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
         let coordinator = DerivedWriteCoordinator::new_for_qualification(lifecycle.clone())
             .expect("qualification writer admission");
-        let store = EventStore::open(root.path()).with_coordinator(coordinator);
         let appended = event(1);
 
         let (locked_tx, locked_rx) = mpsc::channel();
         let (observed_tx, observed_rx) = mpsc::channel();
         let store_root = root.path().to_path_buf();
         let idempotency_key = appended.idempotency_key.clone();
-        let holder = thread::spawn(move || {
+        let holder = spawn_bounded(move || {
             let writer_lock = StoreWriterLock::acquire(&store_root).unwrap();
             locked_tx.send(()).unwrap();
             thread::sleep(Duration::from_millis(40));
@@ -1336,25 +1351,34 @@ mod tests {
                 .unwrap();
             drop(writer_lock);
         });
-        locked_rx.recv().unwrap();
+        locked_rx
+            .recv_timeout(HANG_GUARD)
+            .expect("the holder did not take the writer lock");
 
-        assert_eq!(
-            store
+        // The store is not `Send`, so both qualification writes run on the
+        // bounded thread: the first waits for the busy writer, the second
+        // replays the same event.
+        let writer_root = root.path().to_path_buf();
+        let (created, replayed) = spawn_bounded(move || {
+            let store = EventStore::open(&writer_root).with_coordinator(coordinator);
+            let created = store
                 .record_event_once_for_qualification(&appended)
-                .unwrap(),
-            EventWriteOutcome::Created
-        );
+                .map_err(|error| error.to_string());
+            let replayed = store
+                .record_event_once_for_qualification(&appended)
+                .map_err(|error| error.to_string());
+            (created, replayed)
+        })
+        .wait("the qualification write did not finish after the busy writer released its lock");
+        assert_eq!(created.unwrap(), EventWriteOutcome::Created);
         assert!(
-            !observed_rx.recv().unwrap(),
+            !observed_rx
+                .recv_timeout(HANG_GUARD)
+                .expect("the holder did not report whether truth was published"),
             "qualification must not fall through to loose truth while the derived writer is busy"
         );
-        holder.join().unwrap();
-        assert_eq!(
-            store
-                .record_event_once_for_qualification(&appended)
-                .unwrap(),
-            EventWriteOutcome::Existing
-        );
+        holder.wait("the writer-lock holder did not finish");
+        assert_eq!(replayed.unwrap(), EventWriteOutcome::Existing);
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::Current
@@ -1855,11 +1879,15 @@ mod tests {
             })
         ));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while lifecycle.status().unwrap().availability != DerivedAccessAvailability::Current {
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        loop {
+            let status = lifecycle.status().unwrap();
+            if status.availability == DerivedAccessAvailability::Current {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
-                "maintenance worker did not resume the interrupted projection"
+                "maintenance worker did not resume the interrupted projection: {status:?}"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

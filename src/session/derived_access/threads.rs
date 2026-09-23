@@ -186,6 +186,7 @@ mod tests {
     use crate::session::{
         EventStore, EventWriteOutcome, SupersessionView, read_events_for_display,
     };
+    use crate::test_timing::HANG_GUARD;
 
     /// Keep checkpoint movement under the hook's control. A Ready read can
     /// otherwise schedule native-cursor maintenance that competes with the
@@ -591,15 +592,15 @@ mod tests {
             reader.join().expect("reader completes");
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         let threads = loop {
             match access.threads().expect("read current threads") {
                 DerivedThreadsRoute::Ready(threads) => break threads,
                 DerivedThreadsRoute::Unavailable(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                DerivedThreadsRoute::Unavailable(_) => {
-                    panic!("governed append should leave current threads available")
+                DerivedThreadsRoute::Unavailable(status) => {
+                    panic!("governed append should leave current threads available: {status:?}")
                 }
                 DerivedThreadsRoute::Off => panic!("active access switched off"),
             }
@@ -610,8 +611,8 @@ mod tests {
                 DerivedAttentionRoute::Unavailable(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                DerivedAttentionRoute::Unavailable(_) => {
-                    panic!("governed append should leave current attention available")
+                DerivedAttentionRoute::Unavailable(status) => {
+                    panic!("governed append should leave current attention available: {status:?}")
                 }
                 DerivedAttentionRoute::Off => panic!("active access switched off"),
             }

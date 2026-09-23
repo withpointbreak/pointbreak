@@ -75,7 +75,8 @@ impl BackgroundWorkerStage {
     }
 }
 
-// Failure-only test observation: low bytes hold stage and last rebuild retry;
+// Test-only observation, read by failure messages and by tests that wait for
+// the worker to reach a stage: low bytes hold stage and last rebuild retry;
 // the upper 48 bits count retry decisions, saturating rather than wrapping.
 // The worker is the sole writer between serialized starts. These relaxed
 // accesses never publish product state or participate in worker synchronization.
@@ -102,6 +103,10 @@ impl BackgroundWorkerDiagnostic {
             (count << 16) | ((stage as u64) << 8) | stage as u64,
             Ordering::Relaxed,
         );
+    }
+
+    fn current_stage(&self) -> &'static str {
+        BackgroundWorkerStage::label(self.0.load(Ordering::Relaxed) as u8)
     }
 
     fn snapshot(&self) -> String {
@@ -418,6 +423,13 @@ impl DerivedAccessRuntime {
     #[cfg(test)]
     pub(super) fn maintenance_in_flight(&self) -> bool {
         self.background_work_state.load(Ordering::Acquire) != BackgroundWorkState::Idle as u8
+    }
+
+    /// The background worker's current stage, for a test that must act only
+    /// once the worker has reached a particular stage.
+    #[cfg(test)]
+    pub(super) fn background_worker_stage(&self) -> &'static str {
+        self.background_worker_diagnostic.current_stage()
     }
 
     #[cfg(test)]

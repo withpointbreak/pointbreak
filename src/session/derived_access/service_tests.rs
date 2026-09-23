@@ -4,6 +4,7 @@ use super::product_contract::DerivedAccessProfile;
 use super::runtime::DerivedAccessRuntime;
 use super::service::{DerivedAccessHandle, DerivedAccessIoProbe};
 use super::sqlite::{CursorLedgerIdentity, SqliteCursorLedger};
+use crate::test_timing::spawn_bounded;
 
 fn dependency_line<'a>(dependencies: &'a str, name: &str) -> &'a str {
     dependencies
@@ -478,11 +479,9 @@ fn active_worker_lives_until_the_last_shared_facade_drops() {
     assert!(history.is_active());
     assert!(weak.upgrade().unwrap().maintenance_in_flight());
 
-    let started = std::time::Instant::now();
-    drop(history);
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(1),
-        "the last facade must cancel and join its blocked worker promptly"
+    spawn_bounded(move || drop(history)).wait(
+        "drop waited behind the held rebuild lease: \
+         the last facade must cancel and join its blocked worker promptly",
     );
     assert!(weak.upgrade().is_none());
 }

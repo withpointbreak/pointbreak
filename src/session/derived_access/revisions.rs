@@ -937,6 +937,7 @@ mod tests {
     use crate::session::{
         EventStore, EventWriteOutcome, RevisionFingerprint, read_bound_object_artifact,
     };
+    use crate::test_timing::HANG_GUARD;
 
     fn git(repo: &Path, args: &[&str]) {
         let status = Command::new("git")
@@ -2157,7 +2158,7 @@ mod tests {
         );
 
         let stale = RevisionPageRequest::new(Some(1), Some(&token)).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         let stale_route = loop {
             let route = access
                 .revisions_page(
@@ -2174,10 +2175,16 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        assert!(matches!(
-            stale_route,
-            DerivedRevisionPageRoute::RestartRequired
-        ));
+        match stale_route {
+            DerivedRevisionPageRoute::RestartRequired => {}
+            DerivedRevisionPageRoute::Unavailable(status) => {
+                panic!("stale continuation stayed unavailable: {status:?}")
+            }
+            DerivedRevisionPageRoute::Ready(_) => {
+                panic!("stale continuation served a page instead of requiring a restart")
+            }
+            DerivedRevisionPageRoute::Off => panic!("active access switched off"),
+        }
         let complete_request = RevisionPageRequest::new(Some(500), None).unwrap();
         let DerivedRevisionPageRoute::Ready(restarted) = access
             .revisions_page(

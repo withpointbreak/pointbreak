@@ -1657,6 +1657,7 @@ mod tests {
     use crate::session::store::resolution::resolve_store;
     use crate::session::workflow::history_base_from_events;
     use crate::session::{EventStore, EventWriteOutcome, apply_history_query, count_new_since};
+    use crate::test_timing::{HANG_GUARD, spawn_bounded};
 
     fn active_history(event_count: usize) -> (TempDir, DerivedHistoryAccess) {
         active_history_from_events((0..event_count).map(review_initialized).collect::<Vec<_>>())
@@ -2098,7 +2099,7 @@ mod tests {
 
     fn wait_for_background_rebuild(access: &DerivedHistoryAccess, context: &str) {
         let started = std::time::Instant::now();
-        let deadline = started + std::time::Duration::from_secs(30);
+        let deadline = started + HANG_GUARD;
         while access.maintenance_in_flight() {
             access
                 .runtime
@@ -2108,7 +2109,7 @@ mod tests {
     }
 
     fn wait_for_current_generation(access: &DerivedHistoryAccess, context: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             match access.current().unwrap() {
                 CurrentRead::Ready(_) => return,
@@ -2160,7 +2161,7 @@ mod tests {
 
         access.start_background_rebuild().unwrap();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             match access.current().unwrap() {
                 CurrentRead::Ready(_) => break,
@@ -2524,7 +2525,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(rebuild_lease);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             match access.current().unwrap() {
                 CurrentRead::Ready(_) => break,
@@ -2659,11 +2660,9 @@ mod tests {
         let _rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
         access.start_background_rebuild().unwrap();
 
-        let started = std::time::Instant::now();
-        drop(access);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "drop interrupts retry sleep and joins promptly"
+        spawn_bounded(move || drop(access)).wait(
+            "drop waited behind the held rebuild lease: \
+             drop interrupts retry sleep and joins promptly",
         );
     }
 
@@ -2676,15 +2675,31 @@ mod tests {
         let _writer_lock = StoreWriterLock::acquire(temp.path()).unwrap();
 
         access.restart_background_rebuild().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Cancel only once the worker is confirming writer idleness against the
+        // held lock, so the cancellation interrupts that confirmation.
+        let deadline = std::time::Instant::now() + HANG_GUARD;
+        loop {
+            let stage = access.runtime.background_worker_stage();
+            if matches!(stage, "rebuild_confirmation" | "waiting_for_writer") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker did not reach writer-busy confirmation within {HANG_GUARD:?}; last stage: {stage}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(access.maintenance_in_flight());
 
-        let started = std::time::Instant::now();
-        access.cancel_background_rebuild().unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "cancel must interrupt writer-busy confirmation without waiting for the writer"
+        let (result, access) = spawn_bounded(move || {
+            let result = access.cancel_background_rebuild();
+            (result, access)
+        })
+        .wait(
+            "cancel waited behind the held writer lock: \
+             cancel must interrupt writer-busy confirmation without waiting for the writer",
         );
+        result.unwrap();
         assert!(!access.maintenance_in_flight());
         assert!(access.rebuild_worker_joined());
     }
@@ -2698,12 +2713,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(access.maintenance_in_flight());
 
-        let started = std::time::Instant::now();
-        access.cancel_background_rebuild().unwrap();
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "cancel must not wait for bootstrap writer admission"
+        let (result, access) = spawn_bounded(move || {
+            let result = access.cancel_background_rebuild();
+            (result, access)
+        })
+        .wait(
+            "cancel waited behind the held writer lock: \
+             cancel must not wait for bootstrap writer admission",
         );
+        result.unwrap();
         assert!(!access.maintenance_in_flight());
         assert!(access.rebuild_worker_joined());
     }
@@ -3078,7 +3096,7 @@ mod tests {
             DerivedHistoryAvailability::RebuildRequired
         );
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             match access.freshness().unwrap() {
                 DerivedHistoryRoute::Ready(freshness) => {

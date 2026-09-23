@@ -28,3 +28,6 @@ mod test_tracing;
 
 #[cfg(test)]
 mod test_fixtures;
+
+#[cfg(test)]
+mod test_timing;

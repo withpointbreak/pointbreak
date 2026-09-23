@@ -608,6 +608,7 @@ mod tests {
         DerivedStorageDiscovery, DerivedStorageLayout, DerivedStorageNamespace,
         DerivedStorageTransition,
     };
+    use crate::test_timing::HANG_GUARD;
 
     #[test]
     fn absent_store_selects_stable_paths_without_creating_them() {
@@ -1037,11 +1038,11 @@ mod tests {
     }
 
     fn wait_for_path(path: &Path) {
-        let started = Instant::now();
+        let deadline = Instant::now() + HANG_GUARD;
         while !path.exists() {
             assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "timed out waiting for {}",
+                Instant::now() < deadline,
+                "{} did not appear within {HANG_GUARD:?}",
                 path.display()
             );
             std::thread::sleep(Duration::from_millis(10));

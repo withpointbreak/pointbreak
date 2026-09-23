@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use support::git_repo::GitRepo;
 use support::inspect::{Inspector, capture, legacy_reader_clone, urlencode};
+use support::timing::HANG_GUARD;
 
 fn assert_revision_page_parity(active: &serde_json::Value, authoritative: &serde_json::Value) {
     for field in [
@@ -162,7 +163,7 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     );
     assert!(retry_head.contains("200 OK"), "{retry_head}: {retry_body}");
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     let history = loop {
         let (status, body) = inspector.raw_get("/api/history");
         if status.contains("200 OK") {
@@ -198,7 +199,7 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         }
         assert!(
             Instant::now() < deadline,
-            "active first start never published: {body}"
+            "active first start never published within {HANG_GUARD:?}: {status}: {body}; last progress: {progress_body}"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -245,7 +246,7 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     capture(repo.path());
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     loop {
         let (status, body) = inspector.raw_get("/api/history");
         if status.contains("200 OK") {
@@ -259,7 +260,7 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         );
         assert!(
             Instant::now() < deadline,
-            "same Inspector process never rebuilt after an out-of-band append: {body}"
+            "same Inspector process never rebuilt after an out-of-band append within {HANG_GUARD:?}: {status}: {body}"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -283,7 +284,7 @@ fn active_and_authoritative_revision_routes_match_across_page_boundaries() {
         repo.path(),
         &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")],
     );
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + HANG_GUARD;
     let active_first = loop {
         let (status, body) = inspector.raw_get("/api/revisions?limit=1");
         if status.contains("200 OK") {
@@ -296,7 +297,7 @@ fn active_and_authoritative_revision_routes_match_across_page_boundaries() {
         );
         assert!(
             Instant::now() < deadline,
-            "active revision page never became available: {body}"
+            "active revision page never became available within {HANG_GUARD:?}: {status}: {body}"
         );
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -533,6 +534,63 @@ fn port_exhaustion_is_classified_by_error_kind() {
 }
 
 #[test]
+fn harness_request_fails_fast_when_a_route_never_responds() {
+    use std::io::{Error, ErrorKind};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    use support::inspect::{TransportError, is_hung_response, request_within};
+
+    assert!(is_hung_response(&Error::from(ErrorKind::WouldBlock)));
+    assert!(is_hung_response(&Error::from(ErrorKind::TimedOut)));
+    assert!(!is_hung_response(&Error::from(ErrorKind::ConnectionReset)));
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a silent listener");
+    let addr = listener.local_addr().expect("listener address").to_string();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (connection, _) = listener.accept().expect("accept the harness request");
+        // Hold the connection open without writing until the test is done.
+        let _ = release_rx.recv();
+        drop(connection);
+    });
+
+    let (outcome_tx, outcome_rx) = mpsc::channel();
+    let client_addr = addr.clone();
+    std::thread::spawn(move || {
+        let headers = vec![("Host".to_owned(), client_addr.clone())];
+        let outcome = request_within(
+            &client_addr,
+            "GET",
+            "/never-responds",
+            &headers,
+            Duration::from_millis(100),
+        );
+        let _ = outcome_tx.send(outcome);
+    });
+    let outcome = match outcome_rx.recv_timeout(HANG_GUARD) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the request waited behind the held connection past {HANG_GUARD:?}")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the request thread ended without an outcome")
+        }
+    };
+
+    match outcome {
+        Err(TransportError::Io(error)) => assert!(
+            is_hung_response(&error),
+            "a silent route is a hung response, got {:?}: {error}",
+            error.kind()
+        ),
+        other => panic!("a silent route must fail with a socket timeout, got {other:?}"),
+    }
+    drop(release_tx);
+    server.join().expect("silent listener thread");
+}
+
+#[test]
 fn poll_backoff_doubles_from_20ms_and_caps_at_250ms() {
     let got: Vec<u64> = (0..7)
         .map(|a| support::timing::poll_backoff(a).as_millis() as u64)
@@ -565,8 +623,6 @@ fn stderr_drain_child_entrypoint() {
 #[test]
 fn inspector_stderr_is_readable_while_the_server_runs() {
     use std::process::{Command, Stdio};
-
-    use support::timing::HANG_GUARD;
 
     let mut child = Command::new(std::env::current_exe().expect("test binary path"))
         .args(["--exact", "stderr_drain_child_entrypoint", "--nocapture"])

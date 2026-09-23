@@ -2162,6 +2162,10 @@ mod tests {
 
     use super::*;
 
+    /// Upper bound for a test's wait on progress it expects to happen. Only a real
+    /// hang should reach it, so a loaded host passes and a deadlock still fails.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
     #[test]
     fn qualification_cli_control_binary_attests_clean_source() {
         if let Ok(expected_commit) =
@@ -2836,7 +2840,7 @@ mod tests {
             "pointbreak.inspect-derived-access-status"
         );
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         let published = loop {
             let body = status_document(&fixture.state);
             if body["availability"] == "current" && body["rebuildInFlight"] == false {
@@ -4627,7 +4631,7 @@ mod tests {
                 .success()
         );
         let state = Arc::new(InspectState::new(repo.path().to_path_buf()).unwrap());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + HANG_GUARD;
         loop {
             let status = route(&state, true, "GET", "/api/derived-access/status", None);
             assert_eq!(status.status, "200 OK");
@@ -5021,7 +5025,6 @@ mod tests {
     #[test]
     fn change_reader_cache_slow_timeline_does_not_block_warm_changes() {
         use std::sync::{Arc, mpsc};
-        use std::time::Duration;
 
         let repo = tempfile::tempdir().expect("mixed-scope cache test repository");
         assert!(
@@ -5078,7 +5081,7 @@ mod tests {
                 .expect("blocked Timeline builds from the warm generation")
         });
         timeline_started_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(HANG_GUARD)
             .expect("Timeline construction reached its deliberate gate");
 
         let (changes_done_tx, changes_done_rx) = mpsc::channel();
@@ -5098,7 +5101,7 @@ mod tests {
                 .expect("report completed Changes hit");
         });
         let concurrent_presentation = changes_done_rx
-            .recv_timeout(Duration::from_secs(10))
+            .recv_timeout(HANG_GUARD)
             .expect("warm Changes hit must finish before Timeline is released")
             .expect("concurrent Changes presentation exists");
         assert!(Arc::ptr_eq(&warmed_presentation, &concurrent_presentation));
@@ -5211,7 +5214,6 @@ mod tests {
     fn change_reader_cache_older_timeline_cannot_overwrite_newer_cached_generation() {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::{Arc, mpsc};
-        use std::time::Duration;
 
         let repo = tempfile::tempdir().expect("Timeline generation-order test repository");
         assert!(
@@ -5263,7 +5265,7 @@ mod tests {
         });
         assert_eq!(
             old_base_rx
-                .recv_timeout(Duration::from_secs(10))
+                .recv_timeout(HANG_GUARD)
                 .expect("older Timeline captured its base before advancing"),
             41
         );
@@ -5938,7 +5940,6 @@ mod tests {
     #[test]
     fn authoritative_fallback_permit_spans_the_builder_lifetime() {
         use std::sync::{Arc, mpsc};
-        use std::time::Duration;
 
         let gate = Arc::new(AuthoritativeFallbackGate::new());
         let (started_tx, started_rx) = mpsc::channel();
@@ -5952,7 +5953,7 @@ mod tests {
                 "built"
             });
             started_rx
-                .recv_timeout(Duration::from_secs(10))
+                .recv_timeout(HANG_GUARD)
                 .expect("builder acquired the permit");
             assert!(
                 gate.try_acquire().is_none(),
