@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::fs_retry::{is_transient_sharing_violation, rename_with_sharing_retry};
 use super::layout::DerivedStorageLayout;
 use super::product_contract::DerivedAccessProfile;
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -174,6 +175,8 @@ pub(crate) enum GenerationError {
     GenerationInUse,
     #[error("the current derived generation changed repeatedly while opening")]
     PublicationUnstable,
+    #[error("derived root at {path} is in use: {message}")]
+    RootInUse { path: PathBuf, message: String },
 }
 
 impl GenerationLayout {
@@ -394,7 +397,7 @@ impl GenerationLayout {
         // a generation, so this rename cannot replace a competing progress row.
         write_new_synced(&temporary, &bytes)?;
         before_publish(&temporary);
-        if let Err(error) = std::fs::rename(&temporary, &published) {
+        if let Err(error) = rename_with_sharing_retry(&temporary, &published) {
             let _ = std::fs::remove_file(&temporary);
             return Err(io_error(&temporary, error));
         }
@@ -497,7 +500,8 @@ impl GenerationLayout {
         validate_generation_id(generation_id)?;
         let staging = self.staging(generation_id);
         let generation = self.generation(generation_id);
-        std::fs::rename(&staging, &generation).map_err(|error| io_error(&staging, error))?;
+        rename_with_sharing_retry(&staging, &generation)
+            .map_err(|error| io_error(&staging, error))?;
         Ok(generation)
     }
 
@@ -518,7 +522,8 @@ impl GenerationLayout {
         ));
         let published = self.root.join("publications").join(name);
         write_new_synced(&temporary, &bytes)?;
-        std::fs::rename(&temporary, &published).map_err(|error| io_error(&temporary, error))?;
+        rename_with_sharing_retry(&temporary, &published)
+            .map_err(|error| io_error(&temporary, error))?;
         Ok(published)
     }
 
@@ -781,7 +786,8 @@ impl GenerationLayout {
             std::process::id(),
             UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::rename(&self.root, &destination).map_err(|error| io_error(&self.root, error))?;
+        rename_with_sharing_retry(&self.root, &destination)
+            .map_err(|error| root_rename_error(&self.root, error))?;
         Ok(destination)
     }
 
@@ -794,7 +800,8 @@ impl GenerationLayout {
             std::process::id(),
             UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::rename(&self.root, &destination).map_err(|error| io_error(&self.root, error))?;
+        rename_with_sharing_retry(&self.root, &destination)
+            .map_err(|error| root_rename_error(&self.root, error))?;
         Ok(Some(destination))
     }
 
@@ -1105,6 +1112,19 @@ fn io_error(path: &Path, error: std::io::Error) -> GenerationError {
     GenerationError::Io {
         path: path.to_path_buf(),
         message: error.to_string(),
+    }
+}
+
+/// A root rename that still meets a sharing violation after its retries is
+/// reported as in use, so recovery can defer instead of failing.
+fn root_rename_error(path: &Path, error: std::io::Error) -> GenerationError {
+    if is_transient_sharing_violation(&error) {
+        GenerationError::RootInUse {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }
+    } else {
+        io_error(path, error)
     }
 }
 

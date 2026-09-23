@@ -95,6 +95,13 @@ pub(crate) struct LifecycleStatus {
     pub(crate) elapsed_ms: Option<u64>,
     pub(crate) estimated_remaining_ms: Option<u64>,
     pub(crate) detail: Option<String>,
+    /// Invalid state was found but could not be moved aside yet. Recovery
+    /// retries the classifier instead of rebuilding over it.
+    pub(crate) recovery_deferred: bool,
+    /// Unavailable because of a failure that should clear on its own, such
+    /// as derived or authoritative I/O. Recovery classifies again before it
+    /// rebuilds a generation that may still be valid.
+    pub(crate) transient_failure: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -298,13 +305,7 @@ impl DerivedAccessLifecycle {
         };
         let staging_progress = match self.staging_progress() {
             Ok(progress) => progress,
-            Err(error) => {
-                return Ok(status(
-                    DerivedAccessAvailability::Unavailable,
-                    None,
-                    Some(error.to_string()),
-                ));
-            }
+            Err(error) => return Ok(unavailable_after(&error, None)),
         };
         let Some(publication) = publication else {
             let availability = if staging_progress.is_some() {
@@ -325,6 +326,8 @@ impl DerivedAccessLifecycle {
                 estimated_remaining_ms: staging_progress
                     .and_then(|progress| progress.estimated_remaining_ms),
                 detail: None,
+                recovery_deferred: false,
+                transient_failure: false,
             });
         };
         if let Some(progress) = staging_progress {
@@ -338,6 +341,8 @@ impl DerivedAccessLifecycle {
                 elapsed_ms: Some(progress.elapsed_ms),
                 estimated_remaining_ms: progress.estimated_remaining_ms,
                 detail: Some("current generation remains readable during rebuild".to_owned()),
+                recovery_deferred: false,
+                transient_failure: false,
             });
         }
         let stable_publication = match self.stable_current_publication() {
@@ -418,11 +423,7 @@ impl DerivedAccessLifecycle {
                     Some(detail),
                 )),
                 LifecycleError::Validation(detail) => self.invalid_status(detail, allow_quarantine),
-                error => Ok(status(
-                    DerivedAccessAvailability::Unavailable,
-                    Some(publication.generation_id),
-                    Some(error.to_string()),
-                )),
+                error => Ok(unavailable_after(&error, Some(publication.generation_id))),
             };
         }
         let authority =
@@ -436,11 +437,7 @@ impl DerivedAccessLifecycle {
                     ));
                 }
                 Err(error) => {
-                    return Ok(status(
-                        DerivedAccessAvailability::Unavailable,
-                        Some(publication.generation_id),
-                        Some(error.to_string()),
-                    ));
+                    return Ok(unavailable_after(&error, Some(publication.generation_id)));
                 }
             };
         if let Err(error) = validate_published(
@@ -474,11 +471,12 @@ impl DerivedAccessLifecycle {
     pub(crate) fn try_automatic_legacy_rebuild(
         &self,
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+        hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
         self.rebuild_with_execution(
             BOOTSTRAP_PROJECTION_BATCH,
             progress,
-            |_| {},
+            hook,
             RebuildExecution::Background {
                 suppress_after_activation: true,
             },
@@ -488,11 +486,12 @@ impl DerivedAccessLifecycle {
     pub(crate) fn try_explicit_background_rebuild(
         &self,
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+        hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
         self.rebuild_with_execution(
             BOOTSTRAP_PROJECTION_BATCH,
             progress,
-            |_| {},
+            hook,
             RebuildExecution::Background {
                 suppress_after_activation: false,
             },
@@ -1566,6 +1565,14 @@ impl DerivedAccessLifecycle {
     }
 
     fn quarantine_status(&self, reason: String) -> Result<LifecycleStatus, LifecycleError> {
+        self.quarantine_status_with(&reason, |reason| self.paths.quarantine(reason))
+    }
+
+    fn quarantine_status_with(
+        &self,
+        reason: &str,
+        quarantine: impl FnOnce(&str) -> Result<PathBuf, GenerationError>,
+    ) -> Result<LifecycleStatus, LifecycleError> {
         match StoreWriterLock::try_acquire(&self.store_root) {
             Ok(_lock) => {
                 // The observation that led here was made without the writer
@@ -1578,13 +1585,27 @@ impl DerivedAccessLifecycle {
                 if observed.availability != DerivedAccessAvailability::Quarantined {
                     return Ok(observed);
                 }
-                let confirmed_reason = observed.detail.unwrap_or(reason);
-                self.paths.quarantine(&confirmed_reason)?;
-                Ok(status(
-                    DerivedAccessAvailability::Quarantined,
-                    None,
-                    Some(confirmed_reason),
-                ))
+                let confirmed_reason = observed.detail.unwrap_or_else(|| reason.to_owned());
+                match quarantine(&confirmed_reason) {
+                    Ok(_) => Ok(status(
+                        DerivedAccessAvailability::Quarantined,
+                        None,
+                        Some(confirmed_reason),
+                    )),
+                    // Another holder still has a file open inside the root.
+                    // Report the deferral so recovery classifies again later.
+                    Err(GenerationError::RootInUse { message, .. }) => Ok(LifecycleStatus {
+                        recovery_deferred: true,
+                        ..status(
+                            DerivedAccessAvailability::Unavailable,
+                            None,
+                            Some(format!(
+                                "invalid state awaits quarantine: derived root is in use ({message})"
+                            )),
+                        )
+                    }),
+                    Err(error) => Err(error.into()),
+                }
             }
             Err(WriterLockError::Busy) => Ok(status(
                 DerivedAccessAvailability::Unavailable,
@@ -1626,11 +1647,7 @@ impl DerivedAccessLifecycle {
         } else if generation_error_requires_quarantine(&error) {
             self.invalid_status(error.to_string(), allow_quarantine)
         } else {
-            Ok(status(
-                DerivedAccessAvailability::Unavailable,
-                None,
-                Some(error.to_string()),
-            ))
+            Ok(unavailable_after(&error.into(), None))
         }
     }
 
@@ -1642,11 +1659,7 @@ impl DerivedAccessLifecycle {
         if lifecycle_error_requires_quarantine(&error) {
             self.invalid_status(error.to_string(), allow_quarantine)
         } else {
-            Ok(status(
-                DerivedAccessAvailability::Unavailable,
-                None,
-                Some(error.to_string()),
-            ))
+            Ok(unavailable_after(&error, None))
         }
     }
 
@@ -2370,7 +2383,34 @@ fn status(
         elapsed_ms: None,
         estimated_remaining_ms: None,
         detail,
+        recovery_deferred: false,
+        transient_failure: false,
     }
+}
+
+/// Unavailable because of `error`, marked transient when it should clear on
+/// its own.
+fn unavailable_after(error: &LifecycleError, generation_id: Option<String>) -> LifecycleStatus {
+    LifecycleStatus {
+        transient_failure: is_transient_lifecycle_error(error),
+        ..status(
+            DerivedAccessAvailability::Unavailable,
+            generation_id,
+            Some(error.to_string()),
+        )
+    }
+}
+
+/// Failures that clear up on their own: I/O on the derived root or its locks,
+/// a root that another holder still has open, and derived or authoritative reads.
+pub(crate) fn is_transient_lifecycle_error(error: &LifecycleError) -> bool {
+    matches!(
+        error,
+        LifecycleError::Generation(GenerationError::Io { .. } | GenerationError::RootInUse { .. })
+            | LifecycleError::WriterLock(WriterLockError::Io { .. })
+            | LifecycleError::DerivedRead { .. }
+            | LifecycleError::Truth(_)
+    )
 }
 
 fn directory_has_entries(path: &Path) -> Result<bool, LifecycleError> {
@@ -3186,6 +3226,35 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_rename_in_use_is_a_typed_deferral() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        fs::write(generation.join("cursor.sqlite3"), b"not sqlite").unwrap();
+
+        let status = lifecycle
+            .quarantine_status_with("invalid database", |_| {
+                Err(GenerationError::RootInUse {
+                    path: lifecycle.paths().root().to_path_buf(),
+                    message: "The process cannot access the file (os error 32)".to_owned(),
+                })
+            })
+            .unwrap();
+
+        assert_eq!(status.availability, DerivedAccessAvailability::Unavailable);
+        assert!(status.recovery_deferred, "{status:?}");
+        assert!(
+            status.detail.as_deref().is_some_and(|detail| detail
+                .starts_with("invalid state awaits quarantine: derived root is in use")),
+            "{status:?}"
+        );
+        assert!(lifecycle.paths().root().exists());
+    }
+
+    #[test]
     fn active_off_active_preserves_the_published_generation() {
         let temp = populated_store(1);
         let active = active_lifecycle(temp.path());
@@ -3376,6 +3445,44 @@ mod tests {
     }
 
     #[test]
+    fn invalid_reader_receipt_is_moved_aside_by_the_recovery_classifier() {
+        let temp = valid_change_store();
+        let lifecycle = active_lifecycle(temp.path());
+        let built = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(built.generation_id.as_deref().unwrap());
+        fs::write(generation.join(CHANGE_READER_PROFILE_RESOURCE), b"{").unwrap();
+        let events_before = EventStore::open(temp.path()).list_events().unwrap();
+
+        // The recovery classifier opens the service before it finds the
+        // malformed receipt, then moves the whole root aside.
+        let status = lifecycle.status().unwrap();
+
+        assert_eq!(status.availability, DerivedAccessAvailability::Quarantined);
+        assert!(!lifecycle.paths().root().exists());
+        let quarantined = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(".quarantine-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+        let reason = fs::read_to_string(quarantined[0].join("quarantine-reason.txt")).unwrap();
+        assert!(
+            reason.starts_with("Change reader contract is invalid"),
+            "unexpected reason: {reason}"
+        );
+        assert_eq!(
+            EventStore::open(temp.path()).list_events().unwrap(),
+            events_before
+        );
+    }
+
+    #[test]
     fn fresh_process_valid_l2_restart_is_bounded_and_receipt_backed() {
         let temp = valid_change_store();
         active_lifecycle(temp.path())
@@ -3544,21 +3651,24 @@ mod tests {
         let backend = StoreBackend::Local(temp.path().to_path_buf());
         let mut activated = false;
 
-        let result = lifecycle.try_automatic_legacy_rebuild(|progress| {
-            if !activated
-                && progress.phase == GenerationProgressPhase::ProjectionPopulation
-                && progress.completed == 0
-            {
-                let _authority = StoreAuthorityLock::acquire(temp.path()).unwrap();
-                write_capability_fixture_for_test(
-                    backend.journal().as_ref(),
-                    CapabilityFixtureState::L2,
-                )
-                .unwrap();
-                activated = true;
-            }
-            LifecycleControl::Continue
-        });
+        let result = lifecycle.try_automatic_legacy_rebuild(
+            |progress| {
+                if !activated
+                    && progress.phase == GenerationProgressPhase::ProjectionPopulation
+                    && progress.completed == 0
+                {
+                    let _authority = StoreAuthorityLock::acquire(temp.path()).unwrap();
+                    write_capability_fixture_for_test(
+                        backend.journal().as_ref(),
+                        CapabilityFixtureState::L2,
+                    )
+                    .unwrap();
+                    activated = true;
+                }
+                LifecycleControl::Continue
+            },
+            |_| {},
+        );
 
         assert!(activated);
         assert!(matches!(
@@ -3578,17 +3688,20 @@ mod tests {
         let (continue_tx, continue_rx) = mpsc::channel();
         let background = spawn_bounded(move || {
             let mut paused = false;
-            worker.try_automatic_legacy_rebuild(|progress| {
-                if !paused
-                    && progress.phase == GenerationProgressPhase::ProjectionPopulation
-                    && progress.completed == 0
-                {
-                    paused = true;
-                    projection_tx.send(()).unwrap();
-                    continue_rx.recv().unwrap();
-                }
-                LifecycleControl::Continue
-            })
+            worker.try_automatic_legacy_rebuild(
+                |progress| {
+                    if !paused
+                        && progress.phase == GenerationProgressPhase::ProjectionPopulation
+                        && progress.completed == 0
+                    {
+                        paused = true;
+                        projection_tx.send(()).unwrap();
+                        continue_rx.recv().unwrap();
+                    }
+                    LifecycleControl::Continue
+                },
+                |_| {},
+            )
         });
         projection_rx
             .recv_timeout(HANG_GUARD)

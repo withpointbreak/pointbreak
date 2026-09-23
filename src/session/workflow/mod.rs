@@ -1450,6 +1450,7 @@ mod interaction_attribution_tests {
             repo.path(),
             &["config", "user.email", "pointbreak@example.test"],
         );
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.path().join("file.txt"), "one\n").unwrap();
         git(repo.path(), &["add", "file.txt"]);
         git(repo.path(), &["commit", "--quiet", "-m", "base"]);

@@ -388,8 +388,28 @@ impl DerivedHistoryAccess {
     /// generation and remains available while a first or replacement build is
     /// staging. The normal data routes still decide independently whether a
     /// validated old generation can be served.
+    ///
+    /// When the most recent background run gave up and nothing is recovering
+    /// now, `detail` also says why it stopped.
     #[doc(hidden)]
     pub fn lifecycle_status(&self) -> DerivedHistoryLifecycleStatus {
+        let mut status = self.observed_lifecycle_status();
+        // Consult the record on every observation: seeing a later publication
+        // state, Current included, retires a reason that no longer applies.
+        let failure = self.runtime.background_last_failure();
+        if status.availability != DerivedHistoryAvailability::Current
+            && !status.rebuild_in_flight
+            && let Some(failure) = failure
+        {
+            status.detail = Some(match status.detail.take() {
+                Some(detail) => format!("{detail}; background recovery stopped: {failure}"),
+                None => format!("background recovery stopped: {failure}"),
+            });
+        }
+        status
+    }
+
+    fn observed_lifecycle_status(&self) -> DerivedHistoryLifecycleStatus {
         if let Some(maintenance) = self.runtime.maintenance() {
             return maintenance.status_read_only(self.rebuild_in_flight(), self.rebuild_paused());
         }
@@ -511,6 +531,7 @@ impl DerivedHistoryAccess {
                     .map_err(|error| error.to_string())?
                     .and_then(|current| current.service().locator_checkpoint().ok())
                     .map(|cursor| cursor.sequence);
+                self.runtime.clear_background_failure();
                 return Ok(DerivedHistoryLifecycleReceipt {
                     availability: DerivedHistoryAvailability::Current,
                     generation_id: status.generation_id,
@@ -531,6 +552,7 @@ impl DerivedHistoryAccess {
                 DerivedHistoryControl::Cancel => LifecycleControl::Cancel,
             })
             .map_err(|error| error.to_string())?;
+        self.runtime.clear_background_failure();
         Ok(DerivedHistoryLifecycleReceipt {
             availability: map_availability(receipt.availability),
             generation_id: receipt.generation_id,
@@ -2124,6 +2146,45 @@ mod tests {
         }
     }
 
+    fn wait_for_worker_stage(access: &DerivedHistoryAccess, stage: &str, context: &str) {
+        let started = std::time::Instant::now();
+        let deadline = started + HANG_GUARD;
+        while access.runtime.background_worker_stage() != stage {
+            assert!(
+                access.maintenance_in_flight(),
+                "{context}: the worker returned before reaching {stage}: {:?}",
+                access.lifecycle_status()
+            );
+            access
+                .runtime
+                .assert_background_worker_before_deadline(context, started, deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Make promotion into `generations/` fail until the returned directory's
+    /// permissions are restored, or `None` when permissions are not enforced.
+    #[cfg(unix)]
+    fn deny_generation_promotion(access: &DerivedHistoryAccess) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return None;
+        }
+        let paths = access.lifecycle().expect("test access is active").paths();
+        paths.ensure_scaffold().unwrap();
+        let generations = paths.root().join("generations");
+        std::fs::set_permissions(&generations, std::fs::Permissions::from_mode(0o500)).unwrap();
+        Some(generations)
+    }
+
+    #[cfg(unix)]
+    fn allow_generation_promotion(generations: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(generations, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     #[test]
     fn unavailable_route_never_serializes_lifecycle_current() {
         let status = unavailable_lifecycle_status(
@@ -2137,6 +2198,8 @@ mod tests {
                 elapsed_ms: None,
                 estimated_remaining_ms: None,
                 detail: None,
+                recovery_deferred: false,
+                transient_failure: false,
             },
             "publication handoff requires a retry",
         );
@@ -3495,6 +3558,478 @@ mod tests {
         };
         assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
         wait_for_current_generation(&access, "cached generation recovery");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_worker_retries_a_transient_promotion_failure() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let Some(generations) = deny_generation_promotion(&access) else {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        };
+
+        access.start_background_rebuild().unwrap();
+        wait_for_worker_stage(
+            &access,
+            "waiting_after_transient_failure",
+            "promotion failure retry",
+        );
+        allow_generation_promotion(&generations);
+
+        // Observe only: a reader request would start a fresh worker.
+        let started = std::time::Instant::now();
+        let deadline = started + HANG_GUARD;
+        loop {
+            let status = access.lifecycle_status();
+            if status.availability == DerivedHistoryAvailability::Current
+                && !status.rebuild_in_flight
+            {
+                break;
+            }
+            access.runtime.assert_background_worker_before_deadline(
+                &format!("promotion retry (last status {status:?})"),
+                started,
+                deadline,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        wait_for_background_rebuild(&access, "promotion retry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_background_recovery_is_reported_in_lifecycle_status() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let Some(generations) = deny_generation_promotion(&access) else {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        };
+
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "abandoned promotion retry");
+        let status = access.lifecycle_status();
+        allow_generation_promotion(&generations);
+
+        assert!(!status.rebuild_in_flight, "{status:?}");
+        assert!(
+            status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped: ")),
+            "{status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_restarted_then_cancelled_recovery_does_not_report_a_stale_failure() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let Some(generations) = deny_generation_promotion(&access) else {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        };
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "abandoned promotion retry");
+        assert!(
+            access
+                .lifecycle_status()
+                .detail
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "the first run must give up: {:?}",
+            access.lifecycle_status()
+        );
+
+        access.restart_background_rebuild().unwrap();
+        access.cancel_background_rebuild().unwrap();
+        let status = access.lifecycle_status();
+        allow_generation_promotion(&generations);
+
+        assert!(
+            !status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "a cancelled restart reported the earlier run's failure: {status:?}"
+        );
+    }
+
+    #[test]
+    fn a_transient_read_failure_is_classified_again_before_rebuilding() {
+        let (_temp, access) = active_history(1);
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("generation is published");
+        // A directory where the WAL belongs is a derived read failure, not
+        // invalid state.
+        let wal = lifecycle
+            .paths()
+            .generation(&generation_id)
+            .join("cursor.sqlite3-wal");
+        std::fs::create_dir(&wal).unwrap();
+
+        access.start_background_rebuild().unwrap();
+        wait_for_worker_stage(
+            &access,
+            "waiting_after_transient_failure",
+            "transient read failure",
+        );
+        std::fs::remove_dir(&wal).unwrap();
+        wait_for_background_rebuild(&access, "transient read failure");
+
+        let status = access.lifecycle_status();
+        assert_eq!(
+            status.availability,
+            DerivedHistoryAvailability::Current,
+            "{status:?}"
+        );
+        assert_eq!(
+            lifecycle.published_generation_id().unwrap().as_deref(),
+            Some(generation_id.as_str()),
+            "a read failure that cleared must not trigger a rebuild"
+        );
+    }
+
+    #[test]
+    fn a_persistent_read_failure_still_rebuilds_after_the_retry_budget() {
+        let (_temp, access) = active_history(1);
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("generation is published");
+        std::fs::create_dir(
+            lifecycle
+                .paths()
+                .generation(&generation_id)
+                .join("cursor.sqlite3-wal"),
+        )
+        .unwrap();
+
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "persistent read failure");
+
+        let status = access.lifecycle_status();
+        assert_eq!(
+            status.availability,
+            DerivedHistoryAvailability::Current,
+            "{status:?}"
+        );
+        assert_ne!(
+            lifecycle.published_generation_id().unwrap().as_deref(),
+            Some(generation_id.as_str()),
+            "the unreadable generation is replaced once the budget is spent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_synchronous_repair_retires_an_earlier_background_failure() {
+        let (temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let Some(generations) = deny_generation_promotion(&access) else {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        };
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "abandoned promotion retry");
+        allow_generation_promotion(&generations);
+        assert!(
+            access
+                .lifecycle_status()
+                .detail
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "the background run must give up first: {:?}",
+            access.lifecycle_status()
+        );
+
+        access
+            .rebuild(|_| DerivedHistoryControl::Continue)
+            .expect("synchronous repair");
+        EventStore::open(temp.path())
+            .record_event_once(&review_initialized(1))
+            .unwrap();
+        let status = access.lifecycle_status();
+
+        assert_ne!(
+            status.availability,
+            DerivedHistoryAvailability::Current,
+            "the append must leave derived history behind: {status:?}"
+        );
+        assert!(!status.rebuild_in_flight, "{status:?}");
+        assert!(
+            !status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "a failure from before the repair was reported: {status:?}"
+        );
+    }
+
+    /// Force a background give-up recorded while no generation is published.
+    #[cfg(unix)]
+    fn give_up_before_any_publication(access: &DerivedHistoryAccess) -> bool {
+        let Some(generations) = deny_generation_promotion(access) else {
+            eprintln!("skipped: permissions are not enforced for root");
+            return false;
+        };
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(access, "abandoned promotion retry");
+        allow_generation_promotion(&generations);
+        assert!(
+            access
+                .lifecycle_status()
+                .detail
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "the background run must give up first: {:?}",
+            access.lifecycle_status()
+        );
+        true
+    }
+
+    #[cfg(unix)]
+    fn assert_no_background_failure(access: &DerivedHistoryAccess, context: &str) {
+        let status = access.lifecycle_status();
+        assert!(
+            !status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "{context}: {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_synchronous_repair_retires_the_failure_before_any_later_removal() {
+        let (temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        if !give_up_before_any_publication(&access) {
+            return;
+        }
+
+        access
+            .rebuild(|_| DerivedHistoryControl::Continue)
+            .expect("synchronous repair");
+        // Remove the repaired publication before anything observes it.
+        DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            "store:test",
+        )
+        .unwrap()
+        .retire()
+        .unwrap()
+        .expect("a root to retire");
+
+        assert_no_background_failure(&access, "a failure from before the repair was reported");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_observed_repair_elsewhere_retires_the_failure_before_a_later_removal() {
+        let (temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        if !give_up_before_any_publication(&access) {
+            return;
+        }
+        // A repair and a later removal by another lifecycle, as another
+        // process would make them.
+        let elsewhere = DerivedAccessLifecycle::new(
+            DerivedAccessProfile::SqliteWalBodylessV1,
+            temp.path(),
+            "store:test",
+        )
+        .unwrap();
+        elsewhere.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert_eq!(
+            access.lifecycle_status().availability,
+            DerivedHistoryAvailability::Current
+        );
+        elsewhere.retire().unwrap().expect("a root to retire");
+
+        assert_no_background_failure(
+            &access,
+            "a failure from before an observed repair was reported",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_publication_neither_reports_nor_retires_a_background_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        if !give_up_before_any_publication(&access) {
+            return;
+        }
+        let publications = access
+            .lifecycle()
+            .expect("test access is active")
+            .paths()
+            .root()
+            .join("publications");
+
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = access.lifecycle_status();
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            !unreadable
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "an unreadable publication is not the state the run failed on: {unreadable:?}"
+        );
+        assert!(
+            access
+                .lifecycle_status()
+                .detail
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "an unreadable observation must not retire the failure: {:?}",
+            access.lifecycle_status()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_recorded_on_an_unreadable_publication_is_never_attributed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions are not enforced for root");
+            return;
+        }
+        let paths = access.lifecycle().expect("test access is active").paths();
+        paths.ensure_scaffold().unwrap();
+        let publications = paths.root().join("publications");
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // The worker gives up while it cannot read which generation is
+        // published, so its reason has no publication state to belong to.
+        access.start_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "unreadable publication give-up");
+        let unreadable = access.lifecycle_status();
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            !unreadable
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "an unknown publication state was attributed to the stopped run: {unreadable:?}"
+        );
+        assert_no_background_failure(&access, "the reason was attributed once readable");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quarantine_survives_a_transient_external_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (temp, access) = active_history(1);
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("generation is published");
+        let database = lifecycle
+            .paths()
+            .generation(&generation_id)
+            .join("cursor.sqlite3");
+        std::fs::write(&database, b"not sqlite").unwrap();
+        // An external reader, such as an antivirus scan, that does not share
+        // delete access blocks renaming the directory above the file.
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+            .open(&database)
+            .unwrap();
+
+        access.restart_background_rebuild().unwrap();
+        let release = spawn_bounded(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+        wait_for_background_rebuild(&access, "quarantine behind a transient external handle");
+        release.wait("the external handle release");
+
+        let quarantined = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".quarantine-"))
+            .count();
+        assert_eq!(
+            quarantined,
+            1,
+            "the invalid root was not moved aside: {:?}",
+            access.lifecycle_status()
+        );
+        assert!(
+            matches!(access.current().unwrap(), CurrentRead::Ready(_)),
+            "no replacement was published: {:?}",
+            access.lifecycle_status()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_root_held_past_the_rename_retries_is_quarantined_by_a_later_classification() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (temp, access) = active_history(1);
+        let lifecycle = access.lifecycle().expect("test access is active");
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("generation is published");
+        let database = lifecycle
+            .paths()
+            .generation(&generation_id)
+            .join("cursor.sqlite3");
+        std::fs::write(&database, b"not sqlite").unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE
+            .open(&database)
+            .unwrap();
+
+        access.restart_background_rebuild().unwrap();
+        // The rename retries are spent while the holder stays open, so the
+        // classifier defers; release it only once the worker is waiting.
+        wait_for_worker_stage(
+            &access,
+            "waiting_after_transient_failure",
+            "deferred quarantine",
+        );
+        assert!(
+            lifecycle.paths().root().exists(),
+            "the root cannot move while it is held"
+        );
+        drop(holder);
+        wait_for_background_rebuild(&access, "deferred quarantine");
+
+        let quarantined = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".quarantine-"))
+            .count();
+        let status = access.lifecycle_status();
+        assert_eq!(
+            quarantined, 1,
+            "the invalid root was not moved aside: {status:?}"
+        );
+        assert!(
+            !status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("background recovery stopped")),
+            "{status:?}"
+        );
+        assert!(
+            matches!(access.current().unwrap(), CurrentRead::Ready(_)),
+            "no replacement was published: {status:?}"
+        );
     }
 
     #[test]

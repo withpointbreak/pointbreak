@@ -10,10 +10,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(test)]
+use super::generation::GenerationProgressPhase;
 use super::generation::GenerationPublication;
 use super::layout::{DerivedStorageDiscovery, DerivedStorageLayout, NAMESPACE_CONFLICT_DETAIL};
 use super::lifecycle::{
-    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
+    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError, LifecycleProgress,
+    PublicationBoundary, is_transient_lifecycle_error,
 };
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -24,6 +27,7 @@ use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const BACKGROUND_REBUILD_REQUIRED_CONFIRMATION: Duration = Duration::from_millis(250);
 const BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL: Duration = Duration::from_secs(5);
+const BACKGROUND_TRANSIENT_RETRY_ATTEMPTS: u32 = 6;
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
@@ -46,6 +50,7 @@ enum BackgroundWorkerStage {
     WaitingForWriter,
     WaitingAfterRebuildBusy,
     WaitingAfterTruthChanged,
+    WaitingAfterTransientFailure,
 }
 
 #[cfg(test)]
@@ -70,50 +75,108 @@ impl BackgroundWorkerStage {
             "waiting_for_writer",
             "waiting_after_rebuild_busy",
             "waiting_after_truth_changed",
+            "waiting_after_transient_failure",
         ];
         LABELS.get(usize::from(code)).copied().unwrap_or("unknown")
     }
 }
 
 // Test-only observation, read by failure messages and by tests that wait for
-// the worker to reach a stage: low bytes hold stage and last rebuild retry;
-// the upper 48 bits count retry decisions, saturating rather than wrapping.
+// the worker to reach a stage. In `word`, low bytes hold stage and last rebuild
+// retry; the upper 48 bits count retry decisions, saturating rather than
+// wrapping. `rebuild_progress` holds the last reported rebuild phase and
+// counts, and `last_boundary` the last publication boundary the rebuild passed.
 // The worker is the sole writer between serialized starts. These relaxed
 // accesses never publish product state or participate in worker synchronization.
 #[cfg(test)]
 #[derive(Default)]
-struct BackgroundWorkerDiagnostic(AtomicU64);
+struct BackgroundWorkerDiagnostic {
+    word: AtomicU64,
+    rebuild_progress: AtomicU64,
+    last_boundary: AtomicU8,
+}
 
 #[cfg(test)]
 impl BackgroundWorkerDiagnostic {
     fn reset(&self) {
-        self.0
+        self.word
             .store(BackgroundWorkerStage::NotStarted as u64, Ordering::Relaxed);
+        self.rebuild_progress.store(0, Ordering::Relaxed);
+        self.last_boundary.store(0, Ordering::Relaxed);
     }
 
     fn stage(&self, stage: BackgroundWorkerStage) {
-        let current = self.0.load(Ordering::Relaxed);
-        self.0
+        let current = self.word.load(Ordering::Relaxed);
+        self.word
             .store((current & !0xff) | stage as u64, Ordering::Relaxed);
     }
 
     fn retry(&self, stage: BackgroundWorkerStage) {
-        let count = ((self.0.load(Ordering::Relaxed) >> 16) + 1).min(u64::MAX >> 16);
-        self.0.store(
+        let count = ((self.word.load(Ordering::Relaxed) >> 16) + 1).min(u64::MAX >> 16);
+        self.word.store(
             (count << 16) | ((stage as u64) << 8) | stage as u64,
             Ordering::Relaxed,
         );
     }
 
+    fn progress(&self, progress: &LifecycleProgress) {
+        const COUNT_MAX: u64 = (1 << 28) - 1;
+        let count = |value: usize| (value as u64).min(COUNT_MAX);
+        let phase = match progress.phase {
+            GenerationProgressPhase::CursorPopulation => 1,
+            GenerationProgressPhase::ProjectionPopulation => 2,
+            GenerationProgressPhase::StrictVerification => 3,
+            GenerationProgressPhase::Finalizing => 4,
+        };
+        self.rebuild_progress.store(
+            (phase << 56) | (count(progress.completed) << 28) | count(progress.total),
+            Ordering::Relaxed,
+        );
+    }
+
+    fn boundary(&self, boundary: PublicationBoundary) {
+        let code = match boundary {
+            PublicationBoundary::StagingPrepared => 1,
+            PublicationBoundary::CandidatePopulated => 2,
+            PublicationBoundary::CandidateValidated => 3,
+            PublicationBoundary::ReaderReceiptWritten => 4,
+            PublicationBoundary::GenerationPromoted => 5,
+            PublicationBoundary::CurrentPublished => 6,
+            PublicationBoundary::PriorPublicationRetired => 7,
+        };
+        self.last_boundary.store(code, Ordering::Relaxed);
+    }
+
     fn current_stage(&self) -> &'static str {
-        BackgroundWorkerStage::label(self.0.load(Ordering::Relaxed) as u8)
+        BackgroundWorkerStage::label(self.word.load(Ordering::Relaxed) as u8)
     }
 
     fn snapshot(&self) -> String {
-        let current = self.0.load(Ordering::Relaxed);
+        const PHASES: &[&str] = &[
+            "none",
+            "cursor_population",
+            "projection_population",
+            "strict_verification",
+            "finalizing",
+        ];
+        const BOUNDARIES: &[&str] = &[
+            "none",
+            "staging_prepared",
+            "candidate_populated",
+            "candidate_validated",
+            "reader_receipt_written",
+            "generation_promoted",
+            "current_published",
+            "prior_publication_retired",
+        ];
+        let current = self.word.load(Ordering::Relaxed);
         let retry = (current >> 8) as u8;
+        let rebuild_progress = self.rebuild_progress.load(Ordering::Relaxed);
+        let phase = (rebuild_progress >> 56) as usize;
+        let count_mask = (1 << 28) - 1;
         format!(
-            "stage={} rebuild_retry_count={} last_rebuild_retry={}",
+            "stage={} rebuild_retry_count={} last_rebuild_retry={} rebuild_phase={} progress={} \
+             last_boundary={}",
             BackgroundWorkerStage::label(current as u8),
             current >> 16,
             if retry == 0 {
@@ -121,7 +184,74 @@ impl BackgroundWorkerDiagnostic {
             } else {
                 BackgroundWorkerStage::label(retry)
             },
+            PHASES.get(phase).copied().unwrap_or("unknown"),
+            if phase == 0 {
+                "none".to_owned()
+            } else {
+                format!(
+                    "{}/{}",
+                    (rebuild_progress >> 28) & count_mask,
+                    rebuild_progress & count_mask
+                )
+            },
+            BOUNDARIES
+                .get(usize::from(self.last_boundary.load(Ordering::Relaxed)))
+                .copied()
+                .unwrap_or("unknown"),
         )
+    }
+}
+
+/// One worker run's budget for transient failures: a few waits that double
+/// up to the cap, then the run gives up and reports why.
+struct TransientRetry {
+    remaining: u32,
+    interval: Duration,
+}
+
+impl TransientRetry {
+    fn new() -> Self {
+        Self {
+            remaining: BACKGROUND_TRANSIENT_RETRY_ATTEMPTS,
+            interval: BACKGROUND_REBUILD_RETRY_INTERVAL,
+        }
+    }
+
+    /// The next wait, or `None` once the budget is spent.
+    fn next_delay(&mut self) -> Option<Duration> {
+        self.remaining = self.remaining.checked_sub(1)?;
+        let delay = self.interval;
+        self.interval = self
+            .interval
+            .saturating_mul(2)
+            .min(BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL);
+        Some(delay)
+    }
+}
+
+/// Why a worker run stopped before recovering, bound to the publication state
+/// it stopped on.
+struct BackgroundFailure {
+    error: String,
+    publication: PublicationKey,
+}
+
+/// A publication state as one read observed it. An unreadable publication is
+/// kept apart from an absent one: it says nothing about which state holds.
+#[derive(Debug, Eq, PartialEq)]
+enum PublicationKey {
+    Absent,
+    Published(String),
+    Unreadable,
+}
+
+impl PublicationKey {
+    fn from_read<E>(read: Result<Option<GenerationPublication>, E>) -> Self {
+        match read {
+            Ok(Some(publication)) => Self::Published(publication.generation_id),
+            Ok(None) => Self::Absent,
+            Err(_) => Self::Unreadable,
+        }
     }
 }
 
@@ -168,6 +298,8 @@ pub(crate) struct DerivedAccessRuntime {
     background_work_state: Arc<AtomicU8>,
     background_rebuild_cancel: Arc<AtomicBool>,
     background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Why the most recent worker run stopped before recovering, if it did.
+    background_last_failure: Arc<Mutex<Option<BackgroundFailure>>>,
     #[cfg(test)]
     background_worker_test_gate: Arc<(Mutex<bool>, Condvar)>,
     #[cfg(test)]
@@ -237,6 +369,7 @@ impl DerivedAccessRuntime {
             background_work_state: Arc::new(AtomicU8::new(BackgroundWorkState::Idle as u8)),
             background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             background_rebuild_handle: Mutex::new(None),
+            background_last_failure: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             background_worker_test_gate: Arc::new((Mutex::new(false), Condvar::new())),
             #[cfg(test)]
@@ -414,6 +547,30 @@ impl DerivedAccessRuntime {
             Ok(Some(opened)) => opened.locator_applied() == opened.authority_head(),
             Ok(None) | Err(_) => false,
         })
+    }
+
+    /// Why the most recent worker run stopped, while the publication state it
+    /// stopped on is still the one observed. Observing a different, readable
+    /// state retires the reason: a repair or a later change has moved past it.
+    /// An unreadable observation neither reports nor retires it, so a reason
+    /// recorded while the publication was unreadable is never attributed.
+    pub(super) fn background_last_failure(&self) -> Option<String> {
+        let mut recorded = lock(&self.background_last_failure);
+        let failure = recorded.as_ref()?;
+        let observed = PublicationKey::from_read(self.current_publication_identity());
+        if observed == PublicationKey::Unreadable {
+            return None;
+        }
+        if observed == failure.publication {
+            return Some(failure.error.clone());
+        }
+        *recorded = None;
+        None
+    }
+
+    /// A synchronous repair supersedes whatever the last worker run reported.
+    pub(super) fn clear_background_failure(&self) {
+        *lock(&self.background_last_failure) = None;
     }
 
     pub(super) fn rebuild_in_flight(&self) -> bool {
@@ -741,6 +898,9 @@ impl DerivedAccessRuntime {
         }
         let work_state = Arc::clone(&self.background_work_state);
         let cancel = Arc::clone(&self.background_rebuild_cancel);
+        // The recorded failure always describes the most recent run.
+        *lock(&self.background_last_failure) = None;
+        let last_failure = Arc::clone(&self.background_last_failure);
         #[cfg(test)]
         let background_worker_test_gate = Arc::clone(&self.background_worker_test_gate);
         #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -775,6 +935,7 @@ impl DerivedAccessRuntime {
                     policy,
                     &work_state,
                     cancel,
+                    &last_failure,
                     #[cfg(test)]
                     &diagnostic,
                 );
@@ -830,6 +991,7 @@ impl DerivedAccessRuntime {
             .map_err(|_| "derived-access rebuild worker panicked".to_owned());
         self.background_work_state
             .store(BackgroundWorkState::Idle as u8, Ordering::Release);
+        *lock(&self.background_last_failure) = None;
         joined
     }
 
@@ -877,9 +1039,11 @@ fn background_rebuild(
     policy: BackgroundWorkPolicy,
     work_state: &AtomicU8,
     cancel: Arc<AtomicBool>,
+    last_failure: &Mutex<Option<BackgroundFailure>>,
     #[cfg(test)] diagnostic: &BackgroundWorkerDiagnostic,
 ) {
     let mut truth_changed_retry_interval = BACKGROUND_REBUILD_RETRY_INTERVAL;
+    let mut transient_retry = TransientRetry::new();
     let mut rebuild_required_confirmed = false;
     loop {
         if cancel.load(Ordering::Acquire) {
@@ -889,7 +1053,10 @@ fn background_rebuild(
             #[cfg(test)]
             diagnostic.stage(BackgroundWorkerStage::Maintenance);
             match lifecycle.maintain_current_generation() {
-                Ok(true) => return,
+                Ok(true) => {
+                    *lock(last_failure) = None;
+                    return;
+                }
                 Ok(false) => {
                     #[cfg(test)]
                     diagnostic.stage(BackgroundWorkerStage::WaitingForMaintenance);
@@ -903,6 +1070,7 @@ fn background_rebuild(
                         error = %error,
                         "derived_access_background_current_maintenance_failed"
                     );
+                    record_background_failure(last_failure, &lifecycle, &error);
                     return;
                 }
             }
@@ -919,7 +1087,10 @@ fn background_rebuild(
                 #[cfg(test)]
                 diagnostic.stage(BackgroundWorkerStage::Maintenance);
                 match lifecycle.maintain_current_generation() {
-                    Ok(true) => return,
+                    Ok(true) => {
+                        *lock(last_failure) = None;
+                        return;
+                    }
                     Ok(false) => {
                         #[cfg(test)]
                         diagnostic.stage(BackgroundWorkerStage::WaitingForMaintenance);
@@ -933,6 +1104,7 @@ fn background_rebuild(
                             error = %error,
                             "derived_access_background_current_maintenance_failed"
                         );
+                        record_background_failure(last_failure, &lifecycle, &error);
                         return;
                     }
                 }
@@ -967,20 +1139,74 @@ fn background_rebuild(
                             error = %error,
                             "derived_access_background_rebuild_confirmation_failed"
                         );
+                        record_background_failure(last_failure, &lifecycle, &error);
                         return;
                     }
                 }
             }
+            Ok(status) if status.recovery_deferred => {
+                // Invalid state could not be moved aside yet. Classify it
+                // again later instead of rebuilding over it.
+                if let Some(cancelled) = wait_after_transient_failure(
+                    &mut transient_retry,
+                    &cancel,
+                    #[cfg(test)]
+                    diagnostic,
+                ) {
+                    if cancelled {
+                        return;
+                    }
+                    continue;
+                }
+                let detail = status
+                    .detail
+                    .unwrap_or_else(|| "invalid state awaits quarantine".to_owned());
+                tracing::warn!(detail = %detail, "derived_access_background_quarantine_deferred");
+                record_background_failure(last_failure, &lifecycle, &detail);
+                return;
+            }
+            Ok(status) if status.transient_failure => {
+                // The generation may still be valid: classify again before
+                // rebuilding it. Once the budget is spent, rebuild as before.
+                if let Some(cancelled) = wait_after_transient_failure(
+                    &mut transient_retry,
+                    &cancel,
+                    #[cfg(test)]
+                    diagnostic,
+                ) {
+                    if cancelled {
+                        return;
+                    }
+                    continue;
+                }
+            }
             Ok(_) => {}
             Err(error) => {
+                if is_transient_lifecycle_error(&error)
+                    && let Some(cancelled) = wait_after_transient_failure(
+                        &mut transient_retry,
+                        &cancel,
+                        #[cfg(test)]
+                        diagnostic,
+                    )
+                {
+                    if cancelled {
+                        return;
+                    }
+                    continue;
+                }
                 tracing::warn!(error = %error, "derived_access_background_status_failed");
+                record_background_failure(last_failure, &lifecycle, &error);
                 return;
             }
         }
         work_state.store(BackgroundWorkState::Rebuild as u8, Ordering::Release);
-        let progress = |_| {
+        let progress = |_progress: LifecycleProgress| {
             #[cfg(test)]
-            diagnostic.stage(BackgroundWorkerStage::RebuildProgressReported);
+            {
+                diagnostic.progress(&_progress);
+                diagnostic.stage(BackgroundWorkerStage::RebuildProgressReported);
+            }
             if cancel.load(Ordering::Acquire) {
                 LifecycleControl::Cancel
             } else {
@@ -989,12 +1215,16 @@ fn background_rebuild(
         };
         #[cfg(test)]
         diagnostic.stage(BackgroundWorkerStage::Rebuild);
+        #[cfg(test)]
+        let boundary = |boundary| diagnostic.boundary(boundary);
+        #[cfg(not(test))]
+        let boundary = |_: PublicationBoundary| {};
         let rebuild = match policy {
             BackgroundWorkPolicy::RebuildWhenRequired => {
-                lifecycle.try_automatic_legacy_rebuild(progress)
+                lifecycle.try_automatic_legacy_rebuild(progress, boundary)
             }
             BackgroundWorkPolicy::RebuildRequested => {
-                lifecycle.try_explicit_background_rebuild(progress)
+                lifecycle.try_explicit_background_rebuild(progress, boundary)
             }
             BackgroundWorkPolicy::MaintenanceOnly => {
                 unreachable!("maintenance-only background work returns before rebuild admission")
@@ -1003,7 +1233,10 @@ fn background_rebuild(
         #[cfg(test)]
         diagnostic.stage(BackgroundWorkerStage::RebuildReturned);
         match rebuild {
-            Ok(_) => return,
+            Ok(_) => {
+                *lock(last_failure) = None;
+                return;
+            }
             Err(LifecycleError::RebuildBusy) => {
                 #[cfg(test)]
                 diagnostic.retry(BackgroundWorkerStage::WaitingAfterRebuildBusy);
@@ -1024,11 +1257,51 @@ fn background_rebuild(
             Err(LifecycleError::Cancelled) => return,
             Err(LifecycleError::AutomaticRebuildSuppressed) => return,
             Err(error) => {
+                if is_transient_lifecycle_error(&error)
+                    && let Some(cancelled) = wait_after_transient_failure(
+                        &mut transient_retry,
+                        &cancel,
+                        #[cfg(test)]
+                        diagnostic,
+                    )
+                {
+                    if cancelled {
+                        return;
+                    }
+                    continue;
+                }
                 tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
+                record_background_failure(last_failure, &lifecycle, &error);
                 return;
             }
         }
     }
+}
+
+/// Wait out one transient failure within the run's budget: `None` once the
+/// budget is spent, otherwise whether cancellation ended the wait.
+fn wait_after_transient_failure(
+    retry: &mut TransientRetry,
+    cancel: &AtomicBool,
+    #[cfg(test)] diagnostic: &BackgroundWorkerDiagnostic,
+) -> Option<bool> {
+    let delay = retry.next_delay()?;
+    #[cfg(test)]
+    diagnostic.retry(BackgroundWorkerStage::WaitingAfterTransientFailure);
+    Some(wait_or_cancel(cancel, delay))
+}
+
+fn record_background_failure(
+    last_failure: &Mutex<Option<BackgroundFailure>>,
+    lifecycle: &DerivedAccessLifecycle,
+    error: &dyn std::fmt::Display,
+) {
+    let publication =
+        PublicationKey::from_read(lifecycle.published_generation_identity_read_only());
+    *lock(last_failure) = Some(BackgroundFailure {
+        error: error.to_string(),
+        publication,
+    });
 }
 
 fn wait_or_cancel(cancel: &AtomicBool, duration: Duration) -> bool {
@@ -1146,6 +1419,18 @@ mod tests {
     }
 
     #[test]
+    fn transient_retry_budget_doubles_to_the_cap_then_stops() {
+        let mut retry = TransientRetry::new();
+        let delays = std::iter::from_fn(|| retry.next_delay()).collect::<Vec<_>>();
+
+        assert_eq!(
+            delays,
+            [100, 200, 400, 800, 1600, 3200].map(Duration::from_millis)
+        );
+        assert_eq!(retry.next_delay(), None);
+    }
+
+    #[test]
     fn background_worker_timeout_diagnostic_self_check() {
         let runtime = DerivedAccessRuntime::from_mode(DerivedAccessMode::Off);
         let other = DerivedAccessRuntime::from_mode(DerivedAccessMode::Off);
@@ -1153,17 +1438,28 @@ mod tests {
         std::thread::spawn(move || {
             diagnostic.retry(BackgroundWorkerStage::WaitingAfterRebuildBusy);
             diagnostic.retry(BackgroundWorkerStage::WaitingAfterTruthChanged);
-            diagnostic.stage(BackgroundWorkerStage::Status);
+            diagnostic.progress(&LifecycleProgress {
+                phase: GenerationProgressPhase::Finalizing,
+                completed: 1,
+                total: 1,
+                bytes_processed: 0,
+                elapsed_ms: 0,
+                estimated_remaining_ms: None,
+            });
+            diagnostic.boundary(PublicationBoundary::GenerationPromoted);
+            diagnostic.stage(BackgroundWorkerStage::RebuildProgressReported);
         })
         .join()
         .unwrap();
 
-        let expected =
-            "stage=status rebuild_retry_count=2 last_rebuild_retry=waiting_after_truth_changed";
+        let expected = "stage=rebuild_progress_reported rebuild_retry_count=2 \
+             last_rebuild_retry=waiting_after_truth_changed rebuild_phase=finalizing \
+             progress=1/1 last_boundary=generation_promoted";
         assert_eq!(runtime.background_worker_diagnostic.snapshot(), expected);
         assert_eq!(
             other.background_worker_diagnostic.snapshot(),
-            "stage=not_started rebuild_retry_count=0 last_rebuild_retry=none"
+            "stage=not_started rebuild_retry_count=0 last_rebuild_retry=none \
+             rebuild_phase=none progress=none last_boundary=none"
         );
 
         // Exercise the actual timeout assertion with a synthetic expired
@@ -1187,7 +1483,8 @@ mod tests {
             .stage(BackgroundWorkerStage::SpawnPending);
         assert_eq!(
             runtime.background_worker_diagnostic.snapshot(),
-            "stage=spawn_pending rebuild_retry_count=0 last_rebuild_retry=none"
+            "stage=spawn_pending rebuild_retry_count=0 last_rebuild_retry=none \
+             rebuild_phase=none progress=none last_boundary=none"
         );
         runtime.assert_background_worker_before_deadline(
             "unexpired diagnostic deadline",

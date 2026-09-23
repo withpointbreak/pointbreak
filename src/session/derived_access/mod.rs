@@ -15,6 +15,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod cursor;
 pub(crate) mod detail_reads;
 pub(crate) mod fact_reads;
+mod fs_retry;
 pub(crate) mod generation;
 pub(crate) mod history;
 mod interaction;
