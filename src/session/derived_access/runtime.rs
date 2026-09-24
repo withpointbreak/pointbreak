@@ -88,12 +88,36 @@ impl BackgroundWorkerStage {
 // counts, and `last_boundary` the last publication boundary the rebuild passed.
 // The worker is the sole writer between serialized starts. These relaxed
 // accesses never publish product state or participate in worker synchronization.
+// `timeline` keeps the last `TIMELINE_CAPACITY` distinct states with their
+// time since the worker started (research 0060); its lock is held only to
+// record or format an entry.
 #[cfg(test)]
 #[derive(Default)]
 struct BackgroundWorkerDiagnostic {
     word: AtomicU64,
     rebuild_progress: AtomicU64,
     last_boundary: AtomicU8,
+    timeline: Mutex<DiagnosticTimeline>,
+}
+
+#[cfg(test)]
+const TIMELINE_CAPACITY: usize = 64;
+
+#[cfg(test)]
+#[derive(Default)]
+struct DiagnosticTimeline {
+    started: Option<std::time::Instant>,
+    entries: std::collections::VecDeque<TimelineEntry>,
+}
+
+/// One recorded state: the raw diagnostic words, decoded only when printed.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct TimelineEntry {
+    elapsed_ms: u128,
+    word: u64,
+    rebuild_progress: u64,
+    last_boundary: u8,
 }
 
 #[cfg(test)]
@@ -103,12 +127,17 @@ impl BackgroundWorkerDiagnostic {
             .store(BackgroundWorkerStage::NotStarted as u64, Ordering::Relaxed);
         self.rebuild_progress.store(0, Ordering::Relaxed);
         self.last_boundary.store(0, Ordering::Relaxed);
+        *lock(&self.timeline) = DiagnosticTimeline {
+            started: Some(std::time::Instant::now()),
+            entries: std::collections::VecDeque::with_capacity(TIMELINE_CAPACITY),
+        };
     }
 
     fn stage(&self, stage: BackgroundWorkerStage) {
         let current = self.word.load(Ordering::Relaxed);
         self.word
             .store((current & !0xff) | stage as u64, Ordering::Relaxed);
+        self.record();
     }
 
     fn retry(&self, stage: BackgroundWorkerStage) {
@@ -117,6 +146,30 @@ impl BackgroundWorkerDiagnostic {
             (count << 16) | ((stage as u64) << 8) | stage as u64,
             Ordering::Relaxed,
         );
+        self.record();
+    }
+
+    /// Append the current state to the timeline unless it repeats the last
+    /// entry (a new retry never does), dropping the oldest once full.
+    fn record(&self) {
+        let mut timeline = lock(&self.timeline);
+        let started = *timeline.started.get_or_insert_with(std::time::Instant::now);
+        let entry = TimelineEntry {
+            elapsed_ms: started.elapsed().as_millis(),
+            word: self.word.load(Ordering::Relaxed),
+            rebuild_progress: self.rebuild_progress.load(Ordering::Relaxed),
+            last_boundary: self.last_boundary.load(Ordering::Relaxed),
+        };
+        if timeline.entries.back().is_some_and(|last| {
+            (last.word, last.rebuild_progress, last.last_boundary)
+                == (entry.word, entry.rebuild_progress, entry.last_boundary)
+        }) {
+            return;
+        }
+        if timeline.entries.len() == TIMELINE_CAPACITY {
+            timeline.entries.pop_front();
+        }
+        timeline.entries.push_back(entry);
     }
 
     fn progress(&self, progress: &LifecycleProgress) {
@@ -132,6 +185,7 @@ impl BackgroundWorkerDiagnostic {
             (phase << 56) | (count(progress.completed) << 28) | count(progress.total),
             Ordering::Relaxed,
         );
+        self.record();
     }
 
     fn boundary(&self, boundary: PublicationBoundary) {
@@ -145,6 +199,7 @@ impl BackgroundWorkerDiagnostic {
             PublicationBoundary::PriorPublicationRetired => 7,
         };
         self.last_boundary.store(code, Ordering::Relaxed);
+        self.record();
     }
 
     fn current_stage(&self) -> &'static str {
@@ -152,28 +207,9 @@ impl BackgroundWorkerDiagnostic {
     }
 
     fn snapshot(&self) -> String {
-        const PHASES: &[&str] = &[
-            "none",
-            "cursor_population",
-            "projection_population",
-            "strict_verification",
-            "finalizing",
-        ];
-        const BOUNDARIES: &[&str] = &[
-            "none",
-            "staging_prepared",
-            "candidate_populated",
-            "candidate_validated",
-            "reader_receipt_written",
-            "generation_promoted",
-            "current_published",
-            "prior_publication_retired",
-        ];
         let current = self.word.load(Ordering::Relaxed);
         let retry = (current >> 8) as u8;
         let rebuild_progress = self.rebuild_progress.load(Ordering::Relaxed);
-        let phase = (rebuild_progress >> 56) as usize;
-        let count_mask = (1 << 28) - 1;
         format!(
             "stage={} rebuild_retry_count={} last_rebuild_retry={} rebuild_phase={} progress={} \
              last_boundary={}",
@@ -184,21 +220,85 @@ impl BackgroundWorkerDiagnostic {
             } else {
                 BackgroundWorkerStage::label(retry)
             },
-            PHASES.get(phase).copied().unwrap_or("unknown"),
-            if phase == 0 {
-                "none".to_owned()
-            } else {
-                format!(
-                    "{}/{}",
-                    (rebuild_progress >> 28) & count_mask,
-                    rebuild_progress & count_mask
-                )
-            },
-            BOUNDARIES
-                .get(usize::from(self.last_boundary.load(Ordering::Relaxed)))
-                .copied()
-                .unwrap_or("unknown"),
+            Self::phase_label(rebuild_progress),
+            Self::progress_label(rebuild_progress),
+            Self::boundary_label(self.last_boundary.load(Ordering::Relaxed)),
         )
+    }
+
+    /// `timeline=[t=<ms since the worker started> stage=… phase=… progress=… boundary=…, …]`,
+    /// oldest first, then `wait_start_t=`: the same clock's reading when the
+    /// wait that started at `wait_started` began, to line the timeline up
+    /// with the waiter's own evidence.
+    fn timeline(&self, wait_started: std::time::Instant) -> String {
+        let timeline = lock(&self.timeline);
+        let entries = timeline
+            .entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "t={} stage={} phase={} progress={} boundary={}",
+                    entry.elapsed_ms,
+                    BackgroundWorkerStage::label(entry.word as u8),
+                    Self::phase_label(entry.rebuild_progress),
+                    Self::progress_label(entry.rebuild_progress),
+                    Self::boundary_label(entry.last_boundary),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let wait_start_t = timeline.started.map_or_else(
+            || "none".to_owned(),
+            |started| match wait_started.checked_duration_since(started) {
+                Some(after) => after.as_millis().to_string(),
+                None => format!("-{}", started.duration_since(wait_started).as_millis()),
+            },
+        );
+        format!("timeline=[{entries}] wait_start_t={wait_start_t}")
+    }
+
+    fn phase_label(rebuild_progress: u64) -> &'static str {
+        const PHASES: &[&str] = &[
+            "none",
+            "cursor_population",
+            "projection_population",
+            "strict_verification",
+            "finalizing",
+        ];
+        PHASES
+            .get((rebuild_progress >> 56) as usize)
+            .copied()
+            .unwrap_or("unknown")
+    }
+
+    fn progress_label(rebuild_progress: u64) -> String {
+        let count_mask = (1 << 28) - 1;
+        if rebuild_progress >> 56 == 0 {
+            "none".to_owned()
+        } else {
+            format!(
+                "{}/{}",
+                (rebuild_progress >> 28) & count_mask,
+                rebuild_progress & count_mask
+            )
+        }
+    }
+
+    fn boundary_label(code: u8) -> &'static str {
+        const BOUNDARIES: &[&str] = &[
+            "none",
+            "staging_prepared",
+            "candidate_populated",
+            "candidate_validated",
+            "reader_receipt_written",
+            "generation_promoted",
+            "current_published",
+            "prior_publication_retired",
+        ];
+        BOUNDARIES
+            .get(usize::from(code))
+            .copied()
+            .unwrap_or("unknown")
     }
 }
 
@@ -601,6 +701,31 @@ impl DerivedAccessRuntime {
             "{context} worker did not finish; wait_elapsed={:?}; {}",
             started.elapsed(),
             self.background_worker_diagnostic.snapshot(),
+        );
+    }
+
+    /// The same timeout, with the worker's timeline and then the waiter's
+    /// own `evidence` appended after the snapshot. `evidence` runs only once
+    /// the deadline has passed, after the worker state is read and before the
+    /// panic, so a waiter can stop its helper threads first.
+    #[cfg(test)]
+    pub(super) fn assert_background_worker_before_deadline_with(
+        &self,
+        context: &str,
+        started: std::time::Instant,
+        deadline: std::time::Instant,
+        evidence: impl FnOnce() -> String,
+    ) {
+        if std::time::Instant::now() < deadline {
+            return;
+        }
+        let wait_elapsed = started.elapsed();
+        let snapshot = self.background_worker_diagnostic.snapshot();
+        let timeline = self.background_worker_diagnostic.timeline(started);
+        let evidence = evidence();
+        panic!(
+            "{context} worker did not finish; wait_elapsed={wait_elapsed:?}; {snapshot} \
+             {timeline} {evidence}"
         );
     }
 

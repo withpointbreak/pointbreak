@@ -2151,13 +2151,201 @@ mod tests {
     }
 
     fn wait_for_background_rebuild(access: &DerivedHistoryAccess, context: &str) {
+        wait_for_background_rebuild_within(access, context, HANG_GUARD);
+    }
+
+    thread_local! {
+        /// When the running test began, for a rebuild-wait timeout's
+        /// `setup_ms=`. Set by `mark_test_start`.
+        static TEST_STARTED: std::cell::Cell<Option<std::time::Instant>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Mark the running test's start, so a rebuild-wait timeout reports the
+    /// setup time before its wait began (research 0060 Q3).
+    fn mark_test_start() {
+        TEST_STARTED.set(Some(std::time::Instant::now()));
+    }
+
+    /// Wait up to `bound` for the background worker to go idle. A timeout
+    /// reports, after the worker's snapshot and timeline, evidence that
+    /// separates a stuck worker from a frozen host (research 0060 Q3):
+    /// - `wait_gaps=[t=… gap_ms=…]`: this thread's own poll gaps over 1 s,
+    ///   each starting `t` ms after the wait began. A gap means this thread
+    ///   was not scheduled either.
+    /// - `disk_probe=`: a synced write's latencies over the wait.
+    /// - `setup_ms=`: the test's time before the wait, after `mark_test_start`.
+    fn wait_for_background_rebuild_within(
+        access: &DerivedHistoryAccess,
+        context: &str,
+        bound: std::time::Duration,
+    ) {
+        const REPORTED_GAP: std::time::Duration = std::time::Duration::from_secs(1);
         let started = std::time::Instant::now();
-        let deadline = started + HANG_GUARD;
+        let deadline = started + bound;
+        let setup = TEST_STARTED
+            .get()
+            .map(|test_started| started.duration_since(test_started));
+        let mut probe = Some(DiskProbe::start(started));
+        let mut gaps = Vec::new();
+        let mut last_poll = started;
         while access.maintenance_in_flight() {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_poll) > REPORTED_GAP {
+                gaps.push(format!(
+                    "t={} gap_ms={}",
+                    last_poll.duration_since(started).as_millis(),
+                    now.duration_since(last_poll).as_millis()
+                ));
+            }
+            last_poll = now;
             access
                 .runtime
-                .assert_background_worker_before_deadline(context, started, deadline);
+                .assert_background_worker_before_deadline_with(context, started, deadline, || {
+                    // Stop and join the probe before the panic. One still blocked
+                    // in a syscall when the join's bound expires is detached and
+                    // reported as `joined=false` instead (see `DiskProbe::stop`).
+                    let probe = probe
+                        .take()
+                        .map_or_else(|| "none".to_owned(), DiskProbe::stop);
+                    format!(
+                        "wait_gaps=[{}] disk_probe={probe} setup_ms={}",
+                        gaps.join(", "),
+                        setup.map_or_else(
+                            || "none".to_owned(),
+                            |setup| setup.as_millis().to_string()
+                        ),
+                    )
+                });
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A small synced write every `INTERVAL` on its own thread while a
+    /// rebuild wait runs. If it stalls with the worker, the host's I/O froze;
+    /// if it stays fast, the dwell is the worker's own. It first writes one
+    /// interval in, so a short wait does no probe I/O.
+    struct DiskProbe {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        stats: Arc<Mutex<DiskProbeStats>>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[derive(Default)]
+    struct DiskProbeStats {
+        count: usize,
+        max_ms: u128,
+        /// `t=<ms after the wait began> ms=<latency>` for each latency over `SLOW`.
+        slow: Vec<String>,
+        in_flight_since: Option<std::time::Instant>,
+        first_error: Option<String>,
+    }
+
+    impl DiskProbe {
+        const INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        const SLOW: std::time::Duration = std::time::Duration::from_millis(100);
+
+        fn start(wait_started: std::time::Instant) -> Self {
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let stats = Arc::new(Mutex::new(DiskProbeStats::default()));
+            let handle = std::thread::Builder::new()
+                .name("rebuild-wait-disk-probe".to_owned())
+                .spawn({
+                    let (stop, stats) = (Arc::clone(&stop), Arc::clone(&stats));
+                    move || Self::run(&stop, &stats, wait_started)
+                })
+                .expect("spawn the rebuild wait's disk probe");
+            Self {
+                stop,
+                stats,
+                handle: Some(handle),
+            }
+        }
+
+        fn run(
+            stop: &std::sync::atomic::AtomicBool,
+            stats: &Mutex<DiskProbeStats>,
+            wait_started: std::time::Instant,
+        ) {
+            let mut dir: Option<TempDir> = None;
+            let mut next = std::time::Instant::now() + Self::INTERVAL;
+            while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                let now = std::time::Instant::now();
+                if now < next {
+                    std::thread::park_timeout(next - now);
+                    continue;
+                }
+                next = now + Self::INTERVAL;
+                stats.lock().unwrap().in_flight_since = Some(now);
+                let written = (|| {
+                    let dir = match &mut dir {
+                        Some(dir) => dir,
+                        empty => empty.insert(TempDir::new()?),
+                    };
+                    let path = dir.path().join("probe");
+                    let mut file = std::fs::File::create(&path)?;
+                    std::io::Write::write_all(&mut file, b"probe")?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::remove_file(&path)
+                })();
+                let latency = now.elapsed();
+                let mut stats = stats.lock().unwrap();
+                stats.in_flight_since = None;
+                stats.count += 1;
+                stats.max_ms = stats.max_ms.max(latency.as_millis());
+                if latency > Self::SLOW {
+                    let t = now.duration_since(wait_started).as_millis();
+                    stats.slow.push(format!("t={t} ms={}", latency.as_millis()));
+                }
+                if let Err(error) = written {
+                    stats.first_error.get_or_insert_with(|| error.to_string());
+                }
+            }
+        }
+
+        /// Stop and join the probe within `HANG_GUARD`, then summarize it as
+        /// `max_ms=…,count=…,slow=[…],joined=…`. The join cannot be
+        /// guaranteed: a probe still blocked in a syscall when the bound
+        /// expires is detached and reports `joined=false,in_flight_ms=…`.
+        /// Told to stop, it starts no new write cycle, but it outlives the
+        /// panic until the blocked call returns (it then finishes that cycle,
+        /// removes its directory and exits) or the process exits.
+        fn stop(mut self) -> String {
+            let joined = self.stop_and_join();
+            let stats = self.stats.lock().unwrap();
+            let mut summary = format!(
+                "max_ms={},count={},slow=[{}],joined={joined}",
+                stats.max_ms,
+                stats.count,
+                stats.slow.join(", ")
+            );
+            if let Some(since) = stats.in_flight_since {
+                summary.push_str(&format!(",in_flight_ms={}", since.elapsed().as_millis()));
+            }
+            if let Some(error) = &stats.first_error {
+                summary.push_str(&format!(",first_error={error}"));
+            }
+            summary
+        }
+
+        fn stop_and_join(&mut self) -> bool {
+            let Some(handle) = self.handle.take() else {
+                return true;
+            };
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            handle.thread().unpark();
+            let deadline = std::time::Instant::now() + HANG_GUARD;
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            handle.is_finished() && handle.join().is_ok()
+        }
+    }
+
+    impl Drop for DiskProbe {
+        fn drop(&mut self) {
+            self.stop_and_join();
         }
     }
 
@@ -3210,8 +3398,48 @@ mod tests {
         }
     }
 
+    /// The rebuild wait's timeout reports the worker's timeline, its own poll
+    /// gaps, the disk probe and the setup time, and joins the probe first.
+    #[test]
+    fn background_rebuild_timeout_reports_timeline_gaps_and_disk_probe() {
+        mark_test_start();
+        let (_temp, access) = active_history(1);
+        access.pause_background_worker_for_test();
+        access.start_background_rebuild().unwrap();
+        wait_for_worker_stage(&access, "test_gate", "gated timeout worker");
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_for_background_rebuild_within(
+                &access,
+                "gated timeout",
+                std::time::Duration::from_millis(300),
+            );
+        }))
+        .expect_err("a worker parked at the test gate must time the wait out");
+        let message = failure.downcast_ref::<String>().expect("formatted panic");
+
+        assert!(
+            message.starts_with("gated timeout worker did not finish; wait_elapsed="),
+            "{message}"
+        );
+        for field in [
+            "; stage=test_gate rebuild_retry_count=0 ",
+            " timeline=[t=",
+            " stage=spawn_pending phase=none progress=none boundary=none, t=",
+            " stage=test_gate phase=none progress=none boundary=none] wait_start_t=",
+            " wait_gaps=[",
+            " disk_probe=max_ms=",
+            ",joined=true",
+            " setup_ms=",
+        ] {
+            assert!(message.contains(field), "missing {field:?} in {message}");
+        }
+        assert!(!message.contains("setup_ms=none"), "{message}");
+    }
+
     #[test]
     fn invalid_publication_is_typed_unavailable_instead_of_failing_the_reader() {
+        mark_test_start();
         let (_temp, access) = active_history(1);
         let lifecycle = access.lifecycle().expect("test access is active");
         let publications = lifecycle.paths().root().join("publications");

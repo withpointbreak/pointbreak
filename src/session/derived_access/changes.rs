@@ -2983,9 +2983,9 @@ mod tests {
     /// keys the authoritative lane derives from the same events.
     fn assert_derived_ordering_matches_strict(fixture: &ActiveChangeFixture, context: &str) {
         let strict = strict_ordering(fixture);
-        let DerivedChangeOutcomeV1::Ready(list) = fixture.access.review_list_document().unwrap()
-        else {
-            panic!("{context}: derived list document must be ready");
+        let list = match fixture.access.review_list_document().unwrap() {
+            DerivedChangeOutcomeV1::Ready(list) => list,
+            other => panic!("{context}: derived list document must be ready; got {other:?}"),
         };
         assert!(!list.changes.is_empty(), "{context}: fixture Changes");
         for summary in &list.changes {
@@ -3002,10 +3002,9 @@ mod tests {
                 summary.change_id.as_str()
             );
         }
-        let DerivedChangeOutcomeV1::Ready(attention) =
-            fixture.access.review_attention_document().unwrap()
-        else {
-            panic!("{context}: derived attention document must be ready");
+        let attention = match fixture.access.review_attention_document().unwrap() {
+            DerivedChangeOutcomeV1::Ready(attention) => attention,
+            other => panic!("{context}: derived attention document must be ready; got {other:?}"),
         };
         for summary in &attention.document.changes {
             let listed = list
@@ -3026,12 +3025,13 @@ mod tests {
         // path (correlation index + engagement closure); it must agree with
         // the whole-generation fold exactly.
         for listed in &list.changes {
-            let DerivedChangeOutcomeV1::Ready(detail) = fixture
+            let detail = match fixture
                 .access
                 .review_detail_document(&listed.change_id)
                 .unwrap()
-            else {
-                panic!("{context}: derived detail must be ready");
+            {
+                DerivedChangeOutcomeV1::Ready(detail) => detail,
+                other => panic!("{context}: derived detail must be ready; got {other:?}"),
             };
             assert_eq!(
                 detail.detail.summary.activity_at,
@@ -3052,28 +3052,33 @@ mod tests {
             panic!("{context}: generation must be current");
         };
         let checkpoint = current.pin_change_reader_checkpoint().unwrap();
-        let DerivedChangeOutcomeV1::Ready(skipped) =
-            super::super::change_seek_reads::prepare_narrowed_facade(
-                &current,
-                &checkpoint,
-                &list.changes[0].change_id,
-                super::super::change_seek_reads::NarrowedOrderingV1::Skipped,
-            )
-            .unwrap()
-        else {
-            panic!("{context}: narrowed facade must be ready");
+        let skipped = match super::super::change_seek_reads::prepare_narrowed_facade(
+            &current,
+            &checkpoint,
+            &list.changes[0].change_id,
+            super::super::change_seek_reads::NarrowedOrderingV1::Skipped,
+        )
+        .unwrap()
+        {
+            DerivedChangeOutcomeV1::Ready(skipped) => skipped,
+            // The prepared facade has no `Debug`; a non-Ready outcome carries none.
+            other => panic!(
+                "{context}: narrowed facade must be ready; got {:?}",
+                other.map_ready(|_| ())
+            ),
         };
         assert!(
             skipped.facade.ordering().is_none(),
             "{context}: skipped fold"
         );
         for summary in &list.changes {
-            let DerivedChangeOutcomeV1::Ready(detail) = fixture
+            let detail = match fixture
                 .access
                 .review_detail_document(&summary.change_id)
                 .unwrap()
-            else {
-                panic!("{context}: derived detail must be ready");
+            {
+                DerivedChangeOutcomeV1::Ready(detail) => detail,
+                other => panic!("{context}: derived detail must be ready; got {other:?}"),
             };
             assert_eq!(
                 detail.detail.summary.activity_at,
@@ -3214,9 +3219,9 @@ mod tests {
     }
 
     fn derived_activity(fixture: &ActiveChangeFixture, change_id: &ChangeId) -> Option<String> {
-        let DerivedChangeOutcomeV1::Ready(list) = fixture.access.review_list_document().unwrap()
-        else {
-            panic!("derived list document must be ready");
+        let list = match fixture.access.review_list_document().unwrap() {
+            DerivedChangeOutcomeV1::Ready(list) => list,
+            other => panic!("derived list document must be ready; got {other:?}"),
         };
         list.changes
             .into_iter()
@@ -3724,12 +3729,13 @@ mod tests {
             )
             .unwrap()
             .with_order(order);
-            let DerivedChangeOutcomeV1::Ready(page) = fixture
+            let page = match fixture
                 .access
                 .changes(&DerivedChangePageRequestV1::Bounded(selection))
                 .unwrap()
-            else {
-                panic!("derived page must be ready");
+            {
+                DerivedChangeOutcomeV1::Ready(page) => page,
+                other => panic!("derived page must be ready; got {other:?}"),
             };
             ids.extend(
                 page.document
