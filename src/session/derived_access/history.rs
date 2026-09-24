@@ -1658,6 +1658,10 @@ mod tests {
     use crate::session::derived_access::attention::{
         DerivedAttentionRoute, LegacyAttentionReadBoundary,
     };
+    use crate::session::derived_access::authority_check_override::{
+        AuthorityCheckSite, changed_check, queue_authority_check, take_queued_authority_check,
+        unproven_check,
+    };
     use crate::session::derived_access::generation::{GenerationProgress, GenerationProgressPhase};
     use crate::session::derived_access::lifecycle::LifecycleControl;
     use crate::session::derived_access::sqlite::StoreWriterLock;
@@ -1673,6 +1677,7 @@ mod tests {
         task_input_request_event_with_target, user_response_event,
     };
     use crate::session::store::authority_lock::StoreAuthorityLock;
+    use crate::session::store::backend::JournalChangeCheck;
     use crate::session::store::capabilities::{
         CapabilityFixtureState, write_capability_fixture_for_test,
     };
@@ -2116,6 +2121,32 @@ mod tests {
         assert_eq!(
             access.lifecycle_status().availability,
             DerivedHistoryAvailability::Absent
+        );
+    }
+
+    #[test]
+    fn explicit_rebuild_retries_an_unproven_authority_check() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let store_root = access
+            .lifecycle()
+            .expect("test access is active")
+            .store_root()
+            .to_path_buf();
+        queue_authority_check(
+            &store_root,
+            AuthorityCheckSite::PrePublication,
+            unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234),
+        );
+
+        let receipt = access
+            .rebuild(|_| DerivedHistoryControl::Continue)
+            .expect("one unproven authority check must not fail an explicit rebuild");
+
+        assert!(receipt.rebuilt);
+        assert_eq!(receipt.availability, DerivedHistoryAvailability::Current);
+        assert_eq!(
+            take_queued_authority_check(&store_root, AuthorityCheckSite::PrePublication),
+            None
         );
     }
 
@@ -3595,6 +3626,77 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         wait_for_background_rebuild(&access, "promotion retry");
+    }
+
+    #[test]
+    fn background_worker_retries_unproven_pre_publication_authority() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let store_root = access
+            .lifecycle()
+            .expect("test access is active")
+            .store_root()
+            .to_path_buf();
+        queue_authority_check(
+            &store_root,
+            AuthorityCheckSite::PrePublication,
+            unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234),
+        );
+
+        access.start_background_rebuild().unwrap();
+        wait_for_background_publication(&access, "unproven pre-publication authority");
+
+        assert_eq!(
+            take_queued_authority_check(&store_root, AuthorityCheckSite::PrePublication),
+            None,
+            "the worker never reached the queued pre-publication check"
+        );
+    }
+
+    #[test]
+    fn background_worker_retries_unproven_bootstrap_authority() {
+        assert_background_worker_retries_bootstrap_check(
+            unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234),
+            "unproven bootstrap authority",
+        );
+    }
+
+    #[test]
+    fn background_worker_retries_a_proven_bootstrap_change() {
+        assert_background_worker_retries_bootstrap_check(
+            changed_check("continuous NTFS journal interval contains an event-carrier change"),
+            "proven bootstrap change",
+        );
+    }
+
+    fn assert_background_worker_retries_bootstrap_check(check: JournalChangeCheck, context: &str) {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let store_root = access
+            .lifecycle()
+            .expect("test access is active")
+            .store_root()
+            .to_path_buf();
+        queue_authority_check(&store_root, AuthorityCheckSite::BootstrapPopulation, check);
+
+        access.start_background_rebuild().unwrap();
+        wait_for_background_publication(&access, context);
+
+        assert_eq!(
+            take_queued_authority_check(&store_root, AuthorityCheckSite::BootstrapPopulation),
+            None,
+            "{context}: the worker never reached the queued bootstrap check"
+        );
+    }
+
+    /// Wait for the background worker to return, then require that it
+    /// published a current generation.
+    fn wait_for_background_publication(access: &DerivedHistoryAccess, context: &str) {
+        wait_for_background_rebuild(access, context);
+        let status = access.lifecycle_status();
+        assert_eq!(
+            status.availability,
+            DerivedHistoryAvailability::Current,
+            "{context}: the worker returned without publishing: {status:?}"
+        );
     }
 
     #[cfg(unix)]

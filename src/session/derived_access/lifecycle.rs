@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(test)]
+use super::authority_check_override::{AuthorityCheckSite, take_queued_authority_check};
 use super::cursor::{TruthAuthoritySnapshot, TruthCursor};
 use super::generation::{
     GenerationDescriptor, GenerationError, GenerationLayout, GenerationProgress,
@@ -52,6 +54,7 @@ use crate::session::store::capabilities::{
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 const WAL_OBSERVATION_ATTEMPTS: usize = 4;
+const UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS: usize = 3;
 const WAL_OBSERVATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
 const BOOTSTRAP_PROJECTION_BATCH: usize = 512;
 const CHANGE_ACTIVATION_LOGICAL_KEY: &str =
@@ -165,6 +168,15 @@ pub(crate) enum LifecycleError {
     EmptyStoreIdentity,
     #[error("authoritative truth changed during derived rebuild")]
     TruthChanged,
+    #[error(
+        "authoritative truth stability was not proven during derived rebuild {phase} via {} \
+         ({} native bytes, {} native records examined); retry the rebuild",
+        .check.mechanism, .check.native_bytes_examined, .check.native_records_examined
+    )]
+    TruthUnproven {
+        phase: &'static str,
+        check: Box<JournalChangeCheck>,
+    },
     #[error("derived generation validation failed: {0}")]
     Validation(String),
     #[error(transparent)]
@@ -275,6 +287,23 @@ impl DerivedAccessLifecycle {
             return Err(LifecycleError::AutomaticRebuildSuppressed);
         }
         Ok(Some(authority))
+    }
+
+    /// Observe whether authoritative truth moved since the candidate's
+    /// bootstrap stamp. Only a `Stable` verdict may publish.
+    fn pre_publication_authority_check(
+        &self,
+        before: &JournalChangeStamp,
+    ) -> Result<JournalChangeCheck, LifecycleError> {
+        #[cfg(test)]
+        if let Some(check) =
+            take_queued_authority_check(&self.store_root, AuthorityCheckSite::PrePublication)
+        {
+            return Ok(check);
+        }
+        QualificationLocalJournal::new(&self.store_root)
+            .changes_since(before)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))
     }
 
     /// Recovery classifier: reports lifecycle availability and moves invalid
@@ -516,12 +545,7 @@ impl DerivedAccessLifecycle {
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
         hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
-        self.rebuild_with_execution(
-            BOOTSTRAP_PROJECTION_BATCH,
-            progress,
-            hook,
-            RebuildExecution::Synchronous,
-        )
+        self.synchronous_rebuild(BOOTSTRAP_PROJECTION_BATCH, progress, hook)
     }
 
     fn rebuild_with_hook_and_batch_limit(
@@ -530,12 +554,36 @@ impl DerivedAccessLifecycle {
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
         hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
-        self.rebuild_with_execution(
-            bootstrap_batch_limit,
-            progress,
-            hook,
-            RebuildExecution::Synchronous,
-        )
+        self.synchronous_rebuild(bootstrap_batch_limit, progress, hook)
+    }
+
+    /// Rebuild in the caller's thread. When authoritative truth could not be
+    /// proven stable, the whole rebuild runs again from fresh staging, up to
+    /// `UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS` attempts in total; `progress`
+    /// and `hook` start over with each attempt. A proven change is returned
+    /// at once. Background workers retry both outcomes on their own schedule.
+    fn synchronous_rebuild(
+        &self,
+        bootstrap_batch_limit: usize,
+        mut progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+        mut hook: impl FnMut(PublicationBoundary),
+    ) -> Result<LifecycleReceipt, LifecycleError> {
+        let mut attempt = 1;
+        loop {
+            match self.rebuild_with_execution(
+                bootstrap_batch_limit,
+                &mut progress,
+                &mut hook,
+                RebuildExecution::Synchronous,
+            ) {
+                Err(LifecycleError::TruthUnproven { .. })
+                    if attempt < UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS =>
+                {
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
 
     fn rebuild_with_execution(
@@ -650,10 +698,7 @@ impl DerivedAccessLifecycle {
             if let Some(error) = progress_error {
                 return Err(error);
             }
-            if matches!(bootstrap, Err(CursorLedgerError::BootstrapCancelled)) {
-                return Err(LifecycleError::Cancelled);
-            }
-            let bootstrap = bootstrap?;
+            let bootstrap = bootstrap.map_err(bootstrap_error)?;
 
             let service = DerivedAccessService::open_writable_at(
                 &self.store_root,
@@ -903,12 +948,20 @@ impl DerivedAccessLifecycle {
                 }
             }
         };
-        let authority_check = QualificationLocalJournal::new(&self.store_root)
-            .changes_since(&bootstrap_stamp)
-            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
-        if authority_check.verdict != JournalChangeVerdict::Stable {
-            self.paths.discard_staging(&generation_id)?;
-            return Err(LifecycleError::TruthChanged);
+        let authority_check = self.pre_publication_authority_check(&bootstrap_stamp)?;
+        match authority_check.verdict {
+            JournalChangeVerdict::Stable => {}
+            JournalChangeVerdict::Changed => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(LifecycleError::TruthChanged);
+            }
+            JournalChangeVerdict::Indeterminate => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(LifecycleError::TruthUnproven {
+                    phase: "pre-publication",
+                    check: Box::new(authority_check),
+                });
+            }
         }
         if let Err(error) =
             service.bind_truth_authority_stamp_locked(head, &authority_check.after, &writer_lock)
@@ -2401,6 +2454,21 @@ fn unavailable_after(error: &LifecycleError, generation_id: Option<String>) -> L
     }
 }
 
+/// Bootstrap population proves authority stable across its truth listing. A
+/// proven change and an unproven check are both retryable, like the same
+/// outcomes before publication.
+fn bootstrap_error(error: CursorLedgerError) -> LifecycleError {
+    match error {
+        CursorLedgerError::BootstrapCancelled => LifecycleError::Cancelled,
+        CursorLedgerError::AuthorityTransition(_) => LifecycleError::TruthChanged,
+        CursorLedgerError::AuthorityUnproven(check) => LifecycleError::TruthUnproven {
+            phase: "bootstrap population",
+            check,
+        },
+        error => LifecycleError::Cursor(error),
+    }
+}
+
 /// Failures that clear up on their own: I/O on the derived root or its locks,
 /// a root that another holder still has open, and derived or authoritative reads.
 pub(crate) fn is_transient_lifecycle_error(error: &LifecycleError) -> bool {
@@ -2439,6 +2507,10 @@ mod tests {
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
     use crate::model::JournalId;
+    use crate::session::derived_access::authority_check_override::{
+        AuthorityCheckSite, changed_check, queue_authority_check, take_queued_authority_check,
+        unproven_check,
+    };
     use crate::session::derived_access::layout::{
         DerivedStorageLayout, DerivedStorageNamespace, DerivedStorageTransition,
     };
@@ -3931,6 +4003,195 @@ mod tests {
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::Absent
+        );
+    }
+
+    #[test]
+    fn pre_publication_indeterminate_is_typed_unproven_with_evidence() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let mechanism = "NTFS journal byte work cap was exhausted";
+        // Every attempt of the synchronous rebuild observes the same budget.
+        for _ in 0..UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS {
+            queue_authority_check(
+                temp.path(),
+                AuthorityCheckSite::PrePublication,
+                unproven_check(mechanism, 1_048_576, 1_234),
+            );
+        }
+
+        let error = lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect_err("an unproven authority check must not publish");
+
+        let LifecycleError::TruthUnproven { phase, check } = &error else {
+            panic!("expected TruthUnproven, got {error:?}");
+        };
+        assert_eq!(*phase, "pre-publication");
+        assert_eq!(check.verdict, JournalChangeVerdict::Indeterminate);
+        assert_eq!(check.mechanism, mechanism);
+        assert_eq!(check.native_bytes_examined, 1_048_576);
+        assert_eq!(check.native_records_examined, 1_234);
+        let message = error.to_string();
+        for expected in [mechanism, "1048576 native bytes", "1234 native records"] {
+            assert!(message.contains(expected), "{message:?} lacks {expected:?}");
+        }
+        let staging_root = lifecycle.paths().root().join("staging");
+        assert!(fs::read_dir(&staging_root).unwrap().next().is_none());
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Absent
+        );
+    }
+
+    #[test]
+    fn synchronous_rebuild_recovers_from_one_unproven_authority_check() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        queue_authority_check(
+            temp.path(),
+            AuthorityCheckSite::PrePublication,
+            unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234),
+        );
+
+        let receipt = lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("one unproven authority check must not fail the rebuild");
+
+        assert_eq!(receipt.availability, DerivedAccessAvailability::Current);
+        assert_eq!(
+            lifecycle.published_generation_id().unwrap(),
+            receipt.generation_id
+        );
+        assert_eq!(
+            take_queued_authority_check(temp.path(), AuthorityCheckSite::PrePublication),
+            None
+        );
+    }
+
+    #[test]
+    fn synchronous_rebuild_gives_up_after_bounded_unproven_attempts() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        for attempt in 0..UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS {
+            queue_authority_check(
+                temp.path(),
+                AuthorityCheckSite::PrePublication,
+                unproven_check(&format!("unproven attempt {attempt}"), 1_048_576, 1_234),
+            );
+        }
+        // One more than the budget: it must still be queued afterwards.
+        queue_authority_check(
+            temp.path(),
+            AuthorityCheckSite::PrePublication,
+            unproven_check("beyond the attempt budget", 1_048_576, 1_234),
+        );
+        let mut attempts = 0;
+
+        let result = lifecycle.rebuild_with_hook(
+            |_| LifecycleControl::Continue,
+            |boundary| {
+                if boundary == PublicationBoundary::StagingPrepared {
+                    attempts += 1;
+                }
+            },
+        );
+
+        let Err(LifecycleError::TruthUnproven { check, .. }) = &result else {
+            panic!("expected TruthUnproven after the attempt budget, got {result:?}");
+        };
+        let last_attempt = UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS - 1;
+        assert_eq!(check.mechanism, format!("unproven attempt {last_attempt}"));
+        assert_eq!(attempts, UNPROVEN_AUTHORITY_REBUILD_ATTEMPTS);
+        let remaining =
+            take_queued_authority_check(temp.path(), AuthorityCheckSite::PrePublication)
+                .map(|check| check.mechanism);
+        assert_eq!(remaining.as_deref(), Some("beyond the attempt budget"));
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Absent
+        );
+    }
+
+    #[test]
+    fn synchronous_rebuild_reports_a_proven_change_without_retrying() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        queue_authority_check(
+            temp.path(),
+            AuthorityCheckSite::PrePublication,
+            changed_check("continuous NTFS journal interval contains an event-carrier change"),
+        );
+        let mut attempts = 0;
+
+        let result = lifecycle.rebuild_with_hook(
+            |_| LifecycleControl::Continue,
+            |boundary| {
+                if boundary == PublicationBoundary::StagingPrepared {
+                    attempts += 1;
+                }
+            },
+        );
+
+        assert!(
+            matches!(result, Err(LifecycleError::TruthChanged)),
+            "a proven change must be reported: {result:?}"
+        );
+        assert_eq!(attempts, 1, "a proven change must not be retried");
+    }
+
+    #[test]
+    fn pre_publication_proven_change_stays_truth_changed() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let events = temp.path().join("events");
+
+        let result = lifecycle.rebuild_with_hook(
+            |_| LifecycleControl::Continue,
+            |boundary| {
+                if boundary == PublicationBoundary::CandidateValidated {
+                    fs::write(events.join("zz-noise"), b"noise").unwrap();
+                }
+            },
+        );
+
+        assert!(
+            matches!(result, Err(LifecycleError::TruthChanged)),
+            "a proven change must stay TruthChanged: {result:?}"
+        );
+        assert!(
+            fs::read_dir(lifecycle.paths().root().join("staging"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bootstrap_authority_outcomes_map_to_retryable_lifecycle_errors() {
+        let unproven = unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234);
+        let error = bootstrap_error(CursorLedgerError::AuthorityUnproven(Box::new(
+            unproven.clone(),
+        )));
+        let LifecycleError::TruthUnproven { phase, check } = &error else {
+            panic!("expected TruthUnproven, got {error:?}");
+        };
+        assert_eq!(*phase, "bootstrap population");
+        assert_eq!(**check, unproven);
+
+        let error = bootstrap_error(CursorLedgerError::AuthorityTransition(
+            "authoritative truth changed during bootstrap population via test".to_owned(),
+        ));
+        assert!(matches!(error, LifecycleError::TruthChanged), "{error:?}");
+        let error = bootstrap_error(CursorLedgerError::BootstrapCancelled);
+        assert!(matches!(error, LifecycleError::Cancelled), "{error:?}");
+        let error = bootstrap_error(CursorLedgerError::IncompleteBootstrap);
+        assert!(
+            matches!(
+                error,
+                LifecycleError::Cursor(CursorLedgerError::IncompleteBootstrap)
+            ),
+            "{error:?}"
         );
     }
 

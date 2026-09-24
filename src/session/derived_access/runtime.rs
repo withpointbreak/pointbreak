@@ -1244,7 +1244,14 @@ fn background_rebuild(
                     return;
                 }
             }
-            Err(LifecycleError::TruthChanged) => {
+            Err(error @ (LifecycleError::TruthChanged | LifecycleError::TruthUnproven { .. })) => {
+                if let LifecycleError::TruthUnproven { phase, check } = &error {
+                    tracing::debug!(
+                        phase,
+                        mechanism = %check.mechanism,
+                        "derived_access_background_authority_unproven"
+                    );
+                }
                 #[cfg(test)]
                 diagnostic.retry(BackgroundWorkerStage::WaitingAfterTruthChanged);
                 if wait_or_cancel(&cancel, truth_changed_retry_interval) {

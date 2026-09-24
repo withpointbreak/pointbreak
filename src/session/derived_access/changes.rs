@@ -2134,6 +2134,7 @@ pub(crate) fn lifecycle_failure_outcome<T>(error: LifecycleError) -> DerivedChan
     let detail = error.to_string();
     match error {
         LifecycleError::TruthChanged
+        | LifecycleError::TruthUnproven { .. }
         | LifecycleError::Cancelled
         | LifecycleError::RebuildBusy
         | LifecycleError::WriterLock(_)
@@ -4500,6 +4501,38 @@ mod tests {
         );
         assert!(document.is_retryable());
         let json = serde_json::to_value(document).unwrap();
+        assert_eq!(json["message"], expected_detail);
+    }
+
+    #[test]
+    fn lifecycle_unproven_authority_keeps_the_retryable_projection_failure_axis() {
+        use crate::session::derived_access::authority_check_override::unproven_check;
+
+        let error = LifecycleError::TruthUnproven {
+            phase: "pre-publication",
+            check: Box::new(unproven_check(
+                "NTFS journal byte work cap was exhausted",
+                1_048_576,
+                1_234,
+            )),
+        };
+        let expected_detail = error.to_string();
+        let DerivedChangeOutcomeV1::Retryable(changed) =
+            lifecycle_failure_outcome::<()>(LifecycleError::TruthChanged)
+        else {
+            panic!("a proven truth change must remain a retryable projection failure");
+        };
+        let DerivedChangeOutcomeV1::Retryable(unproven) = lifecycle_failure_outcome::<()>(error)
+        else {
+            panic!("unproven authority must be retryable like a proven truth change");
+        };
+        assert_eq!(unproven.code(), changed.code());
+        assert_eq!(
+            unproven.code(),
+            DerivedProjectionFailureCodeV1::ProjectionUnstable
+        );
+        assert!(unproven.is_retryable());
+        let json = serde_json::to_value(unproven).unwrap();
         assert_eq!(json["message"], expected_detail);
     }
 

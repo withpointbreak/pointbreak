@@ -7,6 +7,8 @@
 #![cfg_attr(not(all(test, feature = "bench")), allow(dead_code))]
 
 pub(crate) mod attention;
+#[cfg(test)]
+mod authority_check_override;
 pub(crate) mod change_revision_reads;
 pub(crate) mod change_seek_reads;
 pub(crate) mod changes;

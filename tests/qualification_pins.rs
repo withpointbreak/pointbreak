@@ -406,8 +406,8 @@ fn ci_profile_exclusions_name_tests_that_still_exist_and_spare_the_full_lane() {
 
     // The ci profile excludes named slow tests from the per-push lane; the
     // scheduled full-suite lane still runs them through the default profile.
-    // Parse names from the default-filter line alone: the retry override's
-    // module-path filter below it is deliberately not a function name.
+    // Parse names from the default-filter line alone: override filters are
+    // binary names, not function names.
     let exclusion_line = profile
         .lines()
         .find(|line| line.starts_with("default-filter"))
@@ -424,21 +424,12 @@ fn ci_profile_exclusions_name_tests_that_still_exist_and_spare_the_full_lane() {
          profile would silently drop the excluded tests from every lane"
     );
 
-    // The Windows-only retry family must stay scoped: platform-conditional
-    // and aimed at the lifecycle timing tests, never a blanket retry that
-    // would mask real failures suite-wide.
-    assert!(
-        profile.contains("platform = 'cfg(windows)'"),
-        "the lifecycle retry override must stay Windows-scoped"
-    );
-    assert!(
-        profile.contains("filter = 'test(session::derived_access::lifecycle::tests)'"),
-        "the retry override must stay scoped to the lifecycle timing family"
-    );
+    // A retried test reports a pass that hides the failure it retried; a
+    // flaky test is fixed in the test or the product instead.
     assert_eq!(
         profile.matches("retries").count(),
-        1,
-        "retries belong to the one scoped override, never profile-wide"
+        0,
+        "nextest retries hide flaky failures; fix the test or the product instead"
     );
 
     // A renamed or deleted test leaves a stale exclusion silently filtering

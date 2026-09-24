@@ -20,6 +20,10 @@ use crate::bench_support::longitudinal::{
 };
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::ShoreError;
+#[cfg(test)]
+use crate::session::derived_access::authority_check_override::{
+    AuthorityCheckSite, take_queued_authority_check,
+};
 use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution,
     TruthAuthoritySnapshot, TruthCursor, TruthHead,
@@ -28,7 +32,7 @@ use crate::session::derived_access::layout::DerivedStorageLayout;
 use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::{
-    JournalChangeStamp, JournalChangeVerdict, JournalCreatedTransitionVerdict,
+    JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, JournalCreatedTransitionVerdict,
 };
 use crate::session::store::capabilities::{
     AuthorityCursorV2, JournalRecordIdentityV1, authority_cursor_from_record_identities,
@@ -146,6 +150,12 @@ pub(crate) enum CursorLedgerError {
     UpgradeRequired(String),
     #[error("cursor-ledger could not bind the created truth carrier: {0}")]
     AuthorityTransition(String),
+    #[error(
+        "authoritative truth stability was not proven during bootstrap population via {} \
+         ({} native bytes, {} native records examined)",
+        .0.mechanism, .0.native_bytes_examined, .0.native_records_examined
+    )]
+    AuthorityUnproven(Box<JournalChangeCheck>),
     #[error("cursor {cursor:?} is ahead of head {head:?}")]
     CursorAhead {
         cursor: TruthCursor,
@@ -399,16 +409,9 @@ impl SqliteCursorLedger {
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let decoded_event_ownership = RetainedDecodedEventsGuardV1::new(events.len());
-        let authority_check = journal
-            .changes_since(&authority_before)
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
-        if authority_check.verdict != JournalChangeVerdict::Stable {
-            return Err(CursorLedgerError::AuthorityTransition(format!(
-                "authoritative truth changed during bootstrap population via {}",
-                authority_check.mechanism
-            )));
-        }
-        let authority_stamp = authority_check.after;
+        let authority_stamp = bootstrap_population_authority(
+            ledger.bootstrap_authority_check(&journal, &authority_before)?,
+        )?;
         std::fs::create_dir_all(ledger.sidecar_path())
             .map_err(|error| io_error(ledger.sidecar_path(), error))?;
         let connection = open_connection(&ledger.database_path, true)?;
@@ -507,6 +510,24 @@ impl SqliteCursorLedger {
             #[cfg(any(test, feature = "longitudinal-counting"))]
             _decoded_event_ownership: decoded_event_ownership,
         })
+    }
+
+    /// Observe whether authoritative truth moved while bootstrap population
+    /// listed it.
+    fn bootstrap_authority_check(
+        &self,
+        journal: &QualificationLocalJournal,
+        before: &JournalChangeStamp,
+    ) -> Result<JournalChangeCheck, CursorLedgerError> {
+        #[cfg(test)]
+        if let Some(check) =
+            take_queued_authority_check(&self.store_root, AuthorityCheckSite::BootstrapPopulation)
+        {
+            return Ok(check);
+        }
+        journal
+            .changes_since(before)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))
     }
 
     pub(crate) fn open(
@@ -1225,6 +1246,23 @@ impl SqliteCursorLedger {
         ));
         std::fs::rename(sidecar, &quarantine).map_err(|error| io_error(sidecar, error))?;
         Ok(quarantine)
+    }
+}
+
+/// The stamp bootstrap population may bind: only one proven stable across
+/// the truth listing.
+fn bootstrap_population_authority(
+    check: JournalChangeCheck,
+) -> Result<JournalChangeStamp, CursorLedgerError> {
+    match check.verdict {
+        JournalChangeVerdict::Stable => Ok(check.after),
+        JournalChangeVerdict::Changed => Err(CursorLedgerError::AuthorityTransition(format!(
+            "authoritative truth changed during bootstrap population via {}",
+            check.mechanism
+        ))),
+        JournalChangeVerdict::Indeterminate => {
+            Err(CursorLedgerError::AuthorityUnproven(Box::new(check)))
+        }
     }
 }
 
@@ -2373,4 +2411,39 @@ fn sqlite_companion_path(database_path: &Path, suffix: &str) -> PathBuf {
     let mut path = database_path.as_os_str().to_os_string();
     path.push(suffix);
     PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::derived_access::authority_check_override::{changed_check, unproven_check};
+
+    #[test]
+    fn bootstrap_population_authority_types_each_verdict() {
+        let after = JournalChangeStamp::Observed {
+            identity_sha256: "identity".to_owned(),
+            change_sha256: "change".to_owned(),
+            entry_count: Some(1),
+            native_cursor: None,
+        };
+        let stable = JournalChangeCheck {
+            after: after.clone(),
+            verdict: JournalChangeVerdict::Stable,
+            ..changed_check("bounded stable continuation")
+        };
+        assert_eq!(bootstrap_population_authority(stable).unwrap(), after);
+
+        let changed = bootstrap_population_authority(changed_check("journal interval moved"));
+        let Err(CursorLedgerError::AuthorityTransition(message)) = changed else {
+            panic!("a proven change must be an authority transition: {changed:?}");
+        };
+        assert!(message.contains("journal interval moved"), "{message}");
+
+        let unproven = unproven_check("NTFS journal byte work cap was exhausted", 1_048_576, 1_234);
+        let result = bootstrap_population_authority(unproven.clone());
+        let Err(CursorLedgerError::AuthorityUnproven(check)) = result else {
+            panic!("an unproven check must keep its evidence: {result:?}");
+        };
+        assert_eq!(*check, unproven);
+    }
 }

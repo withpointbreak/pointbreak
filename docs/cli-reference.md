@@ -677,6 +677,10 @@ derived-path registry.
 - `rebuild` synchronously constructs and publishes a replacement generation even when the old generation
   remains readable. It emits a `pointbreak.store-derived-rebuild` receipt after publication.
 
+If authoritative truth cannot be proven stable during a `build` or `rebuild` (for example, a busy NTFS
+volume exhausts the change-journal budget), the rebuild runs again, up to three attempts in total, before
+it fails.
+
 Who may do what to the disposable derived generation is fixed by the actor's role:
 
 | Role | Commands and routes | May do | Refuses |
