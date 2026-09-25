@@ -1331,3 +1331,127 @@ fn observation_revision_refuses_a_change_replaced_revision_without_writing() {
     );
     assert_eq!(parse_json(&head.stdout)["revisionId"], second_id);
 }
+
+#[test]
+fn observation_revision_follows_the_per_store_rule_for_a_revision_held_by_several_changes() {
+    // Change x: A replaced by B. Change y: C, then A joins as a second current
+    // member. A is non-current in x but current in y, so no Change-wide
+    // replacement exists yet; once y also replaces A, it is replaced in every
+    // Change that holds it and the write is refused naming both heads.
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let a = parse_json(&pointbreak(["capture", "--repo", repo_arg]).stdout);
+    let a_id = a["revision"]["id"].as_str().unwrap().to_owned();
+    let a_hash = a["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let a_cursor = a["reviewCursor"]["token"].as_str().unwrap().to_owned();
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let b = parse_json(
+        &pointbreak([
+            "capture",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &a_cursor,
+            "--advance",
+            "replace",
+        ])
+        .stdout,
+    );
+    let b_id = b["revision"]["id"].as_str().unwrap().to_owned();
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+    let c = parse_json(&pointbreak(["capture", "--repo", repo_arg]).stdout);
+    let c_id = c["revision"]["id"].as_str().unwrap().to_owned();
+    let c_hash = c["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let change_y = c["changeId"].as_str().unwrap().to_owned();
+    assert_ne!(change_y, a["changeId"].as_str().unwrap());
+
+    let joined = pointbreak([
+        "change",
+        "join",
+        &change_y,
+        &a_id,
+        "--repo",
+        repo_arg,
+        "--operation-id",
+        "change-operation:shared-revision-join",
+    ]);
+    assert!(
+        joined.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&joined.stderr)
+    );
+
+    // Still current in y: the seed is its own head, and the write lands on A.
+    // One Change's replacement is never followed silently.
+    let allowed = pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        &a_id,
+        "--track",
+        "human:kevin",
+        "--title",
+        "still a live candidate in another Change",
+    ]);
+    assert!(
+        allowed.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert_eq!(parse_json(&allowed.stdout)["revisionId"], a_id);
+
+    let replaced_in_y = pointbreak([
+        "change",
+        "assert-relation",
+        &change_y,
+        &c_id,
+        &a_id,
+        "--successor-artifact-hash",
+        &c_hash,
+        "--predecessor-artifact-hash",
+        &a_hash,
+        "--repo",
+        repo_arg,
+        "--operation-id",
+        "change-operation:shared-revision-replace",
+    ]);
+    assert!(
+        replaced_in_y.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&replaced_in_y.stderr)
+    );
+
+    // Non-current in every Change that holds it: refused, naming both heads.
+    let before = support::store_event_count(repo.path());
+    let refused = pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        &a_id,
+        "--track",
+        "human:kevin",
+        "--title",
+        "replaced everywhere",
+    ]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("revision_replaced_by_change"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains(&b_id), "stderr:\n{stderr}");
+    assert!(stderr.contains(&c_id), "stderr:\n{stderr}");
+    assert_eq!(support::store_event_count(repo.path()), before);
+}
