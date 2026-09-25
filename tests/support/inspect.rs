@@ -1161,9 +1161,14 @@ pub fn decision_continuity_matrix() -> DecisionContinuityMatrix {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/support/assets/change-ready-store"),
         )
+        // The script owns its home beneath the destination and names an actor for
+        // the writes it attributes; its unattributed calls must not inherit the
+        // caller's actor or signing selection either.
         .env_remove("POINTBREAK_HOME")
         .env_remove("POINTBREAK_FORMAT")
-        .env_remove("POINTBREAK_SIGNING_KEY")
+        .env_remove(pointbreak::environment::ACTOR_ID)
+        .env_remove(pointbreak::environment::SIGNING)
+        .env_remove(pointbreak::environment::SIGNING_KEY)
         .output()
         .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
     assert!(

@@ -183,6 +183,66 @@ fn agent_identity_opt_in_mints_its_key_in_the_harness_home() {
     );
 }
 
+/// The harness home lives for the whole test: fixture preparation, the write
+/// under test and every later command share one directory. An opted-in agent
+/// identity mints its key on the first write and reuses it, silently, on the
+/// next, so both writes carry the same signer.
+#[test]
+fn harness_home_is_shared_by_every_command_in_one_test() {
+    ambient_home();
+    let repo = dirty_repo();
+    let repo_path = repo.path().to_str().expect("utf-8 repo path");
+    let env = [("POINTBREAK_ACTOR_ID", "actor:agent:lifetime")];
+
+    let first = pointbreak_env(["capture", "--repo", repo_path], &env);
+    assert!(
+        first.status.success(),
+        "first capture failed:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&first.stderr)
+            .contains("generated signing key for actor:agent:lifetime"),
+        "the first write under the fresh harness home mints the key"
+    );
+    let minted = harness_home().join("keys").join("agent-lifetime");
+    assert!(minted.is_file(), "key minted at {}", minted.display());
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = pointbreak_env(["capture", "--repo", repo_path], &env);
+    assert!(
+        second.status.success(),
+        "second capture failed:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&second.stderr).contains("generated signing key"),
+        "the second write reuses the key from the same harness home, got:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        entries(&harness_home().join("keys"))
+            .into_iter()
+            .filter(|path| path
+                .file_name()
+                .is_some_and(|name| name == "agent-lifetime"))
+            .count(),
+        1,
+        "exactly one key for the identity across both writes"
+    );
+
+    let signatures = stored_events(&repo)
+        .into_iter()
+        .filter(|event| event["writer"]["actorId"] == "actor:agent:lifetime")
+        .map(|event| event["signature"].clone())
+        .collect::<Vec<_>>();
+    assert!(
+        signatures.len() >= 2 && signatures.iter().all(|signature| !signature.is_null()),
+        "both writes are signed, got {signatures:?}"
+    );
+    assert_ambient_home_untouched();
+}
+
 /// An explicit `POINTBREAK_HOME` passed through `pointbreak_env` still wins over
 /// the harness default, so tests that assert on home contents keep working.
 #[test]
