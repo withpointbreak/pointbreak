@@ -6,7 +6,8 @@ use std::time::Instant;
 
 #[cfg(test)]
 use super::authority_check_override::{AuthorityCheckSite, take_queued_authority_check};
-use super::cursor::{TruthAuthoritySnapshot, TruthCursor};
+use super::cursor::{DeferredPublication, TruthAuthoritySnapshot, TruthCursor};
+use super::deferred::{self, DeferredReceipts};
 use super::generation::{
     GenerationDescriptor, GenerationError, GenerationLayout, GenerationProgress,
     GenerationProgressPhase, GenerationPublication, GenerationReadLease,
@@ -41,8 +42,8 @@ use crate::canonical_hash::canonical_json_bytes;
 use crate::documents::{
     INSPECT_READER_PROFILE_SCHEMA, ReaderProfileAvailabilityV1, ReaderProfileDocumentV1,
 };
-use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
+use crate::session::event::ShoreEvent;
 use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::backend::{
     JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, StoreBackend,
@@ -51,6 +52,7 @@ use crate::session::store::capabilities::{
     StoreCapabilityStatus, inspect_change_reader_journal_records,
     validate_bounded_change_capability_pair,
 };
+use crate::session::{EventStore, EventWriteOutcome};
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 const WAL_OBSERVATION_ATTEMPTS: usize = 4;
@@ -1274,6 +1276,7 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
+        self.settle_deferred_receipts_locked(&service, &publication.generation_id, _writer_lock)?;
         let publication_snapshot = service.publication_validation_snapshot()?;
         let reader_receipt = self.validate_change_reader_publication(
             &generation_root,
@@ -1300,6 +1303,108 @@ impl DerivedAccessLifecycle {
             authority_maintenance_pending: false,
             _lease: lease,
         }))
+    }
+
+    /// Settle this process's deferred receipts for the exact generation before
+    /// publication admission proves authority. Receipts observed against a
+    /// generation that has since been replaced are dropped: the replacement's
+    /// census either included their carriers or its own authority check
+    /// refused it. A settlement the ledger cannot prove is an authority gap.
+    fn settle_deferred_receipts_locked(
+        &self,
+        service: &DerivedAccessService,
+        generation_id: &str,
+        writer_lock: &StoreWriterLock,
+    ) -> Result<(), LifecycleError> {
+        let pending = deferred::pending_for(&self.store_root);
+        let mut guard = deferred::lock_pending(&pending);
+        let Some(entry) = guard.as_ref() else {
+            return Ok(());
+        };
+        if entry.generation_id != generation_id {
+            *guard = None;
+            return Ok(());
+        }
+        match service.settle_deferred_receipts_locked(&entry.receipts, writer_lock) {
+            Ok(settled) => {
+                tracing::debug!(
+                    receipts = entry.receipts.len(),
+                    head = ?settled,
+                    "derived_access_deferred_receipts_settled"
+                );
+                *guard = None;
+                Ok(())
+            }
+            Err(error) if deferred_settlement_is_authority_gap(&error) => {
+                *guard = None;
+                Err(LifecycleError::RebuildRequired(format!(
+                    "deferred derived receipts could not be settled: {error}"
+                )))
+            }
+            Err(error) => Err(LifecycleError::Service(error)),
+        }
+    }
+
+    /// Publish one governed carrier while another holder keeps the derived
+    /// writer lock, proving the same single-carrier transition an admitted
+    /// append proves and retaining the receipt for the next holder in this
+    /// process. Any failure leaves the caller on the plain loose publication;
+    /// the publisher is invoked at most once either way.
+    pub(crate) fn publish_deferred_for_write(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        publish: impl FnOnce() -> crate::error::Result<EventWriteOutcome>,
+    ) -> Result<DeferredPublication, LifecycleError> {
+        if self.profile == DerivedAccessProfile::Off {
+            return Err(LifecycleError::Disabled);
+        }
+        let Some((paths, publication, _lease)) = self
+            .stable_current_publication()
+            .map_err(observe_generation_error)?
+        else {
+            return Err(LifecycleError::RebuildRequired(
+                "no usable derived generation is current".to_owned(),
+            ));
+        };
+        let generation_root = paths.generation(&publication.generation_id);
+        let service = DerivedAccessService::open_at(
+            &self.store_root,
+            &generation_root,
+            CursorLedgerIdentity::new(self.store_id.clone()),
+        )
+        .map_err(observe_service_error)?;
+        let pending = deferred::pending_for(&self.store_root);
+        let mut guard = deferred::lock_pending(&pending);
+        if guard
+            .as_ref()
+            .is_some_and(|entry| entry.generation_id != publication.generation_id)
+        {
+            *guard = None;
+        }
+        if guard
+            .as_ref()
+            .is_some_and(|entry| entry.receipts.len() >= deferred::MAX_DEFERRED_RECEIPTS_PER_STORE)
+        {
+            return Err(LifecycleError::RebuildRequired(
+                "deferred derived receipt budget is exhausted".to_owned(),
+            ));
+        }
+        let chained_after = guard
+            .as_ref()
+            .and_then(|entry| entry.receipts.last().cloned());
+        let outcome =
+            service.publish_deferred(event, attempt_token, chained_after.as_ref(), publish)?;
+        if let DeferredPublication::Created(receipt) = &outcome {
+            guard
+                .get_or_insert_with(|| DeferredReceipts {
+                    generation_id: publication.generation_id.clone(),
+                    receipts: Vec::new(),
+                })
+                .receipts
+                .push(receipt.clone());
+        }
+        Ok(outcome)
     }
 
     /// Run mutable maintenance against the current generation without ever
@@ -2380,6 +2485,25 @@ fn service_error_requires_quarantine(error: &DerivedAccessServiceError) -> bool 
         | DerivedAccessServiceError::ZeroBatchLimit
         | DerivedAccessServiceError::BootstrapCancelled => false,
     }
+}
+
+/// Settlement failures that prove the retained receipts no longer describe
+/// truth or the ledger; transient derived or authoritative I/O keeps them.
+fn deferred_settlement_is_authority_gap(error: &DerivedAccessServiceError) -> bool {
+    matches!(
+        error,
+        DerivedAccessServiceError::Cursor(
+            CursorLedgerError::AuthorityTransition(_)
+                | CursorLedgerError::UnreceiptedCarrier(_)
+                | CursorLedgerError::CarrierAbsent(_)
+                | CursorLedgerError::WitnessMismatch(_)
+                | CursorLedgerError::SequenceGap { .. }
+                | CursorLedgerError::WrongEpoch { .. }
+                | CursorLedgerError::AttemptTokenUsed(_)
+                | CursorLedgerError::Quarantined(_)
+                | CursorLedgerError::SchemaMismatch(_)
+        )
+    )
 }
 
 fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {

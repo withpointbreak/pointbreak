@@ -15,6 +15,7 @@ pub(crate) mod changes;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
+pub(crate) mod deferred;
 pub(crate) mod detail_reads;
 pub(crate) mod fact_reads;
 mod fs_retry;

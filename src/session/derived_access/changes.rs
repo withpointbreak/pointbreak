@@ -2663,20 +2663,33 @@ mod tests {
             }
         }
 
-        fn append_unrelated(&self, suffix: &str) {
+        fn unrelated_event(suffix: &str) -> ShoreEvent {
             let journal_id = JournalId::new(format!("journal:change-endpoint:{suffix}"));
-            record_fixture_event(
-                &self.store,
-                ShoreEvent::new(
-                    EventType::ReviewInitialized,
-                    ReviewInitializedPayload::idempotency_key(&journal_id),
-                    EventTarget::for_journal(journal_id),
-                    Writer::shore_local("change-endpoint-test"),
-                    ReviewInitializedPayload {},
-                    "2026-08-10T02:00:00Z",
-                )
-                .expect("build unrelated append"),
-            );
+            ShoreEvent::new(
+                EventType::ReviewInitialized,
+                ReviewInitializedPayload::idempotency_key(&journal_id),
+                EventTarget::for_journal(journal_id),
+                Writer::shore_local("change-endpoint-test"),
+                ReviewInitializedPayload {},
+                "2026-08-10T02:00:00Z",
+            )
+            .expect("build unrelated append")
+        }
+
+        fn append_unrelated(&self, suffix: &str) {
+            record_fixture_event(&self.store, Self::unrelated_event(suffix));
+        }
+
+        /// Append an unrelated event and return the derived acknowledgement
+        /// instead of asserting on it, for tests that drive the writer through
+        /// a busy derived writer lock.
+        fn append_unrelated_acknowledged(
+            &self,
+            suffix: &str,
+        ) -> crate::session::acknowledgement::EventWriteAcknowledgement {
+            self.store
+                .record_event_once_acknowledged(&Self::unrelated_event(suffix))
+                .expect("record unrelated append")
         }
 
         fn append_removal_support(&self, revision: &RevisionRefV1) -> (ShoreEvent, ShoreEvent) {
@@ -5733,7 +5746,8 @@ mod tests {
         );
         assert_eq!(
             fixture.store.take_write_diagnostics()[0].code,
-            "derived_access_generation_unavailable"
+            "derived_access_receipt_deferred",
+            "a busy writer defers the receipt instead of degrading the coordinator"
         );
     }
 
@@ -6199,6 +6213,194 @@ mod tests {
         assert_eq!(cold_counters.change_support_carriers_opened, 2);
         assert_eq!(cold_counters.change_matches, 0);
         assert_eq!(cold_counters.change_rows_emitted, 1);
+    }
+
+    /// #769: one `Busy` derived writer lock during a governed append must not
+    /// be a one-way door. The authoritative record stays durable and the next
+    /// governed append settles its deferred derived receipt, so later appends
+    /// are acknowledged normally and reads regain validated currentness
+    /// without any rebuild.
+    #[test]
+    fn a_busy_derived_writer_lock_does_not_strand_the_store_in_rebuild_required() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("busy"), Some("busy")]]);
+        // Keep the store's own maintenance worker away from the writer lock so
+        // the only holder is the one this test controls.
+        fixture.runtime.pause_background_worker_for_test();
+        assert!(matches!(
+            fixture
+                .access
+                .changes(&DerivedChangePageRequestV1::Bare)
+                .expect("read before the busy append"),
+            DerivedChangeOutcomeV1::Ready(_)
+        ));
+        let head_before = fixture
+            .lifecycle
+            .open_current()
+            .expect("open the current generation")
+            .expect("fixture generation is published")
+            .authority_head();
+
+        let busy = {
+            let _held = StoreWriterLock::acquire(fixture._temp.path())
+                .expect("hold the derived writer lock");
+            fixture.append_unrelated_acknowledged("during-busy-writer")
+        };
+        assert_eq!(busy.outcome, EventWriteOutcome::Created);
+        assert_eq!(
+            busy.derived.availability,
+            DerivedWriteAvailabilityV1::Unavailable,
+            "a lock held for the whole append cannot admit the write: {:?}",
+            busy.diagnostics
+        );
+        assert!(
+            busy.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("derived-access writer is busy")),
+            "the acknowledgement must name the busy writer: {:?}",
+            busy.diagnostics
+        );
+
+        let recovered = fixture.append_unrelated_acknowledged("after-busy-writer");
+        assert_eq!(recovered.outcome, EventWriteOutcome::Created);
+        assert_eq!(
+            recovered.derived.availability,
+            DerivedWriteAvailabilityV1::Current,
+            "the next governed append must recover: {:?}",
+            recovered.diagnostics
+        );
+        let token = recovered
+            .derived
+            .token
+            .expect("a current append carries a visibility token");
+        assert_eq!(
+            token.head_sequence,
+            head_before.sequence + 2,
+            "both loose records must be receipted, not skipped"
+        );
+
+        for (label, outcome) in [
+            (
+                "cached reader",
+                fixture
+                    .access
+                    .changes(&DerivedChangePageRequestV1::Bare)
+                    .expect("read after recovery"),
+            ),
+            (
+                "fresh reader",
+                fixture
+                    .fresh_access()
+                    .changes(&DerivedChangePageRequestV1::Bare)
+                    .expect("read after recovery from a fresh runtime"),
+            ),
+        ] {
+            assert!(
+                matches!(outcome, DerivedChangeOutcomeV1::Ready(_)),
+                "{label} must be current without a rebuild; got {outcome:?}"
+            );
+        }
+        let status = fixture
+            .lifecycle
+            .status_read_only()
+            .expect("read lifecycle status");
+        assert_eq!(
+            status.availability,
+            crate::session::derived_access::product_contract::DerivedAccessAvailability::Current,
+            "{status:?}"
+        );
+    }
+
+    /// The #817 witness: the `conflicting` fixture's own post-runtime append
+    /// meets a busy derived writer lock. Its fail-closed answer must stay the
+    /// typed `projection_invalid` conflict, never `projection_rebuild_required`.
+    #[test]
+    fn conflicting_proposals_stay_typed_invalid_after_a_busy_derived_writer() {
+        let conflicting = ActiveChangeFixture::new(&[&[Some("present"), None]]);
+        conflicting.runtime.pause_background_worker_for_test();
+        let conflict = conflicting.changes[0].clone();
+        assert_projection_invalid(
+            conflicting
+                .access
+                .changes(&DerivedChangePageRequestV1::Bare)
+                .expect("read conflicting duplicate proposals"),
+            "conflicting proposal summaries for exact Revision",
+        );
+        {
+            let _held = StoreWriterLock::acquire(conflicting._temp.path())
+                .expect("hold the derived writer lock");
+            conflicting.append_duplicate_proposal(
+                &conflict.revision,
+                Some("present"),
+                "after-conflict",
+            );
+        }
+        let later = conflicting.append_unrelated_acknowledged("after-busy-recovery");
+        assert_ne!(
+            later.derived.availability,
+            DerivedWriteAvailabilityV1::Unavailable,
+            "a later unheld append must not stay unavailable: {:?}",
+            later.diagnostics
+        );
+        assert_projection_invalid(
+            conflicting
+                .fresh_access()
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read restarted Timeline after the busy append"),
+            "conflicting proposal summaries for exact Revision",
+        );
+        assert_projection_invalid(
+            conflicting
+                .access
+                .timeline(
+                    &crate::session::DerivedTimelinePageRequestV1::initial(),
+                    &crate::session::TrustSet::default(),
+                )
+                .expect("read Timeline after the busy append"),
+            "conflicting proposal summaries for exact Revision",
+        );
+    }
+
+    /// A writer lock that is released within the admission budget (the
+    /// store's own maintenance pass, another writer's append) is awaited, so
+    /// the append is admitted and acknowledged current with no diagnostic.
+    #[test]
+    fn a_briefly_busy_derived_writer_lock_is_awaited_within_the_admission_budget() {
+        let fixture = ActiveChangeFixture::new(&[&[Some("brief"), Some("brief")]]);
+        fixture.runtime.pause_background_worker_for_test();
+        let root = fixture._temp.path().to_path_buf();
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let held = StoreWriterLock::acquire(&root).expect("hold the derived writer lock");
+            held_tx.send(()).expect("report the held lock");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            drop(held);
+        });
+        held_rx.recv().expect("wait for the held lock");
+
+        let acknowledgement = fixture.append_unrelated_acknowledged("briefly-busy-writer");
+        holder.join().expect("join the lock holder");
+        assert_eq!(acknowledgement.outcome, EventWriteOutcome::Created);
+        assert_eq!(
+            acknowledgement.derived.availability,
+            DerivedWriteAvailabilityV1::Current,
+            "{:?}",
+            acknowledgement.diagnostics
+        );
+        assert!(
+            acknowledgement.diagnostics.is_empty(),
+            "an awaited lock is not a degradation: {:?}",
+            acknowledgement.diagnostics
+        );
+        assert!(matches!(
+            fixture
+                .access
+                .changes(&DerivedChangePageRequestV1::Bare)
+                .expect("read after the awaited append"),
+            DerivedChangeOutcomeV1::Ready(_)
+        ));
     }
 
     #[test]

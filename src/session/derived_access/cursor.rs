@@ -67,6 +67,28 @@ pub(crate) struct CursorReceipt {
     pub(crate) attempt_token: String,
 }
 
+/// A governed receipt observed without the derived writer lock. The
+/// authoritative carrier is durable and its single-carrier transition from
+/// `receipt.cursor.sequence - 1` was proven at publication time; the SQLite
+/// receipt and head advance are settled by the next holder of the writer lock
+/// for the same generation, or the generation requires rebuild.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeferredCursorReceipt {
+    pub(crate) receipt: CursorReceipt,
+    /// The truth change stamp proven to follow this carrier's creation. It
+    /// becomes the ledger's authority stamp when the receipt is settled.
+    pub(crate) authority_stamp: JournalChangeStamp,
+}
+
+/// The outcome of one deferred (writer-lock-free) truth publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DeferredPublication {
+    /// The carrier was created and its receipt awaits settlement.
+    Created(DeferredCursorReceipt),
+    /// The carrier already existed and is receipted at this cursor.
+    Existing(TruthCursor),
+}
+
 impl CursorReceipt {
     #[cfg(any(test, feature = "bench"))]
     fn from_intent(intent: CursorIntent) -> Self {

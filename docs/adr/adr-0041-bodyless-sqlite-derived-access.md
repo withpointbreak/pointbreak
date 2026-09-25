@@ -279,6 +279,29 @@ retained-scale run was required. The rollout contract is
 integration/readiness hashes. No authoritative truth migration, production-store rewrite, body persistence,
 or broad substrate seam is authorized by activation.
 
+## Amendment: A Busy Writer Lock Is Not an Authority Gap (2026-09-25)
+
+Issue #769 showed that one `Busy` derived writer lock during a governed append made the writer
+coordinator permanently loose: the event published without a receipt, the next read proved `Changed`,
+and an activated store stayed `rebuild_required` until an explicit rebuild, with nothing in
+`store derived status` naming the cause. The lock holder in the reproduced cases was the store's own
+maintenance worker, so a single process reached the state.
+
+The as-built writer now treats the lock as transient. Publication admission waits for it within a bounded
+budget (32 polls, 20 ms apart). A holder that outlasts the budget still lets truth publish at once, but
+the writer proves the same single-carrier transition the admitted path proves (`begin/finish_created_transition`
+around the publication, anchored at the ledger's bound authority stamp) and retains the resulting receipt
+in the process (`src/session/derived_access/deferred.rs`). The next holder of the writer lock in that
+process settles the retained receipts for the exact generation before it proves authority
+(`open_current_for_write_locked`), so the next governed append, the existing maintenance pass, or the
+coordinator at drop closes the window. A receipt that cannot be proven, or that the process exits with,
+leaves the same authority gap a loose publication always left. This keeps D6's guarantees: no hidden
+rebuild, no full-history fold, bounded work per request, and never serving unlabeled non-current data
+(reads stay fail-closed until settlement). The owner decision recorded on #769 stands: an activated store
+never rebuilds itself; `store derived status` now names the change-check mechanism and the recorded versus
+observed authority behind a `rebuild_required` verdict, and the `projection_rebuild_required` failure text
+names `store derived rebuild` and the `POINTBREAK_DERIVED_ACCESS=off` interim.
+
 ## Amendment: Change-Cohort Rebuild and Contextual Readers (2026-08-06)
 
 [ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) adds capability
