@@ -16,8 +16,8 @@ use crate::session::event::{
     InputRequestReasonCode, ShoreEvent, review_subject_id,
 };
 use crate::session::observation::{
-    CurrentRevisionContext, RevisionScope, RevisionSelection, required_title, resolve_revision,
-    staged_body, validated_track_id,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, required_title,
+    resolve_revision_for_write, staged_body, validated_track_id,
 };
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::content::ContentArtifacts;
@@ -203,7 +203,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
             reason: "--review-cursor cannot be combined with another Revision selector".to_owned(),
         });
     }
-    let resolved = resolve_revision(
+    let resolved = resolve_revision_for_write(
         &validation_events,
         RevisionSelection::from_revision_options(
             options.revision_id.as_ref(),

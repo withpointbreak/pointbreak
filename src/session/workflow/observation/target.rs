@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::error::{Result, ShoreError};
@@ -8,9 +9,11 @@ use crate::session::event::{
     WorkObjectProposedPayload,
 };
 use crate::session::object_artifact::read_bound_object_artifact_for_write_validation;
+use crate::session::projection::change::{ChangeProjection, project_changes};
 use crate::session::projection::commit_range::revision_of;
 use crate::session::projection::supersession::SupersessionView;
 use crate::session::store::fingerprint::normalized_worktree_root;
+use crate::session::workflow::attention::change_aware_supersession;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedRevision {
@@ -204,6 +207,107 @@ pub(crate) fn resolve_revision(
              `pointbreak revision list`"
                 .to_owned(),
         )),
+    }
+}
+
+/// [`resolve_revision`] for a writer verb (`observation add`, `validation add`,
+/// `assessment add`, `input-request open`).
+///
+/// A `--revision` head seed follows only proposal-borne supersession, which
+/// Change capture never writes (ADR-0042), so on a store that holds Change
+/// claims a Revision replaced through a Change relation claim still reads as a
+/// current head and the write would land on replaced bytes. Before the legacy
+/// head resolution runs, the seed is checked against the Change-aware
+/// replacement view: a seed that some usable Change has replaced is refused
+/// with a typed error naming the replacing current Revision(s) and the exact
+/// selectors (`--review-cursor`, `--exact-revision`). Nothing else changes:
+/// `Exact` and `Current` selections, and a store without Change claims, resolve
+/// exactly as [`resolve_revision`] does.
+///
+/// `events` must be the writer-visible, store-wide event slice: the rule reads
+/// every Change that holds the seed, so a projection narrowed to one Change
+/// cannot decide it.
+pub(crate) fn resolve_revision_for_write(
+    events: &[ShoreEvent],
+    selection: RevisionSelection<'_>,
+    context: &CurrentRevisionContext,
+    scope: RevisionScope,
+) -> Result<ResolvedRevision> {
+    if let RevisionSelection::Head(seed) = selection {
+        let legacy = SupersessionView::from_events(events)?;
+        let changes = project_changes(events)?;
+        if let Some(replacing) = change_replacing_revisions(seed, &legacy, &changes) {
+            return Err(replaced_revision_error(seed, &replacing));
+        }
+    }
+    resolve_revision(events, selection, context, scope)
+}
+
+/// The current Revisions that replace `seed` through effective Change relation
+/// claims, or `None` when no usable Change has replaced it. A store without
+/// Change claims never replaces anything here (its proposal-borne edges keep
+/// their legacy head-following), and a Revision that is still current in any
+/// Change that holds it is not replaced (the [`change_aware_supersession`]
+/// authority rule).
+///
+/// The result is the set of heads reachable from `seed` along admitted
+/// replacement edges, so a crossed pair of histories (whose union loops) still
+/// names the Revision both end at, and a divergent or twice-replaced seed names
+/// every successor head. It falls back to the direct successors only if no head
+/// is reachable, which the per-Change current set makes unreachable in
+/// practice.
+pub(crate) fn change_replacing_revisions(
+    seed: &RevisionId,
+    legacy: &SupersessionView,
+    changes: &ChangeProjection,
+) -> Option<BTreeSet<RevisionId>> {
+    if changes.changes.is_empty() {
+        return None;
+    }
+    let replacement = change_aware_supersession(legacy, changes).replacement;
+    if !replacement.superseded.contains(seed) {
+        return None;
+    }
+    let mut visited: BTreeSet<RevisionId> = BTreeSet::new();
+    let mut frontier: Vec<RevisionId> = vec![seed.clone()];
+    while let Some(revision) = frontier.pop() {
+        for successor in replacement.stale_by_superseding_revision(&revision) {
+            if visited.insert(successor.clone()) {
+                frontier.push(successor);
+            }
+        }
+    }
+    let heads: BTreeSet<RevisionId> = visited
+        .iter()
+        .filter(|revision| replacement.heads.contains(*revision))
+        .cloned()
+        .collect();
+    Some(if heads.is_empty() {
+        replacement.stale_by_superseding_revision(seed)
+    } else {
+        heads
+    })
+}
+
+fn replaced_revision_error(seed: &RevisionId, replacing: &BTreeSet<RevisionId>) -> ShoreError {
+    let listed = replacing
+        .iter()
+        .map(RevisionId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current = if replacing.len() == 1 {
+        format!("the current Revision is {listed}")
+    } else {
+        format!("the current Revisions are {listed}")
+    };
+    ShoreError::WorkflowInputInvalid {
+        reason: format!(
+            "revision_replaced_by_change: revision {seed} was replaced through a Change relation \
+             claim and --revision does not follow Change replacement; {current}. Write to the \
+             current Revision with --review-cursor <token> (from `pointbreak change select` or the \
+             replacing capture), or address this exact Revision with --exact-revision {seed}",
+            seed = seed.as_str(),
+        ),
     }
 }
 
@@ -826,5 +930,229 @@ mod scope_tests {
         assert!(ids.contains(&RevisionId::new("review-unit:sha256:here")));
         assert!(!ids.contains(&RevisionId::new("review-unit:sha256:there")));
         assert!(!ids.contains(&RevisionId::new("review-unit:sha256:floaty")));
+    }
+
+    mod change_replacement {
+        use super::*;
+        use crate::model::ChangeId;
+        use crate::session::projection::change::{ChangeLifecycleV1, ChangeTopologyV1, ChangeView};
+
+        fn rev(suffix: &str) -> RevisionId {
+            RevisionId::new(format!("rev:sha256:{suffix}"))
+        }
+
+        fn roots(suffixes: &[&str]) -> SupersessionView {
+            SupersessionView::from_edges(suffixes.iter().map(|suffix| (rev(suffix), Vec::new())))
+        }
+
+        fn set(suffixes: &[&str]) -> BTreeSet<RevisionId> {
+            suffixes.iter().map(|suffix| rev(suffix)).collect()
+        }
+
+        /// A usable Change: `members` plus `(successor, predecessor)` edges, with
+        /// the current set derived as "members no edge replaces".
+        fn change(id: &str, members: &[&str], edges: &[(&str, &str)]) -> ChangeView {
+            change_with_topology(id, members, edges, ChangeTopologyV1::Replacement)
+        }
+
+        fn change_with_topology(
+            id: &str,
+            members: &[&str],
+            edges: &[(&str, &str)],
+            topology: ChangeTopologyV1,
+        ) -> ChangeView {
+            let members: BTreeSet<RevisionId> = members.iter().map(|suffix| rev(suffix)).collect();
+            let supersedes: BTreeSet<(RevisionId, RevisionId)> = edges
+                .iter()
+                .map(|(successor, predecessor)| (rev(successor), rev(predecessor)))
+                .collect();
+            let replaced: BTreeSet<&RevisionId> = supersedes
+                .iter()
+                .map(|(_, predecessor)| predecessor)
+                .collect();
+            let current_revisions = members
+                .iter()
+                .filter(|member| !replaced.contains(member))
+                .cloned()
+                .collect();
+            ChangeView {
+                change_id: ChangeId::new(format!("change:sha256:{id}")),
+                members,
+                current_revisions,
+                supersedes,
+                topology,
+                lifecycle: ChangeLifecycleV1::InProgress,
+                qualified_current_revisions: BTreeSet::new(),
+                operative_obligations: BTreeSet::new(),
+                diagnostics: Vec::new(),
+            }
+        }
+
+        fn projection(views: Vec<ChangeView>) -> ChangeProjection {
+            ChangeProjection {
+                changes: views
+                    .into_iter()
+                    .map(|view| (view.change_id.clone(), view))
+                    .collect(),
+                links: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn a_change_replaced_seed_names_its_current_successor() {
+            let changes = projection(vec![change("x", &["a", "b"], &[("b", "a")])]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &roots(&["a", "b"]), &changes),
+                Some(set(&["b"]))
+            );
+            assert_eq!(
+                change_replacing_revisions(&rev("b"), &roots(&["a", "b"]), &changes),
+                None
+            );
+        }
+
+        #[test]
+        fn a_multi_round_change_names_the_head_not_the_intermediate() {
+            let changes = projection(vec![change(
+                "x",
+                &["a", "b", "c"],
+                &[("b", "a"), ("c", "b")],
+            )]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &roots(&["a", "b", "c"]), &changes),
+                Some(set(&["c"]))
+            );
+        }
+
+        #[test]
+        fn a_store_without_change_claims_never_refuses() {
+            // The proposal-borne edge keeps its legacy head-following.
+            let legacy =
+                SupersessionView::from_edges([(rev("a"), vec![]), (rev("b"), vec![rev("a")])]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &legacy, &ChangeProjection::default()),
+                None
+            );
+        }
+
+        #[test]
+        fn a_proposal_borne_edge_carries_no_authority_once_a_change_claim_exists() {
+            let legacy = SupersessionView::from_edges([
+                (rev("a"), vec![]),
+                (rev("b"), vec![rev("a")]),
+                (rev("z"), vec![]),
+            ]);
+            let changes = projection(vec![change("x", &["z"], &[])]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &legacy, &changes),
+                None
+            );
+        }
+
+        #[test]
+        fn a_seed_still_current_in_another_change_is_not_refused() {
+            let changes = projection(vec![
+                change("x", &["a"], &[]),
+                change("y", &["a", "b"], &[("b", "a")]),
+            ]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &roots(&["a", "b"]), &changes),
+                None
+            );
+        }
+
+        #[test]
+        fn an_unusable_change_replaces_nothing() {
+            for topology in [
+                ChangeTopologyV1::Incomplete,
+                ChangeTopologyV1::CycleConflicted,
+            ] {
+                let changes = projection(vec![change_with_topology(
+                    "x",
+                    &["a", "b"],
+                    &[("b", "a")],
+                    topology,
+                )]);
+                assert_eq!(
+                    change_replacing_revisions(&rev("a"), &roots(&["a", "b"]), &changes),
+                    None,
+                    "{topology:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn two_changes_replacing_a_shared_seed_name_every_successor() {
+            let changes = projection(vec![
+                change("x", &["a", "b"], &[("b", "a")]),
+                change("y", &["a", "c"], &[("c", "a")]),
+            ]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &roots(&["a", "b", "c"]), &changes),
+                Some(set(&["b", "c"]))
+            );
+        }
+
+        #[test]
+        fn crossed_histories_name_the_revision_both_end_at() {
+            // Each Change is acyclic; only their union loops a <-> b.
+            let changes = projection(vec![
+                change("x", &["a", "b", "c"], &[("b", "a"), ("c", "b")]),
+                change("y", &["a", "b", "c"], &[("a", "b"), ("c", "a")]),
+            ]);
+            let legacy = roots(&["a", "b", "c"]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &legacy, &changes),
+                Some(set(&["c"]))
+            );
+            assert_eq!(
+                change_replacing_revisions(&rev("b"), &legacy, &changes),
+                Some(set(&["c"]))
+            );
+            assert_eq!(
+                change_replacing_revisions(&rev("c"), &legacy, &changes),
+                None
+            );
+        }
+
+        #[test]
+        fn a_sibling_head_that_does_not_replace_the_seed_is_not_named() {
+            // b consolidates a and q; r replaces q on its own. r shares a's
+            // thread but never replaced a, so only b is named.
+            let changes = projection(vec![change(
+                "x",
+                &["a", "q", "b", "r"],
+                &[("b", "a"), ("b", "q"), ("r", "q")],
+            )]);
+            assert_eq!(
+                change_replacing_revisions(&rev("a"), &roots(&["a", "q", "b", "r"]), &changes),
+                Some(set(&["b"]))
+            );
+        }
+
+        #[test]
+        fn the_refusal_is_typed_and_names_the_selectors() {
+            let error = replaced_revision_error(&rev("a"), &set(&["b", "c"]));
+            let message = error.to_string();
+            assert!(
+                message.starts_with("revision_replaced_by_change: "),
+                "{message}"
+            );
+            assert!(message.contains("rev:sha256:a"), "{message}");
+            assert!(
+                message.contains("the current Revisions are rev:sha256:b, rev:sha256:c"),
+                "{message}"
+            );
+            assert!(message.contains("--review-cursor"), "{message}");
+            assert!(
+                message.contains("--exact-revision rev:sha256:a"),
+                "{message}"
+            );
+            let single = replaced_revision_error(&rev("a"), &set(&["b"])).to_string();
+            assert!(
+                single.contains("the current Revision is rev:sha256:b"),
+                "{single}"
+            );
+        }
     }
 }

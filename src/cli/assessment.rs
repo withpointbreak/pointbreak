@@ -65,7 +65,9 @@ pub(super) struct AssessmentAddArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured revision head seed; defaults to the single captured revision.
+    /// Captured revision head seed; defaults to the single captured revision. Refused when a
+    /// Change has replaced the named revision: pass --review-cursor (current Revision) or
+    /// --exact-revision (this one).
     #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
 

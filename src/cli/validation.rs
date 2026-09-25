@@ -56,7 +56,8 @@ struct ValidationAddArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured revision head seed.
+    /// Captured revision head seed. Refused when a Change has replaced the named
+    /// revision: pass --review-cursor (current Revision) or --exact-revision (this one).
     #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
 
