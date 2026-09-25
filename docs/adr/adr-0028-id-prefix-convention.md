@@ -72,7 +72,9 @@ treat ids as opaque strings. This ADR is about internal consistency and discover
   sit outside the registry: `HunkId` is path-based and prefix-free by design, these are
   reserved values rather than a prefix family, and a `const` cannot be built from a registry
   constant without moving it to runtime construction. They are documented in
-  `docs/id-prefixes.md` instead.
+  `docs/id-prefixes.md` instead. (Neither sentinel nor `src/stream/build.rs` was ever built in
+  this repository; the bullet is retained as the decision's historical context, and
+  `docs/id-prefixes.md` no longer lists them. `HunkId` remains path-based and prefix-free.)
 
 ## Amendment: Linkification Membership Resolved (#344)
 

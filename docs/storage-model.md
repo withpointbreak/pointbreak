@@ -377,10 +377,6 @@ are storage details, not history output API.
 and event filenames remain Pointbreak-owned storage details and are not exposed as stable
 paths.
 
-The review stream also surfaces stale and orphan notes as dedicated rows so reviewers can park the
-cursor on them; the stream emits an additional synthetic file header for orphan notes when at least
-one is present.
-
 ## Shared Common-Dir Store Selection
 
 The default durable store is the **shared common-dir store** at `<git-common-dir>/pointbreak`, the path under the

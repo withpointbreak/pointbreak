@@ -72,9 +72,9 @@ with millisecond precision (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
   digest payload. One consumer string-compares `journal:default`
   (`src/session/projection/state.rs`); it is protected by the frozen-value test.
 - `FileId` is path-based and carries **no** prefix by design (distinct from the `file:`
-  redaction ref). `HunkId` is likewise path-based; the two reserved sentinel values
-  `hunk:stale` / `hunk:orphaned` (`src/stream/build.rs`) are const-declared and sit outside
-  the registry — see ADR-0028's consequences.
+  redaction ref). `HunkId` is likewise path-based and prefix-free; no `hunk:` value is
+  reserved. (ADR-0028's consequences mention two `hunk:stale` / `hunk:orphaned` sentinels in a
+  `src/stream/build.rs`; neither was ever built in this repository.)
 - Event idempotency keys (`work_object_proposed:…`, `review_observation_recorded:…`) are a
   separate namespace derived from event-type names, not id prefixes, and are out of the
   registry's scope.
