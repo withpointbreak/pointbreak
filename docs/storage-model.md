@@ -922,23 +922,49 @@ are explicit and tested.
 
 ## V1 Writer Contract
 
-V1 has no store-directory lock: Pointbreak does not coordinate writers with lockfiles, leases, a
-daemon, IPC, or filesystem notifications. Concurrency safety rests on the store primitives instead.
-Events and object artifacts are written with content-addressed exclusive file creation, note-body
-artifacts are content-addressed by body hash, and no shared mutable projection file is written. So
-concurrent writers to one store directory cannot corrupt each other: identical
-events converge (already-exists with a matching payload), different events never collide, and
-conflicting events under one idempotency key fail loud. Reads fold the event log; no cached
-projection file is ever read as authority.
+Pointbreak does not coordinate writers with a daemon, IPC, leases, or filesystem notifications, and
+it has no store-wide session lock: nothing reserves a store directory for one process, one clone,
+or one worktree. Concurrency safety rests on the store primitives. Events and object artifacts are
+written with content-addressed exclusive file creation, note-body artifacts are content-addressed by
+body hash, and no shared mutable projection file is written. So concurrent writers to one store
+directory cannot corrupt each other: identical events converge (already-exists with a matching
+payload), different events never collide, and conflicting events under one idempotency key fail
+loud. Reads fold the event log; no cached projection file is ever read as authority.
+
+One lock does exist, and its scope is narrow. Each event-store write primitive
+(`record_event_once`, `record_change_event_once`, and their acknowledged forms) takes the store's
+**authority lock** — an operating-system advisory file lock on the stable file
+`authority.writer.lock` in the store directory — for the duration of that one call: writer
+admission, event validation, and the exclusive event-file creation happen under it, and the lock is
+released when the call returns. A streaming batch writer (`EventWriteBatch`, the ingest path) holds
+the same lock across its logical batch rather than once per event. The lock blocks rather than
+refuses (a contending writer waits, with no timeout), is reentrant on the thread that already holds
+it, and is released by the operating system when the holding process exits, so there is no stale
+lock to clean up. The lock file itself is never deleted — see
+[Source Retirement](#source-retirement) for why a retired store keeps it.
+
+What the authority lock does and does not promise:
+
+- It serializes individual event appends to one store directory, and the multi-step store transitions
+  that take it explicitly: Change activation and backup restore (`change migrate`,
+  `change migrate-restore`), derived-access rebuilds (which probe it without waiting and report busy),
+  and source retirement (which probes it without waiting and fails with `source_busy;` instead).
+- It does not make a command, a review session, a clone, or a worktree the store's single writer.
+  Two processes may interleave writes to one store; each append is atomic on its own, and the
+  content-addressed primitives — not the lock — are what keep the interleaving safe and the event set
+  convergent.
+- It does not span a multi-command workflow. A cursor emitted by `pointbreak change select` or a
+  capture is revalidated against the current Change graph immediately before each dependent append;
+  that revalidation, not a held lock, is the guard against writing over state another writer moved.
 
 The shared common-dir store depends on this directly. Capture and every native review write land in
 the `<git-common-dir>/pointbreak` store every read resolves, so multiple worktrees of the same clone may write that
-one store directory concurrently, and the content-addressed primitives above keep that
-safe without a lock. `pointbreak store migrate` reuses the same import path — content-hash-validated,
-artifacts before events — to fold a pre-flip worktree-local `.pointbreak/data/` store forward, scanning
-for sensitivity findings before movement and reporting them in its document. Any store-directory lock
-added later must be scoped to the store directory, never "one clone, one writer", so a future
-cross-clone store inherits it.
+one store directory concurrently, and the content-addressed primitives above keep that safe.
+`pointbreak store migrate` reuses the same import path — content-hash-validated, artifacts before
+events — to fold a pre-flip worktree-local `.pointbreak/data/` store forward, scanning for sensitivity
+findings before movement and reporting them in its document. The authority lock is scoped to the
+store directory, never "one clone, one writer", so a cross-clone store (the user-level family tier)
+inherits it unchanged; any coordination added later must keep that scope.
 
 Event files remain the append-only authority. They are created with exclusive file creation:
 same-key and same-payload retries are idempotent, while same-key and different-payload attempts are
@@ -1195,8 +1221,13 @@ independent commit.
 
 ## Lock Discipline
 
-The first local event-store implementation should not need locks. If a future change introduces
-locks, follow these constraints:
+The event store's lock is the per-write authority lock described in
+[V1 Writer Contract](#v1-writer-contract). It keeps its critical section to one append (or one ingest
+batch) and relies on the operating system, not process-exit cleanup, to release it. It does not use
+an acquisition timeout: a blocked writer waits for the holder to finish. The derived-access sidecar
+has its own store-directory-scoped writer lock, described in
+[ADR-0041](./adr/adr-0041-bodyless-sqlite-derived-access.md). Any lock added later follows these
+constraints:
 
 - keep critical sections short
 - do not perform long I/O while holding a lock when it can be avoided
