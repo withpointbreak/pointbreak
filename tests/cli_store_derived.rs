@@ -375,6 +375,94 @@ fn busy_governed_writer_degrades_without_blocking_or_bootstrapping() {
     assert!(store.join("derived").is_dir());
 }
 
+/// #769: a `rebuild_required` status names the change check behind the
+/// verdict, the recorded versus observed authority, and the explicit recovery,
+/// instead of an empty diagnostics list and a bare detail string.
+#[test]
+fn rebuild_required_status_names_the_authority_gap_and_the_explicit_recovery() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let built = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let current = pointbreak_env(["store", "derived", "status", "--repo", repo_arg], ACTIVE);
+    assert!(current.status.success());
+    let current = parse_single_json(&current.stdout);
+    assert_eq!(current["availability"], "current");
+    assert!(
+        current.get("authorityGap").is_none(),
+        "a current generation reports no gap: {current}"
+    );
+
+    // An explicit-off writer publishes loose truth the generation never
+    // receipted: the authority gap that only an explicit rebuild closes.
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let loose = pointbreak_env(["capture", "--repo", repo_arg], OFF);
+    assert!(
+        loose.status.success(),
+        "{}",
+        String::from_utf8_lossy(&loose.stderr)
+    );
+
+    let status = pointbreak_env(["store", "derived", "status", "--repo", repo_arg], ACTIVE);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let json = parse_single_json(&status.stdout);
+    assert_eq!(json["schema"], "pointbreak.store-derived-status");
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["availability"], "rebuild_required", "{json}");
+    assert_eq!(json["rebuildInFlight"], false);
+    let gap = &json["authorityGap"];
+    assert!(
+        gap["mechanism"]
+            .as_str()
+            .is_some_and(|mechanism| !mechanism.is_empty()),
+        "{json}"
+    );
+    assert!(
+        matches!(gap["verdict"].as_str(), Some("changed" | "indeterminate")),
+        "{json}"
+    );
+    assert!(gap["recordedHead"]["epoch"].is_u64(), "{json}");
+    assert!(gap["recordedHead"]["sequence"].is_u64(), "{json}");
+    assert!(gap["recordedAuthority"].is_string(), "{json}");
+    assert!(gap["observedAuthority"].is_string(), "{json}");
+    assert_ne!(gap["recordedAuthority"], gap["observedAuthority"], "{json}");
+    let detail = json["detail"]
+        .as_str()
+        .expect("rebuild_required carries a detail");
+    assert!(
+        detail.contains(gap["mechanism"].as_str().unwrap()),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("run `pointbreak store derived rebuild`"),
+        "{detail}"
+    );
+    assert!(detail.contains("POINTBREAK_DERIVED_ACCESS=off"), "{detail}");
+    assert!(json["diagnostics"].is_array(), "{json}");
+
+    let text = pointbreak_env(
+        [
+            "store", "derived", "status", "--repo", repo_arg, "--format", "text",
+        ],
+        ACTIVE,
+    );
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("availability: RebuildRequired"), "{text}");
+    assert!(text.contains("authority check: "), "{text}");
+    assert!(text.contains("recorded authority: "), "{text}");
+    assert!(text.contains("observed authority: "), "{text}");
+    assert!(text.contains("store derived rebuild"), "{text}");
+}
+
 #[test]
 fn explicit_off_write_creates_no_derived_artifact_or_hint() {
     let repo = GitRepo::new();

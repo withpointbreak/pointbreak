@@ -89,6 +89,19 @@ pub(crate) struct LifecycleProgress {
     pub(crate) estimated_remaining_ms: Option<u64>,
 }
 
+/// The authority check behind a rebuild-required verdict: which mechanism
+/// compared the authority the generation recorded against what the journal
+/// shows now. Status documents surface it so an operator can tell an
+/// out-of-band write from a corrupt or incompatible generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorityGap {
+    pub(crate) mechanism: String,
+    pub(crate) verdict: JournalChangeVerdict,
+    pub(crate) recorded_head: TruthCursor,
+    pub(crate) recorded_authority: String,
+    pub(crate) observed_authority: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleStatus {
     pub(crate) availability: DerivedAccessAvailability,
@@ -107,6 +120,9 @@ pub(crate) struct LifecycleStatus {
     /// as derived or authoritative I/O. Recovery classifies again before it
     /// rebuilds a generation that may still be valid.
     pub(crate) transient_failure: bool,
+    /// Present only when the authority check proved the rebuild-required
+    /// verdict.
+    pub(crate) authority_gap: Option<AuthorityGap>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -359,6 +375,7 @@ impl DerivedAccessLifecycle {
                 detail: None,
                 recovery_deferred: false,
                 transient_failure: false,
+                authority_gap: None,
             });
         };
         if let Some(progress) = staging_progress {
@@ -374,6 +391,7 @@ impl DerivedAccessLifecycle {
                 detail: Some("current generation remains readable during rebuild".to_owned()),
                 recovery_deferred: false,
                 transient_failure: false,
+                authority_gap: None,
             });
         }
         let stable_publication = match self.stable_current_publication() {
@@ -457,20 +475,42 @@ impl DerivedAccessLifecycle {
                 error => Ok(unavailable_after(&error, Some(publication.generation_id))),
             };
         }
-        let authority =
-            match self.observe_current_authority_snapshot(publication_snapshot.authority.clone()) {
-                Ok(authority) => authority.snapshot,
-                Err(LifecycleError::RebuildRequired(detail)) => {
-                    return Ok(status(
-                        DerivedAccessAvailability::RebuildRequired,
-                        Some(publication.generation_id),
-                        Some(detail),
-                    ));
-                }
-                Err(error) => {
-                    return Ok(unavailable_after(&error, Some(publication.generation_id)));
-                }
-            };
+        let recorded = publication_snapshot.authority.clone();
+        let check = match QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&recorded.change_stamp)
+        {
+            Ok(check) => check,
+            Err(error) => {
+                return Ok(unavailable_after(
+                    &LifecycleError::Truth(error.to_string()),
+                    Some(publication.generation_id),
+                ));
+            }
+        };
+        let authority = match require_stable_authority(&check) {
+            Ok(()) => TruthAuthoritySnapshot {
+                head: recorded.head,
+                change_stamp: check.after,
+            },
+            Err(LifecycleError::RebuildRequired(detail)) => {
+                let mut rebuild_required = status(
+                    DerivedAccessAvailability::RebuildRequired,
+                    Some(publication.generation_id),
+                    Some(detail),
+                );
+                rebuild_required.authority_gap = Some(AuthorityGap {
+                    mechanism: check.mechanism,
+                    verdict: check.verdict,
+                    recorded_head: recorded.head.cursor,
+                    recorded_authority: recorded.change_stamp.opaque_sha256(),
+                    observed_authority: check.after.opaque_sha256(),
+                });
+                return Ok(rebuild_required);
+            }
+            Err(error) => {
+                return Ok(unavailable_after(&error, Some(publication.generation_id)));
+            }
+        };
         if let Err(error) = validate_published(
             &descriptor,
             &authority,
@@ -2562,6 +2602,7 @@ fn status(
         detail,
         recovery_deferred: false,
         transient_failure: false,
+        authority_gap: None,
     }
 }
 
@@ -4338,6 +4379,43 @@ mod tests {
             lifecycle.open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn rebuild_required_status_names_the_authority_gap() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().authority_gap,
+            None,
+            "a current generation reports no gap"
+        );
+        let store = EventStore::open(temp.path());
+        store.record_event_once(&lifecycle_event(2)).unwrap();
+
+        let status = lifecycle.status_read_only().unwrap();
+        assert_eq!(
+            status.availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let gap = status
+            .authority_gap
+            .expect("the authority check names the gap");
+        assert!(!gap.mechanism.is_empty());
+        assert_eq!(
+            status.detail.as_deref(),
+            Some(
+                format!(
+                    "authoritative truth freshness is {:?} via {}",
+                    gap.verdict, gap.mechanism
+                )
+                .as_str()
+            )
+        );
+        assert_ne!(gap.verdict, JournalChangeVerdict::Stable);
+        assert_eq!(gap.recorded_head, TruthCursor::new(1, 1));
+        assert_ne!(gap.recorded_authority, gap.observed_authority);
     }
 
     #[test]

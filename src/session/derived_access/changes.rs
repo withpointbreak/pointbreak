@@ -1797,11 +1797,19 @@ impl DerivedProjectionUnavailableDocumentV1 {
         message: impl Into<String>,
         retryable: bool,
     ) -> Self {
+        let mut message = message.into();
+        // An activated store never rebuilds itself; the failure text carries
+        // the explicit recovery so no client has to know the subcommand.
+        if code == DerivedProjectionFailureCodeV1::ProjectionRebuildRequired
+            && !message.contains("store derived rebuild")
+        {
+            message = format!("{message}; {}", super::interaction::REBUILD_RECOVERY_ACTION);
+        }
         Self {
             schema: PROJECTION_ERROR_SCHEMA.to_owned(),
             version: ERROR_DOCUMENT_VERSION,
             code,
-            message: message.into(),
+            message,
             retryable,
         }
     }
@@ -4125,6 +4133,58 @@ mod tests {
             document.message().contains(expected),
             "expected {expected:?} in {:?}",
             document.message()
+        );
+    }
+
+    /// #769: the rebuild-required failure text must carry the explicit
+    /// recovery, because nothing on an activated store rebuilds by itself.
+    #[test]
+    fn projection_rebuild_required_failure_points_at_the_explicit_rebuild() {
+        let DerivedChangeOutcomeV1::ProjectionUnavailable(document) =
+            DerivedChangeOutcomeV1::<()>::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionRebuildRequired,
+                "authoritative truth freshness is Changed via compare native directory observations",
+            )
+        else {
+            panic!("rebuild required is a projection failure");
+        };
+        assert!(
+            document
+                .message()
+                .starts_with("authoritative truth freshness is Changed"),
+            "{}",
+            document.message()
+        );
+        assert!(
+            document
+                .message()
+                .contains("run `pointbreak store derived rebuild`"),
+            "{}",
+            document.message()
+        );
+        assert!(
+            document.message().contains("POINTBREAK_DERIVED_ACCESS=off"),
+            "{}",
+            document.message()
+        );
+        assert_eq!(
+            document.message().matches("store derived rebuild").count(),
+            1,
+            "the guidance is appended once"
+        );
+
+        let DerivedChangeOutcomeV1::ProjectionUnavailable(invalid) =
+            DerivedChangeOutcomeV1::<()>::projection_unavailable(
+                DerivedProjectionFailureCodeV1::ProjectionInvalid,
+                "conflicting proposal summaries for exact Revision",
+            )
+        else {
+            panic!("invalid is a projection failure");
+        };
+        assert_eq!(
+            invalid.message(),
+            "conflicting proposal summaries for exact Revision",
+            "other failure codes keep their text"
         );
     }
 

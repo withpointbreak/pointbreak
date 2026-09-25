@@ -866,6 +866,18 @@ fn unavailable_diagnostic(detail: &str) -> DerivedWriteDiagnostic {
     }
 }
 
+/// Observe the retained process-local diagnostics without draining them, for
+/// status documents that report but do not consume them.
+pub(crate) fn peek_process_diagnostics() -> Vec<DerivedWriteDiagnostic> {
+    PROCESS_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .expect("derived process diagnostic lock poisoned")
+        .iter()
+        .cloned()
+        .collect()
+}
+
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
