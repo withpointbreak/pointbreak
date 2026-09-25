@@ -1,0 +1,150 @@
+name: CI stall report
+
+# Weekly report of runner-wide test stalls (#822): windows where no nextest
+# testcase completes for more than 30 s and 60 s (the analyzer's fixed summary
+# thresholds, kept fixed so weekly reports stay comparable), read from the per-run JUnit
+# timing artifacts ci.yml and nightly.yml already upload. Report-only — no
+# issue is filed or commented on automatically; a human reads the step
+# summary and decides whether the trend needs action.
+#
+# The pull_request trigger below is scoped to this workflow file and the
+# analyzer script, so a change to either runs the real report against live
+# artifacts as part of review, instead of only being exercised on a schedule.
+
+on:
+  schedule:
+    - cron: "23 5 * * 1" # weekly, Monday 05:23 UTC (offset from nightly.yml's 07:00 daily)
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Only include artifacts created at or after this ISO 8601 UTC timestamp (default: 7 days back)"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/ci-stall-report.yml"
+      - "scripts/ci/junit_gaps.py"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  report:
+    name: report
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: resolve inputs
+        id: resolve
+        shell: bash
+        env:
+          INPUT_SINCE: ${{ inputs.since }}
+        run: |
+          set -euo pipefail
+          since="$INPUT_SINCE"
+          if [ -z "$since" ]; then
+            since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          echo "since=$since" >> "$GITHUB_OUTPUT"
+
+      - name: list and download test-timings artifacts
+        id: fetch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SINCE: ${{ steps.resolve.outputs.since }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          downloaded=0
+          skipped_expired=0
+          page=1
+          # The artifacts endpoint is not documented as chronologically
+          # sorted (observed interleaved in practice), so every page is
+          # scanned and filtered rather than stopping at the first artifact
+          # older than $SINCE. A page cap bounds a pathological repo/token.
+          while [ "$page" -le 50 ]; do
+            batch="$(gh api "repos/${REPO}/actions/artifacts?per_page=100&page=${page}" --jq '.artifacts')"
+            count="$(jq 'length' <<<"$batch")"
+            [ "$count" -eq 0 ] && break
+            while IFS=$'\t' read -r id name created expired; do
+              if [ "$expired" = "true" ]; then
+                skipped_expired=$((skipped_expired + 1))
+                continue
+              fi
+              case "$name" in
+                test-timings-*) ;;
+                *) continue ;;
+              esac
+              # created_at is zero-padded ISO 8601 UTC, so lexical and
+              # chronological order agree.
+              if [[ "$created" < "$SINCE" ]]; then
+                continue
+              fi
+              dest="artifacts/${name}-${id}"
+              mkdir -p "$dest"
+              gh api "repos/${REPO}/actions/artifacts/${id}/zip" > "$dest.zip"
+              unzip -o -q "$dest.zip" -d "$dest"
+              rm -f "$dest.zip"
+              downloaded=$((downloaded + 1))
+            done < <(jq -r '.[] | [.id, .name, .created_at, .expired] | @tsv' <<<"$batch")
+            page=$((page + 1))
+          done
+          echo "downloaded $downloaded artifact(s), skipped $skipped_expired expired"
+          echo "downloaded=$downloaded" >> "$GITHUB_OUTPUT"
+
+      - name: build the analyzer's label=file arguments
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > junit-inputs.txt
+          for dir in artifacts/test-timings-*/; do
+            [ -d "$dir" ] || continue
+            junit="${dir}junit.xml"
+            [ -f "$junit" ] || continue
+            name="$(basename "$dir")"
+            # test-timings-<os>[-<shard>-of-<shards>]-<artifact-id> -> the OS leg.
+            label="$(sed -E 's/^test-timings-//; s/-[0-9]+-of-[0-9]+-[0-9]+$//; s/-[0-9]+$//' <<<"$name")"
+            printf '%s=%s\n' "$label" "$junit" >> junit-inputs.txt
+          done
+          echo "legs=$(cut -d= -f1 junit-inputs.txt | sort -u | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: run analyzer summary
+        shell: bash
+        env:
+          SINCE: ${{ steps.resolve.outputs.since }}
+          DOWNLOADED: ${{ steps.fetch.outputs.downloaded }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Runner-wide test stall report (#822)"
+            echo
+            echo "Artifacts named \`test-timings-*\` created at or after \`$SINCE\`."
+            echo "Downloaded: $DOWNLOADED."
+            echo
+            if [ -s junit-inputs.txt ]; then
+              xargs -a junit-inputs.txt python3 scripts/ci/junit_gaps.py --summary
+            else
+              echo "No \`test-timings-*\` artifacts matched the requested window."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s junit-inputs.txt ]; then
+            xargs -a junit-inputs.txt python3 scripts/ci/junit_gaps.py --summary --json > stall-report.json
+          else
+            echo "[]" > stall-report.json
+          fi
+
+      - name: upload JSON report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-stall-report
+          path: stall-report.json
+          if-no-files-found: error

@@ -97,6 +97,14 @@ Screenshot and canonical-example changes have cross-repository consequences. Fol
 `docs/manual-testing.md` and the marketing repository's documented synchronization workflow before
 advancing protected captures or marketing locks.
 
+## CI diagnostics
+
+| Script | Preferred entrypoint | Mutates | Expected result | Failure usually means |
+| --- | --- | --- | --- | --- |
+| `ci/junit_gaps.py` | `.github/workflows/ci-stall-report.yml` (weekly schedule, `workflow_dispatch`, and the `pull_request` self-check when the workflow or this script changes); invoke directly against downloaded JUnit artifacts for ad hoc analysis | Read-only; writes only to stdout | Per-file mode lists each runner-wide stall window (a gap longer than `--min-gap` between consecutive nextest test completions); `--summary` mode groups `LABEL=FILE` inputs (the CI OS leg) into one Markdown or, with `--json`, JSON row per leg: shard runs, count/percent of runs with a window over 30s and over 60s, wall-time median, median of each run's derived-access test-time median, and the largest window (#822) | A missing/unreadable JUnit file, a `--summary` argument that is not `LABEL=FILE`, or a JUnit report whose `<testcase>` elements lack nextest's `timestamp`/`time` attributes |
+
+The report workflow that drives this script is deliberately read-only: `permissions: contents: read, actions: read` only, and it never files or comments on an issue (owner decision — a human reads the step summary). It owns no state beyond the JSON artifact it uploads each run.
+
 ## Maintainer utilities
 
 | Script | Preferred entrypoint | Mutates | Expected result | Failure usually means |
