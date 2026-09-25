@@ -6,8 +6,9 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 /// The syntax set, loaded once. Uses `two-face`'s bundled set (the `bat` syntaxes) rather than
 /// syntect's stock bundle, so the long tail of languages syntect omits — TypeScript and TSX most
-/// notably — tokenize. The `_newlines` variant lets the line tokenizer feed each line with a
-/// trailing `\n` so end-of-line patterns match.
+/// notably — tokenize. Every extension lookup in this module resolves against this set, so there
+/// is no separate "stock-unsupported" class of extensions. The `_newlines` variant lets the line
+/// tokenizer feed each line with a trailing `\n` so end-of-line patterns match.
 pub(crate) fn syntax_set() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
     SET.get_or_init(two_face::syntax::extra_newlines)
@@ -16,8 +17,10 @@ pub(crate) fn syntax_set() -> &'static SyntaxSet {
 /// Detect a syntax from the diff paths (new then old), by extension only.
 ///
 /// In-memory: never touches disk (we deliberately avoid `find_syntax_for_file`, which reads the
-/// first line off disk). Unknown, absent, or stock-unsupported extensions (e.g. `.ts`) return
-/// `None`, which the caller renders plain.
+/// first line off disk). Resolution runs against `syntax_set`, so everything the `two-face`
+/// bundle knows — including `.ts` and `.tsx`, which syntect's stock bundle lacks — resolves. An
+/// absent path or an extension the bundle does not know returns `None`, which the caller renders
+/// plain.
 pub(crate) fn syntax_for_paths(
     new_path: Option<&str>,
     old_path: Option<&str>,
@@ -58,7 +61,7 @@ mod tests {
 
     #[test]
     fn detects_typescript_and_tsx() {
-        // TypeScript/TSX are not in syntect's stock bundle; they are vendored and added to the set.
+        // TypeScript/TSX are not in syntect's stock bundle; the `two-face` bundle supplies them.
         assert!(syntax_for_paths(Some("app.ts"), None).is_some());
         assert!(syntax_for_paths(Some("component.tsx"), None).is_some());
     }
