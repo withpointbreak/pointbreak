@@ -24,6 +24,17 @@ change), so they belong here while the deterministic license/ban/source checks r
 branch whose name contains `full-ci` also runs the workflow, so the full suite can be exercised
 on a risky change before it merges.
 
+## Event-driven and scheduled (`project-sync.yml`)
+
+Mirrors the planning labels (`priority:*`, `effort:*`, `status:*`, `research`, `tracking`) into the
+org project board's Priority, Effort, and Workflow fields, and guards those labels: one per
+namespace, changed only by people with write access. An `issues` event syncs that issue; the daily
+run and `workflow_dispatch` reconcile every open issue, so a missed webhook heals within a day.
+Needs the `PROJECT_SYNC_TOKEN` repository secret (a fine-grained token with the organization
+permission Projects: read and write and repository Issues: read); without it the sync step fails
+loudly and the guard still runs. Theme on the board is hand-set and never touched. The label
+vocabulary itself is documented in `CONTRIBUTING.md`.
+
 ## Release (`release-plan.yml`, `release.yml`, `release-binaries.yml`, `verify-release.yml`)
 
 Triggered by the release process, not by pushes; see `docs/releasing.md`.
@@ -35,6 +46,9 @@ Triggered by the release process, not by pushes; see `docs/releasing.md`.
   change set cannot be computed, run the job.
 - **Scheduled** if it is broad, slow, or report-only; give it `workflow_dispatch` and a
   `timeout-minutes` bound like every other job.
+- **Event-driven** if it reacts to repository metadata (issues, labels) rather than to code; keep
+  it metadata-only, give it a daily reconcile so a missed event heals, and use only the tools on
+  the runner image.
 
 Text guards in `tests/github_actions.rs` pin this topology (job tiers, timeouts, the nextest
 version, trigger shapes). Changing where or when a job runs means updating those guards in the
