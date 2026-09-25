@@ -6,7 +6,8 @@ use std::time::Instant;
 
 #[cfg(test)]
 use super::authority_check_override::{AuthorityCheckSite, take_queued_authority_check};
-use super::cursor::{TruthAuthoritySnapshot, TruthCursor};
+use super::cursor::{DeferredPublication, TruthAuthoritySnapshot, TruthCursor};
+use super::deferred::{self, DeferredReceipts};
 use super::generation::{
     GenerationDescriptor, GenerationError, GenerationLayout, GenerationProgress,
     GenerationProgressPhase, GenerationPublication, GenerationReadLease,
@@ -41,8 +42,8 @@ use crate::canonical_hash::canonical_json_bytes;
 use crate::documents::{
     INSPECT_READER_PROFILE_SCHEMA, ReaderProfileAvailabilityV1, ReaderProfileDocumentV1,
 };
-use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
+use crate::session::event::ShoreEvent;
 use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::backend::{
     JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, StoreBackend,
@@ -51,6 +52,7 @@ use crate::session::store::capabilities::{
     StoreCapabilityStatus, inspect_change_reader_journal_records,
     validate_bounded_change_capability_pair,
 };
+use crate::session::{EventStore, EventWriteOutcome};
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 const WAL_OBSERVATION_ATTEMPTS: usize = 4;
@@ -87,6 +89,19 @@ pub(crate) struct LifecycleProgress {
     pub(crate) estimated_remaining_ms: Option<u64>,
 }
 
+/// The authority check behind a rebuild-required verdict: which mechanism
+/// compared the authority the generation recorded against what the journal
+/// shows now. Status documents surface it so an operator can tell an
+/// out-of-band write from a corrupt or incompatible generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorityGap {
+    pub(crate) mechanism: String,
+    pub(crate) verdict: JournalChangeVerdict,
+    pub(crate) recorded_head: TruthCursor,
+    pub(crate) recorded_authority: String,
+    pub(crate) observed_authority: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleStatus {
     pub(crate) availability: DerivedAccessAvailability,
@@ -105,6 +120,9 @@ pub(crate) struct LifecycleStatus {
     /// as derived or authoritative I/O. Recovery classifies again before it
     /// rebuilds a generation that may still be valid.
     pub(crate) transient_failure: bool,
+    /// Present only when the authority check proved the rebuild-required
+    /// verdict.
+    pub(crate) authority_gap: Option<AuthorityGap>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -357,6 +375,7 @@ impl DerivedAccessLifecycle {
                 detail: None,
                 recovery_deferred: false,
                 transient_failure: false,
+                authority_gap: None,
             });
         };
         if let Some(progress) = staging_progress {
@@ -372,6 +391,7 @@ impl DerivedAccessLifecycle {
                 detail: Some("current generation remains readable during rebuild".to_owned()),
                 recovery_deferred: false,
                 transient_failure: false,
+                authority_gap: None,
             });
         }
         let stable_publication = match self.stable_current_publication() {
@@ -455,20 +475,42 @@ impl DerivedAccessLifecycle {
                 error => Ok(unavailable_after(&error, Some(publication.generation_id))),
             };
         }
-        let authority =
-            match self.observe_current_authority_snapshot(publication_snapshot.authority.clone()) {
-                Ok(authority) => authority.snapshot,
-                Err(LifecycleError::RebuildRequired(detail)) => {
-                    return Ok(status(
-                        DerivedAccessAvailability::RebuildRequired,
-                        Some(publication.generation_id),
-                        Some(detail),
-                    ));
-                }
-                Err(error) => {
-                    return Ok(unavailable_after(&error, Some(publication.generation_id)));
-                }
-            };
+        let recorded = publication_snapshot.authority.clone();
+        let check = match QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&recorded.change_stamp)
+        {
+            Ok(check) => check,
+            Err(error) => {
+                return Ok(unavailable_after(
+                    &LifecycleError::Truth(error.to_string()),
+                    Some(publication.generation_id),
+                ));
+            }
+        };
+        let authority = match require_stable_authority(&check) {
+            Ok(()) => TruthAuthoritySnapshot {
+                head: recorded.head,
+                change_stamp: check.after,
+            },
+            Err(LifecycleError::RebuildRequired(detail)) => {
+                let mut rebuild_required = status(
+                    DerivedAccessAvailability::RebuildRequired,
+                    Some(publication.generation_id),
+                    Some(detail),
+                );
+                rebuild_required.authority_gap = Some(AuthorityGap {
+                    mechanism: check.mechanism,
+                    verdict: check.verdict,
+                    recorded_head: recorded.head.cursor,
+                    recorded_authority: recorded.change_stamp.opaque_sha256(),
+                    observed_authority: check.after.opaque_sha256(),
+                });
+                return Ok(rebuild_required);
+            }
+            Err(error) => {
+                return Ok(unavailable_after(&error, Some(publication.generation_id)));
+            }
+        };
         if let Err(error) = validate_published(
             &descriptor,
             &authority,
@@ -1274,6 +1316,7 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
+        self.settle_deferred_receipts_locked(&service, &publication.generation_id, _writer_lock)?;
         let publication_snapshot = service.publication_validation_snapshot()?;
         let reader_receipt = self.validate_change_reader_publication(
             &generation_root,
@@ -1300,6 +1343,108 @@ impl DerivedAccessLifecycle {
             authority_maintenance_pending: false,
             _lease: lease,
         }))
+    }
+
+    /// Settle this process's deferred receipts for the exact generation before
+    /// publication admission proves authority. Receipts observed against a
+    /// generation that has since been replaced are dropped: the replacement's
+    /// census either included their carriers or its own authority check
+    /// refused it. A settlement the ledger cannot prove is an authority gap.
+    fn settle_deferred_receipts_locked(
+        &self,
+        service: &DerivedAccessService,
+        generation_id: &str,
+        writer_lock: &StoreWriterLock,
+    ) -> Result<(), LifecycleError> {
+        let pending = deferred::pending_for(&self.store_root);
+        let mut guard = deferred::lock_pending(&pending);
+        let Some(entry) = guard.as_ref() else {
+            return Ok(());
+        };
+        if entry.generation_id != generation_id {
+            *guard = None;
+            return Ok(());
+        }
+        match service.settle_deferred_receipts_locked(&entry.receipts, writer_lock) {
+            Ok(settled) => {
+                tracing::debug!(
+                    receipts = entry.receipts.len(),
+                    head = ?settled,
+                    "derived_access_deferred_receipts_settled"
+                );
+                *guard = None;
+                Ok(())
+            }
+            Err(error) if deferred_settlement_is_authority_gap(&error) => {
+                *guard = None;
+                Err(LifecycleError::RebuildRequired(format!(
+                    "deferred derived receipts could not be settled: {error}"
+                )))
+            }
+            Err(error) => Err(LifecycleError::Service(error)),
+        }
+    }
+
+    /// Publish one governed carrier while another holder keeps the derived
+    /// writer lock, proving the same single-carrier transition an admitted
+    /// append proves and retaining the receipt for the next holder in this
+    /// process. Any failure leaves the caller on the plain loose publication;
+    /// the publisher is invoked at most once either way.
+    pub(crate) fn publish_deferred_for_write(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        publish: impl FnOnce() -> crate::error::Result<EventWriteOutcome>,
+    ) -> Result<DeferredPublication, LifecycleError> {
+        if self.profile == DerivedAccessProfile::Off {
+            return Err(LifecycleError::Disabled);
+        }
+        let Some((paths, publication, _lease)) = self
+            .stable_current_publication()
+            .map_err(observe_generation_error)?
+        else {
+            return Err(LifecycleError::RebuildRequired(
+                "no usable derived generation is current".to_owned(),
+            ));
+        };
+        let generation_root = paths.generation(&publication.generation_id);
+        let service = DerivedAccessService::open_at(
+            &self.store_root,
+            &generation_root,
+            CursorLedgerIdentity::new(self.store_id.clone()),
+        )
+        .map_err(observe_service_error)?;
+        let pending = deferred::pending_for(&self.store_root);
+        let mut guard = deferred::lock_pending(&pending);
+        if guard
+            .as_ref()
+            .is_some_and(|entry| entry.generation_id != publication.generation_id)
+        {
+            *guard = None;
+        }
+        if guard
+            .as_ref()
+            .is_some_and(|entry| entry.receipts.len() >= deferred::MAX_DEFERRED_RECEIPTS_PER_STORE)
+        {
+            return Err(LifecycleError::RebuildRequired(
+                "deferred derived receipt budget is exhausted".to_owned(),
+            ));
+        }
+        let chained_after = guard
+            .as_ref()
+            .and_then(|entry| entry.receipts.last().cloned());
+        let outcome =
+            service.publish_deferred(event, attempt_token, chained_after.as_ref(), publish)?;
+        if let DeferredPublication::Created(receipt) = &outcome {
+            guard
+                .get_or_insert_with(|| DeferredReceipts {
+                    generation_id: publication.generation_id.clone(),
+                    receipts: Vec::new(),
+                })
+                .receipts
+                .push(receipt.clone());
+        }
+        Ok(outcome)
     }
 
     /// Run mutable maintenance against the current generation without ever
@@ -2382,6 +2527,25 @@ fn service_error_requires_quarantine(error: &DerivedAccessServiceError) -> bool 
     }
 }
 
+/// Settlement failures that prove the retained receipts no longer describe
+/// truth or the ledger; transient derived or authoritative I/O keeps them.
+fn deferred_settlement_is_authority_gap(error: &DerivedAccessServiceError) -> bool {
+    matches!(
+        error,
+        DerivedAccessServiceError::Cursor(
+            CursorLedgerError::AuthorityTransition(_)
+                | CursorLedgerError::UnreceiptedCarrier(_)
+                | CursorLedgerError::CarrierAbsent(_)
+                | CursorLedgerError::WitnessMismatch(_)
+                | CursorLedgerError::SequenceGap { .. }
+                | CursorLedgerError::WrongEpoch { .. }
+                | CursorLedgerError::AttemptTokenUsed(_)
+                | CursorLedgerError::Quarantined(_)
+                | CursorLedgerError::SchemaMismatch(_)
+        )
+    )
+}
+
 fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {
     matches!(
         error,
@@ -2438,6 +2602,7 @@ fn status(
         detail,
         recovery_deferred: false,
         transient_failure: false,
+        authority_gap: None,
     }
 }
 
@@ -4214,6 +4379,43 @@ mod tests {
             lifecycle.open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn rebuild_required_status_names_the_authority_gap() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().authority_gap,
+            None,
+            "a current generation reports no gap"
+        );
+        let store = EventStore::open(temp.path());
+        store.record_event_once(&lifecycle_event(2)).unwrap();
+
+        let status = lifecycle.status_read_only().unwrap();
+        assert_eq!(
+            status.availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let gap = status
+            .authority_gap
+            .expect("the authority check names the gap");
+        assert!(!gap.mechanism.is_empty());
+        assert_eq!(
+            status.detail.as_deref(),
+            Some(
+                format!(
+                    "authoritative truth freshness is {:?} via {}",
+                    gap.verdict, gap.mechanism
+                )
+                .as_str()
+            )
+        );
+        assert_ne!(gap.verdict, JournalChangeVerdict::Stable);
+        assert_eq!(gap.recorded_head, TruthCursor::new(1, 1));
+        assert_ne!(gap.recorded_authority, gap.observed_authority);
     }
 
     #[test]

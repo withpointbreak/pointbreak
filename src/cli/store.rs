@@ -543,7 +543,9 @@ fn derived_status(
     let status = access.lifecycle_status();
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let digest = derived_status_digest(&status);
-    let document = json::DiagnosticDocument::new("pointbreak.store-derived-status", status, vec![]);
+    let diagnostics = status.writer_diagnostics.clone();
+    let document =
+        json::DiagnosticDocument::new("pointbreak.store-derived-status", status, diagnostics);
     output::write_document(stdout, format, &document, || digest)
 }
 
@@ -617,6 +619,23 @@ fn derived_status_digest(status: &DerivedHistoryLifecycleStatus) -> String {
     }
     if let Some(detail) = &status.detail {
         digest.push_str(&format!("\ndetail: {detail}"));
+    }
+    if let Some(gap) = &status.authority_gap {
+        digest.push_str(&format!(
+            "\nauthority check: {} via {}\nrecorded authority: {} at head {}:{}\nobserved authority: {}",
+            gap.verdict,
+            gap.mechanism,
+            gap.recorded_authority,
+            gap.recorded_head.epoch,
+            gap.recorded_head.sequence,
+            gap.observed_authority
+        ));
+    }
+    for diagnostic in &status.writer_diagnostics {
+        digest.push_str(&format!(
+            "\nwriter diagnostic: {}: {}",
+            diagnostic.code, diagnostic.message
+        ));
     }
     digest
 }

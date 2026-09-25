@@ -195,7 +195,8 @@ impl JournalChangeStamp {
         })
     }
 
-    #[cfg(feature = "bench")]
+    /// An opaque identity for one observed stamp, for diagnostics that name
+    /// the recorded and the observed authority without exposing native fields.
     pub(crate) fn opaque_sha256(&self) -> String {
         match self {
             Self::Absent => crate::canonical_hash::sha256_bytes_hex(b"journal-change-stamp:absent"),

@@ -19,7 +19,8 @@ use crate::error::Result as ShoreResult;
 use crate::model::{RevisionId, RevisionRefV1};
 use crate::session::EventWriteOutcome;
 use crate::session::derived_access::cursor::{
-    AppendResolution, CursorDelta, TruthAuthoritySnapshot, TruthCursor, TruthHead,
+    AppendResolution, CursorDelta, DeferredCursorReceipt, DeferredPublication,
+    TruthAuthoritySnapshot, TruthCursor, TruthHead,
 };
 use crate::session::derived_access::locator::{
     ChronologicalWindowRequest, HydratedWindow, LocatorModelError, LocatorRead, LocatorRow,
@@ -360,6 +361,30 @@ impl DerivedAccessService {
             hook,
             publish,
         )?)
+    }
+
+    /// See [`SqliteCursorLedger::publish_deferred`].
+    pub(crate) fn publish_deferred(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        chained_after: Option<&DeferredCursorReceipt>,
+        publish: impl FnOnce() -> ShoreResult<EventWriteOutcome>,
+    ) -> Result<DeferredPublication, DerivedAccessServiceError> {
+        Ok(self
+            .cursor
+            .publish_deferred(event, attempt_token, chained_after, publish)?)
+    }
+
+    /// See [`SqliteCursorLedger::settle_deferred_receipts_locked`].
+    pub(crate) fn settle_deferred_receipts_locked(
+        &self,
+        receipts: &[DeferredCursorReceipt],
+        writer_lock: &StoreWriterLock,
+    ) -> Result<TruthCursor, DerivedAccessServiceError> {
+        Ok(self
+            .cursor
+            .settle_deferred_receipts_locked(receipts, writer_lock)?)
     }
 
     pub(crate) fn catch_up_to_head(

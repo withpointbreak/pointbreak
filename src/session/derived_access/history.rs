@@ -11,13 +11,15 @@ use rusqlite::types::Value;
 use serde::Serialize;
 
 use super::cursor::TruthCursor;
-use super::interaction::{AUTHORITATIVE_FALLBACK_HINT, claim_unavailable_hint};
+use super::interaction::{
+    AUTHORITATIVE_FALLBACK_HINT, REBUILD_RECOVERY_ACTION, claim_unavailable_hint,
+};
 use super::layout::{
     DerivedStorageDiscovery, DerivedStorageLayout, DerivedStorageNamespace,
     DerivedStorageTransition, NAMESPACE_CONFLICT_DETAIL,
 };
 use super::lifecycle::{
-    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleProgress,
+    AuthorityGap, CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleProgress,
 };
 use super::locator::{LocatorRead, normalize_occurred_at};
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
@@ -152,8 +154,42 @@ pub struct DerivedHistoryLifecycleStatus {
     pub detail: Option<String>,
     pub rebuild_in_flight: bool,
     pub rebuild_paused: bool,
+    /// Present only when `availability` is `rebuild_required` because the
+    /// authority check proved that truth moved past what the generation
+    /// recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority_gap: Option<DerivedHistoryAuthorityGap>,
+    /// Derived write degradation diagnostics this process retained (at most
+    /// eight, oldest first). They ride the document envelope, not the body.
+    #[serde(skip)]
+    pub writer_diagnostics: Vec<ProjectionDiagnostic>,
     #[serde(skip)]
     pub conflict_paths: Option<DerivedHistoryConflictPaths>,
+}
+
+/// The change check behind a `rebuild_required` verdict.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct DerivedHistoryAuthorityGap {
+    /// The change-check mechanism that produced the verdict.
+    pub mechanism: String,
+    /// `changed` or `indeterminate`.
+    pub verdict: String,
+    /// The derived head the recorded authority was bound to.
+    pub recorded_head: DerivedHistoryRecordedHead,
+    /// Opaque identity of the authority stamp the generation recorded.
+    pub recorded_authority: String,
+    /// Opaque identity of the authority stamp the journal shows now.
+    pub observed_authority: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct DerivedHistoryRecordedHead {
+    pub epoch: u64,
+    pub sequence: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -406,6 +442,18 @@ impl DerivedHistoryAccess {
                 None => format!("background recovery stopped: {failure}"),
             });
         }
+        if status.availability == DerivedHistoryAvailability::RebuildRequired {
+            status.detail = Some(match status.detail.take() {
+                Some(detail) => format!("{detail}; {REBUILD_RECOVERY_ACTION}"),
+                None => REBUILD_RECOVERY_ACTION.to_owned(),
+            });
+        }
+        if status.availability != DerivedHistoryAvailability::Current {
+            status.writer_diagnostics = super::writer::peek_process_diagnostics()
+                .into_iter()
+                .map(ProjectionDiagnostic::from)
+                .collect();
+        }
         status
     }
 
@@ -428,6 +476,8 @@ impl DerivedHistoryAccess {
                 detail: Some("derived access is disabled".to_owned()),
                 rebuild_in_flight: false,
                 rebuild_paused: false,
+                authority_gap: None,
+                writer_diagnostics: Vec::new(),
                 conflict_paths: None,
             };
         };
@@ -446,6 +496,8 @@ impl DerivedHistoryAccess {
                 detail: observed.detail,
                 rebuild_in_flight: self.rebuild_in_flight(),
                 rebuild_paused: self.rebuild_paused(),
+                authority_gap: observed.authority_gap.map(map_authority_gap),
+                writer_diagnostics: Vec::new(),
                 conflict_paths: None,
             },
             Err(error) => DerivedHistoryLifecycleStatus {
@@ -462,6 +514,8 @@ impl DerivedHistoryAccess {
                 detail: Some(error.to_string()),
                 rebuild_in_flight: self.rebuild_in_flight(),
                 rebuild_paused: self.rebuild_paused(),
+                authority_gap: None,
+                writer_diagnostics: Vec::new(),
                 conflict_paths: None,
             },
         }
@@ -828,6 +882,8 @@ impl DerivedHistoryMaintenance {
                 detail: Some(NAMESPACE_CONFLICT_DETAIL.to_owned()),
                 rebuild_in_flight,
                 rebuild_paused,
+                authority_gap: None,
+                writer_diagnostics: Vec::new(),
                 conflict_paths: Some(DerivedHistoryConflictPaths {
                     stable: stable.root(),
                     legacy: legacy.root(),
@@ -854,6 +910,8 @@ impl DerivedHistoryMaintenance {
                 detail: observed.detail,
                 rebuild_in_flight,
                 rebuild_paused,
+                authority_gap: observed.authority_gap.map(map_authority_gap),
+                writer_diagnostics: Vec::new(),
                 conflict_paths: None,
             },
             Err(error) => DerivedHistoryLifecycleStatus {
@@ -870,6 +928,8 @@ impl DerivedHistoryMaintenance {
                 detail: Some(error),
                 rebuild_in_flight,
                 rebuild_paused,
+                authority_gap: None,
+                writer_diagnostics: Vec::new(),
                 conflict_paths: None,
             },
         }
@@ -1462,6 +1522,19 @@ fn map_availability(value: DerivedAccessAvailability) -> DerivedHistoryAvailabil
         DerivedAccessAvailability::RebuildRequired => DerivedHistoryAvailability::RebuildRequired,
         DerivedAccessAvailability::Quarantined => DerivedHistoryAvailability::Quarantined,
         DerivedAccessAvailability::Unavailable => DerivedHistoryAvailability::Unavailable,
+    }
+}
+
+fn map_authority_gap(gap: AuthorityGap) -> DerivedHistoryAuthorityGap {
+    DerivedHistoryAuthorityGap {
+        mechanism: gap.mechanism,
+        verdict: format!("{:?}", gap.verdict).to_ascii_lowercase(),
+        recorded_head: DerivedHistoryRecordedHead {
+            epoch: gap.recorded_head.epoch,
+            sequence: gap.recorded_head.sequence,
+        },
+        recorded_authority: gap.recorded_authority,
+        observed_authority: gap.observed_authority,
     }
 }
 
@@ -2404,6 +2477,61 @@ mod tests {
         std::fs::set_permissions(generations, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    /// #769: the status document names the change check, the recorded versus
+    /// observed authority, and the recovery, only when the verdict was proven.
+    #[test]
+    fn rebuild_required_lifecycle_status_serializes_the_authority_gap() {
+        let mut status = DerivedHistoryLifecycleStatus {
+            active: true,
+            availability: DerivedHistoryAvailability::RebuildRequired,
+            namespace: DerivedHistoryNamespace::Stable,
+            generation_id: Some("g-stale".to_owned()),
+            phase: None,
+            completed_events: None,
+            total_events: None,
+            completed_bytes: None,
+            elapsed_milliseconds: None,
+            eta_milliseconds: None,
+            detail: Some(
+                "authoritative truth freshness is Changed via compare native directory observations"
+                    .to_owned(),
+            ),
+            rebuild_in_flight: false,
+            rebuild_paused: false,
+            authority_gap: Some(map_authority_gap(AuthorityGap {
+                mechanism: "compare native directory observations".to_owned(),
+                verdict: crate::session::store::backend::JournalChangeVerdict::Changed,
+                recorded_head: TruthCursor::new(1, 7),
+                recorded_authority: "a".repeat(64),
+                observed_authority: "b".repeat(64),
+            })),
+            writer_diagnostics: vec![ProjectionDiagnostic {
+                code: "derived_access_generation_unavailable".to_owned(),
+                message: "process-local".to_owned(),
+            }],
+            conflict_paths: None,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            json["authorityGap"],
+            serde_json::json!({
+                "mechanism": "compare native directory observations",
+                "verdict": "changed",
+                "recordedHead": {"epoch": 1, "sequence": 7},
+                "recordedAuthority": "a".repeat(64),
+                "observedAuthority": "b".repeat(64),
+            })
+        );
+        assert!(
+            json.get("writerDiagnostics").is_none(),
+            "writer diagnostics ride the document envelope, not the body: {json}"
+        );
+
+        status.authority_gap = None;
+        let json = serde_json::to_value(&status).unwrap();
+        assert!(json.get("authorityGap").is_none(), "{json}");
+    }
+
     #[test]
     fn unavailable_route_never_serializes_lifecycle_current() {
         let status = unavailable_lifecycle_status(
@@ -2419,6 +2547,7 @@ mod tests {
                 detail: None,
                 recovery_deferred: false,
                 transient_failure: false,
+                authority_gap: None,
             },
             "publication handoff requires a retry",
         );

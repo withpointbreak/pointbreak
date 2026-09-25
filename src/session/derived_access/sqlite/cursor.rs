@@ -25,8 +25,8 @@ use crate::session::derived_access::authority_check_override::{
     AuthorityCheckSite, take_queued_authority_check,
 };
 use crate::session::derived_access::cursor::{
-    AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution,
-    TruthAuthoritySnapshot, TruthCursor, TruthHead,
+    AppendResolution, CursorDelta, CursorIntent, CursorReceipt, DeferredCursorReceipt,
+    DeferredPublication, RecoveryResolution, TruthAuthoritySnapshot, TruthCursor, TruthHead,
 };
 use crate::session::derived_access::layout::DerivedStorageLayout;
 use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
@@ -974,6 +974,188 @@ impl SqliteCursorLedger {
         Ok(AppendResolution::Created(proposed_cursor))
     }
 
+    /// Publish one authoritative carrier while the derived writer lock is held
+    /// elsewhere, and prove the same single-carrier transition the governed
+    /// append proves, so the receipt can be settled later instead of opening
+    /// an authority gap.
+    ///
+    /// Nothing in the ledger is written. The proof is anchored at the ledger's
+    /// bound authority stamp and head, or at `chained_after` when earlier
+    /// deferred receipts for this generation are still unsettled. A carrier
+    /// created by anyone else in the interval, or truth that already moved
+    /// past the anchor, is reported as an authority transition failure and the
+    /// caller falls back to the plain loose publication.
+    pub(crate) fn publish_deferred(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        chained_after: Option<&DeferredCursorReceipt>,
+        publish: impl FnOnce() -> crate::error::Result<EventWriteOutcome>,
+    ) -> Result<DeferredPublication, CursorLedgerError> {
+        validate_nonempty("attempt_token", attempt_token)?;
+        validate_nonempty("logical_reread_key", &event.idempotency_key)?;
+        let expected_bytes = serde_json::to_vec(event)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let expected_witness = sha256_bytes_hex(&expected_bytes);
+        let (connection, metadata) = self.hot_read_connection()?;
+        let (anchor_head, anchor_stamp) = match chained_after {
+            Some(previous) => {
+                if previous.receipt.cursor.epoch != metadata.epoch
+                    || previous.receipt.cursor.sequence <= metadata.head_sequence
+                {
+                    return Err(CursorLedgerError::AuthorityTransition(format!(
+                        "deferred receipt {:?} no longer follows ledger head {}:{}",
+                        previous.receipt.cursor, metadata.epoch, metadata.head_sequence
+                    )));
+                }
+                (previous.receipt.cursor, previous.authority_stamp.clone())
+            }
+            None => (
+                TruthCursor::new(metadata.epoch, metadata.head_sequence),
+                metadata.authority_stamp.clone(),
+            ),
+        };
+        let proposed_cursor = TruthCursor::new(
+            anchor_head.epoch,
+            anchor_head.sequence.checked_add(1).ok_or_else(|| {
+                CursorLedgerError::SchemaMismatch("cursor sequence overflow".to_owned())
+            })?,
+        );
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        // Arm the transition observation before proving the anchor is still
+        // current, so a foreign carrier created between the two is classified
+        // by the observation rather than missed by both checks.
+        let observation = journal
+            .begin_created_transition(&anchor_stamp, &event.idempotency_key)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let anchor_check = journal
+            .changes_since(&anchor_stamp)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if anchor_check.verdict != JournalChangeVerdict::Stable {
+            return Err(CursorLedgerError::AuthorityTransition(format!(
+                "truth moved before the deferred publication: {:?} via {}",
+                anchor_check.verdict, anchor_check.mechanism
+            )));
+        }
+        let existing_receipt = receipt_for_key(&connection, &journal, &event.idempotency_key)?;
+        let publication = publish().map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if let Some(receipt) = existing_receipt {
+            if matches!(publication, EventWriteOutcome::Created) {
+                return Err(CursorLedgerError::AuthorityTransition(format!(
+                    "receipt exists but authoritative carrier was recreated: {}",
+                    event.idempotency_key
+                )));
+            }
+            return Ok(DeferredPublication::Existing(receipt.cursor));
+        }
+        if !matches!(publication, EventWriteOutcome::Created) {
+            return Err(CursorLedgerError::UnreceiptedCarrier(
+                event.idempotency_key.clone(),
+            ));
+        }
+        validate_named_carrier(&journal, &event.idempotency_key, &expected_witness)?;
+        let transition = journal
+            .finish_created_transition(observation)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if transition.verdict != JournalCreatedTransitionVerdict::Accepted {
+            return Err(CursorLedgerError::AuthorityTransition(format!(
+                "{:?}: {}",
+                transition.verdict, transition.mechanism
+            )));
+        }
+        Ok(DeferredPublication::Created(DeferredCursorReceipt {
+            receipt: CursorReceipt {
+                cursor: proposed_cursor,
+                logical_reread_key: event.idempotency_key.clone(),
+                validation_witness: expected_witness,
+                attempt_token: attempt_token.to_owned(),
+            },
+            authority_stamp: transition.after,
+        }))
+    }
+
+    /// Settle receipts observed by [`Self::publish_deferred`] under the writer
+    /// lock. The chain must start right after the ledger head, every carrier
+    /// must still match its witness, and truth must not have moved past the
+    /// last deferred stamp; otherwise nothing is written and the caller treats
+    /// the generation as requiring rebuild.
+    pub(crate) fn settle_deferred_receipts_locked(
+        &self,
+        receipts: &[DeferredCursorReceipt],
+        _writer_lock: &StoreWriterLock,
+    ) -> Result<TruthCursor, CursorLedgerError> {
+        let mut connection = open_connection(&self.database_path, false)?;
+        validate_recoverable_metadata(&connection, &self.identity)?;
+        recover_locked(&mut connection, &self.store_root, &self.identity)?;
+        let metadata = read_metadata(&connection)?;
+        let head = TruthCursor::new(metadata.epoch, metadata.head_sequence);
+        let Some(last) = receipts.last() else {
+            return Ok(head);
+        };
+        let mut expected = head.sequence;
+        for deferred in receipts {
+            let cursor = deferred.receipt.cursor;
+            if cursor.epoch != metadata.epoch || cursor.sequence != expected + 1 {
+                return Err(CursorLedgerError::AuthorityTransition(format!(
+                    "deferred receipt {cursor:?} does not continue ledger head {head:?}"
+                )));
+            }
+            expected = cursor.sequence;
+        }
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        let continuation = journal
+            .changes_since(&last.authority_stamp)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if continuation.verdict != JournalChangeVerdict::Stable {
+            return Err(CursorLedgerError::AuthorityTransition(format!(
+                "truth moved after the deferred receipts were observed: {:?} via {}",
+                continuation.verdict, continuation.mechanism
+            )));
+        }
+        for deferred in receipts {
+            validate_named_carrier(
+                &journal,
+                &deferred.receipt.logical_reread_key,
+                &deferred.receipt.validation_witness,
+            )?;
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin deferred receipt settlement", error))?;
+        for deferred in receipts {
+            insert_attempt(&transaction, &deferred.receipt.attempt_token)?;
+            insert_receipt(&transaction, &deferred.receipt)?;
+            advance_head(
+                &transaction,
+                deferred.receipt.cursor,
+                &deferred.authority_stamp,
+            )?;
+        }
+        if continuation.after != last.authority_stamp {
+            let updated = transaction
+                .execute(
+                    "UPDATE cursor_meta
+                     SET authority_stamp_json = ?1
+                     WHERE singleton = 1 AND epoch = ?2 AND head_sequence = ?3",
+                    params![
+                        encode_authority_stamp(&continuation.after)?,
+                        u64_to_i64(last.receipt.cursor.epoch, "authority epoch")?,
+                        u64_to_i64(last.receipt.cursor.sequence, "authority head")?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("continue settled authority stamp", error))?;
+            if updated != 1 {
+                return Err(CursorLedgerError::SchemaMismatch(
+                    "cursor head changed while settling deferred receipts".to_owned(),
+                ));
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit deferred receipt settlement", error))?;
+        Ok(last.receipt.cursor)
+    }
+
     pub(crate) fn recover(&self) -> Result<RecoveryResolution, CursorLedgerError> {
         let _writer_lock = StoreWriterLock::acquire(&self.store_root)?;
         let mut connection = open_connection(&self.database_path, false)?;
@@ -1897,7 +2079,7 @@ fn capture_created_authority_stamp(
     let unchanged = journal
         .changes_since(before)
         .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
-    if unchanged.verdict == crate::session::store::backend::JournalChangeVerdict::Stable {
+    if unchanged.verdict == JournalChangeVerdict::Stable {
         return Ok(before.clone());
     }
     #[cfg(target_os = "linux")]

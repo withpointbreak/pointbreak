@@ -83,7 +83,10 @@ does not report duplicates that already existed in the store. Store-wide hygiene
 A writer reports derived-generation admission failure on its first attempted publication,
 not when its handle is constructed. For example, writing without a usable derived generation
 can succeed durably with `derived.availability: unavailable` and the top-level diagnostic
-`derived_access_generation_unavailable`.
+`derived_access_generation_unavailable`. A write that met a busy derived writer lock for longer
+than the admission budget succeeds durably with `derived.availability: unavailable` and the
+diagnostic `derived_access_receipt_deferred`; its derived receipt is settled by the next governed
+write in the same process (see `pointbreak store`).
 
 These are additive v1 JSON fields: consumers must tolerate unknown fields. Strict decoders may need
 updating, and Rust callers constructing public result structs must supply the new fields. Existing
@@ -672,6 +675,14 @@ derived-path registry.
   `pointbreak.store-derived-status` document is path-free. If both the stable `derived/` namespace and
   its legacy predecessor are present, text output identifies both local paths so the operator can retain
   one disposable copy and move the other aside; Pointbreak never guesses, merges, or deletes either.
+  When `availability` is `rebuild_required` because authoritative truth moved past what the generation
+  recorded, the document carries an `authorityGap` object naming the change-check `mechanism`, its
+  `verdict` (`changed` or `indeterminate`), the `recordedHead` the generation bound its authority to, and
+  the opaque `recordedAuthority` versus `observedAuthority` stamp identities; `detail` ends with the
+  explicit recovery (`store derived rebuild`, or `POINTBREAK_DERIVED_ACCESS=off` in the interim). The
+  envelope's `diagnostics` list carries the derived write diagnostics this process retained (at most
+  eight); a status read from a fresh process therefore reports an empty list. Text output prints the same
+  fields as `authority check`, `recorded authority`, `observed authority`, and `writer diagnostic` lines.
 - `build` synchronously creates or repairs a usable generation only when needed. If a validated current
   generation already exists, it emits a no-op `pointbreak.store-derived-build` receipt.
 - `rebuild` synchronously constructs and publishes a replacement generation even when the old generation
@@ -718,6 +729,17 @@ actionable hint for the exact store and process; it does not synchronously rebui
 publishes authoritative loose truth once and reports derived degradation, leaving the disposable generation
 for a later `build` or `rebuild`. Inspector is the interactive exception: it starts one asynchronous first
 build while keeping the shell and explicit authoritative fallback available.
+
+A busy derived writer lock is not degradation. A governed write that finds the lock held (by the store's
+own maintenance pass or another process's write) waits for it within a bounded budget of about 640 ms. If
+the holder outlasts the budget, the write still publishes authoritative truth at once, proves the same
+single-carrier transition an admitted write proves, and retains the derived receipt in the process; the
+next holder of the writer lock in that process (the next governed write, the existing maintenance worker,
+or the writer at exit) settles it before proving authority. Such a write is acknowledged with
+`derived.availability: unavailable` and the diagnostic `derived_access_receipt_deferred`; reads stay
+fail-closed (`rebuild_required`) only until the receipt is settled, without any rebuild. A receipt that
+cannot be proven (a foreign carrier in the same interval, or the process exiting first) leaves the same
+authority gap a loose write always left, and `store derived rebuild` remains the explicit recovery.
 
 When the derived profile is active and current, output-bounded `history` pages, `attention list`,
 explicitly bounded `revision list --limit` pages, and `summary show` use it without enumerating the event

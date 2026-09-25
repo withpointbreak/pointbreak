@@ -5,30 +5,35 @@
 //! publication, receipt finalization, and catch-up. Construction does not sample
 //! generation availability. `DegradedLoose` deliberately bypasses all derived
 //! work and invokes the authoritative publisher exactly once. Missing, stale,
-//! corrupt, busy, or ambiguous derived state at publication selects the latter
+//! corrupt, or ambiguous derived state at publication selects the latter
 //! state; it cannot make an otherwise valid loose write unavailable.
 //!
+//! A busy derived writer lock is transient, not degradation. Admission waits
+//! for it within a bounded budget; a lock that stays held longer still lets
+//! truth publish, but through a deferred receipt (see `deferred`) that the
+//! next holder of the writer lock in this process settles, so one busy
+//! moment never turns into an authority gap that only a rebuild can close.
+//!
 //! An eligible coordinator may transition to degraded before truth publication
-//! if admission fails, or after publication if receipt
+//! if admission fails for any other reason, or after publication if receipt
 //! finalization fails. It never transitions in the other direction: rebuilding
 //! and admitting a new immutable generation requires a fresh coordinator.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-#[cfg(any(test, feature = "longitudinal-counting"))]
 use std::thread;
-#[cfg(any(test, feature = "longitudinal-counting"))]
 use std::time::Duration;
 
-use super::cursor::AppendResolution;
+use super::cursor::{AppendResolution, DeferredPublication};
+use super::deferred;
 use super::interaction::{RECOVERY_ACTION, claim_unavailable_hint};
 use super::lifecycle::DerivedAccessLifecycle;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use super::product_contract::DerivedAccessAvailability;
-use super::sqlite::{AppendCrashPoint, StoreWriterLock};
+use super::sqlite::{AppendCrashPoint, StoreWriterLock, WriterLockError};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{
     LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
@@ -42,10 +47,23 @@ use crate::session::{
 
 const MAX_DIAGNOSTICS: usize = 8;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+/// Publication admission polls the derived writer lock this often, this many
+/// times (about 640 ms), before it treats the holder as long-lived. The
+/// holders that matter are short: the store's own maintenance pass and another
+/// process's governed append.
+const ADMISSION_BUSY_ATTEMPTS: usize = 32;
+const ADMISSION_BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+/// While receipts are already deferred, a further append probes only briefly:
+/// the next successful acquisition settles the whole chain regardless.
+const DEFERRED_ADMISSION_BUSY_ATTEMPTS: usize = 4;
+/// A dropped coordinator makes one short attempt to settle its deferred
+/// receipts so a single-command process does not leave them behind.
+const DROP_SETTLEMENT_ATTEMPTS: usize = 8;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 const QUALIFICATION_WRITER_ATTEMPTS: usize = 32;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 const QUALIFICATION_WRITER_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+pub(crate) const DEFERRED_RECEIPT_DIAGNOSTIC_CODE: &str = "derived_access_receipt_deferred";
 static ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_DIAGNOSTICS: OnceLock<Mutex<VecDeque<DerivedWriteDiagnostic>>> = OnceLock::new();
 
@@ -253,8 +271,13 @@ impl DerivedWriteCoordinator {
             .lifecycle
             .as_ref()
             .expect("governed derived writes retain their admitted lifecycle");
-        let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+        let writer_lock = match self.acquire_writer_lock_bounded() {
             Ok(lock) => lock,
+            Err(WriterLockError::Busy) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                drop(admission_phase);
+                return self.publish_deferred(event, publish);
+            }
             Err(error) => {
                 let diagnostic = self.record_unavailable(&error.to_string());
                 return self.publish_unavailable(publish, diagnostic);
@@ -410,6 +433,98 @@ impl DerivedWriteCoordinator {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(response_phase);
         Ok(acknowledgement)
+    }
+
+    /// Wait for the derived writer lock within the admission budget. A holder
+    /// that outlasts it is reported as `Busy` and handled by deferral.
+    fn acquire_writer_lock_bounded(&self) -> std::result::Result<StoreWriterLock, WriterLockError> {
+        let attempts = if deferred::has_pending(&self.store_root) {
+            DEFERRED_ADMISSION_BUSY_ATTEMPTS
+        } else {
+            ADMISSION_BUSY_ATTEMPTS
+        };
+        acquire_writer_lock_with_budget(&self.store_root, attempts)
+    }
+
+    /// Publish truth while the derived writer lock stays held elsewhere,
+    /// retaining a proven receipt for later settlement. Truth is published at
+    /// most once; when the receipt cannot be proven the write degrades exactly
+    /// as an unadmitted loose publication did before deferral existed.
+    fn publish_deferred(
+        &self,
+        event: &ShoreEvent,
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+    ) -> Result<EventWriteAcknowledgement> {
+        let lifecycle = self
+            .lifecycle
+            .as_ref()
+            .expect("governed derived writes retain their admitted lifecycle");
+        let attempt_token = next_attempt_token(event);
+        let publication = Cell::new(None);
+        let publish_error = RefCell::new(None);
+        let mut publish = Some(publish);
+        let deferred = lifecycle.publish_deferred_for_write(event, &attempt_token, || {
+            let publish = publish
+                .take()
+                .expect("authoritative publisher is invoked at most once");
+            match publish() {
+                Ok(outcome) => {
+                    publication.set(Some(outcome));
+                    Ok(outcome)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    *publish_error.borrow_mut() = Some(error);
+                    Err(ShoreError::Message(message))
+                }
+            }
+        });
+        let busy = WriterLockError::Busy.to_string();
+        match deferred {
+            Ok(DeferredPublication::Created(receipt)) => {
+                let diagnostic = deferred_receipt_diagnostic(receipt.receipt.cursor.sequence);
+                self.push_diagnostic(diagnostic.clone());
+                enqueue_unavailable_process_hint(&self.store_root, unavailable_diagnostic(&busy));
+                Ok(EventWriteAcknowledgement::new(
+                    publication.get().unwrap_or(EventWriteOutcome::Created),
+                    DerivedWriteAvailabilityV1::Unavailable,
+                    None,
+                    vec![diagnostic.into()],
+                ))
+            }
+            Ok(DeferredPublication::Existing(_)) => {
+                let diagnostic = unavailable_diagnostic(&busy);
+                self.push_diagnostic(diagnostic.clone());
+                enqueue_unavailable_process_hint(&self.store_root, diagnostic.clone());
+                Ok(EventWriteAcknowledgement::new(
+                    publication.get().unwrap_or(EventWriteOutcome::Existing),
+                    DerivedWriteAvailabilityV1::Unavailable,
+                    None,
+                    vec![diagnostic.into()],
+                ))
+            }
+            Err(error) => {
+                if let Some(error) = publish_error.borrow_mut().take() {
+                    return Err(error);
+                }
+                let detail = format!("{busy}; derived receipt could not be deferred: {error}");
+                if let Some(outcome) = publication.get() {
+                    let diagnostic = self.record_unavailable(&detail);
+                    enqueue_unavailable_process_hint(&self.store_root, diagnostic.clone());
+                    return Ok(EventWriteAcknowledgement::new(
+                        outcome,
+                        DerivedWriteAvailabilityV1::Unavailable,
+                        None,
+                        vec![diagnostic.into()],
+                    ));
+                }
+                let publish = publish
+                    .take()
+                    .expect("authoritative publisher is invoked at most once");
+                let diagnostic = self.record_unavailable(&detail);
+                self.publish_unavailable(publish, diagnostic)
+            }
+        }
     }
 
     #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -592,6 +707,32 @@ impl DerivedWriteCoordinator {
     }
 }
 
+impl Drop for DerivedWriteCoordinator {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            return;
+        }
+        let Some(lifecycle) = self.lifecycle.as_ref() else {
+            return;
+        };
+        if !deferred::has_pending(&self.store_root) {
+            return;
+        }
+        let settlement =
+            acquire_writer_lock_with_budget(&self.store_root, DROP_SETTLEMENT_ATTEMPTS)
+                .map_err(|error| error.to_string())
+                .and_then(|writer_lock| {
+                    lifecycle
+                        .open_current_for_write_locked(&writer_lock)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                });
+        if let Err(error) = settlement {
+            tracing::warn!(error, "derived_write_deferred_receipts_unsettled_at_drop");
+        }
+    }
+}
+
 pub(crate) fn take_process_diagnostics() -> Vec<DerivedWriteDiagnostic> {
     PROCESS_DIAGNOSTICS
         .get_or_init(|| Mutex::new(VecDeque::new()))
@@ -599,6 +740,22 @@ pub(crate) fn take_process_diagnostics() -> Vec<DerivedWriteDiagnostic> {
         .expect("derived process diagnostic lock poisoned")
         .drain(..)
         .collect()
+}
+
+fn acquire_writer_lock_with_budget(
+    store_root: &Path,
+    attempts: usize,
+) -> std::result::Result<StoreWriterLock, WriterLockError> {
+    let mut attempt = 0;
+    loop {
+        match StoreWriterLock::try_acquire(store_root) {
+            Err(WriterLockError::Busy) if attempt + 1 < attempts => {
+                attempt += 1;
+                thread::sleep(ADMISSION_BUSY_RETRY_INTERVAL);
+            }
+            result => return result,
+        }
+    }
 }
 
 fn enqueue_unavailable_process_hint(
@@ -683,6 +840,18 @@ fn diagnostic(code: &'static str, detail: &str, quarantine: &str) -> DerivedWrit
     }
 }
 
+fn deferred_receipt_diagnostic(sequence: u64) -> DerivedWriteDiagnostic {
+    DerivedWriteDiagnostic {
+        code: DEFERRED_RECEIPT_DIAGNOSTIC_CODE,
+        message: format!(
+            "{}; the authoritative record is durable and its derived receipt (sequence {sequence}) \
+             is settled by the next governed append in this process; run `pointbreak store \
+             derived status` to confirm the generation is current",
+            WriterLockError::Busy
+        ),
+    }
+}
+
 fn unavailable_diagnostic(detail: &str) -> DerivedWriteDiagnostic {
     const PREFIX: &str = "derived acceleration is unavailable (";
     let action = format!("); {RECOVERY_ACTION}");
@@ -695,6 +864,18 @@ fn unavailable_diagnostic(detail: &str) -> DerivedWriteDiagnostic {
         code: "derived_access_generation_unavailable",
         message: truncate_utf8(&message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
     }
+}
+
+/// Observe the retained process-local diagnostics without draining them, for
+/// status documents that report but do not consume them.
+pub(crate) fn peek_process_diagnostics() -> Vec<DerivedWriteDiagnostic> {
+    PROCESS_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .expect("derived process diagnostic lock poisoned")
+        .iter()
+        .cloned()
+        .collect()
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
@@ -719,7 +900,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AppendCrashPoint, DerivedWriteCoordinator, StoreWriterLock, catch_up_after_publication,
+        AppendCrashPoint, DEFERRED_RECEIPT_DIAGNOSTIC_CODE, DerivedWriteCoordinator,
+        DerivedWriteMode, StoreWriterLock, catch_up_after_publication, deferred,
     };
     use crate::bench_support::longitudinal::{
         LongitudinalCountingScopeV1, LongitudinalDerivedAccessPhaseOwnershipV1,
@@ -728,6 +910,7 @@ mod tests {
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::SignerId;
     use crate::model::JournalId;
+    use crate::session::derived_access::cursor::TruthCursor;
     use crate::session::derived_access::history::{
         CurrentRead, DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryMode,
         DerivedHistoryStatus,
@@ -1085,10 +1268,9 @@ mod tests {
         use crate::session::DerivedWriteAvailabilityV1::Unavailable;
         let root = TempDir::new().unwrap();
         let truth = EventStore::open(root.path());
-        let lifecycle = active_product_lifecycle(&root);
-        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
-        let coordinator = DerivedWriteCoordinator::new(lifecycle).unwrap();
-        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        // No generation was ever built: admission finds nothing usable and
+        // the coordinator degrades on its first publication.
+        let coordinator = DerivedWriteCoordinator::new(active_product_lifecycle(&root)).unwrap();
         for index in 0..2 {
             let ack = coordinator
                 .record_event_once_acknowledged(&event(index), || {
@@ -1106,10 +1288,185 @@ mod tests {
                 );
             }
         }
-        drop(held);
         assert!(
             !coordinator.take_diagnostics().is_empty(),
             "acknowledgement does not drain compatibility diagnostics"
+        );
+    }
+
+    /// A busy derived writer lock is not degradation: every deferred append
+    /// is acknowledged with its own receipt-deferred diagnostic, the
+    /// coordinator stays eligible, and the next admitted append settles the
+    /// whole chain before it is receipted itself.
+    #[test]
+    fn deferred_receipts_chain_and_settle_on_the_next_admission() {
+        use crate::session::DerivedWriteAvailabilityV1::{Current, Unavailable};
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        for index in 0..2 {
+            let ack = coordinator
+                .record_event_once_acknowledged(&event(index), || {
+                    truth.record_event_once(&event(index))
+                })
+                .unwrap();
+            assert_eq!(ack.outcome, EventWriteOutcome::Created);
+            assert_eq!(ack.derived.availability, Unavailable);
+            assert!(ack.derived.token.is_none());
+            assert_eq!(ack.diagnostics.len(), 1, "{:?}", ack.diagnostics);
+            assert_eq!(ack.diagnostics[0].code, DEFERRED_RECEIPT_DIAGNOSTIC_CODE);
+            assert!(
+                ack.diagnostics[0]
+                    .message
+                    .contains("derived-access writer is busy")
+            );
+        }
+        assert_eq!(
+            DerivedWriteMode::load(&coordinator.mode),
+            DerivedWriteMode::AdmissionEligible
+        );
+        assert!(deferred::has_pending(root.path()));
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired,
+            "reads stay fail-closed until the receipts are settled"
+        );
+        drop(held);
+
+        let ack = coordinator
+            .record_event_once_acknowledged(&event(2), || truth.record_event_once(&event(2)))
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(ack.derived.availability, Current, "{:?}", ack.diagnostics);
+        assert_eq!(ack.derived.token.unwrap().head_sequence, 3);
+        assert!(ack.diagnostics.is_empty());
+        assert!(!deferred::has_pending(root.path()));
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+        assert_eq!(
+            lifecycle.open_current().unwrap().unwrap().locator_applied(),
+            TruthCursor::new(1, 3),
+            "settled receipts are projected by the admitted append's catch-up"
+        );
+        assert_eq!(coordinator.take_diagnostics().len(), 2);
+    }
+
+    /// A single-command process drops its coordinator with receipts still
+    /// deferred; the drop settles them once the lock is free.
+    #[test]
+    fn a_dropped_coordinator_settles_its_deferred_receipts() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        let ack = coordinator
+            .record_event_once_acknowledged(&event(0), || truth.record_event_once(&event(0)))
+            .unwrap();
+        assert_eq!(ack.diagnostics[0].code, DEFERRED_RECEIPT_DIAGNOSTIC_CODE);
+        drop(held);
+        drop(coordinator);
+        assert!(!deferred::has_pending(root.path()));
+        let current = lifecycle.open_current().unwrap().unwrap();
+        assert_eq!(current.authority_head(), TruthCursor::new(1, 1));
+    }
+
+    /// A foreign carrier created inside the deferred window makes the receipt
+    /// unprovable. Truth stays durable and the write degrades exactly as an
+    /// unadmitted loose publication did, so the gap is reported, not hidden.
+    #[test]
+    fn a_foreign_carrier_during_a_deferred_publication_degrades_instead_of_hiding_the_gap() {
+        use crate::session::DerivedWriteAvailabilityV1::Unavailable;
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        let ack = coordinator
+            .record_event_once_acknowledged(&event(0), || {
+                truth.record_event_once(&event(7)).unwrap();
+                truth.record_event_once(&event(0))
+            })
+            .unwrap();
+        drop(held);
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(ack.derived.availability, Unavailable);
+        assert_eq!(ack.diagnostics.len(), 1);
+        assert_eq!(
+            ack.diagnostics[0].code,
+            "derived_access_generation_unavailable"
+        );
+        assert!(
+            ack.diagnostics[0]
+                .message
+                .contains("derived receipt could not be deferred"),
+            "{}",
+            ack.diagnostics[0].message
+        );
+        assert_eq!(
+            DerivedWriteMode::load(&coordinator.mode),
+            DerivedWriteMode::DegradedLoose
+        );
+        assert!(!deferred::has_pending(root.path()));
+        assert_eq!(truth.list_events().unwrap().len(), 2);
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+    }
+
+    /// Truth that moves out of band after a receipt was deferred cannot be
+    /// settled: the next admission reports the gap and the store requires an
+    /// explicit rebuild, as any out-of-band append always did.
+    #[test]
+    fn an_out_of_band_append_after_a_deferred_receipt_still_requires_rebuild() {
+        use crate::session::DerivedWriteAvailabilityV1::Unavailable;
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        let lifecycle = active_product_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator = DerivedWriteCoordinator::new(lifecycle.clone()).unwrap();
+        let held = StoreWriterLock::acquire(root.path()).unwrap();
+        let deferred_ack = coordinator
+            .record_event_once_acknowledged(&event(0), || truth.record_event_once(&event(0)))
+            .unwrap();
+        assert_eq!(
+            deferred_ack.diagnostics[0].code,
+            DEFERRED_RECEIPT_DIAGNOSTIC_CODE
+        );
+        drop(held);
+        truth.record_event_once(&event(7)).unwrap();
+
+        let ack = coordinator
+            .record_event_once_acknowledged(&event(1), || truth.record_event_once(&event(1)))
+            .unwrap();
+        assert_eq!(ack.outcome, EventWriteOutcome::Created);
+        assert_eq!(ack.derived.availability, Unavailable);
+        assert!(
+            ack.diagnostics[0]
+                .message
+                .contains("deferred derived receipts could not be settled"),
+            "{}",
+            ack.diagnostics[0].message
+        );
+        assert!(!deferred::has_pending(root.path()));
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        // A new coordinator over a rebuilt generation is current again.
+        drop(coordinator);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert_eq!(
+            lifecycle.status_read_only().unwrap().availability,
+            DerivedAccessAvailability::Current
         );
     }
 
@@ -1204,10 +1561,7 @@ mod tests {
         assert_eq!(second.derived.availability, Unavailable);
         assert!(second.derived.token.is_none());
         assert_eq!(second.diagnostics.len(), 1);
-        assert_eq!(
-            second.diagnostics[0].code,
-            "derived_access_generation_unavailable"
-        );
+        assert_eq!(second.diagnostics[0].code, DEFERRED_RECEIPT_DIAGNOSTIC_CODE);
         assert_eq!(coordinator.take_diagnostics().len(), 2);
     }
 
@@ -1315,7 +1669,7 @@ mod tests {
         assert!(published_while_busy);
         assert_eq!(truth.list_events().unwrap().len(), 2);
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, "derived_access_generation_unavailable");
+        assert_eq!(diagnostics[0].code, DEFERRED_RECEIPT_DIAGNOSTIC_CODE);
         assert!(
             diagnostics[0]
                 .message

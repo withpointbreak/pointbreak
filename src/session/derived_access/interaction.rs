@@ -11,6 +11,9 @@ use std::sync::{Mutex, OnceLock};
 pub(super) const RECOVERY_ACTION: &str =
     "run `pointbreak store derived status` or `pointbreak store derived build`";
 pub(super) const AUTHORITATIVE_FALLBACK_HINT: &str = "hint: derived access is unavailable; using authoritative journal data; run `pointbreak store derived status` or `pointbreak store derived build`";
+/// The explicit recovery for an activated store whose derived generation no
+/// longer follows authoritative truth. Nothing rebuilds it in the background.
+pub(super) const REBUILD_RECOVERY_ACTION: &str = "run `pointbreak store derived rebuild` to publish a replacement generation, or set POINTBREAK_DERIVED_ACCESS=off to use authoritative data until then";
 
 static HINTED_STORES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
