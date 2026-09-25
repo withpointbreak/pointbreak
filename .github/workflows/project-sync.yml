@@ -1,0 +1,230 @@
+name: Project sync
+
+# Labels are the single writable source of planning state: priority:*, effort:*,
+# status:*, research, tracking. This workflow mirrors them one way into the
+# fields of the org project board (https://github.com/orgs/withpointbreak/projects/2)
+# that its views sort and group on, and enforces the two invariants labels
+# cannot enforce by themselves: at most one priority:* and one effort:* label
+# per issue (newest wins), and planning labels changed only by people with
+# write access to this repository. Theme is board-only and hand-set; the sync
+# never touches it.
+#
+# An issue event syncs that one issue. The daily run and workflow_dispatch
+# reconcile every open issue, so a missed webhook or a renamed label heals
+# within a day. Project mutations need a fine-grained token with the
+# organization permission "Projects: read and write" (plus repository
+# "Issues: read" on this repository), stored as the repository secret
+# PROJECT_SYNC_TOKEN. The label guard uses the workflow's own token.
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
+  schedule:
+    - cron: "41 6 * * *" # daily 06:41 UTC, ahead of nightly.yml's 07:00
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Sync one issue number (default: every open issue)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: project-sync-${{ github.event.issue.number || 'all' }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_OWNER: withpointbreak
+  PROJECT_NUMBER: "2"
+
+jobs:
+  sync:
+    name: sync
+    # A label the guard reverts fires this workflow again as github-actions[bot];
+    # the run that reverted it already synced, so the echo run is skipped.
+    if: github.event_name != 'issues' || github.actor != 'github-actions[bot]'
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - name: guard planning labels
+        if: github.event_name == 'issues' && (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_TYPE: ${{ github.event.sender.type }}
+        run: |
+          set -euo pipefail
+          case "$LABEL" in
+            priority:*|effort:*|status:*|research|tracking) ;;
+            *) echo "not a planning label: $LABEL"; exit 0 ;;
+          esac
+          if [ "$ACTOR_TYPE" = "Bot" ]; then
+            echo "bot actor ($ACTOR); guard skipped"
+            exit 0
+          fi
+          encoded="$(jq -rn --arg s "$LABEL" '$s | @uri')"
+          # Repository role of the person who changed the label. Triage-level
+          # collaborators can label but may not set planning state; outsiders
+          # cannot label at all, so this mostly guards templates and future
+          # collaborators.
+          role="$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.role_name // .permission' 2>/dev/null || echo none)"
+          case "$role" in
+            admin|maintain|write) ;;
+            *)
+              if [ "$ACTION" = "labeled" ]; then
+                gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${encoded}" --silent
+                verb="Reverted"
+              else
+                gh api -X POST "repos/${REPO}/issues/${ISSUE}/labels" -f "labels[]=${LABEL}" --silent
+                verb="Restored"
+              fi
+              body="${verb} \`${LABEL}\`: planning labels (\`priority:*\`, \`effort:*\`, \`status:*\`, \`research\`, \`tracking\`) are set by maintainers with write access. See CONTRIBUTING.md, \"Planning labels\"."
+              gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$body" --silent
+              echo "${verb} ${ACTION} of ${LABEL} by ${ACTOR} (role: ${role})"
+              exit 0
+              ;;
+          esac
+          # Mutual exclusivity inside priority:* and effort:*: the label just
+          # added wins, every other label in the same namespace is removed.
+          if [ "$ACTION" = "labeled" ]; then
+            case "$LABEL" in
+              priority:*|effort:*)
+                ns="${LABEL%%:*}:"
+                gh api "repos/${REPO}/issues/${ISSUE}/labels" --jq '.[].name' \
+                  | jq -rR --arg ns "$ns" --arg keep "$LABEL" 'select(startswith($ns) and . != $keep)' \
+                  | while IFS= read -r other; do
+                      [ -n "$other" ] || continue
+                      other_encoded="$(jq -rn --arg s "$other" '$s | @uri')"
+                      gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${other_encoded}" --silent
+                      echo "removed ${other}: superseded by ${LABEL}"
+                    done
+                ;;
+            esac
+          fi
+
+      - name: sync board fields from labels
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_SYNC_TOKEN }}
+          REPO_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_ISSUE: ${{ github.event.issue.number }}
+          INPUT_ISSUE: ${{ inputs.issue }}
+        run: |
+          # shellcheck disable=SC2016  # GraphQL documents carry $variables that must not expand in the shell
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::PROJECT_SYNC_TOKEN is not set; see the header comment of this workflow"
+            exit 1
+          fi
+
+          # 1. The board, its single-select fields, and their options, looked
+          #    up by name so no id is hard-coded.
+          project="$(gh api graphql -f owner="$PROJECT_OWNER" -F number="$PROJECT_NUMBER" -f query='
+            query($owner: String!, $number: Int!) {
+              organization(login: $owner) {
+                projectV2(number: $number) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField { id name options { id name } }
+                    }
+                  }
+                }
+              }
+            }')"
+          project_id="$(jq -r '.data.organization.projectV2.id' <<<"$project")"
+          field_id() {
+            jq -r --arg n "$1" '.data.organization.projectV2.fields.nodes[] | select(.name == $n) | .id' <<<"$project"
+          }
+          option_id() {
+            jq -r --arg f "$1" --arg o "$2" '.data.organization.projectV2.fields.nodes[] | select(.name == $f) | .options[] | select(.name == $o) | .id' <<<"$project"
+          }
+          for f in Priority Effort Workflow; do
+            if [ -z "$(field_id "$f")" ]; then
+              echo "::error::project field '$f' not found on project ${PROJECT_OWNER}/${PROJECT_NUMBER}"
+              exit 1
+            fi
+          done
+
+          # 2. Which issues: the event's issue, the dispatch input, or every
+          #    open issue (pull requests excluded).
+          if [ -n "$EVENT_ISSUE" ]; then
+            numbers="$EVENT_ISSUE"
+          elif [ -n "$INPUT_ISSUE" ]; then
+            numbers="$INPUT_ISSUE"
+          else
+            numbers="$(GH_TOKEN="$REPO_TOKEN" gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+              --jq '.[] | select(has("pull_request") | not) | .number')"
+          fi
+
+          set_field() { # set_field <item id> <field name> <option name or empty to clear>
+            local item="$1" field="$2" option="$3" fid oid
+            fid="$(field_id "$field")"
+            if [ -z "$option" ]; then
+              gh api graphql -f p="$project_id" -f i="$item" -f f="$fid" --silent -f query='
+                mutation($p: ID!, $i: ID!, $f: ID!) {
+                  clearProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f }) { projectV2Item { id } }
+                }'
+              return
+            fi
+            oid="$(option_id "$field" "$option")"
+            if [ -z "$oid" ]; then
+              echo "::error::option '${option}' is missing on field '${field}'; add it on the board or fix the mapping"
+              exit 1
+            fi
+            gh api graphql -f p="$project_id" -f i="$item" -f f="$fid" -f o="$oid" --silent -f query='
+              mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) {
+                updateProjectV2ItemFieldValue(input: { projectId: $p, itemId: $i, fieldId: $f, value: { singleSelectOptionId: $o } }) { projectV2Item { id } }
+              }'
+          }
+
+          # 3. Label -> field mapping, one issue at a time.
+          for n in $numbers; do
+            issue="$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${REPO}/issues/${n}")"
+            node_id="$(jq -r '.node_id' <<<"$issue")"
+            labels="$(jq -r '.labels[].name' <<<"$issue")"
+            has() { grep -qxF -- "$1" <<<"$labels"; }
+
+            priority=""
+            has "priority:P0-release-blocker" && priority="P0 blocker"
+            has "priority:P1-1.0-candidate" && priority="P1 1.0 candidate"
+            has "priority:P2-backlog" && priority="P2 backlog"
+            has "priority:P3-later" && priority="P3 later"
+
+            effort=""
+            has "effort:low" && effort="Low"
+            has "effort:medium" && effort="Medium"
+            has "effort:high" && effort="High"
+
+            # Precedence when several apply: an umbrella is Tracking whatever
+            # else it carries; a study is Research; a gated item is parked
+            # before it is a decision; needs-triage clears the field.
+            workflow="Ready"
+            if has "tracking"; then workflow="Tracking"
+            elif has "research"; then workflow="Research"
+            elif has "status:demand-gated"; then workflow="Demand-gated"
+            elif has "status:needs-decision"; then workflow="Needs decision"
+            elif has "status:needs-triage"; then workflow=""
+            fi
+
+            # addProjectV2ItemById is idempotent: it returns the existing item
+            # when the issue is already on the board.
+            item="$(gh api graphql -f p="$project_id" -f c="$node_id" --jq '.data.addProjectV2ItemById.item.id' -f query='
+              mutation($p: ID!, $c: ID!) {
+                addProjectV2ItemById(input: { projectId: $p, contentId: $c }) { item { id } }
+              }')"
+
+            set_field "$item" Priority "$priority"
+            set_field "$item" Effort "$effort"
+            set_field "$item" Workflow "$workflow"
+            echo "#${n}: Priority=${priority:-<cleared>} Effort=${effort:-<cleared>} Workflow=${workflow:-<cleared>}"
+          done
