@@ -365,6 +365,31 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: echo "CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=packed" >> "$GITHUB_ENV"
+      - name: put Windows test temp directories on the temporary disk
+        # Test fixtures create TempDirs and flush SQLite with synchronous=FULL. The
+        # default TEMP is on C:, the runner's OS disk, where a small write plus flush
+        # was ~6x slower at p50 and ~13x at p99 than on D:, the temporary disk
+        # (windows-ci-measure volume probe, run 36077067834). Runner-wide stalls of
+        # 30-150 s with derived-access tests in flight are tracked in #822.
+        # D: ships without an NTFS USN journal, and derived-access authority needs one on
+        # the store's volume, so create it with C:'s parameters first (run 36079352618).
+        if: runner.os == 'Windows' && matrix.run_tests
+        shell: pwsh
+        run: |
+          $volume = Split-Path -Qualifier $env:RUNNER_TEMP
+          fsutil usn queryjournal $volume *> $null
+          if ($LASTEXITCODE -ne 0) {
+            $c = fsutil usn queryjournal C: | Out-String
+            $max = [regex]::Match($c, 'Maximum Size\s*:\s*(0x[0-9a-fA-F]+)').Groups[1].Value
+            $delta = [regex]::Match($c, 'Allocation Delta\s*:\s*(0x[0-9a-fA-F]+)').Groups[1].Value
+            fsutil usn createjournal "m=$max" "a=$delta" $volume
+            if ($LASTEXITCODE -ne 0) { throw "could not create a USN journal on $volume" }
+          }
+          fsutil usn queryjournal $volume
+          $dir = Join-Path $env:RUNNER_TEMP 'tmp'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          "TMP=$dir" >> $env:GITHUB_ENV
+          "TEMP=$dir" >> $env:GITHUB_ENV
       - name: just test-ci
         if: matrix.run_tests
         run: just test-ci ${{ matrix.shard && format('--partition slice:{0}/{1}', matrix.shard, matrix.shards) || '' }}
