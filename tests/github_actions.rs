@@ -853,3 +853,49 @@ fn commit_check_workflow_reports_shore_examples() {
     assert!(commit_check.contains("fix: correct input request projection"));
     assert!(!commit_check.contains("boardwalk"));
 }
+
+#[test]
+fn project_sync_workflow_mirrors_labels_and_is_dispatchable() {
+    let sync = read_workflow("project-sync.yml");
+    assert!(sync.contains("issues:"));
+    assert!(sync.contains("types: [opened, reopened, labeled, unlabeled]"));
+    assert!(sync.contains("schedule:"));
+    assert!(
+        sync.contains("workflow_dispatch:"),
+        "a scheduled lane nobody can trigger by hand is a lane nobody can debug"
+    );
+    assert!(sync.contains("timeout-minutes:"));
+    assert!(
+        sync.contains("PROJECT_SYNC_TOKEN"),
+        "board mutations need the org-scoped token; the workflow token cannot reach Projects"
+    );
+    assert!(
+        sync.contains("issues: write"),
+        "the label guard removes and restores labels with the workflow token"
+    );
+    assert!(
+        !sync.contains("uses:"),
+        "the sync uses only gh and jq from the runner image; a third-party action here \
+         would need SHA pinning and adds nothing"
+    );
+    for label in [
+        "priority:P0-release-blocker",
+        "priority:P1-1.0-candidate",
+        "priority:P2-backlog",
+        "priority:P3-later",
+        "effort:low",
+        "effort:medium",
+        "effort:high",
+        "status:needs-decision",
+        "status:demand-gated",
+    ] {
+        assert!(
+            sync.contains(label),
+            "planning label {label} must map to a board field"
+        );
+    }
+    assert!(
+        sync.contains("clearProjectV2ItemFieldValue"),
+        "an issue that loses a planning label must clear the board field, not keep a stale value"
+    );
+}
