@@ -2,11 +2,11 @@ mod support;
 
 use std::ffi::OsStr;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::pointbreak;
+use support::{pointbreak, pointbreak_command};
 
 #[test]
 fn assessment_add_and_show_run_at_the_top_level() {
@@ -1065,10 +1065,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+    let mut child = pointbreak_command()
         .args(args)
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

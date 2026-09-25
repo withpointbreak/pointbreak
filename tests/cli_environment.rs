@@ -29,7 +29,9 @@ fn command(args: &[&str]) -> Command {
     {
         support::install_empty_ready_change_store(std::path::Path::new(args[index + 1]));
     }
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+    // Start from the isolated harness command so the captures below write under
+    // a scratch home, then clear every product selector in both spellings.
+    let mut command = support::pointbreak_command();
     command.args(args);
     for selector in PRODUCT_SELECTORS {
         command.env_remove(selector);

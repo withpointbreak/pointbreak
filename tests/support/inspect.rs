@@ -183,7 +183,9 @@ impl Inspector {
         let effective_repo = legacy_clone
             .as_ref()
             .map_or(repo, |(_, clone)| clone.as_path());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+        // The server runs under the same isolated home and identity as every other
+        // harness spawn; a caller's `env` below still wins.
+        let mut command = super::pointbreak_command();
         command.args([
             "inspect",
             "--repo",
