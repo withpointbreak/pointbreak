@@ -29,6 +29,10 @@ on:
         description: "Compare chatty vs quiet test-ci log output on one runner"
         type: boolean
         default: false
+      volume_probe:
+        description: "Report TEMP location, disk backing and C:/D: flush latency (no build; runs alone)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +45,8 @@ jobs:
   measure:
     timeout-minutes: 90
     name: measure (windows-latest)
+    # The volume probe needs no toolchain or build, so skip this job's setup when it runs.
+    if: ${{ !inputs.volume_probe }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -158,3 +164,81 @@ jobs:
       - name: partitioned run timing
         shell: bash
         run: time just test-ci --partition slice:${{ matrix.shard }}/3
+
+  # --- temp volume probe (#822) ----------------------------------------------
+  # Windows CI shards sometimes stop completing tests for 30-150 s while four
+  # flush-heavy derived-access tests are in flight. One hypothesis is a slow or
+  # throttled OS disk under the default TEMP. This reports where TEMP points,
+  # what backs each volume, and small-write flush latency on the TEMP volume,
+  # RUNNER_TEMP and the workspace, sequentially and with four writers at once.
+  volume_probe:
+    timeout-minutes: 15
+    name: volume probe (windows-latest)
+    if: ${{ inputs.volume_probe }}
+    runs-on: windows-latest
+    steps:
+      - name: (measure) temp location, disk backing and flush latency
+        shell: pwsh
+        run: |
+          "TEMP=$env:TEMP"
+          "TMP=$env:TMP"
+          "GetTempPath=$([IO.Path]::GetTempPath())"
+          "RUNNER_TEMP=$env:RUNNER_TEMP"
+          "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE"
+          "ImageVersion=$env:ImageVersion"
+          Get-Volume | Where-Object DriveLetter | Format-Table DriveLetter, FileSystemLabel, FileSystem, DriveType, SizeRemaining, Size -AutoSize | Out-String -Width 200
+          Get-Partition | Where-Object DriveLetter | Format-Table DriveLetter, DiskNumber, Size -AutoSize | Out-String -Width 200
+          Get-PhysicalDisk | Format-Table DeviceId, FriendlyName, MediaType, BusType, Size -AutoSize | Out-String -Width 200
+          # Pointbreak's derived-access authority needs an active NTFS USN journal on the
+          # volume that holds the store. Report both volumes, then create one on D: with
+          # C:'s parameters and confirm it is active.
+          "--- fsutil usn queryjournal C: ---"; fsutil usn queryjournal C:
+          "--- fsutil usn queryjournal D: (before) ---"; fsutil usn queryjournal D:
+          $c = fsutil usn queryjournal C: | Out-String
+          $max = [regex]::Match($c, 'Maximum Size\s*:\s*(0x[0-9a-fA-F]+)').Groups[1].Value
+          $delta = [regex]::Match($c, 'Allocation Delta\s*:\s*(0x[0-9a-fA-F]+)').Groups[1].Value
+          "createjournal m=$max a=$delta D:"; fsutil usn createjournal "m=$max" "a=$delta" D:
+          "--- fsutil usn queryjournal D: (after) ---"; fsutil usn queryjournal D:
+          $flush = {
+            param($dir, $n)
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $buf = New-Object byte[] 4096
+            $lat = New-Object System.Collections.Generic.List[double]
+            for ($i = 0; $i -lt $n; $i++) {
+              $path = Join-Path $dir "probe-$([guid]::NewGuid()).bin"
+              $sw = [Diagnostics.Stopwatch]::StartNew()
+              $fs = [IO.File]::Open($path, 'Create', 'Write', 'None')
+              $fs.Write($buf, 0, $buf.Length)
+              $fs.Flush($true)
+              $fs.Dispose()
+              Remove-Item -LiteralPath $path
+              $sw.Stop()
+              $lat.Add($sw.Elapsed.TotalMilliseconds)
+            }
+            $lat
+          }
+          function Summarize($label, $values) {
+            $s = @($values | Sort-Object)
+            $n = $s.Count
+            "{0}: n={1} p50={2:N2}ms p90={3:N2}ms p99={4:N2}ms max={5:N2}ms" -f $label, $n, $s[[int]($n * 0.5)], $s[[int]($n * 0.9)], $s[[math]::Max(0, [int]($n * 0.99) - 1)], $s[-1]
+          }
+          $dirs = [ordered]@{
+            temp      = Join-Path ([IO.Path]::GetTempPath()) 'pb-822-probe'
+            runner    = Join-Path $env:RUNNER_TEMP 'pb-822-probe'
+            workspace = Join-Path $env:GITHUB_WORKSPACE 'pb-822-probe'
+          }
+          foreach ($name in $dirs.Keys) {
+            Summarize "$name sequential ($($dirs[$name]))" (& $flush $dirs[$name] 500)
+          }
+          $flushText = $flush.ToString()
+          foreach ($name in $dirs.Keys) {
+            $dir = $dirs[$name]
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $all = 1..4 | ForEach-Object -ThrottleLimit 4 -Parallel {
+              $block = [scriptblock]::Create($using:flushText)
+              & $block (Join-Path $using:dir "w$_") 250
+            }
+            $sw.Stop()
+            Summarize "$name 4 writers wall=$([math]::Round($sw.Elapsed.TotalSeconds, 1))s" $all
+          }
+
