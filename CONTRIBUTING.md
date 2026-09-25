@@ -124,6 +124,35 @@ Keep pull requests narrow:
 CI runs formatting, linting, tests, and conventional commit checks across the supported runner
 matrix.
 
+## Planning Labels
+
+Planning state lives in labels, and only there. The board at
+<https://github.com/orgs/withpointbreak/projects/2> derives its Priority, Effort, and Workflow fields
+from them, one way, through `.github/workflows/project-sync.yml`. Nothing is edited on the board
+except Theme.
+
+| Namespace | Values | Rule |
+| --- | --- | --- |
+| `priority:` | `P0-release-blocker`, `P1-1.0-candidate`, `P2-backlog`, `P3-later` | Exactly one. Release scope, not urgency: P0 must be resolved or explicitly deferred before a credible 1.0, P1 is likely 1.0 scope, P2 is useful but not needed for 1.0, P3 is post-1.0 or speculative. |
+| `effort:` | `low`, `medium`, `high` | Exactly one on every work item. Low is a single focused change; high is multi-surface or contract-changing work that wants a plan first. |
+| `status:` | `needs-decision`, `demand-gated`, `needs-triage` | Zero or more. `needs-decision`: an owner must choose among enumerated options before work starts. `demand-gated`: a named trigger has to fire first, and the issue says which. `needs-triage`: no maintainer has set planning labels yet. |
+| kinds | `research`, `tracking` | `research` issues deliver a recommendation or design, not code. `tracking` issues are umbrellas for sub-issues and carry no priority or effort of their own. |
+
+An issue with none of `status:needs-decision`, `status:demand-gated`, `research`, or `tracking` is
+ready to be picked up:
+
+```text
+is:open -label:status:needs-decision -label:status:demand-gated -label:research -label:tracking
+```
+
+Planning labels are set by maintainers with write access. Issue templates apply only `bug`,
+`enhancement`, or `status:needs-triage`, never a planning label. The workflow reverts a planning
+label set or removed by anyone else and comments once, and it keeps exactly one label per
+`priority:` and `effort:` namespace (the label added last wins).
+
+When a comment re-triages an issue, change the label in the same action. The board follows within
+a minute, or at the next daily reconcile.
+
 ## Project Shape
 
 Pointbreak is a Rust terminal review tool. Keep the headless review model authoritative and make the
