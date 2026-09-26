@@ -672,6 +672,18 @@ derived-path registry.
   `pointbreak.store-derived-status` document is path-free. If both the stable `derived/` namespace and
   its legacy predecessor are present, text output identifies both local paths so the operator can retain
   one disposable copy and move the other aside; Pointbreak never guesses, merges, or deletes either.
+  When the cause of an unavailability is typed, the document adds a `reason` field. The only reason
+  today is `journal_unavailable`: on Windows, the NTFS volume that holds the store has no active USN
+  change journal. `availability` is then `unavailable`, nothing retries it, and `detail` reads, for a
+  store on `D:`:
+
+  ```text
+  journal_unavailable: the NTFS change journal is not active on volume D: (os error 1179), so derived access cannot prove authority on it; an administrator can create one with `fsutil usn createjournal m=<size> a=<delta> D:`, or set POINTBREAK_DERIVED_ACCESS=off to use authoritative reads (slower but correct); Pointbreak never creates a journal
+  ```
+
+  A background run that stopped on it prefixes the same text with `background recovery stopped: `, and
+  `build` and `rebuild` fail with it. See
+  [Windows: the NTFS change journal](installation.md#windows-the-ntfs-change-journal).
 - `build` synchronously creates or repairs a usable generation only when needed. If a validated current
   generation already exists, it emits a no-op `pointbreak.store-derived-build` receipt.
 - `rebuild` synchronously constructs and publishes a replacement generation even when the old generation
