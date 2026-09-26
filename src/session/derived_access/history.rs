@@ -4081,6 +4081,12 @@ mod tests {
             panic!("the backend must report the typed state on this volume: {backend:?}");
         };
         assert_eq!(unavailable.os_error, 1179, "{unavailable:?}");
+        // The volume is named the way `fsutil` takes it, e.g. `D:`.
+        let drive = root.to_string_lossy().chars().take(2).collect::<String>();
+        assert!(
+            unavailable.volume.eq_ignore_ascii_case(&drive),
+            "{unavailable:?} should name {drive}"
+        );
 
         // A process that has not run the worker still names the reason.
         let before_worker = access.lifecycle_status();

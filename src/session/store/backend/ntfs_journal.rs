@@ -182,14 +182,17 @@ fn journal_call_failure(
 }
 
 /// The volume as `fsutil` names it: `D:\` becomes `D:`; a volume mounted in
-/// a folder keeps its mount-point path.
+/// a folder keeps its mount-point path. The store path is canonical, so the
+/// OS reports the mount point in verbatim form (`\\?\D:\`); the prefix is
+/// dropped because `fsutil` does not take it.
 fn fsutil_volume(volume_mount: &str) -> String {
-    let trimmed = volume_mount.trim_end_matches('\\');
+    let mount = volume_mount.strip_prefix(r"\\?\").unwrap_or(volume_mount);
+    let trimmed = mount.trim_end_matches('\\');
     let bytes = trimmed.as_bytes();
     if bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         trimmed.to_owned()
     } else {
-        volume_mount.to_owned()
+        mount.to_owned()
     }
 }
 
@@ -728,7 +731,7 @@ mod tests {
     fn journal_not_active_maps_to_the_typed_unavailability() {
         let error = journal_call_failure(
             "query NTFS USN journal",
-            "D:\\",
+            r"\\?\D:\",
             &std::io::Error::from_raw_os_error(1179),
         );
         let crate::error::ShoreError::JournalUnavailable(unavailable) = &error else {
@@ -778,6 +781,10 @@ mod tests {
         assert_eq!(fsutil_volume("D:\\"), "D:");
         assert_eq!(fsutil_volume("e:"), "e:");
         assert_eq!(fsutil_volume("C:\\mnt\\data\\"), "C:\\mnt\\data\\");
+        // Native Windows evidence: a canonical store path yields a verbatim
+        // mount point.
+        assert_eq!(fsutil_volume(r"\\?\D:\"), "D:");
+        assert_eq!(fsutil_volume(r"\\?\C:\mnt\data\"), r"C:\mnt\data\");
     }
 
     #[test]
