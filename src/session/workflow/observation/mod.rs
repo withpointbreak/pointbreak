@@ -16,7 +16,8 @@ pub use self::list::{
 pub use self::target::ObservationTargetSelector;
 pub(crate) use self::target::{
     CurrentRevisionContext, ResolvedRevision, RevisionScope, RevisionSelection,
-    resolve_observation_target, resolve_revision, revision_ids_in_worktree,
+    resolve_observation_target, resolve_revision, resolve_revision_for_write,
+    revision_ids_in_worktree,
 };
 pub use self::util::validated_track_id;
 pub(crate) use self::util::{required_title, staged_body};
@@ -183,6 +184,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.revision_id, rev("b"));
+    }
+
+    #[test]
+    fn write_path_head_seed_keeps_legacy_following_without_change_claims() {
+        // No Change claim in the store: the writer resolver follows the
+        // proposal-borne edge exactly as the reader resolver does.
+        let events = vec![revision_event("a", &[]), revision_event("b", &["a"])];
+
+        let resolved = resolve_revision_for_write(
+            &events,
+            RevisionSelection::Head(&rev("a")),
+            &any_context(),
+            RevisionScope::All,
+        )
+        .unwrap();
+        assert_eq!(resolved.revision_id, rev("b"));
+
+        let head = resolve_revision_for_write(
+            &events,
+            RevisionSelection::Head(&rev("b")),
+            &any_context(),
+            RevisionScope::All,
+        )
+        .unwrap();
+        assert_eq!(head.revision_id, rev("b"));
+
+        let exact = resolve_revision_for_write(
+            &events,
+            RevisionSelection::Exact(&rev("a")),
+            &any_context(),
+            RevisionScope::All,
+        )
+        .unwrap();
+        assert_eq!(exact.revision_id, rev("a"));
     }
 
     #[test]

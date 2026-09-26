@@ -426,10 +426,19 @@ pub fn dump_repo() -> git_repo::GitRepo {
     repo
 }
 
-/// Capture two worktree states where the second supersedes the first, returning
-/// the repository and both full revision ids for selector-behavior tests.
+/// Capture two worktree states where the second replaces the first through a
+/// Change relation claim, returning the repository and both full revision ids
+/// for selector-behavior tests.
 #[allow(dead_code)]
 pub fn superseded_dump_repo() -> (git_repo::GitRepo, String, String) {
+    let (repo, first_id, second_id, _) = superseded_dump_repo_with_cursor();
+    (repo, first_id, second_id)
+}
+
+/// [`superseded_dump_repo`] that also returns the replacing capture's review
+/// cursor, the exact writer selector for the current Revision.
+#[allow(dead_code)]
+pub fn superseded_dump_repo_with_cursor() -> (git_repo::GitRepo, String, String, String) {
     let repo = dump_repo();
     let repo_arg = repo.path().to_str().expect("temporary path is utf-8");
     let first: serde_json::Value =
@@ -461,7 +470,29 @@ pub fn superseded_dump_repo() -> (git_repo::GitRepo, String, String) {
         .as_str()
         .expect("second revision id")
         .to_owned();
-    (repo, first_id, second_id)
+    let second_cursor = second["reviewCursor"]["token"]
+        .as_str()
+        .expect("second review cursor")
+        .to_owned();
+    (repo, first_id, second_id, second_cursor)
+}
+
+/// The authoritative store's event count, for "nothing was appended" checks.
+#[allow(dead_code)]
+pub fn store_event_count(repo_root: &Path) -> u64 {
+    let status: serde_json::Value = serde_json::from_slice(
+        &pointbreak([
+            "store",
+            "status",
+            "--repo",
+            repo_root.to_str().expect("temporary path is utf-8"),
+        ])
+        .stdout,
+    )
+    .expect("store status emits JSON");
+    status["inventory"]["eventCount"]
+        .as_u64()
+        .expect("store status reports an event count")
 }
 
 /// A repository with two commits (clean worktree), so `--base HEAD~1` captures

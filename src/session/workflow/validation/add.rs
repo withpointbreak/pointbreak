@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::super::observation::{
-    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
-    validated_track_id,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision_for_write,
+    staged_body, validated_track_id,
 };
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::EventSigner;
@@ -223,7 +223,7 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
             reason: "--review-cursor cannot be combined with another Revision selector".to_owned(),
         });
     }
-    let resolved = resolve_revision(
+    let resolved = resolve_revision_for_write(
         &events,
         RevisionSelection::from_revision_options(
             options.revision_id.as_ref(),

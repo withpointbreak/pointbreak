@@ -1410,3 +1410,109 @@ fn text_input_request_show_digest_renders_request_and_body() {
         "hydrated body under --include-body: {stdout}"
     );
 }
+
+#[test]
+fn input_request_revision_refuses_a_change_replaced_revision_without_writing() {
+    let (repo, first_id, second_id, second_cursor) = support::superseded_dump_repo_with_cursor();
+    let repo_arg = repo.path().to_str().unwrap();
+    let before = support::store_event_count(repo.path());
+
+    // `--revision` names the Revision a Change replaced: the write is refused
+    // with a typed error that names the current Revision and both exact
+    // selectors, and nothing is appended.
+    let refused = pointbreak([
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--revision",
+        &first_id,
+        "--track",
+        "human:kevin",
+        "--title",
+        "must not land on replaced bytes",
+        "--reason",
+        "manual-decision-required",
+    ]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("revision_replaced_by_change"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains(&first_id), "stderr:\n{stderr}");
+    assert!(stderr.contains(&second_id), "stderr:\n{stderr}");
+    assert!(stderr.contains("--review-cursor"), "stderr:\n{stderr}");
+    assert!(stderr.contains("--exact-revision"), "stderr:\n{stderr}");
+    assert_eq!(
+        support::store_event_count(repo.path()),
+        before,
+        "a refused write must not append"
+    );
+
+    // The exact selectors keep working: the cursor writes to the current
+    // Revision, `--exact-revision` addresses the replaced one deliberately,
+    // and `--revision` naming the current head still resolves exactly.
+    let cursor = pointbreak([
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--review-cursor",
+        &second_cursor,
+        "--track",
+        "human:kevin",
+        "--title",
+        "must not land on replaced bytes",
+        "--reason",
+        "manual-decision-required",
+    ]);
+    assert!(
+        cursor.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&cursor.stderr)
+    );
+    assert_eq!(parse_json(&cursor.stdout)["revisionId"], second_id);
+
+    let exact = pointbreak([
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--exact-revision",
+        &first_id,
+        "--track",
+        "human:kevin",
+        "--title",
+        "must not land on replaced bytes",
+        "--reason",
+        "manual-decision-required",
+    ]);
+    assert!(
+        exact.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&exact.stderr)
+    );
+    assert_eq!(parse_json(&exact.stdout)["revisionId"], first_id);
+
+    let head = pointbreak([
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--revision",
+        &second_id,
+        "--track",
+        "human:kevin",
+        "--title",
+        "must not land on replaced bytes",
+        "--reason",
+        "manual-decision-required",
+    ]);
+    assert!(
+        head.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&head.stderr)
+    );
+    assert_eq!(parse_json(&head.stdout)["revisionId"], second_id);
+}
