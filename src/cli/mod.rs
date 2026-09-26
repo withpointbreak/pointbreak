@@ -636,14 +636,24 @@ mod invocation_read_catalog_tests {
                 "{arguments}",
             );
         }
+        assert_eq!(
+            classify(&format!("history --limit 1 --revision {FULL_REVISION}")),
+            LegacyPreflight(BoundedDerivedRead),
+        );
         // Shapes the routes themselves send to an exhaustive read keep the
-        // complete Journal inspection at the fence.
+        // complete Journal inspection at the fence. An abbreviated revision
+        // resolves through the identifier index, which reads the Journal.
         for (arguments, expected) in [
             ("history --repo /tmp/a", ExplicitExhaustive),
             ("history --limit 1 --watch", ExplicitExhaustive),
             ("history --limit 1 --ref main", ExplicitExhaustive),
             (
                 "history --limit 1 --filter type:assessment",
+                ExplicitExhaustive,
+            ),
+            ("history --limit 1 --revision abc", ExplicitExhaustive),
+            (
+                "history --limit 1 --revision rev:11111111",
                 ExplicitExhaustive,
             ),
             ("attention list --revision abc", Unqualified),

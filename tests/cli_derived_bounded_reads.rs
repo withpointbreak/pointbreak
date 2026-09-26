@@ -646,13 +646,22 @@ fn stale_product_history_schema_falls_back_with_one_actionable_hint() {
 #[cfg(feature = "longitudinal-counting")]
 #[test]
 fn eligible_active_cli_routes_never_walk_event_directory_entries() {
-    let (repo, _, _) = superseded_dump_repo();
+    let (repo, _, revision_id) = superseded_dump_repo();
     build(&repo);
     let repo_arg = repo.path().to_str().unwrap();
     let receipt_dir = tempfile::tempdir().unwrap();
 
     for (ordinal, args) in [
         vec!["history", "--repo", repo_arg, "--limit", "1"],
+        vec![
+            "history",
+            "--repo",
+            repo_arg,
+            "--limit",
+            "1",
+            "--revision",
+            &revision_id,
+        ],
         vec!["attention", "list", "--repo", repo_arg],
         vec!["revision", "list", "--repo", repo_arg, "--limit", "1"],
     ]
