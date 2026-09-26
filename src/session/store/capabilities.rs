@@ -990,7 +990,9 @@ pub(crate) fn bounded_change_capability_pair_state_v1(
     Ok(BoundedChangeCapabilityPairStateV1::Ready(pair))
 }
 
-fn bounded_writer_capability_status(journal: &dyn Journal) -> Result<StoreCapabilityStatus> {
+pub(crate) fn bounded_writer_capability_status(
+    journal: &dyn Journal,
+) -> Result<StoreCapabilityStatus> {
     Ok(match bounded_change_capability_pair_state_v1(journal)? {
         BoundedChangeCapabilityPairStateV1::MigrationRequired => {
             StoreCapabilityStatus::MigrationRequired

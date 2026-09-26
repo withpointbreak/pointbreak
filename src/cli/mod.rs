@@ -316,6 +316,11 @@ struct QualifiedInvocationReadV1<'a> {
 enum LegacyPreflightKindV1 {
     Unqualified,
     ExplicitExhaustive,
+    /// A bounded page that serves from the published derived projection or
+    /// falls back to a complete, capability-validated fold. Its admission is
+    /// answered by the bounded capability-pair probe, so the fence never walks
+    /// the Journal ahead of a read that does not need it.
+    BoundedDerivedRead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -331,6 +336,15 @@ fn classify_invocation_read_v1(cli: &Cli) -> InvocationReadCatalogV1 {
         return Qualified(qualified.route);
     }
     match &cli.command {
+        Command::History(args) if args.bounded_derived_read_v1() => {
+            LegacyPreflight(LegacyPreflightKindV1::BoundedDerivedRead)
+        }
+        Command::Attention(args) if args.bounded_derived_read_v1() => {
+            LegacyPreflight(LegacyPreflightKindV1::BoundedDerivedRead)
+        }
+        Command::Revision(args) if args.bounded_derived_read_v1() => {
+            LegacyPreflight(LegacyPreflightKindV1::BoundedDerivedRead)
+        }
         Command::History(_) => LegacyPreflight(LegacyPreflightKindV1::ExplicitExhaustive),
         Command::Store(args) => args.invocation_read_catalog_v1(),
         Command::Version(_) => Exempt(InvocationReadExemptV1::VersionControl),
@@ -413,7 +427,18 @@ fn preflight_public_store_capability(
             })
         })
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let capability = pointbreak::session::activated_store_capability_for_repo(repo)?;
+    // A bounded derived read never consumes a Journal record it has not
+    // validated: the published projection re-proves its capability pair and
+    // authority stamp, and the authoritative fallback runs the complete
+    // validator before decoding. Admission alone is a bounded point read.
+    let capability = if catalog
+        == InvocationReadCatalogV1::LegacyPreflight(LegacyPreflightKindV1::BoundedDerivedRead)
+    {
+        Some(pointbreak::session::bounded_store_capability_status_for_repo(repo)?)
+    } else {
+        pointbreak::session::activated_store_capability_for_repo(repo)?
+            .map(|inspection| inspection.status)
+    };
     match legacy_admission_v1(
         LegacyAdmissionSurfaceV1::PublicCliCommand,
         capability.as_ref(),
@@ -526,7 +551,6 @@ mod invocation_read_catalog_tests {
             ),
             format!("validation list --exact-revision {FULL_REVISION}"),
             format!("validation list --revision {FULL_REVISION} --track agent:r"),
-            "attention list".to_owned(),
         ] {
             assert_eq!(
                 classify(&arguments),
@@ -570,7 +594,6 @@ mod invocation_read_catalog_tests {
             "revision show".to_owned(),
             "revision show --repo /tmp/a".to_owned(),
             "revision list".to_owned(),
-            "revision list --limit 5".to_owned(),
             "revision list --repo /tmp/a".to_owned(),
         ];
         for selector in [
@@ -589,6 +612,53 @@ mod invocation_read_catalog_tests {
                 classify(&arguments),
                 LegacyPreflight(LegacyPreflightKindV1::Unqualified),
                 "{arguments}",
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_derived_pages_take_the_bounded_admission_probe() {
+        use InvocationReadCatalogV1::LegacyPreflight;
+        use LegacyPreflightKindV1::{BoundedDerivedRead, ExplicitExhaustive, Unqualified};
+
+        for arguments in [
+            "history --repo /tmp/a --limit 1",
+            "history --tail 2 --format text",
+            "history --limit 3 --cursor opaque --track agent:r --event-type revision-captured",
+            "attention list",
+            "attention list --repo /tmp/a --format json-pretty",
+            "revision list --limit 5",
+            "revision list --repo /tmp/a --limit 1 --cursor opaque --format text",
+        ] {
+            assert_eq!(
+                classify(arguments),
+                LegacyPreflight(BoundedDerivedRead),
+                "{arguments}",
+            );
+        }
+        // Shapes the routes themselves send to an exhaustive read keep the
+        // complete Journal inspection at the fence.
+        for (arguments, expected) in [
+            ("history --repo /tmp/a", ExplicitExhaustive),
+            ("history --limit 1 --watch", ExplicitExhaustive),
+            ("history --limit 1 --ref main", ExplicitExhaustive),
+            (
+                "history --limit 1 --filter type:assessment",
+                ExplicitExhaustive,
+            ),
+            ("attention list --revision abc", Unqualified),
+            ("revision list --limit 5 --unreachable", Unqualified),
+            ("revision list --limit 5 --ref main", Unqualified),
+            ("revision list --limit 5 --filter tag:x", Unqualified),
+            (
+                "revision list --limit 5 --integration-ref origin/main",
+                Unqualified,
+            ),
+        ] {
+            assert_eq!(
+                classify(arguments),
+                LegacyPreflight(expected),
+                "{arguments}"
             );
         }
     }
@@ -1736,6 +1806,44 @@ mod change_reader_cli_tests {
             error,
             "migration_required; this command requires an explicit completed store migration"
         );
+    }
+
+    #[test]
+    fn bounded_derived_reads_keep_the_l0_refusal_through_the_bounded_probe() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        for arguments in [
+            &["history", "--limit", "1"][..],
+            &["attention", "list"][..],
+            &["revision", "list", "--limit", "1"][..],
+        ] {
+            let mut raw_args = vec![OsString::from("pointbreak")];
+            raw_args.extend(arguments.iter().map(OsString::from));
+            raw_args.push(OsString::from("--repo"));
+            raw_args.push(repo.path().as_os_str().to_owned());
+            let cli = Cli::try_parse_from(raw_args.clone()).unwrap();
+            assert_eq!(
+                classify_invocation_read_v1(&cli),
+                InvocationReadCatalogV1::LegacyPreflight(LegacyPreflightKindV1::BoundedDerivedRead),
+                "{arguments:?}",
+            );
+            let error = preflight_public_store_capability(&cli, &raw_args)
+                .err()
+                .expect("L0 refusal")
+                .to_string();
+            assert_eq!(
+                error,
+                "migration_required; this command requires an explicit completed store migration",
+                "{arguments:?}",
+            );
+        }
     }
 }
 

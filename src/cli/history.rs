@@ -119,6 +119,14 @@ impl From<HistoryRefByArg> for RefFilterMode {
     }
 }
 
+impl HistoryArgs {
+    /// Whether this invocation is the bounded derived page shape. The CLI
+    /// capability fence reads this so its admission probe matches the route.
+    pub(super) fn bounded_derived_read_v1(&self) -> bool {
+        eligible_for_derived_history(self)
+    }
+}
+
 pub(super) fn run(
     args: HistoryArgs,
     stdout: &mut dyn Write,

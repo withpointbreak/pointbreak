@@ -13,6 +13,11 @@ pub(super) struct RevisionArgs {
 }
 
 impl RevisionArgs {
+    /// Whether this invocation is the bounded derived `revision list` page.
+    pub(super) fn bounded_derived_read_v1(&self) -> bool {
+        matches!(&self.command, RevisionCommand::List(args) if list::eligible_for_bounded_route(args))
+    }
+
     pub(super) fn qualified_invocation_read_v1(
         &self,
     ) -> Option<super::QualifiedInvocationReadV1<'_>> {

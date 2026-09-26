@@ -23,9 +23,11 @@ pub(crate) enum LegacyAdmissionVerdictV1 {
     RefuseReaderUpgrade,
 }
 
+/// Admission reads only the capability status, so a surface may answer it from
+/// the complete record inspection or from the bounded capability-pair probe.
 pub(crate) fn legacy_admission_v1(
     surface: LegacyAdmissionSurfaceV1,
-    capability: Option<&pointbreak::session::StoreCapabilityInspection>,
+    capability: Option<&pointbreak::session::StoreCapabilityStatus>,
 ) -> LegacyAdmissionVerdictV1 {
     use LegacyAdmissionSurfaceV1::{InspectorLegacyRoute, PublicCliCommand};
     use LegacyAdmissionVerdictV1::{
@@ -33,7 +35,7 @@ pub(crate) fn legacy_admission_v1(
     };
     use pointbreak::session::StoreCapabilityStatus as Status;
 
-    match (surface, capability.map(|inspection| &inspection.status)) {
+    match (surface, capability) {
         (PublicCliCommand, None | Some(Status::MigrationRequired)) => RefuseMigrationRequired,
         (InspectorLegacyRoute, None) => Serve,
         (InspectorLegacyRoute, Some(Status::MigrationRequired)) => RefuseMigrationRequired,
@@ -49,41 +51,22 @@ mod tests {
     use LegacyAdmissionVerdictV1::{
         RefuseMigrationInProgress, RefuseMigrationRequired, RefuseReaderUpgrade, Serve,
     };
-    use pointbreak::session::{
-        AuthorityCursorV2, StoreCapabilityInspection, StoreCapabilityStatus,
-    };
+    use pointbreak::session::StoreCapabilityStatus;
 
     use super::*;
 
-    fn inspection(status: StoreCapabilityStatus) -> StoreCapabilityInspection {
-        StoreCapabilityInspection {
-            status,
-            cursor: AuthorityCursorV2 {
-                // The table never reads the cursor; keep this fixture free of
-                // schema literals, which the version registry guard scans.
-                schema: String::new(),
-                journal_record_count: 1,
-                event_count: 1,
-                journal_record_set_hash: format!("sha256:{}", "2".repeat(64)),
-                event_set_hash: format!("sha256:{}", "3".repeat(64)),
-                capability_set_hash: format!("sha256:{}", "4".repeat(64)),
-            },
-            minimum_reader_profile: None,
-        }
-    }
-
     #[test]
     fn table_covers_every_store_state_on_both_surfaces() {
-        let m1 = inspection(StoreCapabilityStatus::MigrationInProgress {
+        let m1 = StoreCapabilityStatus::MigrationInProgress {
             activation_id: "activation:sha256:test".to_owned(),
             manifest_hash: format!("sha256:{}", "1".repeat(64)),
-        });
-        let l0_rooted = inspection(StoreCapabilityStatus::MigrationRequired);
-        let l2 = inspection(StoreCapabilityStatus::Ready {
+        };
+        let l0_rooted = StoreCapabilityStatus::MigrationRequired;
+        let l2 = StoreCapabilityStatus::Ready {
             activation_id: "activation:sha256:test".to_owned(),
             manifest_hash: format!("sha256:{}", "1".repeat(64)),
             completion_id: "completion:sha256:test".to_owned(),
-        });
+        };
         let cells = [
             (PublicCliCommand, None, RefuseMigrationRequired),
             (PublicCliCommand, Some(&l0_rooted), RefuseMigrationRequired),
@@ -110,10 +93,7 @@ mod tests {
     #[test]
     fn the_cli_surface_never_receives_reader_upgrade() {
         // The total match in the CLI renders the arm; the table must never select it.
-        for capability in [
-            None,
-            Some(&inspection(StoreCapabilityStatus::MigrationRequired)),
-        ] {
+        for capability in [None, Some(&StoreCapabilityStatus::MigrationRequired)] {
             assert_ne!(
                 legacy_admission_v1(PublicCliCommand, capability),
                 RefuseReaderUpgrade

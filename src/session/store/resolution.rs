@@ -13,7 +13,8 @@ use crate::session::derived_access::writer::DerivedWriteCoordinator;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::capabilities::{
-    JournalInspection, StoreCapabilityInspection, inspect_activated_journal_records,
+    JournalInspection, StoreCapabilityInspection, StoreCapabilityStatus,
+    bounded_writer_capability_status, inspect_activated_journal_records,
     inspect_change_reader_journal_records, inspect_journal_records, preflight_current_product,
 };
 use crate::session::store::event_store::EventStore;
@@ -319,6 +320,25 @@ pub fn activated_store_capability_for_repo(
         cursor: inspection.cursor,
         minimum_reader_profile: inspection.minimum_reader_profile,
     }))
+}
+
+/// Bounded capability admission for public reads that never consume Journal
+/// records they have not validated themselves.
+///
+/// [`activated_store_capability_for_repo`] routes an activated store through
+/// the complete record validator, which enumerates the Journal. A bounded
+/// derived read does not need that walk: it either serves a published
+/// projection whose capability pair is re-proven against its reader receipt
+/// and whose authority stamp is re-checked, or it falls back to an
+/// authoritative fold that runs the same complete validator before decoding.
+/// This answers only the admission question by point-reading the fixed
+/// activation record and its completion carrier; it never enumerates the
+/// Journal and never decodes an event.
+#[doc(hidden)]
+pub fn bounded_store_capability_status_for_repo(
+    repo: impl AsRef<Path>,
+) -> Result<StoreCapabilityStatus> {
+    bounded_writer_capability_status(resolve_store(repo)?.backend().journal().as_ref())
 }
 
 /// The cheap freshness detector for a repo's event log: the journal's head marker
@@ -832,6 +852,50 @@ mod tests {
             store_capability_for_repo(repo.path()).is_err(),
             "the complete capability inspection remains strict when explicitly requested"
         );
+    }
+
+    #[test]
+    fn bounded_capability_status_matches_admission_without_walking_the_journal() {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+
+        let untouched = GitRepo::new();
+        let scope = LongitudinalCountingScopeV1::new("3".repeat(64)).unwrap();
+        let status = {
+            let _guard = scope.enter();
+            bounded_store_capability_status_for_repo(untouched.path()).unwrap()
+        };
+        assert_eq!(status, StoreCapabilityStatus::MigrationRequired);
+        assert!(
+            activated_store_capability_for_repo(untouched.path())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(scope.snapshot().counters.directory_entries_walked, 0);
+
+        for (label, state) in [
+            ("M1", CapabilityFixtureState::M1),
+            ("L2", CapabilityFixtureState::L2),
+        ] {
+            let repo = GitRepo::new();
+            let resolution = resolve_store(repo.path()).unwrap();
+            write_capability_fixture_for_test(resolution.backend().journal().as_ref(), state)
+                .unwrap();
+            let scope = LongitudinalCountingScopeV1::new("4".repeat(64)).unwrap();
+            let bounded = {
+                let _guard = scope.enter();
+                bounded_store_capability_status_for_repo(repo.path()).unwrap()
+            };
+            let complete = activated_store_capability_for_repo(repo.path())
+                .unwrap()
+                .expect("fixture is activated")
+                .status;
+
+            assert_eq!(bounded, complete, "{label}");
+            let counters = scope.snapshot().counters;
+            assert_eq!(counters.directory_entries_walked, 0, "{label}");
+            assert_eq!(counters.event_decodes, 0, "{label}");
+            assert!(counters.change_capability_carriers_opened <= 2, "{label}");
+        }
     }
 
     #[test]

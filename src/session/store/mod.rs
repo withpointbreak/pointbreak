@@ -29,8 +29,9 @@ pub(crate) use object_artifact::build_object_artifact_v2;
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
 pub use read_context::{PublicReadCommandContextV1, prepare_public_read_command_context_v1};
 pub use resolution::{
-    StorePaths, activated_store_capability_for_repo, change_reader_head_marker_for_repo,
-    event_log_head_marker, family_link_advisory, store_capability_for_repo, store_paths_for_repo,
+    StorePaths, activated_store_capability_for_repo, bounded_store_capability_status_for_repo,
+    change_reader_head_marker_for_repo, event_log_head_marker, family_link_advisory,
+    store_capability_for_repo, store_paths_for_repo,
 };
 // `StoreMode` and the thin repo-level entry points re-export from `session::mod`
 // for the binary crate. The underlying read/write helpers stay crate-internal:

@@ -21,6 +21,14 @@ pub(super) struct AttentionArgs {
 }
 
 impl AttentionArgs {
+    /// Whether this invocation is the unscoped bounded derived list. A
+    /// `--revision` fragment resolves through the identifier index first, so it
+    /// keeps the complete preflight.
+    pub(super) fn bounded_derived_read_v1(&self) -> bool {
+        let AttentionCommand::List(args) = &self.command;
+        args.revision.is_none()
+    }
+
     pub(super) fn qualified_invocation_read_v1(
         &self,
     ) -> Option<super::QualifiedInvocationReadV1<'_>> {
