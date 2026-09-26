@@ -128,7 +128,8 @@ canonical/derived value is **withheld under ambiguity**.
 Reachability (`merged`/`live`/`orphaned`) is a **separate read-time enrichment** (`enrich_liveness(view,
 repo, integration_ref)`) the read surface invokes when a repo is in hand — it never enters the pure fold.
 The graph condition is a **new `CommitGraphCondition::Orphaned` enum**, distinct from the note-anchor
-`ResolutionStatus::Orphaned`.
+`ResolutionStatus::Orphaned`. (That note-anchor type was never built in this repository — see the
+context section above — and the 2026-07-16 amendment below retired the `orphaned` graph condition.)
 
 ### 6. Net-new git reachability plumbing
 

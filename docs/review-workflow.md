@@ -504,6 +504,132 @@ capture scope changed, capture a new Revision in the same Change before recordin
 assessment. The low-level `association record` command remains available for explicitly unverified
 structural provenance; it cannot authorize exact/equivalent/extension wording.
 
+### Closing out a Change whose work landed without it
+
+A Change leaves `pointbreak change attention` only when every current Revision carries exactly one
+accepting assessment and no operative request is open. Iterative work often strands earlier
+Changes: each round was captured from a worktree, the commit came minutes later from a working tree
+that had moved on, nothing was associated, and the worktree is gone. The landing proof above is
+refuted for such a Change because the reviewed bytes did not land unchanged, and an accepting
+assessment on the stranded Revision would be false. Two routes close these Changes with claims that
+already exist. Every claim they record is attributed, individually withdrawable
+(`pointbreak change withdraw-membership`, `pointbreak change withdraw-relation`), and idempotent under
+its operation id.
+
+Try the proof first. `pointbreak association land --dry-run` with a commit-bound cursor
+(`--source commit:<oid>`), or with a captured-source cursor plus `--candidate-parent`, returns the
+complete proof without writing anything; only a refuted proof calls for the routes below. Every Change
+mutation below, the capture included, takes a stable `--operation-id` of the form
+`change-operation:<label>` (no whitespace, at most 256 characters); retrying with the same id and the
+same inputs is idempotent, and reusing an id with different inputs is refused. `capture` generates an
+id when none is passed, so an interrupted flow that omits it cannot be retried under the same identity.
+
+Both routes clear a Change only when the projection's conditions hold afterwards: every current
+Revision of the Change carries exactly one accepting assessment, and no operative input request opened
+on any member Revision is unresolved. Replacing one predecessor does not by itself satisfy either
+condition. A Change with several current Revisions needs a relation for each Revision the landed state
+replaces (or an accepting assessment on each one that stays current). An operative request opened on a
+member is resolved only by exactly one response. Either answer the original request
+(`pointbreak input-request respond <input-request-id> --outcome <outcome>`), or carry it to an open
+request on the new current Revision and answer that target. Carrying alone preserves continuity and
+does not clear the obligation: the projection counts the unanswered target as unresolved until it has
+its single response.
+
+```bash
+# A captured-source cursor on the Change's new current Revision (Route B already has it as
+# $landed_cursor; for Route A select the accepted successor with `pointbreak change select`).
+current_cursor=$(pointbreak change select <change-id> --revision <current-revision-id> \
+  --source captured --format json | jq -r '.token')
+
+# 1. Open the carried copy on the current Revision; note the input request id in the receipt
+pointbreak input-request open --review-cursor "$current_cursor" --track human:kevin \
+  --title "<title>" --reason <reason-code>
+
+# 2. Record the continuity claim from the original request to the open copy
+pointbreak fact port --origin-revision <earlier-revision-id>@<earlier-artifact-sha256> \
+  --origin-fact <input-request-id> --review-cursor "$current_cursor" \
+  --relation carried-open-as --target-fact <target-input-request-id> --track human:kevin
+
+# 3. Answer the carried copy; this is what clears the obligation
+pointbreak input-request respond <target-input-request-id> --outcome <outcome>
+```
+
+Recheck afterwards with `pointbreak change attention` (the Change should no longer be listed) or
+`pointbreak change show <change-id>` (`lifecycle` reads `accepted`).
+
+**Route A: a later capture of the same work exists and was accepted.** Adopt that accepted
+Revision into the stranded Change, then assert that it replaces the stranded Revision. Revision ids
+and object-artifact hashes come from `pointbreak change show <change-id>` (`currentRevisionRefs[]`,
+fields `revisionId` and `objectArtifactContentHash`).
+
+```bash
+pointbreak change join <stranded-change-id> <accepted-revision-id> \
+  --operation-id change-operation:<label>-join
+pointbreak change assert-relation <stranded-change-id> <accepted-revision-id> <stranded-revision-id> \
+  --successor-artifact-hash <accepted-artifact-sha256> \
+  --predecessor-artifact-hash <stranded-artifact-sha256> \
+  --operation-id change-operation:<label>-relation
+```
+
+Both relation endpoints must be exact active members of the Change and the successor must be current
+there; the join establishes that. When the stranded Revision was the Change's only current Revision
+and no operative request on a member is unresolved, the stranded Change now reads `accepted`: its only
+current Revision is the accepted successor, and the earlier Revision keeps its own facts as a replaced
+member. Otherwise it stays `in_progress` until the remaining current Revisions and requests are
+handled as described above. A Revision may be the current member of several Changes at once; each
+Change answers for it separately.
+
+**Route B: the work landed as a commit that was never captured.** Capture the landed commit as a
+replacement Revision inside the last iteration's Change, review that Revision and record the
+assessment you reached, then join it into each earlier iteration's Change with the same relation.
+
+```bash
+# 1. A captured-source cursor on the last iteration's current Revision
+cursor=$(pointbreak change select <last-change-id> --revision <last-revision-id> \
+  --source captured --format json | jq -r '.token')
+
+# 2. Capture the landed commit as the replacement Revision
+receipt=$(pointbreak capture --review-cursor "$cursor" --advance replace \
+  --base <parent-oid> --target <commit-oid> \
+  --summary "closeout: landed as <commit-oid>" \
+  --operation-id change-operation:<label>-capture --format json)
+landed_revision=$(printf '%s\n' "$receipt" | jq -r '.revision.revisionId')
+landed_hash=$(printf '%s\n' "$receipt" | jq -r '.revision.objectArtifactContentHash')
+landed_cursor=$(printf '%s\n' "$receipt" | jq -r '.reviewCursor.token')
+
+# 3. Review the landed Revision, then record the assessment you reached. An `accepted`
+#    assessment here is the accepting fact for the Change, so it must follow a real read of
+#    the landed diff, not stand in for one.
+pointbreak diff --revision "$landed_revision"
+pointbreak assessment add --review-cursor "$landed_cursor" \
+  --track human:kevin --assessment accepted \
+  --summary "review of landed <commit-oid>: <what was checked>; this reviews the landed commit \
+itself and does not establish equivalence with <last-revision-id>"
+
+# 4. Join the landed Revision into each earlier iteration's Change as its replacement
+pointbreak change join <earlier-change-id> "$landed_revision" \
+  --operation-id change-operation:<label>-join-1
+pointbreak change assert-relation <earlier-change-id> "$landed_revision" <earlier-revision-id> \
+  --successor-artifact-hash "$landed_hash" \
+  --predecessor-artifact-hash <earlier-artifact-sha256> \
+  --operation-id change-operation:<label>-relation-1
+```
+
+The replacement relation states something true and nothing more: this capture was replaced by that
+landed state. It does not say the reviewed bytes landed. When the working tree changed between
+capture and commit, **no content equivalence is claimed**; the assessment in step 3 is a separate
+review of the landed Revision, and its summary should say so. The projection treats any current
+`accepted` or `accepted-with-follow-up` assessment on a current Revision as the accepting fact, so
+recording one without reading the landed diff would mark the Change accepted on the strength of no
+review. If nobody reviews the landed commit yet, skip step 3: the Change stays `in_progress` and in
+attention, which is the honest state. Step 4 is subject to the same preconditions as Route A for each
+earlier Change. A commit whose tree does match the captured bytes is not this case: prove it and
+record it with `association land` instead.
+
+Neither route covers work that was abandoned, or a capture with no files. Withdrawing every membership
+leaves the Change `incomplete`, which is still in attention, so such a Change has no clearing fact
+today.
+
 ## 5. Concepts you need to know
 
 ### Durable event facts vs. rebuildable projections
