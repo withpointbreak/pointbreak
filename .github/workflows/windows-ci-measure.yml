@@ -307,37 +307,48 @@ jobs:
           cargo nextest run --lib --run-ignored only --no-capture \
             -E 'test(native_volume_without_a_journal_reports_typed_unavailability_without_retries)'
       - name: typed journal_unavailable from the CLI
-        shell: pwsh
+        shell: bash
         env:
-          POINTBREAK_HOME: 'D:\pb-825-home'
+          POINTBREAK_HOME: 'D:/pb-825-home'
         run: |
-          $pb = Join-Path $env:GITHUB_WORKSPACE 'target\debug\pointbreak.exe'
-          $repo = 'D:\pb-825-repo'
-          New-Item -ItemType Directory -Force -Path $repo | Out-Null
-          git -C $repo init --quiet
-          git -C $repo config user.name 'journal evidence'
-          git -C $repo config user.email 'journal-evidence@example.invalid'
-          Set-Content -Path (Join-Path $repo 'a.txt') -Value 'one'
-          git -C $repo add a.txt
-          git -C $repo commit --quiet -m 'initial'
-          Add-Content -Path (Join-Path $repo 'a.txt') -Value 'two'
-          & $pb capture --repo $repo --summary 'journal evidence' 2>&1 | Tee-Object -FilePath (Join-Path $env:EVIDENCE_DIR 'capture.txt')
-          if ($LASTEXITCODE -ne 0) { throw "capture failed on the journal-less volume" }
-          & $pb store paths --repo $repo | Tee-Object -FilePath (Join-Path $env:EVIDENCE_DIR 'store-paths.json')
-          $status = & $pb store derived status --repo $repo
-          if ($LASTEXITCODE -ne 0) { throw "store derived status failed" }
-          $status | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'store-derived-status.json')
-          $status
-          $document = $status | Out-String | ConvertFrom-Json
-          if ($document.reason -ne 'journal_unavailable') { throw "status did not report reason journal_unavailable" }
-          if ($document.availability -ne 'unavailable') { throw "status did not report availability unavailable" }
-          $build = & $pb store derived build --repo $repo 2>&1 | Out-String
-          $buildExit = $LASTEXITCODE
-          "exit $buildExit`n$build" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'store-derived-build.txt')
-          "store derived build exit $buildExit"; $build
-          if ($buildExit -eq 0) { throw "store derived build must fail on a volume without a journal" }
-          if ($build -notmatch 'journal_unavailable') { throw "store derived build did not report journal_unavailable" }
-          $global:LASTEXITCODE = 0
+          pb="$GITHUB_WORKSPACE/target/debug/pointbreak.exe"
+          out="$(cygpath -u "$EVIDENCE_DIR")"
+          repo='D:/pb-825-repo'
+          mkdir -p "$repo"
+          git -C "$repo" init --quiet
+          git -C "$repo" config user.name 'journal evidence'
+          git -C "$repo" config user.email 'journal-evidence@example.invalid'
+          echo one > "$repo/a.txt"
+          git -C "$repo" add a.txt
+          git -C "$repo" commit --quiet -m initial
+          # Activate the store the way the integration tests do: derived access off.
+          POINTBREAK_DERIVED_ACCESS=off "$pb" key init --name journal-evidence
+          POINTBREAK_DERIVED_ACCESS=off "$pb" change migrate-dry-run --repo "$repo" --format json \
+            > "$out/migrate-dry-run.json"
+          POINTBREAK_DERIVED_ACCESS=off "$pb" change migrate --repo "$repo" \
+            --dry-run "$out/migrate-dry-run.json" \
+            --ack-manifest "$(jq -r .manifestHash "$out/migrate-dry-run.json")" \
+            --ack-cohort-manifest "$(jq -r '.roots[0].cohortManifestHash' "$out/migrate-dry-run.json")" \
+            --ack-minimum-reader review_change_revision_v1 --ack-v0-9-unsupported \
+            --backup 'D:/pb-825-backup' --operation-id journal-evidence --sign-key journal-evidence \
+            --format json > "$out/migrate.json"
+          # With derived access on (the default), a write still publishes truth.
+          echo two >> "$repo/a.txt"
+          capture_exit=0
+          "$pb" capture --repo "$repo" --summary 'journal evidence' \
+            > "$out/capture.json" 2> "$out/capture-stderr.txt" || capture_exit=$?
+          echo "capture exit $capture_exit"; cat "$out/capture-stderr.txt"
+          "$pb" store paths --repo "$repo" | tee "$out/store-paths.json"
+          "$pb" store derived status --repo "$repo" | tee "$out/store-derived-status.json"
+          test "$(jq -r .reason "$out/store-derived-status.json")" = journal_unavailable
+          test "$(jq -r .availability "$out/store-derived-status.json")" = unavailable
+          build_exit=0
+          "$pb" store derived build --repo "$repo" \
+            > "$out/store-derived-build.json" 2> "$out/store-derived-build-stderr.txt" || build_exit=$?
+          echo "store derived build exit $build_exit"; cat "$out/store-derived-build-stderr.txt"
+          test "$build_exit" -ne 0
+          grep -q journal_unavailable "$out/store-derived-build-stderr.txt"
+          test "$capture_exit" -eq 0
       - name: upload the journal-unavailable receipt
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
