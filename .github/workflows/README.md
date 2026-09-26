@@ -40,10 +40,11 @@ vocabulary itself is documented in `CONTRIBUTING.md`.
 Never runs on push, pull request, or a schedule. Each boolean input dispatches one Windows instrument,
 one at a time: the suite's sys:user split, git spawn latency, Defender headroom, log-output cost, the
 three-shard cache probe, and the TEMP volume probe (#822). The `journal-unavailable` job (#825) runs
-alone. It deletes the USN journal on the runner's disposable `D:`, then runs the ignored Windows-only
-library test that exercises the typed `journal_unavailable` path against a store on `D:`, and the CLI's
-`store derived status` and `store derived build` against a repository there. It uploads a receipt
-showing the typed reason and zero background-worker retries. Dispatch it with
+alone. It deletes any USN journal on the runner's disposable `D:` and confirms that `fsutil` reports
+error 1179 there. It then runs the ignored Windows-only library test that exercises the typed
+`journal_unavailable` path against a store on `D:`, and the CLI's `store derived status` and
+`store derived build` against a repository there. It uploads a receipt showing the typed reason and
+zero background-worker retries. Dispatch it with
 `gh workflow run windows-ci-measure.yml -f sys_user=false -f journal_unavailable=true`. Only this
 disposable runner ever creates or deletes a journal; Pointbreak never does.
 

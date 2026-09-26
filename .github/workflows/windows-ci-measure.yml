@@ -249,7 +249,8 @@ jobs:
   # --- journal-unavailable evidence (#825) -----------------------------------
   # Derived access needs an active NTFS USN journal on the store's volume. CI's
   # D: gets one from ci.yml, so no ordinary lane sees a journal-less volume.
-  # This job deletes the journal on the runner's disposable D:, then records
+  # This job deletes any journal on the runner's disposable D:, confirms
+  # fsutil reports error 1179 there, then records
   # native evidence that Pointbreak reports the typed, non-transient
   # journal_unavailable reason and that the background worker gives up without
   # a single retry. Pointbreak itself never creates or deletes a journal; only
@@ -281,13 +282,21 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
-          "--- fsutil usn queryjournal D: (before) ---"; fsutil usn queryjournal D:
-          fsutil usn deletejournal /D D:
-          if ($LASTEXITCODE -ne 0) { throw "could not delete the USN journal on D:" }
+          # Hosted images have shipped D: both with and without a journal, so
+          # delete one only when it exists, then require error 1179.
+          $before = fsutil usn queryjournal D: 2>&1 | Out-String
+          $beforeExit = $LASTEXITCODE
+          "--- fsutil usn queryjournal D: (before, exit $beforeExit) ---"; $before
+          "exit $beforeExit`n$before" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-before.txt')
+          if ($beforeExit -eq 0) {
+            fsutil usn deletejournal /D D:
+            if ($LASTEXITCODE -ne 0) { throw "could not delete the USN journal on D:" }
+          }
           $after = fsutil usn queryjournal D: 2>&1 | Out-String
-          "--- fsutil usn queryjournal D: (after) ---"; $after
-          $after | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-after.txt')
-          if ($LASTEXITCODE -eq 0) { throw "D: still reports an active USN journal" }
+          $afterExit = $LASTEXITCODE
+          "--- fsutil usn queryjournal D: (after, exit $afterExit) ---"; $after
+          "exit $afterExit`n$after" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-after.txt')
+          if ($after -notmatch 'Error 1179') { throw "D: does not report ERROR_JOURNAL_NOT_ACTIVE (1179)" }
           $global:LASTEXITCODE = 0
       - name: typed journal_unavailable in the library, no worker retries
         shell: bash
