@@ -529,10 +529,33 @@ Revision of the Change carries exactly one accepting assessment, and no operativ
 on any member Revision is unresolved. Replacing one predecessor does not by itself satisfy either
 condition. A Change with several current Revisions needs a relation for each Revision the landed state
 replaces (or an accepting assessment on each one that stays current). An operative request opened on a
-member must be answered (`pointbreak input-request respond <input-request-id> --outcome <outcome>`) or
-carried to the new current Revision (`pointbreak fact port --relation carried-open-as`) before the
-Change can leave attention. Recheck afterwards with `pointbreak change attention` (the Change should no
-longer be listed) or `pointbreak change show <change-id>` (`lifecycle` reads `accepted`).
+member is resolved only by exactly one response. Either answer the original request
+(`pointbreak input-request respond <input-request-id> --outcome <outcome>`), or carry it to an open
+request on the new current Revision and answer that target. Carrying alone preserves continuity and
+does not clear the obligation: the projection counts the unanswered target as unresolved until it has
+its single response.
+
+```bash
+# A captured-source cursor on the Change's new current Revision (Route B already has it as
+# $landed_cursor; for Route A select the accepted successor with `pointbreak change select`).
+current_cursor=$(pointbreak change select <change-id> --revision <current-revision-id> \
+  --source captured --format json | jq -r '.token')
+
+# 1. Open the carried copy on the current Revision; note the input request id in the receipt
+pointbreak input-request open --review-cursor "$current_cursor" --track human:kevin \
+  --title "<title>" --reason <reason-code>
+
+# 2. Record the continuity claim from the original request to the open copy
+pointbreak fact port --origin-revision <earlier-revision-id>@<earlier-artifact-sha256> \
+  --origin-fact <input-request-id> --review-cursor "$current_cursor" \
+  --relation carried-open-as --target-fact <target-input-request-id> --track human:kevin
+
+# 3. Answer the carried copy; this is what clears the obligation
+pointbreak input-request respond <target-input-request-id> --outcome <outcome>
+```
+
+Recheck afterwards with `pointbreak change attention` (the Change should no longer be listed) or
+`pointbreak change show <change-id>` (`lifecycle` reads `accepted`).
 
 **Route A: a later capture of the same work exists and was accepted.** Adopt that accepted
 Revision into the stranded Change, then assert that it replaces the stranded Revision. Revision ids
