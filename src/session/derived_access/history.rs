@@ -420,6 +420,24 @@ impl DerivedHistoryAccess {
         // Consult the record on every observation: seeing a later publication
         // state, Current included, retires a reason that no longer applies.
         let failure = self.runtime.background_last_failure();
+        // Probe the journal at most once per observation, and only when a
+        // reason may be reported.
+        let live_journal = std::cell::OnceCell::new();
+        let journal_unavailable_now = || {
+            live_journal
+                .get_or_init(|| self.authority_journal_unavailable())
+                .clone()
+        };
+        // A recorded journal failure holds only while the journal is still
+        // inactive. Once an administrator creates one, the stale record is
+        // retired; availability stays fail-closed until a generation is proven.
+        let failure = failure.filter(|failure| {
+            if failure.journal_unavailable.is_none() || journal_unavailable_now().is_some() {
+                return true;
+            }
+            self.runtime.retire_background_journal_failure();
+            false
+        });
         if status.availability != DerivedHistoryAvailability::Current
             && !status.rebuild_in_flight
             && let Some(failure) = failure
@@ -443,7 +461,7 @@ impl DerivedHistoryAccess {
                 status.availability,
                 DerivedHistoryAvailability::Absent | DerivedHistoryAvailability::RebuildRequired
             )
-            && let Some(unavailable) = self.authority_journal_unavailable()
+            && let Some(unavailable) = journal_unavailable_now()
         {
             status.detail = Some(match status.detail.take() {
                 Some(detail) => format!("{detail}; {unavailable}"),
@@ -466,13 +484,22 @@ impl DerivedHistoryAccess {
     /// Read-only probe of the store's authoritative change journal. Only an
     /// NTFS volume can lack one, so elsewhere this reads nothing.
     fn authority_journal_unavailable(&self) -> Option<crate::error::JournalUnavailable> {
+        let store_root = match (self.runtime.lifecycle(), self.runtime.maintenance()) {
+            (Some(lifecycle), _) => lifecycle.store_root().to_path_buf(),
+            (None, Some(maintenance)) => maintenance.store_root.clone(),
+            (None, None) => return None,
+        };
+        #[cfg(test)]
+        if let Some(unavailable) =
+            crate::session::derived_access::authority_check_override::take_queued_authority_journal_unavailable(
+                &store_root,
+                crate::session::derived_access::authority_check_override::AuthorityCheckSite::StatusProbe,
+            )
+        {
+            return Some(unavailable);
+        }
         #[cfg(windows)]
         {
-            let store_root = match (self.runtime.lifecycle(), self.runtime.maintenance()) {
-                (Some(lifecycle), _) => lifecycle.store_root().to_path_buf(),
-                (None, Some(maintenance)) => maintenance.store_root.clone(),
-                (None, None) => return None,
-            };
             match crate::session::derived_access::QualificationLocalJournal::new(store_root)
                 .change_stamp()
             {
@@ -482,6 +509,7 @@ impl DerivedHistoryAccess {
         }
         #[cfg(not(windows))]
         {
+            let _ = store_root;
             None
         }
     }
@@ -4028,6 +4056,15 @@ mod tests {
             "a volume without a journal must not spend the retry budget: {}",
             access.runtime.background_worker_stage()
         );
+        let still_inactive = crate::error::JournalUnavailable {
+            volume: "D:".to_owned(),
+            os_error: 1179,
+        };
+        queue_authority_journal_unavailable(
+            &store_root,
+            AuthorityCheckSite::StatusProbe,
+            still_inactive.clone(),
+        );
         let status = access.lifecycle_status();
         assert_eq!(
             status.availability,
@@ -4051,6 +4088,53 @@ mod tests {
         let document = serde_json::to_value(&status).unwrap();
         assert_eq!(document["reason"], "journal_unavailable");
         assert_eq!(document["availability"], "unavailable");
+
+        // An administrator creates the journal: the probe now succeeds, so
+        // the stopped worker's reason is retired rather than repeated, and
+        // availability stays fail-closed until a generation is proven.
+        for observation in ["first", "repeated"] {
+            let status = access.lifecycle_status();
+            assert_eq!(status.reason, None, "{observation}: {status:?}");
+            assert!(
+                matches!(
+                    status.availability,
+                    DerivedHistoryAvailability::Absent
+                        | DerivedHistoryAvailability::RebuildRequired
+                ),
+                "{observation}: {status:?}"
+            );
+            let detail = status.detail.as_deref().unwrap_or_default();
+            assert!(
+                !detail.contains("journal_unavailable"),
+                "{observation}: {detail}"
+            );
+            assert!(
+                serde_json::to_value(&status)
+                    .unwrap()
+                    .get("reason")
+                    .is_none(),
+                "{observation}: {status:?}"
+            );
+        }
+
+        // Deleted again later: only the live probe names it; the retired
+        // worker record does not come back.
+        queue_authority_journal_unavailable(
+            &store_root,
+            AuthorityCheckSite::StatusProbe,
+            still_inactive,
+        );
+        let status = access.lifecycle_status();
+        assert_eq!(
+            status.reason,
+            Some(DerivedHistoryUnavailableReason::JournalUnavailable),
+            "{status:?}"
+        );
+        let detail = status.detail.as_deref().unwrap_or_default();
+        assert!(
+            !detail.contains("background recovery stopped"),
+            "the retired record must stay retired: {detail}"
+        );
     }
 
     /// Native evidence for a volume without an active NTFS change journal.

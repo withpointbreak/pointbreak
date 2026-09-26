@@ -141,6 +141,10 @@ fsutil usn queryjournal D:
 fsutil usn createjournal m=<size> a=<delta> D:
 ```
 
+Once the journal exists, `pointbreak store derived status` stops reporting `journal_unavailable`, even in
+a process that was already running. Reads keep using the authoritative path until a generation is built,
+so run `pointbreak store derived build` to resume acceleration.
+
 To run without the journal instead, turn derived access off:
 
 ```powershell

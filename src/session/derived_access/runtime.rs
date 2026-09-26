@@ -704,6 +704,18 @@ impl DerivedAccessRuntime {
         None
     }
 
+    /// Retire a recorded give-up caused by an inactive NTFS journal, once a
+    /// probe shows the journal active again. Any other record is kept.
+    pub(super) fn retire_background_journal_failure(&self) {
+        let mut recorded = lock(&self.background_last_failure);
+        if recorded
+            .as_ref()
+            .is_some_and(|failure| failure.journal_unavailable.is_some())
+        {
+            *recorded = None;
+        }
+    }
+
     /// A synchronous repair supersedes whatever the last worker run reported.
     pub(super) fn clear_background_failure(&self) {
         *lock(&self.background_last_failure) = None;

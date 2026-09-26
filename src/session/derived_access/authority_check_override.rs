@@ -20,6 +20,8 @@ use crate::session::store::backend::{
 pub(crate) enum AuthorityCheckSite {
     PrePublication,
     BootstrapPopulation,
+    /// The read-only journal probe `lifecycle_status` runs.
+    StatusProbe,
 }
 
 type QueuedChecks = HashMap<(PathBuf, AuthorityCheckSite), VecDeque<JournalChangeCheck>>;
