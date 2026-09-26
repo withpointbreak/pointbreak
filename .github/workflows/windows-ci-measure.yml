@@ -33,6 +33,10 @@ on:
         description: "Report TEMP location, disk backing and C:/D: flush latency (no build; runs alone)"
         type: boolean
         default: false
+      journal_unavailable:
+        description: "Delete D:'s USN journal and record the typed journal_unavailable evidence (#825; runs alone)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,8 +49,8 @@ jobs:
   measure:
     timeout-minutes: 90
     name: measure (windows-latest)
-    # The volume probe needs no toolchain or build, so skip this job's setup when it runs.
-    if: ${{ !inputs.volume_probe }}
+    # The volume probe and the journal evidence run alone, so skip this job's setup when either runs.
+    if: ${{ !inputs.volume_probe && !inputs.journal_unavailable }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -242,3 +246,93 @@ jobs:
             Summarize "$name 4 writers wall=$([math]::Round($sw.Elapsed.TotalSeconds, 1))s" $all
           }
 
+  # --- journal-unavailable evidence (#825) -----------------------------------
+  # Derived access needs an active NTFS USN journal on the store's volume. CI's
+  # D: gets one from ci.yml, so no ordinary lane sees a journal-less volume.
+  # This job deletes the journal on the runner's disposable D:, then records
+  # native evidence that Pointbreak reports the typed, non-transient
+  # journal_unavailable reason and that the background worker gives up without
+  # a single retry. Pointbreak itself never creates or deletes a journal; only
+  # this disposable runner does.
+  journal-unavailable:
+    timeout-minutes: 60
+    name: journal unavailable evidence (windows-latest)
+    if: ${{ inputs.journal_unavailable }}
+    runs-on: windows-latest
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}\journal-evidence
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        with:
+          tool: nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: build the library tests and the CLI
+        shell: bash
+        run: |
+          cargo nextest run --lib --no-run
+          cargo build --bin pointbreak
+      - name: "delete the USN journal on D:"
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          "--- fsutil usn queryjournal D: (before) ---"; fsutil usn queryjournal D:
+          fsutil usn deletejournal /D D:
+          if ($LASTEXITCODE -ne 0) { throw "could not delete the USN journal on D:" }
+          $after = fsutil usn queryjournal D: 2>&1 | Out-String
+          "--- fsutil usn queryjournal D: (after) ---"; $after
+          $after | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'queryjournal-after.txt')
+          if ($LASTEXITCODE -eq 0) { throw "D: still reports an active USN journal" }
+          $global:LASTEXITCODE = 0
+      - name: typed journal_unavailable in the library, no worker retries
+        shell: bash
+        env:
+          POINTBREAK_JOURNAL_EVIDENCE_ROOT: 'D:\pb-825-store'
+        run: |
+          export POINTBREAK_JOURNAL_EVIDENCE_RECEIPT="$EVIDENCE_DIR\\library-receipt.json"
+          cargo nextest run --lib --run-ignored only --no-capture \
+            -E 'test(native_volume_without_a_journal_reports_typed_unavailability_without_retries)'
+      - name: typed journal_unavailable from the CLI
+        shell: pwsh
+        env:
+          POINTBREAK_HOME: 'D:\pb-825-home'
+        run: |
+          $pb = Join-Path $env:GITHUB_WORKSPACE 'target\debug\pointbreak.exe'
+          $repo = 'D:\pb-825-repo'
+          New-Item -ItemType Directory -Force -Path $repo | Out-Null
+          git -C $repo init --quiet
+          git -C $repo config user.name 'journal evidence'
+          git -C $repo config user.email 'journal-evidence@example.invalid'
+          Set-Content -Path (Join-Path $repo 'a.txt') -Value 'one'
+          git -C $repo add a.txt
+          git -C $repo commit --quiet -m 'initial'
+          Add-Content -Path (Join-Path $repo 'a.txt') -Value 'two'
+          & $pb capture --repo $repo --summary 'journal evidence' 2>&1 | Tee-Object -FilePath (Join-Path $env:EVIDENCE_DIR 'capture.txt')
+          if ($LASTEXITCODE -ne 0) { throw "capture failed on the journal-less volume" }
+          & $pb store paths --repo $repo | Tee-Object -FilePath (Join-Path $env:EVIDENCE_DIR 'store-paths.json')
+          $status = & $pb store derived status --repo $repo
+          if ($LASTEXITCODE -ne 0) { throw "store derived status failed" }
+          $status | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'store-derived-status.json')
+          $status
+          $document = $status | Out-String | ConvertFrom-Json
+          if ($document.reason -ne 'journal_unavailable') { throw "status did not report reason journal_unavailable" }
+          if ($document.availability -ne 'unavailable') { throw "status did not report availability unavailable" }
+          $build = & $pb store derived build --repo $repo 2>&1 | Out-String
+          $buildExit = $LASTEXITCODE
+          "exit $buildExit`n$build" | Set-Content -Path (Join-Path $env:EVIDENCE_DIR 'store-derived-build.txt')
+          "store derived build exit $buildExit"; $build
+          if ($buildExit -eq 0) { throw "store derived build must fail on a volume without a journal" }
+          if ($build -notmatch 'journal_unavailable') { throw "store derived build did not report journal_unavailable" }
+          $global:LASTEXITCODE = 0
+      - name: upload the journal-unavailable receipt
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: journal-unavailable-evidence
+          path: journal-evidence/
+          if-no-files-found: error

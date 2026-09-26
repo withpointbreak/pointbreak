@@ -35,6 +35,18 @@ permission Projects: read and write and repository Issues: read); without it the
 loudly and the guard still runs. Theme on the board is hand-set and never touched. The label
 vocabulary itself is documented in `CONTRIBUTING.md`.
 
+## Dispatch-only measurement (`windows-ci-measure.yml`)
+
+Never runs on push, pull request, or a schedule. Each boolean input dispatches one Windows instrument,
+one at a time: the suite's sys:user split, git spawn latency, Defender headroom, log-output cost, the
+three-shard cache probe, and the TEMP volume probe (#822). The `journal-unavailable` job (#825) runs
+alone. It deletes the USN journal on the runner's disposable `D:`, then runs the ignored Windows-only
+library test that exercises the typed `journal_unavailable` path against a store on `D:`, and the CLI's
+`store derived status` and `store derived build` against a repository there. It uploads a receipt
+showing the typed reason and zero background-worker retries. Dispatch it with
+`gh workflow run windows-ci-measure.yml -f sys_user=false -f journal_unavailable=true`. Only this
+disposable runner ever creates or deletes a journal; Pointbreak never does.
+
 ## Release (`release-plan.yml`, `release.yml`, `release-binaries.yml`, `verify-release.yml`)
 
 Triggered by the release process, not by pushes; see `docs/releasing.md`.
