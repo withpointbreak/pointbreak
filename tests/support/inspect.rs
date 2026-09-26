@@ -183,7 +183,9 @@ impl Inspector {
         let effective_repo = legacy_clone
             .as_ref()
             .map_or(repo, |(_, clone)| clone.as_path());
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+        // The server runs under the same isolated home and identity as every other
+        // harness spawn; a caller's `env` below still wins.
+        let mut command = super::pointbreak_command();
         command.args([
             "inspect",
             "--repo",
@@ -1159,9 +1161,14 @@ pub fn decision_continuity_matrix() -> DecisionContinuityMatrix {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/support/assets/change-ready-store"),
         )
+        // The script owns its home beneath the destination and names an actor for
+        // the writes it attributes; its unattributed calls must not inherit the
+        // caller's actor or signing selection either.
         .env_remove("POINTBREAK_HOME")
         .env_remove("POINTBREAK_FORMAT")
-        .env_remove("POINTBREAK_SIGNING_KEY")
+        .env_remove(pointbreak::environment::ACTOR_ID)
+        .env_remove(pointbreak::environment::SIGNING)
+        .env_remove(pointbreak::environment::SIGNING_KEY)
         .output()
         .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
     assert!(

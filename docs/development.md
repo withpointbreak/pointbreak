@@ -146,6 +146,19 @@ gated on `--features gix-parity` and exercised by `just git-parity` — and by t
 git-parity` when you change the git seam or either backend; `just git-bench` prints the per-operation
 subprocess-vs-gix win. See `docs/adr/adr-0040-git-backend-seam-and-hybrid.md`.
 
+### Integration tests and the caller's identity
+
+The shared integration harness in `tests/support` spawns every `pointbreak` binary under a
+per-test scratch `POINTBREAK_HOME` with `POINTBREAK_ACTOR_ID`, `POINTBREAK_SIGNING`, and
+`POINTBREAK_SIGNING_KEY` cleared, alongside the log, format, color, and theme selectors it already
+removed. The scratch home is one directory per test thread, created on the first spawn and removed
+when the test ends, so fixture preparation, the write under test, and every later command in that
+test share it. A test's writes therefore derive their actor from the fixture repository's git identity
+and never mint, reuse, or sign with a key in the caller's real home, so the gates and focused test
+runs are safe from a shell or agent session that has an identity exported. A test that needs an
+identity, or a home it can inspect, names it through `pointbreak_env`; `tests/harness_isolation.rs`
+pins this contract.
+
 ## Generated and protected artifacts
 
 Some commands are intentionally mutating:

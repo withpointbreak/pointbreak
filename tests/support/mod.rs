@@ -5,6 +5,8 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use tempfile::TempDir;
+
 #[allow(dead_code)]
 pub mod event_signature_fixtures;
 #[allow(dead_code)]
@@ -17,19 +19,38 @@ pub mod snapshots;
 pub mod timing;
 mod write_acknowledgement;
 
+thread_local! {
+    static HARNESS_HOME: TempDir = tempfile::Builder::new()
+        .prefix("pointbreak-harness-home-")
+        .tempdir()
+        .expect("create isolated harness home");
+}
+
+/// The isolated `POINTBREAK_HOME` every helper in this module spawns the binary
+/// under.
+///
+/// One scratch directory per test thread: libtest runs each test on its own
+/// thread, and cargo-nextest additionally gives each test its own process, so
+/// whatever a test writes through the harness (signing keys, store families)
+/// never reaches the caller's real home and is removed when the test finishes. A
+/// test that needs to inspect the home, or share one between threads it spawns
+/// itself, passes an explicit `POINTBREAK_HOME` through `pointbreak_env`; that
+/// value wins over this default.
 #[allow(dead_code)]
-pub fn pointbreak<I, S>(args: I) -> Output
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let args = prepare_change_cli_fixture(args);
-    let output = Command::new(env!("CARGO_BIN_EXE_pointbreak"))
-        .args(&args)
+pub fn harness_home() -> PathBuf {
+    HARNESS_HOME.with(|home| home.path().to_path_buf())
+}
+
+/// A `pointbreak` command with every ambient selector and identity input
+/// cleared, so a test's bytes and provenance depend only on what the test
+/// itself sets. Every helper in this module builds on it; a test that must spawn
+/// the binary itself (to pipe stdin, or to skip the fixture preparation and
+/// mirror refresh the helpers add) starts from it too, and layers its own `env`
+/// on top. An explicit value always wins over a removal made here.
+#[allow(dead_code)]
+pub fn pointbreak_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+    command
         .env_remove("POINTBREAK_LOG")
         .env_remove("RUST_LOG")
         // Isolate byte-asserting tests from a developer's ambient output-lane
@@ -43,6 +64,33 @@ where
         // selection; theme tests set these explicitly via pointbreak_env.
         .env_remove("POINTBREAK_THEME")
         .env_remove("BAT_THEME")
+        // Isolate every write from the caller's real home and identity. Under an
+        // inherited `actor:agent:*` id the first write would mint or reuse a signing
+        // key in the caller's `~/.pointbreak/keys` and sign the test's events with
+        // it, so outcomes would depend on who runs the test. The binary runs under
+        // a per-test scratch home with no ambient actor or signing selection: the
+        // writing actor derives from the fixture repository's git identity, and
+        // tests that need an identity name it through pointbreak_env.
+        .env(pointbreak::environment::HOME, harness_home())
+        .env_remove(pointbreak::environment::ACTOR_ID)
+        .env_remove(pointbreak::environment::SIGNING)
+        .env_remove(pointbreak::environment::SIGNING_KEY);
+    command
+}
+
+#[allow(dead_code)]
+pub fn pointbreak<I, S>(args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let args = prepare_change_cli_fixture(args);
+    let output = pointbreak_command()
+        .args(&args)
         .output()
         .expect("run pointbreak binary");
     if output.status.success() {
@@ -65,13 +113,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+    pointbreak_command()
         .args(args)
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
-        .env_remove("POINTBREAK_FORMAT")
-        .env_remove("POINTBREAK_THEME")
-        .env_remove("BAT_THEME")
         .output()
         .expect("run unprepared pointbreak binary")
 }
@@ -82,14 +125,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
-    command
-        .args(args)
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
-        .env_remove("POINTBREAK_FORMAT")
-        .env_remove("POINTBREAK_THEME")
-        .env_remove("BAT_THEME");
+    let mut command = pointbreak_command();
+    command.args(args);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -97,7 +134,9 @@ where
 }
 
 /// Run `pointbreak` with extra environment variables — e.g. `POINTBREAK_ACTOR_ID` to
-/// attribute a write to a specific actor.
+/// attribute a write to a specific actor, or `POINTBREAK_HOME` to replace the
+/// per-test harness home with one the test can inspect. Values passed here win
+/// over the harness defaults.
 #[allow(dead_code)]
 pub fn pointbreak_env<I, S>(args: I, env: &[(&str, &str)]) -> Output
 where
@@ -109,16 +148,11 @@ where
         .map(|arg| arg.as_ref().to_owned())
         .collect::<Vec<_>>();
     let args = prepare_change_cli_fixture(args);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
-    command
-        .args(&args)
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
-        // Clear ambient selectors first; a caller that passes POINTBREAK_FORMAT or
-        // a theme variable in `env` re-sets it below and still wins.
-        .env_remove("POINTBREAK_FORMAT")
-        .env_remove("POINTBREAK_THEME")
-        .env_remove("BAT_THEME");
+    // Ambient selectors and identity are cleared first; a caller that passes
+    // POINTBREAK_FORMAT, a theme variable, POINTBREAK_HOME or POINTBREAK_ACTOR_ID
+    // in `env` re-sets it below and still wins.
+    let mut command = pointbreak_command();
+    command.args(&args);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -300,7 +334,7 @@ fn fixture_capture<'a>(state: &'a FixtureChangeState, selector: &str) -> &'a Fix
 }
 
 fn fresh_fixture_cursor(repo: &Path, revision: &str, change_id: &str) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+    let output = pointbreak_command()
         .args([
             "change",
             "select",
@@ -311,9 +345,6 @@ fn fresh_fixture_cursor(repo: &Path, revision: &str, change_id: &str) -> String 
             "--repo",
             repo.to_str().expect("fixture repo path is utf-8"),
         ])
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
-        .env_remove("POINTBREAK_FORMAT")
         .output()
         .expect("select fresh fixture review cursor");
     assert!(

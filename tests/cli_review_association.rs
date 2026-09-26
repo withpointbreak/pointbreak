@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::pointbreak;
+use support::{pointbreak, pointbreak_command};
 
 fn parse_json(stdout: &[u8]) -> Value {
     serde_json::from_slice(stdout).expect("stdout is valid JSON")
@@ -1169,7 +1169,7 @@ fn text_association_withdraw_receipts() {
 fn rewrite_land(repo: &GitRepo, token: &str, commit: &str, extra: &[&str]) -> std::process::Output {
     // Invoke directly: the general fixture helper refreshes legacy mirrors after
     // success, which would obscure whether preview itself writes anything.
-    std::process::Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+    pointbreak_command()
         .args([
             "association",
             "land",
