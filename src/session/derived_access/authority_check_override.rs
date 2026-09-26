@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::error::JournalUnavailable;
+use crate::session::derived_access::history::JournalProbe;
 use crate::session::store::backend::{
     JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict,
 };
@@ -20,8 +21,6 @@ use crate::session::store::backend::{
 pub(crate) enum AuthorityCheckSite {
     PrePublication,
     BootstrapPopulation,
-    /// The read-only journal probe `lifecycle_status` runs.
-    StatusProbe,
 }
 
 type QueuedChecks = HashMap<(PathBuf, AuthorityCheckSite), VecDeque<JournalChangeCheck>>;
@@ -100,6 +99,38 @@ pub(crate) fn take_queued_authority_journal_unavailable(
         queued.remove(&key);
     }
     failure
+}
+
+type QueuedStatusProbes = HashMap<PathBuf, VecDeque<JournalProbe>>;
+
+static QUEUED_STATUS_PROBES: OnceLock<Mutex<QueuedStatusProbes>> = OnceLock::new();
+
+/// Queue the outcome of the next read-only journal probe `lifecycle_status`
+/// runs in `store_root`. Outcomes are used once each, in the order they were
+/// queued; with none queued the probe reads the platform as usual.
+pub(crate) fn queue_status_probe(store_root: &Path, probe: JournalProbe) {
+    QUEUED_STATUS_PROBES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(canonical_store_root(store_root))
+        .or_default()
+        .push_back(probe);
+}
+
+/// The oldest status-probe outcome queued for `store_root`, removing it.
+pub(crate) fn take_queued_status_probe(store_root: &Path) -> Option<JournalProbe> {
+    let mut queued = QUEUED_STATUS_PROBES
+        .get()?
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let key = canonical_store_root(store_root);
+    let probes = queued.get_mut(&key)?;
+    let probe = probes.pop_front();
+    if probes.is_empty() {
+        queued.remove(&key);
+    }
+    probe
 }
 
 /// A check that could not prove authority stable within its budget.

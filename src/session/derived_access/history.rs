@@ -423,16 +423,15 @@ impl DerivedHistoryAccess {
         // Probe the journal at most once per observation, and only when a
         // reason may be reported.
         let live_journal = std::cell::OnceCell::new();
-        let journal_unavailable_now = || {
-            live_journal
-                .get_or_init(|| self.authority_journal_unavailable())
-                .clone()
-        };
-        // A recorded journal failure holds only while the journal is still
-        // inactive. Once an administrator creates one, the stale record is
-        // retired; availability stays fail-closed until a generation is proven.
+        let journal_probe = || live_journal.get_or_init(|| self.authority_journal_probe());
+        // A recorded journal failure holds until the journal is proven active.
+        // Once an administrator creates one, the stale record is retired;
+        // availability stays fail-closed until a generation is proven. A probe
+        // that fails or is skipped proves nothing, so the record stands.
         let failure = failure.filter(|failure| {
-            if failure.journal_unavailable.is_none() || journal_unavailable_now().is_some() {
+            if failure.journal_unavailable.is_none()
+                || !matches!(journal_probe(), JournalProbe::Active)
+            {
                 return true;
             }
             self.runtime.retire_background_journal_failure();
@@ -461,7 +460,7 @@ impl DerivedHistoryAccess {
                 status.availability,
                 DerivedHistoryAvailability::Absent | DerivedHistoryAvailability::RebuildRequired
             )
-            && let Some(unavailable) = journal_unavailable_now()
+            && let JournalProbe::Unavailable(unavailable) = journal_probe()
         {
             status.detail = Some(match status.detail.take() {
                 Some(detail) => format!("{detail}; {unavailable}"),
@@ -482,35 +481,32 @@ impl DerivedHistoryAccess {
     }
 
     /// Read-only probe of the store's authoritative change journal. Only an
-    /// NTFS volume can lack one, so elsewhere this reads nothing.
-    fn authority_journal_unavailable(&self) -> Option<crate::error::JournalUnavailable> {
+    /// NTFS volume can lack one, so elsewhere this proves nothing.
+    fn authority_journal_probe(&self) -> JournalProbe {
         let store_root = match (self.runtime.lifecycle(), self.runtime.maintenance()) {
             (Some(lifecycle), _) => lifecycle.store_root().to_path_buf(),
             (None, Some(maintenance)) => maintenance.store_root.clone(),
-            (None, None) => return None,
+            (None, None) => return JournalProbe::Inconclusive,
         };
         #[cfg(test)]
-        if let Some(unavailable) =
-            crate::session::derived_access::authority_check_override::take_queued_authority_journal_unavailable(
+        if let Some(probe) =
+            crate::session::derived_access::authority_check_override::take_queued_status_probe(
                 &store_root,
-                crate::session::derived_access::authority_check_override::AuthorityCheckSite::StatusProbe,
             )
         {
-            return Some(unavailable);
+            return probe;
         }
         #[cfg(windows)]
         {
-            match crate::session::derived_access::QualificationLocalJournal::new(store_root)
-                .change_stamp()
-            {
-                Err(crate::error::ShoreError::JournalUnavailable(unavailable)) => Some(unavailable),
-                _ => None,
-            }
+            JournalProbe::from_change_stamp(
+                crate::session::derived_access::QualificationLocalJournal::new(store_root)
+                    .change_stamp(),
+            )
         }
         #[cfg(not(windows))]
         {
             let _ = store_root;
-            None
+            JournalProbe::Inconclusive
         }
     }
 
@@ -1571,6 +1567,39 @@ fn to_sql_integer(value: impl TryInto<i64>) -> Result<i64, String> {
         .map_err(|_| "history value does not fit SQLite INTEGER".to_owned())
 }
 
+/// What a read-only probe of the store's change journal established.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum JournalProbe {
+    /// The volume's NTFS change journal answered with a native cursor.
+    Active,
+    /// The volume reported that it has no active change journal.
+    Unavailable(crate::error::JournalUnavailable),
+    /// Nothing was proven either way: the probe failed, the journal was never
+    /// queried, or this platform has no journal to query.
+    Inconclusive,
+}
+
+impl JournalProbe {
+    /// Classify a change-stamp capture. Only a stamp carrying a native cursor
+    /// proves the journal was queried and answered.
+    #[cfg_attr(not(any(test, windows)), allow(dead_code))]
+    fn from_change_stamp(
+        stamp: crate::error::Result<crate::session::store::backend::JournalChangeStamp>,
+    ) -> Self {
+        use crate::session::store::backend::JournalChangeStamp;
+        match stamp {
+            Ok(JournalChangeStamp::Observed {
+                native_cursor: Some(_),
+                ..
+            }) => Self::Active,
+            Err(crate::error::ShoreError::JournalUnavailable(unavailable)) => {
+                Self::Unavailable(unavailable)
+            }
+            Ok(_) | Err(_) => Self::Inconclusive,
+        }
+    }
+}
+
 fn map_availability(value: DerivedAccessAvailability) -> DerivedHistoryAvailability {
     match value {
         DerivedAccessAvailability::Absent => DerivedHistoryAvailability::Absent,
@@ -1778,7 +1807,7 @@ mod tests {
     };
     use crate::session::derived_access::authority_check_override::{
         AuthorityCheckSite, changed_check, queue_authority_check,
-        queue_authority_journal_unavailable, take_queued_authority_check,
+        queue_authority_journal_unavailable, queue_status_probe, take_queued_authority_check,
         take_queued_authority_journal_unavailable, unproven_check,
     };
     use crate::session::derived_access::generation::{GenerationProgress, GenerationProgressPhase};
@@ -4023,6 +4052,62 @@ mod tests {
     }
 
     #[test]
+    fn only_a_native_journal_cursor_proves_the_journal_active() {
+        use crate::session::store::backend::JournalChangeStamp;
+        let observed = |native_cursor: serde_json::Value| -> JournalChangeStamp {
+            serde_json::from_value(serde_json::json!({
+                "state": "observed",
+                "identity_sha256": "identity",
+                "change_sha256": "change",
+                "entry_count": null,
+                "native_cursor": native_cursor,
+            }))
+            .unwrap()
+        };
+        let cursor = serde_json::json!({
+            "journalId": 1,
+            "nextUsn": 2,
+            "directoryFileReference": 3,
+            "volumeSerialNumber": 4,
+        });
+        let unavailable = crate::error::JournalUnavailable {
+            volume: "D:".to_owned(),
+            os_error: 1179,
+        };
+        let cases = [
+            ("native cursor", Ok(observed(cursor)), JournalProbe::Active),
+            (
+                "journal unavailable",
+                Err(crate::error::ShoreError::JournalUnavailable(
+                    unavailable.clone(),
+                )),
+                JournalProbe::Unavailable(unavailable),
+            ),
+            // `events/` missing: the journal was never queried.
+            (
+                "absent stamp",
+                Ok(JournalChangeStamp::Absent),
+                JournalProbe::Inconclusive,
+            ),
+            (
+                "stamp without a cursor",
+                Ok(observed(serde_json::Value::Null)),
+                JournalProbe::Inconclusive,
+            ),
+            (
+                "access denied",
+                Err(crate::error::ShoreError::Message(
+                    "could not inspect journal events directory: access denied".to_owned(),
+                )),
+                JournalProbe::Inconclusive,
+            ),
+        ];
+        for (case, stamp, expected) in cases {
+            assert_eq!(JournalProbe::from_change_stamp(stamp), expected, "{case}");
+        }
+    }
+
+    #[test]
     fn background_worker_gives_up_once_on_a_volume_without_a_journal() {
         let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
         let store_root = access
@@ -4060,10 +4145,9 @@ mod tests {
             volume: "D:".to_owned(),
             os_error: 1179,
         };
-        queue_authority_journal_unavailable(
+        queue_status_probe(
             &store_root,
-            AuthorityCheckSite::StatusProbe,
-            still_inactive.clone(),
+            JournalProbe::Unavailable(still_inactive.clone()),
         );
         let status = access.lifecycle_status();
         assert_eq!(
@@ -4089,10 +4173,36 @@ mod tests {
         assert_eq!(document["reason"], "journal_unavailable");
         assert_eq!(document["availability"], "unavailable");
 
-        // An administrator creates the journal: the probe now succeeds, so
-        // the stopped worker's reason is retired rather than repeated, and
-        // availability stays fail-closed until a generation is proven.
-        for observation in ["first", "repeated"] {
+        // A probe that fails or never queries the journal proves nothing, so
+        // the stopped worker's reason stands, observation after observation.
+        for observation in ["queued inconclusive", "platform inconclusive"] {
+            if observation == "queued inconclusive" {
+                queue_status_probe(&store_root, JournalProbe::Inconclusive);
+            }
+            let status = access.lifecycle_status();
+            assert_eq!(
+                status.reason,
+                Some(DerivedHistoryUnavailableReason::JournalUnavailable),
+                "{observation}: {status:?}"
+            );
+            assert_eq!(
+                status.availability,
+                DerivedHistoryAvailability::Unavailable,
+                "{observation}: {status:?}"
+            );
+            let detail = status.detail.as_deref().unwrap_or_default();
+            assert!(
+                detail.contains("background recovery stopped: journal_unavailable"),
+                "{observation}: {detail}"
+            );
+        }
+
+        // An administrator creates the journal: the probe now proves it
+        // active, so the stopped worker's reason is retired rather than
+        // repeated, and availability stays fail-closed until a generation is
+        // proven. Later inconclusive probes do not bring the reason back.
+        queue_status_probe(&store_root, JournalProbe::Active);
+        for observation in ["active", "inconclusive afterward"] {
             let status = access.lifecycle_status();
             assert_eq!(status.reason, None, "{observation}: {status:?}");
             assert!(
@@ -4119,11 +4229,7 @@ mod tests {
 
         // Deleted again later: only the live probe names it; the retired
         // worker record does not come back.
-        queue_authority_journal_unavailable(
-            &store_root,
-            AuthorityCheckSite::StatusProbe,
-            still_inactive,
-        );
+        queue_status_probe(&store_root, JournalProbe::Unavailable(still_inactive));
         let status = access.lifecycle_status();
         assert_eq!(
             status.reason,
