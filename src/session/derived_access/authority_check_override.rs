@@ -3,12 +3,15 @@
 //! Outside Windows a native authority check reports only `Stable` or
 //! `Changed`, and a truth append can force `Changed` anywhere. An unproven
 //! `Indeterminate` verdict comes only from an exhausted NTFS journal budget, so
-//! tests queue the check a site reports instead of provoking one.
+//! tests queue the check a site reports instead of provoking one. A volume
+//! without an active NTFS journal likewise exists only on Windows, so tests
+//! queue that typed failure the same way.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use crate::error::JournalUnavailable;
 use crate::session::store::backend::{
     JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict,
 };
@@ -55,6 +58,46 @@ pub(crate) fn take_queued_authority_check(
         queued.remove(&key);
     }
     check
+}
+
+type QueuedUnavailable = HashMap<(PathBuf, AuthorityCheckSite), VecDeque<JournalUnavailable>>;
+
+static QUEUED_UNAVAILABLE: OnceLock<Mutex<QueuedUnavailable>> = OnceLock::new();
+
+/// Queue a journal-unavailable failure for the next authority check at `site`
+/// in `store_root`, as a volume without an active NTFS journal reports it.
+/// A queued failure is used once and takes precedence over a queued check.
+pub(crate) fn queue_authority_journal_unavailable(
+    store_root: &Path,
+    site: AuthorityCheckSite,
+    unavailable: JournalUnavailable,
+) {
+    QUEUED_UNAVAILABLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry((canonical_store_root(store_root), site))
+        .or_default()
+        .push_back(unavailable);
+}
+
+/// The oldest journal-unavailable failure queued for `site` in `store_root`,
+/// removing it.
+pub(crate) fn take_queued_authority_journal_unavailable(
+    store_root: &Path,
+    site: AuthorityCheckSite,
+) -> Option<JournalUnavailable> {
+    let mut queued = QUEUED_UNAVAILABLE
+        .get()?
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let key = (canonical_store_root(store_root), site);
+    let failures = queued.get_mut(&key)?;
+    let failure = failures.pop_front();
+    if failures.is_empty() {
+        queued.remove(&key);
+    }
+    failure
 }
 
 /// A check that could not prove authority stable within its budget.

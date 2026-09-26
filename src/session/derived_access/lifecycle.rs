@@ -41,6 +41,7 @@ use crate::canonical_hash::canonical_json_bytes;
 use crate::documents::{
     INSPECT_READER_PROFILE_SCHEMA, ReaderProfileAvailabilityV1, ReaderProfileDocumentV1,
 };
+use crate::error::{JournalUnavailable, ShoreError};
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::store::authority_lock::StoreAuthorityLock;
@@ -105,6 +106,9 @@ pub(crate) struct LifecycleStatus {
     /// as derived or authoritative I/O. Recovery classifies again before it
     /// rebuilds a generation that may still be valid.
     pub(crate) transient_failure: bool,
+    /// Unavailable because the store's volume has no active NTFS change
+    /// journal: the typed reason status reports, never retried.
+    pub(crate) journal_unavailable: Option<JournalUnavailable>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -182,19 +186,58 @@ pub(crate) enum LifecycleError {
     #[error(transparent)]
     Generation(#[from] GenerationError),
     #[error(transparent)]
-    Cursor(#[from] CursorLedgerError),
+    Cursor(CursorLedgerError),
     #[error(transparent)]
-    Service(#[from] DerivedAccessServiceError),
+    Service(DerivedAccessServiceError),
     #[error(transparent)]
     WriterLock(#[from] WriterLockError),
     #[error("authoritative truth read failed: {0}")]
     Truth(String),
+    /// The store's volume has no active NTFS change journal. Never transient:
+    /// it clears only when an administrator creates a journal.
+    #[error("{0}")]
+    JournalUnavailable(JournalUnavailable),
     #[error("derived generation read failed while {operation} at {path}: {source}")]
     DerivedRead {
         path: PathBuf,
         operation: &'static str,
         source: std::io::Error,
     },
+}
+
+impl LifecycleError {
+    /// A failed authoritative-journal observation. A volume without an active
+    /// NTFS journal keeps its type; every other failure is a `Truth` message.
+    fn journal(error: ShoreError) -> Self {
+        match error {
+            ShoreError::JournalUnavailable(unavailable) => Self::JournalUnavailable(unavailable),
+            error => Self::Truth(error.to_string()),
+        }
+    }
+}
+
+// Manual conversions so a journal-unavailable failure raised below the
+// lifecycle surfaces as its own variant instead of hiding inside a wrapper.
+impl From<CursorLedgerError> for LifecycleError {
+    fn from(error: CursorLedgerError) -> Self {
+        match error {
+            CursorLedgerError::JournalUnavailable(unavailable) => {
+                Self::JournalUnavailable(unavailable)
+            }
+            error => Self::Cursor(error),
+        }
+    }
+}
+
+impl From<DerivedAccessServiceError> for LifecycleError {
+    fn from(error: DerivedAccessServiceError) -> Self {
+        match error {
+            DerivedAccessServiceError::Cursor(CursorLedgerError::JournalUnavailable(
+                unavailable,
+            )) => Self::JournalUnavailable(unavailable),
+            error => Self::Service(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -303,7 +346,7 @@ impl DerivedAccessLifecycle {
         }
         QualificationLocalJournal::new(&self.store_root)
             .changes_since(before)
-            .map_err(|error| LifecycleError::Truth(error.to_string()))
+            .map_err(LifecycleError::journal)
     }
 
     /// Recovery classifier: reports lifecycle availability and moves invalid
@@ -357,6 +400,7 @@ impl DerivedAccessLifecycle {
                 detail: None,
                 recovery_deferred: false,
                 transient_failure: false,
+                journal_unavailable: None,
             });
         };
         if let Some(progress) = staging_progress {
@@ -372,6 +416,7 @@ impl DerivedAccessLifecycle {
                 detail: Some("current generation remains readable during rebuild".to_owned()),
                 recovery_deferred: false,
                 transient_failure: false,
+                journal_unavailable: None,
             });
         }
         let stable_publication = match self.stable_current_publication() {
@@ -1523,7 +1568,7 @@ impl DerivedAccessLifecycle {
         let snapshot = current.service.truth_authority_snapshot()?;
         let check = QualificationLocalJournal::new(&self.store_root)
             .changes_since(&snapshot.change_stamp)
-            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+            .map_err(LifecycleError::journal)?;
         Ok(check.verdict == JournalChangeVerdict::Stable)
     }
 
@@ -1535,7 +1580,7 @@ impl DerivedAccessLifecycle {
         self.observe_current_authority_snapshot_with(snapshot, |before| {
             journal
                 .changes_since(before)
-                .map_err(|error| LifecycleError::Truth(error.to_string()))
+                .map_err(LifecycleError::journal)
         })
     }
 
@@ -1585,7 +1630,7 @@ impl DerivedAccessLifecycle {
         self.persist_current_authority_snapshot_with(service, snapshot, writer_lock, |before| {
             journal
                 .changes_since(before)
-                .map_err(|error| LifecycleError::Truth(error.to_string()))
+                .map_err(LifecycleError::journal)
         })
     }
 
@@ -2438,14 +2483,20 @@ fn status(
         detail,
         recovery_deferred: false,
         transient_failure: false,
+        journal_unavailable: None,
     }
 }
 
 /// Unavailable because of `error`, marked transient when it should clear on
-/// its own.
+/// its own, and carrying the typed journal-unavailable reason when that is
+/// the cause.
 fn unavailable_after(error: &LifecycleError, generation_id: Option<String>) -> LifecycleStatus {
     LifecycleStatus {
         transient_failure: is_transient_lifecycle_error(error),
+        journal_unavailable: match error {
+            LifecycleError::JournalUnavailable(unavailable) => Some(unavailable.clone()),
+            _ => None,
+        },
         ..status(
             DerivedAccessAvailability::Unavailable,
             generation_id,
@@ -2465,12 +2516,15 @@ fn bootstrap_error(error: CursorLedgerError) -> LifecycleError {
             phase: "bootstrap population",
             check,
         },
-        error => LifecycleError::Cursor(error),
+        error => LifecycleError::from(error),
     }
 }
 
 /// Failures that clear up on their own: I/O on the derived root or its locks,
 /// a root that another holder still has open, and derived or authoritative reads.
+/// `JournalUnavailable` is deliberately absent: a volume without an active
+/// NTFS journal stays that way until an administrator creates one, so the
+/// worker gives up at once instead of spending its retry budget.
 pub(crate) fn is_transient_lifecycle_error(error: &LifecycleError) -> bool {
     matches!(
         error,
@@ -4165,6 +4219,47 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn journal_unavailable_stays_typed_and_is_never_transient() {
+        let unavailable = JournalUnavailable {
+            volume: "D:".to_owned(),
+            os_error: 1179,
+        };
+        let raised = [
+            LifecycleError::journal(ShoreError::JournalUnavailable(unavailable.clone())),
+            LifecycleError::from(CursorLedgerError::JournalUnavailable(unavailable.clone())),
+            LifecycleError::from(DerivedAccessServiceError::Cursor(
+                CursorLedgerError::JournalUnavailable(unavailable.clone()),
+            )),
+            bootstrap_error(CursorLedgerError::JournalUnavailable(unavailable.clone())),
+        ];
+        for error in &raised {
+            let LifecycleError::JournalUnavailable(carried) = error else {
+                panic!("the typed state must reach the lifecycle as its own variant: {error:?}");
+            };
+            assert_eq!(carried, &unavailable);
+            assert!(
+                !is_transient_lifecycle_error(error),
+                "a volume without a journal must not spend the worker's retry budget"
+            );
+            let status = unavailable_after(error, None);
+            assert_eq!(status.availability, DerivedAccessAvailability::Unavailable);
+            assert!(!status.transient_failure);
+            assert_eq!(status.journal_unavailable.as_ref(), Some(&unavailable));
+            let detail = status.detail.expect("unavailable status carries detail");
+            assert!(detail.contains("fsutil usn createjournal m=<size> a=<delta> D:"));
+            assert!(detail.contains("POINTBREAK_DERIVED_ACCESS=off"));
+        }
+
+        // Every other journal failure keeps its transient `Truth` message.
+        let other = LifecycleError::journal(ShoreError::Message(
+            "could not query NTFS USN journal: Access is denied. (os error 5)".to_owned(),
+        ));
+        assert!(matches!(other, LifecycleError::Truth(_)), "{other:?}");
+        assert!(is_transient_lifecycle_error(&other));
+        assert_eq!(unavailable_after(&other, None).journal_unavailable, None);
     }
 
     #[test]

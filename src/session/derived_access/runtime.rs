@@ -21,6 +21,7 @@ use super::lifecycle::{
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::{InteractionActorV1, reserve_interaction_child_scope_v1};
+use crate::error::JournalUnavailable;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{ReadStore, opaque_path_identity};
 
@@ -206,6 +207,10 @@ impl BackgroundWorkerDiagnostic {
         BackgroundWorkerStage::label(self.word.load(Ordering::Relaxed) as u8)
     }
 
+    fn retry_count(&self) -> u64 {
+        self.word.load(Ordering::Relaxed) >> 16
+    }
+
     fn snapshot(&self) -> String {
         let current = self.word.load(Ordering::Relaxed);
         let retry = (current >> 8) as u8;
@@ -333,7 +338,35 @@ impl TransientRetry {
 /// it stopped on.
 struct BackgroundFailure {
     error: String,
+    journal_unavailable: Option<JournalUnavailable>,
     publication: PublicationKey,
+}
+
+/// The reason a worker run stopped, as status reports it: its message and,
+/// when the store's volume has no active NTFS journal, that typed reason.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct BackgroundFailureReport {
+    pub(super) detail: String,
+    pub(super) journal_unavailable: Option<JournalUnavailable>,
+}
+
+/// A worker give-up cause: its message, plus the typed journal-unavailable
+/// reason when that is what stopped the worker.
+trait BackgroundFailureCause: std::fmt::Display {
+    fn journal_unavailable(&self) -> Option<&JournalUnavailable> {
+        None
+    }
+}
+
+impl BackgroundFailureCause for String {}
+
+impl BackgroundFailureCause for LifecycleError {
+    fn journal_unavailable(&self) -> Option<&JournalUnavailable> {
+        match self {
+            Self::JournalUnavailable(unavailable) => Some(unavailable),
+            _ => None,
+        }
+    }
 }
 
 /// A publication state as one read observed it. An unreadable publication is
@@ -654,7 +687,7 @@ impl DerivedAccessRuntime {
     /// state retires the reason: a repair or a later change has moved past it.
     /// An unreadable observation neither reports nor retires it, so a reason
     /// recorded while the publication was unreadable is never attributed.
-    pub(super) fn background_last_failure(&self) -> Option<String> {
+    pub(super) fn background_last_failure(&self) -> Option<BackgroundFailureReport> {
         let mut recorded = lock(&self.background_last_failure);
         let failure = recorded.as_ref()?;
         let observed = PublicationKey::from_read(self.current_publication_identity());
@@ -662,7 +695,10 @@ impl DerivedAccessRuntime {
             return None;
         }
         if observed == failure.publication {
-            return Some(failure.error.clone());
+            return Some(BackgroundFailureReport {
+                detail: failure.error.clone(),
+                journal_unavailable: failure.journal_unavailable.clone(),
+            });
         }
         *recorded = None;
         None
@@ -687,6 +723,13 @@ impl DerivedAccessRuntime {
     #[cfg(test)]
     pub(super) fn background_worker_stage(&self) -> &'static str {
         self.background_worker_diagnostic.current_stage()
+    }
+
+    /// How many retry decisions the background worker has made, for a test
+    /// that must prove a failure spent none of the retry budget.
+    #[cfg(test)]
+    pub(super) fn background_worker_retry_count(&self) -> u64 {
+        self.background_worker_diagnostic.retry_count()
     }
 
     #[cfg(test)]
@@ -1426,12 +1469,13 @@ fn wait_after_transient_failure(
 fn record_background_failure(
     last_failure: &Mutex<Option<BackgroundFailure>>,
     lifecycle: &DerivedAccessLifecycle,
-    error: &dyn std::fmt::Display,
+    error: &dyn BackgroundFailureCause,
 ) {
     let publication =
         PublicationKey::from_read(lifecycle.published_generation_identity_read_only());
     *lock(last_failure) = Some(BackgroundFailure {
         error: error.to_string(),
+        journal_unavailable: error.journal_unavailable().cloned(),
         publication,
     });
 }

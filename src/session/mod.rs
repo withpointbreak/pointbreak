@@ -49,7 +49,7 @@ pub use derived_access::history::{
     DerivedHistoryControl, DerivedHistoryFreshness, DerivedHistoryLifecycleReceipt,
     DerivedHistoryLifecycleStatus, DerivedHistoryNamespace, DerivedHistoryNewCount,
     DerivedHistoryPage, DerivedHistoryProgress, DerivedHistoryProgressPhase, DerivedHistoryRoute,
-    DerivedHistoryStatus, DerivedHistoryTransition,
+    DerivedHistoryStatus, DerivedHistoryTransition, DerivedHistoryUnavailableReason,
 };
 #[doc(hidden)]
 pub use derived_access::revisions::{
