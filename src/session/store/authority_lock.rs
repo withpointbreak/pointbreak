@@ -117,6 +117,15 @@ impl StoreAuthorityLock {
         self.reentrant
     }
 
+    /// Queries the retained lock object without reopening or releasing authority.
+    #[allow(
+        dead_code,
+        reason = "physical identity consumers are not yet connected"
+    )]
+    pub(in crate::session) fn physical_lock_identity(&self) -> Result<PhysicalFileIdentity> {
+        file_identity(&self._state._file)
+    }
+
     fn new(key: (ThreadId, PathBuf), state: Arc<StoreAuthorityLockState>, reentrant: bool) -> Self {
         Self {
             _state: state,
@@ -212,6 +221,228 @@ fn lock_error(path: &Path, action: &str, error: std::io::Error) -> ShoreError {
     ))
 }
 
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) struct PhysicalFileIdentity {
+    volume: u64,
+    file: u128,
+}
+
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+impl PhysicalFileIdentity {
+    pub(in crate::session) fn parts(&self) -> (u64, u128) {
+        (self.volume, self.file)
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+fn physical_error(error: std::io::Error) -> ShoreError {
+    ShoreError::Message(format!(
+        "could not validate physical store authority: {error}"
+    ))
+}
+
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+fn physical_mismatch() -> ShoreError {
+    ShoreError::Message("physical store root or stable authority lock changed".to_owned())
+}
+
+/// Opens the final component without following it; ancestors remain caller-owned.
+/// Creation is limited to a regular leaf in an existing parent, without truncation.
+#[cfg(any(unix, windows))]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn open_identity_path(
+    path: &Path,
+    directory: bool,
+    create: bool,
+) -> Result<File> {
+    if directory && create {
+        return Err(ShoreError::Message(
+            "physical identity opens cannot create directories".to_owned(),
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(create)
+        .create(create)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | if directory { libc::O_DIRECTORY } else { 0 });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // Observe the final object itself; never follow a reparse point.
+        options.custom_flags(0x0020_0000 | if directory { 0x0200_0000 } else { 0 });
+    }
+    let file = options.open(path).map_err(physical_error)?;
+    let metadata = file.metadata().map_err(physical_error)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err(physical_mismatch());
+        }
+    }
+    if (directory && !metadata.is_dir()) || (!directory && !metadata.is_file()) {
+        return Err(physical_mismatch());
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn file_identity(file: &File) -> Result<PhysicalFileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = file.metadata().map_err(physical_error)?;
+    Ok(PhysicalFileIdentity {
+        volume: metadata.dev(),
+        file: u128::from(metadata.ino()),
+    })
+}
+
+/// Query only: the caller retains ownership and must keep the fd live.
+#[cfg(unix)]
+#[allow(dead_code, reason = "borrowed native consumers are not yet admitted")]
+pub(in crate::session) fn borrowed_file_stat(
+    file: std::os::fd::BorrowedFd<'_>,
+) -> std::io::Result<libc::stat> {
+    use std::os::fd::AsRawFd as _;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: the borrowed fd and correctly sized writable output stay live
+    // through fstat. No owner, duplicate or path-based handle is constructed.
+    if unsafe { libc::fstat(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: successful fstat initialized the complete output.
+    Ok(unsafe { stat.assume_init() })
+}
+
+#[cfg(unix)]
+#[allow(dead_code, reason = "borrowed native consumers are not yet admitted")]
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "stat field widths vary across Unix targets"
+)]
+pub(in crate::session) fn identity_from_stat(stat: &libc::stat) -> PhysicalFileIdentity {
+    PhysicalFileIdentity {
+        volume: stat.st_dev as u64,
+        file: stat.st_ino as u128,
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code, reason = "borrowed native consumers are not yet admitted")]
+pub(in crate::session) fn borrowed_file_identity(
+    file: std::os::fd::BorrowedFd<'_>,
+) -> Result<PhysicalFileIdentity> {
+    let stat = borrowed_file_stat(file).map_err(physical_error)?;
+    Ok(identity_from_stat(&stat))
+}
+
+#[cfg(windows)]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn file_identity(file: &File) -> Result<PhysicalFileIdentity> {
+    use std::os::windows::io::AsHandle as _;
+    borrowed_file_identity(file.as_handle())
+}
+
+/// Query only: the caller retains ownership and must keep the HANDLE live.
+#[cfg(windows)]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn borrowed_file_identity(
+    file: std::os::windows::io::BorrowedHandle<'_>,
+) -> Result<PhysicalFileIdentity> {
+    use std::os::windows::io::AsRawHandle as _;
+    #[repr(C)]
+    struct FileIdInfo {
+        volume: u64,
+        file: [u8; 16],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandleEx(
+            file: *mut std::ffi::c_void,
+            class: i32,
+            info: *mut std::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+    let mut info = std::mem::MaybeUninit::<FileIdInfo>::zeroed();
+    // SAFETY: the open handle and correctly sized writable output live through
+    // the synchronous FILE_ID_INFO query, matching the existing NTFS adapter.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            18,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FileIdInfo>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(physical_error(std::io::Error::last_os_error()));
+    }
+    // SAFETY: successful query initialized the complete FILE_ID_INFO.
+    let info = unsafe { info.assume_init() };
+    Ok(PhysicalFileIdentity {
+        volume: info.volume,
+        file: u128::from_le_bytes(info.file),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn file_identity(_file: &File) -> Result<PhysicalFileIdentity> {
+    Err(ShoreError::Message(
+        "unsupported platform: physical store identity unavailable".to_owned(),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+#[allow(
+    dead_code,
+    reason = "physical identity consumers are not yet connected"
+)]
+pub(in crate::session) fn open_identity_path(
+    _path: &Path,
+    _directory: bool,
+    _create: bool,
+) -> Result<File> {
+    Err(ShoreError::Message(
+        "unsupported platform: physical store identity unavailable".to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -222,6 +453,174 @@ mod tests {
         InteractionActorV1, InteractionLockAcquisitionV1, InteractionLockKindV1,
         InteractionLockModeV1, InteractionLockOutcomeV1, LongitudinalCountingScopeV1,
     };
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn physical_identity_borrow_matches_owner_without_closing_it() {
+        let file = tempfile::tempfile().unwrap();
+        let expected = file_identity(&file).unwrap();
+        #[cfg(unix)]
+        let observed = {
+            use std::os::fd::AsFd as _;
+            let stat = borrowed_file_stat(file.as_fd()).unwrap();
+            assert_eq!(identity_from_stat(&stat), expected);
+            borrowed_file_identity(file.as_fd()).unwrap()
+        };
+        #[cfg(windows)]
+        let observed = {
+            use std::os::windows::io::AsHandle as _;
+            borrowed_file_identity(file.as_handle()).unwrap()
+        };
+        assert_eq!(observed, expected);
+        assert!(file.metadata().unwrap().is_file());
+        assert_eq!(file_identity(&file).unwrap(), expected);
+    }
+
+    #[test]
+    fn physical_identity_parts_preserve_full_identifier_width() {
+        let identity = PhysicalFileIdentity {
+            volume: u64::MAX,
+            file: (1_u128 << 127) | 7,
+        };
+        assert_eq!(identity.parts(), (u64::MAX, (1_u128 << 127) | 7));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn physical_identity_open_preserves_kind_and_creation_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("identity-file");
+        assert!(open_identity_path(&leaf, false, false).is_err());
+        assert!(!leaf.exists());
+        let missing_directory = root.path().join("missing-directory");
+        assert!(open_identity_path(&missing_directory, true, false).is_err());
+        assert!(open_identity_path(&missing_directory, true, true).is_err());
+        assert!(!missing_directory.exists());
+        let missing_parent = root.path().join("missing-parent");
+        assert!(open_identity_path(&missing_parent.join("lock"), false, true).is_err());
+        assert!(!missing_parent.exists());
+        let created = open_identity_path(&leaf, false, true).unwrap();
+        assert!(created.metadata().unwrap().is_file());
+        drop(created);
+        std::fs::write(&leaf, b"retain these bytes").unwrap();
+        drop(open_identity_path(&leaf, false, true).unwrap());
+        assert_eq!(std::fs::read(&leaf).unwrap(), b"retain these bytes");
+        assert!(open_identity_path(&leaf, true, false).is_err());
+        assert!(open_identity_path(root.path(), false, false).is_err());
+        assert!(open_identity_path(root.path(), true, false).is_ok());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn physical_identity_open_refuses_leaf_links_including_dangling_create() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        let file_link = root.path().join("file-link");
+        let dir_link = root.path().join("dir-link");
+        let absent = root.path().join("absent");
+        let dangling = root.path().join("dangling");
+        std::fs::write(&file, b"unchanged").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file, &file_link).unwrap();
+            std::os::unix::fs::symlink(root.path(), &dir_link).unwrap();
+            std::os::unix::fs::symlink(&absent, &dangling).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            // This native fixture requires Windows symbolic-link creation rights.
+            std::os::windows::fs::symlink_file(&file, &file_link).unwrap();
+            std::os::windows::fs::symlink_dir(root.path(), &dir_link).unwrap();
+            std::os::windows::fs::symlink_file(&absent, &dangling).unwrap();
+        }
+        assert!(open_identity_path(&file_link, false, false).is_err());
+        assert!(open_identity_path(&file_link, false, true).is_err());
+        assert!(open_identity_path(&dir_link, true, false).is_err());
+        assert!(open_identity_path(&dangling, false, true).is_err());
+        assert!(!absent.exists());
+        assert_eq!(std::fs::read(&file).unwrap(), b"unchanged");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn physical_lock_identity_observes_held_file_after_name_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let guard = StoreAuthorityLock::acquire(root.path()).unwrap();
+        let named = root.path().join(STORE_AUTHORITY_LOCK_FILE);
+        let before = open_identity_path(&named, false, false).unwrap();
+        let original = file_identity(&before).unwrap();
+        assert_eq!(guard.physical_lock_identity().unwrap(), original);
+        let retained = root.path().join("retained-lock");
+        std::fs::rename(&named, &retained).unwrap();
+        let replacement = open_identity_path(&named, false, true).unwrap();
+        assert_ne!(file_identity(&replacement).unwrap(), original);
+        assert_eq!(file_identity(&before).unwrap(), original);
+        assert_eq!(guard.physical_lock_identity().unwrap(), original);
+        assert_eq!(
+            file_identity(&open_identity_path(&retained, false, false).unwrap()).unwrap(),
+            original
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn physical_lock_identity_query_preserves_lock_and_nested_lifetime() {
+        let root = tempfile::tempdir().unwrap();
+        let guard = StoreAuthorityLock::acquire(root.path()).unwrap();
+        let expected = guard.physical_lock_identity().unwrap();
+        let nested = StoreAuthorityLock::try_acquire(root.path())
+            .unwrap()
+            .unwrap();
+        assert!(nested.is_reentrant());
+        assert_eq!(nested.physical_lock_identity().unwrap(), expected);
+        drop(guard);
+        let path = root.path().to_owned();
+        assert!(
+            std::thread::spawn(move || {
+                StoreAuthorityLock::try_acquire(&path).unwrap().is_none()
+            })
+            .join()
+            .unwrap()
+        );
+        drop(nested);
+        let reopened = StoreAuthorityLock::try_acquire(root.path())
+            .unwrap()
+            .unwrap();
+        assert!(!reopened.is_reentrant());
+        assert_eq!(reopened.physical_lock_identity().unwrap(), expected);
+        drop(reopened);
+        assert!(root.path().join(STORE_AUTHORITY_LOCK_FILE).is_file());
+    }
+
+    #[test]
+    fn identity_helpers_do_not_change_legacy_root_creation_or_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("legacy-root");
+        let guard = StoreAuthorityLock::try_acquire(&missing).unwrap().unwrap();
+        assert!(missing.is_dir());
+        drop(guard);
+        assert!(missing.join(STORE_AUTHORITY_LOCK_FILE).is_file());
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, b"keep").unwrap();
+        let error = StoreAuthorityLock::try_acquire(&file).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not create store authority directory")
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn physical_identity_refuses_unsupported_platform_before_path_creation() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(file_identity(&file).is_err());
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("lock");
+        assert!(open_identity_path(&missing, false, true).is_err());
+        assert!(!missing.exists());
+    }
 
     #[test]
     fn authority_lock_serializes_independent_store_writers() {
