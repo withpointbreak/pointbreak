@@ -227,6 +227,13 @@ pub(crate) fn resolve_revision(
 /// `events` must be the writer-visible, store-wide event slice: the rule reads
 /// every Change that holds the seed, so a projection narrowed to one Change
 /// cannot decide it.
+///
+/// The refusal is decided on that snapshot, which the command loaded before it
+/// appends; it is not repeated under the store's authority lock at durable
+/// append time. A replacement relation that another writer appends after the
+/// snapshot was taken does not refuse this write, so the guarantee is "refused
+/// on the pre-append snapshot", not "never appended". One authority-lock
+/// boundary around read, validation and append is tracked in #837.
 pub(crate) fn resolve_revision_for_write(
     events: &[ShoreEvent],
     selection: RevisionSelection<'_>,

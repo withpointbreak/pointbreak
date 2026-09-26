@@ -1094,8 +1094,11 @@ Observations are append-only review notes for a captured revision.
   `--revision` retains legacy proposal-supersession selection and does not follow Change replacement:
   when it names a Revision that a Change has replaced, the write is refused with
   `revision_replaced_by_change`, which names the current Revision(s); pass `--review-cursor` to write
-  to the current Revision or `--exact-revision` to address the replaced one deliberately. The three
-  options are mutually exclusive.
+  to the current Revision or `--exact-revision` to address the replaced one deliberately. The refusal
+  is decided on the writer-visible store-wide event snapshot loaded before the append; it is not
+  re-checked under the store's authority lock at append time, so a replacement relation another
+  writer appends after that snapshot does not refuse the write (#837). The three options are mutually
+  exclusive.
 - Tracks are review lanes, not actor or producer provenance.
 - Without `--file`, the observation targets the whole revision.
 - With `--file <path>`, it targets a captured file.
@@ -1145,8 +1148,9 @@ Input requests are durable pause or decision requests for a captured revision.
 - Change-capable writers use `--review-cursor`; `--exact-revision` is the low-level exact target and
   `--revision` retains legacy proposal-supersession selection without following Change replacement:
   naming a Revision that a Change has replaced is refused with `revision_replaced_by_change`, which
-  names the current Revision(s) and the two exact selectors. Without a selector, the command defaults to
-  the single captured Revision and errors if several are in scope.
+  names the current Revision(s) and the two exact selectors (decided on the pre-append snapshot, as
+  for `observation add`). Without a selector, the command defaults to the single captured Revision and
+  errors if several are in scope.
 - `--mode` defaults to `operative`; `advisory` requests are durable and visible but do not imply a
   cooperative client must pause. The `mode` (`operative`/`advisory`) and `reasonCode` values surface
   on the consumed `input-request list` field-paths, so — like the response outcomes below — they are
@@ -1194,7 +1198,8 @@ Assessments record review calls for a captured revision.
   `--exact-revision` is the low-level exact target; `--revision` retains legacy proposal-supersession
   selection without following Change replacement: naming a Revision that a Change has replaced is
   refused with `revision_replaced_by_change`, which names the current Revision(s) and the two exact
-  selectors. The three options are mutually exclusive.
+  selectors (decided on the pre-append snapshot, as for `observation add`). The three options are
+  mutually exclusive.
 - CLI input uses `kebab-case` assessment values: `accepted`, `accepted-with-follow-up`,
   `needs-changes`, and `needs-clarification`. Command JSON output uses the matching `snake_case`
   values: `accepted`, `accepted_with_follow_up`, `needs_changes`, and `needs_clarification`. The
@@ -1419,7 +1424,8 @@ replace a review assessment.
   `--exact-revision` is the low-level exact target; `--revision` retains legacy proposal-supersession
   selection without following Change replacement: naming a Revision that a Change has replaced is
   refused with `revision_replaced_by_change`, which names the current Revision(s) and the two exact
-  selectors. The three options are mutually exclusive.
+  selectors (decided on the pre-append snapshot, as for `observation add`). The three options are
+  mutually exclusive.
 - Validation targets are revision-only. There are no file or path target flags.
 - Status values are `passed`, `failed`, `errored`, and `skipped`.
 - `--command`, `--exit-code`, `--source-fingerprint`, `--started-at`, `--completed-at`, and
